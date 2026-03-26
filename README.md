@@ -2,6 +2,15 @@
 
 Put Genie onboarding on rails — with built-in guardrails. GenieRails imports your existing Genie Space, generates ABAC governance (groups, tags, masking, row filters), and promotes everything to production. No Terraform to write.
 
+## What you get
+
+- **Groups and access control** — role-based groups (e.g. `analyst`, `manager`) with fine-grained row and column policies
+- **Column masking** — AI-generated SQL UDFs that mask sensitive data (SSN, credit cards, PII) per group
+- **Row-level security** — filter rows by region, department, or any business dimension
+- **Tag-based governance** — Unity Catalog tag policies that classify and protect sensitive columns
+- **Genie Space configuration as code** — instructions, benchmarks, SQL measures, all version-controlled
+- **Dev → prod promotion** — one command to replicate governance to production with catalog remapping
+
 ## Getting Started
 
 | Starting point | You have... | Guide |
@@ -9,7 +18,7 @@ Put Genie onboarding on rails — with built-in guardrails. GenieRails imports y
 | **I already have a Genie Space** | A space configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](shared/docs/from-ui-to-production.md) |
 | **I'm starting from scratch** | Tables in Unity Catalog, no Genie Space yet | [Quickstart](shared/docs/quickstart.md) |
 
-### Repository Layout
+## Repository Layout
 
 ```
 genierails/
@@ -22,14 +31,17 @@ genierails/
 
 ## Documentation
 
+**Guides:**
 - [From UI to Production](shared/docs/from-ui-to-production.md) — import your existing Genie Space, add governance, promote to prod
 - [Quickstart](shared/docs/quickstart.md) — create a Genie Space from scratch
-- [Playbook](shared/docs/playbook.md) — next steps after first deployment: add spaces, promote, overlays, advanced scenarios
+- [Playbook](shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios
+
+**Reference:**
 - [Architecture](shared/docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
-- [Central Governance, Self-Service Genie](shared/docs/self-service-genie.md) — central ABAC team + BU teams self-serve Genie spaces
-- [CI/CD Integration](shared/docs/cicd.md) — validate and deploy from a pipeline
-- [Troubleshooting](shared/docs/troubleshooting.md) — imports, provider quirks, brownfield workflows
-- [Advanced Usage](shared/docs/advanced.md) — IDP-synced groups, ABAC-only mode, masking UDF reuse, legacy migration
 - [Country & Region Overlays](shared/docs/country-overlays.md) — region-specific PII governance (ANZ, India, Southeast Asia)
 - [Industry Overlays](shared/docs/industry-overlays.md) — industry-specific masking and access patterns (Financial Services, Healthcare, Retail)
+- [Central Governance, Self-Service Genie](shared/docs/self-service-genie.md) — central ABAC team + BU teams self-serve Genie spaces
+- [Advanced Usage](shared/docs/advanced.md) — IDP-synced groups, ABAC-only mode, masking UDF reuse, legacy migration
+- [CI/CD Integration](shared/docs/cicd.md) — validate and deploy from a pipeline
+- [Troubleshooting](shared/docs/troubleshooting.md) — imports, provider quirks, brownfield workflows
 - [Integration Testing](shared/docs/integration-testing.md) — unit tests, integration scenarios, test data
