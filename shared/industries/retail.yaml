@@ -1,0 +1,241 @@
+code: retail
+name: Retail & E-Commerce
+regulations:
+  - CCPA (California Consumer Privacy Act)
+  - GDPR (General Data Protection Regulation)
+  - CAN-SPAM Act
+  - PCI DSS (for payment data)
+
+identifiers:
+  - name: Customer Email
+    column_hints:
+      - email
+      - email_address
+      - customer_email
+      - contact_email
+    format: "user@domain"
+    sensitivity: confidential
+    masking_function: mask_email
+    category: contact_info
+
+  - name: Phone Number
+    column_hints:
+      - phone
+      - phone_number
+      - mobile
+      - contact_phone
+      - cell_phone
+    format: "Various formats"
+    sensitivity: confidential
+    masking_function: mask_phone
+    category: contact_info
+
+  - name: Customer Address
+    column_hints:
+      - address
+      - street_address
+      - mailing_address
+      - shipping_address
+      - billing_address
+    format: "Free text"
+    sensitivity: confidential
+    masking_function: mask_address
+    category: contact_info
+
+  - name: Customer Name
+    column_hints:
+      - customer_name
+      - first_name
+      - last_name
+      - full_name
+      - shopper_name
+    format: "Free text"
+    sensitivity: confidential
+    masking_function: mask_name_hash
+    category: customer_profile
+
+  - name: Loyalty Card Number
+    column_hints:
+      - loyalty_number
+      - loyalty_card
+      - rewards_number
+      - member_number
+    format: "Alphanumeric"
+    sensitivity: confidential
+    masking_function: mask_loyalty
+    category: customer_profile
+
+  - name: IP Address
+    column_hints:
+      - ip_address
+      - ip
+      - client_ip
+      - user_ip
+    format: "IPv4 or IPv6"
+    sensitivity: confidential
+    masking_function: mask_ip
+    category: device_info
+
+  - name: Device ID
+    column_hints:
+      - device_id
+      - device_fingerprint
+      - browser_id
+    format: "UUID or hash"
+    sensitivity: confidential
+    masking_function: mask_hash
+    category: device_info
+
+masking_functions:
+  - name: mask_email
+    signature: "mask_email(email STRING) RETURNS STRING"
+    comment: "Email address — mask local part, preserve domain for analytics"
+    body: |
+      CASE
+        WHEN email IS NULL THEN NULL
+        WHEN INSTR(email, '@') > 0 THEN
+          CONCAT(LEFT(SUBSTRING_INDEX(email, '@', 1), 1), '****@', SUBSTRING_INDEX(email, '@', -1))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_phone
+    signature: "mask_phone(phone STRING) RETURNS STRING"
+    comment: "Phone number — show last 4 digits only"
+    body: |
+      CASE
+        WHEN phone IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(phone, '[^0-9]', '')) >= 4 THEN
+          CONCAT('***-***-', RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_address
+    signature: "mask_address(addr STRING) RETURNS STRING"
+    comment: "Street address — show city/state only (redact street-level detail)"
+    body: |
+      CASE
+        WHEN addr IS NULL THEN NULL
+        ELSE '[ADDRESS REDACTED]'
+      END
+
+  - name: mask_name_hash
+    signature: "mask_name_hash(name STRING) RETURNS STRING"
+    comment: "Customer name — deterministic hash for join consistency without revealing identity"
+    body: |
+      CASE
+        WHEN name IS NULL THEN NULL
+        ELSE CONCAT('CUST_', LEFT(SHA2(LOWER(TRIM(name)), 256), 8))
+      END
+
+  - name: mask_loyalty
+    signature: "mask_loyalty(loyalty STRING) RETURNS STRING"
+    comment: "Loyalty card number — show last 4 characters only"
+    body: |
+      CASE
+        WHEN loyalty IS NULL THEN NULL
+        WHEN LENGTH(loyalty) > 4 THEN CONCAT(REPEAT('*', LENGTH(loyalty) - 4), RIGHT(loyalty, 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_ip
+    signature: "mask_ip(ip STRING) RETURNS STRING"
+    comment: "IP address — zero out last octet for IPv4 (k-anonymity)"
+    body: |
+      CASE
+        WHEN ip IS NULL THEN NULL
+        WHEN INSTR(ip, '.') > 0 THEN
+          CONCAT(SUBSTRING_INDEX(ip, '.', 3), '.0')
+        ELSE '[REDACTED]'
+      END
+
+group_templates:
+  marketing:
+    description: "Anonymized access — hashed identifiers for campaign targeting and segmentation"
+    access_level: anonymized
+  customer_support:
+    description: "Partial access to contact info for support cases; no purchase history aggregates"
+    access_level: partial
+  ops:
+    description: "Partial access to order and logistics data; masked customer PII"
+    access_level: partial
+  data_science:
+    description: "Hashed/anonymized identifiers for modeling; no raw PII"
+    access_level: anonymized
+  store_manager:
+    description: "Access to store-level aggregates; masked individual customer data"
+    access_level: masked
+
+access_patterns:
+  - name: right_to_deletion
+    description: "CCPA/GDPR right to erasure — customers can request deletion of their data"
+    guidance: >
+      Ensure that customer identifiers (email, phone, loyalty number) can be
+      traced across tables for deletion requests. Consider adding a customer_id
+      tag to enable cross-table deletion workflows.
+
+  - name: consent_based_access
+    description: "Marketing data access should be gated on customer consent status"
+    guidance: >
+      If tables include a consent or opt_in column, consider creating a row filter
+      that restricts marketing group access to only consented records. This supports
+      GDPR lawful basis and CAN-SPAM compliance.
+
+prompt_overlay: |
+  ### Industry-Specific Identifiers: Retail & E-Commerce
+
+  When analyzing retail and e-commerce datasets, be aware of these customer data
+  identifiers and privacy requirements (CCPA, GDPR).
+
+  **Contact Information:**
+  - Email: Columns: `email`, `email_address`, `customer_email`.
+    Use `mask_email` — mask local part, preserve domain for analytics.
+  - Phone: Columns: `phone`, `phone_number`, `mobile`.
+    Use `mask_phone` — show last 4 digits only.
+  - Address: Columns: `address`, `street_address`, `shipping_address`.
+    Use `mask_address` — redact street-level detail.
+
+  **Customer Profile:**
+  - Customer Name: Columns: `customer_name`, `first_name`, `last_name`.
+    Use `mask_name_hash` — deterministic hash for join consistency.
+  - Loyalty Card: Columns: `loyalty_number`, `loyalty_card`, `rewards_number`.
+    Use `mask_loyalty` — show last 4 characters.
+
+  **Device / Tracking:**
+  - IP Address: Columns: `ip_address`, `ip`, `client_ip`.
+    Use `mask_ip` — zero out last octet (k-anonymity).
+  - Device ID: Columns: `device_id`, `device_fingerprint`.
+    Use `mask_hash` — deterministic SHA-256 token.
+
+  **Available Retail Masking Functions:**
+  - `mask_email(email STRING) RETURNS STRING` — first initial + domain visible
+  - `mask_phone(phone STRING) RETURNS STRING` — last 4 digits visible
+  - `mask_address(addr STRING) RETURNS STRING` — full redaction
+  - `mask_name_hash(name STRING) RETURNS STRING` — deterministic hash (join-safe)
+  - `mask_loyalty(loyalty STRING) RETURNS STRING` — last 4 characters visible
+  - `mask_ip(ip STRING) RETURNS STRING` — last octet zeroed
+
+  **Suggested Group Structure:**
+  - `marketing`: Anonymized access — hashed identifiers for campaign targeting
+  - `customer_support`: Partial access to contact info for active support cases
+  - `ops`: Masked customer PII; full access to order and logistics data
+  - `data_science`: Hashed/anonymized identifiers for modeling
+  - `store_manager`: Store-level aggregates; masked individual customer data
+
+  **Access Patterns:**
+  - **Right to Deletion**: CCPA/GDPR requires that customers can request data erasure.
+    Ensure customer identifiers can be traced across tables.
+  - **Consent-Based Access**: Marketing access should respect customer consent/opt-in
+    status. Consider row filters on consent columns.
+
+  **Regulatory Context:**
+  - CCPA: California residents have the right to know, delete, and opt out of sale
+    of their personal information. Use anonymization for marketing analytics.
+  - GDPR: Applies to EU customers. Requires lawful basis for processing, data
+    minimization, and right to erasure. Hashing counts as pseudonymization, not
+    anonymization — it still requires a lawful basis.
+  - PCI DSS: If payment card data is present, apply `mask_card_last4` (see
+    financial_services overlay if both industries apply).
+
+  When you encounter columns matching these patterns, prefer light masking (hashing,
+  partial masking) over full redaction to preserve analytics utility while protecting
+  customer privacy.

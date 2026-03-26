@@ -1,0 +1,228 @@
+code: financial_services
+name: Financial Services
+regulations:
+  - PCI DSS (Payment Card Industry Data Security Standard)
+  - SOX (Sarbanes-Oxley Act)
+  - GLBA (Gramm-Leach-Bliley Act)
+  - BSA/AML (Bank Secrecy Act / Anti-Money Laundering)
+
+identifiers:
+  - name: Account Number
+    column_hints:
+      - account_number
+      - acct_no
+      - account_no
+      - acct_number
+    format: "Variable length numeric"
+    sensitivity: restricted
+    masking_function: mask_account_last4
+    category: financial_id
+
+  - name: Routing Number
+    column_hints:
+      - routing_number
+      - routing_no
+      - aba_number
+    format: "9 digits (ABA routing)"
+    sensitivity: confidential
+    masking_function: mask_routing
+    category: financial_id
+
+  - name: Credit Card Number
+    column_hints:
+      - card_number
+      - credit_card
+      - cc_number
+      - pan
+    format: "13-19 digits (PCI-scoped)"
+    sensitivity: restricted
+    masking_function: mask_card_last4
+    category: payment_card
+
+  - name: Transaction Amount
+    column_hints:
+      - transaction_amount
+      - txn_amount
+      - amount
+      - transfer_amount
+    format: "Decimal currency value"
+    sensitivity: confidential
+    masking_function: mask_amount_round
+    category: transaction
+
+  - name: Customer SSN
+    column_hints:
+      - ssn
+      - social_security
+      - tax_id
+    format: "9 digits (NNN-NN-NNNN)"
+    sensitivity: restricted
+    masking_function: mask_ssn_last4
+    category: customer_pii
+
+  - name: Customer Name
+    column_hints:
+      - customer_name
+      - account_holder
+      - beneficiary_name
+    format: "Free text"
+    sensitivity: restricted
+    masking_function: mask_name
+    category: customer_pii
+
+  - name: Customer Email
+    column_hints:
+      - customer_email
+      - email_address
+      - contact_email
+    format: "user@domain"
+    sensitivity: confidential
+    masking_function: mask_email
+    category: customer_pii
+
+masking_functions:
+  - name: mask_account_last4
+    signature: "mask_account_last4(acct STRING) RETURNS STRING"
+    comment: "Account number — show last 4 digits only (PCI/GLBA compliant)"
+    body: |
+      CASE
+        WHEN acct IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(acct, '[^0-9]', '')) > 4 THEN
+          CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(acct, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(acct, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_routing
+    signature: "mask_routing(rtn STRING) RETURNS STRING"
+    comment: "Routing number — show last 4 digits only"
+    body: |
+      CASE
+        WHEN rtn IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(rtn, '[^0-9]', '')) = 9 THEN
+          CONCAT('XXXXX', RIGHT(REGEXP_REPLACE(rtn, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_card_last4
+    signature: "mask_card_last4(card STRING) RETURNS STRING"
+    comment: "Credit card number — PCI DSS compliant, show last 4 digits only"
+    body: |
+      CASE
+        WHEN card IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(card, '[^0-9]', '')) >= 13 THEN
+          CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(card, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(card, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_amount_round
+    signature: "mask_amount_round(amount DOUBLE) RETURNS STRING"
+    comment: "Transaction amount — round to nearest thousand for non-privileged users"
+    body: |
+      CASE
+        WHEN amount IS NULL THEN NULL
+        ELSE CONCAT('$', CAST(ROUND(amount, -3) AS STRING))
+      END
+
+  - name: mask_ssn_last4
+    signature: "mask_ssn_last4(ssn STRING) RETURNS STRING"
+    comment: "Social Security Number — show last 4 digits only"
+    body: |
+      CASE
+        WHEN ssn IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(ssn, '[^0-9]', '')) = 9 THEN
+          CONCAT('***-**-', RIGHT(REGEXP_REPLACE(ssn, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_name
+    signature: "mask_name(name STRING) RETURNS STRING"
+    comment: "Customer name — show first initial only"
+    body: |
+      CASE
+        WHEN name IS NULL THEN NULL
+        WHEN LENGTH(name) > 0 THEN CONCAT(LEFT(name, 1), '****')
+        ELSE '[REDACTED]'
+      END
+
+group_templates:
+  fraud_team:
+    description: "Full access to all financial data for fraud investigation and AML compliance"
+    access_level: full
+  senior_analyst:
+    description: "Full access to PII and transaction data for risk analysis"
+    access_level: full
+  analyst:
+    description: "Masked access to sensitive financial identifiers; rounded transaction amounts"
+    access_level: masked
+  marketing:
+    description: "Anonymized access — no raw financial identifiers or transaction details"
+    access_level: anonymized
+  compliance_officer:
+    description: "Full access with audit logging for SOX and BSA/AML compliance"
+    access_level: full
+
+access_patterns:
+  - name: audit_trail
+    description: "All access to financial data must be auditable for SOX compliance"
+    guidance: >
+      Ensure that tables tagged with financial_id or payment_card have row-level
+      audit logging enabled. Consider adding a separate audit group that captures
+      who accessed what data and when.
+
+  - name: pci_isolation
+    description: "Payment card data (PAN, CVV) must be isolated per PCI DSS requirements"
+    guidance: >
+      Credit card columns should use mask_card_last4 for all non-privileged groups.
+      Consider creating a dedicated pci_clearance tag to separate PCI-scoped access
+      from general financial data access.
+
+prompt_overlay: |
+  ### Industry-Specific Identifiers: Financial Services
+
+  When analyzing financial services datasets, be aware of these industry-specific
+  regulated identifiers and compliance requirements.
+
+  **Financial Identifiers:**
+  - Account Number: Variable length numeric. Columns: `account_number`, `acct_no`.
+    Use `mask_account_last4` — show last 4 digits only (GLBA compliant).
+  - Routing Number (ABA): 9 digits. Columns: `routing_number`, `aba_number`.
+    Use `mask_routing` — show last 4 digits.
+  - Credit Card Number (PAN): 13-19 digits. Columns: `card_number`, `credit_card`, `pan`.
+    Use `mask_card_last4` — PCI DSS compliant, last 4 digits only.
+
+  **Transaction Data:**
+  - Transaction Amount: Decimal currency. Columns: `transaction_amount`, `txn_amount`, `amount`.
+    Use `mask_amount_round` — round to nearest thousand for non-privileged users.
+
+  **Customer PII:**
+  - SSN: 9 digits. Columns: `ssn`, `social_security`, `tax_id`.
+    Use `mask_ssn_last4` — show last 4 digits only.
+  - Customer Name: Free text. Columns: `customer_name`, `account_holder`.
+    Use `mask_name` — show first initial only.
+  - Customer Email: Columns: `customer_email`, `email_address`.
+    Use `mask_email` — mask local part, keep domain.
+
+  **Available Financial Services Masking Functions:**
+  - `mask_account_last4(acct STRING) RETURNS STRING` — last 4 digits visible
+  - `mask_routing(rtn STRING) RETURNS STRING` — last 4 digits visible
+  - `mask_card_last4(card STRING) RETURNS STRING` — PCI compliant, last 4 digits
+  - `mask_amount_round(amount DOUBLE) RETURNS STRING` — rounded to nearest thousand
+  - `mask_ssn_last4(ssn STRING) RETURNS STRING` — last 4 digits visible
+  - `mask_name(name STRING) RETURNS STRING` — first initial only
+
+  **Suggested Group Structure:**
+  - `fraud_team` / `compliance_officer`: Full access to all data (AML/SOX compliance)
+  - `senior_analyst`: Full access for risk analysis
+  - `analyst`: Masked PII, rounded amounts
+  - `marketing`: Anonymized — no raw identifiers or transaction details
+
+  **Regulatory Context:**
+  - PCI DSS: Card numbers (PAN) must never be displayed in full to non-privileged users.
+    Only first 6 and last 4 digits may be shown; prefer showing only last 4.
+  - SOX: Financial data access must be auditable. Consider audit logging.
+  - GLBA: Customer financial information must be protected from unauthorized access.
+  - BSA/AML: Transaction monitoring teams (fraud_team) need full access to detect
+    suspicious activity patterns.
+
+  When you encounter columns matching these patterns, prefer the industry-specific masking
+  functions over generic ones (e.g. `mask_card_last4` over `mask_redact` for card columns).

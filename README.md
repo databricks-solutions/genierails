@@ -46,6 +46,7 @@ All docs live in `shared/docs/`:
 - [Troubleshooting](shared/docs/troubleshooting.md) — imports, provider quirks, brownfield workflows
 - [Advanced Usage](shared/docs/advanced.md) — IDP-synced groups, ABAC-only mode, masking UDF reuse, legacy migration
 - [Country & Region Overlays (APJ)](shared/docs/country-overlays.md) — using, tuning, or adding country-specific PII governance (ANZ, India, Southeast Asia); contributor guide for new regions
+- [Industry Overlays](shared/docs/industry-overlays.md) — industry-specific masking, group templates, and access patterns (Financial Services, Healthcare, Retail); contributor guide for new industries
 - [Integration Testing](shared/docs/integration-testing.md) — unit tests, integration scenarios, test data
 
 ## Testing
