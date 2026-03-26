@@ -1,4 +1,4 @@
-# GenieRails
+# GenieRails <!-- CI test -->
 
 Put Genie onboarding on rails — with built-in guardrails. GenieRails generates ABAC governance, masking functions, and Genie Spaces from a small set of input files so you can get business users into Genie quickly without editing Terraform.
 
