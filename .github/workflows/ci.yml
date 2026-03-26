@@ -37,7 +37,7 @@ jobs:
       - name: Run validation tests
         run: cd shared && bash test.sh --skip-tf
 
-  integration-tests:
+  integration-tests-aws:
     name: Integration Tests (AWS)
     runs-on: ubuntu-latest
     if: contains(github.event.pull_request.labels.*.name, 'run-integration')
@@ -79,4 +79,54 @@ jobs:
           DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: python shared/scripts/provision_test_env.py teardown
+
+  integration-tests-azure:
+    name: Integration Tests (Azure)
+    runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.labels.*.name, 'run-integration')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Install dependencies
+        run: pip install python-hcl2 databricks-sdk requests
+
+      - name: Provision test environment
+        env:
+          DATABRICKS_ACCOUNT_ID: ${{ secrets.AZURE_DATABRICKS_ACCOUNT_ID }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.AZURE_DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.AZURE_DATABRICKS_CLIENT_SECRET }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          AZURE_REGION: ${{ secrets.AZURE_REGION }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: python shared/scripts/provision_test_env.py provision
+
+      - name: Run integration tests
+        env:
+          DATABRICKS_ACCOUNT_ID: ${{ secrets.AZURE_DATABRICKS_ACCOUNT_ID }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.AZURE_DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.AZURE_DATABRICKS_CLIENT_SECRET }}
+          CLOUD_PROVIDER: azure
+        run: python shared/scripts/run_integration_tests.py
+
+      - name: Teardown test environment
+        if: always()
+        env:
+          DATABRICKS_ACCOUNT_ID: ${{ secrets.AZURE_DATABRICKS_ACCOUNT_ID }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.AZURE_DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.AZURE_DATABRICKS_CLIENT_SECRET }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         run: python shared/scripts/provision_test_env.py teardown
