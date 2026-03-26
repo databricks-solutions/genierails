@@ -45,6 +45,6 @@ output "genie_spaces_created" {
 }
 
 output "genie_groups_csv" {
-  description = "Comma-separated group names for Genie ACL calls."
-  value       = local.genie_groups_csv
+  description = "Comma-separated group names for Genie ACL calls (all groups, for backward compat)."
+  value       = join(",", keys(var.groups))
 }
