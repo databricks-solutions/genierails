@@ -26,19 +26,6 @@ genierails/
 
 `aws/` and `azure/` are the entry points — always run `make` commands from one of these directories. `shared/` holds all Terraform modules, Python scripts, and docs, and is invoked automatically through the cloud wrapper.
 
-### Quick commands (same for both clouds)
-
-```bash
-cd aws/   # or azure/
-make setup
-vi envs/dev/auth.auto.tfvars      # service principal credentials
-vi envs/dev/env.auto.tfvars       # your Genie Space ID (or tables for a new space)
-
-make generate
-make validate-generated
-make apply
-```
-
 ## Documentation
 
 All docs live in `shared/docs/`:
