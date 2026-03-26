@@ -424,6 +424,7 @@ Fields to include:
 - `genie_sql_measures` — standard aggregate metrics derived from the user's numeric columns (e.g., sums, averages, counts that are meaningful in the domain). Each measure has `alias`, `sql`, `display_name`, `comment`, and `instruction`.
 - `genie_sql_expressions` — computed dimensions derived from the user's date/category columns (e.g., year extraction, bucketing, status grouping). Each expression has `alias`, `sql`, `display_name`, `comment`, and `instruction`.
 - `genie_join_specs` — relationships between the user's tables based on foreign key columns (look for matching ID columns like `CustomerID`, `OrderID`, `ProductID`). Each join has `left_table`, `left_alias`, `right_table`, `right_alias`, `sql`, `comment`, and `instruction`.
+- `genie_acl_groups` — list of group names that should have CAN_RUN access to this Genie Space. **Only include groups whose FGAC policies reference this space's tables.** For example, if Finance_Analyst has policies on `dev_fin.finance.*` tables, include them in the Finance Analytics space but NOT in the Clinical Analytics space. This ensures each space is only accessible to relevant roles.
 
 ### Output Format — Genie Space Config (in `abac.auto.tfvars`)
 
@@ -505,6 +506,13 @@ genie_join_specs = [
     comment     = "Join <left_table> to <right_table> on <key>"
     instruction = "Use when you need <right_table> context for <left_table> queries"
   },
+]
+
+# Groups that should have CAN_RUN access to this Genie Space.
+# Only include groups whose FGAC policies reference this space's tables.
+genie_acl_groups = [
+  "<Group_Name_1>",
+  "<Group_Name_2>",
 ]
 ```
 

@@ -51,6 +51,7 @@ locals {
     sql_expressions  = var.genie_sql_expressions
     sql_measures     = var.genie_sql_measures
     join_specs       = var.genie_join_specs
+    acl_groups       = var.genie_acl_groups
   }
 
   legacy_space_name = var.genie_space_title != "" ? var.genie_space_title : "Genie Space"
@@ -309,6 +310,12 @@ variable "genie_join_specs" {
     instruction = string
   }))
   default = []
+}
+
+variable "genie_acl_groups" {
+  type        = list(string)
+  default     = []
+  description = "Groups that should have CAN_RUN access to this Genie Space. Empty = all groups."
 }
 
 # ── Group variables ───────────────────────────────────────────────────────────

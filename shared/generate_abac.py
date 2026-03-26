@@ -4296,6 +4296,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
             )
             _legacy_genie_list_keys = (
                 "genie_sample_questions",
+                "genie_acl_groups",
             )
             # Scalar string assignments (genie_space_title = "...", etc.)
             _legacy_genie_scalar_re = re.compile(

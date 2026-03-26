@@ -609,6 +609,31 @@ def validate_group_members(cfg: dict, group_names: set[str], result: ValidationR
         result.ok(f"group_members: {len(members)} group(s) with member assignments")
 
 
+def validate_acl_groups(cfg: dict, group_names: set[str], result: ValidationResult):
+    """Validate acl_groups in genie_space_configs reference defined groups."""
+    gsc = cfg.get("genie_space_configs") or {}
+    if isinstance(gsc, list):
+        gsc = gsc[0] if gsc else {}
+    if not isinstance(gsc, dict) or not gsc:
+        return
+    for space_name, space_cfg in gsc.items():
+        if isinstance(space_cfg, list):
+            space_cfg = space_cfg[0] if space_cfg else {}
+        acl = space_cfg.get("acl_groups") or []
+        if isinstance(acl, list) and acl:
+            if isinstance(acl[0], list):
+                acl = acl[0]
+            for g in acl:
+                if g not in group_names and g.lower() not in {"account users"}:
+                    result.error(
+                        f"genie_space_configs[\"{space_name}\"].acl_groups: "
+                        f"group '{g}' not defined in 'groups'"
+                    )
+            if acl:
+                result.ok(f"genie_space_configs[\"{space_name}\"].acl_groups: "
+                         f"{len(acl)} group(s) configured")
+
+
 def _find_tfvars_file(tfvars_path: Path, name: str) -> Path | None:
     """Locate a sibling tfvars file relative to the given tfvars file."""
     candidates = [
@@ -828,6 +853,7 @@ def main():
     validate_fgac_policies(merged_cfg, group_names, tag_map, sql_functions, result,
                            sql_function_arg_counts=sql_function_arg_counts)
     validate_group_members(merged_cfg, group_names, result)
+    validate_acl_groups(merged_cfg, group_names, result)
 
     result.print_report()
     sys.exit(0 if result.passed else 1)
