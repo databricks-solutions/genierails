@@ -4,14 +4,15 @@ Put Genie onboarding on rails — with built-in guardrails. GenieRails imports y
 
 ## Getting Started
 
-**Already have a Genie Space?** Most users do — follow [Import, Govern, and Promote](shared/docs/playbook.md#import-govern-and-promote) to bring it under code governance and deploy to prod.
-
-**Starting from scratch?** See the [Quickstart](shared/docs/playbook.md#quickstart-from-scratch) in the Playbook.
+| Starting point | You have... | Guide |
+|---|---|---|
+| **I already have a Genie Space** | A space configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](shared/docs/from-ui-to-production.md) |
+| **I'm starting from scratch** | Tables in Unity Catalog, no Genie Space yet | [Quickstart](shared/docs/quickstart.md) |
 
 Pick your cloud and set up credentials:
 
-| My workspace is on… | Start here |
-| ------------------- | ---------- |
+| My workspace is on... | Start here |
+| --- | --- |
 | AWS   | [`aws/README.md`](aws/README.md) |
 | Azure | [`azure/README.md`](azure/README.md) |
 
@@ -28,14 +29,14 @@ genierails/
 
 ## Documentation
 
-All docs live in `shared/docs/`:
-
-- [Playbook](shared/docs/playbook.md) — start here: import your existing Genie Space, add governance, promote to prod (also covers quickstart, advanced scenarios)
+- [From UI to Production](shared/docs/from-ui-to-production.md) — import your existing Genie Space, add governance, promote to prod
+- [Quickstart](shared/docs/quickstart.md) — create a Genie Space from scratch
+- [Playbook](shared/docs/playbook.md) — next steps after first deployment: add spaces, promote, overlays, advanced scenarios
 - [Architecture](shared/docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
 - [Central Governance, Self-Service Genie](shared/docs/self-service-genie.md) — central ABAC team + BU teams self-serve Genie spaces
 - [CI/CD Integration](shared/docs/cicd.md) — validate and deploy from a pipeline
 - [Troubleshooting](shared/docs/troubleshooting.md) — imports, provider quirks, brownfield workflows
 - [Advanced Usage](shared/docs/advanced.md) — IDP-synced groups, ABAC-only mode, masking UDF reuse, legacy migration
-- [Country & Region Overlays (APJ)](shared/docs/country-overlays.md) — using, tuning, or adding country-specific PII governance (ANZ, India, Southeast Asia); contributor guide for new regions
-- [Industry Overlays](shared/docs/industry-overlays.md) — industry-specific masking, group templates, and access patterns (Financial Services, Healthcare, Retail); contributor guide for new industries
+- [Country & Region Overlays](shared/docs/country-overlays.md) — region-specific PII governance (ANZ, India, Southeast Asia)
+- [Industry Overlays](shared/docs/industry-overlays.md) — industry-specific masking and access patterns (Financial Services, Healthcare, Retail)
 - [Integration Testing](shared/docs/integration-testing.md) — unit tests, integration scenarios, test data
