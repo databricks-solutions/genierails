@@ -498,6 +498,12 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
                 # Skip malformed join_specs (e.g. plain strings from LLM)
             lines.append("    ]")
 
+        if cfg.get("acl_groups"):
+            lines.append("    acl_groups = [")
+            for g in cfg["acl_groups"]:
+                lines.append(f"      {_hcl_str(g)},")
+            lines.append("    ]")
+
         lines.append("  }")
 
     lines.append("}")
@@ -2859,6 +2865,122 @@ def autofix_genie_config_fields(tfvars_path: Path) -> int:
     return added
 
 
+def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -> int:
+    """Populate acl_groups in genie_space_configs from FGAC policy analysis.
+
+    For each space, finds which groups have FGAC policies on that space's tables
+    and adds them to acl_groups. If acl_groups is already set, it's left unchanged.
+
+    Returns the number of spaces that had acl_groups populated.
+    """
+    import hcl2
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    genie_cfgs = cfg.get("genie_space_configs") or {}
+    if isinstance(genie_cfgs, list):
+        genie_cfgs = genie_cfgs[0] if genie_cfgs else {}
+    groups = cfg.get("groups") or {}
+    if isinstance(groups, list):
+        groups = groups[0] if groups else {}
+    fgac_policies = cfg.get("fgac_policies") or []
+    if isinstance(fgac_policies, list) and len(fgac_policies) == 1 and isinstance(fgac_policies[0], list):
+        fgac_policies = fgac_policies[0]
+
+    # Build space_name → set of catalogs from env.auto.tfvars or from tag_assignments
+    space_catalogs: dict[str, set[str]] = {}
+
+    # Try to get uc_tables per space from env.auto.tfvars
+    if env_tfvars_path and env_tfvars_path.exists():
+        try:
+            env_cfg = hcl2.loads(env_tfvars_path.read_text())
+            for space in (env_cfg.get("genie_spaces") or []):
+                if isinstance(space, list):
+                    space = space[0] if space else {}
+                name = space.get("name", "")
+                tables = space.get("uc_tables") or []
+                if isinstance(tables, list) and tables:
+                    if isinstance(tables[0], list):
+                        tables = tables[0]
+                    cats = {t.split(".")[0] for t in tables if "." in t}
+                    if cats:
+                        space_catalogs[name] = cats
+        except Exception:
+            pass
+
+    if not space_catalogs:
+        # Fallback: if we can't determine per-space catalogs, assign all groups to all spaces
+        return 0
+
+    # Build group → set of catalogs from fgac_policies
+    group_catalogs: dict[str, set[str]] = {}
+    for pol in fgac_policies:
+        if isinstance(pol, list):
+            pol = pol[0] if pol else {}
+        catalog = pol.get("catalog") or pol.get("function_catalog") or ""
+        if isinstance(catalog, list):
+            catalog = catalog[0] if catalog else ""
+        principals = pol.get("to_principals") or []
+        if isinstance(principals, list) and principals:
+            if isinstance(principals[0], list):
+                principals = principals[0]
+        for g in principals:
+            group_catalogs.setdefault(g, set()).add(catalog)
+        # Also include except_principals — they have elevated access
+        except_p = pol.get("except_principals") or []
+        if isinstance(except_p, list) and except_p:
+            if isinstance(except_p[0], list):
+                except_p = except_p[0]
+        for g in except_p:
+            group_catalogs.setdefault(g, set()).add(catalog)
+
+    # For each space, find groups whose FGAC catalogs overlap with the space's catalogs
+    fixed = 0
+    for space_name, cfg_entry in genie_cfgs.items():
+        if isinstance(cfg_entry, list):
+            cfg_entry = cfg_entry[0] if cfg_entry else {}
+        existing_acl = cfg_entry.get("acl_groups") or []
+        if isinstance(existing_acl, list) and existing_acl:
+            if isinstance(existing_acl[0], list):
+                existing_acl = existing_acl[0]
+            if existing_acl:
+                continue  # already set, don't override
+
+        cats = space_catalogs.get(space_name, set())
+        if not cats:
+            continue
+
+        # Find groups that have policies on this space's catalogs
+        space_groups = sorted({
+            g for g, g_cats in group_catalogs.items()
+            if g_cats & cats and g in groups
+        })
+
+        if not space_groups:
+            # If no specific groups found, use all groups (backward compat)
+            space_groups = sorted(groups.keys())
+
+        # Insert acl_groups into the HCL text for this space
+        # Find the space's config block and add acl_groups before the closing }
+        import re
+        # Match the space's config block: "Space Name" = { ... }
+        escaped_name = re.escape(space_name)
+        pattern = rf'("{escaped_name}"\s*=\s*\{{[^}}]*?)(\n\s*\}})'
+        acl_line = "\n    acl_groups = [\n" + "".join(f'      "{g}",\n' for g in space_groups) + "    ]"
+        new_text, count = re.subn(pattern, rf'\1{acl_line}\2', text, count=1, flags=re.DOTALL)
+        if count > 0:
+            text = new_text
+            fixed += 1
+
+    if fixed:
+        tfvars_path.write_text(text)
+    return fixed
+
+
 _GENERIC_FUNCTION_PREFS = ["mask_pii_partial", "mask_redact", "mask_nullify", "mask_hash"]
 _GENERIC_SAFE_FUNCTIONS = {"mask_pii_partial", "mask_redact", "mask_nullify", "mask_hash"}
 _FUNCTION_EXPECTED_CATEGORIES = {
@@ -4263,6 +4385,11 @@ Before you apply, tune for your business roles, security requirements, and Genie
         n_fields = autofix_genie_config_fields(tfvars_path)
         if n_fields:
             print(f"  Auto-fixed: added {n_fields} missing required field(s) in genie_space_configs")
+
+        env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
+        n_acl = autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
+        if n_acl:
+            print(f"  Auto-fixed: populated acl_groups for {n_acl} genie space(s)")
 
         n_fn_refs = autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
         if n_fn_refs:

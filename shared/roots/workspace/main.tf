@@ -82,6 +82,7 @@ locals {
     sql_expressions  = []
     sql_measures     = []
     join_specs       = []
+    acl_groups       = []
   }
 
   # ── Merged space map passed to the workspace module ───────────────────────
@@ -201,6 +202,7 @@ variable "genie_space_configs" {
       comment     = string
       instruction = string
     })), [])
+    acl_groups = optional(list(string), [])
   }))
   default     = {}
   description = "Map of space key to Genie semantic config (title, benchmarks, join specs, etc.). Keys must match genie_spaces[*].key."
