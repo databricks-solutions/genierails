@@ -31,10 +31,17 @@ The ABAC governance (groups, tag policies, tag assignments, masking functions) i
 
 Find the Genie Space ID in the URL when viewing the space in the Databricks UI (e.g. `...genie/rooms/01ef7b3c2a4d5e6f`).
 
+Pick your cloud and set up credentials:
+
+| My workspace is on... | Start here |
+| --- | --- |
+| AWS   | [`aws/README.md`](../../aws/README.md) |
+| Azure | [`azure/README.md`](../../azure/README.md) |
+
 ```bash
 cd aws/   # or azure/
 make setup
-vi envs/dev/auth.auto.tfvars   # workspace credentials
+vi envs/dev/auth.auto.tfvars   # workspace credentials (see cloud README above)
 vi envs/dev/env.auto.tfvars
 ```
 

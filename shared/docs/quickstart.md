@@ -6,10 +6,17 @@ Use this when you don't have an existing Genie Space yet and want to create ever
 
 ## Step-by-step
 
+Pick your cloud and set up credentials:
+
+| My workspace is on... | Start here |
+| --- | --- |
+| AWS   | [`aws/README.md`](../../aws/README.md) |
+| Azure | [`azure/README.md`](../../azure/README.md) |
+
 ```bash
 cd aws/   # or azure/
 make setup
-vi envs/dev/auth.auto.tfvars   # enter workspace credentials for the service principal
+vi envs/dev/auth.auto.tfvars   # enter workspace credentials (see cloud README above)
 
 vi envs/dev/env.auto.tfvars
 # Define your Genie Spaces. All table names must be fully qualified (catalog.schema.table).
