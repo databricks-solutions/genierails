@@ -2,7 +2,7 @@
 
 This document covers the self-service Genie operating model, where a central **Data Governance team** owns ABAC policies and groups, while independent **BU teams** self-serve their own Genie spaces.
 
-For the quick step-by-step, see [playbook.md §7](playbook.md#scenario-g-central-governance-self-service-genie). This document covers the reasoning, Git strategies, CI/CD integration, and FAQ.
+For the quick step-by-step, see [playbook.md — Central governance, self-service Genie](playbook.md#central-governance-self-service-genie). This document covers the reasoning, Git strategies, CI/CD integration, and FAQ.
 
 ---
 

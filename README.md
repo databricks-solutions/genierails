@@ -39,7 +39,7 @@ make apply
 
 All docs live in `shared/docs/`:
 
-- [Playbook](shared/docs/playbook.md) — use cases: quickstart, ABAC-only, multi-space, existing spaces, promotion, self-service Genie, destroy
+- [Playbook](shared/docs/playbook.md) — start here: import your existing Genie Space, add governance, promote to prod (also covers quickstart, advanced scenarios)
 - [Architecture](shared/docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
 - [Central Governance, Self-Service Genie](shared/docs/self-service-genie.md) — central ABAC team + BU teams self-serve Genie spaces
 - [CI/CD Integration](shared/docs/cicd.md) — validate and deploy from a pipeline
