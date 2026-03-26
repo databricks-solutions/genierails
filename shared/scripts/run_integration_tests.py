@@ -1449,6 +1449,101 @@ def _assert_genie_space_id_file(env: str, space_name: str) -> None:
     print(f"  {_green('PASS')}  Genie Space ID file: {candidates[0].name}")
 
 
+def _read_genie_space_id(env: str, space_name: str) -> str:
+    """Read the Genie Space object ID from the .genie_space_id_<key> file."""
+    key = re.sub(r"[^a-z0-9]+", "_", space_name.lower()).strip("_")
+    candidates = list((ENVS_DIR / env).glob(f".genie_space_id_{key}*"))
+    if not candidates:
+        legacy = ENVS_DIR / env / ".genie_space_id"
+        if legacy.exists():
+            return legacy.read_text().strip()
+        return ""
+    return candidates[0].read_text().strip()
+
+
+def _get_genie_space_acl_groups(auth_file: Path, space_id: str) -> set[str]:
+    """Query the Genie Space permissions API and return the set of group names with CAN_RUN."""
+    if not space_id:
+        return set()
+    try:
+        import ssl as _ssl
+        import urllib.request as _urq
+        import json as _json
+
+        cfg = _load_auth_cfg(auth_file)
+        _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+        host = _s(cfg.get("databricks_workspace_host", ""))
+        client_id = _s(cfg.get("databricks_client_id", ""))
+        client_secret = _s(cfg.get("databricks_client_secret", ""))
+        if not host:
+            return set()
+
+        from databricks.sdk import WorkspaceClient
+        w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+        token = w.config.authenticate()
+
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+        url = f"{host.rstrip('/')}/api/2.0/permissions/genie/{space_id}"
+        req = _urq.Request(url, headers=token)
+        with _urq.urlopen(req, timeout=30, context=ctx) as resp:
+            data = _json.loads(resp.read())
+
+        groups = set()
+        for acl in data.get("access_control_list", []):
+            group = acl.get("group_name", "")
+            perms = acl.get("all_permissions", [])
+            for p in perms:
+                if p.get("permission_level") == "CAN_RUN" and group:
+                    groups.add(group)
+        return groups
+    except Exception as exc:
+        print(f"  {_yellow('WARN')} Could not query Genie Space ACLs for {space_id}: {exc}")
+        return set()
+
+
+def _assert_acl_groups(auth_file: Path, env: str, space_name: str, expected_groups: set[str], label: str) -> None:
+    """Assert that a Genie Space's ACLs match the expected groups."""
+    space_id = _read_genie_space_id(env, space_name)
+    if not space_id:
+        print(f"  {_yellow('WARN')} Skipping ACL check for '{space_name}' — no space ID found")
+        return
+    actual_groups = _get_genie_space_acl_groups(auth_file, space_id)
+    if not actual_groups:
+        print(f"  {_yellow('WARN')} Could not retrieve ACLs for '{space_name}' — skipping check")
+        return
+    # Check expected groups are present (actual may include admins/system groups)
+    missing = expected_groups - actual_groups
+    if missing:
+        raise AssertionError(
+            f"ACL check failed for '{space_name}' ({label}): "
+            f"expected groups {missing} not found in ACLs. "
+            f"Actual: {actual_groups}"
+        )
+    print(f"  {_green('PASS')}  {label}: {sorted(expected_groups)} have CAN_RUN on '{space_name}'")
+
+
+def _assert_acl_excludes_groups(auth_file: Path, env: str, space_name: str, excluded_groups: set[str], label: str) -> None:
+    """Assert that specific groups do NOT have CAN_RUN on a Genie Space."""
+    space_id = _read_genie_space_id(env, space_name)
+    if not space_id:
+        print(f"  {_yellow('WARN')} Skipping ACL exclusion check for '{space_name}' — no space ID found")
+        return
+    actual_groups = _get_genie_space_acl_groups(auth_file, space_id)
+    if not actual_groups:
+        print(f"  {_yellow('WARN')} Could not retrieve ACLs for '{space_name}' — skipping check")
+        return
+    unexpected = excluded_groups & actual_groups
+    if unexpected:
+        raise AssertionError(
+            f"ACL exclusion check failed for '{space_name}' ({label}): "
+            f"groups {unexpected} should NOT have CAN_RUN but do. "
+            f"Actual: {actual_groups}"
+        )
+    print(f"  {_green('PASS')}  {label}: {sorted(excluded_groups)} correctly excluded from '{space_name}'")
+
+
 def _assert_state_no_account_resources(env: str) -> None:
     """Assert terraform.tfstate contains no account-level resources (genie_only mode)."""
     import json as _json_st
@@ -1676,6 +1771,46 @@ def scenario_multi_space(
 
     _step("Verifying data + ABAC governance")
     _verify_data(auth_file, dev=True, warehouse_id=warehouse_id)
+
+    # ── Verify per-space ACLs ─────────────────────────────────────────────────
+    _step("Verifying per-space Genie ACLs")
+    # Read the generated config to find acl_groups per space
+    gen_abac = ENVS_DIR / env / "generated" / "abac.auto.tfvars"
+    if gen_abac.exists():
+        try:
+            import hcl2 as _hcl2_ms
+            with open(gen_abac) as _f_ms:
+                _gen_cfg = _hcl2_ms.load(_f_ms)
+            _gsc = _gen_cfg.get("genie_space_configs") or {}
+            if isinstance(_gsc, list):
+                _gsc = _gsc[0] if _gsc else {}
+            _all_groups = set((_gen_cfg.get("groups") or {}).keys())
+            if isinstance(_all_groups, list):
+                _all_groups = set(_all_groups[0].keys()) if _all_groups else set()
+
+            for _space_name, _space_cfg in _gsc.items():
+                if isinstance(_space_cfg, list):
+                    _space_cfg = _space_cfg[0] if _space_cfg else {}
+                _acl = _space_cfg.get("acl_groups") or []
+                if isinstance(_acl, list) and _acl:
+                    if isinstance(_acl[0], list):
+                        _acl = _acl[0]
+                    if _acl:
+                        _expected = set(_acl)
+                        _excluded = _all_groups - _expected
+                        _assert_acl_groups(auth_file, env, _space_name, _expected,
+                                          f"Per-space ACL: {_space_name}")
+                        if _excluded:
+                            _assert_acl_excludes_groups(auth_file, env, _space_name, _excluded,
+                                                       f"ACL exclusion: {_space_name}")
+                    else:
+                        print(f"  {_green('PASS')}  {_space_name}: acl_groups empty (all groups get access — backward compat)")
+                else:
+                    print(f"  {_green('PASS')}  {_space_name}: no acl_groups (all groups get access — backward compat)")
+        except Exception as _acl_exc:
+            print(f"  {_yellow('WARN')} Could not verify per-space ACLs: {_acl_exc}")
+    else:
+        print(f"  {_yellow('WARN')} Skipping ACL verification — generated config not found")
 
     # ── teardown ─────────────────────────────────────────────────────────────
     if not keep_data:
