@@ -13,10 +13,12 @@ Put Genie onboarding on rails — with built-in guardrails. GenieRails imports y
 
 ## Getting Started
 
-| Starting point | You have... | Guide |
-|---|---|---|
-| **I already have a Genie Space** | A space configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](shared/docs/from-ui-to-production.md) |
-| **I'm starting from scratch** | Tables in Unity Catalog, no Genie Space yet | [Quickstart](shared/docs/quickstart.md) |
+Pick your cloud to set up credentials, then follow the guide for your scenario:
+
+| My workspace is on... | Start here |
+| --- | --- |
+| AWS   | [`aws/README.md`](aws/README.md) |
+| Azure | [`azure/README.md`](azure/README.md) |
 
 ## Repository Layout
 
