@@ -43,7 +43,7 @@ The LLM uses these exact names in generated FGAC policies, tag assignments, and 
 
 ## ABAC-Only Mode (No Genie Space)
 
-See [playbook.md — Section 2: ABAC governance only](playbook.md#2-abac-governance-only-no-genie-space) for the full step-by-step.
+See [playbook.md — ABAC governance only](playbook.md#abac-governance-only-no-genie-space) for the full step-by-step.
 
 ## Existing Masking Functions
 
