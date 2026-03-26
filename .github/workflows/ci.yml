@@ -38,7 +38,7 @@ jobs:
         run: cd shared && bash test.sh --skip-tf
 
   integration-tests:
-    name: Integration Tests
+    name: Integration Tests (AWS)
     runs-on: ubuntu-latest
     if: contains(github.event.pull_request.labels.*.name, 'run-integration')
     steps:
@@ -48,11 +48,35 @@ jobs:
         with:
           python-version: "3.11"
 
+      - uses: hashicorp/setup-terraform@v3
+
       - name: Install dependencies
-        run: pip install python-hcl2 databricks-sdk
+        run: pip install python-hcl2 databricks-sdk requests
+
+      - name: Provision test environment
+        env:
+          DATABRICKS_ACCOUNT_ID: ${{ secrets.DATABRICKS_ACCOUNT_ID }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          DATABRICKS_AWS_REGION: ${{ secrets.DATABRICKS_AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: python shared/scripts/provision_test_env.py provision
 
       - name: Run integration tests
         env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_ACCOUNT_ID: ${{ secrets.DATABRICKS_ACCOUNT_ID }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          CLOUD_PROVIDER: aws
         run: python shared/scripts/run_integration_tests.py
+
+      - name: Teardown test environment
+        if: always()
+        env:
+          DATABRICKS_ACCOUNT_ID: ${{ secrets.DATABRICKS_ACCOUNT_ID }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: python shared/scripts/provision_test_env.py teardown
