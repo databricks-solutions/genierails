@@ -485,7 +485,7 @@ clean-all: ## Remove all env workspaces under envs/
 	@rm -rf "$(CLOUD_ROOT)/envs"
 	@echo "Removed $(CLOUD_ROOT)/envs"
 
-_ITEST_RUNNER   := python3 "$(SHARED_ROOT)/scripts/run_integration_tests.py"
+_ITEST_RUNNER   := CLOUD_PROVIDER=$(CLOUD) python3 "$(SHARED_ROOT)/scripts/run_integration_tests.py"
 _ITEST_AUTH     := $(ENV_DIR)/auth.auto.tfvars
 _ITEST_WH_FLAG  := $(if $(WAREHOUSE_ID),--warehouse-id $(WAREHOUSE_ID),)
 _ITEST_KD_FLAG  := $(if $(KEEP_DATA),--keep-data,)
@@ -575,6 +575,12 @@ test-genie-only: _bootstrap _guard-workspace-target ## Scenario: genie_only=true
 test-country-overlay: _bootstrap _guard-workspace-target ## Scenario: country/region overlays (ANZ, IN, SEA) — generation only, no apply
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario country-overlay \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-industry-overlay: _bootstrap _guard-workspace-target ## Scenario: industry overlays (financial/healthcare/retail) + country+industry combo
+	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario industry-overlay \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 

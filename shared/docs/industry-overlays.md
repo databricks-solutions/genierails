@@ -277,6 +277,27 @@ pytest shared/tests/test_industry_overlays.py -v
 
 The existing `TestIndustryYamlFileIntegrity` test class automatically validates new YAML files (structure, required fields, cross-references). You can optionally add content-specific tests — see existing industry test classes for the pattern.
 
+### Integration testing
+
+The `industry-overlay` integration test scenario runs end-to-end against a live Databricks workspace:
+
+```bash
+# Run the industry overlay scenario only
+cd aws/   # or azure/
+make test-industry-overlay
+
+# Or run all scenarios (includes industry-overlay)
+make test-ci
+```
+
+The scenario tests:
+1. Each industry individually (financial\_services, healthcare, retail) — full generate + apply + verify cycle
+2. Multi-industry composition (`INDUSTRY=financial_services,healthcare,retail`)
+3. Country + industry composition (`COUNTRY=ANZ INDUSTRY=healthcare`)
+4. Baseline without `INDUSTRY=` (no regression)
+
+See [Integration Testing](integration-testing.md) for full details.
+
 ---
 
 ## FAQ
