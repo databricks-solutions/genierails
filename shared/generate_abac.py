@@ -90,6 +90,7 @@ def _ensure_packages():
 _ensure_packages()
 
 COUNTRIES_DIR = SCRIPT_DIR / "countries"
+INDUSTRIES_DIR = SCRIPT_DIR / "industries"
 
 
 def load_country_overlays(country_codes: list[str]) -> str:
@@ -129,6 +130,63 @@ def load_country_overlays(country_codes: list[str]) -> str:
         print(f"  Country overlay: {code_upper} ({overlay_name}) — "
               f"{len(identifiers)} identifier(s), "
               f"{len(data.get('masking_functions', []))} masking function(s)")
+
+    if not parts:
+        return ""
+
+    return "\n\n".join(parts) + "\n"
+
+
+def load_industry_overlays(industry_codes: list[str]) -> str:
+    """Load industry YAML overlays and return combined prompt text.
+
+    Each code maps to a YAML file in shared/industries/ (e.g. "healthcare" -> healthcare.yaml).
+    Returns the concatenated prompt_overlay text plus group templates and access patterns,
+    ready for injection into the LLM prompt.
+    """
+    import yaml
+
+    parts: list[str] = []
+
+    for code in industry_codes:
+        code_lower = code.strip().lower()
+        yaml_path = INDUSTRIES_DIR / f"{code_lower}.yaml"
+        if not yaml_path.exists():
+            available = sorted(
+                p.stem for p in INDUSTRIES_DIR.glob("*.yaml") if not p.stem.startswith("_")
+            )
+            print(f"  ERROR: Industry overlay file not found: {yaml_path}")
+            print(f"  Available: {', '.join(available) or '(none)'}")
+            sys.exit(1)
+
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f)
+
+        overlay_name = data.get("name", code_lower)
+        identifiers = data.get("identifiers", [])
+        prompt_overlay = data.get("prompt_overlay", "")
+        group_templates = data.get("group_templates", {})
+        access_patterns = data.get("access_patterns", [])
+
+        if prompt_overlay:
+            parts.append(prompt_overlay.rstrip())
+
+        if group_templates:
+            lines = [f"\n**Suggested Group Templates ({overlay_name}):**"]
+            for gname, gdef in group_templates.items():
+                lines.append(f"- `{gname}`: {gdef.get('description', '')} (access: {gdef.get('access_level', '')})")
+            parts.append("\n".join(lines))
+
+        if access_patterns:
+            lines = [f"\n**Access Patterns ({overlay_name}):**"]
+            for ap in access_patterns:
+                lines.append(f"- **{ap['name']}**: {ap.get('description', '')}. {ap.get('guidance', '')}")
+            parts.append("\n".join(lines))
+
+        print(f"  Industry overlay: {code_lower} ({overlay_name}) — "
+              f"{len(identifiers)} identifier(s), "
+              f"{len(data.get('masking_functions', []))} masking function(s), "
+              f"{len(group_templates)} group template(s)")
 
     if not parts:
         return ""
@@ -658,12 +716,17 @@ def build_prompt(ddl_text: str,
                  per_space_name: str | None = None,
                  space_names: list[str] | None = None,
                  mode: str = "full",
-                 countries: list[str] | None = None) -> str:
+                 countries: list[str] | None = None,
+                 industries: list[str] | None = None) -> str:
     """Build the full prompt by injecting DDL and optional group names into the template.
 
     When countries is set, country-specific identifier overlays are loaded from
     shared/countries/ and injected into the prompt to teach the LLM about
     region-specific masking patterns and regulatory context.
+
+    When industries is set, industry-specific overlays are loaded from
+    shared/industries/ and injected into the prompt with masking patterns,
+    group templates, and access patterns for the target industry.
 
     When per_space_name is set, an extra instruction is injected telling the LLM
     to generate ONLY config for that specific space (skip groups and tag_policies,
@@ -761,15 +824,20 @@ def build_prompt(ddl_text: str,
     if countries:
         country_instruction = load_country_overlays(countries)
 
+    industry_instruction = ""
+    if industries:
+        industry_instruction = load_industry_overlays(industries)
+
     if idx == -1:
         print("WARNING: Could not find '### MY TABLES' in ABAC_PROMPT.md")
         print("  Appending DDL at the end of the prompt instead.\n")
-        prompt = template + f"\n\n{per_space_instruction}{country_instruction}{groups_lines}{space_names_lines}{cs_lines}\n\n{ddl_text}\n"
+        prompt = template + f"\n\n{per_space_instruction}{country_instruction}{industry_instruction}{groups_lines}{space_names_lines}{cs_lines}\n\n{ddl_text}\n"
     else:
         prompt_body = template[:idx].rstrip()
         user_input = (
             f"\n\n{per_space_instruction}"
             f"{country_instruction}"
+            f"{industry_instruction}"
             f"{groups_lines}"
             f"{space_names_lines}"
             f"### MY TABLES\n\n"
@@ -3656,6 +3724,15 @@ def main():
              "in env.auto.tfvars if both are set. See shared/countries/ for available overlays.",
     )
     parser.add_argument(
+        "--industry",
+        metavar="CODE",
+        help="Comma-separated industry codes for industry-specific identifier awareness "
+             "(e.g. financial_services, healthcare, retail). Injects masking patterns, "
+             "group templates, and regulatory context into the LLM prompt. Overrides the "
+             "'industry' field in env.auto.tfvars if both are set. "
+             "See shared/industries/ for available overlays.",
+    )
+    parser.add_argument(
         "--mode",
         choices=["full", "governance", "genie"],
         default="full",
@@ -3709,6 +3786,17 @@ def main():
             print(f"  Country: {', '.join(countries)}")
         else:
             countries = None
+
+    # ── Industry overlay: resolve from CLI --industry or env config ──────────
+    # Priority: CLI --industry > env.auto.tfvars industry field > empty (global)
+    industry_raw = args.industry or auth_cfg.get("industry", "")
+    industries: list[str] | None = None
+    if industry_raw:
+        industries = [i.strip().lower() for i in industry_raw.split(",") if i.strip()]
+        if industries:
+            print(f"  Industry: {', '.join(industries)}")
+        else:
+            industries = None
 
     # ── Per-space mode: resolve the target space and redirect out_dir ────────
     # When --space is given, we only generate config for that one space.
@@ -3908,6 +3996,7 @@ def main():
         space_names=configured_space_names,
         mode=args.mode,
         countries=countries,
+        industries=industries,
     )
 
     if args.dry_run:

@@ -30,6 +30,7 @@ VALID_POLICY_TYPES = {"POLICY_TYPE_COLUMN_MASK", "POLICY_TYPE_ROW_FILTER"}
 BUILTIN_PRINCIPALS = {"account users"}
 
 COUNTRIES_DIR = Path(__file__).resolve().parent / "countries"
+INDUSTRIES_DIR = Path(__file__).resolve().parent / "industries"
 
 COLUMN_MASK_REQUIRED = {"name", "policy_type", "catalog", "to_principals", "match_condition", "match_alias", "function_name", "function_catalog", "function_schema"}
 ROW_FILTER_REQUIRED = {"name", "policy_type", "catalog", "to_principals", "function_name", "function_catalog", "function_schema"}
@@ -218,7 +219,46 @@ def _load_country_categories(
     return hint_to_category, func_to_categories
 
 
-# Country-specific hint→category mapping, populated when --country is used.
+def _load_industry_categories(
+    industry_codes: list[str],
+) -> tuple[dict[str, str], dict[str, set[str]]]:
+    """Load industry overlays and return (hint→category, function→categories) mappings.
+
+    Same structure as _load_country_categories but reads from shared/industries/
+    with lowercase codes.
+    """
+    try:
+        import yaml
+    except ImportError:
+        print("  WARNING: pyyaml not installed — skipping industry-aware validation")
+        return {}, {}
+
+    hint_to_category: dict[str, str] = {}
+    func_to_categories: dict[str, set[str]] = {}
+
+    for code in industry_codes:
+        code_lower = code.strip().lower()
+        yaml_path = INDUSTRIES_DIR / f"{code_lower}.yaml"
+        if not yaml_path.exists():
+            continue
+
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f)
+
+        for ident in data.get("identifiers", []):
+            category = ident.get("category", "")
+            if not category:
+                continue
+            for hint in ident.get("column_hints", []):
+                hint_to_category[hint.lower()] = category
+            fn = ident.get("masking_function")
+            if fn:
+                func_to_categories.setdefault(fn, set()).add(category)
+
+    return hint_to_category, func_to_categories
+
+
+# Country/industry-specific hint→category mapping, populated when --country/--industry is used.
 _country_hint_to_category: dict[str, str] = {}
 
 
@@ -711,11 +751,20 @@ def main():
              "(e.g. ANZ, IN, SEA). Extends column category detection with "
              "region-specific identifier patterns. See shared/countries/.",
     )
+    parser.add_argument(
+        "--industry",
+        metavar="CODE",
+        help="Comma-separated industry codes for industry-specific column inference "
+             "(e.g. financial_services, healthcare, retail). Extends column category "
+             "detection with industry-specific identifier patterns. "
+             "See shared/industries/.",
+    )
     args = parser.parse_args()
 
-    # ── Country/region overlay: extend column inference ──────────────────────
+    # ── Overlay: extend column inference with country/industry hints ────────
+    global _country_hint_to_category
+
     if args.country:
-        global _country_hint_to_category
         country_codes = [c.strip().upper() for c in args.country.split(",") if c.strip()]
         if country_codes:
             hints, func_cats = _load_country_categories(country_codes)
@@ -723,6 +772,16 @@ def main():
             FUNCTION_EXPECTED_CATEGORIES.update(func_cats)
             if hints:
                 print(f"  Country overlays loaded: {', '.join(country_codes)} "
+                      f"({len(hints)} column hints, {len(func_cats)} function mappings)")
+
+    if args.industry:
+        industry_codes = [i.strip().lower() for i in args.industry.split(",") if i.strip()]
+        if industry_codes:
+            hints, func_cats = _load_industry_categories(industry_codes)
+            _country_hint_to_category.update(hints)
+            FUNCTION_EXPECTED_CATEGORIES.update(func_cats)
+            if hints:
+                print(f"  Industry overlays loaded: {', '.join(industry_codes)} "
                       f"({len(hints)} column hints, {len(func_cats)} function mappings)")
 
     tfvars_path = Path(args.tfvars).resolve()

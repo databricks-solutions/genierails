@@ -1,0 +1,243 @@
+code: healthcare
+name: Healthcare
+regulations:
+  - HIPAA (Health Insurance Portability and Accountability Act)
+  - HITECH (Health Information Technology for Economic and Clinical Health Act)
+  - 42 CFR Part 2 (Substance Use Disorder Records)
+
+identifiers:
+  - name: Patient ID
+    column_hints:
+      - patient_id
+      - pat_id
+      - mrn
+      - medical_record_number
+    format: "Alphanumeric identifier"
+    sensitivity: restricted
+    masking_function: mask_patient_id
+    category: patient_id
+
+  - name: Diagnosis Code
+    column_hints:
+      - diagnosis
+      - diagnosis_code
+      - icd_code
+      - icd10
+      - dx_code
+    format: "ICD-10 code (e.g. A00.0)"
+    sensitivity: restricted
+    masking_function: mask_diagnosis
+    category: diagnosis
+
+  - name: Medical Record Number
+    column_hints:
+      - medical_record
+      - record_number
+      - chart_number
+      - emr_id
+    format: "Facility-specific alphanumeric"
+    sensitivity: restricted
+    masking_function: mask_medical_record
+    category: medical_record
+
+  - name: Date of Birth
+    column_hints:
+      - date_of_birth
+      - dob
+      - birth_date
+      - patient_dob
+    format: "Date (YYYY-MM-DD)"
+    sensitivity: restricted
+    masking_function: mask_dob_year
+    category: patient_pii
+
+  - name: Provider NPI
+    column_hints:
+      - npi
+      - provider_npi
+      - npi_number
+    format: "10 digits"
+    sensitivity: confidential
+    masking_function: mask_npi
+    category: provider_id
+
+  - name: Insurance Member ID
+    column_hints:
+      - member_id
+      - insurance_id
+      - subscriber_id
+      - policy_number
+    format: "Alphanumeric"
+    sensitivity: restricted
+    masking_function: mask_member_id
+    category: insurance_id
+
+  - name: Procedure Code
+    column_hints:
+      - procedure_code
+      - cpt_code
+      - procedure
+    format: "CPT/HCPCS code"
+    sensitivity: confidential
+    masking_function: mask_redact
+    category: procedure
+
+masking_functions:
+  - name: mask_patient_id
+    signature: "mask_patient_id(pid STRING) RETURNS STRING"
+    comment: "Patient ID — full redaction by default (HIPAA PHI)"
+    body: |
+      CASE
+        WHEN pid IS NULL THEN NULL
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_diagnosis
+    signature: "mask_diagnosis(dx STRING) RETURNS STRING"
+    comment: "Diagnosis code — show category only (first 3 chars), mask specific code"
+    body: |
+      CASE
+        WHEN dx IS NULL THEN NULL
+        WHEN LENGTH(dx) >= 3 THEN CONCAT(LEFT(dx, 3), '.**')
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_medical_record
+    signature: "mask_medical_record(mrn STRING) RETURNS STRING"
+    comment: "Medical record number — full redaction (HIPAA PHI)"
+    body: |
+      CASE
+        WHEN mrn IS NULL THEN NULL
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_dob_year
+    signature: "mask_dob_year(dob STRING) RETURNS STRING"
+    comment: "Date of birth — show year only for de-identification (HIPAA Safe Harbor)"
+    body: |
+      CASE
+        WHEN dob IS NULL THEN NULL
+        WHEN LENGTH(dob) >= 4 THEN CONCAT(LEFT(dob, 4), '-**-**')
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_npi
+    signature: "mask_npi(npi STRING) RETURNS STRING"
+    comment: "Provider NPI — show last 4 digits only"
+    body: |
+      CASE
+        WHEN npi IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(npi, '[^0-9]', '')) = 10 THEN
+          CONCAT('XXXXXX', RIGHT(REGEXP_REPLACE(npi, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_member_id
+    signature: "mask_member_id(mid STRING) RETURNS STRING"
+    comment: "Insurance member ID — show last 4 characters only"
+    body: |
+      CASE
+        WHEN mid IS NULL THEN NULL
+        WHEN LENGTH(mid) > 4 THEN CONCAT(REPEAT('*', LENGTH(mid) - 4), RIGHT(mid, 4))
+        ELSE '[REDACTED]'
+      END
+
+group_templates:
+  physician:
+    description: "Full access to all patient data including diagnoses and medical records"
+    access_level: full
+  nurse:
+    description: "Full access to patient demographics and care-relevant clinical data"
+    access_level: full
+  analyst:
+    description: "De-identified access — no direct patient identifiers, diagnosis categories only"
+    access_level: de-identified
+  billing_clerk:
+    description: "Access to insurance and procedure codes; no clinical diagnoses"
+    access_level: partial
+  researcher:
+    description: "De-identified dataset access for clinical research (HIPAA Safe Harbor)"
+    access_level: de-identified
+
+access_patterns:
+  - name: break_glass
+    description: "Emergency override for clinical staff to access full patient data outside their normal scope"
+    guidance: >
+      Create a dedicated break_glass group with full access to all PHI. Membership
+      should be temporary and audit-logged. The FGAC policy for this group should
+      use except_principals to override masking for break-glass users. Document that
+      all break-glass access triggers an audit review within 24 hours.
+
+  - name: minimum_necessary
+    description: "HIPAA minimum necessary standard — users should only see data required for their role"
+    guidance: >
+      Apply the HIPAA minimum necessary principle: billing staff should not see
+      clinical diagnoses, researchers should only see de-identified data, and
+      nurses should see care-relevant data but not billing details. Use tag-based
+      FGAC policies to enforce these boundaries.
+
+  - name: substance_use_protection
+    description: "42 CFR Part 2 requires extra protection for substance use disorder records"
+    guidance: >
+      If any tables contain substance use disorder (SUD) data, apply full redaction
+      for all groups except direct care providers. 42 CFR Part 2 is stricter than
+      general HIPAA and requires explicit patient consent for disclosure.
+
+prompt_overlay: |
+  ### Industry-Specific Identifiers: Healthcare
+
+  When analyzing healthcare datasets, be aware of these HIPAA-regulated identifiers
+  and the strict requirements for Protected Health Information (PHI).
+
+  **Patient Identifiers (PHI):**
+  - Patient ID / MRN: Alphanumeric. Columns: `patient_id`, `mrn`, `medical_record_number`.
+    Use `mask_patient_id` — full redaction by default.
+  - Medical Record Number: Facility-specific. Columns: `medical_record`, `chart_number`.
+    Use `mask_medical_record` — full redaction.
+  - Date of Birth: Columns: `date_of_birth`, `dob`, `birth_date`.
+    Use `mask_dob_year` — show year only (HIPAA Safe Harbor method).
+
+  **Clinical Data:**
+  - Diagnosis Code (ICD-10): Columns: `diagnosis`, `icd_code`, `dx_code`.
+    Use `mask_diagnosis` — show category only (first 3 chars), mask specific code.
+  - Procedure Code (CPT/HCPCS): Columns: `procedure_code`, `cpt_code`.
+    Use `mask_redact` — full redaction for non-clinical staff.
+
+  **Provider & Insurance:**
+  - Provider NPI: 10 digits. Columns: `npi`, `provider_npi`.
+    Use `mask_npi` — show last 4 digits.
+  - Insurance Member ID: Columns: `member_id`, `insurance_id`, `subscriber_id`.
+    Use `mask_member_id` — show last 4 characters.
+
+  **Available Healthcare Masking Functions:**
+  - `mask_patient_id(pid STRING) RETURNS STRING` — full redaction
+  - `mask_diagnosis(dx STRING) RETURNS STRING` — category only (first 3 chars)
+  - `mask_medical_record(mrn STRING) RETURNS STRING` — full redaction
+  - `mask_dob_year(dob STRING) RETURNS STRING` — year only (Safe Harbor)
+  - `mask_npi(npi STRING) RETURNS STRING` — last 4 digits
+  - `mask_member_id(mid STRING) RETURNS STRING` — last 4 characters
+
+  **Suggested Group Structure:**
+  - `physician`: Full access to all patient data
+  - `nurse`: Full access to demographics and clinical data
+  - `analyst` / `researcher`: De-identified access only (HIPAA Safe Harbor)
+  - `billing_clerk`: Insurance and procedure codes; no clinical diagnoses
+
+  **Access Patterns:**
+  - **Break-Glass**: Create a dedicated group for emergency clinical access that
+    overrides normal masking. All break-glass access must be audit-logged and
+    reviewed within 24 hours.
+  - **Minimum Necessary**: HIPAA requires that users only see data necessary for
+    their role. Billing staff should not see diagnoses; researchers get de-identified data.
+
+  **Regulatory Context:**
+  - HIPAA: All 18 PHI identifiers must be protected. Use full masking by default;
+    only grant access based on role with explicit FGAC policies.
+  - HITECH: Extends HIPAA with breach notification requirements. Masked data that
+    cannot be re-identified is excluded from breach notification.
+  - 42 CFR Part 2: Substance use disorder records require stricter protection than
+    general PHI — apply full redaction for all non-direct-care groups.
+
+  When you encounter columns matching these patterns, prefer full masking by default
+  and only grant access via explicit FGAC policies. Healthcare data should be
+  masked more aggressively than other industries.

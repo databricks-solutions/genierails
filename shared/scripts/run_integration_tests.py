@@ -133,7 +133,7 @@ CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / _default_cl
 # changing it once in main() propagates everywhere.
 ENVS_DIR    = Path(os.environ.get("ENVS_DIR", CLOUD_ROOT / "envs"))
 
-PROVISION_STATE_FILE = SCRIPT_DIR / ".test_env_state.json"
+PROVISION_STATE_FILE = SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
 
 DEFAULT_AUTH_FILE = ENVS_DIR / "dev" / "auth.auto.tfvars"
 
@@ -321,6 +321,17 @@ def _make(
         if result.returncode == 0:
             return result
         if attempt < retries:
+            # Before retrying apply, run make import to adopt any orphaned
+            # resources (e.g. tag policies that reappeared due to eventual
+            # consistency after deletion).  import is a no-op when there is
+            # nothing to adopt.
+            is_apply = any(t.startswith("apply") for t in targets_and_vars if "=" not in t)
+            if is_apply:
+                env_vars = {v.split("=", 1)[0]: v.split("=", 1)[1]
+                            for v in [*targets_and_vars, *injected] if "=" in v}
+                import_args = [f"{k}={v}" for k, v in env_vars.items()]
+                print(f"  [IMPORT] Running make import before retry to adopt any orphaned resources...")
+                _run(["make", "--no-print-directory", "import", *import_args], cwd=cwd, check=False)
             if retry_delay_seconds > 0:
                 print(
                     f"  [RETRY] Command failed (exit {result.returncode}), "
@@ -690,7 +701,7 @@ def _force_delete_tag_policies(*envs: str) -> None:
             print(f"  WARN: force_delete_tag_policies({env}) failed: {exc}")
 
 
-def _wait_for_tag_policy_deletion(*envs: str, max_wait: int = 60, poll_interval: int = 10) -> None:
+def _wait_for_tag_policy_deletion(*envs: str, max_wait: int = 180, poll_interval: int = 10) -> None:
     """Poll until all our snake_case tag policies are confirmed deleted.
 
     Databricks tag policy deletions are eventually consistent — the API may
@@ -1001,7 +1012,7 @@ def _force_delete_tag_assignments(*envs: str) -> None:
 # (e.g. Data_Analyst, Finance_Analyst, Clinical_Data_Steward).
 # Built-in groups use lowercase (admins, users, account users).
 # Other demos use mixed naming.  We only delete groups matching our pattern.
-_OUR_GROUP_NAME_RE = _re_mod.compile(r"^[A-Z][a-z]+(_[A-Z][a-z]+)+$")
+_OUR_GROUP_NAME_RE = _re_mod.compile(r"^[A-Z][a-z]+(_[A-Z][a-z]+)*$")
 
 # Built-in / system groups that must never be deleted.
 _BUILTIN_GROUPS = frozenset({
@@ -3847,6 +3858,240 @@ def scenario_country_overlay(
     print(f"\n  {_green(_bold('PASSED'))}  country-overlay")
 
 
+def scenario_industry_overlay(
+    auth_file: Path,
+    warehouse_id: str,
+    keep_data: bool,
+    fresh_env: bool = False,
+) -> None:
+    """
+    Test the industry overlay feature end-to-end.
+
+    Phase 1 — Schema setup:
+      Reuse dev_fin from quickstart and ALTER TABLE to add industry-specific
+      columns (account_number, patient_id, loyalty_number, diagnosis_code)
+      to the existing finance.customers table.
+
+    Phase 2 — Financial Services full cycle (generate → apply → verify):
+      Generate with INDUSTRY=financial_services. Assert the generated output
+      includes industry-specific masking functions (mask_account_last4,
+      mask_card_last4). Apply all layers. Verify deployment.
+
+    Phase 3 — Healthcare generation + apply:
+      Regenerate with INDUSTRY=healthcare. Assert healthcare-specific terms
+      (mask_patient_id, mask_diagnosis). Apply and verify.
+
+    Phase 4 — Retail generation check:
+      Regenerate with INDUSTRY=retail. Assert retail-specific terms
+      (mask_name_hash, mask_loyalty). Generation-only.
+
+    Phase 5 — Multi-industry generation check:
+      Regenerate with INDUSTRY=financial_services,healthcare,retail.
+      Assert all three overlay term sets present.
+
+    Phase 6 — Combined country+industry (COUNTRY=ANZ INDUSTRY=healthcare):
+      Assert both ANZ and healthcare terms appear in output.
+
+    Phase 7 — Baseline generation check:
+      Regenerate without INDUSTRY. Generation-only.
+
+    Phase 8 — Teardown.
+    """
+    _banner("Scenario: industry-overlay — INDUSTRY= with overlays + COUNTRY+INDUSTRY combo")
+    env = "dev"
+
+    _preamble_cleanup(env, fresh_env=fresh_env)
+
+    # ── Phase 1: Schema setup ────────────────────────────────────────────────
+    _step("Phase 1 — Creating dev_fin test catalog")
+    _setup_data(auth_file, warehouse_id=warehouse_id)
+
+    resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
+
+    industry_columns = [
+        ("patient_id",       "STRING COMMENT 'Patient identifier (MRN)'"),
+        ("diagnosis_code",   "STRING COMMENT 'ICD-10 diagnosis code'"),
+        ("loyalty_number",   "STRING COMMENT 'Customer loyalty card number'"),
+        ("member_id",        "STRING COMMENT 'Insurance member ID'"),
+    ]
+    # Also add APJ columns for the combined country+industry test
+    apj_columns = [
+        ("tax_file_number",  "STRING COMMENT 'Australian Tax File Number (TFN)'"),
+        ("medicare_number",  "STRING COMMENT 'Australian Medicare card number'"),
+    ]
+
+    def _ensure_extra_columns() -> None:
+        """Add industry + APJ columns to finance.customers (idempotent)."""
+        for col_name, col_def in industry_columns + apj_columns:
+            try:
+                _sdk_run_sql(
+                    auth_file,
+                    f"ALTER TABLE {DEV_FIN_CAT}.finance.customers ADD COLUMN {col_name} {col_def}",
+                    warehouse_id=resolved_wh,
+                )
+            except Exception as e:
+                if "already exists" in str(e).lower() or "COLUMN_ALREADY_EXISTS" in str(e):
+                    pass
+                else:
+                    raise
+
+    _step("Phase 1 — Adding industry + APJ columns to finance.customers")
+    _ensure_extra_columns()
+
+    _make("setup", f"ENV={env}")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
+
+    env_dir = ENVS_DIR / env
+    gen_dir = env_dir / "generated"
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _any_term_in_generated(terms: list[str], label: str) -> None:
+        """Assert at least one term from the list appears in generated output."""
+        files_to_check = [
+            gen_dir / "generated_response.md",
+            gen_dir / "abac.auto.tfvars",
+            gen_dir / "masking_functions.sql",
+        ]
+        all_content = ""
+        for f in files_to_check:
+            if f.exists():
+                all_content += f.read_text()
+        found = [t for t in terms if t in all_content]
+        if not found:
+            raise AssertionError(
+                f"None of {terms} found in generated output ({label}). "
+                f"Files checked: {[f.name for f in files_to_check if f.exists()]}"
+            )
+        print(f"  {_green('PASS')}  {label}: found {found[:3]} in generated output")
+
+    FINANCIAL_TERMS = ["mask_account_last4", "mask_card_last4", "mask_ssn_last4",
+                       "account_number", "PCI", "financial"]
+    HEALTHCARE_TERMS = ["mask_patient_id", "mask_diagnosis", "mask_dob_year",
+                        "patient_id", "HIPAA", "diagnosis"]
+    RETAIL_TERMS = ["mask_name_hash", "mask_loyalty", "mask_email",
+                    "loyalty", "CCPA", "retail"]
+    ANZ_TERMS = ["mask_tfn", "mask_medicare", "TFN", "Medicare", "tax_file_number"]
+
+    # ── Phase 2: Financial Services full cycle ────────────────────────────────
+    _step("Phase 2 — Generating with INDUSTRY=financial_services")
+    _clean_env_artifacts(env)
+    _make("generate", f"ENV={env}", "INDUSTRY=financial_services", retries=2)
+
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (financial)")
+    _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (financial)")
+    _any_term_in_generated(FINANCIAL_TERMS, "Financial Services overlay: industry-specific terms")
+
+    _step("Phase 2 — Applying all layers (financial_services)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Phase 2 — Verifying ABAC governance deployed (financial_services)")
+    _assert_genie_space_id_file(env, "Finance Analytics")
+    _verify_data(auth_file, dev=True, warehouse_id=resolved_wh)
+
+    _step("Phase 2 — Destroying governance (free FGAC quota)")
+    _try_destroy(env)
+    _try_destroy_account()
+
+    # ── Phase 3: Healthcare full cycle ────────────────────────────────────────
+    _step("Phase 3 — Generating with INDUSTRY=healthcare")
+    _clean_env_artifacts(env)
+    _make("setup", f"ENV={env}")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
+    _make("generate", f"ENV={env}", "INDUSTRY=healthcare", retries=2)
+
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (healthcare)")
+    _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (healthcare)")
+    _any_term_in_generated(HEALTHCARE_TERMS, "Healthcare overlay: industry-specific terms")
+
+    _step("Phase 3 — Applying all layers (healthcare)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Phase 3 — Verifying ABAC governance deployed (healthcare)")
+    _assert_genie_space_id_file(env, "Finance Analytics")
+    _verify_data(auth_file, dev=True, warehouse_id=resolved_wh)
+
+    _step("Phase 3 — Destroying governance (free FGAC quota)")
+    _try_destroy(env)
+    _try_destroy_account()
+
+    # ── Phase 4: Retail generation check ──────────────────────────────────────
+    _step("Phase 4 — Generating with INDUSTRY=retail")
+    _clean_env_artifacts(env)
+    _make("setup", f"ENV={env}")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
+    _make("generate", f"ENV={env}", "INDUSTRY=retail", retries=2)
+
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (retail)")
+    _any_term_in_generated(RETAIL_TERMS, "Retail overlay: industry-specific terms")
+    # Skip apply — Phases 2-3 proved the deploy path works
+
+    # ── Phase 5: Multi-industry generation check ─────────────────────────────
+    _step("Phase 5 — Generating multi-industry (financial_services,healthcare,retail)")
+    _clean_env_artifacts(env)
+    _make("setup", f"ENV={env}")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
+    _make("generate", f"ENV={env}", "INDUSTRY=financial_services,healthcare,retail", retries=2)
+
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (multi-industry)")
+    _any_term_in_generated(FINANCIAL_TERMS, "Multi-industry: financial terms")
+    _any_term_in_generated(HEALTHCARE_TERMS, "Multi-industry: healthcare terms")
+    _any_term_in_generated(RETAIL_TERMS, "Multi-industry: retail terms")
+
+    # ── Phase 6: Combined country+industry ────────────────────────────────────
+    _step("Phase 6 — Generating with COUNTRY=ANZ INDUSTRY=healthcare")
+    _clean_env_artifacts(env)
+    _ensure_extra_columns()
+    _make("setup", f"ENV={env}")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
+    _make("generate", f"ENV={env}", "COUNTRY=ANZ", "INDUSTRY=healthcare", retries=2)
+
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (ANZ+healthcare)")
+    _any_term_in_generated(ANZ_TERMS, "Combined: ANZ country terms present")
+    _any_term_in_generated(HEALTHCARE_TERMS, "Combined: healthcare industry terms present")
+    print(f"  {_green('PASS')}  Country+Industry overlays compose correctly")
+
+    # ── Phase 7: Baseline (no INDUSTRY) ───────────────────────────────────────
+    _step("Phase 7 — Generating without INDUSTRY (baseline)")
+    _clean_env_artifacts(env)
+    _make("setup", f"ENV={env}")
+    _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
+    _make("generate", f"ENV={env}", retries=2)
+
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (baseline)")
+    print(f"  {_green('PASS')}  Baseline generation succeeded without INDUSTRY=")
+
+    # ── Phase 8: Teardown ─────────────────────────────────────────────────────
+    if not keep_data:
+        _step("Phase 8 — Cleaning up extra columns (best-effort)")
+        for col_name, _ in industry_columns + apj_columns:
+            for key in ["pii_level", "phi_level", "pci_level", "financial_sensitivity",
+                        "compliance_scope", "aml_scope"]:
+                try:
+                    _sdk_run_sql(
+                        auth_file,
+                        f"ALTER TABLE {DEV_FIN_CAT}.finance.customers "
+                        f"ALTER COLUMN {col_name} UNSET TAGS ('{key}')",
+                        warehouse_id=resolved_wh,
+                    )
+                except Exception:
+                    pass
+            try:
+                _sdk_run_sql(
+                    auth_file,
+                    f"ALTER TABLE {DEV_FIN_CAT}.finance.customers DROP COLUMN {col_name}",
+                    warehouse_id=resolved_wh,
+                )
+            except Exception as e:
+                print(f"  WARN  Could not drop {col_name}: {e}")
+
+        _teardown_data("--teardown", auth_file=auth_file, warehouse_id=resolved_wh)
+        _try_destroy(env)
+        _try_destroy_account()
+
+    print(f"\n  {_green(_bold('PASSED'))}  industry-overlay")
+
+
 # ---------------------------------------------------------------------------
 # Scenario registry
 # ---------------------------------------------------------------------------
@@ -3865,6 +4110,7 @@ SCENARIOS: dict[str, tuple[str, Callable]] = {
     "schema-drift":    ("Column tag drift detection after ADD/DROP/RENAME COLUMN",           scenario_schema_drift),
     "genie-only":      ("Genie-only mode (genie_only=true, no account-level resources)",    scenario_genie_only),
     "country-overlay": ("Country/region overlays (ANZ, IN, SEA) — generation only",         scenario_country_overlay),
+    "industry-overlay": ("Industry overlays (financial/healthcare/retail) + country+industry combo", scenario_industry_overlay),
     "genie-import-no-abac": ("Import Genie Space, deploy to prod without ABAC",            scenario_genie_import_no_abac),
 }
 

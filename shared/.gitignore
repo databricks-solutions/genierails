@@ -5,7 +5,7 @@
 scripts/account-admin.env
 scripts/account-admin.env.*
 scripts/account-admin.*.env
-scripts/.test_env_state.json
+scripts/.test_env_state.*.json
 
 # Terraform lock files
 *.terraform.lock.hcl

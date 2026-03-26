@@ -337,7 +337,8 @@ the next one starts.
 | **schema-drift** | — | Detects and classifies new columns after initial ABAC deployment; tests `make audit-schema` and `make generate-delta` across ADD/DROP/RENAME COLUMN scenarios |
 | **genie-only** | § 7 (genie\_only) | Minimal-privilege SP (workspace USER + SQL entitlement) creates Genie Space with `genie_only=true`; no account-level resources |
 | **genie-import-no-abac** | § 3 + § 7 | Import an existing Genie Space and deploy to prod **without any ABAC governance** — validates the genie-only import-to-prod workflow when a separate team manages ABAC centrally |
-| **country-overlay** | — | Country/region overlays (ANZ, IN, SEA) — generation only, no apply |
+| **country-overlay** | — | Country/region overlays (ANZ, IN, SEA) — full cycle per region + multi-region generation |
+| **industry-overlay** | — | Industry overlays (financial\_services, healthcare, retail) — full cycle per industry + multi-industry + country+industry composition (COUNTRY=ANZ INDUSTRY=healthcare) |
 
 ---
 
@@ -404,6 +405,7 @@ make test-multi-space-import
 make test-genie-only
 make test-genie-import-no-abac
 make test-country-overlay
+make test-industry-overlay
 
 # All targets accept WAREHOUSE_ID= and KEEP_DATA=1
 make test-promote WAREHOUSE_ID=abc123ef KEEP_DATA=1

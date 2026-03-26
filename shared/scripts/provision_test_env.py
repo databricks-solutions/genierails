@@ -102,7 +102,7 @@ _default_cloud  = (
 CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / _default_cloud))
 ENVS_DIR    = CLOUD_ROOT / "envs"                       # user's real envs (never touched)
 TEST_ENVS_DIR = CLOUD_ROOT / "envs" / "test"            # isolated dir for integration tests
-STATE_FILE  = SCRIPT_DIR / ".test_env_state.json"
+STATE_FILE  = SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
 DEFAULT_ENV_FILE = SCRIPT_DIR / f"account-admin.{_default_cloud}.env"
 
 
