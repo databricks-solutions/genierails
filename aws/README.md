@@ -49,15 +49,6 @@ databricks_workspace_host = "https://dbc-xxxxxxxx-xxxx.cloud.databricks.com"
 
 ---
 
-## Testing
-
-```bash
-make test-unit   # unit tests — ~1 second, no credentials required
-make test-ci     # full CI pipeline: provision → integration tests → teardown
-```
-
-See [Integration Testing](../shared/docs/integration-testing.md) for setup and credentials.
-
 ## Documentation
 
 - [From UI to Production](../shared/docs/from-ui-to-production.md) — import your existing Genie Space, add governance, promote to prod

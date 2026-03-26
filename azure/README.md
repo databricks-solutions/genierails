@@ -53,15 +53,6 @@ databricks_workspace_host = "https://adb-1234567890.12.azuredatabricks.net"
 
 ---
 
-## Testing
-
-```bash
-make test-unit   # unit tests — ~1 second, no credentials required
-make test-ci     # full CI pipeline: provision → integration tests → teardown
-```
-
-See [Integration Testing](../shared/docs/integration-testing.md) for setup and credentials.
-
 ## Documentation
 
 - [Azure Prerequisites](docs/azure-prerequisites.md) — Azure-specific resource setup, RBAC roles, storage accounts
