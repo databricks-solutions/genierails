@@ -30,14 +30,15 @@ locals {
     : databricks_sql_endpoint.warehouse[0].id
   )
 
-  # Per-space group list: use acl_groups if set, otherwise all groups (backward compat)
-  genie_space_groups = {
+  # Per-space group list: use acl_groups if set, otherwise all groups (backward compat).
+  # When var.groups is empty (genie-only mode), ACLs are skipped entirely.
+  genie_space_groups = length(var.groups) > 0 ? {
     for key, space in var.genie_spaces : key => (
       length(try(space.config.acl_groups, [])) > 0
         ? join(",", space.config.acl_groups)
         : join(",", keys(var.groups))
     )
-  }
+  } : {}
 
   # Spaces that already have an ID — apply ACLs, and config if defined.
   existing_spaces = { for k, v in var.genie_spaces : k => v if v.genie_space_id != "" }
