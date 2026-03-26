@@ -1,5 +1,34 @@
-*conf*.json
+# OS
 .DS_Store
-__pycache__
+
+# IDE
 .idea/
+
+# Python
+__pycache__/
+*.pyc
+
+# Environment / secrets
 .env
+*conf*.json
+
+# Terraform state (may contain secrets)
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# AI-generated output (user-specific)
+generated/
+masking_functions.sql
+
+# User-created environment directories
+envs/
+
+# Local import IDs
+import_ids.env
+
+# User-specific credentials (only track the .example)
+auth.auto.tfvars
+
+# Auto-created Genie Space ID (managed by Terraform lifecycle)
+.genie_space_id
