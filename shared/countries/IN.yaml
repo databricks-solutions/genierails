@@ -1,0 +1,205 @@
+code: IN
+name: India
+regulations:
+  - Information Technology Act 2000
+  - Aadhaar (Targeted Delivery of Financial and Other Subsidies, Benefits and Services) Act 2016
+  - Digital Personal Data Protection Act 2023 (DPDP Act)
+  - RBI Data Localization Circular 2018
+  - Income Tax Act 1961
+
+identifiers:
+  - name: Aadhaar
+    country: IN
+    column_hints:
+      - aadhaar
+      - aadhar
+      - aadhaar_number
+      - aadhar_number
+      - aadhaar_no
+      - uid_number
+    format: "12 digits — appears as 1234 5678 9012 or 123456789012 or 1234-5678-9012"
+    sensitivity: restricted
+    masking_function: mask_aadhaar
+    category: government_id
+
+  - name: PAN (Permanent Account Number)
+    country: IN
+    column_hints:
+      - pan
+      - pan_number
+      - pan_card
+      - pan_no
+      - permanent_account_number
+    format: "10 characters (AAAAA9999A — 5 letters, 4 digits, 1 letter)"
+    sensitivity: restricted
+    masking_function: mask_pan_india
+    category: government_id
+
+  - name: GSTIN (GST Identification Number)
+    country: IN
+    column_hints:
+      - gstin
+      - gst_number
+      - gst_no
+      - gst_id
+    format: "15 characters (state code + PAN + entity code + check digit)"
+    sensitivity: confidential
+    masking_function: mask_gstin
+    category: business_id
+
+  - name: IFSC (Indian Financial System Code)
+    country: IN
+    column_hints:
+      - ifsc
+      - ifsc_code
+      - bank_ifsc
+    format: "11 characters (AAAA0NNNNNN — bank code + 0 + branch code)"
+    sensitivity: public
+    masking_function: null
+    category: financial_id
+
+  - name: Voter ID (EPIC)
+    country: IN
+    column_hints:
+      - voter_id
+      - epic
+      - epic_number
+      - voter_card
+    format: "3 letters + 7 digits"
+    sensitivity: restricted
+    masking_function: mask_voter_id
+    category: government_id
+
+  - name: Driving Licence (India)
+    country: IN
+    column_hints:
+      - driving_licence
+      - dl_number
+    format: "State code + 13 digits (e.g. MH-12-2019-0012345)"
+    sensitivity: restricted
+    masking_function: mask_dl_india
+    category: government_id
+
+  - name: UPI ID
+    country: IN
+    column_hints:
+      - upi
+      - upi_id
+      - vpa
+    format: "email-like (name@bank)"
+    sensitivity: confidential
+    masking_function: mask_email
+    category: financial_id
+
+masking_functions:
+  - name: mask_aadhaar
+    signature: "mask_aadhaar(aadhaar STRING) RETURNS STRING"
+    comment: "Indian Aadhaar — normalize to digits, show last 4 only (XXXX XXXX 9012)"
+    body: |
+      CASE
+        WHEN aadhaar IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(aadhaar, '[^0-9]', '')) = 12 THEN
+          CONCAT('XXXX XXXX ', RIGHT(REGEXP_REPLACE(aadhaar, '[^0-9]', ''), 4))
+        ELSE '[INVALID AADHAAR]'
+      END
+
+  - name: mask_pan_india
+    signature: "mask_pan_india(pan STRING) RETURNS STRING"
+    comment: "Indian PAN — show first 3 and last character (ABC****7A)"
+    body: |
+      CASE
+        WHEN pan IS NULL THEN NULL
+        WHEN LENGTH(UPPER(TRIM(pan))) = 10 THEN
+          CONCAT(LEFT(UPPER(TRIM(pan)), 3), '****', RIGHT(UPPER(TRIM(pan)), 1))
+        ELSE '[INVALID PAN]'
+      END
+
+  - name: mask_gstin
+    signature: "mask_gstin(gstin STRING) RETURNS STRING"
+    comment: "Indian GSTIN — show state code (first 2) and last 3 characters"
+    body: |
+      CASE
+        WHEN gstin IS NULL THEN NULL
+        WHEN LENGTH(TRIM(gstin)) = 15 THEN
+          CONCAT(LEFT(TRIM(gstin), 2), REPEAT('*', 10), RIGHT(TRIM(gstin), 3))
+        ELSE '[INVALID GSTIN]'
+      END
+
+  - name: mask_voter_id
+    signature: "mask_voter_id(voter_id STRING) RETURNS STRING"
+    comment: "Indian Voter ID (EPIC) — show first letter and last 3 characters"
+    body: |
+      CASE
+        WHEN voter_id IS NULL THEN NULL
+        WHEN LENGTH(TRIM(voter_id)) >= 4 THEN
+          CONCAT(LEFT(TRIM(voter_id), 1), REPEAT('*', LENGTH(TRIM(voter_id)) - 4), RIGHT(TRIM(voter_id), 3))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_dl_india
+    signature: "mask_dl_india(dl STRING) RETURNS STRING"
+    comment: "Indian driving licence — show state code (first 2) and last 4 characters"
+    body: |
+      CASE
+        WHEN dl IS NULL THEN NULL
+        WHEN LENGTH(TRIM(dl)) >= 6 THEN
+          CONCAT(LEFT(TRIM(dl), 2), REPEAT('*', LENGTH(TRIM(dl)) - 6), RIGHT(TRIM(dl), 4))
+        ELSE '[REDACTED]'
+      END
+
+prompt_overlay: |
+  ### Country-Specific Identifiers: India
+
+  When analyzing Indian datasets, be aware of these regulated identifiers and their
+  format variability. Indian data systems are highly heterogeneous — the same identifier
+  often appears in different formats across source systems.
+
+  **Government IDs:**
+  - Aadhaar: 12-digit unique identity number. Appears in multiple formats:
+    `1234 5678 9012` (spaces), `123456789012` (no separators), `1234-5678-9012` (hyphens).
+    Columns: `aadhaar`, `aadhar` (common misspelling), `aadhaar_number`, `uid_number`.
+    Regulated by Aadhaar Act 2016 — must be masked. Use `mask_aadhaar`.
+    IMPORTANT: The masking function normalizes all formats to digits before masking.
+  - PAN (Permanent Account Number): 10 characters with strict pattern AAAAA9999A
+    (5 letters, 4 digits, 1 letter). Columns: `pan`, `pan_number`, `pan_card`.
+    Regulated by Income Tax Act. Use `mask_pan_india` — show first 3 + last 1.
+    NOTE: Do NOT confuse with credit card PAN — use `mask_pan_india`, not `mask_credit_card_*`.
+  - Voter ID (EPIC): 3 letters + 7 digits. Columns: `voter_id`, `epic`.
+    Use `mask_voter_id` — first letter + last 3.
+  - Driving Licence: State code prefix + digits (e.g. MH-12-2019-0012345).
+    Columns: `driving_licence`, `dl_number`. Use `mask_dl_india` — show state code + last 4.
+
+  **Business IDs:**
+  - GSTIN (GST Identification Number): 15 characters combining state code + PAN + entity
+    code + check digit. Columns: `gstin`, `gst_number`, `gst_no`.
+    Use `mask_gstin` — show state code (first 2) + last 3.
+
+  **Financial:**
+  - IFSC (Indian Financial System Code): 11-character bank/branch code (e.g. HDFC0001234).
+    Columns: `ifsc`, `ifsc_code`. This is a public branch identifier — typically does NOT
+    need masking, but the LLM should recognize it as a financial system column.
+  - UPI ID: email-like format (name@bank). Columns: `upi`, `upi_id`, `vpa`.
+    Use existing `mask_email` — same local-part masking logic applies.
+  - Indian mobile numbers: +91 followed by 10 digits. Columns: `mobile`, `phone`.
+    Use existing `mask_phone` — last 4 digits visible.
+
+  **Available India-Specific Masking Functions:**
+  - `mask_aadhaar(aadhaar STRING) RETURNS STRING` — Aadhaar, last 4 digits visible (XXXX XXXX 9012)
+  - `mask_pan_india(pan STRING) RETURNS STRING` — PAN, first 3 + last 1 visible (ABC****7A)
+  - `mask_gstin(gstin STRING) RETURNS STRING` — GSTIN, state code + last 3 visible
+  - `mask_voter_id(voter_id STRING) RETURNS STRING` — Voter ID, first letter + last 3 visible
+  - `mask_dl_india(dl STRING) RETURNS STRING` — driving licence, state code + last 4 visible
+
+  **Regulatory context:**
+  - Aadhaar Act 2016: Aadhaar numbers are classified as sensitive — unauthorized disclosure
+    carries penalties. Even partial Aadhaar exposure is regulated.
+  - Digital Personal Data Protection Act 2023 (DPDP Act): India's comprehensive data
+    protection law. Requires purpose limitation and data minimization for personal data.
+  - RBI Data Localization Circular 2018: Mandates that payment system data must be stored
+    and processed within India. This affects where financial data can flow.
+
+  When you encounter columns matching these patterns, prefer the India-specific masking
+  functions over generic ones. Pay special attention to:
+  1. `pan` columns — these are Indian PAN (tax ID), NOT credit card PAN. Use `mask_pan_india`.
+  2. `aadhaar` vs `aadhar` — both spellings are common in Indian datasets.
+  3. Format normalization — Aadhaar functions strip non-digit characters before masking.

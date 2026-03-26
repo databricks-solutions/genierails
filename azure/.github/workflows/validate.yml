@@ -1,0 +1,37 @@
+name: Validate ABAC Config
+
+# Runs on every PR that touches governance config files.
+# No Databricks credentials required — only parses committed config files.
+on:
+  pull_request:
+    paths:
+      - 'envs/**'
+      - 'modules/**'
+      - 'roots/**'
+      - 'scripts/**'
+      - 'Makefile'
+
+jobs:
+  validate:
+    name: Validate governance config
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install python-hcl2
+
+      - name: Validate account layer
+        run: make validate ENV=account
+
+      - name: Validate dev config
+        run: make validate ENV=dev
+
+      - name: Validate prod config
+        run: make validate ENV=prod

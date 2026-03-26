@@ -1,0 +1,166 @@
+# ============================================================================
+# GENERATED DRAFT ABAC CONFIG — source for promote
+# ============================================================================
+#
+# Operating modes (set when running make generate):
+#
+#   make generate                    Full generation (default) — groups + ABAC + Genie configs.
+#                                    Use for centralized teams that own everything.
+#
+#   make generate MODE=governance    ABAC-only generation — groups, tag_policies,
+#                                    tag_assignments, fgac_policies, masking functions.
+#                                    genie_space_configs is suppressed (BU teams own it).
+#                                    Use with: make apply-governance ENV=<env>
+#
+#   make generate MODE=genie         Genie-only generation — genie_space_configs
+#                                    (instructions, benchmarks, measures, sample questions).
+#                                    All ABAC sections and masking SQL are suppressed.
+#                                    Existing groups are auto-loaded from the account layer.
+#                                    Use with: make apply-genie ENV=<env>
+#
+# For the self-service Genie pattern (central ABAC team + BU teams self-serve Genie spaces)
+# see docs/self-service-genie.md.
+#
+# ============================================================================
+# `make generate` writes a full draft into `envs/<env>/generated/abac.auto.tfvars`.
+# `make promote` then splits that draft into:
+#   - `envs/account/abac.auto.tfvars`
+#       groups + optional group_members
+#   - `envs/<env>/data_access/abac.auto.tfvars`
+#       env-scoped groups lookup + tag_policies + tag_assignments + fgac_policies
+#   - `envs/<env>/data_access/masking_functions.sql`
+#       env-scoped masking SQL deployed by the governance layer
+#   - `envs/<env>/abac.auto.tfvars`
+#       groups lookup + Genie config only
+#
+# Setup:
+#   1. cp auth.auto.tfvars.example auth.auto.tfvars   (credentials — gitignored)
+#      cp env.auto.tfvars.example env.auto.tfvars     (tables + environment)
+#   2. Generate a draft with `make generate`
+#   3. Tune the draft, then run `make promote` and `make apply`
+#
+# For a complete working example see examples/finance/finance.tfvars.example.
+# ============================================================================
+
+# === Groups: one entry per access tier ===
+# Each key becomes a Databricks account-level group with consumer entitlements.
+groups = {
+  "Data_Consumer" = { description = "Read-only access to governed data" }
+  # "GroupName"   = { description = "What this group can see" }
+}
+
+# === Tag policies: governance tags for ABAC matching ===
+# Each entry creates a databricks_tag_policy with the specified allowed values.
+tag_policies = [
+  # { key = "sensitivity", description = "Data sensitivity level", values = ["public", "confidential", "restricted"] }
+]
+
+# === Tag assignments: bind tags to your tables/columns ===
+# entity_type: "tables" or "columns"
+# entity_name must be fully qualified:
+#   Tables:  "catalog.schema.TableName"
+#   Columns: "catalog.schema.TableName.ColumnName"
+tag_assignments = [
+  # { entity_type = "columns", entity_name = "my_catalog.my_schema.Table.Column", tag_key = "sensitivity", tag_value = "confidential" }
+]
+
+# === FGAC policies: the access rules ===
+# policy_type: POLICY_TYPE_COLUMN_MASK or POLICY_TYPE_ROW_FILTER
+# catalog, function_catalog, function_schema are REQUIRED on each policy.
+# function_name is relative (just the function name, e.g. "mask_redact").
+fgac_policies = [
+  # Column mask example:
+  # {
+  #   name             = "mask_confidential"
+  #   policy_type      = "POLICY_TYPE_COLUMN_MASK"
+  #   catalog          = "my_catalog"
+  #   to_principals    = ["Restricted_Users"]
+  #   comment          = "Mask confidential columns"
+  #   match_condition  = "hasTagValue('sensitivity', 'confidential')"
+  #   match_alias      = "cols"
+  #   function_name    = "mask_redact"
+  #   function_catalog = "my_catalog"
+  #   function_schema  = "my_schema"
+  # }
+  #
+  # Row filter example:
+  # {
+  #   name             = "region_filter"
+  #   policy_type      = "POLICY_TYPE_ROW_FILTER"
+  #   catalog          = "my_catalog"
+  #   to_principals    = ["EU_Staff"]
+  #   comment          = "EU staff see EU data only"
+  #   when_condition   = "hasTagValue('data_region', 'scoped')"
+  #   function_name    = "filter_by_region_eu"
+  #   function_catalog = "my_catalog"
+  #   function_schema  = "my_schema"
+  # }
+]
+
+# === Genie Space Configs (workspace-owned after promote) ===
+# One entry per Genie Space, keyed by the same `key` used in env.auto.tfvars genie_spaces.
+# All table names in SQL must be fully qualified: catalog.schema.table.
+#
+# The key must exactly match the `name` field in env.auto.tfvars genie_spaces.
+# The `title` field is optional — if omitted, the space name is used as the title.
+# genie_space_configs = {
+#   "Financial & Clinical Analytics" = {
+#     description = "Explore transaction data, patient encounters, and compliance metrics."
+#
+#     sample_questions = [
+#       "What is the total revenue by region for last quarter?",
+#       "Show the top 10 customers by transaction volume",
+#       "Which accounts have been flagged for AML review?",
+#     ]
+#
+#     instructions = "When asked about 'customers' without a status qualifier, default to active customers (CustomerStatus = 'Active'). 'Last month' means the previous calendar month. Round monetary values to 2 decimal places."
+#
+#     benchmarks = [
+#       {
+#         question = "What is the total amount of completed transactions?"
+#         sql      = "SELECT SUM(Amount) as total_amount FROM catalog.schema.transactions WHERE TransactionStatus = 'Completed'"
+#       },
+#     ]
+#
+#     sql_filters = [
+#       {
+#         sql          = "customers.CustomerStatus = 'Active'"
+#         display_name = "active customers"
+#         comment      = "Only include customers with Active status"
+#         instruction  = "Apply when the user asks about customers without specifying a status"
+#       },
+#     ]
+#
+#     sql_measures = [
+#       {
+#         alias        = "total_revenue"
+#         sql          = "SUM(transactions.Amount)"
+#         display_name = "total revenue"
+#         comment      = "Sum of all transaction amounts"
+#         instruction  = "Use for revenue, total amount, or sales calculations"
+#       },
+#     ]
+#
+#     sql_expressions = [
+#       {
+#         alias        = "transaction_year"
+#         sql          = "YEAR(transactions.TransactionDate)"
+#         display_name = "transaction year"
+#         comment      = "Extracts year from transaction date"
+#         instruction  = "Use for year-over-year analysis of transactions"
+#       },
+#     ]
+#
+#     join_specs = [
+#       {
+#         left_table  = "catalog.schema.accounts"
+#         left_alias  = "accounts"
+#         right_table = "catalog.schema.customers"
+#         right_alias = "customers"
+#         sql         = "accounts.CustomerID = customers.CustomerID"
+#         comment     = "Join accounts to customers on CustomerID"
+#         instruction = "Use when you need customer details for account queries"
+#       },
+#     ]
+#   }
+# }

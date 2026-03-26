@@ -1,0 +1,176 @@
+name: Deploy ABAC Governance
+
+# Applies committed governance config to Databricks on merge to main.
+# Requires GitHub Secrets and an S3 bucket for Terraform state storage.
+#
+# Required GitHub Secrets (Settings → Secrets → Actions):
+#
+#   Databricks — account layer (SP must be Account Admin + Metastore Admin):
+#     DATABRICKS_ACCOUNT_ID
+#     ACCOUNT_DATABRICKS_CLIENT_ID
+#     ACCOUNT_DATABRICKS_CLIENT_SECRET
+#     ACCOUNT_DATABRICKS_WORKSPACE_ID       (any workspace the SP has access to)
+#     ACCOUNT_DATABRICKS_WORKSPACE_HOST
+#
+#   Databricks — dev workspace (SP must be Workspace Admin):
+#     DEV_DATABRICKS_CLIENT_ID
+#     DEV_DATABRICKS_CLIENT_SECRET
+#     DEV_DATABRICKS_WORKSPACE_ID
+#     DEV_DATABRICKS_WORKSPACE_HOST
+#
+#   Databricks — prod workspace (SP must be Workspace Admin):
+#     PROD_DATABRICKS_CLIENT_ID
+#     PROD_DATABRICKS_CLIENT_SECRET
+#     PROD_DATABRICKS_WORKSPACE_ID
+#     PROD_DATABRICKS_WORKSPACE_HOST
+#
+#   AWS — for S3 Terraform state storage:
+#     TF_STATE_BUCKET         (e.g. my-company-tf-state)
+#     TF_STATE_BUCKET_REGION  (e.g. us-east-1)
+#     AWS_ACCESS_KEY_ID
+#     AWS_SECRET_ACCESS_KEY
+#
+# Terraform state layout in S3:
+#   s3://<TF_STATE_BUCKET>/genie-aws/envs/account/terraform.tfstate
+#   s3://<TF_STATE_BUCKET>/genie-aws/envs/dev/terraform.tfstate
+#   s3://<TF_STATE_BUCKET>/genie-aws/envs/dev/data_access/terraform.tfstate
+#   s3://<TF_STATE_BUCKET>/genie-aws/envs/prod/terraform.tfstate
+#   s3://<TF_STATE_BUCKET>/genie-aws/envs/prod/data_access/terraform.tfstate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'envs/**'
+      - 'modules/**'
+      - 'roots/**'
+      - 'scripts/**'
+      - 'Makefile'
+
+jobs:
+  deploy:
+    name: Apply governance config
+    runs-on: ubuntu-latest
+
+    # Optional: configure a GitHub Environment named "production" to require
+    # manual approval before this job runs (Settings → Environments).
+    # environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install python-hcl2 databricks-sdk
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS credentials (for S3 state)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.TF_STATE_BUCKET_REGION }}
+
+      # -----------------------------------------------------------------------
+      # Write auth.auto.tfvars for each layer from GitHub Secrets.
+      # These files are gitignored and never committed — reconstructed here only.
+      # The account layer symlinks to the account auth file by default.
+      # -----------------------------------------------------------------------
+      - name: Write auth.auto.tfvars files
+        env:
+          DATABRICKS_ACCOUNT_ID:              ${{ secrets.DATABRICKS_ACCOUNT_ID }}
+          ACCOUNT_DATABRICKS_CLIENT_ID:       ${{ secrets.ACCOUNT_DATABRICKS_CLIENT_ID }}
+          ACCOUNT_DATABRICKS_CLIENT_SECRET:   ${{ secrets.ACCOUNT_DATABRICKS_CLIENT_SECRET }}
+          ACCOUNT_DATABRICKS_WORKSPACE_ID:    ${{ secrets.ACCOUNT_DATABRICKS_WORKSPACE_ID }}
+          ACCOUNT_DATABRICKS_WORKSPACE_HOST:  ${{ secrets.ACCOUNT_DATABRICKS_WORKSPACE_HOST }}
+          DEV_DATABRICKS_CLIENT_ID:           ${{ secrets.DEV_DATABRICKS_CLIENT_ID }}
+          DEV_DATABRICKS_CLIENT_SECRET:       ${{ secrets.DEV_DATABRICKS_CLIENT_SECRET }}
+          DEV_DATABRICKS_WORKSPACE_ID:        ${{ secrets.DEV_DATABRICKS_WORKSPACE_ID }}
+          DEV_DATABRICKS_WORKSPACE_HOST:      ${{ secrets.DEV_DATABRICKS_WORKSPACE_HOST }}
+          PROD_DATABRICKS_CLIENT_ID:          ${{ secrets.PROD_DATABRICKS_CLIENT_ID }}
+          PROD_DATABRICKS_CLIENT_SECRET:      ${{ secrets.PROD_DATABRICKS_CLIENT_SECRET }}
+          PROD_DATABRICKS_WORKSPACE_ID:       ${{ secrets.PROD_DATABRICKS_WORKSPACE_ID }}
+          PROD_DATABRICKS_WORKSPACE_HOST:     ${{ secrets.PROD_DATABRICKS_WORKSPACE_HOST }}
+        run: |
+          mkdir -p envs/account envs/dev envs/prod
+
+          cat > envs/account/auth.auto.tfvars <<EOF
+          databricks_account_id     = "${DATABRICKS_ACCOUNT_ID}"
+          databricks_client_id      = "${ACCOUNT_DATABRICKS_CLIENT_ID}"
+          databricks_client_secret  = "${ACCOUNT_DATABRICKS_CLIENT_SECRET}"
+          databricks_workspace_id   = "${ACCOUNT_DATABRICKS_WORKSPACE_ID}"
+          databricks_workspace_host = "${ACCOUNT_DATABRICKS_WORKSPACE_HOST}"
+          EOF
+
+          cat > envs/dev/auth.auto.tfvars <<EOF
+          databricks_account_id     = "${DATABRICKS_ACCOUNT_ID}"
+          databricks_client_id      = "${DEV_DATABRICKS_CLIENT_ID}"
+          databricks_client_secret  = "${DEV_DATABRICKS_CLIENT_SECRET}"
+          databricks_workspace_id   = "${DEV_DATABRICKS_WORKSPACE_ID}"
+          databricks_workspace_host = "${DEV_DATABRICKS_WORKSPACE_HOST}"
+          EOF
+
+          cat > envs/prod/auth.auto.tfvars <<EOF
+          databricks_account_id     = "${DATABRICKS_ACCOUNT_ID}"
+          databricks_client_id      = "${PROD_DATABRICKS_CLIENT_ID}"
+          databricks_client_secret  = "${PROD_DATABRICKS_CLIENT_SECRET}"
+          databricks_workspace_id   = "${PROD_DATABRICKS_WORKSPACE_ID}"
+          databricks_workspace_host = "${PROD_DATABRICKS_WORKSPACE_HOST}"
+          EOF
+
+      # -----------------------------------------------------------------------
+      # Sync Terraform state from S3 before applying.
+      # The local backend ("backend local {}") reads state from the envs/ paths.
+      # CI runners are ephemeral — we pre-populate state so Terraform can diff
+      # against existing deployed resources rather than treating every run as
+      # a fresh deploy.
+      # -----------------------------------------------------------------------
+      - name: Download Terraform state from S3
+        run: |
+          bucket="${{ secrets.TF_STATE_BUCKET }}"
+          prefix="genie-aws/envs"
+          echo "Syncing tfstate from s3://${bucket}/${prefix}/ ..."
+          aws s3 sync "s3://${bucket}/${prefix}/" envs/ \
+            --exclude "*" --include "*.tfstate" || true
+          echo "State files found:"
+          find envs -name "*.tfstate" 2>/dev/null | sort || echo "  (none — first deploy)"
+
+      # -----------------------------------------------------------------------
+      # Apply each environment layer.
+      # make apply ENV=<env> runs: account → data_access → workspace.
+      # The account layer is applied once explicitly, then dev and prod each
+      # re-run it (idempotent). This ensures account-layer changes are always
+      # applied before workspace-layer changes across all envs.
+      # The generated/ directory is gitignored, so promote is skipped
+      # automatically — Terraform uses the already-split abac.auto.tfvars.
+      # -----------------------------------------------------------------------
+      - name: Apply account layer
+        run: make apply ENV=account
+
+      - name: Apply dev environment
+        run: make apply ENV=dev
+
+      - name: Apply prod environment
+        run: make apply ENV=prod
+
+      # -----------------------------------------------------------------------
+      # Persist updated Terraform state back to S3 regardless of apply outcome.
+      # Using `if: always()` so partial failures don't orphan updated state.
+      # -----------------------------------------------------------------------
+      - name: Upload Terraform state to S3
+        if: always()
+        run: |
+          bucket="${{ secrets.TF_STATE_BUCKET }}"
+          prefix="genie-aws/envs"
+          echo "Uploading tfstate to s3://${bucket}/${prefix}/ ..."
+          find envs -name "terraform.tfstate" | while read -r f; do
+            key="${prefix}/${f#envs/}"
+            echo "  s3://${bucket}/${key}"
+            aws s3 cp "${f}" "s3://${bucket}/${key}"
+          done

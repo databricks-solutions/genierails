@@ -1,0 +1,298 @@
+code: ANZ
+name: Australia & New Zealand
+regulations:
+  - Privacy Act 1988 (AU)
+  - Privacy Act 2020 (NZ)
+  - My Health Records Act 2012 (AU)
+  - Health Information Privacy Code 2020 (NZ)
+  - AML/CTF Act 2006 (AU)
+  - Anti-Money Laundering and Countering Financing of Terrorism Act 2009 (NZ)
+  - Tax Administration Act 1994 (NZ)
+
+identifiers:
+  # ── Australia ──────────────────────────────────────────────────────────────
+  - name: Tax File Number (TFN)
+    country: AU
+    column_hints:
+      - tfn
+      - tax_file_number
+      - tax_file_no
+    format: "9 digits (NNN NNN NNN)"
+    sensitivity: restricted
+    masking_function: mask_tfn
+    category: government_id
+
+  - name: Medicare Number
+    country: AU
+    column_hints:
+      - medicare
+      - medicare_number
+      - medicare_no
+      - medicare_card
+    format: "10-11 digits"
+    sensitivity: restricted
+    masking_function: mask_medicare
+    category: health_id
+
+  - name: BSB (Bank State Branch)
+    country: AU
+    column_hints:
+      - bsb
+      - bsb_number
+      - bank_bsb
+    format: "6 digits (NNN-NNN)"
+    sensitivity: confidential
+    masking_function: mask_bsb
+    category: financial_id
+
+  - name: Driver Licence (AU)
+    country: AU
+    column_hints:
+      - driver_licence
+      - licence_number
+      - drivers_licence
+    format: State-specific alphanumeric
+    sensitivity: restricted
+    masking_function: mask_licence_number
+    category: government_id
+
+  - name: Australian Business Number (ABN)
+    country: AU
+    column_hints:
+      - abn
+      - abn_number
+    format: "11 digits"
+    sensitivity: confidential
+    masking_function: mask_abn
+    category: business_id
+
+  - name: Centrelink Reference Number (CRN)
+    country: AU
+    column_hints:
+      - crn
+      - centrelink_number
+      - centrelink
+    format: "9 characters + 1 letter"
+    sensitivity: restricted
+    masking_function: mask_crn
+    category: government_id
+
+  # ── New Zealand ────────────────────────────────────────────────────────────
+  - name: IRD Number
+    country: NZ
+    column_hints:
+      - ird
+      - ird_number
+      - ird_no
+    format: "8-9 digits"
+    sensitivity: restricted
+    masking_function: mask_ird
+    category: government_id
+
+  - name: NHI Number (National Health Index)
+    country: NZ
+    column_hints:
+      - nhi
+      - nhi_number
+    format: "3 letters + 4 digits (e.g. ABC1234)"
+    sensitivity: restricted
+    masking_function: mask_nhi
+    category: health_id
+
+  - name: NZ Driver Licence
+    country: NZ
+    column_hints:
+      - nz_licence
+      - nz_driver_licence
+    format: "2 letters + 6 digits"
+    sensitivity: restricted
+    masking_function: mask_nz_licence
+    category: government_id
+
+  - name: NZ Passport
+    country: NZ
+    column_hints:
+      - passport
+      - passport_number
+      - nz_passport
+    format: "2 letters + 6 digits"
+    sensitivity: restricted
+    masking_function: mask_passport
+    category: government_id
+
+masking_functions:
+  # ── Australia ──────────────────────────────────────────────────────────────
+  - name: mask_tfn
+    signature: "mask_tfn(tfn STRING) RETURNS STRING"
+    comment: "Australian Tax File Number — show last 3 digits only"
+    body: |
+      CASE
+        WHEN tfn IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(tfn, '[^0-9]', '')) = 9 THEN
+          CONCAT('XXX XXX ', RIGHT(REGEXP_REPLACE(tfn, '[^0-9]', ''), 3))
+        ELSE '[INVALID TFN]'
+      END
+
+  - name: mask_medicare
+    signature: "mask_medicare(medicare STRING) RETURNS STRING"
+    comment: "Australian Medicare number — show last 4 digits only"
+    body: |
+      CASE
+        WHEN medicare IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(medicare, '[^0-9]', '')) >= 4 THEN
+          CONCAT('XXXX XXXX ', RIGHT(REGEXP_REPLACE(medicare, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_bsb
+    signature: "mask_bsb(bsb STRING) RETURNS STRING"
+    comment: "Australian BSB number — show last 3 digits only"
+    body: |
+      CASE
+        WHEN bsb IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(bsb, '[^0-9]', '')) = 6 THEN
+          CONCAT('XXX-', RIGHT(REGEXP_REPLACE(bsb, '[^0-9]', ''), 3))
+        ELSE '[INVALID BSB]'
+      END
+
+  - name: mask_licence_number
+    signature: "mask_licence_number(licence STRING) RETURNS STRING"
+    comment: "Driver licence number — show first 2 and last 2 characters only"
+    body: |
+      CASE
+        WHEN licence IS NULL THEN NULL
+        WHEN LENGTH(licence) <= 4 THEN '[REDACTED]'
+        ELSE CONCAT(LEFT(licence, 2), REPEAT('*', LENGTH(licence) - 4), RIGHT(licence, 2))
+      END
+
+  - name: mask_abn
+    signature: "mask_abn(abn STRING) RETURNS STRING"
+    comment: "Australian Business Number — show first 2 and last 3 digits"
+    body: |
+      CASE
+        WHEN abn IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(abn, '[^0-9]', '')) = 11 THEN
+          CONCAT(LEFT(REGEXP_REPLACE(abn, '[^0-9]', ''), 2), ' XXX XXX ', RIGHT(REGEXP_REPLACE(abn, '[^0-9]', ''), 3))
+        ELSE '[INVALID ABN]'
+      END
+
+  - name: mask_crn
+    signature: "mask_crn(crn STRING) RETURNS STRING"
+    comment: "Centrelink Reference Number — show last 3 characters only"
+    body: |
+      CASE
+        WHEN crn IS NULL THEN NULL
+        WHEN LENGTH(crn) >= 3 THEN CONCAT(REPEAT('*', LENGTH(crn) - 3), RIGHT(crn, 3))
+        ELSE '[REDACTED]'
+      END
+
+  # ── New Zealand ────────────────────────────────────────────────────────────
+  - name: mask_ird
+    signature: "mask_ird(ird STRING) RETURNS STRING"
+    comment: "NZ IRD number — show last 3 digits only"
+    body: |
+      CASE
+        WHEN ird IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(ird, '[^0-9]', '')) >= 3 THEN
+          CONCAT(REPEAT('X', LENGTH(REGEXP_REPLACE(ird, '[^0-9]', '')) - 3), '-', RIGHT(REGEXP_REPLACE(ird, '[^0-9]', ''), 3))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_nhi
+    signature: "mask_nhi(nhi STRING) RETURNS STRING"
+    comment: "NZ National Health Index — show first letter and last 2 characters"
+    body: |
+      CASE
+        WHEN nhi IS NULL THEN NULL
+        WHEN LENGTH(nhi) >= 4 THEN
+          CONCAT(LEFT(nhi, 1), REPEAT('*', LENGTH(nhi) - 3), RIGHT(nhi, 2))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_nz_licence
+    signature: "mask_nz_licence(licence STRING) RETURNS STRING"
+    comment: "NZ driver licence — show first 2 and last 2 characters"
+    body: |
+      CASE
+        WHEN licence IS NULL THEN NULL
+        WHEN LENGTH(licence) <= 4 THEN '[REDACTED]'
+        ELSE CONCAT(LEFT(licence, 2), REPEAT('*', LENGTH(licence) - 4), RIGHT(licence, 2))
+      END
+
+  - name: mask_passport
+    signature: "mask_passport(passport STRING) RETURNS STRING"
+    comment: "Passport number — show first letter and last 2 characters"
+    body: |
+      CASE
+        WHEN passport IS NULL THEN NULL
+        WHEN LENGTH(passport) >= 4 THEN
+          CONCAT(LEFT(passport, 1), REPEAT('*', LENGTH(passport) - 3), RIGHT(passport, 2))
+        ELSE '[REDACTED]'
+      END
+
+prompt_overlay: |
+  ### Country-Specific Identifiers: Australia & New Zealand (ANZ)
+
+  When analyzing ANZ datasets, be aware of these country-specific regulated identifiers.
+  ANZ datasets frequently mix Australian and New Zealand records in the same tables
+  (e.g. trans-Tasman banking, shared HR systems).
+
+  **Australia — Government IDs:**
+  - Tax File Number (TFN): 9 digits. Columns often named `tfn`, `tax_file_number`.
+    Regulated by Privacy Act 1988 with extra protections under the TFN Rule.
+    Use `mask_tfn` — show last 3 digits.
+  - Driver Licence: State-issued, alphanumeric. Columns: `driver_licence`, `licence_number`.
+    Use `mask_licence_number` — first 2 + last 2 chars.
+  - Centrelink Reference Number (CRN): 9 chars + letter. Columns: `crn`, `centrelink_number`.
+    Use `mask_crn` — last 3 chars.
+  - Australian Business Number (ABN): 11 digits. Columns: `abn`. Not always PII but
+    sometimes restricted. Use `mask_abn` — first 2 + last 3 digits.
+
+  **Australia — Health:**
+  - Medicare Number: 10-11 digits. Columns: `medicare`, `medicare_number`.
+    Regulated by My Health Records Act 2012. Use `mask_medicare` — show last 4 digits.
+
+  **Australia — Financial:**
+  - BSB (Bank State Branch): 6 digits identifying bank and branch. Columns: `bsb`, `bsb_number`.
+    Use `mask_bsb` — show last 3 digits.
+  - Bank Account Number: Typically 6-10 digits. Columns: `account_number`, `bank_account`.
+    Use existing `mask_account_number` (deterministic SHA-256 token).
+
+  **New Zealand — Government IDs:**
+  - IRD Number: 8-9 digit tax identifier. Columns: `ird`, `ird_number`, `ird_no`.
+    Regulated by Tax Administration Act 1994. Use `mask_ird` — show last 3 digits.
+  - NZ Driver Licence: 2 letters + 6 digits. Columns: `nz_licence`, `nz_driver_licence`.
+    Use `mask_nz_licence` — first 2 + last 2 chars.
+  - NZ Passport: 2 letters + 6 digits. Columns: `passport`, `passport_number`.
+    Use `mask_passport` — first letter + last 2 chars.
+
+  **New Zealand — Health:**
+  - NHI Number (National Health Index): 3 letters + 4 digits (e.g. ABC1234).
+    Columns: `nhi`, `nhi_number`. Regulated by Health Information Privacy Code 2020.
+    Use `mask_nhi` — show first letter + last 2 chars.
+
+  **New Zealand — Financial:**
+  - NZ Bank Account: Format NNN-NNNN-NNNNNNN-NNN (bank-branch-account-suffix).
+    Columns: `bank_account`, `account_number`. Use existing `mask_account_number`.
+
+  **Available ANZ Masking Functions:**
+  - `mask_tfn(tfn STRING) RETURNS STRING` — Australian TFN, last 3 digits visible
+  - `mask_medicare(medicare STRING) RETURNS STRING` — Medicare number, last 4 digits visible
+  - `mask_bsb(bsb STRING) RETURNS STRING` — BSB number, last 3 digits visible
+  - `mask_licence_number(licence STRING) RETURNS STRING` — first 2 + last 2 chars visible
+  - `mask_abn(abn STRING) RETURNS STRING` — ABN, first 2 + last 3 digits visible
+  - `mask_crn(crn STRING) RETURNS STRING` — CRN, last 3 chars visible
+  - `mask_ird(ird STRING) RETURNS STRING` — NZ IRD number, last 3 digits visible
+  - `mask_nhi(nhi STRING) RETURNS STRING` — NZ NHI, first letter + last 2 chars visible
+  - `mask_nz_licence(licence STRING) RETURNS STRING` — NZ licence, first 2 + last 2 chars
+  - `mask_passport(passport STRING) RETURNS STRING` — passport, first letter + last 2 chars
+
+  **Regulatory context:**
+  - Privacy Act 1988 (AU) governs personal information. TFN has additional protections
+    under the Privacy (Tax File Number) Rule 2015.
+  - Privacy Act 2020 (NZ) has similar scope. IRD numbers are specifically protected.
+  - AML/CTF Act 2006 (AU) and equivalent NZ Act: transaction data needs appropriate masking.
+  - My Health Records Act 2012 (AU): Medicare numbers and health identifiers are strictly regulated.
+
+  When you encounter columns matching these patterns, prefer the country-specific masking
+  functions over generic ones (e.g. `mask_tfn` over `mask_redact` for TFN columns).

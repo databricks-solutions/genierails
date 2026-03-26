@@ -1,0 +1,42 @@
+# Databricks Authentication — secrets only.
+# Terraform auto-loads *.auto.tfvars — no need to pass -var-file.
+# This file is gitignored. NEVER check it in.
+#
+# Configure these values in envs/<env>/auth.auto.tfvars.
+# envs/account/auth.auto.tfvars defaults to the selected workspace auth file.
+# envs/<env>/data_access/auth.auto.tfvars defaults to ../auth.auto.tfvars.
+# Replace either if account or governance resources need different credentials.
+#
+# Where to find each value:
+# - databricks_account_id:
+#   Account Console -> top-right profile menu -> account selector / URL
+# - databricks_client_id:
+#   Account Console -> User management -> Service principals -> <your SP>
+#   Use the service principal's Application ID / Client ID
+# - databricks_client_secret:
+#   Same service principal -> OAuth secrets / Client secrets
+#   Create a new secret, then paste it here
+# - databricks_workspace_id:
+#   Workspace URL or Account Console -> Workspaces -> <your workspace>
+#   Example URL pattern: ?o=<workspace_id>
+# - databricks_workspace_host:
+#   Your workspace browser URL, e.g. https://dbc-....cloud.databricks.com/
+#
+# Required permissions for the service principal:
+#
+# Full mode (default):
+#   - Account Admin   — create groups, assign groups to workspaces
+#   - Workspace Admin  — create warehouses, manage Genie Spaces and permissions
+#   - Metastore Admin  — create tag policies, FGAC policies, grants, masking functions
+#
+# Genie-only mode (set genie_only = true in env.auto.tfvars):
+#   - Workspace Admin only
+#   - databricks_account_id can be left empty
+#
+#   cp auth.auto.tfvars.example auth.auto.tfvars
+
+databricks_account_id    = ""
+databricks_client_id     = ""
+databricks_client_secret = ""
+databricks_workspace_id  = ""
+databricks_workspace_host = ""

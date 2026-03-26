@@ -1,28 +1,57 @@
-# REPO NAME 
+# GenieRails
+
+Put Genie onboarding on rails — with built-in guardrails. GenieRails generates ABAC governance, masking functions, and Genie Spaces from a small set of input files so you can get business users into Genie quickly without editing Terraform.
+
+## Getting Started
+
+Pick whichever cloud your Databricks workspace runs on:
+
+| My workspace is on… | Start here |
+| ------------------- | ---------- |
+| AWS   | [`aws/README.md`](aws/README.md) |
+| Azure | [`azure/README.md`](azure/README.md) |
+
+### Repository Layout
 
 ```
-Placeholder
-
-Fill here a description at a functional level - what is this content doing
+genie/
+├── aws/            Cloud wrapper for AWS deployments
+├── azure/          Cloud wrapper for Azure deployments
+└── shared/         All shared code (Terraform modules, scripts, tests, docs)
 ```
 
-## Video Overview
+`aws/` and `azure/` are the entry points — always run `make` commands from one of these directories. You never run commands from `shared/` directly; it holds all the Terraform modules, Python scripts, and docs, and is invoked automatically through the cloud wrapper.
 
-Include a GIF overview of what your project does. Use a service like Quicktime, Zoom or Loom to create the video, then convert to a GIF.
+### Quickstart (same for both clouds)
 
+```bash
+cd aws/   # or azure/
+make setup
+vi envs/dev/auth.auto.tfvars      # service principal credentials
+vi envs/dev/env.auto.tfvars       # your tables and Genie Space name
 
-## Installation
+make generate
+make validate-generated
+make apply
+```
 
-Include details on how to use and install this content. 
+## Documentation
 
-## How to get help
+All docs live in `shared/docs/`:
 
-Databricks support doesn't cover this content. For questions or bugs, please open a GitHub issue and the team will help on a best effort basis.
+- [Playbook](shared/docs/playbook.md) — use cases: quickstart, ABAC-only, multi-space, existing spaces, promotion, self-service Genie, destroy
+- [Architecture](shared/docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
+- [Central Governance, Self-Service Genie](shared/docs/self-service-genie.md) — central ABAC team + BU teams self-serve Genie spaces
+- [CI/CD Integration](shared/docs/cicd.md) — validate and deploy from a pipeline
+- [Troubleshooting](shared/docs/troubleshooting.md) — imports, provider quirks, brownfield workflows
+- [Advanced Usage](shared/docs/advanced.md) — IDP-synced groups, ABAC-only mode, masking UDF reuse, legacy migration
+- [Country & Region Overlays (APJ)](shared/docs/country-overlays.md) — using, tuning, or adding country-specific PII governance (ANZ, India, Southeast Asia); contributor guide for new regions
+- [Integration Testing](shared/docs/integration-testing.md) — unit tests, integration scenarios, test data
 
+## Testing
 
-## License
-
-&copy; 2025 Databricks, Inc. All rights reserved. The source in this notebook is provided subject to the Databricks License [https://databricks.com/db-license-source].  All included or referenced third party libraries are subject to the licenses set forth below.
-
-| library                                | description             | license    | source                                              |
-|----------------------------------------|-------------------------|------------|-----------------------------------------------------|
+```bash
+cd aws/              # or azure/
+make test-unit       # fast unit tests (~1s, no credentials)
+make test-ci         # full CI: provision → integration tests → teardown
+```

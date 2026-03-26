@@ -1,0 +1,275 @@
+code: SEA
+name: Singapore & Malaysia
+regulations:
+  - Personal Data Protection Act 2012 (SG PDPA)
+  - Personal Data Protection Act 2010 (MY PDPA)
+  - MAS Technology Risk Management Guidelines (SG)
+  - Bank Negara Malaysia Risk Management in Technology
+
+identifiers:
+  # ── Singapore ──────────────────────────────────────────────────────────────
+  - name: NRIC (National Registration Identity Card)
+    country: SG
+    column_hints:
+      - nric
+      - nric_number
+      - nric_no
+      - sg_nric
+    format: "1 letter (S/T/F/G/M) + 7 digits + 1 letter (e.g. S1234567D)"
+    sensitivity: restricted
+    masking_function: mask_nric
+    category: government_id
+
+  - name: FIN (Foreign Identification Number)
+    country: SG
+    column_hints:
+      - fin
+      - fin_number
+      - sg_fin
+    format: "Same as NRIC (starts with F/G/M + 7 digits + 1 letter)"
+    sensitivity: restricted
+    masking_function: mask_fin
+    category: government_id
+
+  - name: UEN (Unique Entity Number)
+    country: SG
+    column_hints:
+      - uen
+      - uen_number
+      - company_uen
+      - sg_uen
+    format: "9-10 characters (business registration number)"
+    sensitivity: confidential
+    masking_function: mask_uen
+    category: business_id
+
+  - name: CPF Account Number
+    country: SG
+    column_hints:
+      - cpf
+      - cpf_account
+      - cpf_number
+    format: "Same as NRIC"
+    sensitivity: restricted
+    masking_function: mask_nric
+    category: financial_id
+
+  # ── Malaysia ───────────────────────────────────────────────────────────────
+  - name: MyKad (Malaysian NRIC)
+    country: MY
+    column_hints:
+      - mykad
+      - kad_pengenalan
+      - no_kp
+      - ic_number
+      - ic_no
+      - my_nric
+    format: "12 digits (YYMMDD-PB-NNNG — encodes birthdate, birthplace, sequence, gender)"
+    sensitivity: restricted
+    masking_function: mask_mykad
+    category: government_id
+
+  - name: MyKAS (Temporary Foreign Worker ID)
+    country: MY
+    column_hints:
+      - mykas
+    format: "12 digits (similar to MyKad)"
+    sensitivity: restricted
+    masking_function: mask_mykad
+    category: government_id
+
+  - name: MyTentera (Military ID)
+    country: MY
+    column_hints:
+      - mytentera
+    format: "12 digits (similar to MyKad)"
+    sensitivity: restricted
+    masking_function: mask_mykad
+    category: government_id
+
+  - name: Malaysian Tax Identification Number
+    country: MY
+    column_hints:
+      - tin
+      - tax_id
+      - tax_number
+      - cukai
+      - my_tin
+    format: "Varies by entity type"
+    sensitivity: confidential
+    masking_function: mask_tin_my
+    category: government_id
+
+  - name: SSM Registration Number
+    country: MY
+    column_hints:
+      - ssm
+      - ssm_number
+      - company_reg
+      - ssm_reg
+    format: "Company registration number"
+    sensitivity: confidential
+    masking_function: mask_ssm
+    category: business_id
+
+  - name: EPF Number (KWSP)
+    country: MY
+    column_hints:
+      - epf
+      - kwsp
+      - epf_number
+      - kwsp_number
+    format: "Member number for Employees Provident Fund"
+    sensitivity: restricted
+    masking_function: mask_epf
+    category: financial_id
+
+masking_functions:
+  # ── Singapore ──────────────────────────────────────────────────────────────
+  - name: mask_nric
+    signature: "mask_nric(nric STRING) RETURNS STRING"
+    comment: "Singapore NRIC — show first letter and last 4 characters (e.g. S****567D)"
+    body: |
+      CASE
+        WHEN nric IS NULL THEN NULL
+        WHEN LENGTH(TRIM(nric)) >= 5 THEN
+          CONCAT(LEFT(TRIM(nric), 1), REPEAT('*', LENGTH(TRIM(nric)) - 5), RIGHT(TRIM(nric), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_fin
+    signature: "mask_fin(fin STRING) RETURNS STRING"
+    comment: "Singapore FIN — show first letter and last 4 characters (same pattern as NRIC)"
+    body: |
+      CASE
+        WHEN fin IS NULL THEN NULL
+        WHEN LENGTH(TRIM(fin)) >= 5 THEN
+          CONCAT(LEFT(TRIM(fin), 1), REPEAT('*', LENGTH(TRIM(fin)) - 5), RIGHT(TRIM(fin), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_uen
+    signature: "mask_uen(uen STRING) RETURNS STRING"
+    comment: "Singapore UEN — show last 4 characters only"
+    body: |
+      CASE
+        WHEN uen IS NULL THEN NULL
+        WHEN LENGTH(TRIM(uen)) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(TRIM(uen)) - 4), RIGHT(TRIM(uen), 4))
+        ELSE '[REDACTED]'
+      END
+
+  # ── Malaysia ───────────────────────────────────────────────────────────────
+  - name: mask_mykad
+    signature: "mask_mykad(ic STRING) RETURNS STRING"
+    comment: "Malaysian MyKad/IC — show last 4 digits only. WARNING: MyKad first 6 digits encode DOB."
+    body: |
+      CASE
+        WHEN ic IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(ic, '[^0-9]', '')) = 12 THEN
+          CONCAT('XXXXXXXX', RIGHT(REGEXP_REPLACE(ic, '[^0-9]', ''), 4))
+        ELSE '[INVALID IC]'
+      END
+
+  - name: mask_tin_my
+    signature: "mask_tin_my(tin STRING) RETURNS STRING"
+    comment: "Malaysian Tax ID — show last 4 characters only"
+    body: |
+      CASE
+        WHEN tin IS NULL THEN NULL
+        WHEN LENGTH(TRIM(tin)) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(TRIM(tin)) - 4), RIGHT(TRIM(tin), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_ssm
+    signature: "mask_ssm(ssm STRING) RETURNS STRING"
+    comment: "Malaysian SSM company registration — show last 4 characters only"
+    body: |
+      CASE
+        WHEN ssm IS NULL THEN NULL
+        WHEN LENGTH(TRIM(ssm)) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(TRIM(ssm)) - 4), RIGHT(TRIM(ssm), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_epf
+    signature: "mask_epf(epf STRING) RETURNS STRING"
+    comment: "Malaysian EPF/KWSP number — show last 4 characters only"
+    body: |
+      CASE
+        WHEN epf IS NULL THEN NULL
+        WHEN LENGTH(TRIM(epf)) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(TRIM(epf)) - 4), RIGHT(TRIM(epf), 4))
+        ELSE '[REDACTED]'
+      END
+
+prompt_overlay: |
+  ### Country-Specific Identifiers: Singapore & Malaysia (SEA)
+
+  When analyzing Southeast Asian datasets, be aware of these regulated identifiers.
+  Singapore and Malaysia share some column naming patterns (both use `nric`, `ic_number`)
+  but the formats differ significantly — pay attention to format/length to choose the
+  correct masking function.
+
+  **Singapore — Government IDs:**
+  - NRIC (National Registration Identity Card): 1 letter (S/T for citizens, F/G/M for foreigners)
+    + 7 digits + 1 check letter (e.g. S1234567D). Total 9 characters.
+    Columns: `nric`, `nric_number`, `nric_no`, `sg_nric`.
+    Regulated by PDPA 2012. Use `mask_nric` — show first letter + last 4 chars.
+  - FIN (Foreign Identification Number): Same format as NRIC but starts with F/G/M.
+    Columns: `fin`, `fin_number`. Use `mask_fin` — same pattern as NRIC.
+  - CPF Account Number: Same as the individual's NRIC.
+    Columns: `cpf`, `cpf_account`. Use `mask_nric`.
+
+  **Singapore — Business:**
+  - UEN (Unique Entity Number): 9-10 character business registration.
+    Columns: `uen`, `uen_number`, `company_uen`. Less sensitive but sometimes restricted.
+    Use `mask_uen` — show last 4 chars.
+
+  **Malaysia — Government IDs:**
+  - MyKad (Malaysian IC/NRIC): 12 digits with format YYMMDD-PB-NNNG.
+    CRITICAL: The first 6 digits encode the holder's date of birth, and digits 7-8
+    encode birthplace. Even partial exposure of a MyKad reveals sensitive personal data.
+    Columns: `mykad`, `ic_number`, `ic_no`, `kad_pengenalan`, `no_kp`.
+    Regulated by PDPA 2010. Use `mask_mykad` — show last 4 digits ONLY.
+  - MyKAS (temporary foreign worker ID) and MyTentera (military ID) use the same
+    12-digit format. Columns: `mykas`, `mytentera`. Use `mask_mykad`.
+  - Malaysian TIN: Tax identification, variable format.
+    Columns: `tin`, `tax_id`, `cukai`. Use `mask_tin_my` — show last 4.
+
+  **Malaysia — Business:**
+  - SSM Registration: Company registration number.
+    Columns: `ssm`, `ssm_number`, `company_reg`. Use `mask_ssm` — show last 4.
+
+  **Malaysia — Financial:**
+  - EPF/KWSP Number: Employee Provident Fund member number.
+    Columns: `epf`, `kwsp`, `epf_number`. Use `mask_epf` — show last 4.
+
+  **Disambiguating SG vs MY NRIC columns:**
+  Both countries use `nric` and `ic_number` as column names, but:
+  - Singapore NRIC: 9 characters (letter + 7 digits + letter)
+  - Malaysian MyKad: 12 digits (may include hyphens: YYMMDD-PB-NNNG)
+  If the dataset contains records from both countries, check the data format/length.
+  When in doubt, use the more restrictive masking (show fewer characters).
+
+  **Available SEA Masking Functions:**
+  - `mask_nric(nric STRING) RETURNS STRING` — SG NRIC, first letter + last 4 chars (S****567D)
+  - `mask_fin(fin STRING) RETURNS STRING` — SG FIN, first letter + last 4 chars
+  - `mask_uen(uen STRING) RETURNS STRING` — SG UEN, last 4 chars visible
+  - `mask_mykad(ic STRING) RETURNS STRING` — MY MyKad, last 4 digits only (XXXXXXXX1234)
+  - `mask_tin_my(tin STRING) RETURNS STRING` — MY tax ID, last 4 chars visible
+  - `mask_ssm(ssm STRING) RETURNS STRING` — MY SSM registration, last 4 chars visible
+  - `mask_epf(epf STRING) RETURNS STRING` — MY EPF/KWSP, last 4 chars visible
+
+  **Regulatory context:**
+  - PDPA 2012 (Singapore): Comprehensive data protection. NRIC collection was restricted
+    in 2019 — organizations should not collect NRIC unless legally required.
+  - PDPA 2010 (Malaysia): Governs commercial processing of personal data. MyKad numbers
+    are classified as sensitive due to embedded biometric and demographic data.
+  - MAS Technology Risk Management Guidelines: Financial institutions in SG must implement
+    data masking for sensitive customer identifiers.
+
+  When you encounter columns matching these patterns, prefer the SEA-specific masking
+  functions over generic ones. Pay special attention to MyKad — its embedded DOB means
+  even partial exposure is a privacy risk.
