@@ -74,9 +74,23 @@ databricks_workspace_host = "https://adb-1234567890.12.azuredatabricks.net"
 > - `databricks_account_host` must be `accounts.azuredatabricks.net` (the Terraform provider default is the AWS URL)
 > - `databricks_workspace_host` uses the Azure format: `adb-<workspace-id>.<region-id>.azuredatabricks.net`
 
-### Step 3 — Declare your tables
+### Step 3 — Configure your Genie Space
 
-Edit `envs/dev/env.auto.tfvars` and list the Unity Catalog tables to include in the Genie Space:
+Edit `envs/dev/env.auto.tfvars`. Choose one of:
+
+**Already have a Genie Space?** (recommended) — import it by ID:
+
+```hcl
+genie_spaces = [
+  {
+    genie_space_id = "01ef7b3c2a4d5e6f"   # find this in the Genie Space URL
+  },
+]
+```
+
+Tables, instructions, and benchmarks are discovered automatically from the API.
+
+**Starting from scratch?** — define tables for a new space:
 
 ```hcl
 genie_spaces = [
@@ -91,7 +105,7 @@ genie_spaces = [
 ]
 ```
 
-All table names must be fully qualified (`catalog.schema.table` or `catalog.schema.*`). The `name` becomes the Genie Space title in the UI. A serverless SQL warehouse is created automatically — see the [Playbook](../shared/docs/playbook.md) for warehouse and multi-space options.
+All table names must be fully qualified (`catalog.schema.table` or `catalog.schema.*`). A serverless SQL warehouse is created automatically — see the [Playbook](../shared/docs/playbook.md) for warehouse and multi-space options.
 
 ### Step 4 — Generate
 
@@ -141,7 +155,7 @@ make generate ENV=bu2 && make apply ENV=bu2
 GenieRails uses a shared module architecture. All Terraform modules, scripts, and Python tools live in `../shared/`. This `azure/` directory is a thin wrapper — you never edit anything in `shared/` directly.
 
 ```
-genie/
+genierails/
 ├── azure/          ← you work here
 │   ├── Makefile    sets CLOUD=azure, delegates everything to shared/Makefile.shared
 │   ├── envs/       your per-environment configs (auth, tables, generated artifacts)
@@ -171,7 +185,7 @@ See [Integration Testing](../shared/docs/integration-testing.md) for setup, cred
 ## Documentation
 
 - [Azure Prerequisites](docs/azure-prerequisites.md) — Azure-specific resource setup, RBAC roles, storage accounts
-- [Playbook](../shared/docs/playbook.md) — all use cases: quickstart, ABAC-only, multi-space, existing spaces, promotion, self-service Genie, destroy
+- [Playbook](../shared/docs/playbook.md) — start here: import your existing Genie Space, add governance, promote to prod (also covers quickstart, advanced scenarios)
 - [Architecture](../shared/docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
 - [Central Governance, Self-Service Genie](../shared/docs/self-service-genie.md) — central ABAC team + BU teams self-serve Genie spaces
 - [CI/CD Integration](../shared/docs/cicd.md) — validate and deploy from a pipeline

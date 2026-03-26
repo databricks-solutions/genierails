@@ -69,9 +69,23 @@ databricks_workspace_host = "https://dbc-xxxxxxxx-xxxx.cloud.databricks.com"
 
 > **Note:** No `databricks_account_host` is needed for AWS — the Terraform provider defaults to `accounts.cloud.databricks.com`. If you are on Azure, see [`../azure/README.md`](../azure/README.md).
 
-### Step 3 — Declare your tables
+### Step 3 — Configure your Genie Space
 
-Edit `envs/dev/env.auto.tfvars` and list the Unity Catalog tables to include in the Genie Space:
+Edit `envs/dev/env.auto.tfvars`. Choose one of:
+
+**Already have a Genie Space?** (recommended) — import it by ID:
+
+```hcl
+genie_spaces = [
+  {
+    genie_space_id = "01ef7b3c2a4d5e6f"   # find this in the Genie Space URL
+  },
+]
+```
+
+Tables, instructions, and benchmarks are discovered automatically from the API.
+
+**Starting from scratch?** — define tables for a new space:
 
 ```hcl
 genie_spaces = [
@@ -86,7 +100,7 @@ genie_spaces = [
 ]
 ```
 
-All table names must be fully qualified (`catalog.schema.table` or `catalog.schema.*`). The `name` becomes the Genie Space title in the UI. A serverless SQL warehouse is created automatically — see the [Playbook](../shared/docs/playbook.md) for warehouse and multi-space options.
+All table names must be fully qualified (`catalog.schema.table` or `catalog.schema.*`). A serverless SQL warehouse is created automatically — see the [Playbook](../shared/docs/playbook.md) for warehouse and multi-space options.
 
 ### Step 4 — Generate
 
@@ -136,7 +150,7 @@ make generate ENV=bu2 && make apply ENV=bu2
 GenieRails uses a shared module architecture. All Terraform modules, scripts, and Python tools live in `../shared/`. This `aws/` directory is a thin wrapper — you never edit anything in `shared/` directly.
 
 ```
-genie/
+genierails/
 ├── aws/            ← you work here
 │   ├── Makefile    sets CLOUD=aws, delegates everything to shared/Makefile.shared
 │   └── envs/       your per-environment configs (auth, tables, generated artifacts)

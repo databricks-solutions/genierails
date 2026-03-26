@@ -1,10 +1,14 @@
 # GenieRails
 
-Put Genie onboarding on rails — with built-in guardrails. GenieRails generates ABAC governance, masking functions, and Genie Spaces from a small set of input files so you can get business users into Genie quickly without editing Terraform.
+Put Genie onboarding on rails — with built-in guardrails. GenieRails imports your existing Genie Space, generates ABAC governance (groups, tags, masking, row filters), and promotes everything to production. No Terraform to write.
 
 ## Getting Started
 
-Pick whichever cloud your Databricks workspace runs on:
+**Already have a Genie Space?** Most users do — follow the [Playbook](shared/docs/playbook.md) to import it, add governance, and promote to prod.
+
+**Starting from scratch?** See the [Quickstart](shared/docs/playbook.md#quickstart-from-scratch) in the Playbook.
+
+Pick your cloud and set up credentials:
 
 | My workspace is on… | Start here |
 | ------------------- | ---------- |
@@ -14,21 +18,21 @@ Pick whichever cloud your Databricks workspace runs on:
 ### Repository Layout
 
 ```
-genie/
+genierails/
 ├── aws/            Cloud wrapper for AWS deployments
 ├── azure/          Cloud wrapper for Azure deployments
 └── shared/         All shared code (Terraform modules, scripts, tests, docs)
 ```
 
-`aws/` and `azure/` are the entry points — always run `make` commands from one of these directories. You never run commands from `shared/` directly; it holds all the Terraform modules, Python scripts, and docs, and is invoked automatically through the cloud wrapper.
+`aws/` and `azure/` are the entry points — always run `make` commands from one of these directories. `shared/` holds all Terraform modules, Python scripts, and docs, and is invoked automatically through the cloud wrapper.
 
-### Quickstart (same for both clouds)
+### Quick commands (same for both clouds)
 
 ```bash
 cd aws/   # or azure/
 make setup
 vi envs/dev/auth.auto.tfvars      # service principal credentials
-vi envs/dev/env.auto.tfvars       # your tables and Genie Space name
+vi envs/dev/env.auto.tfvars       # your Genie Space ID (or tables for a new space)
 
 make generate
 make validate-generated
