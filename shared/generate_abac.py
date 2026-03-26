@@ -1026,10 +1026,28 @@ def sanitize_tfvars_hcl(hcl_block: str) -> str:
             return s
         return re.sub(pattern, block + r"\g<0>", s, count=1, flags=re.MULTILINE)
 
+    genie_configs_block = (
+        "# ----------------------------------------------------------------------------\n"
+        "# Genie Space configs (per-space semantic configuration + ACLs)\n"
+        "# ----------------------------------------------------------------------------\n"
+        "# Each key is the human-readable space name matching genie_spaces[*].name in\n"
+        "# env.auto.tfvars. Contains instructions, benchmarks, SQL measures, and ACLs.\n"
+        "#\n"
+        "# acl_groups: controls which groups get CAN_RUN on this Genie Space.\n"
+        "#   - List the group names that should have access to this specific space\n"
+        "#   - Groups NOT listed are excluded from the space\n"
+        "#   - Empty list or omitted = all groups get access (backward compatible)\n"
+        "#   - In multi-space setups, use this to ensure Finance groups only see\n"
+        "#     the Finance space, Clinical groups only see the Clinical space, etc.\n"
+        "#\n"
+        + docs
+    )
+
     text = insert_before(r"^groups\s*=\s*\{", groups_block, text)
     text = insert_before(r"^tag_policies\s*=\s*\[", tag_policies_block, text)
     text = insert_before(r"^tag_assignments\s*=\s*\[", tag_assignments_block, text)
     text = insert_before(r"^fgac_policies\s*=\s*\[", fgac_block, text)
+    text = insert_before(r"^genie_space_configs\s*=\s*\{", genie_configs_block, text)
 
     return text
 
@@ -4316,10 +4334,15 @@ Before you apply, tune for your business roles, security requirements, and Genie
 - **Masking behavior**: Are you using the right approach (partial, redact, hash) per sensitivity and use case?
 - **Row filters and exceptions**: Are filters too broad/strict? Are exceptions minimal and intentional?
 
-## Checklist — Genie Space Metadata
+## Checklist — Genie Space Metadata & ACLs
 
 - **Genie title & description**: Does the AI-generated title/description accurately represent the space?
 - **Genie sample questions**: Do the sample questions reflect what business users will ask?
+- **Per-space ACLs (`acl_groups`)**: Each space lists which groups get `CAN_RUN` access. Verify that:
+  - Each space includes all groups that need access
+  - Groups that should NOT see this space are excluded
+  - In multi-space setups, Finance groups should only be in the Finance space, Clinical groups in the Clinical space, etc.
+  - Empty `acl_groups` means all groups get access (backward compatible)
 - **Validate before apply**: Run validation before `terraform apply`.
 
 ## Suggested workflow
