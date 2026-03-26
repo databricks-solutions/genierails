@@ -4,7 +4,7 @@ Put Genie onboarding on rails — with built-in guardrails. GenieRails imports y
 
 ## Getting Started
 
-**Already have a Genie Space?** Most users do — follow the [Playbook](shared/docs/playbook.md) to import it, add governance, and promote to prod.
+**Already have a Genie Space?** Most users do — follow [Import, Govern, and Promote](shared/docs/playbook.md#import-govern-and-promote) to bring it under code governance and deploy to prod.
 
 **Starting from scratch?** See the [Quickstart](shared/docs/playbook.md#quickstart-from-scratch) in the Playbook.
 
@@ -39,11 +39,3 @@ All docs live in `shared/docs/`:
 - [Country & Region Overlays (APJ)](shared/docs/country-overlays.md) — using, tuning, or adding country-specific PII governance (ANZ, India, Southeast Asia); contributor guide for new regions
 - [Industry Overlays](shared/docs/industry-overlays.md) — industry-specific masking, group templates, and access patterns (Financial Services, Healthcare, Retail); contributor guide for new industries
 - [Integration Testing](shared/docs/integration-testing.md) — unit tests, integration scenarios, test data
-
-## Testing
-
-```bash
-cd aws/              # or azure/
-make test-unit       # fast unit tests (~1s, no credentials)
-make test-ci         # full CI: provision → integration tests → teardown
-```
