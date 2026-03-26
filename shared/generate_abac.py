@@ -3442,6 +3442,143 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
     return fixes
 
 
+def autofix_duplicate_column_masks(tfvars_path: Path) -> int:
+    """Remove FGAC policies that would cause multiple column masks on the same column.
+
+    Databricks does not allow multiple column masks on the same column.  When the
+    LLM generates two COLUMN_MASK policies that both match the same tagged columns
+    (e.g. one via ``phi_level`` and another via ``clinical_type``), the Terraform
+    apply succeeds but queries fail with MULTIPLE_MASKS.
+
+    This autofix:
+    1. Builds a map of column → set of tag values from tag_assignments
+    2. For each COLUMN_MASK policy, determines which columns it matches
+    3. If two policies match the same column, removes the more generic one
+       (prefers domain-specific functions over ``mask_redact`` / ``mask_nullify``)
+
+    Returns the number of policies removed.
+    """
+    try:
+        import hcl2
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies") or []
+    if isinstance(policies, list) and len(policies) == 1 and isinstance(policies[0], list):
+        policies = policies[0]
+    assignments = cfg.get("tag_assignments") or []
+    if isinstance(assignments, list) and len(assignments) == 1 and isinstance(assignments[0], list):
+        assignments = assignments[0]
+
+    if not policies or not assignments:
+        return 0
+
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+
+    # Build column → {tag_key: tag_value} map from tag_assignments
+    col_tags: dict[str, dict[str, str]] = {}
+    for a in assignments:
+        if isinstance(a, list):
+            a = a[0] if a else {}
+        if _s(a.get("entity_type", "")) != "columns":
+            continue
+        entity = _s(a.get("entity_name", ""))
+        key = _s(a.get("tag_key", ""))
+        val = _s(a.get("tag_value", ""))
+        if entity and key:
+            col_tags.setdefault(entity, {})[key] = val
+
+    # For each COLUMN_MASK policy, find which columns it matches
+    generic_fns = {"mask_redact", "mask_nullify", "mask_hash", "mask_pii_partial"}
+
+    policy_columns: list[tuple[int, dict, set[str]]] = []
+    for i, p in enumerate(policies):
+        if isinstance(p, list):
+            p = p[0] if p else {}
+        if _s(p.get("policy_type", "")) != "POLICY_TYPE_COLUMN_MASK":
+            continue
+        condition = _s(p.get("match_condition", ""))
+        if not condition:
+            continue
+
+        # Extract hasTagValue('key', 'value') pairs from condition
+        import re
+        tag_matches = re.findall(r"hasTagValue\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)", condition)
+        if not tag_matches:
+            continue
+
+        # Find columns that match ALL conditions (AND) or ANY condition (OR)
+        is_or = " OR " in condition.upper() or " || " in condition
+        matched_cols: set[str] = set()
+        for col, tags in col_tags.items():
+            if is_or:
+                if any(tags.get(k) == v for k, v in tag_matches):
+                    matched_cols.add(col)
+            else:
+                if all(tags.get(k) == v for k, v in tag_matches):
+                    matched_cols.add(col)
+
+        if matched_cols:
+            policy_columns.append((i, p, matched_cols))
+
+    # Find columns covered by multiple policies
+    col_to_policies: dict[str, list[int]] = {}
+    for idx, (i, p, cols) in enumerate(policy_columns):
+        for col in cols:
+            col_to_policies.setdefault(col, []).append(idx)
+
+    # Identify policies to remove (prefer specific over generic)
+    remove_indices: set[int] = set()
+    for col, pidxs in col_to_policies.items():
+        if len(pidxs) <= 1:
+            continue
+        # Sort: generic functions last
+        entries = [(pidx, policy_columns[pidx]) for pidx in pidxs]
+        specific = [(pidx, e) for pidx, e in entries if _s(e[1].get("function_name", "")) not in generic_fns]
+        generic = [(pidx, e) for pidx, e in entries if _s(e[1].get("function_name", "")) in generic_fns]
+        if specific and generic:
+            # Remove generic ones — specific function is preferred
+            for pidx, e in generic:
+                remove_indices.add(e[0])  # original policy index
+
+    if not remove_indices:
+        return 0
+
+    # Remove the policies from the HCL text by name
+    removed = 0
+    for idx in sorted(remove_indices, reverse=True):
+        p = policies[idx]
+        if isinstance(p, list):
+            p = p[0] if p else {}
+        name = _s(p.get("name", ""))
+        if not name:
+            continue
+        # Remove the policy block from fgac_policies list
+        escaped = re.escape(name)
+        pattern = re.compile(
+            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
+            re.DOTALL,
+        )
+        new_text = pattern.sub("", text, count=1)
+        if new_text != text:
+            text = new_text
+            removed += 1
+            print(f"    Removed duplicate mask policy '{name}' (generic function on column already covered by specific policy)")
+
+    if removed:
+        # Clean up any leftover double commas or trailing commas before ]
+        text = re.sub(r',\s*,', ',', text)
+        text = re.sub(r',\s*\]', '\n  ]', text)
+        tfvars_path.write_text(text)
+    return removed
+
+
 def sanitize_space_key(name: str) -> str:
     """Convert a human-readable space name to a safe directory/Terraform key.
 
@@ -4403,6 +4540,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
         n_cat_mismatch = autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
         if n_cat_mismatch:
             print(f"  Auto-fixed: corrected {n_cat_mismatch} function/category mismatch(es) in fgac_policies")
+
+        n_dup_masks = autofix_duplicate_column_masks(tfvars_path)
+        if n_dup_masks:
+            print(f"  Auto-fixed: removed {n_dup_masks} duplicate column mask policy/ies")
 
         # ── Semantic quality check (catches LLM issues that autofix can't fix) ──
         semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)
