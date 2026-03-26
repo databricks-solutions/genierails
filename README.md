@@ -8,6 +8,8 @@ Put Genie onboarding on rails — with built-in guardrails. GenieRails imports y
 - **Column masking** — AI-generated SQL UDFs that mask sensitive data (SSN, credit cards, PII) per group
 - **Row-level security** — filter rows by region, department, or any business dimension
 - **Tag-based governance** — Unity Catalog tag policies that classify and protect sensitive columns
+- **Consumer entitlements** — workspace consume access granted to each group automatically
+- **Genie Space ACLs** — `CAN_RUN` permissions so each group can use the Genie Space
 - **Genie Space configuration as code** — instructions, benchmarks, SQL measures, all version-controlled
 - **Dev → prod promotion** — one command to replicate governance to production with catalog remapping
 
