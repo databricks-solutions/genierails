@@ -498,6 +498,12 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
                 # Skip malformed join_specs (e.g. plain strings from LLM)
             lines.append("    ]")
 
+        if cfg.get("acl_groups"):
+            lines.append("    acl_groups = [")
+            for g in cfg["acl_groups"]:
+                lines.append(f"      {_hcl_str(g)},")
+            lines.append("    ]")
+
         lines.append("  }")
 
     lines.append("}")
@@ -1020,10 +1026,28 @@ def sanitize_tfvars_hcl(hcl_block: str) -> str:
             return s
         return re.sub(pattern, block + r"\g<0>", s, count=1, flags=re.MULTILINE)
 
+    genie_configs_block = (
+        "# ----------------------------------------------------------------------------\n"
+        "# Genie Space configs (per-space semantic configuration + ACLs)\n"
+        "# ----------------------------------------------------------------------------\n"
+        "# Each key is the human-readable space name matching genie_spaces[*].name in\n"
+        "# env.auto.tfvars. Contains instructions, benchmarks, SQL measures, and ACLs.\n"
+        "#\n"
+        "# acl_groups: controls which groups get CAN_RUN on this Genie Space.\n"
+        "#   - List the group names that should have access to this specific space\n"
+        "#   - Groups NOT listed are excluded from the space\n"
+        "#   - Empty list or omitted = all groups get access (backward compatible)\n"
+        "#   - In multi-space setups, use this to ensure Finance groups only see\n"
+        "#     the Finance space, Clinical groups only see the Clinical space, etc.\n"
+        "#\n"
+        + docs
+    )
+
     text = insert_before(r"^groups\s*=\s*\{", groups_block, text)
     text = insert_before(r"^tag_policies\s*=\s*\[", tag_policies_block, text)
     text = insert_before(r"^tag_assignments\s*=\s*\[", tag_assignments_block, text)
     text = insert_before(r"^fgac_policies\s*=\s*\[", fgac_block, text)
+    text = insert_before(r"^genie_space_configs\s*=\s*\{", genie_configs_block, text)
 
     return text
 
@@ -2859,6 +2883,122 @@ def autofix_genie_config_fields(tfvars_path: Path) -> int:
     return added
 
 
+def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -> int:
+    """Populate acl_groups in genie_space_configs from FGAC policy analysis.
+
+    For each space, finds which groups have FGAC policies on that space's tables
+    and adds them to acl_groups. If acl_groups is already set, it's left unchanged.
+
+    Returns the number of spaces that had acl_groups populated.
+    """
+    import hcl2
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    genie_cfgs = cfg.get("genie_space_configs") or {}
+    if isinstance(genie_cfgs, list):
+        genie_cfgs = genie_cfgs[0] if genie_cfgs else {}
+    groups = cfg.get("groups") or {}
+    if isinstance(groups, list):
+        groups = groups[0] if groups else {}
+    fgac_policies = cfg.get("fgac_policies") or []
+    if isinstance(fgac_policies, list) and len(fgac_policies) == 1 and isinstance(fgac_policies[0], list):
+        fgac_policies = fgac_policies[0]
+
+    # Build space_name → set of catalogs from env.auto.tfvars or from tag_assignments
+    space_catalogs: dict[str, set[str]] = {}
+
+    # Try to get uc_tables per space from env.auto.tfvars
+    if env_tfvars_path and env_tfvars_path.exists():
+        try:
+            env_cfg = hcl2.loads(env_tfvars_path.read_text())
+            for space in (env_cfg.get("genie_spaces") or []):
+                if isinstance(space, list):
+                    space = space[0] if space else {}
+                name = space.get("name", "")
+                tables = space.get("uc_tables") or []
+                if isinstance(tables, list) and tables:
+                    if isinstance(tables[0], list):
+                        tables = tables[0]
+                    cats = {t.split(".")[0] for t in tables if "." in t}
+                    if cats:
+                        space_catalogs[name] = cats
+        except Exception:
+            pass
+
+    if not space_catalogs:
+        # Fallback: if we can't determine per-space catalogs, assign all groups to all spaces
+        return 0
+
+    # Build group → set of catalogs from fgac_policies
+    group_catalogs: dict[str, set[str]] = {}
+    for pol in fgac_policies:
+        if isinstance(pol, list):
+            pol = pol[0] if pol else {}
+        catalog = pol.get("catalog") or pol.get("function_catalog") or ""
+        if isinstance(catalog, list):
+            catalog = catalog[0] if catalog else ""
+        principals = pol.get("to_principals") or []
+        if isinstance(principals, list) and principals:
+            if isinstance(principals[0], list):
+                principals = principals[0]
+        for g in principals:
+            group_catalogs.setdefault(g, set()).add(catalog)
+        # Also include except_principals — they have elevated access
+        except_p = pol.get("except_principals") or []
+        if isinstance(except_p, list) and except_p:
+            if isinstance(except_p[0], list):
+                except_p = except_p[0]
+        for g in except_p:
+            group_catalogs.setdefault(g, set()).add(catalog)
+
+    # For each space, find groups whose FGAC catalogs overlap with the space's catalogs
+    fixed = 0
+    for space_name, cfg_entry in genie_cfgs.items():
+        if isinstance(cfg_entry, list):
+            cfg_entry = cfg_entry[0] if cfg_entry else {}
+        existing_acl = cfg_entry.get("acl_groups") or []
+        if isinstance(existing_acl, list) and existing_acl:
+            if isinstance(existing_acl[0], list):
+                existing_acl = existing_acl[0]
+            if existing_acl:
+                continue  # already set, don't override
+
+        cats = space_catalogs.get(space_name, set())
+        if not cats:
+            continue
+
+        # Find groups that have policies on this space's catalogs
+        space_groups = sorted({
+            g for g, g_cats in group_catalogs.items()
+            if g_cats & cats and g in groups
+        })
+
+        if not space_groups:
+            # If no specific groups found, use all groups (backward compat)
+            space_groups = sorted(groups.keys())
+
+        # Insert acl_groups into the HCL text for this space
+        # Find the space's config block and add acl_groups before the closing }
+        import re
+        # Match the space's config block: "Space Name" = { ... }
+        escaped_name = re.escape(space_name)
+        pattern = rf'("{escaped_name}"\s*=\s*\{{[^}}]*?)(\n\s*\}})'
+        acl_line = "\n    acl_groups = [\n" + "".join(f'      "{g}",\n' for g in space_groups) + "    ]"
+        new_text, count = re.subn(pattern, rf'\1{acl_line}\2', text, count=1, flags=re.DOTALL)
+        if count > 0:
+            text = new_text
+            fixed += 1
+
+    if fixed:
+        tfvars_path.write_text(text)
+    return fixed
+
+
 _GENERIC_FUNCTION_PREFS = ["mask_pii_partial", "mask_redact", "mask_nullify", "mask_hash"]
 _GENERIC_SAFE_FUNCTIONS = {"mask_pii_partial", "mask_redact", "mask_nullify", "mask_hash"}
 _FUNCTION_EXPECTED_CATEGORIES = {
@@ -3320,6 +3460,197 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
     return fixes
 
 
+def autofix_duplicate_column_masks(tfvars_path: Path) -> int:
+    """Remove FGAC policies that would cause multiple column masks on the same column.
+
+    Databricks does not allow multiple column masks on the same column.  When the
+    LLM generates two COLUMN_MASK policies that both match the same tagged columns
+    (e.g. one via ``phi_level`` and another via ``clinical_type``), the Terraform
+    apply succeeds but queries fail with MULTIPLE_MASKS.
+
+    This autofix:
+    1. Builds a map of column → set of tag values from tag_assignments
+    2. For each COLUMN_MASK policy, determines which columns it matches
+    3. If two policies match the same column, removes the more generic one
+       (prefers domain-specific functions over ``mask_redact`` / ``mask_nullify``)
+
+    Returns the number of policies removed.
+    """
+    try:
+        import hcl2
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies") or []
+    if isinstance(policies, list) and len(policies) == 1 and isinstance(policies[0], list):
+        policies = policies[0]
+    assignments = cfg.get("tag_assignments") or []
+    if isinstance(assignments, list) and len(assignments) == 1 and isinstance(assignments[0], list):
+        assignments = assignments[0]
+
+    if not policies or not assignments:
+        return 0
+
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+
+    # Build column → {tag_key: tag_value} map from tag_assignments
+    col_tags: dict[str, dict[str, str]] = {}
+    for a in assignments:
+        if isinstance(a, list):
+            a = a[0] if a else {}
+        if _s(a.get("entity_type", "")) != "columns":
+            continue
+        entity = _s(a.get("entity_name", ""))
+        key = _s(a.get("tag_key", ""))
+        val = _s(a.get("tag_value", ""))
+        if entity and key:
+            col_tags.setdefault(entity, {})[key] = val
+
+    # For each COLUMN_MASK policy, find which columns it matches
+    generic_fns = {"mask_redact", "mask_nullify", "mask_hash", "mask_pii_partial"}
+
+    policy_columns: list[tuple[int, dict, set[str]]] = []
+    for i, p in enumerate(policies):
+        if isinstance(p, list):
+            p = p[0] if p else {}
+        if _s(p.get("policy_type", "")) != "POLICY_TYPE_COLUMN_MASK":
+            continue
+        condition = _s(p.get("match_condition", ""))
+        if not condition:
+            continue
+
+        # Extract hasTagValue('key', 'value') pairs from condition
+        import re
+        tag_matches = re.findall(r"hasTagValue\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)", condition)
+        if not tag_matches:
+            continue
+
+        # Find columns that match ALL conditions (AND) or ANY condition (OR)
+        is_or = " OR " in condition.upper() or " || " in condition
+        matched_cols: set[str] = set()
+        for col, tags in col_tags.items():
+            if is_or:
+                if any(tags.get(k) == v for k, v in tag_matches):
+                    matched_cols.add(col)
+            else:
+                if all(tags.get(k) == v for k, v in tag_matches):
+                    matched_cols.add(col)
+
+        if matched_cols:
+            policy_columns.append((i, p, matched_cols))
+
+    # Find columns covered by multiple policies
+    col_to_policies: dict[str, list[int]] = {}
+    for idx, (i, p, cols) in enumerate(policy_columns):
+        for col in cols:
+            col_to_policies.setdefault(col, []).append(idx)
+
+    # Identify policies to remove (prefer specific over generic)
+    remove_indices: set[int] = set()
+    for col, pidxs in col_to_policies.items():
+        if len(pidxs) <= 1:
+            continue
+        # Sort: generic functions last
+        entries = [(pidx, policy_columns[pidx]) for pidx in pidxs]
+        specific = [(pidx, e) for pidx, e in entries if _s(e[1].get("function_name", "")) not in generic_fns]
+        generic = [(pidx, e) for pidx, e in entries if _s(e[1].get("function_name", "")) in generic_fns]
+        if specific and generic:
+            # Remove generic ones — specific function is preferred
+            for pidx, e in generic:
+                remove_indices.add(e[0])  # original policy index
+
+    if not remove_indices:
+        return 0
+
+    # Remove the policies from the HCL text by name
+    removed = 0
+    for idx in sorted(remove_indices, reverse=True):
+        p = policies[idx]
+        if isinstance(p, list):
+            p = p[0] if p else {}
+        name = _s(p.get("name", ""))
+        if not name:
+            continue
+        # Remove the policy block from fgac_policies list
+        escaped = re.escape(name)
+        pattern = re.compile(
+            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
+            re.DOTALL,
+        )
+        new_text = pattern.sub("", text, count=1)
+        if new_text != text:
+            text = new_text
+            removed += 1
+            print(f"    Removed duplicate mask policy '{name}' (generic function on column already covered by specific policy)")
+
+    if removed:
+        # Clean up any leftover double commas or trailing commas before ]
+        text = re.sub(r',\s*,', ',', text)
+        text = re.sub(r',\s*\]', '\n  ]', text)
+        tfvars_path.write_text(text)
+    return removed
+
+
+def autofix_forbidden_conditions(tfvars_path: Path) -> int:
+    """Remove FGAC policies that use unsupported condition functions.
+
+    Databricks ABAC only supports hasTagValue() and hasTag() in conditions.
+    The LLM sometimes generates conditions with columnName(), tableName(),
+    or IN() which cause validation failures.
+
+    Returns the number of policies removed.
+    """
+    import re as _re_fc
+
+    _FORBIDDEN = ["columnName(", "tableName(", " IN (", " IN("]
+
+    text = tfvars_path.read_text()
+
+    try:
+        import hcl2
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies") or []
+    if isinstance(policies, list) and len(policies) == 1 and isinstance(policies[0], list):
+        policies = policies[0]
+
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+
+    removed = 0
+    for p in policies:
+        if isinstance(p, list):
+            p = p[0] if p else {}
+        condition = _s(p.get("match_condition", "")) or _s(p.get("when_condition", ""))
+        if not any(f in condition for f in _FORBIDDEN):
+            continue
+        name = _s(p.get("name", ""))
+        if not name:
+            continue
+        escaped = _re_fc.escape(name)
+        pattern = _re_fc.compile(
+            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
+            re.DOTALL,
+        )
+        new_text = pattern.sub("", text, count=1)
+        if new_text != text:
+            text = new_text
+            removed += 1
+
+    if removed:
+        text = re.sub(r',\s*,', ',', text)
+        text = re.sub(r',\s*\]', '\n  ]', text)
+        tfvars_path.write_text(text)
+    return removed
+
+
 def sanitize_space_key(name: str) -> str:
     """Convert a human-readable space name to a safe directory/Terraform key.
 
@@ -3636,6 +3967,47 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]
                         f"tag_assignment uses '{val}' for key '{key}' — "
                         f"not in live policy {sorted(live[key])} or file policy {sorted(file_vals)}"
                     )
+
+    # Check 3: masking SQL has basic syntactic validity
+    sql_path = tfvars_path.parent / "masking_functions.sql"
+    if sql_path.exists():
+        sql_text = sql_path.read_text()
+        # Check for common LLM SQL errors
+        if sql_text.strip():
+            # Unmatched CASE/END
+            case_count = len(re.findall(r'\bCASE\b', sql_text, re.IGNORECASE))
+            end_count = len(re.findall(r'\bEND\b', sql_text, re.IGNORECASE))
+            # Each CREATE FUNCTION has an END too, so allow some slack
+            create_count = len(re.findall(r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION', sql_text, re.IGNORECASE))
+            if case_count > 0 and end_count < case_count:
+                errors.append(
+                    f"masking_functions.sql has {case_count} CASE but only {end_count} END — "
+                    f"likely incomplete or malformed SQL"
+                )
+            # Check each function has RETURNS
+            functions = re.findall(r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+\S+\s*\([^)]*\)', sql_text, re.IGNORECASE)
+            returns = re.findall(r'\bRETURNS\b', sql_text, re.IGNORECASE)
+            if len(functions) > 0 and len(returns) < len(functions):
+                errors.append(
+                    f"masking_functions.sql has {len(functions)} function(s) but only "
+                    f"{len(returns)} RETURNS clause(s) — likely malformed function definition"
+                )
+
+    # Check 4: no forbidden condition functions in FGAC policies
+    _forbidden_funcs = ["columnName(", "tableName(", " IN (", " IN("]
+    for pol in cfg.get("fgac_policies", []):
+        if isinstance(pol, list):
+            pol = pol[0] if pol else {}
+        condition = pol.get("match_condition", "") or pol.get("when_condition", "")
+        if isinstance(condition, list):
+            condition = condition[0] if condition else ""
+        for forbidden in _forbidden_funcs:
+            if forbidden in condition:
+                errors.append(
+                    f"fgac_policy '{pol.get('name', '?')}' uses unsupported '{forbidden.strip()}' "
+                    f"in condition — only hasTagValue() and hasTag() are allowed"
+                )
+                break
 
     return errors
 
@@ -4057,10 +4429,15 @@ Before you apply, tune for your business roles, security requirements, and Genie
 - **Masking behavior**: Are you using the right approach (partial, redact, hash) per sensitivity and use case?
 - **Row filters and exceptions**: Are filters too broad/strict? Are exceptions minimal and intentional?
 
-## Checklist — Genie Space Metadata
+## Checklist — Genie Space Metadata & ACLs
 
 - **Genie title & description**: Does the AI-generated title/description accurately represent the space?
 - **Genie sample questions**: Do the sample questions reflect what business users will ask?
+- **Per-space ACLs (`acl_groups`)**: Each space lists which groups get `CAN_RUN` access. Verify that:
+  - Each space includes all groups that need access
+  - Groups that should NOT see this space are excluded
+  - In multi-space setups, Finance groups should only be in the Finance space, Clinical groups in the Clinical space, etc.
+  - Empty `acl_groups` means all groups get access (backward compatible)
 - **Validate before apply**: Run validation before `terraform apply`.
 
 ## Suggested workflow
@@ -4174,6 +4551,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
             )
             _legacy_genie_list_keys = (
                 "genie_sample_questions",
+                "genie_acl_groups",
             )
             # Scalar string assignments (genie_space_title = "...", etc.)
             _legacy_genie_scalar_re = re.compile(
@@ -4264,6 +4642,11 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_fields:
             print(f"  Auto-fixed: added {n_fields} missing required field(s) in genie_space_configs")
 
+        env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
+        n_acl = autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
+        if n_acl:
+            print(f"  Auto-fixed: populated acl_groups for {n_acl} genie space(s)")
+
         n_fn_refs = autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
         if n_fn_refs:
             print(f"  Auto-fixed: corrected {n_fn_refs} invalid function reference(s) in fgac_policies")
@@ -4275,6 +4658,14 @@ Before you apply, tune for your business roles, security requirements, and Genie
         n_cat_mismatch = autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
         if n_cat_mismatch:
             print(f"  Auto-fixed: corrected {n_cat_mismatch} function/category mismatch(es) in fgac_policies")
+
+        n_dup_masks = autofix_duplicate_column_masks(tfvars_path)
+        if n_dup_masks:
+            print(f"  Auto-fixed: removed {n_dup_masks} duplicate column mask policy/ies")
+
+        n_forbidden = autofix_forbidden_conditions(tfvars_path)
+        if n_forbidden:
+            print(f"  Auto-fixed: removed {n_forbidden} fgac_policy/ies with unsupported condition functions")
 
         # ── Semantic quality check (catches LLM issues that autofix can't fix) ──
         semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)

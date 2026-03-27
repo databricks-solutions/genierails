@@ -33,6 +33,7 @@ vi envs/dev/generated/abac.auto.tfvars
 #   - tag policies and tag assignments
 #   - FGAC policies
 #   - genie_space_configs (title, instructions, benchmarks, filters, measures per space)
+#   - acl_groups per space (which groups can run each Genie Space)
 
 vi envs/dev/generated/masking_functions.sql
 # Review and iterate on the generated masking and row-filter functions.

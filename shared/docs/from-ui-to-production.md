@@ -90,7 +90,8 @@ You will see output like:
 vi envs/dev/generated/abac.auto.tfvars
 # - Review the imported genie_space_configs (instructions, benchmarks, etc.)
 # - Review and tune the generated groups, tag_assignments, fgac_policies
-# - The imported Genie config is now HCL — edit it here to manage it as code
+# - Check acl_groups per space — controls which groups can run each Genie Space
+#   (see "Per-space Genie ACLs" below)
 
 vi envs/dev/generated/masking_functions.sql
 # Review and iterate on generated masking and row-filter functions.
@@ -99,7 +100,30 @@ make validate-generated
 make apply
 ```
 
-> `make apply` attaches to the existing space (does not create or delete it), applies ABAC governance, and pushes any changes to the space config (instructions, benchmarks, etc.) back to the API.
+> `make apply` attaches to the existing space (does not create or delete it), applies ABAC governance, per-space ACLs, and pushes any changes to the space config (instructions, benchmarks, etc.) back to the API.
+
+### Per-space Genie ACLs
+
+Each space in `genie_space_configs` has an `acl_groups` field that controls which groups get `CAN_RUN` access. The LLM assigns groups based on which FGAC policies reference each space's tables:
+
+```hcl
+genie_space_configs = {
+  "Finance Analytics" = {
+    acl_groups = ["Finance_Analyst", "Manager"]   # only these groups can run this space
+    # ... instructions, benchmarks, etc.
+  }
+  "Clinical Analytics" = {
+    acl_groups = ["Clinical_Staff", "Manager"]    # different groups for this space
+    # ...
+  }
+}
+```
+
+**Review checklist:**
+- Verify each space's `acl_groups` includes all groups that need access
+- Groups not listed are excluded from that space (they cannot run queries)
+- If `acl_groups` is empty or omitted, all groups get access (backward compatible)
+- `acl_groups` entries must match group names defined in the `groups` block
 
 ## Step 4 — Promote to prod
 

@@ -30,7 +30,15 @@ locals {
     : databricks_sql_endpoint.warehouse[0].id
   )
 
-  genie_groups_csv = join(",", keys(var.groups))
+  # Per-space group list: use acl_groups if set, otherwise all groups (backward compat).
+  # When var.groups is empty (genie-only mode), ACLs are skipped entirely.
+  genie_space_groups = length(var.groups) > 0 ? {
+    for key, space in var.genie_spaces : key => (
+      length(try(space.config.acl_groups, [])) > 0
+        ? join(",", space.config.acl_groups)
+        : join(",", keys(var.groups))
+    )
+  } : {}
 
   # Spaces that already have an ID — apply ACLs, and config if defined.
   existing_spaces = { for k, v in var.genie_spaces : k => v if v.genie_space_id != "" }
@@ -90,11 +98,14 @@ resource "databricks_sql_endpoint" "warehouse" {
 # ── Existing spaces: apply ACLs + config (when config is defined) ─────────────
 
 resource "null_resource" "genie_space_acls" {
-  for_each = local.genie_groups_csv != "" ? local.existing_spaces : {}
+  for_each = {
+    for k, v in local.existing_spaces : k => v
+    if lookup(local.genie_space_groups, k, "") != ""
+  }
 
   triggers = {
     space_id = each.value.genie_space_id
-    groups   = local.genie_groups_csv
+    groups   = local.genie_space_groups[each.key]
   }
 
   provisioner "local-exec" {
@@ -105,7 +116,7 @@ resource "null_resource" "genie_space_acls" {
       DATABRICKS_CLIENT_ID     = var.databricks_client_id
       DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
       GENIE_SPACE_OBJECT_ID    = each.value.genie_space_id
-      GENIE_GROUPS_CSV         = local.genie_groups_csv
+      GENIE_GROUPS_CSV         = local.genie_space_groups[each.key]
     }
   }
 
@@ -254,10 +265,13 @@ resource "null_resource" "genie_space_config" {
 resource "null_resource" "genie_space_acls_created" {
   # Skip ACL setup when no groups are configured (e.g. self-service genie-only mode
   # where groups are managed by the governance team in a separate environment).
-  for_each = local.genie_groups_csv != "" ? local.new_spaces : {}
+  for_each = {
+    for k, v in local.new_spaces : k => v
+    if lookup(local.genie_space_groups, k, "") != ""
+  }
 
   triggers = {
-    groups = local.genie_groups_csv
+    groups = local.genie_space_groups[each.key]
   }
 
   provisioner "local-exec" {
@@ -268,7 +282,7 @@ resource "null_resource" "genie_space_acls_created" {
       DATABRICKS_CLIENT_ID     = var.databricks_client_id
       DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
       GENIE_ID_FILE            = "${var.genie_id_file_prefix}_${each.key}"
-      GENIE_GROUPS_CSV         = local.genie_groups_csv
+      GENIE_GROUPS_CSV         = local.genie_space_groups[each.key]
     }
   }
 

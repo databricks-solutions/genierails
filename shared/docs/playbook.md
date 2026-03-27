@@ -193,6 +193,6 @@ inputs → make generate → review generated/ → make validate-generated → m
 
 | File | What it contains |
 | ---- | ---------------- |
-| `generated/abac.auto.tfvars` | Groups, tag policies, tag assignments, FGAC policies, genie_space_configs |
+| `generated/abac.auto.tfvars` | Groups, tag policies, tag assignments, FGAC policies, genie_space_configs (including per-space `acl_groups`) |
 | `generated/masking_functions.sql` | SQL masking and row-filter functions |
 | `generated/spaces/<key>/` | Per-space drafts (used by `make generate SPACE="..."`) |

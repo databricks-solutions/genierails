@@ -51,6 +51,7 @@ locals {
     sql_expressions  = var.genie_sql_expressions
     sql_measures     = var.genie_sql_measures
     join_specs       = var.genie_join_specs
+    acl_groups       = var.genie_acl_groups
   }
 
   legacy_space_name = var.genie_space_title != "" ? var.genie_space_title : "Genie Space"
@@ -82,6 +83,7 @@ locals {
     sql_expressions  = []
     sql_measures     = []
     join_specs       = []
+    acl_groups       = []
   }
 
   # ── Merged space map passed to the workspace module ───────────────────────
@@ -201,6 +203,7 @@ variable "genie_space_configs" {
       comment     = string
       instruction = string
     })), [])
+    acl_groups = optional(list(string), [])
   }))
   default     = {}
   description = "Map of space key to Genie semantic config (title, benchmarks, join specs, etc.). Keys must match genie_spaces[*].key."
@@ -307,6 +310,12 @@ variable "genie_join_specs" {
     instruction = string
   }))
   default = []
+}
+
+variable "genie_acl_groups" {
+  type        = list(string)
+  default     = []
+  description = "Groups that should have CAN_RUN access to this Genie Space. Empty = all groups."
 }
 
 # ── Group variables ───────────────────────────────────────────────────────────

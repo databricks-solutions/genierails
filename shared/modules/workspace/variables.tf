@@ -100,6 +100,7 @@ variable "genie_spaces" {
         comment     = string
         instruction = string
       }))
+      acl_groups = optional(list(string), [])
     })
   }))
   default     = {}

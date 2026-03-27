@@ -16,6 +16,7 @@ from validate_abac import (
     validate_tag_policies,
     validate_tag_assignments,
     validate_fgac_policies,
+    validate_acl_groups,
     parse_sql_functions,
     parse_sql_function_arg_counts,
     _condition_matches_tags,
@@ -411,3 +412,98 @@ class TestConditionMatchesTags:
             "hasTagValue('pii_level', 'Full_PII') OR hasTagValue('pii_level', 'Limited_PII')",
             tags,
         )
+
+
+# ===========================================================================
+#  validate_acl_groups
+# ===========================================================================
+
+class TestValidateAclGroups:
+
+    def _groups(self) -> set:
+        return {"Analyst", "Manager", "Clinical_Staff"}
+
+    def test_valid_acl_groups_pass(self):
+        cfg = {
+            "genie_space_configs": {
+                "Finance Analytics": {
+                    "acl_groups": ["Analyst", "Manager"],
+                }
+            }
+        }
+        r = _result()
+        validate_acl_groups(cfg, self._groups(), r)
+        assert r.passed
+
+    def test_undefined_group_in_acl_fails(self):
+        cfg = {
+            "genie_space_configs": {
+                "Finance Analytics": {
+                    "acl_groups": ["Analyst", "Ghost_Group"],
+                }
+            }
+        }
+        r = _result()
+        validate_acl_groups(cfg, self._groups(), r)
+        assert not r.passed
+        assert any("Ghost_Group" in e for e in r.errors)
+
+    def test_empty_acl_groups_no_error(self):
+        cfg = {
+            "genie_space_configs": {
+                "Finance Analytics": {
+                    "acl_groups": [],
+                }
+            }
+        }
+        r = _result()
+        validate_acl_groups(cfg, self._groups(), r)
+        assert r.passed
+
+    def test_missing_acl_groups_no_error(self):
+        cfg = {
+            "genie_space_configs": {
+                "Finance Analytics": {
+                    "title": "Finance",
+                }
+            }
+        }
+        r = _result()
+        validate_acl_groups(cfg, self._groups(), r)
+        assert r.passed
+
+    def test_no_genie_space_configs_no_error(self):
+        cfg = {}
+        r = _result()
+        validate_acl_groups(cfg, self._groups(), r)
+        assert r.passed
+
+    def test_account_users_builtin_passes(self):
+        cfg = {
+            "genie_space_configs": {
+                "Finance Analytics": {
+                    "acl_groups": ["Analyst", "account users"],
+                }
+            }
+        }
+        r = _result()
+        validate_acl_groups(cfg, self._groups(), r)
+        assert r.passed
+
+    def test_multiple_spaces_validated_independently(self):
+        cfg = {
+            "genie_space_configs": {
+                "Finance Analytics": {
+                    "acl_groups": ["Analyst"],
+                },
+                "Clinical Analytics": {
+                    "acl_groups": ["Clinical_Staff", "Bad_Group"],
+                },
+            }
+        }
+        r = _result()
+        validate_acl_groups(cfg, self._groups(), r)
+        assert not r.passed
+        assert any("Bad_Group" in e for e in r.errors)
+        # Finance should pass, only Clinical should fail
+        assert not any("Analyst" in e for e in r.errors)
