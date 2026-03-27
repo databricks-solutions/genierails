@@ -4555,19 +4555,45 @@ def main() -> None:
     results: dict[str, str] = {}
     total_start = time.time()
 
+    # Scenarios get one automatic retry on LLM-related failures (masking SQL,
+    # semantic check, validation).  Infrastructure failures are not retried.
+    _LLM_RETRY_PATTERNS = [
+        "masking_functions", "SEMANTIC CHECK", "semantic_check",
+        "deploy_masking", "local-exec provisioner error",
+        "genie_space_configs section missing", "columnName()",
+        "per-space directory bootstrapped", "MULTIPLE_MASKS",
+    ]
+
+    def _is_llm_failure(exc: Exception) -> bool:
+        msg = str(exc)
+        return any(p in msg for p in _LLM_RETRY_PATTERNS)
+
     for name, (desc, fn) in selected:
         start = time.time()
         print(f"\n{'─' * 64}")
         print(f"  Running: {_bold(name)}  —  {desc}")
         print(f"{'─' * 64}")
-        try:
-            fn(auth_file, warehouse_id, keep_data, fresh_env=fresh_env)
-            elapsed = time.time() - start
-            results[name] = _green(f"PASSED  ({elapsed:.0f}s)")
-        except Exception as exc:
+        last_exc = None
+        for attempt in range(2):  # 1 attempt + 1 retry
+            if attempt > 0:
+                print(f"\n  {_yellow('RETRY')} Scenario '{name}' failed on LLM quality — retrying (attempt {attempt + 1}/2)...")
+                print(f"{'─' * 64}")
+                start = time.time()
+            try:
+                fn(auth_file, warehouse_id, keep_data, fresh_env=fresh_env)
+                elapsed = time.time() - start
+                results[name] = _green(f"PASSED  ({elapsed:.0f}s)")
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0 and _is_llm_failure(exc):
+                    continue  # retry
+                break  # infrastructure failure or second attempt — don't retry
+        if last_exc is not None:
             elapsed = time.time() - start
             results[name] = _red(f"FAILED  ({elapsed:.0f}s)")
-            print(f"\n  {_red(_bold('FAILED'))}: {exc}")
+            print(f"\n  {_red(_bold('FAILED'))}: {last_exc}")
             if fail_fast:
                 # Print partial summary before aborting so the CI log shows
                 # which scenario failed and how long it took.

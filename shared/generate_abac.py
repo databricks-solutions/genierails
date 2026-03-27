@@ -3968,6 +3968,47 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]
                         f"not in live policy {sorted(live[key])} or file policy {sorted(file_vals)}"
                     )
 
+    # Check 3: masking SQL has basic syntactic validity
+    sql_path = tfvars_path.parent / "masking_functions.sql"
+    if sql_path.exists():
+        sql_text = sql_path.read_text()
+        # Check for common LLM SQL errors
+        if sql_text.strip():
+            # Unmatched CASE/END
+            case_count = len(re.findall(r'\bCASE\b', sql_text, re.IGNORECASE))
+            end_count = len(re.findall(r'\bEND\b', sql_text, re.IGNORECASE))
+            # Each CREATE FUNCTION has an END too, so allow some slack
+            create_count = len(re.findall(r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION', sql_text, re.IGNORECASE))
+            if case_count > 0 and end_count < case_count:
+                errors.append(
+                    f"masking_functions.sql has {case_count} CASE but only {end_count} END — "
+                    f"likely incomplete or malformed SQL"
+                )
+            # Check each function has RETURNS
+            functions = re.findall(r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+\S+\s*\([^)]*\)', sql_text, re.IGNORECASE)
+            returns = re.findall(r'\bRETURNS\b', sql_text, re.IGNORECASE)
+            if len(functions) > 0 and len(returns) < len(functions):
+                errors.append(
+                    f"masking_functions.sql has {len(functions)} function(s) but only "
+                    f"{len(returns)} RETURNS clause(s) — likely malformed function definition"
+                )
+
+    # Check 4: no forbidden condition functions in FGAC policies
+    _forbidden_funcs = ["columnName(", "tableName(", " IN (", " IN("]
+    for pol in cfg.get("fgac_policies", []):
+        if isinstance(pol, list):
+            pol = pol[0] if pol else {}
+        condition = pol.get("match_condition", "") or pol.get("when_condition", "")
+        if isinstance(condition, list):
+            condition = condition[0] if condition else ""
+        for forbidden in _forbidden_funcs:
+            if forbidden in condition:
+                errors.append(
+                    f"fgac_policy '{pol.get('name', '?')}' uses unsupported '{forbidden.strip()}' "
+                    f"in condition — only hasTagValue() and hasTag() are allowed"
+                )
+                break
+
     return errors
 
 
