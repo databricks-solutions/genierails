@@ -3597,6 +3597,60 @@ def autofix_duplicate_column_masks(tfvars_path: Path) -> int:
     return removed
 
 
+def autofix_forbidden_conditions(tfvars_path: Path) -> int:
+    """Remove FGAC policies that use unsupported condition functions.
+
+    Databricks ABAC only supports hasTagValue() and hasTag() in conditions.
+    The LLM sometimes generates conditions with columnName(), tableName(),
+    or IN() which cause validation failures.
+
+    Returns the number of policies removed.
+    """
+    import re as _re_fc
+
+    _FORBIDDEN = ["columnName(", "tableName(", " IN (", " IN("]
+
+    text = tfvars_path.read_text()
+
+    try:
+        import hcl2
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies") or []
+    if isinstance(policies, list) and len(policies) == 1 and isinstance(policies[0], list):
+        policies = policies[0]
+
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+
+    removed = 0
+    for p in policies:
+        if isinstance(p, list):
+            p = p[0] if p else {}
+        condition = _s(p.get("match_condition", "")) or _s(p.get("when_condition", ""))
+        if not any(f in condition for f in _FORBIDDEN):
+            continue
+        name = _s(p.get("name", ""))
+        if not name:
+            continue
+        escaped = _re_fc.escape(name)
+        pattern = _re_fc.compile(
+            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
+            re.DOTALL,
+        )
+        new_text = pattern.sub("", text, count=1)
+        if new_text != text:
+            text = new_text
+            removed += 1
+
+    if removed:
+        text = re.sub(r',\s*,', ',', text)
+        text = re.sub(r',\s*\]', '\n  ]', text)
+        tfvars_path.write_text(text)
+    return removed
+
+
 def sanitize_space_key(name: str) -> str:
     """Convert a human-readable space name to a safe directory/Terraform key.
 
@@ -4567,6 +4621,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
         n_dup_masks = autofix_duplicate_column_masks(tfvars_path)
         if n_dup_masks:
             print(f"  Auto-fixed: removed {n_dup_masks} duplicate column mask policy/ies")
+
+        n_forbidden = autofix_forbidden_conditions(tfvars_path)
+        if n_forbidden:
+            print(f"  Auto-fixed: removed {n_forbidden} fgac_policy/ies with unsupported condition functions")
 
         # ── Semantic quality check (catches LLM issues that autofix can't fix) ──
         semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)
