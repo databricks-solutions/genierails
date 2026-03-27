@@ -1908,6 +1908,9 @@ def scenario_per_space(
     _assert_genie_space_id_file(env, "Finance Analytics")
     _assert_genie_space_id_file(env, "Clinical Analytics")
 
+    # Re-resolve warehouse ID — Terraform may have recreated it during Phase 2 apply
+    warehouse_id = _patch_warehouse_id_in_env_tfvars(env, auth_file) or warehouse_id
+
     _step("Verifying data + ABAC governance")
     _verify_data(auth_file, dev=True, warehouse_id=warehouse_id)
 
