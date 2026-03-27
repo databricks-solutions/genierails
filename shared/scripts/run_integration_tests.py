@@ -1873,6 +1873,12 @@ def scenario_per_space(
     _make(f"apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
     _assert_genie_space_id_file(env, "Finance Analytics")
 
+    # Patch the warehouse ID so Phase 2 reuses the same warehouse instead of
+    # trying to create a duplicate "ABAC Governance Warehouse".
+    resolved_wh = _patch_warehouse_id_in_env_tfvars(env, auth_file)
+    if resolved_wh:
+        warehouse_id = resolved_wh
+
     # ── Phase 2: add Clinical Analytics without touching Finance ─────────────
     _step("Phase 2 — Adding Clinical Analytics to env.auto.tfvars")
     _write_env_tfvars(env, SPACES_MULTI, warehouse_id)
