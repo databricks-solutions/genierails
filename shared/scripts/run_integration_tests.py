@@ -4562,6 +4562,7 @@ def main() -> None:
         "deploy_masking", "local-exec provisioner error",
         "genie_space_configs section missing", "columnName()",
         "per-space directory bootstrapped", "MULTIPLE_MASKS",
+        "Validation found errors", "make generate ENV=",
     ]
 
     def _is_llm_failure(exc: Exception) -> bool:
