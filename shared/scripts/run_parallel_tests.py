@@ -209,15 +209,24 @@ def main():
     print(f"  Each workspace is torn down immediately after its scenario completes.")
     test_results = {}
     keep_envs = args.keep_envs
+    _abort = False  # Set on first failure to skip remaining scenarios
 
     def run_and_teardown(scenario, info):
+        nonlocal _abort
+        if _abort:
+            # A previous scenario failed — skip this one and just teardown
+            if not keep_envs and "state_file" in info:
+                teardown_scenario(scenario, info["state_file"], env_file, cloud)
+                try: Path(info["state_file"]).unlink()
+                except Exception: pass
+            return {"scenario": scenario, "status": "skipped", "elapsed": 0}
         result = run_scenario(scenario, info["auth_file"], info["state_file"], info["run_id"], cloud)
+        if result["status"] != "passed":
+            _abort = True  # Signal other pending scenarios to skip
         if not keep_envs and "state_file" in info:
             teardown_scenario(scenario, info["state_file"], env_file, cloud)
-            try:
-                Path(info["state_file"]).unlink()
-            except Exception:
-                pass
+            try: Path(info["state_file"]).unlink()
+            except Exception: pass
         return result
 
     with ThreadPoolExecutor(max_workers=max_parallel) as executor:
@@ -228,6 +237,7 @@ def main():
                 test_results[s] = f.result()
             except Exception as exc:
                 test_results[s] = {"scenario": s, "status": "failed", "elapsed": 0}
+                _abort = True
 
     print()
 
@@ -245,6 +255,9 @@ def main():
             e = r.get("elapsed", 0)
             if r["status"] == "passed":
                 print(f"  {s:<22}  {_green(f'PASSED  ({e:.0f}s)')}")
+            elif r["status"] == "skipped":
+                print(f"  {s:<22}  {_yellow('SKIPPED  (fail-fast)')}")
+                all_passed = False
             else:
                 print(f"  {s:<22}  {_red(f'FAILED  ({e:.0f}s)')}")
                 all_passed = False
