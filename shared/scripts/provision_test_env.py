@@ -1091,11 +1091,35 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     _ok("Metastore assigned to workspace")
 
     # ------------------------------------------------------------------
-    # Step 5: Create the External Location BEFORE transferring metastore
-    # ownership.  The SP is still the metastore creator at this point and
-    # therefore has full metastore admin rights.  After ownership is
-    # transferred to the admin group the SP loses implicit admin and would
-    # receive "User does not have CREATE EXTERNAL LOCATION" errors.
+    # Step 5a: Assign workspace admin BEFORE creating the external location.
+    # The SP needs workspace access to call the workspace API.  On AWS the
+    # SP as metastore creator has implicit access; on Azure it doesn't.
+    # ------------------------------------------------------------------
+    principals_to_assign = []
+    if group_id:
+        principals_to_assign.append((group_id, f"group '{group_name}'"))
+    if sp_scim_id:
+        principals_to_assign.append((sp_scim_id, f"SP (scim_id={sp_scim_id})"))
+
+    if principals_to_assign:
+        for principal_id, label in principals_to_assign:
+            _step(f"Adding {label} as workspace admin")
+            try:
+                a.workspace_assignment.update(
+                    workspace_id=ws_id,
+                    principal_id=principal_id,
+                    permissions=[WorkspacePermission.ADMIN],
+                )
+                _ok(f"Workspace admin granted to {label}")
+            except Exception as exc:
+                _warn(f"Could not assign workspace admin to {label}: {exc}")
+
+    _warn("Waiting 20 s for workspace identity propagation…")
+    time.sleep(20)
+
+    # ------------------------------------------------------------------
+    # Step 5b: Create the External Location.  The SP now has workspace
+    # access and metastore admin rights (as metastore creator).
     #
     # Trailing slash on the URL is required so Databricks prefix-matches
     # sub-paths like s3://bucket/prefix/catalog_name as being covered by
@@ -1140,41 +1164,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     # other UC privileges needed for the integration tests.  Transferring
     # ownership would strip those rights and cause catalog creation to fail.
 
-    # ------------------------------------------------------------------
-    # Step 7: Set admin group AND SP directly as workspace admins.
-    # workspace_assignment.update takes a numeric SCIM principal_id.
-    #
-    # We assign BOTH:
-    #   • the admin group  — inheritable permissions for future members
-    #   • the SP directly  — ensures OAuth M2M works immediately without
-    #                        waiting for SCIM group-membership sync to propagate
-    # ------------------------------------------------------------------
-    principals_to_assign: list[tuple[int, str]] = []
-    if group_id:
-        principals_to_assign.append((int(group_id), f"group {group_name!r}"))
-    if sp_scim_id:
-        principals_to_assign.append((sp_scim_id, f"SP (scim_id={sp_scim_id})"))
-
-    if principals_to_assign:
-        for principal_id, label in principals_to_assign:
-            _step(f"Adding {label} as workspace admin")
-            try:
-                a.workspace_assignment.update(
-                    workspace_id=ws_id,
-                    principal_id=principal_id,
-                    permissions=[WorkspacePermission.ADMIN],
-                )
-                _ok(f"Workspace admin granted to {label}")
-            except Exception as exc:
-                _warn(f"Could not assign workspace admin to {label}: {exc}")
-    else:
-        _warn("Skipping workspace admin assignment (no group or SP SCIM ID available).")
-        _warn("Add the admin group as workspace admin manually in the Workspace Settings.")
-
-    # Allow the workspace identity system to propagate the new assignments
-    # before anything tries to authenticate via OAuth M2M.
-    _warn("Waiting 20 s for workspace identity propagation…")
-    time.sleep(20)
+    # Workspace admin assignment already done in Step 5a above.
 
     # ------------------------------------------------------------------
     # Step 7: Write auth.auto.tfvars into the isolated envs/test/ directory
