@@ -544,6 +544,11 @@ def _suffix_account_names(tfvars_path: Path) -> int:
     if count:
         tfvars_path.write_text(text)
         print(f"  Suffixed {count} account-level name(s) with '_{suffix}'")
+    elif group_names or tag_keys:
+        # Groups/tag keys exist but none were replaced — suffix may have failed
+        print(f"  {_yellow('WARN')} Suffix replacement found 0 matches for "
+              f"{len(group_names)} group(s) and {len(tag_keys)} tag key(s) — "
+              f"names may already be suffixed or file format unexpected")
 
     return count
 
@@ -1397,6 +1402,16 @@ def _preamble_cleanup(*envs: str, fresh_env: bool = False) -> None:
     counter always starts at 0 so the FGAC quota wait is skipped entirely.
     """
     _step("Pre-scenario cleanup (destroying any leftover resources from prior run)")
+
+    # In parallel mode (per-scenario workspace), each scenario has a fresh metastore
+    # with no stale resources. Skip all API-level cleanup (which could interfere with
+    # other concurrent scenarios) and only clean local artifacts.
+    if _TEST_SUFFIX and fresh_env:
+        print("  Parallel mode — fresh workspace, skipping API cleanup.")
+        for env in envs:
+            _clean_env_artifacts(env)
+        _clean_account_artifacts()
+        return
 
     # On a fresh provisioned environment the metastore starts clean, so there is
     # no stale FGAC quota to wait for.  However, if a PREVIOUS scenario in the

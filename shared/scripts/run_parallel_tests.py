@@ -120,13 +120,61 @@ def run_scenario(scenario, auth_file, state_file, run_id, cloud):
     return {"scenario": scenario, "status": "passed" if passed else "failed", "elapsed": elapsed}
 
 
-def teardown_scenario(scenario, state_file, env_file, cloud):
+def _cleanup_account_resources(auth_file, suffix, cloud):
+    """Delete account-level groups and tag policies matching this scenario's suffix."""
+    if not suffix:
+        return
+    try:
+        import re as _re_cl
+        import hcl2
+
+        with open(auth_file) as f:
+            cfg = hcl2.load(f)
+        _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+        account_id = _s(cfg.get("databricks_account_id", ""))
+        client_id = _s(cfg.get("databricks_client_id", ""))
+        client_secret = _s(cfg.get("databricks_client_secret", ""))
+        account_host = _s(cfg.get("databricks_account_host", ""))
+        if not account_host:
+            account_host = "https://accounts.azuredatabricks.net" if cloud == "azure" else "https://accounts.cloud.databricks.com"
+        if not account_id:
+            return
+
+        from databricks.sdk import AccountClient
+        a = AccountClient(host=account_host, account_id=account_id,
+                         client_id=client_id, client_secret=client_secret)
+
+        # Delete groups ending with our suffix
+        for g in list(a.groups.list()):
+            name = g.display_name or ""
+            if name.endswith(f"_{suffix}"):
+                try:
+                    a.groups.delete(id=g.id)
+                except Exception:
+                    pass
+    except Exception:
+        pass  # best effort
+
+
+def teardown_scenario(scenario, state_file, env_file, cloud, suffix=""):
     env = os.environ.copy()
     env["CLOUD_PROVIDER"] = cloud
     env["CLOUD_ROOT"] = str(CLOUD_ROOT)
     env["_PARALLEL_STATE_FILE"] = state_file
 
     print(f"  [{_ts()}] {scenario}: tearing down...")
+
+    # Delete account-level groups/tag policies with this scenario's suffix
+    state = {}
+    try:
+        state = json.loads(Path(state_file).read_text())
+    except Exception:
+        pass
+    auth_file = str(Path(state.get("test_envs_dir", "")) / "dev" / "auth.auto.tfvars")
+    if Path(auth_file).exists():
+        _cleanup_account_resources(auth_file, suffix, cloud)
+
+    # Teardown workspace + metastore + storage
     result = subprocess.run(
         [sys.executable, str(SCRIPT_DIR / "provision_test_env.py"),
          "teardown", "--env-file", str(env_file)],
@@ -203,18 +251,18 @@ def main():
 
     def run_and_teardown(scenario, info):
         nonlocal _abort
+        suffix = info.get("run_id", "")[:6]
         if _abort:
-            # A previous scenario failed — skip this one and just teardown
             if not keep_envs and "state_file" in info:
-                teardown_scenario(scenario, info["state_file"], env_file, cloud)
+                teardown_scenario(scenario, info["state_file"], env_file, cloud, suffix=suffix)
                 try: Path(info["state_file"]).unlink()
                 except Exception: pass
             return {"scenario": scenario, "status": "skipped", "elapsed": 0}
         result = run_scenario(scenario, info["auth_file"], info["state_file"], info["run_id"], cloud)
         if result["status"] != "passed":
-            _abort = True  # Signal other pending scenarios to skip
+            _abort = True
         if not keep_envs and "state_file" in info:
-            teardown_scenario(scenario, info["state_file"], env_file, cloud)
+            teardown_scenario(scenario, info["state_file"], env_file, cloud, suffix=suffix)
             try: Path(info["state_file"]).unlink()
             except Exception: pass
         return result
