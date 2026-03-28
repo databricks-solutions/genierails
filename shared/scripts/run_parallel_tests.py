@@ -195,6 +195,15 @@ def main():
         print(f"  Failed: {', '.join(failed_prov.keys())}")
     print()
 
+    # Wait for workspace identity propagation across all provisioned environments.
+    # The provision script waits 20s per workspace, but with 15 concurrent provisions
+    # the Databricks identity system needs extra time to register all SPs.
+    if len(provisioned) > 1:
+        wait = 60
+        print(f"  Waiting {wait}s for workspace identity propagation across {len(provisioned)} environments...")
+        time.sleep(wait)
+        print()
+
     # Phase 3: Run + teardown per scenario
     print(f"── Phase 3: Running {len(provisioned)} scenarios (max {max_parallel} concurrent)")
     print(f"  Each workspace is torn down immediately after its scenario completes.")
