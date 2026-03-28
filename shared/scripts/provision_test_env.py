@@ -1130,7 +1130,9 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
             except Exception as exc:
                 _warn(f"Could not create External Location (attempt {_attempt + 1}): {exc}")
         if not el_created:
-            _warn("Catalog creation will require an explicit MANAGED LOCATION.")
+            print("ERROR: External Location creation failed after 3 attempts.")
+            print("  Catalog creation requires an External Location. Aborting.")
+            sys.exit(1)
 
     # Note: we intentionally do NOT transfer metastore ownership to the admin
     # group here.  The SP (account admin and metastore creator) retains its
