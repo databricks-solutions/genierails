@@ -142,9 +142,8 @@ def main():
     parser = argparse.ArgumentParser(description="Parallel integration tests")
     parser.add_argument("--env-file", required=True)
     parser.add_argument("--scenarios", default=",".join(SCENARIOS))
-    parser.add_argument("--max-parallel", type=int, default=3,
-                       help="Max concurrent scenarios (default: 3). "
-                            "Higher values may hit Databricks API rate limits on FGAC policy creation. "
+    parser.add_argument("--max-parallel", type=int, default=15,
+                       help="Max concurrent scenarios (default: 15). "
                             "Provisioning always runs all in parallel regardless.")
     parser.add_argument("--keep-envs", action="store_true")
     args = parser.parse_args()
@@ -194,15 +193,6 @@ def main():
     if failed_prov:
         print(f"  Failed: {', '.join(failed_prov.keys())}")
     print()
-
-    # Wait for workspace identity propagation across all provisioned environments.
-    # The provision script waits 20s per workspace, but with 15 concurrent provisions
-    # the Databricks identity system needs extra time to register all SPs.
-    if len(provisioned) > 1:
-        wait = 60
-        print(f"  Waiting {wait}s for workspace identity propagation across {len(provisioned)} environments...")
-        time.sleep(wait)
-        print()
 
     # Phase 3: Run + teardown per scenario
     print(f"── Phase 3: Running {len(provisioned)} scenarios (max {max_parallel} concurrent)")
