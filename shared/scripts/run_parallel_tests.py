@@ -59,6 +59,12 @@ def provision_for_scenario(scenario, env_file, cloud):
     env["CLOUD_PROVIDER"] = cloud
     env["CLOUD_ROOT"] = str(CLOUD_ROOT)
     env["_PARALLEL_STATE_FILE"] = str(state_file)
+    # Clear Databricks SDK env vars — same fix as run_scenario.
+    # Without this, inherited DATABRICKS_HOST causes the provision script's
+    # WorkspaceClient to create external locations on the wrong workspace.
+    for k in ["DATABRICKS_HOST", "DATABRICKS_CLIENT_ID", "DATABRICKS_CLIENT_SECRET",
+              "DATABRICKS_TOKEN", "DATABRICKS_ACCOUNT_ID"]:
+        env.pop(k, None)
 
     print(f"  [{_ts()}] {_bold(scenario)}: provisioning...")
     result = subprocess.run(
@@ -223,13 +229,10 @@ def main():
             break
     print()
 
-    # Phase 2: Provision environments
-    # Limit provisioning concurrency to 5 to avoid cloud API rate limits
-    # (Azure resource group limits, AWS IAM propagation)
-    prov_parallel = min(len(scenarios), 5)
-    print(f"── Phase 2: Provisioning {len(scenarios)} environments ({prov_parallel} concurrent)")
+    # Phase 2: Provision all in parallel
+    print(f"── Phase 2: Provisioning {len(scenarios)} environments (all concurrent)")
     provision_results = {}
-    with ThreadPoolExecutor(max_workers=prov_parallel) as executor:
+    with ThreadPoolExecutor(max_workers=len(scenarios)) as executor:
         futures = {executor.submit(provision_for_scenario, s, env_file, cloud): s for s in scenarios}
         for f in as_completed(futures):
             s = futures[f]
