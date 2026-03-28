@@ -319,6 +319,23 @@ def _make(
             check=False,
         )
         if result.returncode == 0:
+            # After successful generate, suffix account-level names for test isolation
+            is_generate = any(t == "generate" or t == "generate-delta" for t in targets_and_vars if "=" not in t)
+            if is_generate and _TEST_SUFFIX:
+                env_vars = {v.split("=", 1)[0]: v.split("=", 1)[1]
+                            for v in [*targets_and_vars, *injected] if "=" in v}
+                env_name = env_vars.get("ENV", "dev")
+                gen_abac = ENVS_DIR / env_name / "generated" / "abac.auto.tfvars"
+                if gen_abac.exists():
+                    _suffix_account_names(gen_abac)
+                # Also suffix assembled abac if it exists (per-space merge)
+                assembled = ENVS_DIR / env_name / "abac.auto.tfvars"
+                if assembled.exists():
+                    _suffix_account_names(assembled)
+                # Suffix account-layer abac if it exists
+                account_abac = ENVS_DIR / "account" / "abac.auto.tfvars"
+                if account_abac.exists():
+                    _suffix_account_names(account_abac)
             return result
         if attempt < retries:
             # Before retrying apply, run make import to adopt any orphaned
@@ -446,6 +463,88 @@ def _copy_auth(src_env: str, dest_env: str) -> None:
     src  = ENVS_DIR / src_env / "auth.auto.tfvars"
     dest = ENVS_DIR / dest_env / "auth.auto.tfvars"
     shutil.copy2(src, dest)
+
+
+# ---------------------------------------------------------------------------
+# Account-level name suffixing (test isolation)
+# ---------------------------------------------------------------------------
+# Groups and tag policies are account-scoped. To prevent conflicts between
+# scenarios, append a unique suffix to all group names and tag policy keys
+# in the generated config. This is test-only — normal user flow is unaffected.
+
+_TEST_SUFFIX = ""  # Set in main() from the provisioned run_id
+
+
+def _suffix_account_names(tfvars_path: Path) -> int:
+    """Append _TEST_SUFFIX to all group names and tag policy keys in the generated config.
+
+    Updates all cross-references (to_principals, except_principals, group_members,
+    acl_groups, tag_key, match_condition hasTagValue, when_condition).
+
+    Returns the number of names suffixed.
+    """
+    if not _TEST_SUFFIX:
+        return 0
+
+    _ensure_packages()
+    import hcl2
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    suffix = _TEST_SUFFIX
+    count = 0
+
+    # Extract group names
+    groups_cfg = cfg.get("groups") or {}
+    if isinstance(groups_cfg, list):
+        groups_cfg = groups_cfg[0] if groups_cfg else {}
+    group_names = list(groups_cfg.keys())
+
+    # Extract tag policy keys
+    tag_policies = cfg.get("tag_policies") or []
+    if isinstance(tag_policies, list) and tag_policies and isinstance(tag_policies[0], list):
+        tag_policies = tag_policies[0]
+    tag_keys = []
+    for tp in tag_policies:
+        if isinstance(tp, list):
+            tp = tp[0] if tp else {}
+        key = tp.get("key", "")
+        if isinstance(key, list):
+            key = key[0] if key else ""
+        if key:
+            tag_keys.append(key)
+
+    # Replace group names in all contexts (double-quoted strings)
+    for name in group_names:
+        old = f'"{name}"'
+        new = f'"{name}_{suffix}"'
+        if old in text:
+            text = text.replace(old, new)
+            count += 1
+
+    # Replace tag policy keys in double-quoted strings (tag_key = "...")
+    for key in tag_keys:
+        old_dq = f'"{key}"'
+        new_dq = f'"{key}_{suffix}"'
+        if old_dq in text:
+            text = text.replace(old_dq, new_dq)
+            count += 1
+        # Replace in single-quoted strings (hasTagValue('key', ...))
+        old_sq = f"'{key}'"
+        new_sq = f"'{key}_{suffix}'"
+        if old_sq in text:
+            text = text.replace(old_sq, new_sq)
+            count += 1
+
+    if count:
+        tfvars_path.write_text(text)
+        print(f"  Suffixed {count} account-level name(s) with '_{suffix}'")
+
+    return count
 
 
 def _clean_env_artifacts(env: str) -> None:
@@ -4456,7 +4555,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Auto-detect provisioned environment from provision_test_env.py state
     # ------------------------------------------------------------------
-    global ENVS_DIR  # DEFAULT_AUTH_FILE is derived from ENVS_DIR, not a separate global
+    global ENVS_DIR, _TEST_SUFFIX  # DEFAULT_AUTH_FILE is derived from ENVS_DIR, not a separate global
     fresh_env = False
     _cloud_root = CLOUD_ROOT
 
@@ -4468,6 +4567,10 @@ def main() -> None:
             if _test_envs and Path(_test_envs).exists():
                 ENVS_DIR = Path(_test_envs)
                 fresh_env = True
+                # Use run_id as suffix for account-level name isolation
+                _run_id = _state.get("run_id", "")
+                if _run_id:
+                    _TEST_SUFFIX = _run_id[:6]  # short suffix e.g. "a44317"
                 try:
                     _envs_display = ENVS_DIR.relative_to(MODULE_ROOT)
                 except ValueError:
