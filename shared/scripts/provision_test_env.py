@@ -1109,7 +1109,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
         # exist" even though the bucket is reachable — this is Databricks signalling
         # that it could not assume the IAM role yet.  A short retry resolves it.
         el_created = False
-        for _attempt, _delay in enumerate([0, 30, 60]):
+        for _attempt, _delay in enumerate([0, 30, 60, 90]):
             if _delay:
                 _warn(f"  Retrying External Location creation in {_delay} s (attempt {_attempt + 1})…")
                 time.sleep(_delay)
