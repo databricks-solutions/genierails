@@ -223,10 +223,13 @@ def main():
             break
     print()
 
-    # Phase 2: Provision all in parallel
-    print(f"── Phase 2: Provisioning {len(scenarios)} environments (all concurrent)")
+    # Phase 2: Provision environments
+    # Limit provisioning concurrency to 5 to avoid cloud API rate limits
+    # (Azure resource group limits, AWS IAM propagation)
+    prov_parallel = min(len(scenarios), 5)
+    print(f"── Phase 2: Provisioning {len(scenarios)} environments ({prov_parallel} concurrent)")
     provision_results = {}
-    with ThreadPoolExecutor(max_workers=len(scenarios)) as executor:
+    with ThreadPoolExecutor(max_workers=prov_parallel) as executor:
         futures = {executor.submit(provision_for_scenario, s, env_file, cloud): s for s in scenarios}
         for f in as_completed(futures):
             s = futures[f]
