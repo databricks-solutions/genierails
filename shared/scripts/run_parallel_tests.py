@@ -88,6 +88,12 @@ def run_scenario(scenario, auth_file, state_file, run_id, cloud):
     env["_PARALLEL_STATE_FILE"] = state_file
     # Per-scenario suffix for account-level name isolation
     env["_TEST_SUFFIX"] = run_id[:6] if run_id else ""
+    # Clear Databricks SDK env vars so each scenario reads from its own auth file.
+    # Without this, inherited values from the parent shell prevent _configure_sdk_env()
+    # from setting the correct per-workspace host/credentials.
+    for k in ["DATABRICKS_HOST", "DATABRICKS_CLIENT_ID", "DATABRICKS_CLIENT_SECRET",
+              "DATABRICKS_TOKEN", "DATABRICKS_ACCOUNT_ID"]:
+        env.pop(k, None)
 
     print(f"  [{_ts()}] {_bold(scenario)}: running (suffix={run_id[:6]})...")
     start = time.time()
