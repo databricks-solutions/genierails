@@ -229,7 +229,7 @@ def main():
             break
     print()
 
-    # Phase 2: Provision all in parallel
+    # Phase 2: Provision all in parallel (with 1 retry for failures)
     print(f"── Phase 2: Provisioning {len(scenarios)} environments (all concurrent)")
     provision_results = {}
     with ThreadPoolExecutor(max_workers=len(scenarios)) as executor:
@@ -240,6 +240,20 @@ def main():
                 provision_results[s] = f.result()
             except Exception as exc:
                 provision_results[s] = {"scenario": s, "status": "provision_failed", "error": str(exc)}
+
+    # Retry any failed provisions once
+    failed = {k: v for k, v in provision_results.items() if v["status"] != "provisioned"}
+    if failed:
+        print(f"\n  Retrying {len(failed)} failed provision(s)...")
+        with ThreadPoolExecutor(max_workers=len(failed)) as executor:
+            futures = {executor.submit(provision_for_scenario, s, env_file, cloud): s for s in failed}
+            for f in as_completed(futures):
+                s = futures[f]
+                try:
+                    result = f.result()
+                    provision_results[s] = result
+                except Exception as exc:
+                    provision_results[s] = {"scenario": s, "status": "provision_failed", "error": str(exc)}
 
     provisioned = {k: v for k, v in provision_results.items() if v["status"] == "provisioned"}
     failed_prov = {k: v for k, v in provision_results.items() if v["status"] != "provisioned"}

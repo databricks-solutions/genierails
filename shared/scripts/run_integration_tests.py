@@ -4674,19 +4674,24 @@ def main() -> None:
     results: dict[str, str] = {}
     total_start = time.time()
 
-    # Scenarios get one automatic retry on LLM-related failures (masking SQL,
-    # semantic check, validation).  Infrastructure failures are not retried.
-    _LLM_RETRY_PATTERNS = [
+    # Scenarios get one automatic retry on transient failures:
+    # - LLM quality: masking SQL, semantic check, validation errors
+    # - Infrastructure timing: tag assignment/policy creation, provisioner errors
+    _RETRY_PATTERNS = [
         "masking_functions", "SEMANTIC CHECK", "semantic_check",
         "deploy_masking", "local-exec provisioner error",
         "genie_space_configs section missing", "columnName()",
         "per-space directory bootstrapped", "MULTIPLE_MASKS",
         "Validation found errors", "make generate ENV=",
+        "failed to create entity_tag_assignment",
+        "failed to create policy_info",
+        "failed to update policy_info",
+        "make apply",
     ]
 
-    def _is_llm_failure(exc: Exception) -> bool:
+    def _is_retryable(exc: Exception) -> bool:
         msg = str(exc)
-        return any(p in msg for p in _LLM_RETRY_PATTERNS)
+        return any(p in msg for p in _RETRY_PATTERNS)
 
     for name, (desc, fn) in selected:
         start = time.time()
@@ -4707,7 +4712,7 @@ def main() -> None:
                 break
             except Exception as exc:
                 last_exc = exc
-                if attempt == 0 and _is_llm_failure(exc):
+                if attempt == 0 and _is_retryable(exc):
                     continue  # retry
                 break  # infrastructure failure or second attempt — don't retry
         if last_exc is not None:
