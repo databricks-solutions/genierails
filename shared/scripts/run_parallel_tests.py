@@ -142,8 +142,9 @@ def main():
     parser = argparse.ArgumentParser(description="Parallel integration tests")
     parser.add_argument("--env-file", required=True)
     parser.add_argument("--scenarios", default=",".join(SCENARIOS))
-    parser.add_argument("--max-parallel", type=int, default=15,
-                       help="Max concurrent scenarios (default: 15)")
+    parser.add_argument("--max-parallel", type=int, default=5,
+                       help="Max concurrent scenarios (default: 5). "
+                            "Higher values may hit Databricks API rate limits on FGAC policy creation.")
     parser.add_argument("--keep-envs", action="store_true")
     args = parser.parse_args()
 
