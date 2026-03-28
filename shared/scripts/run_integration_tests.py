@@ -2200,8 +2200,14 @@ def scenario_multi_env(
     # the created warehouse and patch it into both dev and bu2 env.auto.tfvars so
     # bu2's apply reuses the existing warehouse (count=0 branch).
     actual_wh = _patch_warehouse_id_in_env_tfvars(dev_env, auth_file)
+    if not actual_wh:
+        # Retry after a short wait — warehouse may still be starting
+        time.sleep(15)
+        actual_wh = _resolve_warehouse_id(auth_file, "")
     if actual_wh:
         _write_env_tfvars(bu2_env, SPACES_CLINICAL_ONLY, actual_wh)
+    else:
+        _warn("Could not discover warehouse ID — bu2 may fail with 'already exists'")
 
     # ── bu2: generate + apply ─────────────────────────────────────────────────
     _step("bu2 — Generating Clinical Analytics ABAC config independently")
