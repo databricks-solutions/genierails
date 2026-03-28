@@ -48,24 +48,11 @@ fi
 
 mkdir -p "$ENV_DIR"
 
-# Create a per-env copy of the Terraform root so parallel scenarios don't
-# corrupt each other's .terraform.lock.hcl (which is always written to the
-# working directory, ignoring TF_DATA_DIR). Each scenario gets its own
-# isolated working directory with symlinked .tf files.
-WORK_DIR="$ENV_DIR/.tf_workdir"
-mkdir -p "$WORK_DIR"
-for tf_file in "$ROOT_DIR"/*.tf "$ROOT_DIR"/*.tf.json; do
-  [ -e "$tf_file" ] && ln -sf "$tf_file" "$WORK_DIR/" 2>/dev/null
-done
-# Copy (not symlink) the lock file so concurrent writes don't collide
-[ -f "$ROOT_DIR/.terraform.lock.hcl" ] && cp -n "$ROOT_DIR/.terraform.lock.hcl" "$WORK_DIR/" 2>/dev/null
-# Link module directories if they exist
-for subdir in "$ROOT_DIR"/*/; do
-  [ -d "$subdir" ] && ln -sfn "$subdir" "$WORK_DIR/" 2>/dev/null
-done
-
+# Use TF_DATA_DIR for per-env .terraform/ isolation. The .terraform.lock.hcl
+# file is always in the working directory — use -lockfile=readonly during init
+# to prevent concurrent writes from corrupting it.
 export TF_DATA_DIR="$ENV_DIR/.terraform"
-cd "$WORK_DIR"
+cd "$ROOT_DIR"
 
 INIT_CMD=(
   terraform
@@ -73,6 +60,7 @@ INIT_CMD=(
   -input=false
   -reconfigure
   -backend-config="path=$ENV_DIR/terraform.tfstate"
+  -lockfile=readonly
 )
 
 echo "+ ${INIT_CMD[*]}"
