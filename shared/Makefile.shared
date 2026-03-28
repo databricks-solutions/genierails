@@ -596,6 +596,17 @@ test-all: _bootstrap _guard-workspace-target ## Run all scenario tests sequentia
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
+test-ci-parallel: ## Parallel CI: provision one workspace per scenario, run all concurrently, teardown
+	@# Each scenario gets its own workspace + metastore + unique name suffix.
+	@# All 15 workspaces provision in parallel (~2.5 min), then scenarios run
+	@# concurrently. ~20 min total vs ~3 hours sequential.
+	@set -e; \
+	CLOUD_PROVIDER=$(CLOUD) python3 "$(SHARED_ROOT)/scripts/run_parallel_tests.py" \
+		--env-file "$(ACCOUNT_ADMIN_ENV)" \
+		$(if $(MAX_PARALLEL),--max-parallel $(MAX_PARALLEL),) \
+		$(if $(SCENARIOS),--scenarios $(SCENARIOS),) \
+		$(if $(KEEP_ENVS),--keep-envs,)
+
 test-ci: ## Full CI pipeline: unit tests → provision fresh env → integration tests → teardown (always)
 	@# Designed for automated DevOps workflows (PR checks, nightly runs).
 	@# Provisions a fresh isolated Databricks environment, runs all tests, then tears

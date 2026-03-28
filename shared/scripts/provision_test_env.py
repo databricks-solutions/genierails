@@ -101,8 +101,16 @@ _default_cloud  = (
 )
 CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / _default_cloud))
 ENVS_DIR    = CLOUD_ROOT / "envs"                       # user's real envs (never touched)
-TEST_ENVS_DIR = CLOUD_ROOT / "envs" / "test"            # isolated dir for integration tests
-STATE_FILE  = SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
+# Support per-scenario parallel provisioning: _PARALLEL_STATE_FILE overrides the
+# default state file and test envs directory so each scenario gets its own workspace.
+_parallel_state = os.environ.get("_PARALLEL_STATE_FILE", "")
+if _parallel_state:
+    STATE_FILE = Path(_parallel_state)
+    _scenario_name = STATE_FILE.stem.split(".")[-1]
+    TEST_ENVS_DIR = CLOUD_ROOT / "envs" / "parallel_test" / _scenario_name
+else:
+    STATE_FILE = SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
+    TEST_ENVS_DIR = CLOUD_ROOT / "envs" / "test"
 DEFAULT_ENV_FILE = SCRIPT_DIR / f"account-admin.{_default_cloud}.env"
 
 

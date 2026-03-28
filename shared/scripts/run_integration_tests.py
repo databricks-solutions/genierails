@@ -133,7 +133,8 @@ CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / _default_cl
 # changing it once in main() propagates everywhere.
 ENVS_DIR    = Path(os.environ.get("ENVS_DIR", CLOUD_ROOT / "envs"))
 
-PROVISION_STATE_FILE = SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
+_parallel_state = os.environ.get("_PARALLEL_STATE_FILE", "")
+PROVISION_STATE_FILE = Path(_parallel_state) if _parallel_state else SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
 
 DEFAULT_AUTH_FILE = ENVS_DIR / "dev" / "auth.auto.tfvars"
 
@@ -472,7 +473,7 @@ def _copy_auth(src_env: str, dest_env: str) -> None:
 # scenarios, append a unique suffix to all group names and tag policy keys
 # in the generated config. This is test-only — normal user flow is unaffected.
 
-_TEST_SUFFIX = ""  # Set in main() from the provisioned run_id
+_TEST_SUFFIX = os.environ.get("_TEST_SUFFIX", "")  # Set from env (parallel runner) or main() (sequential)
 
 
 def _suffix_account_names(tfvars_path: Path) -> int:
