@@ -1742,12 +1742,17 @@ def _verify_data(
         flags.append("--verify-prod")
     if not flags:
         return
-    try:
-        _setup_data(auth_file, *flags, warehouse_id=warehouse_id)
-    except RuntimeError:
-        print("  Verify failed — retrying after 30s (Delta table propagation)...")
-        time.sleep(30)
-        _setup_data(auth_file, *flags, warehouse_id=warehouse_id)
+    for _v_attempt in range(3):
+        try:
+            _setup_data(auth_file, *flags, warehouse_id=warehouse_id)
+            break
+        except RuntimeError:
+            if _v_attempt < 2:
+                _wait = 30 * (_v_attempt + 1)
+                print(f"  Verify failed — retrying after {_wait}s (attempt {_v_attempt + 1}/3, Delta propagation)...")
+                time.sleep(_wait)
+            else:
+                raise
 
 
 # ---------------------------------------------------------------------------
