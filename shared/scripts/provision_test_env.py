@@ -1117,9 +1117,29 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     _warn("Waiting 20 s for workspace identity propagation…")
     time.sleep(20)
 
+    # Step 5a-2: Explicitly grant metastore admin to the SP via workspace API.
+    # On Azure, implicit metastore admin from being the creator is not always
+    # recognized when accessing through the workspace API. Explicit grant ensures
+    # FGAC policy creation (CREATE_FUNCTION, tag assignments) works.
+    try:
+        from databricks.sdk import WorkspaceClient as _WC_ma
+        w_admin = _WC_ma(host=ws_host, client_id=client_id, client_secret=client_secret)
+        w_admin.grants.update(
+            securable_type="metastore",
+            full_name=ms_id,
+            changes=[{
+                "principal": client_id,
+                "add": ["CREATE_CATALOG", "CREATE_EXTERNAL_LOCATION",
+                        "CREATE_FUNCTION", "CREATE_SCHEMA"],
+            }],
+        )
+        _ok("Metastore privileges granted to SP via workspace API")
+    except Exception as exc:
+        _warn(f"Could not grant metastore privileges (SP may already have them as creator): {exc}")
+
     # ------------------------------------------------------------------
     # Step 5b: Create the External Location.  The SP now has workspace
-    # access and metastore admin rights (as metastore creator).
+    # access and explicit metastore admin rights.
     #
     # Trailing slash on the URL is required so Databricks prefix-matches
     # sub-paths like s3://bucket/prefix/catalog_name as being covered by
