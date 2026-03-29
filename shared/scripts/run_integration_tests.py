@@ -1729,7 +1729,12 @@ def _verify_data(
     prod: bool = False,
     warehouse_id: str = "",
 ) -> None:
-    """Run setup_test_data.py --verify (and --verify-prod) as assertions."""
+    """Run setup_test_data.py --verify (and --verify-prod) as assertions.
+
+    Retries once after 30s if the first attempt fails — handles Delta table
+    eventual consistency where CREATE TABLE succeeds but the table isn't
+    queryable immediately (especially under concurrent S3 load).
+    """
     flags: list[str] = []
     if dev:
         flags.append("--verify")
@@ -1737,7 +1742,12 @@ def _verify_data(
         flags.append("--verify-prod")
     if not flags:
         return
-    _setup_data(auth_file, *flags, warehouse_id=warehouse_id)
+    try:
+        _setup_data(auth_file, *flags, warehouse_id=warehouse_id)
+    except RuntimeError:
+        print("  Verify failed — retrying after 30s (Delta table propagation)...")
+        time.sleep(30)
+        _setup_data(auth_file, *flags, warehouse_id=warehouse_id)
 
 
 # ---------------------------------------------------------------------------
