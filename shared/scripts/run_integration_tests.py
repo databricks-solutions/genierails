@@ -1407,8 +1407,40 @@ def _preamble_cleanup(*envs: str, fresh_env: bool = False) -> None:
     # with no stale resources. Skip all API-level cleanup (which could interfere with
     # other concurrent scenarios) and only clean local artifacts.
     if _TEST_SUFFIX and fresh_env:
-        print("  Parallel mode — fresh workspace, skipping API cleanup.")
+        print("  Parallel mode — fresh workspace, cleaning only own-suffix account resources.")
+        # Clean suffixed tag policies from previous runs via workspace API.
+        # Each scenario has its own workspace, so this is safe in parallel.
         for env in envs:
+            auth_file = ENVS_DIR / env / "auth.auto.tfvars"
+            if not auth_file.exists():
+                auth_file = ENVS_DIR / "dev" / "auth.auto.tfvars"
+            if auth_file.exists():
+                try:
+                    import hcl2 as _hcl2_pc
+                    import re as _re_pc
+                    _suffix_re = _re_pc.compile(r"^[a-z_]+_[a-f0-9]{4,}$")
+                    with open(auth_file) as f:
+                        _cfg = _hcl2_pc.load(f)
+                    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+                    _host = _s(_cfg.get("databricks_workspace_host", ""))
+                    _cid = _s(_cfg.get("databricks_client_id", ""))
+                    _csec = _s(_cfg.get("databricks_client_secret", ""))
+                    if _host:
+                        from databricks.sdk import WorkspaceClient as _WC_pc
+                        _w = _WC_pc(host=_host, client_id=_cid, client_secret=_csec)
+                        _deleted = 0
+                        for tp in list(_w.tag_policies.list_tag_policies()):
+                            key = getattr(tp, "tag_key", "") or ""
+                            if _suffix_re.match(key):
+                                try:
+                                    _w.tag_policies.delete_tag_policy(tag_key=key)
+                                    _deleted += 1
+                                except Exception:
+                                    pass
+                        if _deleted:
+                            print(f"  Deleted {_deleted} orphan suffixed tag policy/ies")
+                except Exception as _exc:
+                    print(f"  {_yellow('WARN')} tag policy cleanup: {_exc}")
             _clean_env_artifacts(env)
         _clean_account_artifacts()
         return

@@ -158,6 +158,24 @@ def _cleanup_account_resources(auth_file, suffix, cloud):
                     a.groups.delete(id=g.id)
                 except Exception:
                     pass
+
+        # Delete tag policies ending with our suffix
+        # Tag policies are accessed via workspace client, but we need a workspace host.
+        # Read it from the auth file.
+        ws_host = _s(cfg.get("databricks_workspace_host", ""))
+        if ws_host:
+            try:
+                from databricks.sdk import WorkspaceClient
+                w = WorkspaceClient(host=ws_host, client_id=client_id, client_secret=client_secret)
+                for tp in list(w.tag_policies.list_tag_policies()):
+                    key = getattr(tp, "tag_key", "") or ""
+                    if key.endswith(f"_{suffix}"):
+                        try:
+                            w.tag_policies.delete_tag_policy(tag_key=key)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
     except Exception:
         pass  # best effort
 
@@ -214,6 +232,50 @@ def main():
     print(f"  Scenarios:    {len(scenarios)}")
     print(f"  Max parallel: {max_parallel}")
     print(f"  Credentials:  {env_file}")
+    print()
+
+    # ── Phase 0: Clean up orphan account resources from previous runs ────────
+    print("── Phase 0: Cleaning orphan account resources from previous runs")
+    try:
+        import re as _re_pre
+        import hcl2 as _hcl2_pre
+        with open(env_file) as f:
+            _cfg = {}
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    _cfg[k.strip()] = v.strip()
+
+        _account_id = _cfg.get("DATABRICKS_ACCOUNT_ID", "")
+        _client_id = _cfg.get("DATABRICKS_CLIENT_ID", "")
+        _client_secret = _cfg.get("DATABRICKS_CLIENT_SECRET", "")
+        _account_host = "https://accounts.azuredatabricks.net" if cloud == "azure" else "https://accounts.cloud.databricks.com"
+
+        from databricks.sdk import AccountClient
+        _a = AccountClient(host=_account_host, account_id=_account_id,
+                          client_id=_client_id, client_secret=_client_secret)
+
+        # Delete suffixed groups (pattern: Title_Case_hexsuffix)
+        _suffix_re = _re_pre.compile(r"^[A-Z][a-z]+(_[A-Z][a-z]+)*_[a-f0-9]{6}$")
+        _g_del = 0
+        for g in list(_a.groups.list()):
+            name = g.display_name or ""
+            if _suffix_re.match(name):
+                try:
+                    _a.groups.delete(id=g.id)
+                    _g_del += 1
+                except Exception:
+                    pass
+        if _g_del:
+            print(f"  Deleted {_g_del} orphan suffixed groups")
+
+        # Delete suffixed tag policies (need a workspace — provision one temporarily or skip)
+        # Tag policies are only accessible via workspace API; we can't clean them without a workspace.
+        # They'll be cleaned by each scenario's _preamble_cleanup or by the scenario retry.
+        print(f"  (Tag policies cleaned per-scenario during apply)")
+    except Exception as exc:
+        print(f"  {_yellow('WARN')} Cleanup failed: {exc}")
     print()
 
     # Phase 1: Unit tests
