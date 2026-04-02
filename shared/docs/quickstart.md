@@ -102,3 +102,4 @@ Each entry in `genie_spaces` operates in one of two modes based on whether `geni
 - [Add another Genie Space](playbook.md#add-another-genie-space) — incremental generation without touching existing spaces
 - [Country & industry overlays](playbook.md#country-and-industry-overlays) — region-specific or industry-specific governance
 - [Advanced scenarios](playbook.md#advanced-scenarios) — ABAC-only, self-service Genie, independent BU environments
+- [Version control your configs](version-control.md) — what to commit, version pinning, running Terraform directly

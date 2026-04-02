@@ -192,3 +192,4 @@ Each space's config is fetched independently. All spaces get their governance ge
 - [Country & industry overlays](playbook.md#country-and-industry-overlays) — region-specific or industry-specific governance
 - [Schema drift detection](playbook.md#schema-drift-detection) — handle table changes after initial deployment
 - [Advanced scenarios](playbook.md#advanced-scenarios) — ABAC-only, self-service Genie, independent BU environments
+- [Version control your configs](version-control.md) — what to commit, version pinning, running Terraform directly
