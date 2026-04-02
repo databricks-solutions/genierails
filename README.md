@@ -1,16 +1,16 @@
 # GenieRails
 
-Put Genie onboarding on rails — with built-in guardrails. GenieRails imports your existing Genie Space, generates ABAC governance (groups, tags, masking, row filters), and promotes everything to production. No Terraform to write.
+Put Genie onboarding on rails — with built-in guardrails. Point GenieRails at your tables, and it generates everything you need to run a governed Genie Space: groups, tag policies, column masks, row filters, ACLs, entitlements, and the Space itself. No Terraform to write.
 
 ## What you get
 
-- **Groups and access control** — role-based groups (e.g. `analyst`, `manager`) with fine-grained row and column policies
-- **Column masking** — AI-generated SQL UDFs that mask sensitive data (SSN, credit cards, PII) per group
-- **Row-level security** — filter rows by region, department, or any business dimension
-- **Tag-based governance** — Unity Catalog tag policies that classify and protect sensitive columns
+- **Role-based groups** — e.g. `Finance_Analyst`, `Compliance_Officer`, each with tailored data access
+- **Tag-based governance** — Unity Catalog tag policies that classify sensitive columns (PII, PCI, PHI)
+- **Column masking** — AI-generated SQL UDFs that mask sensitive data (SSN, credit cards, emails) per group
+- **Row-level security** — filter rows by region, department, compliance scope, or any business dimension
 - **Consumer entitlements** — workspace consume access granted to each group automatically
 - **Per-space Genie ACLs** — `CAN_RUN` permissions scoped per space, so each group only accesses the spaces it needs
-- **Genie Space configuration as code** — instructions, benchmarks, SQL measures, all version-controlled
+- **Genie Space as code** — instructions, benchmarks, SQL measures, all version-controlled
 - **Dev → prod promotion** — one command to replicate governance to production with catalog remapping
 
 ## Getting Started
