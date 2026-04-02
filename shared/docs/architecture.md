@@ -37,6 +37,8 @@ The layers are designed so that different teams can own different layers indepen
 | `envs/<env>/data_access/masking_functions.sql` | Env-scoped masking SQL deployed by the governance layer | **Yes** |
 | `envs/<env>/abac.auto.tfvars` | Workspace-owned config: group lookups and Genie config only | **Yes** |
 
+> **See also:** [Version Control & Standalone Terraform](version-control.md) for detailed guidance on what to commit, how to set up git tracking, version pinning, and running Terraform independently.
+
 Examples:
 
 - `envs/dev/auth.auto.tfvars`

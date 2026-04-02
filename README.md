@@ -42,6 +42,7 @@ genierails/
 - [Playbook](shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios
 
 **Reference:**
+- [Version Control & Standalone Terraform](shared/docs/version-control.md) — what to commit, version pinning, running Terraform directly
 - [Architecture](shared/docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
 - [Country & Region Overlays](shared/docs/country-overlays.md) — region-specific PII governance (ANZ, India, Southeast Asia)
 - [Industry Overlays](shared/docs/industry-overlays.md) — industry-specific masking and access patterns (Financial Services, Healthcare, Retail)

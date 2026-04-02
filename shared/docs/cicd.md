@@ -19,6 +19,8 @@ Use this split of responsibilities:
 
 This keeps LLM-driven generation and human review out of the automated deployment path, while still letting CI own repeatable validation and rollout.
 
+> **Prerequisite:** Your configs should be version-controlled before setting up CI/CD. See [Version Control & Standalone Terraform](version-control.md) for what to commit and how to set up git tracking.
+
 ## What Should Be Committed
 
 Commit the reviewed environment and layer config:
