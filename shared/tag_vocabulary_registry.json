@@ -1,0 +1,132 @@
+{
+  "families": {
+    "pii_level": {
+      "canonical_key": "pii_level",
+      "description": "Canonical vocabulary for PII sensitivity and masking tiers.",
+      "canonical_values": [
+        "public",
+        "masked",
+        "full",
+        "Limited_PII",
+        "Full_PII",
+        "masked_name",
+        "masked_email",
+        "masked_phone",
+        "masked_account",
+        "masked_ssn",
+        "masked_dob",
+        "masked_tfn",
+        "masked_medicare",
+        "masked_bsb",
+        "masked_aadhaar",
+        "masked_pan",
+        "masked_nric",
+        "masked_mykad",
+        "redacted_address"
+      ],
+      "key_aliases": [],
+      "value_aliases": {
+        "masked_address": "redacted_address",
+        "redacted_address": "redacted_address",
+        "redacted_tfn": "masked_tfn",
+        "redacted_medicare": "masked_medicare",
+        "redacted_bsb": "masked_bsb",
+        "redacted_aadhaar": "masked_aadhaar",
+        "redacted_pan": "masked_pan",
+        "redacted_nric": "masked_nric",
+        "redacted_mykad": "masked_mykad"
+      }
+    },
+    "pci_level": {
+      "canonical_key": "pci_level",
+      "description": "Canonical vocabulary for PCI masking tiers.",
+      "canonical_values": [
+        "public",
+        "masked_card_last4",
+        "redacted_card_full",
+        "redacted_cvv"
+      ],
+      "key_aliases": [],
+      "value_aliases": {
+        "masked_card": "masked_card_last4",
+        "masked_card_last4": "masked_card_last4",
+        "masked_card_full": "redacted_card_full",
+        "redacted_card": "redacted_card_full",
+        "redacted_card_full": "redacted_card_full",
+        "restricted_card": "redacted_card_full",
+        "restricted": "redacted_card_full",
+        "pci_full_mask": "redacted_card_full",
+        "full_card": "redacted_card_full",
+        "masked_cvv": "redacted_cvv",
+        "restricted_cvv": "redacted_cvv",
+        "full_cvv": "redacted_cvv",
+        "redacted_cvv": "redacted_cvv"
+      }
+    },
+    "compliance_scope": {
+      "canonical_key": "compliance_scope",
+      "description": "Canonical vocabulary for AML and compliance scoping tags.",
+      "canonical_values": [
+        "standard",
+        "aml_restricted"
+      ],
+      "key_aliases": [
+        "aml_scope"
+      ],
+      "value_aliases": {
+        "compliance_restricted": "aml_restricted",
+        "aml_restricted": "aml_restricted",
+        "standard": "standard",
+        "public": "standard"
+      }
+    },
+    "kyc_scope": {
+      "canonical_key": "kyc_scope",
+      "description": "Canonical vocabulary for KYC access tiers.",
+      "canonical_values": [
+        "public",
+        "verified_only"
+      ],
+      "key_aliases": [],
+      "value_aliases": {
+        "kyc_restricted": "verified_only",
+        "verified_only": "verified_only",
+        "public": "public"
+      }
+    },
+    "phi_level": {
+      "canonical_key": "phi_level",
+      "description": "Canonical vocabulary for PHI sensitivity and masking tiers.",
+      "canonical_values": [
+        "public",
+        "redacted",
+        "full",
+        "high",
+        "Limited_PHI",
+        "Full_PHI",
+        "Restricted_PHI",
+        "redacted_notes"
+      ],
+      "key_aliases": [],
+      "value_aliases": {
+        "restricted_notes": "redacted_notes",
+        "redacted_notes": "redacted_notes"
+      }
+    },
+    "financial_sensitivity": {
+      "canonical_key": "financial_sensitivity",
+      "description": "Canonical vocabulary for financial masking tiers.",
+      "canonical_values": [
+        "public",
+        "rounded_amounts"
+      ],
+      "key_aliases": [
+        "financial_level"
+      ],
+      "value_aliases": {
+        "masked_amount": "rounded_amounts",
+        "rounded_amounts": "rounded_amounts"
+      }
+    }
+  }
+}

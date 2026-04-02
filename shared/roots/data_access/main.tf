@@ -130,7 +130,7 @@ variable "sql_warehouse_id" {
 
 variable "warehouse_name" {
   type    = string
-  default = "ABAC Governance Warehouse"
+  default = "ABAC Serverless Warehouse"
 }
 
 variable "genie_space_id" {

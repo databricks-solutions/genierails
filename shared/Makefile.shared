@@ -1,4 +1,4 @@
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated promote plan sync-tags apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay
+.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay
 
 # ── Variables expected from the including Makefile ──────────────
 # SHARED_ROOT  — absolute path to shared/
@@ -315,6 +315,11 @@ sync-tags: _bootstrap ## Sync tag policy values in the shared account layer
 	@echo "=== Sync Tag Policies (account) ==="
 	@cd "$(ACCOUNT_ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/sync_tag_policies.py"
 
+wait-tag-policies: _bootstrap ## Wait until account tag policies are visible to downstream FGAC APIs
+	@$(MAKE) --no-print-directory _guard-account-config
+	@echo "=== Wait For Tag Policy Visibility (account) ==="
+	@cd "$(ACCOUNT_ENV_DIR)" && python3 -u "$(SHARED_ROOT)/scripts/wait_for_tag_policies.py" $(if $(REQUIRED_VALUES_TFVARS),--required-values-from "$(REQUIRED_VALUES_TFVARS)",)
+
 _apply-layer:
 	@set -e; layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	env_dir="$(LAYER_ENV_DIR)"; \
@@ -343,12 +348,16 @@ _apply-layer:
 		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(SHARED_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
 	fi; \
 	LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; \
+	if [ "$$layer" = "account" ]; then \
+		$(MAKE) --no-print-directory sync-tags; \
+	fi; \
 	printf "%s\n" "$$current_fingerprint" > "$$fingerprint_file"
 
 apply: _bootstrap ## Apply the selected layer, or account -> data_access -> workspace for ENV=<workspace>
 	@set -e; if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		$(MAKE) --no-print-directory _guard-account-config; \
 		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
+		$(MAKE) --no-print-directory wait-tag-policies; \
 	else \
 		$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 		if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
@@ -359,10 +368,11 @@ apply: _bootstrap ## Apply the selected layer, or account -> data_access -> work
 		$(MAKE) --no-print-directory _guard-account-config; \
 		$(MAKE) --no-print-directory TARGET_ENV="$(ENV)" _guard-data-access-config; \
 		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
+		$(MAKE) --no-print-directory wait-tag-policies REQUIRED_VALUES_TFVARS="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars"; \
 		echo "=== Waiting 30s for account-level groups to propagate before data_access apply ==="; \
 		sleep 30; \
 		$(MAKE) --no-print-directory _apply-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
-		echo "=== Waiting 30s for account-level groups to propagate before workspace apply ==="; \
+		echo "=== Waiting 30s for data_access resources to propagate before workspace apply ==="; \
 		sleep 30; \
 		$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"; \
 	fi
@@ -378,6 +388,7 @@ apply-governance: _bootstrap _guard-workspace-target ## [Governance team] Apply 
 	$(MAKE) --no-print-directory _guard-account-config; \
 	$(MAKE) --no-print-directory TARGET_ENV="$(ENV)" _guard-data-access-config; \
 	$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
+	$(MAKE) --no-print-directory wait-tag-policies REQUIRED_VALUES_TFVARS="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars"; \
 	echo "=== Waiting 30s for account-level groups to propagate before data_access apply ==="; \
 	sleep 30; \
 	$(MAKE) --no-print-directory _apply-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"
@@ -596,16 +607,18 @@ test-all: _bootstrap _guard-workspace-target ## Run all scenario tests sequentia
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-ci-parallel: ## Parallel CI: provision one workspace per scenario, run all concurrently, teardown
+test-ci-parallel: ## Parallel CI: provision one workspace per scenario, run concurrently, teardown
 	@# Each scenario gets its own workspace + metastore + unique name suffix.
-	@# All 15 workspaces provision in parallel (~2.5 min), then scenarios run
-	@# concurrently. ~20 min total vs ~3 hours sequential.
+	@# All workspaces provision in parallel (~3 min), then scenarios execute
+	@# in batches of MAX_PARALLEL (default 5) to avoid API rate limiting.
+	@# Per-scenario logs saved to shared/scripts/logs/ for debugging.
 	@set -e; \
 	CLOUD_PROVIDER=$(CLOUD) python3 "$(SHARED_ROOT)/scripts/run_parallel_tests.py" \
 		--env-file "$(ACCOUNT_ADMIN_ENV)" \
 		$(if $(MAX_PARALLEL),--max-parallel $(MAX_PARALLEL),) \
 		$(if $(SCENARIOS),--scenarios $(SCENARIOS),) \
-		$(if $(KEEP_ENVS),--keep-envs,)
+		$(if $(KEEP_ENVS),--keep-envs,) \
+		$(if $(NO_FAIL_FAST),--no-fail-fast,)
 
 test-ci: ## Full CI pipeline: unit tests → provision fresh env → integration tests → teardown (always)
 	@# Designed for automated DevOps workflows (PR checks, nightly runs).

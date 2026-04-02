@@ -103,6 +103,8 @@ Makefile targets (added by this PR)
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import os
 import re
 import shutil
@@ -111,6 +113,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Callable
+
+from warehouse_utils import select_warehouse
 
 # Force line-buffered stdout so that print() and subprocess output appear
 # in the correct order when the test runner is invoked with piped stdout.
@@ -132,6 +136,7 @@ CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / _default_cl
 # All helpers that reference ENVS_DIR use the module-level variable so that
 # changing it once in main() propagates everywhere.
 ENVS_DIR    = Path(os.environ.get("ENVS_DIR", CLOUD_ROOT / "envs"))
+ACCOUNT_OPS_LOCK = CLOUD_ROOT / ".parallel_account_ops.lock"
 
 _parallel_state = os.environ.get("_PARALLEL_STATE_FILE", "")
 PROVISION_STATE_FILE = Path(_parallel_state) if _parallel_state else SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
@@ -266,6 +271,29 @@ def _run(
     return result
 
 
+def _make_targets(items: tuple[str, ...]) -> set[str]:
+    return {item for item in items if "=" not in item}
+
+
+def _needs_account_ops_lock(items: tuple[str, ...]) -> bool:
+    """Serialize account-affecting make targets across parallel scenarios."""
+    return bool(
+        _make_targets(items)
+        & {"apply", "apply-governance", "sync-tags", "wait-tag-policies", "import"}
+    )
+
+
+@contextlib.contextmanager
+def _account_ops_lock(reason: str):
+    ACCOUNT_OPS_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with open(ACCOUNT_OPS_LOCK, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
 def _make(
     *targets_and_vars: str,
     cwd: Path = CLOUD_ROOT,
@@ -314,11 +342,20 @@ def _make(
             injected.append(f"ACCOUNT_ENV_DIR={ENVS_DIR / 'account'}")
 
     for attempt in range(1 + retries):
-        result = _run(
+        # NOTE: Orphan tag policy cleanup is handled by _preamble_cleanup at
+        # scenario start, NOT here. Running it before every apply would delete
+        # tag policies that Phase 1 just created when Phase 2 calls apply.
+
+        run_make = lambda: _run(
             ["make", "--no-print-directory", *targets_and_vars, *injected],
             cwd=cwd,
             check=False,
         )
+        if _needs_account_ops_lock(targets_and_vars):
+            with _account_ops_lock(" ".join(_make_targets(targets_and_vars))):
+                result = run_make()
+        else:
+            result = run_make()
         if result.returncode == 0:
             # After successful generate, suffix account-level names for test isolation
             is_generate = any(t == "generate" or t == "generate-delta" for t in targets_and_vars if "=" not in t)
@@ -337,6 +374,25 @@ def _make(
                 account_abac = ENVS_DIR / "account" / "abac.auto.tfvars"
                 if account_abac.exists():
                     _suffix_account_names(account_abac)
+                # Preserve existing tag policy values from the account layer.
+                # In multi-phase scenarios, Phase 2's LLM may generate different
+                # values than Phase 1. Merge existing values so the new policy is
+                # a superset, preventing INVALID_TAG_POLICY_VALUE on existing tags.
+                if account_abac.exists():
+                    for abac_file in [gen_abac, assembled]:
+                        if abac_file.exists():
+                            _preserve_existing_tag_policy_values(abac_file, account_abac)
+                    # Also update account abac from assembled (which has the merged values)
+                    if assembled.exists():
+                        _preserve_existing_tag_policy_values(account_abac, assembled)
+                    try:
+                        sys.path.insert(0, str(MODULE_ROOT))
+                        from generate_abac import autofix_canonical_tag_vocabulary
+                        for abac_file in [gen_abac, assembled, account_abac]:
+                            if abac_file.exists():
+                                autofix_canonical_tag_vocabulary(abac_file)
+                    except Exception as exc:
+                        print(f"  [WARN] canonical tag normalization after preserve: {exc}")
             return result
         if attempt < retries:
             # Before retrying apply, run make import to adopt any orphaned
@@ -345,11 +401,16 @@ def _make(
             # nothing to adopt.
             is_apply = any(t.startswith("apply") for t in targets_and_vars if "=" not in t)
             if is_apply:
+                # Do NOT delete tag policies before retry — the account layer already
+                # created them and wait-tag-policies confirmed visibility. Deleting them
+                # forces recreation and another 300s visibility wait, causing timeouts.
+                # Just run import to adopt any orphaned resources.
                 env_vars = {v.split("=", 1)[0]: v.split("=", 1)[1]
                             for v in [*targets_and_vars, *injected] if "=" in v}
                 import_args = [f"{k}={v}" for k, v in env_vars.items()]
                 print(f"  [IMPORT] Running make import before retry to adopt any orphaned resources...")
-                _run(["make", "--no-print-directory", "import", *import_args], cwd=cwd, check=False)
+                with _account_ops_lock("import retry"):
+                    _run(["make", "--no-print-directory", "import", *import_args], cwd=cwd, check=False)
             if retry_delay_seconds > 0:
                 print(
                     f"  [RETRY] Command failed (exit {result.returncode}), "
@@ -367,7 +428,7 @@ def _make(
     return result
 
 
-def _setup_data(auth_file: Path, *flags: str, warehouse_id: str = "") -> None:
+def _setup_data(auth_file: Path, *flags: str, warehouse_id: str = "") -> str:
     cmd = [
         sys.executable,
         str(MODULE_ROOT / "scripts" / "setup_test_data.py"),
@@ -377,6 +438,7 @@ def _setup_data(auth_file: Path, *flags: str, warehouse_id: str = "") -> None:
         cmd += ["--warehouse-id", warehouse_id]
     cmd += list(flags)
     _run(cmd)
+    return _resolve_warehouse_id(auth_file, warehouse_id)
 
 
 # ---------------------------------------------------------------------------
@@ -406,14 +468,9 @@ def _resolve_warehouse_id(auth_file: Path, warehouse_id: str) -> str:
             return ""
         w = _WC(host=host, client_id=client_id, client_secret=client_secret)
         warehouses = list(w.warehouses.list())
-        for wh in warehouses:
-            state = str(wh.state)
-            if "RUNNING" in state or "STARTING" in state:
-                print(f"  Auto-selected warehouse: {wh.name} ({wh.id})")
-                return wh.id or ""
-        if warehouses:
-            wh = warehouses[0]
-            print(f"  Auto-selected warehouse (not running): {wh.name} ({wh.id})")
+        wh = select_warehouse(warehouses)
+        if wh:
+            print(f"  Auto-selected warehouse: {wh.name} ({wh.id})")
             return wh.id or ""
     except Exception as exc:
         print(f"  WARNING: Could not auto-detect warehouse: {exc}")
@@ -519,27 +576,53 @@ def _suffix_account_names(tfvars_path: Path) -> int:
         if key:
             tag_keys.append(key)
 
-    # Replace group names in all contexts (double-quoted strings)
+    import re as _re_suffix
+
+    # Replace group names in all contexts (double-quoted strings).
+    # Use regex with negative lookahead to prevent double-suffixing when the
+    # assembled config contains both unsuffixed (from new per-space generate)
+    # and already-suffixed names (from previous phases).
     for name in group_names:
+        if name.endswith(f"_{suffix}"):
+            continue  # already suffixed
+        # Match "name" NOT followed by _suffix (prevents "name_abc123" → "name_abc123_abc123")
+        pattern = _re_suffix.compile(
+            r'"' + _re_suffix.escape(name) + r'"(?!.*_' + _re_suffix.escape(suffix) + r')'
+        )
+        # Simpler approach: replace exact "name" only when NOT already part of "name_suffix"
         old = f'"{name}"'
         new = f'"{name}_{suffix}"'
-        if old in text:
+        already_suffixed = f'"{name}_{suffix}"'
+        if old in text and already_suffixed not in text:
             text = text.replace(old, new)
             count += 1
+        elif old in text:
+            # Both unsuffixed and suffixed exist — only replace the unsuffixed ones.
+            # Temporarily protect already-suffixed instances, replace, then restore.
+            placeholder = f'"__SUFFIXED__{name}__"'
+            text = text.replace(already_suffixed, placeholder)
+            text = text.replace(old, new)
+            text = text.replace(placeholder, already_suffixed)
+            count += 1
 
-    # Replace tag policy keys in double-quoted strings (tag_key = "...")
+    # Replace tag policy keys in double-quoted and single-quoted strings.
     for key in tag_keys:
-        old_dq = f'"{key}"'
-        new_dq = f'"{key}_{suffix}"'
-        if old_dq in text:
-            text = text.replace(old_dq, new_dq)
-            count += 1
-        # Replace in single-quoted strings (hasTagValue('key', ...))
-        old_sq = f"'{key}'"
-        new_sq = f"'{key}_{suffix}'"
-        if old_sq in text:
-            text = text.replace(old_sq, new_sq)
-            count += 1
+        if key.endswith(f"_{suffix}"):
+            continue  # already suffixed
+        for quote in ['"', "'"]:
+            old_q = f'{quote}{key}{quote}'
+            new_q = f'{quote}{key}_{suffix}{quote}'
+            already_q = f'{quote}{key}_{suffix}{quote}'
+            if old_q in text and already_q not in text:
+                text = text.replace(old_q, new_q)
+                count += 1
+            elif old_q in text:
+                # Protect already-suffixed, replace unsuffixed, restore.
+                placeholder = f'{quote}__SUFFIXED__{key}__{quote}'
+                text = text.replace(already_q, placeholder)
+                text = text.replace(old_q, new_q)
+                text = text.replace(placeholder, already_q)
+                count += 1
 
     if count:
         tfvars_path.write_text(text)
@@ -551,6 +634,135 @@ def _suffix_account_names(tfvars_path: Path) -> int:
               f"names may already be suffixed or file format unexpected")
 
     return count
+
+
+def _preserve_existing_tag_policy_values(new_abac: Path, existing_abac: Path) -> int:
+    """Merge existing tag policy values into the newly generated config.
+
+    In multi-phase scenarios (e.g. per-space, abac-only), Phase 2's LLM
+    re-generation may produce different tag policy values than Phase 1.
+    Since Phase 1's tag assignments are already on columns, the new tag
+    policy must be a SUPERSET of the old values, otherwise ABAC evaluation
+    fails with INVALID_TAG_POLICY_VALUE.
+
+    Returns the number of values added.
+    """
+    if not existing_abac.exists() or not new_abac.exists():
+        return 0
+
+    _ensure_packages()
+    import hcl2
+
+    try:
+        existing_cfg = hcl2.loads(existing_abac.read_text())
+        new_text = new_abac.read_text()
+        new_cfg = hcl2.loads(new_text)
+    except Exception:
+        return 0
+
+    # Build map of existing tag_key → set of values
+    existing_vals: dict[str, set[str]] = {}
+    for tp in existing_cfg.get("tag_policies", []):
+        k = tp.get("key", "")
+        vals = tp.get("values", [])
+        if k and vals:
+            existing_vals[k] = set(vals)
+
+    if not existing_vals:
+        return 0
+
+    # Find values in existing that are missing from new
+    added = 0
+    for tp in new_cfg.get("tag_policies", []):
+        k = tp.get("key", "")
+        new_vals = tp.get("values", [])
+        if k not in existing_vals:
+            continue
+        missing = sorted(existing_vals[k] - set(new_vals))
+        if not missing:
+            continue
+        # Add missing values to the new config via text replacement
+        import re as _re_pres
+        # Find the values = [...] block for this key
+        pattern = _re_pres.compile(
+            r'(\{\s*key\s*=\s*"' + _re_pres.escape(k) + r'"[^}]*?values\s*=\s*\[)([^\]]*?)(\])',
+            _re_pres.DOTALL,
+        )
+        m = pattern.search(new_text)
+        if m:
+            existing_block = m.group(2).rstrip().rstrip(",")
+            extra = ", ".join(f'"{v}"' for v in missing)
+            new_block = f"{existing_block}, {extra}"
+            new_text = new_text[:m.start(2)] + new_block + new_text[m.end(2):]
+            added += len(missing)
+            for v in missing:
+                print(f"  [PRESERVE] Kept existing tag_policy value '{v}' for key '{k}'")
+
+    if added:
+        new_abac.write_text(new_text)
+    return added
+
+
+def _cleanup_orphan_tag_policies_before_apply() -> None:
+    """Delete ALL tag policies with the current suffix from the workspace.
+
+    When `make apply` retries, import_existing.sh may import an orphan tag policy
+    from a previous attempt (with a different UUID). Terraform then sees a state
+    mismatch and destroy-and-recreates, producing DUPLICATE tag policies with the
+    same key. The FGAC engine can't resolve duplicates → "Unknown tag policy key".
+
+    Deleting all suffixed tag policies before apply ensures a clean slate.
+    Terraform then creates them fresh with no duplicates.
+    """
+    if not _TEST_SUFFIX:
+        return
+    auth_file = ENVS_DIR / "dev" / "auth.auto.tfvars"
+    if not auth_file.exists():
+        return
+    try:
+        _ensure_packages()
+        import hcl2 as _hcl2_ct
+        with open(auth_file) as f:
+            cfg = _hcl2_ct.load(f)
+        _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+        host = _s(cfg.get("databricks_workspace_host", ""))
+        cid = _s(cfg.get("databricks_client_id", ""))
+        csec = _s(cfg.get("databricks_client_secret", ""))
+        if not host:
+            return
+        from databricks.sdk import WorkspaceClient as _WC_ct
+        w = _WC_ct(host=host, client_id=cid, client_secret=csec)
+        deleted = 0
+        for tp in list(w.tag_policies.list_tag_policies()):
+            key = getattr(tp, "tag_key", "") or ""
+            if key.endswith(f"_{_TEST_SUFFIX}"):
+                try:
+                    w.tag_policies.delete_tag_policy(tag_key=key)
+                    deleted += 1
+                except Exception:
+                    pass
+        if deleted:
+            print(f"  [PRE-APPLY] Deleted {deleted} orphan tag policy/ies with suffix '_{_TEST_SUFFIX}'")
+        # Also clear the account Terraform state for tag policies so Terraform
+        # creates fresh instead of trying to refresh stale IDs.
+        account_state = ENVS_DIR / "account" / "terraform.tfstate"
+        if account_state.exists():
+            import json as _json_ct
+            try:
+                state = _json_ct.loads(account_state.read_text())
+                resources = state.get("resources", [])
+                cleaned = [r for r in resources if r.get("type") != "databricks_tag_policy"]
+                if len(cleaned) < len(resources):
+                    state["resources"] = cleaned
+                    state["serial"] = state.get("serial", 0) + 1
+                    account_state.write_text(_json_ct.dumps(state, indent=2))
+                    print(f"  [PRE-APPLY] Cleared {len(resources) - len(cleaned)} tag_policy entries from account state")
+            except Exception:
+                pass
+        _clear_apply_fingerprints(ENVS_DIR / "account")
+        print("  [PRE-APPLY] Cleared account apply fingerprints so tag policies are recreated")
+    except Exception as exc:
+        print(f"  {_yellow('WARN')} pre-apply tag policy cleanup: {exc}")
 
 
 def _clean_env_artifacts(env: str) -> None:
@@ -620,6 +832,19 @@ def _clean_account_artifacts() -> None:
         shutil.rmtree(tf_dir)
 
 
+def _reset_phase_artifacts(*envs: str) -> None:
+    """Remove local split/generated artifacts after an intra-scenario destroy.
+
+    Some multi-phase scenarios intentionally destroy account/workspace resources
+    between phases to free quota, then regenerate with different overlays. If we
+    keep the previous phase's split files around, the next phase can preserve or
+    merge stale tag-policy values back into the newly generated config.
+    """
+    for env in envs:
+        _clean_env_artifacts(env)
+    _clean_account_artifacts()
+
+
 # ---------------------------------------------------------------------------
 # Destroy helpers (best-effort — skip if no state)
 # ---------------------------------------------------------------------------
@@ -639,6 +864,19 @@ def _clear_apply_fingerprints(*env_dirs: Path) -> None:
                 sha_file.unlink()
             except OSError:
                 pass
+
+
+def _force_account_reapply(reason: str) -> None:
+    """Force the shared account layer to re-run on the next apply.
+
+    Some multi-phase scenarios reuse the shared account env across dev/prod or
+    across multiple workspace envs. Clearing the fingerprint ensures the next
+    `make apply` re-executes the account layer instead of skipping it as
+    "inputs unchanged", which gives sync-tags another chance to converge live
+    tag-policy values before downstream verification.
+    """
+    _clear_apply_fingerprints(ENVS_DIR / "account")
+    print(f"  [PRE-APPLY] Cleared account apply fingerprints before {reason}")
 
 
 def _try_destroy(env: str) -> None:
@@ -1403,47 +1641,66 @@ def _preamble_cleanup(*envs: str, fresh_env: bool = False) -> None:
     """
     _step("Pre-scenario cleanup (destroying any leftover resources from prior run)")
 
-    # In parallel mode (per-scenario workspace), each scenario has a fresh metastore
-    # with no stale resources. Skip all API-level cleanup (which could interfere with
-    # other concurrent scenarios) and only clean local artifacts.
+    def _has_local_state(env: str) -> bool:
+        env_dir = ENVS_DIR / env
+        candidates = [
+            env_dir / "terraform.tfstate",
+            env_dir / "terraform.tfstate.backup",
+            env_dir / ".terraform",
+            env_dir / "data_access" / "terraform.tfstate",
+            env_dir / "data_access" / "terraform.tfstate.backup",
+            env_dir / "data_access" / ".terraform",
+            env_dir / ".workspace.apply.sha",
+            env_dir / "data_access" / ".workspace.apply.sha",
+            env_dir / "generated",
+        ]
+        return any(path.exists() for path in candidates)
+
+    # In parallel mode (per-scenario workspace), the first attempt starts with a fresh
+    # metastore and can skip expensive API cleanup. But when a scenario is retried in the
+    # same workspace after a partial apply, stale data_access/workspace resources must be
+    # destroyed or the next attempt will hit "already exists" assignment/policy errors.
     if _TEST_SUFFIX and fresh_env:
-        print("  Parallel mode — fresh workspace, cleaning only own-suffix account resources.")
-        # Clean suffixed tag policies from previous runs via workspace API.
-        # Each scenario has its own workspace, so this is safe in parallel.
-        for env in envs:
-            auth_file = ENVS_DIR / env / "auth.auto.tfvars"
-            if not auth_file.exists():
-                auth_file = ENVS_DIR / "dev" / "auth.auto.tfvars"
-            if auth_file.exists():
-                try:
-                    import hcl2 as _hcl2_pc
-                    import re as _re_pc
-                    _suffix_re = _re_pc.compile(r"^[a-z_]+_[a-f0-9]{4,}$")
-                    with open(auth_file) as f:
-                        _cfg = _hcl2_pc.load(f)
-                    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
-                    _host = _s(_cfg.get("databricks_workspace_host", ""))
-                    _cid = _s(_cfg.get("databricks_client_id", ""))
-                    _csec = _s(_cfg.get("databricks_client_secret", ""))
-                    if _host:
-                        from databricks.sdk import WorkspaceClient as _WC_pc
-                        _w = _WC_pc(host=_host, client_id=_cid, client_secret=_csec)
-                        _deleted = 0
-                        for tp in list(_w.tag_policies.list_tag_policies()):
-                            key = getattr(tp, "tag_key", "") or ""
-                            if _suffix_re.match(key):
-                                try:
-                                    _w.tag_policies.delete_tag_policy(tag_key=key)
-                                    _deleted += 1
-                                except Exception:
-                                    pass
-                        if _deleted:
-                            print(f"  Deleted {_deleted} orphan suffixed tag policy/ies")
-                except Exception as _exc:
-                    print(f"  {_yellow('WARN')} tag policy cleanup: {_exc}")
-            _clean_env_artifacts(env)
-        _clean_account_artifacts()
-        return
+        has_stale_state = any(_has_local_state(env) for env in (*envs, "account"))
+        if not has_stale_state:
+            print("  Parallel mode — fresh workspace, cleaning only own-suffix account resources.")
+            # Clean suffixed tag policies from previous runs via workspace API.
+            # Each scenario has its own workspace, so this is safe in parallel.
+            for env in envs:
+                auth_file = ENVS_DIR / env / "auth.auto.tfvars"
+                if not auth_file.exists():
+                    auth_file = ENVS_DIR / "dev" / "auth.auto.tfvars"
+                if auth_file.exists():
+                    try:
+                        import hcl2 as _hcl2_pc
+                        import re as _re_pc
+                        _suffix_re = _re_pc.compile(r"^[a-z_]+_[a-f0-9]{4,}$")
+                        with open(auth_file) as f:
+                            _cfg = _hcl2_pc.load(f)
+                        _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+                        _host = _s(_cfg.get("databricks_workspace_host", ""))
+                        _cid = _s(_cfg.get("databricks_client_id", ""))
+                        _csec = _s(_cfg.get("databricks_client_secret", ""))
+                        if _host:
+                            from databricks.sdk import WorkspaceClient as _WC_pc
+                            _w = _WC_pc(host=_host, client_id=_cid, client_secret=_csec)
+                            _deleted = 0
+                            for tp in list(_w.tag_policies.list_tag_policies()):
+                                key = getattr(tp, "tag_key", "") or ""
+                                if _suffix_re.match(key):
+                                    try:
+                                        _w.tag_policies.delete_tag_policy(tag_key=key)
+                                        _deleted += 1
+                                    except Exception:
+                                        pass
+                            if _deleted:
+                                print(f"  Deleted {_deleted} orphan suffixed tag policy/ies")
+                    except Exception as _exc:
+                        print(f"  {_yellow('WARN')} tag policy cleanup: {_exc}")
+                _clean_env_artifacts(env)
+            _clean_account_artifacts()
+            return
+        print("  Parallel mode retry detected — stale state exists, doing full cleanup.")
 
     # On a fresh provisioned environment the metastore starts clean, so there is
     # no stale FGAC quota to wait for.  However, if a PREVIOUS scenario in the
@@ -1731,10 +1988,29 @@ def _verify_data(
 ) -> None:
     """Run setup_test_data.py --verify (and --verify-prod) as assertions.
 
-    Retries once after 30s if the first attempt fails — handles Delta table
-    eventual consistency where CREATE TABLE succeeds but the table isn't
-    queryable immediately (especially under concurrent S3 load).
+    Retries up to 3 times with progressive waits if verification fails —
+    handles Delta table eventual consistency where CREATE TABLE succeeds
+    but the table metadata isn't fully propagated in Unity Catalog yet.
     """
+    def _verify_envs() -> list[str]:
+        envs: list[str] = []
+        if dev:
+            envs.append("dev")
+        if prod:
+            envs.append("prod")
+        return envs
+
+    def _converge_tag_policies_before_verify(env_name: str) -> None:
+        refs_tfvars = ENVS_DIR / env_name / "data_access" / "abac.auto.tfvars"
+        if not refs_tfvars.exists():
+            return
+        print(
+            "  Re-syncing account tag policies before verify"
+            f" ({env_name}, refs={refs_tfvars})..."
+        )
+        _make("sync-tags")
+        _make("wait-tag-policies", f"REQUIRED_VALUES_TFVARS={refs_tfvars}")
+
     flags: list[str] = []
     if dev:
         flags.append("--verify")
@@ -1742,14 +2018,16 @@ def _verify_data(
         flags.append("--verify-prod")
     if not flags:
         return
-    for _v_attempt in range(3):
+    for _v_attempt in range(4):
         try:
+            for env_name in _verify_envs():
+                _converge_tag_policies_before_verify(env_name)
             _setup_data(auth_file, *flags, warehouse_id=warehouse_id)
             break
         except RuntimeError:
-            if _v_attempt < 2:
-                _wait = 30 * (_v_attempt + 1)
-                print(f"  Verify failed — retrying after {_wait}s (attempt {_v_attempt + 1}/3, Delta propagation)...")
+            if _v_attempt < 3:
+                _wait = 60 * (_v_attempt + 1)
+                print(f"  Verify failed — retrying after {_wait}s (attempt {_v_attempt + 1}/4, tag policy propagation)...")
                 time.sleep(_wait)
             else:
                 raise
@@ -1778,7 +2056,7 @@ def scenario_quickstart(
     _preamble_cleanup(env, fresh_env=fresh_env)
 
     _step("Creating dev_fin test catalog")
-    _setup_data(auth_file, warehouse_id=warehouse_id)   # dev_fin + dev_clinical (idempotent)
+    warehouse_id = _setup_data(auth_file, warehouse_id=warehouse_id) or warehouse_id   # dev_fin + dev_clinical (idempotent)
 
     _step("Preparing env")
     _make(f"setup", f"ENV={env}")
@@ -1786,7 +2064,7 @@ def scenario_quickstart(
 
     # ── generate + apply ─────────────────────────────────────────────────────
     _step("Generating ABAC config")
-    _make(f"generate", f"ENV={env}", retries=2)
+    _make(f"generate", f"ENV={env}", retries=3)
 
     _step("Asserting generated output")
     gen_dir = ENVS_DIR / env / "generated"
@@ -1839,7 +2117,7 @@ def scenario_multi_catalog(
     _preamble_cleanup(env, fresh_env=fresh_env)
 
     _step("Creating dev_fin and dev_clinical test catalogs")
-    _setup_data(auth_file, warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, warehouse_id=warehouse_id) or warehouse_id
 
     _step("Preparing env")
     _make(f"setup", f"ENV={env}")
@@ -1847,7 +2125,7 @@ def scenario_multi_catalog(
 
     # ── generate + apply ─────────────────────────────────────────────────────
     _step("Generating ABAC config (tables from both catalogs)")
-    _make(f"generate", f"ENV={env}", retries=2)
+    _make(f"generate", f"ENV={env}", retries=3)
 
     _step("Asserting generated output covers both catalogs")
     gen_dir = ENVS_DIR / env / "generated"
@@ -1902,7 +2180,7 @@ def scenario_multi_space(
     _preamble_cleanup(env, fresh_env=fresh_env)
 
     _step("Creating dev_fin and dev_clinical test catalogs")
-    _setup_data(auth_file, warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, warehouse_id=warehouse_id) or warehouse_id
 
     _step("Preparing env")
     _make(f"setup", f"ENV={env}")
@@ -1910,7 +2188,7 @@ def scenario_multi_space(
 
     # ── generate + apply ─────────────────────────────────────────────────────
     _step("Generating ABAC config (both spaces)")
-    _make(f"generate", f"ENV={env}", retries=2)
+    _make(f"generate", f"ENV={env}", retries=3)
 
     _step("Asserting generated output contains both spaces")
     gen_dir = ENVS_DIR / env / "generated"
@@ -2008,7 +2286,7 @@ def scenario_per_space(
     _preamble_cleanup(env, fresh_env=fresh_env)
 
     _step("Creating both test catalogs")
-    _setup_data(auth_file, warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, warehouse_id=warehouse_id) or warehouse_id
 
     _step("Preparing env with Finance Analytics only")
     _make(f"setup", f"ENV={env}")
@@ -2016,7 +2294,7 @@ def scenario_per_space(
 
     # ── Phase 1: deploy Finance only ─────────────────────────────────────────
     _step("Phase 1 — Full generate for Finance Analytics")
-    _make(f"generate", f"ENV={env}", retries=2)
+    _make(f"generate", f"ENV={env}", retries=3)
 
     gen_dir = ENVS_DIR / env / "generated"
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (phase 1)")
@@ -2046,7 +2324,7 @@ def scenario_per_space(
     _write_env_tfvars(env, SPACES_MULTI, warehouse_id)
 
     _step("Phase 2 — Per-space generate for Clinical Analytics only")
-    _make(f"generate", f"ENV={env}", f'SPACE=Clinical Analytics', retries=2)
+    _make(f"generate", f"ENV={env}", f'SPACE=Clinical Analytics', retries=3)
 
     _step("Asserting per-space isolation")
     assembled = gen_dir / "abac.auto.tfvars"
@@ -2110,7 +2388,7 @@ def scenario_promote(
     _preamble_cleanup(dev_env, prod_env, fresh_env=fresh_env)
 
     _step("Creating dev + prod test catalogs")
-    _setup_data(auth_file, "--prod", warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, "--prod", warehouse_id=warehouse_id) or warehouse_id
 
     for env in (dev_env, prod_env):
         _step(f"Preparing {env} env")
@@ -2120,7 +2398,7 @@ def scenario_promote(
 
     # ── dev generate + apply ─────────────────────────────────────────────────
     _step("Generating dev ABAC config")
-    _make(f"generate", f"ENV={dev_env}", retries=2)
+    _make(f"generate", f"ENV={dev_env}", retries=3)
 
     gen_dir = ENVS_DIR / dev_env / "generated"
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "dev abac.auto.tfvars generated")
@@ -2171,7 +2449,11 @@ def scenario_promote(
     # Copy auth to prod (promote doesn't touch auth)
     _copy_auth(dev_env, prod_env)
 
+    # Ensure prod reuses the same warehouse (prevent "already exists" error)
+    _patch_warehouse_id_in_env_tfvars(prod_env, auth_file)
+
     _step("Applying prod")
+    _force_account_reapply("promote prod apply")
     _make(f"apply", f"ENV={prod_env}", retries=3, retry_delay_seconds=120)
 
     _step("Verifying prod data + ABAC")
@@ -2213,7 +2495,7 @@ def scenario_multi_env(
     _preamble_cleanup(dev_env, bu2_env, fresh_env=fresh_env)
 
     _step("Creating both test catalogs")
-    _setup_data(auth_file, warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, warehouse_id=warehouse_id) or warehouse_id
 
     for env in (dev_env, bu2_env):
         _step(f"Preparing {env} env")
@@ -2226,7 +2508,7 @@ def scenario_multi_env(
 
     # ── dev: generate + apply ─────────────────────────────────────────────────
     _step("dev — Generating Finance Analytics ABAC config")
-    _make(f"generate", f"ENV={dev_env}", retries=2)
+    _make(f"generate", f"ENV={dev_env}", retries=3)
 
     dev_gen = ENVS_DIR / dev_env / "generated"
     _assert_contains(dev_gen / "abac.auto.tfvars", "Finance Analytics",
@@ -2258,7 +2540,7 @@ def scenario_multi_env(
 
     # ── bu2: generate + apply ─────────────────────────────────────────────────
     _step("bu2 — Generating Clinical Analytics ABAC config independently")
-    _make(f"generate", f"ENV={bu2_env}", retries=2)
+    _make(f"generate", f"ENV={bu2_env}", retries=3)
 
     bu2_gen = ENVS_DIR / bu2_env / "generated"
     _assert_contains(bu2_gen / "abac.auto.tfvars", "Clinical Analytics",
@@ -2267,6 +2549,7 @@ def scenario_multi_env(
                          "Finance Analytics absent from bu2 generated config")
 
     _step("bu2 — Applying Clinical Analytics")
+    _force_account_reapply("bu2 apply")
     _make(f"apply", f"ENV={bu2_env}", retries=3, retry_delay_seconds=120)
     _assert_genie_space_id_file(bu2_env, "Clinical Analytics")
 
@@ -2343,15 +2626,10 @@ def _get_or_find_warehouse(auth_file: Path, warehouse_id: str) -> str:
     if warehouse_id:
         return warehouse_id
 
-    print("  No warehouse-id provided; auto-selecting a SQL warehouse...")
+    print("  No warehouse-id provided; auto-selecting a deterministic SQL warehouse...")
     warehouses = list(w.warehouses.list())
-    for wh in warehouses:
-        state = str(wh.state)
-        if "RUNNING" in state or "STARTING" in state:
-            print(f"    Using warehouse: {wh.name} ({wh.id})")
-            return wh.id
-    if warehouses:
-        wh = warehouses[0]
+    wh = select_warehouse(warehouses)
+    if wh:
         print(f"    Using warehouse: {wh.name} ({wh.id})")
         return wh.id
     raise RuntimeError("No SQL warehouses found in the workspace.")
@@ -2641,7 +2919,7 @@ def scenario_attach_and_promote(
     _preamble_cleanup(env, prod_env, fresh_env=fresh_env)
 
     _step("Phase 1 — Setting up dev_fin and prod_fin test catalogs")
-    _setup_data(auth_file, "--prod", warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, "--prod", warehouse_id=warehouse_id) or warehouse_id
 
     resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
 
@@ -2688,7 +2966,7 @@ genie_spaces = [
     _write_env_tfvars(env, attach_with_tables_hcl, resolved_wh)
 
     _step("Phase 2 — Running make generate (attach mode with explicit uc_tables)")
-    _make(f"generate", f"ENV={env}", retries=2)
+    _make(f"generate", f"ENV={env}", retries=3)
 
     _step("Asserting generated config references the dev_fin catalog")
     gen_dir = ENVS_DIR / env / "generated"
@@ -2740,6 +3018,7 @@ genie_spaces = [
     _copy_auth(env, prod_env)
 
     _step("Phase 4 — Applying prod governance")
+    _force_account_reapply("attach-promote prod apply")
     _make(f"apply", f"ENV={prod_env}", retries=3, retry_delay_seconds=120)
 
     _step("Verifying prod ABAC governance")
@@ -2808,7 +3087,7 @@ def scenario_self_service_genie(
     _preamble_cleanup(gov_env, bu_env, bu_clin_env, bu_prod_env, fresh_env=fresh_env)
 
     _step("Phase 1 — Setting up dev_fin + dev_clinical + prod_fin test catalogs")
-    _setup_data(auth_file, "--prod", warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, "--prod", warehouse_id=warehouse_id) or warehouse_id
 
     resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
     _make("setup", f"ENV={gov_env}")
@@ -2829,7 +3108,7 @@ uc_tables = [
     _copy_auth("dev", gov_env)
 
     _step("Phase 1 — Generating ABAC config (governance MODE)")
-    _make("generate", f"ENV={gov_env}", "MODE=governance", retries=2)
+    _make("generate", f"ENV={gov_env}", "MODE=governance", retries=3)
 
     _step("Asserting governance mode output: ABAC sections present, genie_space_configs absent")
     gov_gen = gov_env_dir / "generated" / "abac.auto.tfvars"
@@ -2873,7 +3152,7 @@ uc_tables = [
     _copy_auth("dev", bu_env)
 
     _step("Phase 2 — Generating Genie config (genie MODE)")
-    _make("generate", f"ENV={bu_env}", "MODE=genie", retries=2)
+    _make("generate", f"ENV={bu_env}", "MODE=genie", retries=3)
 
     _step("Asserting genie mode output: genie_space_configs present, ABAC sections absent")
     bu_gen = ENVS_DIR / bu_env / "generated" / "abac.auto.tfvars"
@@ -2924,7 +3203,7 @@ uc_tables = [
     _copy_auth("dev", bu_clin_env)
 
     _step("Phase 3 — Generating Genie config for second BU (genie MODE)")
-    _make("generate", f"ENV={bu_clin_env}", "MODE=genie", retries=2)
+    _make("generate", f"ENV={bu_clin_env}", "MODE=genie", retries=3)
 
     bu_clin_gen = ENVS_DIR / bu_clin_env / "generated" / "abac.auto.tfvars"
     _assert_file_exists(bu_clin_gen, f"{bu_clin_env}/generated/abac.auto.tfvars created")
@@ -3038,8 +3317,8 @@ def scenario_abac_only(
       generated, no .genie_space_id_* file, data_access/terraform.tfstate exists.
 
     Phase 2 — §2 → §4 upgrade path:
-      Add Finance Analytics to genie_spaces and run `make generate SPACE="Finance Analytics"`.
-      Then `make apply`. Assert Genie Space created, existing governance preserved
+      Add Finance Analytics to genie_spaces and run `make generate MODE=genie`.
+      Then `make apply-genie`. Assert Genie Space created, existing governance preserved
       (data_access/terraform.tfstate still exists, column tags and masks still applied).
 
     Tests: playbook.md §2 "ABAC governance only" and the §2 → §4 upgrade path.
@@ -3050,7 +3329,7 @@ def scenario_abac_only(
     _preamble_cleanup(env, fresh_env=fresh_env)
 
     _step("Phase 1 — Setting up dev_fin test catalog")
-    _setup_data(auth_file, warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, warehouse_id=warehouse_id) or warehouse_id
 
     resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
 
@@ -3062,7 +3341,7 @@ def scenario_abac_only(
     (env_dir / "env.auto.tfvars").write_text(TABLES_FINANCE_ONLY_HCL + wh_line + "\n")
 
     _step("Phase 1 — Generating ABAC config (plain make generate, no genie_spaces)")
-    _make("generate", f"ENV={env}", retries=2)
+    _make("generate", f"ENV={env}", retries=3)
 
     gen_dir = env_dir / "generated"
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated")
@@ -3109,14 +3388,14 @@ def scenario_abac_only(
     _step("Phase 2 — Adding Finance Analytics to env.auto.tfvars (ABAC-only → Genie upgrade)")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
 
-    _step("Phase 2 — Per-space generate for Finance Analytics")
-    _make("generate", f"ENV={env}", "SPACE=Finance Analytics", retries=2)
+    _step("Phase 2 — Genie-only generate for Finance Analytics")
+    _make("generate", f"ENV={env}", "MODE=genie", retries=3)
 
     _assert_contains(gen_dir / "abac.auto.tfvars", "Finance Analytics",
                      "Finance Analytics genie_space_configs present after upgrade")
 
-    _step("Phase 2 — Applying (Genie Space created on top of existing governance)")
-    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+    _step("Phase 2 — Applying workspace layer only (Genie on top of existing governance)")
+    _make("apply-genie", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     _step("Asserting Phase 2: Genie Space created, governance preserved")
     _assert_genie_space_id_file(env, "Finance Analytics")
@@ -3167,7 +3446,7 @@ def scenario_multi_space_import(
     _preamble_cleanup(env, fresh_env=fresh_env)
 
     _step("Setting up dev_fin and dev_clinical test catalogs")
-    _setup_data(auth_file, warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, warehouse_id=warehouse_id) or warehouse_id
 
     resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
 
@@ -3218,7 +3497,7 @@ genie_spaces = [
     _write_env_tfvars(env, two_space_import_hcl, resolved_wh)
 
     _step("Running make generate — importing both spaces in one call")
-    _make("generate", f"ENV={env}", retries=2)
+    _make("generate", f"ENV={env}", retries=3)
 
     gen_dir = ENVS_DIR / env / "generated"
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated")
@@ -3281,14 +3560,14 @@ def scenario_schema_drift(
     _preamble_cleanup(env, fresh_env=fresh_env)
 
     _step("Creating test catalogs")
-    _setup_data(auth_file, warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, warehouse_id=warehouse_id) or warehouse_id
 
     _step("Preparing env")
     _make("setup", f"ENV={env}")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, warehouse_id)
 
     _step("Generating ABAC config (baseline)")
-    _make("generate", f"ENV={env}", retries=2)
+    _make("generate", f"ENV={env}", retries=3)
 
     _step("Applying all layers (baseline)")
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
@@ -3325,7 +3604,7 @@ def scenario_schema_drift(
     print(f"  {_green('PASS')}  Forward drift detected")
 
     _step("Running generate-delta to classify new column")
-    _make("generate-delta", f"ENV={env}", retries=2)
+    _make("generate-delta", f"ENV={env}", retries=3)
 
     da_abac = ENVS_DIR / env / "generated" / "abac.auto.tfvars"
     _assert_contains(da_abac, "emergency_ssn", "emergency_ssn added to config")
@@ -3346,26 +3625,9 @@ def scenario_schema_drift(
     # ── Phase C: Reverse drift (DROP COLUMN) ─────────────────────────────
     _step("Phase C: Unset tags + enable column mapping + drop column to test reverse drift")
     # Must remove all governed tags before Databricks allows DROP COLUMN.
-    # Query the actual tags on this column and unset them all.
-    _sdk_run_sql(
-        auth_file,
-        f"SELECT tag_name FROM system.information_schema.column_tags "
-        f"WHERE catalog_name = '{DEV_FIN_CAT}' AND schema_name = 'finance' "
-        f"AND table_name = 'customers' AND column_name = 'emergency_ssn'",
-        warehouse_id=warehouse_id,
-    )
-    # Unset tags — try each governed key; harmless if not present
-    for key in ["pii_level", "phi_level", "pci_level", "financial_sensitivity",
-                "compliance_scope", "aml_scope"]:
-        try:
-            _sdk_run_sql(
-                auth_file,
-                f"ALTER TABLE {DEV_FIN_CAT}.finance.customers "
-                f"ALTER COLUMN emergency_ssn UNSET TAGS ('{key}')",
-                warehouse_id=warehouse_id,
-            )
-        except Exception:
-            pass  # tag key not present — skip
+    # Query the actual tag names from information_schema (handles suffixed keys in parallel mode).
+    _unset_column_tags(auth_file, DEV_FIN_CAT, "finance", "customers", "emergency_ssn",
+                       warehouse_id=warehouse_id)
     _sdk_run_sql(
         auth_file,
         f"ALTER TABLE {DEV_FIN_CAT}.finance.customers SET TBLPROPERTIES ('delta.columnMapping.mode' = 'name')",
@@ -3402,17 +3664,8 @@ def scenario_schema_drift(
 
     # ── Phase D: Rename (both directions) ────────────────────────────────
     _step("Phase D: Unset tags + rename column to test combined drift")
-    for key in ["pii_level", "phi_level", "pci_level", "financial_sensitivity",
-                "compliance_scope", "aml_scope"]:
-        try:
-            _sdk_run_sql(
-                auth_file,
-                f"ALTER TABLE {DEV_FIN_CAT}.finance.customers "
-                f"ALTER COLUMN email UNSET TAGS ('{key}')",
-                warehouse_id=warehouse_id,
-            )
-        except Exception:
-            pass
+    _unset_column_tags(auth_file, DEV_FIN_CAT, "finance", "customers", "email",
+                       warehouse_id=warehouse_id)
     _sdk_run_sql(
         auth_file,
         f"ALTER TABLE {DEV_FIN_CAT}.finance.customers RENAME COLUMN email TO contact_email",
@@ -3426,7 +3679,7 @@ def scenario_schema_drift(
     print(f"  {_green('PASS')}  Rename drift detected")
 
     _step("Running generate-delta to handle rename")
-    _make("generate-delta", f"ENV={env}", retries=2)
+    _make("generate-delta", f"ENV={env}", retries=3)
 
     text = da_abac.read_text()
     if "contact_email" not in text:
@@ -3454,6 +3707,74 @@ def scenario_schema_drift(
         _try_destroy_account()
 
     print(f"\n  {_green(_bold('PASSED'))}  schema-drift")
+
+
+def _unset_column_tags(
+    auth_file: Path,
+    catalog: str,
+    schema: str,
+    table: str,
+    column: str,
+    warehouse_id: str = "",
+) -> None:
+    """Query actual tag names from information_schema and UNSET them all.
+
+    This handles suffixed tag keys in parallel mode (e.g. pii_level_abc123)
+    by reading the real tag names rather than guessing base names.
+    """
+    import hcl2 as _hcl2
+    from databricks.sdk import WorkspaceClient as _WC
+    from databricks.sdk.service.sql import StatementState
+
+    def _s(v): return (v[0] if isinstance(v, list) else (v or "")).strip()
+
+    with open(auth_file) as f:
+        auth = _hcl2.load(f)
+    host          = _s(auth.get("databricks_workspace_host", ""))
+    client_id     = _s(auth.get("databricks_client_id", ""))
+    client_secret = _s(auth.get("databricks_client_secret", ""))
+    w = _WC(host=host, client_id=client_id, client_secret=client_secret)
+
+    wh = warehouse_id
+    if not wh:
+        for warehouse in w.warehouses.list():
+            if warehouse.id:
+                wh = warehouse.id
+                break
+
+    # Query actual tag names on this column
+    query_sql = (
+        f"SELECT tag_name FROM system.information_schema.column_tags "
+        f"WHERE catalog_name = '{catalog}' AND schema_name = '{schema}' "
+        f"AND table_name = '{table}' AND column_name = '{column}'"
+    )
+    r = w.statement_execution.execute_statement(
+        statement=query_sql, warehouse_id=wh, wait_timeout="50s",
+    )
+    while r.status and r.status.state in (StatementState.PENDING, StatementState.RUNNING):
+        import time as _time
+        _time.sleep(2)
+        r = w.statement_execution.get_statement(r.statement_id)
+
+    tag_names = []
+    if r.result and r.result.data_array:
+        tag_names = [row[0] for row in r.result.data_array if row and row[0]]
+
+    if not tag_names:
+        print(f"  No tags found on {catalog}.{schema}.{table}.{column}")
+        return
+
+    print(f"  Found {len(tag_names)} tag(s) on {column}: {', '.join(tag_names)}")
+    for tag in tag_names:
+        try:
+            _sdk_run_sql(
+                auth_file,
+                f"ALTER TABLE {catalog}.{schema}.{table} "
+                f"ALTER COLUMN {column} UNSET TAGS ('{tag}')",
+                warehouse_id=warehouse_id,
+            )
+        except Exception:
+            pass  # tag may have been removed by another process
 
 
 def _sdk_run_sql(auth_file: Path, sql: str, warehouse_id: str = "") -> None:
@@ -3549,7 +3870,7 @@ def scenario_genie_only(
         auth_file.write_text(_auth_content)
 
     _step("Phase 1 — Creating dev_fin test catalog")
-    _setup_data(auth_file, warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, warehouse_id=warehouse_id) or warehouse_id
 
     resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
     _make("setup", f"ENV={env}")
@@ -3597,7 +3918,7 @@ genie_only = true
 
     # ── Phase 3: Generate + Apply (with reduced-privilege SP) ───────────────
     _step("Phase 3 — Generating Genie config (MODE=genie)")
-    _make("generate", f"ENV={env}", "MODE=genie", retries=2)
+    _make("generate", f"ENV={env}", "MODE=genie", retries=3)
 
     _step("Asserting genie mode output: genie_space_configs present, ABAC sections absent")
     bu_gen = env_dir / "generated" / "abac.auto.tfvars"
@@ -3723,7 +4044,7 @@ def scenario_genie_import_no_abac(
     _preamble_cleanup(src_env, env, prod_env, fresh_env=fresh_env)
 
     _step("Phase 1 — Creating dev_fin + prod_fin test catalogs")
-    _setup_data(auth_file, "--prod", warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, "--prod", warehouse_id=warehouse_id) or warehouse_id
 
     resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
 
@@ -3766,7 +4087,7 @@ genie_spaces = [
     _copy_auth("dev", env)
 
     _step("Phase 3 — Generating Genie config (MODE=genie, no ABAC)")
-    _make("generate", f"ENV={env}", "MODE=genie", retries=2)
+    _make("generate", f"ENV={env}", "MODE=genie", retries=3)
 
     gen_dir = env_dir / "generated"
     gen_abac = gen_dir / "abac.auto.tfvars"
@@ -3845,7 +4166,7 @@ genie_spaces = [
 {wh_line}
 """
         (prod_env_dir / "env.auto.tfvars").write_text(prod_hcl)
-        _make("generate", f"ENV={prod_env}", "MODE=genie", retries=2)
+        _make("generate", f"ENV={prod_env}", "MODE=genie", retries=3)
 
     _copy_auth("dev", prod_env)
 
@@ -3953,7 +4274,7 @@ def scenario_country_overlay(
 
     # ── Phase 1: Schema setup ────────────────────────────────────────────────
     _step("Phase 1 — Creating dev_fin test catalog")
-    _setup_data(auth_file, warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, warehouse_id=warehouse_id) or warehouse_id
 
     resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
 
@@ -4040,13 +4361,16 @@ def scenario_country_overlay(
     # ── Phase 2: ANZ full cycle ──────────────────────────────────────────────
     _step("Phase 2 — Generating with COUNTRY=ANZ")
     _clean_env_artifacts(env)
-    _make("generate", f"ENV={env}", "COUNTRY=ANZ", retries=2)
+    _make("generate", f"ENV={env}", "COUNTRY=ANZ", retries=3)
 
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (ANZ)")
     _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (ANZ)")
     _any_term_in_generated(ANZ_TERMS, "ANZ overlay: country-specific terms in output")
 
     _step("Phase 2 — Applying all layers (ANZ)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+    _step("Phase 2 — Re-applying after sync convergence (ANZ)")
+    _force_account_reapply("country-overlay ANZ convergence")
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     _step("Phase 2 — Verifying ABAC governance deployed (ANZ)")
@@ -4057,19 +4381,23 @@ def scenario_country_overlay(
     _step("Phase 2 — Destroying governance (free FGAC quota for next region)")
     _try_destroy(env)
     _try_destroy_account()
+    _reset_phase_artifacts(env)
 
     # ── Phase 3: IN full cycle ───────────────────────────────────────────────
     _step("Phase 3 — Generating with COUNTRY=IN")
     _clean_env_artifacts(env)
     _make("setup", f"ENV={env}")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
-    _make("generate", f"ENV={env}", "COUNTRY=IN", retries=2)
+    _make("generate", f"ENV={env}", "COUNTRY=IN", retries=3)
 
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (IN)")
     _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (IN)")
     _any_term_in_generated(IN_TERMS, "India overlay: country-specific terms in output")
 
     _step("Phase 3 — Applying all layers (IN)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+    _step("Phase 3 — Re-applying after sync convergence (IN)")
+    _force_account_reapply("country-overlay IN convergence")
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     _step("Phase 3 — Verifying ABAC governance deployed (IN)")
@@ -4079,19 +4407,23 @@ def scenario_country_overlay(
     _step("Phase 3 — Destroying governance (free FGAC quota for next region)")
     _try_destroy(env)
     _try_destroy_account()
+    _reset_phase_artifacts(env)
 
     # ── Phase 4: SEA full cycle ──────────────────────────────────────────────
     _step("Phase 4 — Generating with COUNTRY=SEA")
     _clean_env_artifacts(env)
     _make("setup", f"ENV={env}")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
-    _make("generate", f"ENV={env}", "COUNTRY=SEA", retries=2)
+    _make("generate", f"ENV={env}", "COUNTRY=SEA", retries=3)
 
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (SEA)")
     _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (SEA)")
     _any_term_in_generated(SEA_TERMS, "SEA overlay: country-specific terms in output")
 
     _step("Phase 4 — Applying all layers (SEA)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+    _step("Phase 4 — Re-applying after sync convergence (SEA)")
+    _force_account_reapply("country-overlay SEA convergence")
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     _step("Phase 4 — Verifying ABAC governance deployed (SEA)")
@@ -4101,6 +4433,7 @@ def scenario_country_overlay(
     _step("Phase 4 — Destroying governance (free FGAC quota for next phase)")
     _try_destroy(env)
     _try_destroy_account()
+    _reset_phase_artifacts(env)
 
     # ── Phase 5: Multi-region generation + apply ─────────────────────────────
     _step("Phase 5 — Ensuring APJ columns exist + generating multi-region")
@@ -4108,7 +4441,7 @@ def scenario_country_overlay(
     _ensure_apj_columns()
     _make("setup", f"ENV={env}")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
-    _make("generate", f"ENV={env}", "COUNTRY=ANZ,IN,SEA", retries=2)
+    _make("generate", f"ENV={env}", "COUNTRY=ANZ,IN,SEA", retries=3)
 
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (multi)")
     _any_term_in_generated(ANZ_TERMS, "Multi-region: ANZ terms in output")
@@ -4123,7 +4456,7 @@ def scenario_country_overlay(
     _clean_env_artifacts(env)
     _make("setup", f"ENV={env}")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
-    _make("generate", f"ENV={env}", retries=2)
+    _make("generate", f"ENV={env}", retries=3)
 
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (baseline)")
     # NOTE: We do NOT assert absence of country-specific functions here.
@@ -4216,7 +4549,7 @@ def scenario_industry_overlay(
 
     # ── Phase 1: Schema setup ────────────────────────────────────────────────
     _step("Phase 1 — Creating dev_fin test catalog")
-    _setup_data(auth_file, warehouse_id=warehouse_id)
+    warehouse_id = _setup_data(auth_file, warehouse_id=warehouse_id) or warehouse_id
 
     resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
 
@@ -4288,13 +4621,16 @@ def scenario_industry_overlay(
     # ── Phase 2: Financial Services full cycle ────────────────────────────────
     _step("Phase 2 — Generating with INDUSTRY=financial_services")
     _clean_env_artifacts(env)
-    _make("generate", f"ENV={env}", "INDUSTRY=financial_services", retries=2)
+    _make("generate", f"ENV={env}", "INDUSTRY=financial_services", retries=3)
 
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (financial)")
     _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (financial)")
     _any_term_in_generated(FINANCIAL_TERMS, "Financial Services overlay: industry-specific terms")
 
     _step("Phase 2 — Applying all layers (financial_services)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+    _step("Phase 2 — Re-applying after sync convergence (financial_services)")
+    _force_account_reapply("industry-overlay financial convergence")
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     _step("Phase 2 — Verifying ABAC governance deployed (financial_services)")
@@ -4304,19 +4640,23 @@ def scenario_industry_overlay(
     _step("Phase 2 — Destroying governance (free FGAC quota)")
     _try_destroy(env)
     _try_destroy_account()
+    _reset_phase_artifacts(env)
 
     # ── Phase 3: Healthcare full cycle ────────────────────────────────────────
     _step("Phase 3 — Generating with INDUSTRY=healthcare")
     _clean_env_artifacts(env)
     _make("setup", f"ENV={env}")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
-    _make("generate", f"ENV={env}", "INDUSTRY=healthcare", retries=2)
+    _make("generate", f"ENV={env}", "INDUSTRY=healthcare", retries=3)
 
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (healthcare)")
     _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated (healthcare)")
     _any_term_in_generated(HEALTHCARE_TERMS, "Healthcare overlay: industry-specific terms")
 
     _step("Phase 3 — Applying all layers (healthcare)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+    _step("Phase 3 — Re-applying after sync convergence (healthcare)")
+    _force_account_reapply("industry-overlay healthcare convergence")
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     _step("Phase 3 — Verifying ABAC governance deployed (healthcare)")
@@ -4326,13 +4666,14 @@ def scenario_industry_overlay(
     _step("Phase 3 — Destroying governance (free FGAC quota)")
     _try_destroy(env)
     _try_destroy_account()
+    _reset_phase_artifacts(env)
 
     # ── Phase 4: Retail generation check ──────────────────────────────────────
     _step("Phase 4 — Generating with INDUSTRY=retail")
     _clean_env_artifacts(env)
     _make("setup", f"ENV={env}")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
-    _make("generate", f"ENV={env}", "INDUSTRY=retail", retries=2)
+    _make("generate", f"ENV={env}", "INDUSTRY=retail", retries=3)
 
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (retail)")
     _any_term_in_generated(RETAIL_TERMS, "Retail overlay: industry-specific terms")
@@ -4343,7 +4684,7 @@ def scenario_industry_overlay(
     _clean_env_artifacts(env)
     _make("setup", f"ENV={env}")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
-    _make("generate", f"ENV={env}", "INDUSTRY=financial_services,healthcare,retail", retries=2)
+    _make("generate", f"ENV={env}", "INDUSTRY=financial_services,healthcare,retail", retries=3)
 
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (multi-industry)")
     _any_term_in_generated(FINANCIAL_TERMS, "Multi-industry: financial terms")
@@ -4356,7 +4697,7 @@ def scenario_industry_overlay(
     _ensure_extra_columns()
     _make("setup", f"ENV={env}")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
-    _make("generate", f"ENV={env}", "COUNTRY=ANZ", "INDUSTRY=healthcare", retries=2)
+    _make("generate", f"ENV={env}", "COUNTRY=ANZ", "INDUSTRY=healthcare", retries=3)
 
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (ANZ+healthcare)")
     _any_term_in_generated(ANZ_TERMS, "Combined: ANZ country terms present")
@@ -4368,7 +4709,7 @@ def scenario_industry_overlay(
     _clean_env_artifacts(env)
     _make("setup", f"ENV={env}")
     _write_env_tfvars(env, SPACES_FINANCE_ONLY, resolved_wh)
-    _make("generate", f"ENV={env}", retries=2)
+    _make("generate", f"ENV={env}", retries=3)
 
     _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated (baseline)")
     print(f"  {_green('PASS')}  Baseline generation succeeded without INDUSTRY=")

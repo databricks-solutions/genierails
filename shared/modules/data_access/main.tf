@@ -30,9 +30,14 @@ locals {
     : databricks_sql_endpoint.warehouse[0].id
   )
 
-  tag_assignment_map = {
+  _grouped_tag_assignments = {
     for ta in var.tag_assignments :
-    "${ta.entity_type}|${ta.entity_name}|${ta.tag_key}|${ta.tag_value}" => ta
+    "${ta.entity_type}|${ta.entity_name}|${ta.tag_key}|${ta.tag_value}" => ta...
+  }
+
+  tag_assignment_map = {
+    for key, grouped in local._grouped_tag_assignments :
+    key => grouped[0]
   }
 
   fgac_policy_map = { for p in var.fgac_policies : p.name => p }

@@ -9,13 +9,8 @@ the Databricks REST API, so Terraform can use ignore_changes = [values] safely.
 Usage:
     python3 scripts/sync_tag_policies.py [path/to/abac.auto.tfvars]
 """
-import json
 import os
-import ssl
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
 WORK_DIR = Path.cwd()
@@ -48,7 +43,7 @@ def _load_auth():
         if isinstance(val, list):
             val = val[0] if val else ""
         val = (val or "").strip()
-        if val and not os.environ.get(env_key):
+        if val:
             os.environ[env_key] = val
 
     return cfg
@@ -80,6 +75,7 @@ def main():
 
     # Get auth token via SDK's config.authenticate()
     from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.tags import TagPolicy, Value
     host = _str(auth_cfg.get("databricks_workspace_host", ""))
     client_id = _str(auth_cfg.get("databricks_client_id", ""))
     client_secret = _str(auth_cfg.get("databricks_client_secret", ""))
@@ -97,27 +93,21 @@ def main():
         print("  [WARN] No workspace host found; skipping tag policy sync")
         return
 
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
-
-    # List existing tag policies via REST API
+    # List existing tag policies via SDK. The REST list path has returned 404
+    # in some workspaces even though the tag policy service is available.
     existing = {}
     try:
-        list_url = f"{base}/api/2.1/unity-catalog/tag-policies"
-        req = urllib.request.Request(list_url, headers=token)
-        with urllib.request.urlopen(req, timeout=30, context=ssl_ctx) as resp:
-            data = json.loads(resp.read())
-        for tp in data.get("tag_policies", []):
-            tag_key = tp.get("tag_key", "")
-            values = set(v.get("name", "") for v in (tp.get("values") or []))
+        for tp in w.tag_policies.list_tag_policies():
+            tag_key = getattr(tp, "tag_key", "") or ""
+            values = {
+                getattr(v, "name", "") or ""
+                for v in (getattr(tp, "values", None) or [])
+                if getattr(v, "name", "") or ""
+            }
             existing[tag_key] = values
     except Exception as list_err:
-        # The tag-policies API may return a transient InternalError.
-        # If listing fails we cannot determine which policies need syncing,
-        # so skip — terraform apply will still create/update missing ones.
-        print(f"  [WARN] Could not list tag policies ({list_err}); skipping")
-        return
+        print(f"  [ERROR] Could not list tag policies ({list_err})")
+        raise SystemExit(1)
 
     updated = 0
     for tp in desired_policies:
@@ -128,40 +118,31 @@ def main():
         if current_values is None:
             continue
 
-        if desired_values == current_values:
-            continue
-
         missing = desired_values - current_values
         removed = current_values - desired_values
-        all_values = sorted(desired_values | current_values)
-
-        # Update tag policy via REST API
-        body = json.dumps({
-            "tag_policy": {
-                "tag_key": key,
-                "values": [{"name": v} for v in all_values],
-            },
-            "update_mask": "values",
-        }).encode()
+        desired_list = sorted(desired_values)
 
         try:
-            update_url = f"{base}/api/2.1/unity-catalog/tag-policies/{urllib.parse.quote(key, safe='')}"
-            req = urllib.request.Request(
-                update_url,
-                data=body,
-                headers={**token, "Content-Type": "application/json"},
-                method="PATCH",
+            w.tag_policies.update_tag_policy(
+                tag_key=key,
+                tag_policy=TagPolicy(
+                    tag_key=key,
+                    values=[Value(name=v) for v in desired_list],
+                ),
+                update_mask="values",
             )
-            urllib.request.urlopen(req, timeout=30, context=ssl_ctx)
             changes = []
             if missing:
                 changes.append(f"added {sorted(missing)}")
             if removed:
                 changes.append(f"removed {sorted(removed)}")
+            if not changes:
+                changes.append("reasserted desired values")
             print(f"  [SYNC] {key}: {', '.join(changes)}")
             updated += 1
         except Exception as e:
             print(f"  [ERROR] {key}: {e}")
+            raise SystemExit(1)
 
     if updated:
         print(f"  Synced {updated} tag policy/ies")

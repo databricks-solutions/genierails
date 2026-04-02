@@ -104,10 +104,16 @@ ENVS_DIR    = CLOUD_ROOT / "envs"                       # user's real envs (neve
 # Support per-scenario parallel provisioning: _PARALLEL_STATE_FILE overrides the
 # default state file and test envs directory so each scenario gets its own workspace.
 _parallel_state = os.environ.get("_PARALLEL_STATE_FILE", "")
+_parallel_suite = os.environ.get("_PARALLEL_SUITE_ID", "").strip()
 if _parallel_state:
     STATE_FILE = Path(_parallel_state)
     _scenario_name = STATE_FILE.stem.split(".")[-1]
-    TEST_ENVS_DIR = CLOUD_ROOT / "envs" / "parallel_test" / _scenario_name
+    if _parallel_suite:
+        TEST_ENVS_DIR = (
+            CLOUD_ROOT / "envs" / "parallel_test" / _parallel_suite / _scenario_name
+        )
+    else:
+        TEST_ENVS_DIR = CLOUD_ROOT / "envs" / "parallel_test" / _scenario_name
 else:
     STATE_FILE = SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
     TEST_ENVS_DIR = CLOUD_ROOT / "envs" / "test"
@@ -1123,26 +1129,16 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     # FGAC policy creation (CREATE_FUNCTION, tag assignments) works.
     try:
         from databricks.sdk import WorkspaceClient as _WC_ma
+        from databricks.sdk.service.catalog import PermissionsChange, Privilege
         w_admin = _WC_ma(host=ws_host, client_id=client_id, client_secret=client_secret)
-        # Use the REST API directly — the SDK's grants.update doesn't support METASTORE securable type.
-        import urllib.request as _urq_ma, json as _json_ma, ssl as _ssl_ma
-        _ctx_ma = _ssl_ma.create_default_context()
-        _ctx_ma.check_hostname = False
-        _ctx_ma.verify_mode = _ssl_ma.CERT_NONE
-        _token = w_admin.config.authenticate()
-        _body = _json_ma.dumps({
-            "changes": [{
-                "principal": client_id,
-                "add": ["CREATE_CATALOG", "CREATE_EXTERNAL_LOCATION",
-                        "CREATE_FUNCTION", "CREATE_SCHEMA"]
-            }]
-        }).encode()
-        _req = _urq_ma.Request(
-            f"{ws_host.rstrip('/')}/api/2.1/unity-catalog/permissions/metastore/{ms_id}",
-            data=_body, method="PATCH",
-            headers={**_token, "Content-Type": "application/json"},
+        w_admin.grants.update(
+            securable_type="metastore",
+            full_name=ms_id,
+            changes=[PermissionsChange(
+                principal=client_id,
+                add=[Privilege.CREATE_CATALOG, Privilege.CREATE_EXTERNAL_LOCATION],
+            )],
         )
-        _urq_ma.urlopen(_req, context=_ctx_ma)
         _ok("Metastore privileges granted to SP via workspace API")
     except Exception as exc:
         _warn(f"Could not grant metastore privileges (SP may already have them as creator): {exc}")

@@ -31,12 +31,16 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 try:
     import hcl2
 except ImportError:
     print("ERROR: python-hcl2 is required. Install with:")
     print("  pip install python-hcl2")
     sys.exit(2)
+
+from tag_vocabulary import REGISTRY  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +350,38 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     # config (e.g. phi_level for a Clinical space).  Those keys must be added
     # to the assembled tag_policies so that validation passes and the account
     # layer creates the corresponding Databricks tag policies.
+    def _normalize_policy(policy: dict) -> dict | None:
+        key = policy.get("key", "")
+        if not key:
+            return None
+        canonical_key = REGISTRY.canonical_key(key)
+        values: list[str] = []
+        for raw_value in policy.get("values", []) or []:
+            canonical_value = REGISTRY.canonical_value(canonical_key, raw_value)
+            if REGISTRY.is_allowed_value(canonical_key, canonical_value) is False:
+                raise ValueError(
+                    f"Per-space tag_policy '{canonical_key}' contains unknown canonical value "
+                    f"'{canonical_value}'"
+                )
+            if canonical_value not in values:
+                values.append(canonical_value)
+        return {
+            **policy,
+            "key": canonical_key,
+            "values": values,
+        }
+
+    existing_tag_policies = [
+        normalized
+        for normalized in (_normalize_policy(tp) for tp in existing_tag_policies)
+        if normalized
+    ]
+    new_tag_policies = [
+        normalized
+        for normalized in (_normalize_policy(tp) for tp in new_tag_policies)
+        if normalized
+    ]
+
     existing_tp_keys = {tp.get("key", "") for tp in existing_tag_policies}
     added_tp = 0
     merged_tag_policies = list(existing_tag_policies)
@@ -376,17 +412,39 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
         print(f"    genie_space_configs: updated entry '{space_name}'")
 
     # ── Merge tag_assignments (dedup by entity_name + tag_key) ───────────
+    def _normalize_assignment(assignment: dict) -> dict:
+        canonical_key = REGISTRY.canonical_key(assignment.get("tag_key", ""))
+        canonical_value = REGISTRY.canonical_value(
+            canonical_key,
+            assignment.get("tag_value", ""),
+        )
+        return {
+            **assignment,
+            "tag_key": canonical_key,
+            "tag_value": canonical_value,
+        }
+
+    existing_tag_assignments = [_normalize_assignment(ta) for ta in existing_tag_assignments]
+    new_tag_assignments = [_normalize_assignment(ta) for ta in new_tag_assignments]
+
     existing_ta_keys = {
-        (ta.get("entity_name", ""), ta.get("tag_key", ""))
+        (ta.get("entity_type", ""), ta.get("entity_name", ""), ta.get("tag_key", "")): ta
         for ta in existing_tag_assignments
     }
     added_ta = 0
     merged_tag_assignments = list(existing_tag_assignments)
     for ta in new_tag_assignments:
-        key = (ta.get("entity_name", ""), ta.get("tag_key", ""))
+        key = (ta.get("entity_type", ""), ta.get("entity_name", ""), ta.get("tag_key", ""))
+        existing_assignment = existing_ta_keys.get(key)
+        if existing_assignment and existing_assignment.get("tag_value") != ta.get("tag_value"):
+            raise ValueError(
+                "Per-space merge conflict for "
+                f"{ta.get('entity_name', '')} / {ta.get('tag_key', '')}: "
+                f"'{existing_assignment.get('tag_value')}' vs '{ta.get('tag_value')}'"
+            )
         if key not in existing_ta_keys:
             merged_tag_assignments.append(ta)
-            existing_ta_keys.add(key)
+            existing_ta_keys[key] = ta
             added_ta += 1
     if added_ta:
         print(f"    tag_assignments: added {added_ta} new entry/entries")

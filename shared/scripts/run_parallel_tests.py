@@ -50,8 +50,8 @@ def _yellow(s): return f"\033[33m{s}\033[0m"
 def _bold(s): return f"\033[1m{s}\033[0m"
 
 
-def provision_for_scenario(scenario, env_file, cloud):
-    state_file = SCRIPT_DIR / f".test_env_state.{cloud}.{scenario}.json"
+def provision_for_scenario(scenario, env_file, cloud, suite_id, log_dir=None):
+    state_file = SCRIPT_DIR / f".test_env_state.{cloud}.{suite_id}.{scenario}.json"
     if state_file.exists():
         state_file.unlink()
 
@@ -59,6 +59,7 @@ def provision_for_scenario(scenario, env_file, cloud):
     env["CLOUD_PROVIDER"] = cloud
     env["CLOUD_ROOT"] = str(CLOUD_ROOT)
     env["_PARALLEL_STATE_FILE"] = str(state_file)
+    env["_PARALLEL_SUITE_ID"] = suite_id
     # Clear Databricks SDK env vars — same fix as run_scenario.
     # Without this, inherited DATABRICKS_HOST causes the provision script's
     # WorkspaceClient to create external locations on the wrong workspace.
@@ -74,6 +75,17 @@ def provision_for_scenario(scenario, env_file, cloud):
     )
     if result.returncode != 0 or not state_file.exists():
         print(f"  [{_ts()}] {_red(scenario)}: provisioning FAILED")
+        if log_dir:
+            log_file = Path(log_dir) / f"{scenario}.provision.log"
+            with open(log_file, "w") as f:
+                f.write(f"# Provision FAILED for {scenario} ({cloud})\n")
+                f.write(f"# Exit code: {result.returncode}\n")
+                f.write("=" * 72 + "\n\n")
+                f.write("=== STDOUT ===\n")
+                f.write(result.stdout or "(empty)\n")
+                f.write("\n=== STDERR ===\n")
+                f.write(result.stderr or "(empty)\n")
+            print(f"    | Full log: {log_file}")
         return {"scenario": scenario, "status": "provision_failed",
                 "error": (result.stdout or "")[-300:]}
 
@@ -87,11 +99,12 @@ def provision_for_scenario(scenario, env_file, cloud):
     }
 
 
-def run_scenario(scenario, auth_file, state_file, run_id, cloud):
+def run_scenario(scenario, auth_file, state_file, run_id, cloud, suite_id, log_dir=None):
     env = os.environ.copy()
     env["CLOUD_PROVIDER"] = cloud
     env["CLOUD_ROOT"] = str(CLOUD_ROOT)
     env["_PARALLEL_STATE_FILE"] = state_file
+    env["_PARALLEL_SUITE_ID"] = suite_id
     # Per-scenario suffix for account-level name isolation
     env["_TEST_SUFFIX"] = run_id[:6] if run_id else ""
     # Clear Databricks SDK env vars so each scenario reads from its own auth file.
@@ -101,15 +114,52 @@ def run_scenario(scenario, auth_file, state_file, run_id, cloud):
               "DATABRICKS_TOKEN", "DATABRICKS_ACCOUNT_ID"]:
         env.pop(k, None)
 
-    print(f"  [{_ts()}] {_bold(scenario)}: running (suffix={run_id[:6]})...")
+    suffix = run_id[:6] if run_id else "nosuffix"
+    if cloud == "azure":
+        # Azure workspace / SP auth can lag slightly behind provisioning.
+        # Give the freshly created workspace a short settle window before
+        # Terraform uses oauth-m2m against workspace APIs.
+        print(f"  [{_ts()}] {_yellow(scenario)}: waiting 30s for Azure auth propagation...")
+        time.sleep(30)
+    print(f"  [{_ts()}] {_bold(scenario)}: running (suffix={suffix})...")
     start = time.time()
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT_DIR / "run_integration_tests.py"),
-         "--scenario", scenario, "--auth-file", auth_file],
-        cwd=str(CLOUD_ROOT), env=env, capture_output=True, text=True, timeout=3600,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "run_integration_tests.py"),
+             "--scenario", scenario, "--auth-file", auth_file],
+            cwd=str(CLOUD_ROOT), env=env, capture_output=True, text=True, timeout=9000,
+        )
+    except subprocess.TimeoutExpired as te:
+        elapsed = time.time() - start
+        print(f"  [{_ts()}] {_red(scenario)}: TIMED OUT after {elapsed:.0f}s")
+        if log_dir:
+            log_file = Path(log_dir) / f"{scenario}.{suffix}.log"
+            with open(log_file, "w") as f:
+                f.write(f"# Scenario: {scenario}  TIMED OUT after {elapsed:.0f}s\n")
+                f.write("=" * 72 + "\n\n")
+                f.write("=== STDOUT (partial) ===\n")
+                stdout = te.stdout or b""
+                f.write(stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else stdout or "(empty)")
+                f.write("\n=== STDERR (partial) ===\n")
+                stderr = te.stderr or b""
+                f.write(stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else stderr or "(empty)")
+            print(f"    | Full log: {log_file}")
+        return {"scenario": scenario, "status": "failed", "elapsed": elapsed}
     elapsed = time.time() - start
     passed = result.returncode == 0
+
+    # Save full output to log file for post-mortem debugging
+    if log_dir:
+        log_file = Path(log_dir) / f"{scenario}.{suffix}.log"
+        with open(log_file, "w") as f:
+            f.write(f"# Scenario: {scenario}  Suffix: {suffix}  Cloud: {cloud}\n")
+            f.write(f"# Status: {'PASSED' if passed else 'FAILED'}  Elapsed: {elapsed:.0f}s\n")
+            f.write(f"# Exit code: {result.returncode}\n")
+            f.write("=" * 72 + "\n\n")
+            f.write("=== STDOUT ===\n")
+            f.write(result.stdout or "(empty)\n")
+            f.write("\n=== STDERR ===\n")
+            f.write(result.stderr or "(empty)\n")
 
     if passed:
         print(f"  [{_ts()}] {_green(scenario)}: PASSED ({elapsed:.0f}s)")
@@ -122,6 +172,8 @@ def run_scenario(scenario, auth_file, state_file, run_id, cloud):
         print(f"  [{_ts()}] {_red(scenario)}: FAILED ({elapsed:.0f}s)")
         for l in deduped[-6:]:
             print(f"    | {l}")
+        if log_dir:
+            print(f"    | Full log: {log_file}")
 
     return {"scenario": scenario, "status": "passed" if passed else "failed", "elapsed": elapsed}
 
@@ -215,15 +267,22 @@ def main():
     parser.add_argument("--env-file", required=True)
     parser.add_argument("--scenarios", default=",".join(SCENARIOS))
     parser.add_argument("--max-parallel", type=int, default=15,
-                       help="Max concurrent scenarios (default: 15). "
+                       help="Max concurrent scenario executions (default: 15). "
                             "Provisioning always runs all in parallel regardless.")
     parser.add_argument("--keep-envs", action="store_true")
+    parser.add_argument("--no-fail-fast", action="store_true",
+                       help="Continue running all scenarios even if one fails")
     args = parser.parse_args()
 
     env_file = Path(args.env_file).resolve()
     cloud = _default_cloud
     scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
     max_parallel = args.max_parallel
+
+    # Create timestamped log directory for per-scenario output
+    suite_id = time.strftime('%Y%m%d_%H%M%S')
+    log_dir = SCRIPT_DIR / "logs" / f"{cloud}_{suite_id}"
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 64)
     print(f"  Parallel Integration Test Runner")
@@ -232,6 +291,7 @@ def main():
     print(f"  Scenarios:    {len(scenarios)}")
     print(f"  Max parallel: {max_parallel}")
     print(f"  Credentials:  {env_file}")
+    print(f"  Logs:         {log_dir}")
     print()
 
     # ── Phase 0: Clean up orphan account resources from previous runs ────────
@@ -295,7 +355,10 @@ def main():
     print(f"── Phase 2: Provisioning {len(scenarios)} environments (all concurrent)")
     provision_results = {}
     with ThreadPoolExecutor(max_workers=len(scenarios)) as executor:
-        futures = {executor.submit(provision_for_scenario, s, env_file, cloud): s for s in scenarios}
+        futures = {
+            executor.submit(provision_for_scenario, s, env_file, cloud, suite_id, log_dir): s
+            for s in scenarios
+        }
         for f in as_completed(futures):
             s = futures[f]
             try:
@@ -308,7 +371,10 @@ def main():
     if failed:
         print(f"\n  Retrying {len(failed)} failed provision(s)...")
         with ThreadPoolExecutor(max_workers=len(failed)) as executor:
-            futures = {executor.submit(provision_for_scenario, s, env_file, cloud): s for s in failed}
+            futures = {
+                executor.submit(provision_for_scenario, s, env_file, cloud, suite_id, log_dir): s
+                for s in failed
+            }
             for f in as_completed(futures):
                 s = futures[f]
                 try:
@@ -329,18 +395,36 @@ def main():
     print(f"  Each workspace is torn down immediately after its scenario completes.")
     test_results = {}
     keep_envs = args.keep_envs
-    _abort = False  # Set on first failure to skip remaining scenarios
+    fail_fast = not args.no_fail_fast
+    _abort = False  # Set on first failure to skip remaining scenarios (if fail-fast)
 
     def run_and_teardown(scenario, info):
         nonlocal _abort
         suffix = info.get("run_id", "")[:6]
-        if _abort:
+        if _abort and fail_fast:
             if not keep_envs and "state_file" in info:
                 teardown_scenario(scenario, info["state_file"], env_file, cloud, suffix=suffix)
                 try: Path(info["state_file"]).unlink()
                 except Exception: pass
             return {"scenario": scenario, "status": "skipped", "elapsed": 0}
-        result = run_scenario(scenario, info["auth_file"], info["state_file"], info["run_id"], cloud)
+        # Validate auth file exists before running (catch missing files early)
+        auth = info.get("auth_file", "")
+        if not Path(auth).exists():
+            print(f"  [{_ts()}] {_red(scenario)}: auth file not found: {auth}")
+            if not keep_envs and "state_file" in info:
+                teardown_scenario(scenario, info["state_file"], env_file, cloud, suffix=suffix)
+                try: Path(info["state_file"]).unlink()
+                except Exception: pass
+            return {"scenario": scenario, "status": "failed", "elapsed": 0}
+        result = run_scenario(
+            scenario,
+            auth,
+            info["state_file"],
+            info["run_id"],
+            cloud,
+            suite_id,
+            log_dir=str(log_dir),
+        )
         if result["status"] != "passed":
             _abort = True
         if not keep_envs and "state_file" in info:
@@ -356,8 +440,17 @@ def main():
             try:
                 test_results[s] = f.result()
             except Exception as exc:
+                print(f"  [{_ts()}] {_red(s)}: CRASHED — {exc}")
                 test_results[s] = {"scenario": s, "status": "failed", "elapsed": 0}
                 _abort = True
+                # Save crash info to log
+                if log_dir:
+                    crash_log = Path(log_dir) / f"{s}.CRASH.log"
+                    import traceback
+                    with open(crash_log, "w") as cf:
+                        cf.write(f"# Scenario {s} crashed\n")
+                        cf.write(f"# Exception: {exc}\n\n")
+                        traceback.print_exc(file=cf)
 
     print()
 
@@ -391,6 +484,7 @@ def main():
     else:
         p = sum(1 for r in test_results.values() if r["status"] == "passed")
         print(f"  {_red(_bold(f'{len(scenarios) - p} scenario(s) FAILED'))}")
+    print(f"\n  Logs: {log_dir}")
     print("=" * 64)
     sys.exit(0 if all_passed else 1)
 

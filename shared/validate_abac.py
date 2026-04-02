@@ -18,6 +18,8 @@ import re
 import argparse
 from pathlib import Path
 
+from tag_vocabulary import REGISTRY
+
 try:
     import hcl2
 except ImportError:
@@ -325,6 +327,7 @@ def validate_tag_policies(cfg: dict, result: ValidationResult) -> dict[str, set[
         return {}
     tag_map: dict[str, set[str]] = {}
     seen_keys: set[str] = set()
+    seen_canonical_keys: dict[str, str] = {}
     for i, tp in enumerate(policies):
         key = tp.get("key", "")
         if not key:
@@ -333,9 +336,33 @@ def validate_tag_policies(cfg: dict, result: ValidationResult) -> dict[str, set[
         if key in seen_keys:
             result.error(f"tag_policies[{i}]: duplicate key '{key}'")
         seen_keys.add(key)
+        canonical_key = REGISTRY.canonical_key(key)
+        if canonical_key != key:
+            result.error(
+                f"tag_policies[{i}]: key '{key}' is non-canonical — use '{canonical_key}'"
+            )
+        elif canonical_key in seen_canonical_keys:
+            result.error(
+                f"tag_policies[{i}]: canonical key '{canonical_key}' already defined by "
+                f"'{seen_canonical_keys[canonical_key]}'"
+            )
+        else:
+            seen_canonical_keys[canonical_key] = key
         values = tp.get("values", [])
         if not values:
             result.error(f"tag_policies[{i}] (key='{key}'): 'values' is empty")
+        for value in values or []:
+            canonical_value = REGISTRY.canonical_value(canonical_key, value)
+            if canonical_value != value:
+                result.error(
+                    f"tag_policies[{i}] (key='{key}'): value '{value}' is non-canonical — "
+                    f"use '{canonical_value}'"
+                )
+            elif REGISTRY.is_allowed_value(canonical_key, value) is False:
+                result.error(
+                    f"tag_policies[{i}] (key='{key}'): value '{value}' is not in the "
+                    f"canonical registry {sorted(REGISTRY.canonical_values_for_key(canonical_key) or [])}"
+                )
         tag_map[key] = set(values)
     result.ok(f"tag_policies: {len(policies)} policy/ies, {sum(len(v) for v in tag_map.values())} total values")
     return tag_map
@@ -354,6 +381,8 @@ def validate_tag_assignments(cfg: dict, tag_map: dict[str, set[str]], result: Va
         ename = ta.get("entity_name", "")
         tkey = ta.get("tag_key", "")
         tval = ta.get("tag_value", "")
+        canonical_key = REGISTRY.canonical_key(tkey)
+        canonical_value = REGISTRY.canonical_value(canonical_key, tval)
 
         if etype not in VALID_ENTITY_TYPES:
             result.error(f"{prefix}: entity_type '{etype}' invalid — must be 'tables' or 'columns'")
@@ -368,6 +397,20 @@ def validate_tag_assignments(cfg: dict, tag_map: dict[str, set[str]], result: Va
             result.error(
                 f"{prefix}: entity_name '{ename}' must be fully qualified "
                 f"as 'catalog.schema.table.column' (expected 3 dots, got {dot_count})"
+            )
+
+        if canonical_key != tkey:
+            result.error(f"{prefix}: tag_key '{tkey}' is non-canonical — use '{canonical_key}'")
+        if canonical_value != tval:
+            result.error(
+                f"{prefix}: tag_value '{tval}' is non-canonical for tag_key '{tkey}' — "
+                f"use '{canonical_value}'"
+            )
+        elif REGISTRY.is_allowed_value(canonical_key, tval) is False:
+            result.error(
+                f"{prefix}: tag_value '{tval}' is not in the canonical registry for "
+                f"tag_key '{canonical_key}' — allowed: "
+                f"{sorted(REGISTRY.canonical_values_for_key(canonical_key) or [])}"
             )
 
         if tkey and tkey not in tag_map:
@@ -458,6 +501,24 @@ def validate_fgac_policies(
                 )
         for tag_ref in re.findall(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", condition):
             ref_key, ref_val = tag_ref
+            canonical_key = REGISTRY.canonical_key(ref_key)
+            canonical_value = REGISTRY.canonical_value(canonical_key, ref_val)
+            if canonical_key != ref_key:
+                result.error(
+                    f"{prefix}: condition uses non-canonical tag_key '{ref_key}' — "
+                    f"use '{canonical_key}'"
+                )
+            if canonical_value != ref_val:
+                result.error(
+                    f"{prefix}: condition uses non-canonical tag_value '{ref_val}' for "
+                    f"tag_key '{ref_key}' — use '{canonical_value}'"
+                )
+            elif REGISTRY.is_allowed_value(canonical_key, ref_val) is False:
+                result.error(
+                    f"{prefix}: condition references canonical tag_value '{ref_val}' "
+                    f"outside the registry for '{canonical_key}' — allowed: "
+                    f"{sorted(REGISTRY.canonical_values_for_key(canonical_key) or [])}"
+                )
             if ref_key not in tag_map:
                 result.error(f"{prefix}: condition references undefined tag_key '{ref_key}'")
             elif ref_val not in tag_map.get(ref_key, set()):
@@ -466,6 +527,12 @@ def validate_fgac_policies(
                     f"not in tag_policy '{ref_key}' — allowed: {sorted(tag_map[ref_key])}"
                 )
         for tag_ref in re.findall(r"hasTag\(\s*'([^']+)'\s*\)", condition):
+            canonical_key = REGISTRY.canonical_key(tag_ref)
+            if canonical_key != tag_ref:
+                result.error(
+                    f"{prefix}: condition uses non-canonical tag_key '{tag_ref}' — "
+                    f"use '{canonical_key}'"
+                )
             if tag_ref not in tag_map:
                 result.error(f"{prefix}: condition references undefined tag_key '{tag_ref}'")
 
