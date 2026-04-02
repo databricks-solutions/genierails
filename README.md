@@ -15,7 +15,7 @@ Put Genie onboarding on rails — with built-in guardrails. GenieRails imports y
 
 ## Getting Started
 
-Pick your cloud to set up credentials, then follow the guide for your scenario:
+Check the [Prerequisites](shared/docs/prerequisites.md) first (Python, Terraform, Databricks account setup), then pick your cloud:
 
 | My workspace is on... | Start here |
 | --- | --- |
@@ -35,7 +35,8 @@ genierails/
 
 ## Documentation
 
-**Guides:**
+**Getting Started:**
+- [Prerequisites](shared/docs/prerequisites.md) — OS, Python, Terraform, network, Databricks account, cloud credentials
 - [From UI to Production](shared/docs/from-ui-to-production.md) — import your existing Genie Space, add governance, promote to prod
 - [Quickstart](shared/docs/quickstart.md) — create a Genie Space from scratch
 - [Playbook](shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios
