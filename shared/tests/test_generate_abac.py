@@ -17,11 +17,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from generate_abac import (
     fix_hcl_syntax,
+    autofix_canonical_tag_vocabulary,
     autofix_tag_policies,
     autofix_invalid_tag_values,
     autofix_undefined_tag_refs,
     autofix_missing_fgac_policies,
     autofix_fgac_policy_count,
+    bootstrap_per_space_dirs,
+    extract_code_blocks,
 )
 from tests.conftest import assert_valid_hcl
 
@@ -236,7 +239,8 @@ fgac_policies = []
         text = path.read_text()
         assert '"Full_PII"' in text
 
-    def test_adds_value_referenced_in_fgac_condition(self, tmp_tfvars):
+    def test_does_not_add_value_from_fgac_condition(self, tmp_tfvars):
+        """autofix_tag_policies should NOT promote values from FGAC conditions."""
         hcl = """\
 tag_policies = [
   {
@@ -263,8 +267,8 @@ fgac_policies = [
 """
         path = tmp_tfvars(hcl)
         count = autofix_tag_policies(path)
-        assert count == 1
-        assert '"Full_PII"' in path.read_text()
+        assert count == 0
+        assert '"Full_PII"' not in path.read_text()
 
     def test_adds_multiple_missing_values(self, tmp_tfvars):
         hcl = self._base_hcl('"public"', "Full_PII")
@@ -317,6 +321,279 @@ fgac_policies = []
         text2 = path2.read_text()
         assert '"Limited_PII"' in text2
         assert '"Full_PII"' in text2
+
+
+class TestAutofixCanonicalTagVocabulary:
+
+    def test_normalizes_and_merges_duplicate_tag_policies(self, tmp_tfvars):
+        hcl = """\
+tag_policies = [
+  {
+    key    = "pci_level_deadbe"
+    values = ["public", "masked_card", "restricted_card", "restricted_cvv"]
+  },
+  {
+    key    = "pci_level_deadbe"
+    values = ["public", "masked_card_last4", "redacted_card_full", "redacted_cvv"]
+  },
+  {
+    key    = "aml_scope_deadbe"
+    values = ["public", "aml_restricted"]
+  },
+  {
+    key    = "financial_level_deadbe"
+    values = ["public", "masked_amount"]
+  },
+]
+
+tag_assignments = [
+  {
+    entity_type = "columns"
+    entity_name = "main.fin.credit_cards.card_number"
+    tag_key     = "pci_level_deadbe"
+    tag_value   = "restricted_card"
+  },
+  {
+    entity_type = "tables"
+    entity_name = "main.fin.transactions"
+    tag_key     = "aml_scope_deadbe"
+    tag_value   = "aml_restricted"
+  },
+]
+
+fgac_policies = [
+  {
+    name            = "mask_pci"
+    policy_type     = "POLICY_TYPE_COLUMN_MASK"
+    catalog         = "main"
+    to_principals   = ["account users"]
+    match_condition = "hasTagValue('pci_level_deadbe', 'masked_card_full')"
+    match_alias     = "mask_pci"
+    function_name   = "mask_credit_card_full"
+    function_catalog = "main"
+    function_schema  = "governance"
+  },
+  {
+    name           = "filter_aml"
+    policy_type    = "POLICY_TYPE_ROW_FILTER"
+    catalog        = "main"
+    to_principals  = ["account users"]
+    when_condition = "hasTagValue('aml_scope_deadbe', 'aml_restricted')"
+    function_name  = "filter_compliance_only"
+    function_catalog = "main"
+    function_schema  = "governance"
+  },
+]
+"""
+        path = tmp_tfvars(hcl)
+        count = autofix_canonical_tag_vocabulary(path)
+        assert count > 0
+        cfg = assert_valid_hcl(path)
+
+        tag_policies = cfg.get("tag_policies", [])
+        pci_policies = [tp for tp in tag_policies if tp.get("key") == "pci_level_deadbe"]
+        assert len(pci_policies) == 1
+        assert pci_policies[0]["values"] == [
+            "public",
+            "masked_card_last4",
+            "redacted_card_full",
+            "redacted_cvv",
+        ]
+
+        compliance_policies = [
+            tp for tp in tag_policies if tp.get("key") == "compliance_scope_deadbe"
+        ]
+        assert len(compliance_policies) == 1
+        assert compliance_policies[0]["values"] == ["standard", "aml_restricted"]
+
+        financial_policies = [
+            tp for tp in tag_policies
+            if tp.get("key") == "financial_sensitivity_deadbe"
+        ]
+        assert len(financial_policies) == 1
+        assert financial_policies[0]["values"] == ["public", "rounded_amounts"]
+
+        assignments = cfg.get("tag_assignments", [])
+        assert assignments[0]["tag_value"] == "redacted_card_full"
+        assert assignments[1]["tag_key"] == "compliance_scope_deadbe"
+
+    def test_normalizes_fgac_conditions(self, tmp_tfvars):
+        hcl = """\
+tag_policies = [
+  {
+    key    = "pci_level_deadbe"
+    values = ["public", "redacted_card_full", "redacted_cvv"]
+  },
+  {
+    key    = "compliance_scope_deadbe"
+    values = ["standard", "aml_restricted"]
+  },
+]
+
+tag_assignments = []
+
+fgac_policies = [
+  {
+    name            = "mask_pci"
+    policy_type     = "POLICY_TYPE_COLUMN_MASK"
+    catalog         = "main"
+    to_principals   = ["account users"]
+    match_condition = "hasTagValue('pci_level_deadbe', 'pci_full_mask')"
+    when_condition  = "hasTag('aml_scope_deadbe')"
+    match_alias     = "mask_pci"
+    function_name   = "mask_credit_card_full"
+    function_catalog = "main"
+    function_schema  = "governance"
+  },
+]
+"""
+        path = tmp_tfvars(hcl)
+        count = autofix_canonical_tag_vocabulary(path)
+        assert count > 0
+        text = path.read_text()
+        assert "pci_full_mask" not in text
+        assert "aml_scope_deadbe" not in text
+        assert "hasTagValue('pci_level_deadbe', 'redacted_card_full')" in text
+        assert "hasTag('compliance_scope_deadbe')" in text
+
+    def test_dedupes_identical_tag_assignments_after_normalization(self, tmp_tfvars):
+        hcl = """\
+tag_policies = [
+  {
+    key    = "aml_scope_deadbe"
+    values = ["public", "aml_restricted"]
+  },
+]
+
+tag_assignments = [
+  {
+    entity_type = "tables"
+    entity_name = "main.fin.transactions"
+    tag_key     = "aml_scope_deadbe"
+    tag_value   = "aml_restricted"
+  },
+  {
+    entity_type = "tables"
+    entity_name = "main.fin.transactions"
+    tag_key     = "compliance_scope_deadbe"
+    tag_value   = "aml_restricted"
+  },
+]
+
+fgac_policies = []
+"""
+        path = tmp_tfvars(hcl)
+        count = autofix_canonical_tag_vocabulary(path)
+        assert count > 0
+        cfg = assert_valid_hcl(path)
+        assert cfg["tag_assignments"] == [
+            {
+                "entity_type": "tables",
+                "entity_name": "main.fin.transactions",
+                "tag_key": "compliance_scope_deadbe",
+                "tag_value": "aml_restricted",
+            }
+        ]
+
+    def test_removes_unknown_canonical_tag_policy_values(self, tmp_tfvars):
+        hcl = """\
+tag_policies = [
+  {
+    key    = "pii_level_deadbe"
+    values = ["public", "masked_email", "masked_loyalty", "masked_member_id"]
+  },
+]
+
+tag_assignments = []
+
+fgac_policies = []
+"""
+        path = tmp_tfvars(hcl)
+        count = autofix_canonical_tag_vocabulary(path)
+        assert count > 0
+        cfg = assert_valid_hcl(path)
+        assert cfg["tag_policies"] == [{"key": "pii_level_deadbe", "values": ["public", "masked_email"]}]
+
+
+class TestBootstrapPerSpaceDirs:
+
+    def test_bootstraps_all_configured_spaces_when_parser_shape_is_partial(self, tmp_path):
+        out_dir = tmp_path / "generated"
+        out_dir.mkdir()
+        (out_dir / "abac.auto.tfvars").write_text(
+            """\
+genie_space_configs = {
+  "Finance Analytics" = {
+    title = "Finance Analytics"
+  }
+}
+"""
+        )
+        auth_cfg = {
+            "genie_spaces": [
+                {"name": "Finance Analytics", "config": {"title": "Finance Analytics"}},
+                {"name": "Clinical Analytics", "config": {"title": "Clinical Analytics"}},
+            ]
+        }
+
+        bootstrap_per_space_dirs(out_dir, auth_cfg, "")
+
+        assert (out_dir / "spaces" / "finance_analytics" / "abac.auto.tfvars").exists()
+        assert (out_dir / "spaces" / "clinical_analytics" / "abac.auto.tfvars").exists()
+
+
+class TestExtractCodeBlocks:
+
+    def test_extracts_hcl_from_nonstandard_label(self):
+        sql, hcl = extract_code_blocks(
+            """\
+Here is the output.
+```sql
+CREATE OR REPLACE FUNCTION mask_x(input STRING) RETURNS STRING RETURN input;
+```
+```tfvars
+groups = {}
+tag_policies = []
+tag_assignments = []
+```
+"""
+        )
+        assert sql is not None
+        assert hcl is not None
+        assert "tag_policies" in hcl
+
+    def test_falls_back_to_plain_hcl_when_fence_missing(self):
+        sql, hcl = extract_code_blocks(
+            """\
+```sql
+CREATE OR REPLACE FUNCTION mask_x(input STRING) RETURNS STRING RETURN input;
+```
+
+groups = {}
+tag_policies = []
+tag_assignments = []
+fgac_policies = []
+"""
+        )
+        assert sql is not None
+        assert hcl is not None
+        assert "fgac_policies" in hcl
+
+    def test_uses_rest_of_response_for_unclosed_hcl_fence(self):
+        sql, hcl = extract_code_blocks(
+            """\
+```sql
+CREATE OR REPLACE FUNCTION mask_x(input STRING) RETURNS STRING RETURN input;
+```
+```hcl
+groups = {}
+tag_policies = []
+genie_instructions = "When asked about 'transactions', default to completed."
+"""
+        )
+        assert sql is not None
+        assert hcl is not None
+        assert "genie_instructions" in hcl
 
 
 # ===========================================================================

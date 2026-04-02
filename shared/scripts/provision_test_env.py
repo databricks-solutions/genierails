@@ -101,8 +101,22 @@ _default_cloud  = (
 )
 CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / _default_cloud))
 ENVS_DIR    = CLOUD_ROOT / "envs"                       # user's real envs (never touched)
-TEST_ENVS_DIR = CLOUD_ROOT / "envs" / "test"            # isolated dir for integration tests
-STATE_FILE  = SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
+# Support per-scenario parallel provisioning: _PARALLEL_STATE_FILE overrides the
+# default state file and test envs directory so each scenario gets its own workspace.
+_parallel_state = os.environ.get("_PARALLEL_STATE_FILE", "")
+_parallel_suite = os.environ.get("_PARALLEL_SUITE_ID", "").strip()
+if _parallel_state:
+    STATE_FILE = Path(_parallel_state)
+    _scenario_name = STATE_FILE.stem.split(".")[-1]
+    if _parallel_suite:
+        TEST_ENVS_DIR = (
+            CLOUD_ROOT / "envs" / "parallel_test" / _parallel_suite / _scenario_name
+        )
+    else:
+        TEST_ENVS_DIR = CLOUD_ROOT / "envs" / "parallel_test" / _scenario_name
+else:
+    STATE_FILE = SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
+    TEST_ENVS_DIR = CLOUD_ROOT / "envs" / "test"
 DEFAULT_ENV_FILE = SCRIPT_DIR / f"account-admin.{_default_cloud}.env"
 
 
@@ -1083,11 +1097,55 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     _ok("Metastore assigned to workspace")
 
     # ------------------------------------------------------------------
-    # Step 5: Create the External Location BEFORE transferring metastore
-    # ownership.  The SP is still the metastore creator at this point and
-    # therefore has full metastore admin rights.  After ownership is
-    # transferred to the admin group the SP loses implicit admin and would
-    # receive "User does not have CREATE EXTERNAL LOCATION" errors.
+    # Step 5a: Assign workspace admin BEFORE creating the external location.
+    # The SP needs workspace access to call the workspace API.  On AWS the
+    # SP as metastore creator has implicit access; on Azure it doesn't.
+    # ------------------------------------------------------------------
+    principals_to_assign = []
+    if group_id:
+        principals_to_assign.append((group_id, f"group '{group_name}'"))
+    if sp_scim_id:
+        principals_to_assign.append((sp_scim_id, f"SP (scim_id={sp_scim_id})"))
+
+    if principals_to_assign:
+        for principal_id, label in principals_to_assign:
+            _step(f"Adding {label} as workspace admin")
+            try:
+                a.workspace_assignment.update(
+                    workspace_id=ws_id,
+                    principal_id=principal_id,
+                    permissions=[WorkspacePermission.ADMIN],
+                )
+                _ok(f"Workspace admin granted to {label}")
+            except Exception as exc:
+                _warn(f"Could not assign workspace admin to {label}: {exc}")
+
+    _warn("Waiting 20 s for workspace identity propagation…")
+    time.sleep(20)
+
+    # Step 5a-2: Explicitly grant metastore admin to the SP via workspace API.
+    # On Azure, implicit metastore admin from being the creator is not always
+    # recognized when accessing through the workspace API. Explicit grant ensures
+    # FGAC policy creation (CREATE_FUNCTION, tag assignments) works.
+    try:
+        from databricks.sdk import WorkspaceClient as _WC_ma
+        from databricks.sdk.service.catalog import PermissionsChange, Privilege
+        w_admin = _WC_ma(host=ws_host, client_id=client_id, client_secret=client_secret)
+        w_admin.grants.update(
+            securable_type="metastore",
+            full_name=ms_id,
+            changes=[PermissionsChange(
+                principal=client_id,
+                add=[Privilege.CREATE_CATALOG, Privilege.CREATE_EXTERNAL_LOCATION],
+            )],
+        )
+        _ok("Metastore privileges granted to SP via workspace API")
+    except Exception as exc:
+        _warn(f"Could not grant metastore privileges (SP may already have them as creator): {exc}")
+
+    # ------------------------------------------------------------------
+    # Step 5b: Create the External Location.  The SP now has workspace
+    # access and explicit metastore admin rights.
     #
     # Trailing slash on the URL is required so Databricks prefix-matches
     # sub-paths like s3://bucket/prefix/catalog_name as being covered by
@@ -1101,7 +1159,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
         # exist" even though the bucket is reachable — this is Databricks signalling
         # that it could not assume the IAM role yet.  A short retry resolves it.
         el_created = False
-        for _attempt, _delay in enumerate([0, 30, 60]):
+        for _attempt, _delay in enumerate([0, 30, 60, 90]):
             if _delay:
                 _warn(f"  Retrying External Location creation in {_delay} s (attempt {_attempt + 1})…")
                 time.sleep(_delay)
@@ -1122,7 +1180,9 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
             except Exception as exc:
                 _warn(f"Could not create External Location (attempt {_attempt + 1}): {exc}")
         if not el_created:
-            _warn("Catalog creation will require an explicit MANAGED LOCATION.")
+            print("ERROR: External Location creation failed after 3 attempts.")
+            print("  Catalog creation requires an External Location. Aborting.")
+            sys.exit(1)
 
     # Note: we intentionally do NOT transfer metastore ownership to the admin
     # group here.  The SP (account admin and metastore creator) retains its
@@ -1130,41 +1190,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     # other UC privileges needed for the integration tests.  Transferring
     # ownership would strip those rights and cause catalog creation to fail.
 
-    # ------------------------------------------------------------------
-    # Step 7: Set admin group AND SP directly as workspace admins.
-    # workspace_assignment.update takes a numeric SCIM principal_id.
-    #
-    # We assign BOTH:
-    #   • the admin group  — inheritable permissions for future members
-    #   • the SP directly  — ensures OAuth M2M works immediately without
-    #                        waiting for SCIM group-membership sync to propagate
-    # ------------------------------------------------------------------
-    principals_to_assign: list[tuple[int, str]] = []
-    if group_id:
-        principals_to_assign.append((int(group_id), f"group {group_name!r}"))
-    if sp_scim_id:
-        principals_to_assign.append((sp_scim_id, f"SP (scim_id={sp_scim_id})"))
-
-    if principals_to_assign:
-        for principal_id, label in principals_to_assign:
-            _step(f"Adding {label} as workspace admin")
-            try:
-                a.workspace_assignment.update(
-                    workspace_id=ws_id,
-                    principal_id=principal_id,
-                    permissions=[WorkspacePermission.ADMIN],
-                )
-                _ok(f"Workspace admin granted to {label}")
-            except Exception as exc:
-                _warn(f"Could not assign workspace admin to {label}: {exc}")
-    else:
-        _warn("Skipping workspace admin assignment (no group or SP SCIM ID available).")
-        _warn("Add the admin group as workspace admin manually in the Workspace Settings.")
-
-    # Allow the workspace identity system to propagate the new assignments
-    # before anything tries to authenticate via OAuth M2M.
-    _warn("Waiting 20 s for workspace identity propagation…")
-    time.sleep(20)
+    # Workspace admin assignment already done in Step 5a above.
 
     # ------------------------------------------------------------------
     # Step 7: Write auth.auto.tfvars into the isolated envs/test/ directory

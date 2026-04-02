@@ -6,11 +6,9 @@ so no file I/O, Databricks, or LLM access is needed.
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from validate_abac import (
+from validate_abac import (  # noqa: E402
     ValidationResult,
     validate_groups,
     validate_tag_policies,
@@ -120,6 +118,24 @@ class TestValidateTagPolicies:
         validate_tag_policies({"tag_policies": [{"values": ["public"]}]}, r)
         assert not r.passed
 
+    def test_non_canonical_registry_key_fails(self):
+        r = _result()
+        validate_tag_policies(
+            {"tag_policies": [{"key": "aml_scope_deadbe", "values": ["aml_restricted"]}]},
+            r,
+        )
+        assert not r.passed
+        assert any("non-canonical" in e for e in r.errors)
+
+    def test_unknown_registry_value_fails(self):
+        r = _result()
+        validate_tag_policies(
+            {"tag_policies": [{"key": "pci_level", "values": ["masked_pan"]}]},
+            r,
+        )
+        assert not r.passed
+        assert any("canonical registry" in e for e in r.errors)
+
 
 # ===========================================================================
 #  validate_tag_assignments
@@ -206,6 +222,26 @@ class TestValidateTagAssignments:
         validate_tag_assignments(cfg, self._tag_map(), r)
         assert not r.passed
         assert any("not an allowed value" in e for e in r.errors)
+
+    def test_non_canonical_registry_value_fails(self):
+        cfg = {
+            "tag_assignments": [
+                {
+                    "entity_type": "tables",
+                    "entity_name": "cat.schema.tbl",
+                    "tag_key": "pci_level",
+                    "tag_value": "restricted_card",
+                }
+            ]
+        }
+        r = _result()
+        validate_tag_assignments(
+            cfg,
+            {"pci_level": {"public", "masked_card_last4", "redacted_card_full"}},
+            r,
+        )
+        assert not r.passed
+        assert any("non-canonical" in e for e in r.errors)
 
     def test_table_entity_wrong_dot_count_fails(self):
         cfg = {

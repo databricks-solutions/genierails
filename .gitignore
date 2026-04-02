@@ -32,3 +32,6 @@ auth.auto.tfvars
 
 # Auto-created Genie Space ID (managed by Terraform lifecycle)
 .genie_space_id
+
+# Parallel test runner logs
+shared/scripts/logs/

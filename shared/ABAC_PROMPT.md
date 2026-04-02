@@ -20,6 +20,12 @@ ABAC uses governed **tags** on tables/columns and **FGAC policies** (column mask
 3. Assign **tags** to tables and columns
 4. Create **FGAC policies** that match tagged columns/tables and apply masking functions for specific groups
 
+Return exactly two fenced code blocks in this order:
+1. one ```sql``` block containing only `masking_functions.sql`
+2. one ```hcl``` block containing only `abac.auto.tfvars`
+
+Do not omit the HCL fence, do not rename the HCL language tag, and do not wrap either file in additional prose inside the fences.
+
 ### Available Masking Function Patterns
 
 Use these signatures. Replace `{catalog}.{schema}` with the user's catalog and schema.
@@ -341,6 +347,11 @@ Each column must be matched by **at most one** column mask policy per principal 
 3. **Quick check**: For every pair of column mask policies that share any group in `to_principals`, verify that their `match_condition` values cannot both be true for the same column. If they can, either merge the policies or split the tag values. The number of distinct tag values in `tag_policies` should be >= the number of distinct masking functions you want to apply for that tag key.
 
 ### CRITICAL — Internal Consistency
+
+The caller may inject a `CANONICAL TAG VOCABULARY` section above the table DDL.
+When that section is present, treat it as the source of truth for those governed
+tag families. Use the listed canonical keys and values exactly, and normalize any
+synonyms to the canonical forms before you output HCL.
 
 Every tag value used in `tag_assignments` and in `match_condition` / `when_condition` MUST be defined in `tag_policies`. Before generating, cross-check:
 

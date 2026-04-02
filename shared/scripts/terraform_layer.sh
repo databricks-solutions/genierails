@@ -48,13 +48,19 @@ fi
 
 mkdir -p "$ENV_DIR"
 
+# Use TF_DATA_DIR for per-env .terraform/ isolation. The .terraform.lock.hcl
+# file is always in the working directory — use -lockfile=readonly during init
+# to prevent concurrent writes from corrupting it.
+export TF_DATA_DIR="$ENV_DIR/.terraform"
+cd "$ROOT_DIR"
+
 INIT_CMD=(
   terraform
-  -chdir="$ROOT_DIR"
   init
   -input=false
   -reconfigure
   -backend-config="path=$ENV_DIR/terraform.tfstate"
+  -lockfile=readonly
 )
 
 echo "+ ${INIT_CMD[*]}"
@@ -73,25 +79,25 @@ fi
 
 case "$COMMAND" in
   plan|apply|destroy|import)
-    CMD=(terraform -chdir="$ROOT_DIR" "$COMMAND" "${VAR_ARGS[@]}" "$@")
+    CMD=(terraform "$COMMAND" "${VAR_ARGS[@]}" "$@")
     ;;
   state-list)
-    CMD=(terraform -chdir="$ROOT_DIR" state list "$@")
+    CMD=(terraform state list "$@")
     ;;
   state-show)
-    CMD=(terraform -chdir="$ROOT_DIR" state show "$@")
+    CMD=(terraform state show "$@")
     ;;
   state-rm)
-    CMD=(terraform -chdir="$ROOT_DIR" state rm "$@")
+    CMD=(terraform state rm "$@")
     ;;
   state-mv)
-    CMD=(terraform -chdir="$ROOT_DIR" state mv "$@")
+    CMD=(terraform state mv "$@")
     ;;
   output)
-    CMD=(terraform -chdir="$ROOT_DIR" output "$@")
+    CMD=(terraform output "$@")
     ;;
   print-cmd)
-    printf 'terraform -chdir="%s" %s' "$ROOT_DIR" "$1"
+    printf 'terraform %s (in %s, TF_DATA_DIR=%s)' "$1" "$ROOT_DIR" "$TF_DATA_DIR"
     shift || true
     for arg in "${VAR_ARGS[@]}" "$@"; do
       printf ' %q' "$arg"

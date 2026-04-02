@@ -47,6 +47,9 @@ resource "databricks_group_member" "members" {
 
 # Tag policies are account-scoped resources managed here once, shared across
 # all workspace environments. The workspace provider is required to create them.
+# Values are fully managed by the generated config — the autofix pipeline and
+# _preserve_existing_tag_policy_values() ensure the values list is always a
+# superset of what's already assigned to columns.
 resource "databricks_tag_policy" "policies" {
   for_each = { for tp in var.tag_policies : tp.key => tp }
 
@@ -55,6 +58,8 @@ resource "databricks_tag_policy" "policies" {
   description = each.value.description
   values      = [for v in each.value.values : { name = v }]
 
+  # The provider can reorder values after apply. We manage value convergence
+  # via sync_tag_policies.py and keep Terraform responsible for key ownership.
   lifecycle {
     ignore_changes = [values]
   }

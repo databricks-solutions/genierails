@@ -62,10 +62,13 @@ After setup, update envs/dev/env.auto.tfvars:
 """
 
 import argparse
+import json
 import os
 import sys
 import time
 from pathlib import Path
+
+from warehouse_utils import DEFAULT_WAREHOUSE_NAME, select_warehouse
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 WORK_DIR = Path.cwd()
@@ -610,7 +613,7 @@ def _configure_env(cfg: dict):
     }
     for k, env_k in mapping.items():
         v = cfg.get(k, "")
-        if v and not os.environ.get(env_k):
+        if v:
             os.environ[env_k] = v
 
 
@@ -619,18 +622,11 @@ def _get_warehouse(w, warehouse_id: str) -> str:
     if warehouse_id:
         return warehouse_id
 
-    print("  No --warehouse-id provided; looking for a running SQL warehouse...")
+    print("  No --warehouse-id provided; selecting a deterministic SQL warehouse...")
     warehouses = list(w.warehouses.list())
-    for wh in warehouses:
-        state = str(wh.state)
-        if "RUNNING" in state or "STARTING" in state:
-            print(f"    Using warehouse: {wh.name} ({wh.id})")
-            return wh.id
-
-    # Fall back to first available
-    if warehouses:
-        wh = warehouses[0]
-        print(f"    Starting warehouse: {wh.name} ({wh.id})")
+    wh = select_warehouse(warehouses)
+    if wh:
+        print(f"    Using warehouse: {wh.name} ({wh.id})")
         return wh.id
 
     # No warehouse at all — create a serverless one on-demand.  This happens when
@@ -641,7 +637,7 @@ def _get_warehouse(w, warehouse_id: str) -> str:
     print("  No SQL warehouses found — creating a temporary serverless warehouse for DDL...")
     from databricks.sdk.service.sql import EndpointInfoWarehouseType
     wh = w.warehouses.create(
-        name="ABAC Test Setup Warehouse",
+        name=DEFAULT_WAREHOUSE_NAME,
         cluster_size="Small",
         warehouse_type=EndpointInfoWarehouseType.PRO,
         max_num_clusters=1,
@@ -825,12 +821,17 @@ def _verify_tables(w, warehouse_id: str, expected: dict[str, int], label: str) -
     catalog_list = ", ".join(f"'{c}'" for c in catalogs)
     print(f"\n  [{label}] Checking column tags (ABAC governance applied)...")
     try:
+        tag_queries = [
+            (
+                "SELECT "
+                f"'{catalog}' AS table_catalog, schema_name, table_name, column_name, tag_name "
+                f"FROM {catalog}.information_schema.column_tags"
+            )
+            for catalog in catalogs
+        ]
         rows = _run_query(
             w, warehouse_id,
-            f"SELECT table_catalog, table_schema, table_name, column_name, tag_name "
-            f"FROM system.information_schema.column_tags "
-            f"WHERE table_catalog IN ({catalog_list}) "
-            f"ORDER BY table_catalog, table_name, column_name",
+            " UNION ALL ".join(tag_queries) + " ORDER BY table_catalog, table_name, column_name",
         )
         if rows:
             print(f"    PASS  Found {len(rows)} column tag(s) across {catalog_list}")
@@ -867,6 +868,59 @@ def _verify_tables(w, warehouse_id: str, expected: dict[str, int], label: str) -
         print(f"    WARN  Could not query column masks: {e}")
 
     return failures
+
+
+def _infer_catalog_storage_base(w) -> str | None:
+    """Best-effort fallback when provisioned auth lacks catalog_storage_base."""
+    try:
+        locations = list(w.external_locations.list())
+    except Exception:
+        return None
+
+    preferred_names = {"test-external-location"}
+    for loc in locations:
+        name = getattr(loc, "name", "") or ""
+        url = getattr(loc, "url", "") or ""
+        if name in preferred_names and url:
+            return url.rstrip("/")
+
+    genie_locations = [
+        (getattr(loc, "url", "") or "").rstrip("/")
+        for loc in locations
+        if (getattr(loc, "url", "") or "").startswith(("s3://genie-", "abfss://genie-"))
+    ]
+    if len(genie_locations) == 1:
+        return genie_locations[0]
+    return None
+
+
+def _load_catalog_storage_base_from_state(auth_cfg: dict) -> str | None:
+    """Fallback for provisioned test envs whose auth file lacks the field."""
+    workspace_id = auth_cfg.get("databricks_workspace_id", "")
+    if isinstance(workspace_id, list):
+        workspace_id = workspace_id[0] if workspace_id else ""
+    workspace_id = str(workspace_id or "").strip()
+
+    workspace_host = auth_cfg.get("databricks_workspace_host", "")
+    if isinstance(workspace_host, list):
+        workspace_host = workspace_host[0] if workspace_host else ""
+    workspace_host = str(workspace_host or "").strip().rstrip("/")
+
+    for cloud in ("aws", "azure"):
+        state_path = SCRIPT_DIR / f".test_env_state.{cloud}.json"
+        if not state_path.exists():
+            continue
+        try:
+            state = json.loads(state_path.read_text())
+        except Exception:
+            continue
+        state_ws_id = str(state.get("workspace_id", "") or "").strip()
+        state_host = str(state.get("workspace_host", "") or "").strip().rstrip("/")
+        if workspace_id and workspace_id == state_ws_id:
+            return str(state.get("ext_loc_url", "") or "").rstrip("/") or None
+        if workspace_host and workspace_host == state_host:
+            return str(state.get("ext_loc_url", "") or "").rstrip("/") or None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -926,14 +980,20 @@ def main():
     _configure_env(auth_cfg)
 
     # catalog_storage_base is written by provision_test_env.py into the generated
-    # auth.auto.tfvars when a fresh test environment is provisioned.  When present
+    # auth.auto.tfvars when a fresh test environment is provisioned. When present
     # each catalog is created with an explicit storage_root pointing to a unique
     # subfolder under the External Location, so no metastore-level default storage
-    # is needed.  When absent (normal dev/prod environments), the metastore default
-    # storage is used and storage_root is left unset.
-    catalog_storage_base: str | None = auth_cfg.get("catalog_storage_base", [None])[0] \
-        if isinstance(auth_cfg.get("catalog_storage_base"), list) \
+    # is needed. When absent, fall back to discovering the provisioned test
+    # external location from the workspace.
+    catalog_storage_base: str | None = (
+        auth_cfg.get("catalog_storage_base", [None])[0]
+        if isinstance(auth_cfg.get("catalog_storage_base"), list)
         else auth_cfg.get("catalog_storage_base")
+    )
+    if not catalog_storage_base:
+        catalog_storage_base = _load_catalog_storage_base_from_state(auth_cfg)
+        if catalog_storage_base:
+            print(f"  Using state-file catalog storage base: {catalog_storage_base}")
 
     def _catalog_storage(catalog_name: str) -> str | None:
         if not catalog_storage_base:
@@ -941,6 +1001,10 @@ def main():
         return f"{catalog_storage_base.rstrip('/')}/{catalog_name}"
 
     w = WorkspaceClient(product="genierails-test-setup", product_version="0.1.0")
+    if not catalog_storage_base:
+        catalog_storage_base = _infer_catalog_storage_base(w)
+        if catalog_storage_base:
+            print(f"  Using inferred catalog storage base: {catalog_storage_base}")
     warehouse_id = _get_warehouse(w, args.warehouse_id)
 
     # ── Verify paths ───────────────────────────────────────────────────────

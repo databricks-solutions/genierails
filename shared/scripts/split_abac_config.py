@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Split a generated ABAC draft into shared account, env governance, and workspace tfvars."""
+"""Split a generated ABAC draft into account, governance, and workspace tfvars."""
 
 from __future__ import annotations
 
@@ -8,12 +8,16 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 try:
     import hcl2
 except ImportError:
     print("ERROR: python-hcl2 is required. Install with:")
     print("  pip install python-hcl2")
     sys.exit(2)
+
+from tag_vocabulary import REGISTRY  # noqa: E402
 
 
 ACCOUNT_KEYS = (
@@ -114,14 +118,65 @@ def merge_group_members(existing: dict, new: dict) -> dict:
 
 
 def merge_tag_policies(existing: list, new: list) -> list:
-    """Union tag policies by key; new env's definition wins on values.
+    """Union tag policies by key; duplicate keys union their values.
 
     Existing keys from other environments are preserved so that promoting
     an older env never silently drops policies added by a newer environment.
     """
-    merged = {tp["key"]: tp for tp in (existing or [])}
+
+    def _normalize_policy(policy: dict) -> dict | None:
+        key = policy.get("key")
+        if not key:
+            return None
+        canonical_key = REGISTRY.canonical_key(key)
+        values: list[str] = []
+        for raw_value in policy.get("values", []) or []:
+            canonical_value = REGISTRY.canonical_value(canonical_key, raw_value)
+            if REGISTRY.is_allowed_value(canonical_key, canonical_value) is False:
+                raise ValueError(
+                    f"tag_policy '{canonical_key}' contains unknown canonical value "
+                    f"'{canonical_value}'"
+                )
+            if canonical_value not in values:
+                values.append(canonical_value)
+        return {
+            **policy,
+            "key": canonical_key,
+            "values": values,
+        }
+
+    def _merge_policy(target: dict, source: dict) -> dict:
+        merged = dict(target or {})
+        merged["key"] = source["key"]
+        merged["description"] = (
+            source.get("description")
+            or merged.get("description")
+            or ""
+        )
+        merged_values = list(merged.get("values", []) or [])
+        for value in source.get("values", []) or []:
+            if value not in merged_values:
+                merged_values.append(value)
+        merged["values"] = merged_values
+        return merged
+
+    merged: dict[str, dict] = {}
+    for tp in (existing or []):
+        tp = _normalize_policy(tp)
+        if not tp:
+            continue
+        key = tp.get("key")
+        if not key:
+            continue
+        merged[key] = _merge_policy(merged.get(key, {}), tp)
     for tp in (new or []):
-        merged[tp["key"]] = tp
+        tp = _normalize_policy(tp)
+        if not tp:
+            continue
+        key = tp.get("key")
+        if not key:
+            continue
+        merged[key] = _merge_policy(merged.get(key, {}), tp)
     return list(merged.values())
 
 
@@ -154,24 +209,46 @@ def build_account_config(full_cfg: dict, existing_cfg: dict | None) -> dict:
 
 
 def reconcile_tag_policy_values(account_cfg: dict, data_access_cfg: dict) -> None:
-    """Ensure every tag_assignment value appears in the account-layer tag policy.
+    """Remove tag_assignments whose values are not in the account-layer tag policy.
 
     The autofix in generate_abac.py runs on the full generated ABAC before
     splitting, but edge cases (per-space assembly, regex mismatches) can leave
     a tag_assignment in the data_access layer whose value is absent from the
-    account-layer policy.  Catching this here prevents silent Terraform errors
-    at apply time ('Tag value X is not an allowed value for tag policy key Y').
+    account-layer policy.  Instead of blindly adding these (potentially
+    LLM-hallucinated) values to the tag policy, we remove the bad assignments
+    to prevent INVALID_TAG_POLICY_VALUE errors at query time.
     """
-    policies = {tp["key"]: tp for tp in account_cfg.get("tag_policies", [])}
-    for ta in data_access_cfg.get("tag_assignments", []):
-        key = ta.get("tag_key")
-        val = ta.get("tag_value")
-        if not key or not val or key not in policies:
-            continue
-        allowed = policies[key].get("values", [])
-        if val not in allowed:
-            policies[key]["values"] = allowed + [val]
-            print(f"  [SPLIT-REPAIR] Added '{val}' to account tag_policy '{key}'")
+    policies = {
+        REGISTRY.canonical_key(tp["key"]): {
+            **tp,
+            "values": [
+                REGISTRY.canonical_value(tp["key"], value)
+                for value in tp.get("values", [])
+            ],
+        }
+        for tp in account_cfg.get("tag_policies", [])
+        if tp.get("key")
+    }
+    original = data_access_cfg.get("tag_assignments", [])
+    cleaned = []
+    removed = 0
+    for ta in original:
+        key = REGISTRY.canonical_key(ta.get("tag_key", ""))
+        val = REGISTRY.canonical_value(key, ta.get("tag_value", ""))
+        if key:
+            ta["tag_key"] = key
+        if val:
+            ta["tag_value"] = val
+        if key and val and key in policies:
+            allowed = policies[key].get("values", [])
+            if val not in allowed:
+                print(f"  [SPLIT-REPAIR] Removed tag_assignment '{key}={val}' "
+                      f"(not in tag_policy allowed values: {allowed})")
+                removed += 1
+                continue
+        cleaned.append(ta)
+    if removed:
+        data_access_cfg["tag_assignments"] = cleaned
 
 
 def _strip_var_refs(space_cfg: dict) -> dict:

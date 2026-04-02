@@ -49,6 +49,8 @@ import threading
 import time
 from pathlib import Path
 
+from tag_vocabulary import REGISTRY
+
 PRODUCT_NAME = "genierails"
 PRODUCT_VERSION = "0.1.0"
 
@@ -91,6 +93,26 @@ _ensure_packages()
 
 COUNTRIES_DIR = SCRIPT_DIR / "countries"
 INDUSTRIES_DIR = SCRIPT_DIR / "industries"
+
+
+def _canonical_tag_key(tag_key: str) -> str:
+    return REGISTRY.canonical_key(tag_key)
+
+
+def _tag_key_family(tag_key: str) -> str:
+    family = REGISTRY.family_for_key(tag_key)
+    if family:
+        return family
+    canonical = _canonical_tag_key(tag_key)
+    return canonical.split("_", 1)[0] if "_" in canonical else canonical
+
+
+def _canonical_tag_value(tag_key: str, tag_value: str) -> str:
+    return REGISTRY.canonical_value(tag_key, tag_value)
+
+
+def _normalize_has_tag_refs(condition: str) -> tuple[str, int]:
+    return REGISTRY.normalize_condition_refs(condition)
 
 
 def load_country_overlays(country_codes: list[str]) -> str:
@@ -194,6 +216,71 @@ def load_industry_overlays(industry_codes: list[str]) -> str:
     return "\n\n".join(parts) + "\n"
 
 
+def build_industry_detection_guidance(ddl_text: str, industry_codes: list[str]) -> tuple[str, str]:
+    """Detect overlay-specific columns in DDL and return prompt + comment guidance.
+
+    This keeps multi-industry generations from collapsing to the dominant domain
+    when the DDL clearly contains identifiers from several overlays.
+    """
+    try:
+        import yaml
+    except ImportError:
+        return "", ""
+
+    ddl_lower = ddl_text.lower()
+    matched_lines: list[str] = []
+    seen_functions: set[str] = set()
+    seen_comments: set[str] = set()
+
+    for code in industry_codes:
+        yaml_path = INDUSTRIES_DIR / f"{code.strip().lower()}.yaml"
+        if not yaml_path.exists():
+            continue
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f) or {}
+        overlay_name = data.get("name", code)
+        for ident in data.get("identifiers", []):
+            hints = [h.lower() for h in ident.get("column_hints", [])]
+            matched = [hint for hint in hints if hint and hint in ddl_lower]
+            if not matched:
+                continue
+            fn = ident.get("masking_function") or ""
+            comment_key = (
+                overlay_name,
+                ident.get("name", ""),
+                fn,
+                tuple(sorted(set(matched))),
+            )
+            if comment_key in seen_comments:
+                continue
+            seen_comments.add(comment_key)
+            fn_text = f" use `{fn}`" if fn and fn != "null" else ""
+            matched_lines.append(
+                f"- `{overlay_name}` detected `{ident.get('name', '')}` via {sorted(set(matched))};{fn_text}"
+            )
+            if fn and fn != "null":
+                seen_functions.add(fn)
+
+    if not matched_lines:
+        return "", ""
+
+    prompt = (
+        "\n### OVERLAY MATCHES DETECTED IN THE DDL\n\n"
+        "The following overlay-specific identifiers are present in the schema. "
+        "Your generated ABAC output must preserve coverage for each matched domain"
+        " and include the corresponding masking concepts and functions when applicable.\n"
+        + "\n".join(matched_lines)
+        + "\n"
+    )
+    comments = (
+        "# Overlay-specific identifiers detected in the DDL.\n"
+        "# Preserve coverage for these domains in the generated config:\n"
+        + "\n".join(f"# {line[2:]}" if line.startswith("- ") else f"# {line}" for line in matched_lines)
+        + "\n"
+    )
+    return prompt, comments
+
+
 def _load_tfvars(path: Path, label: str) -> dict:
     """Load a single .tfvars file. Returns empty dict if not found."""
     if not path.exists():
@@ -239,7 +326,7 @@ def load_auth_config(auth_file: Path, env_file: Path | None = None) -> dict:
 
 
 def configure_databricks_env(auth_cfg: dict):
-    """Set Databricks SDK env vars from auth config if not already set."""
+    """Set Databricks SDK env vars from auth config."""
     mapping = {
         "databricks_workspace_host": "DATABRICKS_HOST",
         "databricks_client_id": "DATABRICKS_CLIENT_ID",
@@ -247,7 +334,7 @@ def configure_databricks_env(auth_cfg: dict):
     }
     for tfvar_key, env_key in mapping.items():
         val = auth_cfg.get(tfvar_key, "")
-        if val and not os.environ.get(env_key):
+        if val:
             os.environ[env_key] = val
 
 
@@ -826,6 +913,8 @@ def build_prompt(ddl_text: str,
             "The SQL code block should be empty or omitted.\n\n"
         )
 
+    vocabulary_instruction = REGISTRY.render_prompt_block() + "\n"
+
     country_instruction = ""
     if countries:
         country_instruction = load_country_overlays(countries)
@@ -833,17 +922,29 @@ def build_prompt(ddl_text: str,
     industry_instruction = ""
     if industries:
         industry_instruction = load_industry_overlays(industries)
+    overlay_detection_prompt = ""
+    if industries:
+        overlay_detection_prompt, _ = build_industry_detection_guidance(
+            ddl_text,
+            industries,
+        )
 
     if idx == -1:
         print("WARNING: Could not find '### MY TABLES' in ABAC_PROMPT.md")
         print("  Appending DDL at the end of the prompt instead.\n")
-        prompt = template + f"\n\n{per_space_instruction}{country_instruction}{industry_instruction}{groups_lines}{space_names_lines}{cs_lines}\n\n{ddl_text}\n"
+        prompt = template + (
+            f"\n\n{per_space_instruction}{vocabulary_instruction}"
+            f"{country_instruction}{industry_instruction}{overlay_detection_prompt}"
+            f"{groups_lines}{space_names_lines}{cs_lines}\n\n{ddl_text}\n"
+        )
     else:
         prompt_body = template[:idx].rstrip()
         user_input = (
             f"\n\n{per_space_instruction}"
+            f"{vocabulary_instruction}"
             f"{country_instruction}"
             f"{industry_instruction}"
+            f"{overlay_detection_prompt}"
             f"{groups_lines}"
             f"{space_names_lines}"
             f"### MY TABLES\n\n"
@@ -860,7 +961,52 @@ def extract_code_blocks(response_text: str) -> tuple[str | None, str | None]:
     sql_block = None
     hcl_block = None
 
-    blocks = re.findall(r"```(\w*)\n(.*?)```", response_text, re.DOTALL)
+    blocks = re.findall(
+        r"```[ \t]*([A-Za-z0-9_-]*)[^\n]*\n?(.*?)```",
+        response_text,
+        re.DOTALL,
+    )
+
+    def _looks_like_hcl(content: str) -> bool:
+        markers = (
+            "groups",
+            "tag_policies",
+            "tag_assignments",
+            "fgac_policies",
+            "genie_space_configs",
+            "uc_tables",
+        )
+        hits = sum(1 for marker in markers if re.search(rf"(?m)^\s*{marker}\s*=", content))
+        return hits >= 2 or (
+            "genie_space_configs" in content and "sample_questions" in content
+        )
+
+    def _extract_hcl_fallback(text: str) -> str | None:
+        hcl_fence = re.search(r"```[ \t]*(hcl|terraform|tfvars)[^\n]*\n?(.*)$", text, re.DOTALL | re.IGNORECASE)
+        if hcl_fence:
+            candidate = hcl_fence.group(2).strip()
+            return candidate if _looks_like_hcl(candidate) else None
+
+        lines = text.splitlines()
+        start = None
+        for idx, line in enumerate(lines):
+            if re.match(
+                r"^\s*(groups|tag_policies|tag_assignments|fgac_policies|genie_space_configs|uc_tables)\s*=",
+                line,
+            ):
+                start = idx
+                break
+        if start is None:
+            return None
+
+        candidate_lines: list[str] = []
+        for line in lines[start:]:
+            stripped = line.strip()
+            if candidate_lines and stripped.startswith("```"):
+                break
+            candidate_lines.append(line)
+        candidate = "\n".join(candidate_lines).strip()
+        return candidate if _looks_like_hcl(candidate) else None
 
     for lang, content in blocks:
         content = content.strip()
@@ -872,8 +1018,11 @@ def extract_code_blocks(response_text: str) -> tuple[str | None, str | None]:
             hcl_block = content
         elif not lang and sql_block is None and "CREATE" in content.upper() and "FUNCTION" in content.upper():
             sql_block = content
-        elif not lang and hcl_block is None and "groups" in content and "tag_policies" in content:
+        elif not lang and hcl_block is None and _looks_like_hcl(content):
             hcl_block = content
+
+    if hcl_block is None:
+        hcl_block = _extract_hcl_fallback(response_text)
 
     return sql_block, hcl_block
 
@@ -1050,6 +1199,46 @@ def sanitize_tfvars_hcl(hcl_block: str) -> str:
     text = insert_before(r"^genie_space_configs\s*=\s*\{", genie_configs_block, text)
 
     return text
+
+
+def _trim_incomplete_genie_tail(hcl_block: str) -> tuple[str, int]:
+    """Trim a truncated legacy Genie tail when the LLM cuts off mid-section.
+
+    Overlay responses sometimes end partway through `genie_sample_questions`,
+    `genie_benchmarks`, or similar legacy single-space keys. When that happens,
+    the ABAC sections above are still useful, but the trailing incomplete Genie
+    fragment makes the whole tfvars file unparsable. If we detect one of these
+    trailing keys without a balanced closing structure, trim from that key onward.
+    """
+    trailing_keys = (
+        "genie_space_title",
+        "genie_space_description",
+        "genie_sample_questions",
+        "genie_instructions",
+        "genie_benchmarks",
+        "genie_sql_filters",
+        "genie_sql_expressions",
+        "genie_sql_measures",
+        "genie_join_specs",
+        "genie_acl_groups",
+        "genie_space_configs",
+    )
+    pattern = re.compile(
+        rf"(?m)^\s*(?:{'|'.join(re.escape(k) for k in trailing_keys)})\s*="
+    )
+    matches = list(pattern.finditer(hcl_block))
+    if not matches:
+        return hcl_block, 0
+
+    last = matches[-1]
+    prefix = hcl_block[:last.start()]
+    suffix = hcl_block[last.start():]
+    opens = suffix.count("[") + suffix.count("{")
+    closes = suffix.count("]") + suffix.count("}")
+    if opens <= closes:
+        return hcl_block, 0
+    trimmed = prefix.rstrip() + "\n"
+    return trimmed, 1
 
 
 def call_anthropic(prompt: str, model: str) -> str:
@@ -1304,32 +1493,17 @@ def _fetch_live_tag_policy_values() -> dict[str, set[str]]:
     Returns {tag_key: set(values)}.  Returns an empty dict on any failure
     (network, auth, API unavailable) so callers can proceed without live data.
     """
-    import ssl
-    import urllib.request
-    import json as _json
-
     try:
         from databricks.sdk import WorkspaceClient
         w = WorkspaceClient(product="genierails", product_version="0.1.0")
-        token = w.config.authenticate()
-        host = (os.environ.get("DATABRICKS_HOST") or "").rstrip("/")
-        if not host:
-            return {}
-
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
-
-        req = urllib.request.Request(
-            f"{host}/api/2.1/unity-catalog/tag-policies", headers=token,
-        )
-        with urllib.request.urlopen(req, timeout=30, context=ssl_ctx) as resp:
-            data = _json.loads(resp.read())
-
         result: dict[str, set[str]] = {}
-        for tp in data.get("tag_policies", []):
-            tag_key = tp.get("tag_key", "")
-            values = {v.get("name", "") for v in (tp.get("values") or []) if v.get("name")}
+        for tp in w.tag_policies.list_tag_policies():
+            tag_key = getattr(tp, "tag_key", "") or ""
+            values = {
+                getattr(v, "name", "") or ""
+                for v in (getattr(tp, "values", None) or [])
+                if getattr(v, "name", "") or ""
+            }
             if tag_key:
                 result[tag_key] = values
         return result
@@ -1393,9 +1567,12 @@ def autofix_tag_policies(tfvars_path: Path) -> int:
             text, re.DOTALL,
         ):
             used.setdefault(m.group(2), set()).add(m.group(1))
-    # Also collect from hasTagValue() in fgac_policies conditions
-    for m in re.finditer(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", text):
-        used.setdefault(m.group(1), set()).add(m.group(2))
+    # NOTE: We intentionally do NOT add values from hasTagValue() in FGAC
+    # conditions.  The LLM sometimes hallucinate tag values in conditions
+    # (e.g. 'full_card' when the policy only defines 'masked_card_last4').
+    # Adding these to the tag policy would promote hallucinations into valid
+    # values.  Instead, autofix_invalid_condition_values() (below) removes
+    # FGAC policies that reference values not in the tag policy.
 
     added_total = 0
     for key in used:
@@ -1804,6 +1981,10 @@ def autofix_invalid_tag_values(tfvars_path: Path) -> int:
     for ta in cfg.get("tag_assignments", []):
         k = ta.get("tag_key", "")
         v = ta.get("tag_value", "")
+        registry_allowed = REGISTRY.is_allowed_value(k, v)
+        if registry_allowed is False:
+            bad_pairs.add((k, v))
+            continue
         if k in allowed and v and v not in allowed[k]:
             bad_pairs.add((k, v))
 
@@ -2316,6 +2497,70 @@ def _find_brace_blocks(text: str) -> list[tuple[int, int]]:
     return blocks
 
 
+def _replace_bracket_section(text: str, section_name: str, new_items: list[str]) -> str:
+    section = _find_bracket_section(text, section_name)
+    if section is None:
+        return text
+    sec_start, sec_end = section
+    if new_items:
+        new_section = "\n" + ",\n".join(new_items) + "\n"
+    else:
+        new_section = "\n"
+    return text[:sec_start] + new_section + text[sec_end:]
+
+
+def _render_tag_policy_block(policy: dict) -> str:
+    lines = ["  {"]
+    lines.append(f'    key = "{policy.get("key", "")}"')
+    description = policy.get("description", "")
+    if description:
+        lines.append(f'    description = "{description}"')
+    values = policy.get("values", []) or []
+    rendered_values = "[" + ", ".join(f'"{v}"' for v in values) + "]"
+    lines.append(f"    values = {rendered_values}")
+    lines.append("  }")
+    return "\n".join(lines)
+
+
+def _render_tag_assignment_block(assignment: dict) -> str:
+    lines = ["  {"]
+    ordered_keys = ["entity_type", "entity_name", "tag_key", "tag_value"]
+    for key in ordered_keys:
+        value = assignment.get(key, "")
+        lines.append(f'    {key} = "{value}"')
+    lines.append("  }")
+    return "\n".join(lines)
+
+
+def _render_fgac_policy_block(policy: dict) -> str:
+    lines = ["  {"]
+    ordered_keys = [
+        "name",
+        "policy_type",
+        "catalog",
+        "to_principals",
+        "except_principals",
+        "comment",
+        "match_condition",
+        "when_condition",
+        "match_alias",
+        "function_name",
+        "function_catalog",
+        "function_schema",
+    ]
+    for key in ordered_keys:
+        value = policy.get(key)
+        if value in (None, "", []):
+            continue
+        if isinstance(value, list):
+            rendered = "[" + ", ".join(f'"{v}"' for v in value) + "]"
+        else:
+            rendered = f'"{value}"'
+        lines.append(f"    {key:<16} = {rendered}")
+    lines.append("  }")
+    return "\n".join(lines)
+
+
 def _parse_sql_function_names(sql_path: Path | None) -> set[str]:
     if not sql_path or not sql_path.exists():
         return set()
@@ -2453,6 +2698,146 @@ def autofix_ambiguous_tag_values(tfvars_path: Path) -> int:
                 text = text[:tp_match.start(2)] + new_vals + text[tp_match.end(2):]
                 print(f"  [AUTOFIX] Added '{norm_val}' to tag_policy '{tag_key}'")
 
+    tfvars_path.write_text(text)
+    return updates
+
+
+def autofix_canonical_tag_vocabulary(tfvars_path: Path) -> int:
+    """Normalize tag keys/values and collapse duplicate tag_policies entries."""
+    text = tfvars_path.read_text()
+    try:
+        import hcl2
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    updates = 0
+
+    policies = cfg.get("tag_policies", []) or []
+    merged_policies: list[dict] = []
+    merged_by_key: dict[str, dict] = {}
+    for policy in policies:
+        if isinstance(policy, list):
+            policy = policy[0] if policy else {}
+        key = policy.get("key", "")
+        if not key:
+            continue
+        canonical_key = _canonical_tag_key(key)
+        if canonical_key != key:
+            updates += 1
+            print(f"  [AUTOFIX] Normalized tag_policy key '{key}' to '{canonical_key}'")
+        normalized_values: list[str] = []
+        for value in policy.get("values", []) or []:
+            canonical_value = _canonical_tag_value(canonical_key, value)
+            if canonical_value != value:
+                updates += 1
+                print(
+                    f"  [AUTOFIX] Normalized tag_policy value '{value}' "
+                    f"to '{canonical_value}' for key '{canonical_key}'"
+                )
+            if REGISTRY.is_allowed_value(canonical_key, canonical_value) is False:
+                updates += 1
+                print(
+                    f"  [AUTOFIX] Removed tag_policy value '{canonical_value}' "
+                    f"for key '{canonical_key}' because it is not in the registry"
+                )
+                continue
+            if canonical_value not in normalized_values:
+                normalized_values.append(canonical_value)
+
+        entry = merged_by_key.get(canonical_key)
+        if entry is None:
+            entry = {
+                "key": canonical_key,
+                "description": policy.get("description", ""),
+                "values": [],
+            }
+            merged_by_key[canonical_key] = entry
+            merged_policies.append(entry)
+        elif key != canonical_key:
+            updates += 1
+        if not entry.get("description") and policy.get("description"):
+            entry["description"] = policy.get("description", "")
+        for value in normalized_values:
+            if value not in entry["values"]:
+                entry["values"].append(value)
+
+    assignments = cfg.get("tag_assignments", []) or []
+    normalized_assignments: list[dict] = []
+    seen_assignments: set[tuple[str, str, str, str]] = set()
+    for assignment in assignments:
+        if isinstance(assignment, list):
+            assignment = assignment[0] if assignment else {}
+        normalized = dict(assignment)
+        key = normalized.get("tag_key", "")
+        value = normalized.get("tag_value", "")
+        canonical_key = _canonical_tag_key(key)
+        canonical_value = _canonical_tag_value(canonical_key, value)
+        if canonical_key != key:
+            updates += 1
+            print(f"  [AUTOFIX] Normalized tag_assignment key '{key}' to '{canonical_key}'")
+        if canonical_value != value:
+            updates += 1
+            print(
+                f"  [AUTOFIX] Normalized tag_assignment value '{value}' "
+                f"to '{canonical_value}' for key '{canonical_key}'"
+            )
+        normalized["tag_key"] = canonical_key
+        normalized["tag_value"] = canonical_value
+        signature = (
+            normalized.get("entity_type", ""),
+            normalized.get("entity_name", ""),
+            canonical_key,
+            canonical_value,
+        )
+        if signature in seen_assignments:
+            updates += 1
+            print(
+                "  [AUTOFIX] Removed duplicate tag_assignment "
+                f"'{signature[1]} {canonical_key}={canonical_value}'"
+            )
+            continue
+        seen_assignments.add(signature)
+        normalized_assignments.append(normalized)
+
+    policies_cfg = cfg.get("fgac_policies", []) or []
+    normalized_fgac_policies: list[dict] = []
+    for policy in policies_cfg:
+        if isinstance(policy, list):
+            policy = policy[0] if policy else {}
+        normalized = dict(policy)
+        for field in ("match_condition", "when_condition"):
+            condition = normalized.get(field, "")
+            if not condition:
+                continue
+            normalized_condition, n_updates = _normalize_has_tag_refs(str(condition))
+            if n_updates:
+                updates += n_updates
+                print(
+                    f"  [AUTOFIX] Normalized {n_updates} tag ref(s) in "
+                    f"fgac_policy '{normalized.get('name', '?')}' field '{field}'"
+                )
+                normalized[field] = normalized_condition
+        normalized_fgac_policies.append(normalized)
+
+    if not updates:
+        return 0
+
+    text = _replace_bracket_section(
+        text,
+        "tag_policies",
+        [_render_tag_policy_block(policy) for policy in merged_policies],
+    )
+    text = _replace_bracket_section(
+        text,
+        "tag_assignments",
+        [_render_tag_assignment_block(assignment) for assignment in normalized_assignments],
+    )
+    text = _replace_bracket_section(
+        text,
+        "fgac_policies",
+        [_render_fgac_policy_block(policy) for policy in normalized_fgac_policies],
+    )
     tfvars_path.write_text(text)
     return updates
 
@@ -2997,6 +3382,46 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
     if fixed:
         tfvars_path.write_text(text)
     return fixed
+
+
+def autofix_missing_genie_space_entries(tfvars_path: Path, auth_cfg: dict) -> int:
+    """Ensure each configured Genie space has a genie_space_configs entry."""
+    configured_spaces = auth_cfg.get("genie_spaces", []) or []
+    if not configured_spaces or not tfvars_path.exists():
+        return 0
+
+    try:
+        import hcl2
+        parsed = hcl2.loads(tfvars_path.read_text())
+    except Exception:
+        return 0
+
+    genie_cfgs = parsed.get("genie_space_configs") or {}
+    if isinstance(genie_cfgs, list):
+        genie_cfgs = genie_cfgs[0] if genie_cfgs else {}
+    genie_cfgs = dict(genie_cfgs)
+
+    added = 0
+    for space in configured_spaces:
+        if isinstance(space, list):
+            space = space[0] if space else {}
+        if not isinstance(space, dict):
+            continue
+        name = str(space.get("name") or "").strip()
+        if not name or name in genie_cfgs:
+            continue
+        genie_cfgs[name] = {}
+        added += 1
+        print(f"  [AUTOFIX] Added missing genie_space_configs entry for '{name}'")
+
+    if not added:
+        return 0
+
+    text = tfvars_path.read_text()
+    text = remove_hcl_top_level_block(text, "genie_space_configs")
+    text = text.rstrip() + "\n\n" + format_genie_space_configs_hcl(genie_cfgs) + "\n"
+    tfvars_path.write_text(text)
+    return added
 
 
 _GENERIC_FUNCTION_PREFS = ["mask_pii_partial", "mask_redact", "mask_nullify", "mask_hash"]
@@ -3651,6 +4076,166 @@ def autofix_forbidden_conditions(tfvars_path: Path) -> int:
     return removed
 
 
+def autofix_invalid_condition_values(tfvars_path: Path) -> int:
+    """Remove FGAC policies whose conditions reference tag values not in tag_policies.
+
+    The LLM sometimes generates hasTagValue('pci_level', 'full_card') in conditions
+    when the tag_policy only defines ['public', 'masked_card_last4', 'redacted_cvv'].
+    Databricks rejects these at query time with INVALID_TAG_POLICY_VALUE.
+
+    Also removes policies that reference tag_keys not defined in tag_policies
+    (complementing autofix_undefined_tag_refs which may miss condition-only refs).
+
+    Returns the number of policies removed.
+    """
+    try:
+        import hcl2
+        cfg = hcl2.loads(tfvars_path.read_text())
+    except Exception:
+        return 0
+
+    # Build allowed map: tag_key → set of allowed values
+    allowed: dict[str, set[str]] = {}
+    for tp in cfg.get("tag_policies", []):
+        k = tp.get("key", "")
+        vals = tp.get("values", [])
+        if k and vals:
+            allowed[k] = set(vals)
+
+    if not allowed:
+        return 0
+
+    policies = cfg.get("fgac_policies") or []
+    if isinstance(policies, list) and len(policies) == 1 and isinstance(policies[0], list):
+        policies = policies[0]
+
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+
+    # Find policies with invalid tag refs in conditions
+    bad_names: list[str] = []
+    for p in policies:
+        if isinstance(p, list):
+            p = p[0] if p else {}
+        name = _s(p.get("name", ""))
+        if not name:
+            continue
+        condition = _s(p.get("match_condition", "")) + " " + _s(p.get("when_condition", ""))
+        # Check each hasTagValue('key', 'value') reference
+        for m in re.finditer(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", condition):
+            ref_key, ref_val = m.group(1), m.group(2)
+            if ref_key not in allowed:
+                bad_names.append(name)
+                print(f"  [AUTOFIX] Removing fgac_policy '{name}': "
+                      f"condition references undefined tag_key '{ref_key}'")
+                break
+            if ref_val not in allowed[ref_key]:
+                bad_names.append(name)
+                print(f"  [AUTOFIX] Removing fgac_policy '{name}': "
+                      f"condition uses tag_value '{ref_val}' not in "
+                      f"tag_policy '{ref_key}' {sorted(allowed[ref_key])}")
+                break
+        # Check hasTag('key') references
+        for m in re.finditer(r"hasTag\(\s*'([^']+)'\s*\)", condition):
+            ref_key = m.group(1)
+            if ref_key not in allowed and name not in bad_names:
+                bad_names.append(name)
+                print(f"  [AUTOFIX] Removing fgac_policy '{name}': "
+                      f"condition references undefined tag_key '{ref_key}' in hasTag()")
+                break
+
+    if not bad_names:
+        return 0
+
+    text = tfvars_path.read_text()
+    for name in bad_names:
+        escaped = re.escape(name)
+        pattern = re.compile(
+            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
+            re.DOTALL,
+        )
+        text = pattern.sub("", text, count=1)
+
+    text = re.sub(r',\s*,', ',', text)
+    text = re.sub(r',\s*\]', '\n  ]', text)
+    tfvars_path.write_text(text)
+    return len(bad_names)
+
+
+def autofix_malformed_conditions(tfvars_path: Path) -> int:
+    """Remove FGAC policies with syntactically invalid conditions.
+
+    Catches compilation errors that would fail at Terraform apply time:
+    - Unbalanced parentheses
+    - Conditions that are just bare strings (not function calls)
+    - Empty conditions for column mask policies (match_condition required)
+
+    Returns the number of policies removed.
+    """
+    try:
+        import hcl2
+        cfg = hcl2.loads(tfvars_path.read_text())
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies") or []
+    if isinstance(policies, list) and len(policies) == 1 and isinstance(policies[0], list):
+        policies = policies[0]
+
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+
+    bad_names: list[str] = []
+    for p in policies:
+        if isinstance(p, list):
+            p = p[0] if p else {}
+        name = _s(p.get("name", ""))
+        policy_type = _s(p.get("policy_type", ""))
+        if not name:
+            continue
+
+        match_cond = _s(p.get("match_condition", ""))
+        when_cond = _s(p.get("when_condition", ""))
+
+        # Column masks require a non-empty match_condition
+        if policy_type == "POLICY_TYPE_COLUMN_MASK" and not match_cond:
+            bad_names.append(name)
+            print(f"  [AUTOFIX] Removing fgac_policy '{name}': "
+                  f"COLUMN_MASK missing required match_condition")
+            continue
+
+        for cond_label, condition in [("match_condition", match_cond), ("when_condition", when_cond)]:
+            if not condition:
+                continue
+            # Unbalanced parentheses
+            if condition.count("(") != condition.count(")"):
+                bad_names.append(name)
+                print(f"  [AUTOFIX] Removing fgac_policy '{name}': "
+                      f"unbalanced parentheses in {cond_label}")
+                break
+            # Condition must contain at least one hasTagValue() or hasTag() call
+            if "hasTagValue(" not in condition and "hasTag(" not in condition:
+                bad_names.append(name)
+                print(f"  [AUTOFIX] Removing fgac_policy '{name}': "
+                      f"{cond_label} has no hasTagValue()/hasTag() calls")
+                break
+
+    if not bad_names:
+        return 0
+
+    text = tfvars_path.read_text()
+    for name in bad_names:
+        escaped = re.escape(name)
+        pattern = re.compile(
+            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
+            re.DOTALL,
+        )
+        text = pattern.sub("", text, count=1)
+
+    text = re.sub(r',\s*,', ',', text)
+    text = re.sub(r',\s*\]', '\n  ]', text)
+    tfvars_path.write_text(text)
+    return len(bad_names)
+
+
 def sanitize_space_key(name: str) -> str:
     """Convert a human-readable space name to a safe directory/Terraform key.
 
@@ -3703,16 +4288,38 @@ def bootstrap_per_space_dirs(out_dir: Path, auth_cfg: dict, hcl_text: str) -> No
 
     try:
         parsed = hcl2.load(io.StringIO(source_text))
-        genie_cfgs: dict = parsed.get("genie_space_configs") or {}
+        genie_cfgs = parsed.get("genie_space_configs") or {}
     except Exception as e:
         print(f"  WARNING: Could not parse genie_space_configs for bootstrap: {e}")
         return
 
-    if not genie_cfgs:
+    if isinstance(genie_cfgs, list):
+        genie_cfgs = genie_cfgs[0] if genie_cfgs and isinstance(genie_cfgs[0], dict) else {}
+
+    if not isinstance(genie_cfgs, dict):
+        genie_cfgs = {}
+
+    configured_spaces = auth_cfg.get("genie_spaces", []) or []
+    bootstrapped_cfgs: dict[str, dict] = {}
+    for sp in configured_spaces:
+        space_name = sp.get("name") or sp.get("genie_space_id") or ""
+        if not space_name:
+            continue
+        cfg = genie_cfgs.get(space_name)
+        if not isinstance(cfg, dict):
+            cfg = dict(sp.get("config") or {})
+            cfg.setdefault("title", space_name)
+        bootstrapped_cfgs[space_name] = cfg
+
+    for space_name, cfg in genie_cfgs.items():
+        if isinstance(cfg, dict):
+            bootstrapped_cfgs.setdefault(space_name, cfg)
+
+    if not bootstrapped_cfgs:
         return
 
     spaces_dir = out_dir / "spaces"
-    for space_name, cfg in genie_cfgs.items():
+    for space_name, cfg in bootstrapped_cfgs.items():
         key = sanitize_space_key(space_name)
         space_dir = spaces_dir / key
         space_dir.mkdir(parents=True, exist_ok=True)
@@ -3730,7 +4337,7 @@ def bootstrap_per_space_dirs(out_dir: Path, auth_cfg: dict, hcl_text: str) -> No
         space_abac.write_text(content)
 
     print(
-        f"  Bootstrapped {len(genie_cfgs)} per-space dir(s) under {spaces_dir.relative_to(out_dir.parent) if out_dir.parent != out_dir else spaces_dir}"
+        f"  Bootstrapped {len(bootstrapped_cfgs)} per-space dir(s) under {spaces_dir.relative_to(out_dir.parent) if out_dir.parent != out_dir else spaces_dir}"
     )
 
 
@@ -4008,6 +4615,81 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]
                     f"in condition — only hasTagValue() and hasTag() are allowed"
                 )
                 break
+
+    # Check 5: no non-canonical tag keys / values remain for normalized families
+    for tp in cfg.get("tag_policies", []):
+        key = tp.get("key", "")
+        canonical_key = _canonical_tag_key(key)
+        if canonical_key != key:
+            errors.append(
+                f"tag_policy key '{key}' is non-canonical; expected '{canonical_key}'"
+            )
+        for value in tp.get("values", []) or []:
+            canonical_value = _canonical_tag_value(canonical_key, value)
+            if canonical_value != value:
+                errors.append(
+                    f"tag_policy '{canonical_key}' uses non-canonical value '{value}' "
+                    f"(expected '{canonical_value}')"
+                )
+            elif REGISTRY.is_allowed_value(canonical_key, value) is False:
+                allowed_values = sorted(REGISTRY.canonical_values_for_key(canonical_key) or [])
+                errors.append(
+                    f"tag_policy '{canonical_key}' uses unknown canonical value '{value}' "
+                    f"(allowed: {allowed_values})"
+                )
+
+    for ta in cfg.get("tag_assignments", []):
+        key = ta.get("tag_key", "")
+        value = ta.get("tag_value", "")
+        canonical_key = _canonical_tag_key(key)
+        canonical_value = _canonical_tag_value(canonical_key, value)
+        if canonical_key != key:
+            errors.append(
+                f"tag_assignment key '{key}' is non-canonical; expected '{canonical_key}'"
+            )
+        if canonical_value != value:
+            errors.append(
+                f"tag_assignment '{key}={value}' is non-canonical; "
+                f"expected '{canonical_key}={canonical_value}'"
+            )
+        elif REGISTRY.is_allowed_value(canonical_key, value) is False:
+            allowed_values = sorted(REGISTRY.canonical_values_for_key(canonical_key) or [])
+            errors.append(
+                f"tag_assignment '{canonical_key}={value}' uses unknown canonical value "
+                f"(allowed: {allowed_values})"
+            )
+
+    for pol in cfg.get("fgac_policies", []):
+        if isinstance(pol, list):
+            pol = pol[0] if pol else {}
+        condition = " ".join(
+            str(pol.get(field, "") or "")
+            for field in ("match_condition", "when_condition")
+        )
+        for key, value in re.findall(
+            r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)",
+            condition,
+        ):
+            canonical_key = _canonical_tag_key(key)
+            canonical_value = _canonical_tag_value(canonical_key, value)
+            if canonical_key != key or canonical_value != value:
+                errors.append(
+                    f"fgac_policy '{pol.get('name', '?')}' uses non-canonical "
+                    f"hasTagValue('{key}', '{value}')"
+                )
+            elif REGISTRY.is_allowed_value(canonical_key, value) is False:
+                allowed_values = sorted(REGISTRY.canonical_values_for_key(canonical_key) or [])
+                errors.append(
+                    f"fgac_policy '{pol.get('name', '?')}' uses unknown canonical "
+                    f"hasTagValue('{canonical_key}', '{value}') (allowed: {allowed_values})"
+                )
+        for key in re.findall(r"hasTag\(\s*'([^']+)'\s*\)", condition):
+            canonical_key = _canonical_tag_key(key)
+            if canonical_key != key:
+                errors.append(
+                    f"fgac_policy '{pol.get('name', '?')}' uses non-canonical "
+                    f"hasTag('{key}')"
+                )
 
     return errors
 
@@ -4360,6 +5042,13 @@ def main():
         if names:
             configured_space_names = names
 
+    overlay_detection_comments = ""
+    if industries:
+        _, overlay_detection_comments = build_industry_detection_guidance(
+            ddl_text,
+            industries,
+        )
+
     prompt = build_prompt(
         ddl_text,
         catalog_schemas=catalog_schemas,
@@ -4511,6 +5200,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
             )
 
         hcl_block = sanitize_tfvars_hcl(hcl_block)
+        trimmed_hcl, genie_tail_repairs = _trim_incomplete_genie_tail(hcl_block)
+        if genie_tail_repairs:
+            hcl_block = trimmed_hcl
+            print(
+                "  [AUTOFIX] Trimmed incomplete trailing Genie section from generated tfvars"
+            )
 
         # ── Mode-based output filtering ───────────────────────────────────────
         if args.mode == "governance":
@@ -4594,10 +5289,15 @@ Before you apply, tune for your business roles, security requirements, and Genie
             )
 
         tfvars_path = out_dir / "abac.auto.tfvars"
-        tfvars_path.write_text(hcl_header + hcl_block + "\n")
+        extra_comments = overlay_detection_comments if overlay_detection_comments else ""
+        tfvars_path.write_text(hcl_header + extra_comments + hcl_block + "\n")
         print(f"  abac.auto.tfvars written to: {tfvars_path}")
 
         fix_hcl_syntax(tfvars_path)
+
+        n_canonical = autofix_canonical_tag_vocabulary(tfvars_path)
+        if n_canonical:
+            print(f"  Auto-fixed: normalized {n_canonical} tag vocabulary reference(s)")
 
         n_normalized = autofix_ambiguous_tag_values(tfvars_path)
         if n_normalized:
@@ -4642,6 +5342,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_fields:
             print(f"  Auto-fixed: added {n_fields} missing required field(s) in genie_space_configs")
 
+        n_missing_spaces = autofix_missing_genie_space_entries(tfvars_path, auth_cfg)
+        if n_missing_spaces:
+            print(f"  Auto-fixed: added {n_missing_spaces} missing genie_space_configs entr(y/ies)")
+
         env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
         n_acl = autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
         if n_acl:
@@ -4667,6 +5371,26 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_forbidden:
             print(f"  Auto-fixed: removed {n_forbidden} fgac_policy/ies with unsupported condition functions")
 
+        n_bad_cond_vals = autofix_invalid_condition_values(tfvars_path)
+        if n_bad_cond_vals:
+            print(f"  Auto-fixed: removed {n_bad_cond_vals} fgac_policy/ies with invalid tag values in conditions")
+
+        n_malformed = autofix_malformed_conditions(tfvars_path)
+        if n_malformed:
+            print(f"  Auto-fixed: removed {n_malformed} fgac_policy/ies with malformed conditions")
+
+        # Final cleanup: re-run invalid tag values + ambiguous to catch anything
+        # introduced by intermediate autofixes (e.g. autofix_missing_fgac_policies).
+        n_final_bad = autofix_invalid_tag_values(tfvars_path)
+        if n_final_bad:
+            print(f"  Auto-fixed (final pass): removed {n_final_bad} tag_assignment(s) with invalid values")
+        n_final_ambig = autofix_ambiguous_tag_values(tfvars_path)
+        if n_final_ambig:
+            print(f"  Auto-fixed (final pass): normalized {n_final_ambig} ambiguous tag_assignment value(s)")
+        n_final_canonical = autofix_canonical_tag_vocabulary(tfvars_path)
+        if n_final_canonical:
+            print(f"  Auto-fixed (final pass): normalized {n_final_canonical} tag vocabulary reference(s)")
+
         # ── Semantic quality check (catches LLM issues that autofix can't fix) ──
         semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)
         if semantic_errors:
@@ -4680,8 +5404,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 new_sql, new_hcl = extract_code_blocks(response_text)
                 if new_hcl:
                     hcl_block = new_hcl
-                    tfvars_path.write_text(hcl_header + hcl_block + "\n")
+                    extra_comments = overlay_detection_comments if overlay_detection_comments else ""
+                    tfvars_path.write_text(hcl_header + extra_comments + hcl_block + "\n")
                     fix_hcl_syntax(tfvars_path)
+                    autofix_canonical_tag_vocabulary(tfvars_path)
                     autofix_ambiguous_tag_values(tfvars_path)
                     autofix_invalid_tag_values(tfvars_path)
                     autofix_tag_policies(tfvars_path)
@@ -4692,6 +5418,9 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_arg_count_mismatch(tfvars_path, sql_path if sql_block else None)
                     autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
+                    autofix_forbidden_conditions(tfvars_path)
+                    autofix_invalid_condition_values(tfvars_path)
+                    autofix_malformed_conditions(tfvars_path)
                 if new_sql:
                     sql_block = new_sql
                     sql_path = out_dir / "masking_functions.sql"
@@ -4718,6 +5447,9 @@ Before you apply, tune for your business roles, security requirements, and Genie
             assembled_abac_path = assembled_dir / "abac.auto.tfvars"
             if assembled_abac_path.exists():
                 assembled_sql_path = assembled_dir / "masking_functions.sql"
+                n_canonical_assembled = autofix_canonical_tag_vocabulary(assembled_abac_path)
+                if n_canonical_assembled:
+                    print(f"  Auto-fixed assembled abac: normalized {n_canonical_assembled} tag vocabulary reference(s)")
                 n_normalized_assembled = autofix_ambiguous_tag_values(assembled_abac_path)
                 if n_normalized_assembled:
                     print(f"  Auto-fixed assembled abac: normalized {n_normalized_assembled} ambiguous tag_assignment value(s)")
@@ -4742,6 +5474,9 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 n_fields_assembled = autofix_genie_config_fields(assembled_abac_path)
                 if n_fields_assembled:
                     print(f"  Auto-fixed assembled abac: added {n_fields_assembled} missing required field(s) in genie_space_configs")
+                n_missing_spaces_assembled = autofix_missing_genie_space_entries(assembled_abac_path, auth_cfg)
+                if n_missing_spaces_assembled:
+                    print(f"  Auto-fixed assembled abac: added {n_missing_spaces_assembled} missing genie_space_configs entr(y/ies)")
                 n_fn_refs_assembled = autofix_invalid_function_refs(
                     assembled_abac_path,
                     assembled_sql_path if assembled_sql_path.exists() else None,
