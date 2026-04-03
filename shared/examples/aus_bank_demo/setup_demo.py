@@ -563,7 +563,13 @@ def _create_genie_space(dev_state: dict) -> str:
             wh_id = wh.id
             break
 
-    tables = f"{DEV_CATALOG}.{SCHEMA}.*"
+    # Use explicit table names (not wildcards) to avoid UC API propagation delay
+    tables = ",".join([
+        f"{DEV_CATALOG}.{SCHEMA}.customers",
+        f"{DEV_CATALOG}.{SCHEMA}.accounts",
+        f"{DEV_CATALOG}.{SCHEMA}.transactions",
+        f"{DEV_CATALOG}.{SCHEMA}.credit_cards",
+    ])
 
     env = {
         **os.environ,
