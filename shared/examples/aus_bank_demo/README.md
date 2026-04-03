@@ -24,8 +24,8 @@ The setup script provisions two isolated workspaces and creates sample Australia
 cd aws   # or: cd azure
 
 # Copy the example and fill in your Account Admin SP credentials
-cp shared/scripts/account-admin.aws.env.example shared/scripts/account-admin.aws.env
-vi shared/scripts/account-admin.aws.env
+cp ../shared/scripts/account-admin.aws.env.example ../shared/scripts/account-admin.aws.env
+vi ../shared/scripts/account-admin.aws.env
 ```
 
 You need:
@@ -39,8 +39,8 @@ See [Prerequisites](../../docs/prerequisites.md) for detailed setup instructions
 ### 2. Provision the demo
 
 ```bash
-python shared/examples/aus_bank_demo/setup_demo.py provision \
-    --env-file shared/scripts/account-admin.aws.env
+python ../shared/examples/aus_bank_demo/setup_demo.py provision \
+    --env-file ../shared/scripts/account-admin.aws.env
 ```
 
 When complete, you'll see:
@@ -192,8 +192,8 @@ make destroy ENV=prod
 make destroy ENV=dev
 
 # Tear down workspaces, metastores, cloud storage — everything
-python shared/examples/aus_bank_demo/setup_demo.py teardown \
-    --env-file shared/scripts/account-admin.aws.env
+python ../shared/examples/aus_bank_demo/setup_demo.py teardown \
+    --env-file ../shared/scripts/account-admin.aws.env
 ```
 
 ---
