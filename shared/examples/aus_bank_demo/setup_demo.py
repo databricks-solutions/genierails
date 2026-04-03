@@ -417,26 +417,27 @@ def _create_prod_workspace(cfg: dict, cloud: str, metastore_id: str, dev_state: 
         client_secret=cfg.get("DATABRICKS_CLIENT_SECRET", ""),
     )
 
-    # Import the cloud provider to create the workspace
-    sys.path.insert(0, str(SCRIPTS_DIR / "cloud_providers"))
-    if cloud == "aws":
-        from aws_provider import AWSProvider
-        provider = AWSProvider()
-    else:
-        from azure_provider import AzureProvider
-        provider = AzureProvider()
-
     import secrets
-    prod_run_id = "demo-prod-" + secrets.token_hex(4)
     prod_ws_name = f"genie-demo-prod-{secrets.token_hex(5)}"
-    region = dev_state.get("region", cfg.get("DATABRICKS_AWS_REGION", "ap-southeast-2"))
+    region = dev_state.get("region", cfg.get("DATABRICKS_AWS_REGION",
+                           cfg.get("AZURE_REGION", "ap-southeast-2")))
+
+    # Build workspace creation kwargs per cloud
+    if cloud == "aws":
+        ws_kwargs = {"aws_region": region}
+    else:
+        ws_kwargs = {
+            "location": region,
+            "managed_resource_group_id": (
+                f"/subscriptions/{cfg.get('AZURE_SUBSCRIPTION_ID', '')}"
+                f"/resourceGroups/{prod_ws_name}-managed"
+            ),
+        }
 
     print(f"  Creating workspace: {prod_ws_name} in {region}...")
-    ws = a.workspaces.create(
-        workspace_name=prod_ws_name,
-        **provider.workspace_create_kwargs(cfg, region),
-    ).result()
-    prod_host = f"https://{ws.deployment_name}.cloud.databricks.com" if cloud == "aws" else ws.workspace_url
+    ws = a.workspaces.create(workspace_name=prod_ws_name, **ws_kwargs).result()
+    prod_host = (f"https://{ws.deployment_name}.cloud.databricks.com"
+                 if cloud == "aws" else (ws.workspace_url or ""))
     prod_ws_id = str(ws.workspace_id)
     print(f"  {_green('✓')} Prod workspace created: {prod_host}")
 
