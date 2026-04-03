@@ -311,6 +311,20 @@ def cmd_provision(env_file: Path) -> None:
     }
     _save_state(state)
 
+    # Copy auth files from provisioned envs/test/ to envs/dev/ and envs/account/
+    # so that `make apply ENV=dev` can find them without manual copying
+    _step("Setting up envs/dev/ and envs/account/ for make apply...")
+    test_envs = Path(dev_state.get("test_envs_dir", ""))
+    import shutil
+    for src, dst in [
+        (test_envs / "dev" / "auth.auto.tfvars", CLOUD_ROOT / "envs" / "dev" / "auth.auto.tfvars"),
+        (test_envs / "account" / "auth.auto.tfvars", CLOUD_ROOT / "envs" / "account" / "auth.auto.tfvars"),
+    ]:
+        if src.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+    print(f"  {_green('✓')} Auth credentials copied to envs/dev/ and envs/account/")
+
     # Print summary
     print()
     print("=" * 64)

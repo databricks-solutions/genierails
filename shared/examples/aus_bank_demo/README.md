@@ -80,18 +80,10 @@ Point out what's in the tables:
 ### 2a. Configure the import
 
 ```bash
-# Set up the environment directories
+# Set up the environment directories (auth credentials are already copied by setup_demo.py)
 make setup ENV=dev
 
-# Copy auth credentials from the provisioned environment
-# (the setup script printed the envs path — look for "Config dir" in the output)
-cp envs/test/dev/auth.auto.tfvars envs/dev/auth.auto.tfvars
-cp envs/test/account/auth.auto.tfvars envs/account/auth.auto.tfvars
-```
-
-Edit `envs/dev/env.auto.tfvars` — paste the Genie Space ID and table config:
-
-```bash
+# Edit env.auto.tfvars — paste the Genie Space ID and table config from setup output
 vi envs/dev/env.auto.tfvars
 ```
 
