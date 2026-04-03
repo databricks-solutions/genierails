@@ -54,22 +54,24 @@ When complete, you'll see:
 
 ---
 
-## Part 1: The Problem (2 min)
+## Part 1: The Challenge (2 min)
 
-Open the Genie Space "Kookaburra Bank Analytics" in the dev workspace UI.
+Open the Genie Space "Kookaburra Bank Analytics" in the dev workspace UI. Show the four tables — customers, accounts, transactions, credit cards.
 
-Ask natural language questions to show the ungoverned state:
+**Set the scene:**
 
-> "Show me all customer details"
+> _"The data platform team has built this Genie Space for our retail banking analysts. The tables are ready, the Space is configured — but we can't onboard business users yet. Why? Because these tables contain highly sensitive data:"_
 
-Point out the compliance risks:
-- **TFN numbers** (`123 456 789`) visible to everyone — violates Privacy Act 1988
-- **Medicare numbers** visible — violates My Health Records Act
-- **Full credit card PANs** (`4000 1234 5678 9010`) — PCI-DSS violation
-- **AML risk flags** (`HIGH_RISK`, `BLOCKED`) visible — should be restricted to compliance team
-- **BSB + account numbers** exposed — financial identity theft risk
+Point out what's in the tables:
+- **Tax File Numbers (TFN)** — protected under Privacy Act 1988
+- **Medicare numbers** — protected under My Health Records Act
+- **Full credit card PANs and CVVs** — PCI-DSS regulated
+- **AML risk flags** (`HIGH_RISK`, `BLOCKED`) — restricted to the compliance team
+- **BSB + account numbers** — financial identity risk
 
-**Key message:** _"This Genie Space is useful for analytics, but it's a compliance nightmare. Let's fix that in 10 minutes."_
+> _"We need to onboard 5 different teams — tellers, relationship managers, compliance, marketing, and branch managers. Each team needs different access levels. A teller should see masked TFN and last-4 of cards. A compliance officer needs full access to investigate AML flags. Marketing should only see anonymized, aggregated data."_
+
+> _"Setting this up manually — groups, tag policies, masking functions, row filters, ACLs, entitlements — would take weeks. Let's do it in 10 minutes."_
 
 ---
 
