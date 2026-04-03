@@ -77,31 +77,9 @@ Point out what's in the tables:
 
 ## Part 2: Import & Generate (5 min)
 
-### 2a. Configure the import
+### 2a. Generate ABAC governance
 
-```bash
-# Set up the environment directories
-make setup ENV=dev
-
-# Copy auth credentials from the provisioned environment
-# (setup_demo.py prints the exact cp commands — paste them here)
-cp envs/test/dev/auth.auto.tfvars envs/dev/auth.auto.tfvars
-cp envs/test/account/auth.auto.tfvars envs/account/auth.auto.tfvars
-
-# Edit env.auto.tfvars — paste the Genie Space ID and table config from setup output
-vi envs/dev/env.auto.tfvars
-```
-
-```hcl
-genie_spaces = [
-  {
-    genie_space_id = "01ef7b3c2a4d5e6f"   # paste your ID from setup output
-    # tables and warehouse are auto-discovered from the existing Space
-  },
-]
-```
-
-### 2b. Generate ABAC governance
+The setup script already configured `envs/dev/` with auth credentials and the Genie Space ID. Go straight to generate:
 
 ```bash
 make generate ENV=dev COUNTRY=ANZ INDUSTRY=financial_services

@@ -311,9 +311,36 @@ def cmd_provision(env_file: Path) -> None:
     }
     _save_state(state)
 
-    # Store the auth source path for the next steps
+    # Auto-configure envs/dev/ so the user can go straight to `make generate`
+    _step("Configuring envs/dev/ for the demo...")
     test_envs = Path(dev_state.get("test_envs_dir", ""))
-    auth_source = test_envs / "dev" / "auth.auto.tfvars"
+    import shutil
+
+    # Run make setup ENV=dev to create directory structure
+    subprocess.run(
+        ["make", "--no-print-directory", "setup", "ENV=dev"],
+        cwd=str(CLOUD_ROOT), capture_output=True, text=True,
+    )
+
+    # Copy auth credentials
+    for src, dst in [
+        (test_envs / "dev" / "auth.auto.tfvars", CLOUD_ROOT / "envs" / "dev" / "auth.auto.tfvars"),
+        (test_envs / "account" / "auth.auto.tfvars", CLOUD_ROOT / "envs" / "account" / "auth.auto.tfvars"),
+    ]:
+        if src.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+    # Write env.auto.tfvars with genie_space_id
+    env_tfvars = CLOUD_ROOT / "envs" / "dev" / "env.auto.tfvars"
+    env_tfvars.write_text(f"""\
+genie_spaces = [
+  {{
+    genie_space_id = "{genie_space_id}"
+  }},
+]
+""")
+    print(f"  {_green('✓')} envs/dev/ configured (auth + env.auto.tfvars)")
 
     # Print summary
     print()
@@ -328,19 +355,8 @@ def cmd_provision(env_file: Path) -> None:
     print(f"  State file:      {STATE_FILE}")
     print()
     print("  Next steps:")
-    print()
-    print("    # 1. Set up the environment")
-    print("    make setup ENV=dev")
-    print()
-    print("    # 2. Copy auth credentials (run after make setup)")
-    print(f"    cp {auth_source} envs/dev/auth.auto.tfvars")
-    print(f"    cp {test_envs / 'account' / 'auth.auto.tfvars'} envs/account/auth.auto.tfvars")
-    print()
-    print("    # 3. Edit envs/dev/env.auto.tfvars — paste these values:")
-    print(f"    #    genie_space_id = \"{genie_space_id}\"")
-    print(f"    #    sql_warehouse_id = \"<from warehouse list above>\"")
-    print()
-    print("    # 4. Follow shared/examples/aus_bank_demo/README.md for the demo")
+    print("    1. Run: make generate ENV=dev COUNTRY=ANZ INDUSTRY=financial_services")
+    print("    2. Follow ../shared/examples/aus_bank_demo/README.md for the demo")
     print()
 
 
