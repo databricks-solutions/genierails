@@ -79,9 +79,7 @@ Point out what's in the tables:
 
 ### 2a. Generate ABAC governance
 
-The setup script already configured `envs/dev/` with auth credentials and the Genie Space ID.
-
-> **Important:** Before running generate, open the Genie Space in the dev workspace UI first. This triggers the Databricks backend to populate the space config, which GenieRails needs to discover the tables. (This is only needed for newly created spaces — in a real flow, the space already exists.)
+The setup script already configured `envs/dev/` with auth credentials, tables, and the Genie Space ID.
 
 ```bash
 make generate ENV=dev COUNTRY=ANZ INDUSTRY=financial_services
