@@ -80,20 +80,36 @@ Point out what's in the tables:
 ### 2a. Configure the import
 
 ```bash
-# Set up the environment
+# Set up the environment directories
 make setup ENV=dev
 
-# Edit env.auto.tfvars — paste the Genie Space ID from setup output
+# Copy auth credentials from the provisioned environment
+# (the setup script printed the envs path — look for "Config dir" in the output)
+cp envs/test/dev/auth.auto.tfvars envs/dev/auth.auto.tfvars
+cp envs/test/account/auth.auto.tfvars envs/account/auth.auto.tfvars
+```
+
+Edit `envs/dev/env.auto.tfvars` — paste the Genie Space ID and table config:
+
+```bash
 vi envs/dev/env.auto.tfvars
 ```
 
-Set `genie_space_id` to the value from the setup output:
 ```hcl
+uc_tables = [
+  "dev_bank.retail.customers",
+  "dev_bank.retail.accounts",
+  "dev_bank.retail.transactions",
+  "dev_bank.retail.credit_cards",
+]
+
 genie_spaces = [
   {
-    genie_space_id = "01ef7b3c2a4d5e6f"   # paste your ID here
+    genie_space_id = "01ef7b3c2a4d5e6f"   # paste your ID from setup output
   },
 ]
+
+sql_warehouse_id = ""   # paste from setup output, or leave empty to auto-create
 ```
 
 ### 2b. Generate ABAC governance
