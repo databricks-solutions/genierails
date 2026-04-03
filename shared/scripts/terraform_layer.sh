@@ -50,7 +50,8 @@ mkdir -p "$ENV_DIR"
 
 # Use TF_DATA_DIR for per-env .terraform/ isolation. The .terraform.lock.hcl
 # file is always in the working directory — use -lockfile=readonly during init
-# to prevent concurrent writes from corrupting it.
+# to prevent concurrent writes from corrupting it. On first run (no lock file),
+# skip -lockfile=readonly so Terraform can generate the lock file.
 export TF_DATA_DIR="$ENV_DIR/.terraform"
 cd "$ROOT_DIR"
 
@@ -60,8 +61,10 @@ INIT_CMD=(
   -input=false
   -reconfigure
   -backend-config="path=$ENV_DIR/terraform.tfstate"
-  -lockfile=readonly
 )
+if [ -f .terraform.lock.hcl ]; then
+  INIT_CMD+=(-lockfile=readonly)
+fi
 
 echo "+ ${INIT_CMD[*]}"
 "${INIT_CMD[@]}" >/dev/null
