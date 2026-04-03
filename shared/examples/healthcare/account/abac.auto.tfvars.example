@@ -1,0 +1,18 @@
+# ============================================================================
+# Healthcare Example — Account Layer (shared across all environments)
+# ============================================================================
+# This file lives at envs/account/abac.auto.tfvars
+# ============================================================================
+
+groups = {
+  "Nurse"                 = { description = "Bedside care — partial PII, limited clinical notes" }
+  "Physician"             = { description = "Full clinical access, full PII for their region" }
+  "Billing_Clerk"         = { description = "Financial records — masked PHI, no clinical notes" }
+  "Chief_Medical_Officer" = { description = "Full unrestricted access across all regions" }
+}
+
+tag_policies = [
+  { key = "phi_level",             description = "Protected Health Information access tier",  values = ["Restricted_PHI", "Limited_PHI", "redacted_notes"] },
+  { key = "pii_level",             description = "Personally identifiable information tier",  values = ["public", "masked_name", "masked_ssn", "masked_email", "masked_phone", "redacted_address"] },
+  { key = "financial_sensitivity", description = "Billing/financial data clearance",          values = ["public", "rounded_amounts"] },
+]

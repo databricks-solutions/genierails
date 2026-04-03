@@ -1,0 +1,152 @@
+# ============================================================================
+# Healthcare Example — Data Access Layer (per environment)
+# ============================================================================
+# This file lives at envs/<env>/data_access/abac.auto.tfvars
+# ============================================================================
+
+# Groups are defined in the account layer (envs/account/abac.auto.tfvars).
+# Terraform looks them up by name at apply time.
+
+tag_assignments = [
+  # --- Patients table ---
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.patients.mrn",          tag_key = "phi_level",  tag_value = "Restricted_PHI" },
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.patients.first_name",   tag_key = "pii_level",  tag_value = "masked_name" },
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.patients.last_name",    tag_key = "pii_level",  tag_value = "masked_name" },
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.patients.ssn",          tag_key = "pii_level",  tag_value = "masked_ssn" },
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.patients.email",        tag_key = "pii_level",  tag_value = "masked_email" },
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.patients.phone",        tag_key = "pii_level",  tag_value = "masked_phone" },
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.patients.address",      tag_key = "pii_level",  tag_value = "redacted_address" },
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.patients.insurance_id", tag_key = "phi_level",  tag_value = "Limited_PHI" },
+
+  # --- Encounters table ---
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.encounters.diagnosis_code",  tag_key = "phi_level",  tag_value = "Restricted_PHI" },
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.encounters.diagnosis_desc",  tag_key = "phi_level",  tag_value = "redacted_notes" },
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.encounters.treatment_notes", tag_key = "phi_level",  tag_value = "redacted_notes" },
+
+  # --- Prescriptions table ---
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.prescriptions.drug_name", tag_key = "phi_level",  tag_value = "Limited_PHI" },
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.prescriptions.dosage",    tag_key = "phi_level",  tag_value = "Limited_PHI" },
+
+  # --- Billing table ---
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.billing.total_amount",   tag_key = "financial_sensitivity", tag_value = "rounded_amounts" },
+  { entity_type = "columns", entity_name = "hc_catalog.clinical.billing.insurance_id",   tag_key = "phi_level",             tag_value = "Limited_PHI" },
+]
+
+fgac_policies = [
+  # PII masking for Nurses and Billing Clerks
+  {
+    name             = "mask_pii_names"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "hc_catalog"
+    to_principals    = ["Nurse", "Billing_Clerk"]
+    comment          = "Partial names for non-physician staff"
+    match_condition  = "hasTagValue('pii_level', 'masked_name')"
+    match_alias      = "pii_name_cols"
+    function_name    = "mask_pii_partial"
+    function_catalog = "hc_catalog"
+    function_schema  = "clinical"
+  },
+  {
+    name             = "mask_pii_ssn"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "hc_catalog"
+    to_principals    = ["Nurse", "Billing_Clerk"]
+    comment          = "Last-4 SSN only"
+    match_condition  = "hasTagValue('pii_level', 'masked_ssn')"
+    match_alias      = "pii_ssn_cols"
+    function_name    = "mask_ssn"
+    function_catalog = "hc_catalog"
+    function_schema  = "clinical"
+  },
+  {
+    name             = "mask_pii_email"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "hc_catalog"
+    to_principals    = ["Nurse", "Billing_Clerk"]
+    comment          = "Mask email local part"
+    match_condition  = "hasTagValue('pii_level', 'masked_email')"
+    match_alias      = "pii_email_cols"
+    function_name    = "mask_email"
+    function_catalog = "hc_catalog"
+    function_schema  = "clinical"
+  },
+  {
+    name             = "mask_pii_phone"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "hc_catalog"
+    to_principals    = ["Nurse", "Billing_Clerk"]
+    comment          = "Last-4 phone digits"
+    match_condition  = "hasTagValue('pii_level', 'masked_phone')"
+    match_alias      = "pii_phone_cols"
+    function_name    = "mask_phone"
+    function_catalog = "hc_catalog"
+    function_schema  = "clinical"
+  },
+  {
+    name             = "mask_pii_address"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "hc_catalog"
+    to_principals    = ["Nurse", "Billing_Clerk"]
+    comment          = "Redact full address"
+    match_condition  = "hasTagValue('pii_level', 'redacted_address')"
+    match_alias      = "pii_addr_cols"
+    function_name    = "mask_redact"
+    function_catalog = "hc_catalog"
+    function_schema  = "clinical"
+  },
+
+  # PHI masking
+  {
+    name             = "mask_phi_mrn"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "hc_catalog"
+    to_principals    = ["Nurse", "Billing_Clerk"]
+    comment          = "Last-4 of MRN and diagnosis code category only"
+    match_condition  = "hasTagValue('phi_level', 'Restricted_PHI')"
+    match_alias      = "phi_restricted_cols"
+    function_name    = "mask_mrn"
+    function_catalog = "hc_catalog"
+    function_schema  = "clinical"
+  },
+  {
+    name             = "mask_phi_notes"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "hc_catalog"
+    to_principals    = ["Billing_Clerk"]
+    comment          = "Billing clerks cannot see clinical notes"
+    match_condition  = "hasTagValue('phi_level', 'redacted_notes')"
+    match_alias      = "phi_notes_cols"
+    function_name    = "mask_redact"
+    function_catalog = "hc_catalog"
+    function_schema  = "clinical"
+  },
+
+  # Insurance ID — tokenized for non-billing staff
+  {
+    name              = "mask_insurance_id"
+    policy_type       = "POLICY_TYPE_COLUMN_MASK"
+    catalog           = "hc_catalog"
+    to_principals     = ["account users"]
+    except_principals = ["Billing_Clerk", "Chief_Medical_Officer"]
+    comment           = "Insurance ID tokenized for non-billing staff"
+    match_condition   = "hasTagValue('phi_level', 'Limited_PHI')"
+    match_alias       = "phi_limited_cols"
+    function_name     = "mask_account_number"
+    function_catalog  = "hc_catalog"
+    function_schema   = "clinical"
+  },
+
+  # Financial masking for Nurses
+  {
+    name             = "mask_financial_amounts"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "hc_catalog"
+    to_principals    = ["Nurse"]
+    comment          = "Nurses see rounded billing amounts"
+    match_condition  = "hasTagValue('financial_sensitivity', 'rounded_amounts')"
+    match_alias      = "fin_amount_cols"
+    function_name    = "mask_amount_rounded"
+    function_catalog = "hc_catalog"
+    function_schema  = "clinical"
+  },
+]

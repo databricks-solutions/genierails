@@ -1,0 +1,21 @@
+# ============================================================================
+# Finance Example — Account Layer (shared across all environments)
+# ============================================================================
+# This file lives at envs/account/abac.auto.tfvars
+# It defines groups and tag policies that are shared across dev, prod, etc.
+# ============================================================================
+
+groups = {
+  "Junior_Analyst"     = { description = "Masked PII, last-4 card, rounded amounts" }
+  "Senior_Analyst"     = { description = "Full PII, full card, full amounts" }
+  "US_Region_Staff"    = { description = "Row access limited to US data" }
+  "EU_Region_Staff"    = { description = "Row access limited to EU data" }
+  "Compliance_Officer" = { description = "Full unmasked access" }
+}
+
+tag_policies = [
+  { key = "pii_level",       description = "PII access level",          values = ["public", "masked_name", "masked_ssn", "masked_email", "masked_phone", "redacted_address"] },
+  { key = "pci_level",       description = "PCI-DSS clearance",         values = ["public", "masked_card_last4", "redacted_card_full", "redacted_cvv"] },
+  { key = "compliance_scope", description = "AML investigation scope",  values = ["standard", "aml_restricted"] },
+  { key = "financial_sensitivity", description = "Financial data sensitivity", values = ["public", "rounded_amounts"] },
+]

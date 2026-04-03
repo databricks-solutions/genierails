@@ -1,0 +1,121 @@
+# ============================================================================
+# Finance Example — Data Access Layer (per environment)
+# ============================================================================
+# This file lives at envs/<env>/data_access/abac.auto.tfvars
+# It defines tag assignments and FGAC policies for a specific environment.
+# ============================================================================
+
+# Groups are defined in the account layer (envs/account/abac.auto.tfvars).
+# Terraform looks them up by name at apply time.
+
+# entity_name must be fully qualified: "catalog.schema.table" or "catalog.schema.table.column"
+tag_assignments = [
+  # Customers table
+  { entity_type = "columns", entity_name = "fin_catalog.finance.customers.ssn",            tag_key = "pii_level",  tag_value = "masked_ssn" },
+  { entity_type = "columns", entity_name = "fin_catalog.finance.customers.first_name",     tag_key = "pii_level",  tag_value = "masked_name" },
+  { entity_type = "columns", entity_name = "fin_catalog.finance.customers.last_name",      tag_key = "pii_level",  tag_value = "masked_name" },
+  { entity_type = "columns", entity_name = "fin_catalog.finance.customers.email",          tag_key = "pii_level",  tag_value = "masked_email" },
+
+  # Credit cards table
+  { entity_type = "columns", entity_name = "fin_catalog.finance.credit_cards.card_number", tag_key = "pci_level",  tag_value = "masked_card_last4" },
+  { entity_type = "columns", entity_name = "fin_catalog.finance.credit_cards.cvv",         tag_key = "pci_level",  tag_value = "redacted_cvv" },
+
+  # Transactions table
+  { entity_type = "tables",  entity_name = "fin_catalog.finance.transactions",             tag_key = "compliance_scope", tag_value = "aml_restricted" },
+  { entity_type = "columns", entity_name = "fin_catalog.finance.transactions.amount",      tag_key = "financial_sensitivity", tag_value = "rounded_amounts" },
+]
+
+# catalog, function_catalog, function_schema are REQUIRED on each policy.
+fgac_policies = [
+  # PII masking — junior analysts see partial names
+  {
+    name             = "mask_pii_names"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "fin_catalog"
+    to_principals    = ["Junior_Analyst"]
+    comment          = "Mask names for junior analysts"
+    match_condition  = "hasTagValue('pii_level', 'masked_name')"
+    match_alias      = "pii_name_cols"
+    function_name    = "mask_pii_partial"
+    function_catalog = "fin_catalog"
+    function_schema  = "finance"
+  },
+  {
+    name             = "mask_pii_email"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "fin_catalog"
+    to_principals    = ["Junior_Analyst"]
+    comment          = "Mask email for junior analysts"
+    match_condition  = "hasTagValue('pii_level', 'masked_email')"
+    match_alias      = "pii_email_cols"
+    function_name    = "mask_email_finance"
+    function_catalog = "fin_catalog"
+    function_schema  = "finance"
+  },
+  {
+    name             = "mask_pii_ssn"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "fin_catalog"
+    to_principals    = ["Junior_Analyst"]
+    comment          = "Mask SSN for junior analysts"
+    match_condition  = "hasTagValue('pii_level', 'masked_ssn')"
+    match_alias      = "pii_ssn_cols"
+    function_name    = "mask_ssn"
+    function_catalog = "fin_catalog"
+    function_schema  = "finance"
+  },
+
+  # PCI — credit card masking
+  {
+    name             = "mask_pci_card_last4"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "fin_catalog"
+    to_principals    = ["Junior_Analyst"]
+    comment          = "Last 4 digits only for junior analysts"
+    match_condition  = "hasTagValue('pci_level', 'masked_card_last4')"
+    match_alias      = "pci_card_cols"
+    function_name    = "mask_credit_card_last4"
+    function_catalog = "fin_catalog"
+    function_schema  = "finance"
+  },
+  {
+    name              = "mask_pci_cvv"
+    policy_type       = "POLICY_TYPE_COLUMN_MASK"
+    catalog           = "fin_catalog"
+    to_principals     = ["account users"]
+    except_principals = ["Compliance_Officer"]
+    comment           = "Mask CVV for all except Compliance_Officer"
+    match_condition   = "hasTagValue('pci_level', 'redacted_cvv')"
+    match_alias       = "pci_cvv_cols"
+    function_name     = "mask_credit_card_full"
+    function_catalog  = "fin_catalog"
+    function_schema   = "finance"
+  },
+
+  # Financial — rounded amounts
+  {
+    name             = "mask_financial_amounts"
+    policy_type      = "POLICY_TYPE_COLUMN_MASK"
+    catalog          = "fin_catalog"
+    to_principals    = ["Junior_Analyst"]
+    comment          = "Round transaction amounts for junior analysts"
+    match_condition  = "hasTagValue('financial_sensitivity', 'rounded_amounts')"
+    match_alias      = "fin_amount_cols"
+    function_name    = "mask_amount_rounded"
+    function_catalog = "fin_catalog"
+    function_schema  = "finance"
+  },
+
+  # AML — row filter for compliance-restricted transactions
+  {
+    name             = "filter_aml_compliance"
+    policy_type      = "POLICY_TYPE_ROW_FILTER"
+    catalog          = "fin_catalog"
+    to_principals    = ["Junior_Analyst", "Senior_Analyst"]
+    comment          = "Non-compliance staff filtered from AML-flagged transactions"
+    when_condition   = "hasTagValue('compliance_scope', 'aml_restricted')"
+    function_name    = "filter_aml_clearance"
+    function_catalog = "fin_catalog"
+    function_schema  = "finance"
+  },
+]
