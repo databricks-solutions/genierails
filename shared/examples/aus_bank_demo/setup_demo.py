@@ -1,0 +1,640 @@
+#!/usr/bin/env python3
+"""
+Australian Bank Demo — Setup and Teardown
+
+Provisions a complete demo environment for the GenieRails champion flow:
+  - Dev workspace + prod workspace (fresh, isolated)
+  - Unity Catalog metastore with cloud storage
+  - Sample Australian banking tables (customers, accounts, transactions, credit_cards)
+  - An ungoverned Genie Space pointing at the dev tables
+
+After setup, follow the README.md to run the demo.
+
+Usage
+-----
+  # Provision everything (from the cloud wrapper directory: aws/ or azure/)
+  python shared/examples/aus_bank_demo/setup_demo.py provision \\
+      --env-file shared/scripts/account-admin.aws.env
+
+  # Check status
+  python shared/examples/aus_bank_demo/setup_demo.py status
+
+  # Tear down everything
+  python shared/examples/aus_bank_demo/setup_demo.py teardown
+
+Prerequisites
+-------------
+  - shared/scripts/account-admin.<cloud>.env with Account Admin SP credentials
+  - See shared/docs/prerequisites.md for full requirements
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+SCRIPT_DIR = Path(__file__).resolve().parent
+SHARED_DIR = SCRIPT_DIR.parent.parent  # shared/
+SCRIPTS_DIR = SHARED_DIR / "scripts"
+CLOUD_ROOT = Path(os.environ.get("CLOUD_ROOT", SHARED_DIR.parent / "aws"))
+
+_default_cloud = os.environ.get("CLOUD_PROVIDER", "aws").lower()
+STATE_FILE = SCRIPT_DIR / f".demo_state.{_default_cloud}.json"
+
+# ---------------------------------------------------------------------------
+# Catalog + table definitions
+# ---------------------------------------------------------------------------
+DEV_CATALOG = "dev_bank"
+PROD_CATALOG = "prod_bank"
+SCHEMA = "retail"
+
+SETUP_SQL = f"""
+-- ── Customers ────────────────────────────────────────────────────────────
+CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.customers (
+  customer_id     BIGINT    COMMENT 'Unique customer identifier',
+  first_name      STRING    COMMENT 'Customer first name',
+  last_name       STRING    COMMENT 'Customer last name',
+  email           STRING    COMMENT 'Contact email address',
+  phone           STRING    COMMENT 'Australian phone number (+61 format)',
+  address         STRING    COMMENT 'Residential street address',
+  suburb          STRING    COMMENT 'Suburb or locality',
+  state           STRING    COMMENT 'Australian state (NSW, VIC, QLD, etc.)',
+  postcode        STRING    COMMENT 'Australian postcode (4 digits)',
+  tfn             STRING    COMMENT 'Tax File Number — highly sensitive Australian PII (9 digits)',
+  medicare_number STRING    COMMENT 'Medicare card number — sensitive Australian health identifier',
+  date_of_birth   DATE      COMMENT 'Date of birth',
+  bsb             STRING    COMMENT 'Bank-State-Branch number (6 digits, format XXX-XXX)',
+  account_number  STRING    COMMENT 'Bank account number'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+
+-- ── Accounts ─────────────────────────────────────────────────────────────
+CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.accounts (
+  account_id      BIGINT       COMMENT 'Unique account identifier',
+  customer_id     BIGINT       COMMENT 'FK to customers',
+  bsb             STRING       COMMENT 'Bank-State-Branch number (6 digits)',
+  account_number  STRING       COMMENT 'Bank account number',
+  account_type    STRING       COMMENT 'SAVINGS, EVERYDAY, TERM_DEPOSIT, HOME_LOAN',
+  balance         DECIMAL(18,2) COMMENT 'Current account balance in AUD',
+  opened_date     DATE         COMMENT 'Date account was opened',
+  branch          STRING       COMMENT 'Branch name (e.g. Sydney CBD, Melbourne Central)'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+
+-- ── Transactions ─────────────────────────────────────────────────────────
+CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.transactions (
+  transaction_id  BIGINT       COMMENT 'Unique transaction identifier',
+  account_id      BIGINT       COMMENT 'FK to accounts',
+  transaction_date TIMESTAMP   COMMENT 'Date and time of transaction',
+  amount          DECIMAL(18,2) COMMENT 'Transaction amount in AUD',
+  merchant        STRING       COMMENT 'Merchant or payee name',
+  category        STRING       COMMENT 'Transaction category (RETAIL, TRANSFER, ATM, INTERNATIONAL)',
+  aml_risk_flag   STRING       COMMENT 'AML risk assessment: CLEAR, REVIEW, HIGH_RISK, BLOCKED',
+  cross_border    BOOLEAN      COMMENT 'True if international transaction',
+  country         STRING       COMMENT 'Destination country code (AU, NZ, SG, etc.)'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+
+-- ── Credit Cards ─────────────────────────────────────────────────────────
+CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.credit_cards (
+  card_id         BIGINT       COMMENT 'Unique card identifier',
+  customer_id     BIGINT       COMMENT 'FK to customers',
+  card_number     STRING       COMMENT 'Full credit card PAN — PCI-DSS sensitive',
+  cvv             STRING       COMMENT 'Card verification value — PCI-DSS sensitive',
+  expiry_date     STRING       COMMENT 'Card expiry (MM/YY)',
+  credit_limit    DECIMAL(18,2) COMMENT 'Credit limit in AUD',
+  card_type       STRING       COMMENT 'VISA, MASTERCARD, AMEX',
+  status          STRING       COMMENT 'ACTIVE, BLOCKED, EXPIRED'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+"""
+
+SAMPLE_DATA_SQL = f"""
+-- ── Customers (realistic Australian data) ────────────────────────────────
+INSERT INTO {DEV_CATALOG}.{SCHEMA}.customers VALUES
+(1001, 'Sarah',    'Chen',       'sarah.chen@email.com.au',      '+61 412 345 678', '42 George St',      'Sydney',       'NSW', '2000', '123 456 789', '2123 45670 1', '1985-03-14', '062-000', '12345678'),
+(1002, 'James',    'O''Brien',   'james.obrien@email.com.au',    '+61 423 456 789', '15 Collins St',     'Melbourne',    'VIC', '3000', '234 567 890', '3234 56781 2', '1978-07-22', '063-000', '23456789'),
+(1003, 'Priya',    'Sharma',     'priya.sharma@email.com.au',    '+61 434 567 890', '8 Queen St',        'Brisbane',     'QLD', '4000', '345 678 901', '4345 67892 3', '1992-11-05', '064-000', '34567890'),
+(1004, 'David',    'Williams',   'david.williams@email.com.au',  '+61 445 678 901', '23 King William St','Adelaide',     'SA',  '5000', '456 789 012', '5456 78903 4', '1970-01-30', '065-000', '45678901'),
+(1005, 'Mei',      'Nguyen',     'mei.nguyen@email.com.au',      '+61 456 789 012', '5 Hay St',          'Perth',        'WA',  '6000', '567 890 123', '6567 89014 5', '1988-09-18', '066-000', '56789012'),
+(1006, 'Tom',      'Wilson',     'tom.wilson@email.com.au',      '+61 467 890 123', '12 Liverpool St',   'Hobart',       'TAS', '7000', '678 901 234', '7678 90125 6', '1995-04-12', '067-000', '67890123'),
+(1007, 'Anh',      'Tran',       'anh.tran@email.com.au',        '+61 478 901 234', '31 Smith St',       'Darwin',       'NT',  '0800', '789 012 345', '8789 01236 7', '1982-12-25', '068-000', '78901234'),
+(1008, 'Emily',    'Jones',      'emily.jones@email.com.au',     '+61 489 012 345', '7 Northbourne Ave', 'Canberra',     'ACT', '2600', '890 123 456', '9890 12347 8', '1990-06-08', '062-001', '89012345'),
+(1009, 'Ravi',     'Patel',      'ravi.patel@email.com.au',      '+61 490 123 456', '19 Pitt St',        'Sydney',       'NSW', '2000', '901 234 567', '2901 23458 9', '1975-08-20', '062-002', '90123456'),
+(1010, 'Jessica',  'Brown',      'jessica.brown@email.com.au',   '+61 401 234 567', '4 Swanston St',     'Melbourne',    'VIC', '3000', '012 345 678', '3012 34569 0', '1998-02-14', '063-001', '01234567');
+
+-- ── Accounts ─────────────────────────────────────────────────────────────
+INSERT INTO {DEV_CATALOG}.{SCHEMA}.accounts VALUES
+(2001, 1001, '062-000', '12345678', 'EVERYDAY',     15420.50,  '2015-03-10', 'Sydney CBD'),
+(2002, 1001, '062-000', '12345679', 'SAVINGS',     142500.00,  '2015-03-10', 'Sydney CBD'),
+(2003, 1002, '063-000', '23456789', 'EVERYDAY',      8730.25,  '2018-07-15', 'Melbourne Central'),
+(2004, 1003, '064-000', '34567890', 'EVERYDAY',     23100.80,  '2020-01-05', 'Brisbane City'),
+(2005, 1003, '064-000', '34567891', 'TERM_DEPOSIT', 50000.00,  '2022-06-01', 'Brisbane City'),
+(2006, 1004, '065-000', '45678901', 'HOME_LOAN',  -485000.00,  '2019-09-20', 'Adelaide Central'),
+(2007, 1005, '066-000', '56789012', 'SAVINGS',      67800.00,  '2021-04-12', 'Perth CBD'),
+(2008, 1006, '067-000', '67890123', 'EVERYDAY',      3200.15,  '2023-01-08', 'Hobart'),
+(2009, 1007, '068-000', '78901234', 'SAVINGS',      28900.00,  '2017-11-30', 'Darwin'),
+(2010, 1008, '062-001', '89012345', 'EVERYDAY',     11500.75,  '2022-03-22', 'Canberra');
+
+-- ── Transactions ─────────────────────────────────────────────────────────
+INSERT INTO {DEV_CATALOG}.{SCHEMA}.transactions VALUES
+(3001, 2001, '2024-11-15 10:23:00', -85.50,    'Woolworths Sydney',    'RETAIL',        'CLEAR',     false, 'AU'),
+(3002, 2001, '2024-11-15 14:10:00', -250.00,   'Qantas Airways',       'RETAIL',        'CLEAR',     false, 'AU'),
+(3003, 2002, '2024-11-14 09:00:00', -15000.00, 'ANZ Bank Transfer',    'TRANSFER',      'REVIEW',    true,  'NZ'),
+(3004, 2003, '2024-11-15 16:45:00', -42.80,    'Coles Melbourne',      'RETAIL',        'CLEAR',     false, 'AU'),
+(3005, 2004, '2024-11-15 08:30:00', 5200.00,   'Salary Deposit',       'TRANSFER',      'CLEAR',     false, 'AU'),
+(3006, 2005, '2024-11-13 11:00:00', -50000.00, 'Crypto Exchange Ltd',  'TRANSFER',      'HIGH_RISK', true,  'SG'),
+(3007, 2006, '2024-11-15 00:00:00', -2450.00,  'Home Loan Repayment',  'TRANSFER',      'CLEAR',     false, 'AU'),
+(3008, 2007, '2024-11-14 20:15:00', -180.00,   'Harvey Norman Perth',  'RETAIL',        'CLEAR',     false, 'AU'),
+(3009, 2001, '2024-11-12 03:00:00', -8500.00,  'Offshore Holdings BVI','TRANSFER',      'HIGH_RISK', true,  'VG'),
+(3010, 2008, '2024-11-15 12:00:00', -55.00,    'Uber Eats Hobart',     'RETAIL',        'CLEAR',     false, 'AU'),
+(3011, 2009, '2024-11-15 07:30:00', -320.00,   'Dan Murphy Darwin',    'RETAIL',        'CLEAR',     false, 'AU'),
+(3012, 2010, '2024-11-15 13:20:00', -125.00,   'JB Hi-Fi Canberra',   'RETAIL',        'CLEAR',     false, 'AU'),
+(3013, 2003, '2024-11-10 22:00:00', -25000.00, 'Wire to Unknown',      'TRANSFER',      'BLOCKED',   true,  'MM'),
+(3014, 2001, '2024-11-15 15:00:00', -200.00,   'ATM Withdrawal',       'ATM',           'CLEAR',     false, 'AU'),
+(3015, 2002, '2024-11-14 06:00:00', -3200.00,  'SWIFT Transfer',       'INTERNATIONAL', 'REVIEW',    true,  'HK');
+
+-- ── Credit Cards ─────────────────────────────────────────────────────────
+INSERT INTO {DEV_CATALOG}.{SCHEMA}.credit_cards VALUES
+(4001, 1001, '4000 1234 5678 9010', '123', '12/26', 15000.00, 'VISA',       'ACTIVE'),
+(4002, 1002, '5100 2345 6789 0121', '456', '03/27', 20000.00, 'MASTERCARD', 'ACTIVE'),
+(4003, 1003, '3700 345 678 901',    '7890','06/25', 10000.00, 'AMEX',       'ACTIVE'),
+(4004, 1004, '4000 4567 8901 2343', '234', '09/26', 25000.00, 'VISA',       'ACTIVE'),
+(4005, 1005, '5100 5678 9012 3454', '567', '01/28', 12000.00, 'MASTERCARD', 'ACTIVE'),
+(4006, 1006, '4000 6789 0123 4565', '890', '11/25', 8000.00,  'VISA',       'EXPIRED'),
+(4007, 1007, '5100 7890 1234 5676', '012', '07/27', 30000.00, 'MASTERCARD', 'ACTIVE'),
+(4008, 1008, '4000 8901 2345 6787', '345', '04/26', 18000.00, 'VISA',       'ACTIVE'),
+(4009, 1009, '3700 901 234 567',    '6789','08/25', 50000.00, 'AMEX',       'BLOCKED'),
+(4010, 1010, '4000 0123 4567 8909', '678', '02/28', 10000.00, 'VISA',       'ACTIVE');
+"""
+
+# Prod catalog gets same schema but no data
+PROD_SETUP_SQL = f"""
+CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.customers LIKE {DEV_CATALOG}.{SCHEMA}.customers;
+CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.accounts LIKE {DEV_CATALOG}.{SCHEMA}.accounts;
+CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.transactions LIKE {DEV_CATALOG}.{SCHEMA}.transactions;
+CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.credit_cards LIKE {DEV_CATALOG}.{SCHEMA}.credit_cards;
+"""
+
+
+# ---------------------------------------------------------------------------
+# Helpers (reused from provision_test_env.py and setup_test_data.py)
+# ---------------------------------------------------------------------------
+
+def _step(msg: str) -> None:
+    print(f"\n\033[36m──\033[0m {msg}")
+
+
+def _green(s: str) -> str:
+    return f"\033[32m{s}\033[0m"
+
+
+def _red(s: str) -> str:
+    return f"\033[31m{s}\033[0m"
+
+
+def _yellow(s: str) -> str:
+    return f"\033[33m{s}\033[0m"
+
+
+def _load_env_file(path: Path) -> dict[str, str]:
+    """Parse a KEY=VALUE env file (ignoring comments and blank lines)."""
+    cfg: dict[str, str] = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip()
+    return cfg
+
+
+def _save_state(state: dict) -> None:
+    STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def _load_state() -> dict:
+    if STATE_FILE.exists():
+        return json.loads(STATE_FILE.read_text())
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_provision(env_file: Path) -> None:
+    """Provision dev + prod workspaces, create tables, create Genie Space."""
+    cfg = _load_env_file(env_file)
+    cloud = _default_cloud
+
+    print("=" * 64)
+    print("  Australian Bank Demo — Setup")
+    print("=" * 64)
+    print(f"  Cloud: {cloud}")
+    print(f"  Credentials: {env_file}")
+    print()
+
+    # Delegate to provision_test_env.py for the heavy lifting
+    _step("Provisioning dev workspace (this takes ~3-5 minutes)...")
+    dev_state_file = SCRIPT_DIR / f".demo_dev_state.{cloud}.json"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "provision_test_env.py"),
+         "provision", "--force", "--env-file", str(env_file)],
+        cwd=str(CLOUD_ROOT),
+        env={
+            **os.environ,
+            "CLOUD_PROVIDER": cloud,
+            "CLOUD_ROOT": str(CLOUD_ROOT),
+            "_PARALLEL_STATE_FILE": str(dev_state_file),
+        },
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"\n  {_red('ERROR')} Dev workspace provisioning failed (exit {result.returncode})")
+        sys.exit(1)
+
+    dev_state = json.loads(dev_state_file.read_text())
+    dev_host = dev_state.get("workspace_host", "")
+    dev_ws_id = dev_state.get("workspace_id", "")
+    run_id = dev_state.get("run_id", "")
+    print(f"  {_green('✓')} Dev workspace ready: {dev_host}")
+
+    # Provision prod workspace
+    _step("Provisioning prod workspace...")
+    prod_state_file = SCRIPT_DIR / f".demo_prod_state.{cloud}.json"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "provision_test_env.py"),
+         "provision", "--force", "--env-file", str(env_file)],
+        cwd=str(CLOUD_ROOT),
+        env={
+            **os.environ,
+            "CLOUD_PROVIDER": cloud,
+            "CLOUD_ROOT": str(CLOUD_ROOT),
+            "_PARALLEL_STATE_FILE": str(prod_state_file),
+        },
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"\n  {_red('ERROR')} Prod workspace provisioning failed (exit {result.returncode})")
+        sys.exit(1)
+
+    prod_state = json.loads(prod_state_file.read_text())
+    prod_host = prod_state.get("workspace_host", "")
+    print(f"  {_green('✓')} Prod workspace ready: {prod_host}")
+
+    # Create tables in dev workspace
+    _step("Creating Australian banking tables in dev workspace...")
+    dev_auth = Path(dev_state.get("test_envs_dir", "")) / "dev" / "auth.auto.tfvars"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / "setup_test_data.py"),
+         "--auth-file", str(dev_auth),
+         "--custom-sql", "-"],
+        input=SETUP_SQL + "\n" + SAMPLE_DATA_SQL,
+        cwd=str(CLOUD_ROOT),
+        env={**os.environ, "CLOUD_PROVIDER": cloud, "CLOUD_ROOT": str(CLOUD_ROOT)},
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        # Fallback: run SQL directly via the SDK
+        print(f"  {_yellow('WARN')} setup_test_data.py custom-sql not supported, using SDK directly")
+        _create_tables_via_sdk(dev_state)
+    else:
+        print(f"  {_green('✓')} Dev tables created")
+
+    # Create prod catalog (same schema, no data)
+    _step("Creating prod catalog (empty schema for promotion)...")
+    _create_prod_catalog(prod_state)
+
+    # Create Genie Space
+    _step("Creating Genie Space 'Kookaburra Bank Analytics'...")
+    genie_space_id = _create_genie_space(dev_state)
+
+    # Save state
+    state = {
+        "cloud": cloud,
+        "run_id": run_id,
+        "dev": {
+            "workspace_host": dev_host,
+            "workspace_id": dev_ws_id,
+            "state_file": str(dev_state_file),
+            "envs_dir": dev_state.get("test_envs_dir", ""),
+        },
+        "prod": {
+            "workspace_host": prod_host,
+            "workspace_id": prod_state.get("workspace_id", ""),
+            "state_file": str(prod_state_file),
+            "envs_dir": prod_state.get("test_envs_dir", ""),
+        },
+        "genie_space_id": genie_space_id,
+        "dev_catalog": DEV_CATALOG,
+        "prod_catalog": PROD_CATALOG,
+    }
+    _save_state(state)
+
+    # Print summary
+    print()
+    print("=" * 64)
+    print("  Demo Environment Ready")
+    print("=" * 64)
+    print(f"  Dev workspace:   {dev_host}")
+    print(f"  Prod workspace:  {prod_host}")
+    print(f"  Genie Space ID:  {genie_space_id}")
+    print(f"  Dev catalog:     {DEV_CATALOG}")
+    print(f"  Prod catalog:    {PROD_CATALOG}")
+    print(f"  State file:      {STATE_FILE}")
+    print()
+    print("  Next steps:")
+    print(f"    1. Open {dev_host} and explore the ungoverned Genie Space")
+    print(f"    2. Follow shared/examples/aus_bank_demo/README.md")
+    print()
+
+
+def _create_tables_via_sdk(dev_state: dict) -> None:
+    """Create tables directly via Databricks SDK."""
+    import hcl2 as _hcl2
+
+    auth_file = Path(dev_state.get("test_envs_dir", "")) / "dev" / "auth.auto.tfvars"
+    with open(auth_file) as f:
+        cfg = _hcl2.load(f)
+
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+    host = _s(cfg.get("databricks_workspace_host", ""))
+    client_id = _s(cfg.get("databricks_client_id", ""))
+    client_secret = _s(cfg.get("databricks_client_secret", ""))
+
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.sql import StatementState
+
+    w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+
+    # Find or create warehouse
+    wh_id = ""
+    for wh in w.warehouses.list():
+        if wh.id:
+            wh_id = wh.id
+            break
+    if not wh_id:
+        wh = w.warehouses.create(
+            name="Demo Warehouse",
+            cluster_size="2X-Small",
+            warehouse_type="PRO",
+            auto_stop_mins=15,
+            enable_serverless_compute=True,
+        ).result()
+        wh_id = wh.id
+
+    # Ensure catalogs exist
+    catalog_storage_base = _s(cfg.get("catalog_storage_base", ""))
+    for catalog_name in [DEV_CATALOG, PROD_CATALOG]:
+        try:
+            storage = f"{catalog_storage_base.rstrip('/')}/{catalog_name}" if catalog_storage_base else None
+            w.catalogs.create(name=catalog_name, comment=f"Australian bank demo — {catalog_name}",
+                              storage_root=storage)
+        except Exception:
+            pass  # already exists
+        try:
+            w.schemas.create(name=SCHEMA, catalog_name=catalog_name)
+        except Exception:
+            pass  # already exists
+
+    # Run SQL
+    all_sql = SETUP_SQL + "\n" + SAMPLE_DATA_SQL + "\n" + PROD_SETUP_SQL
+    for stmt in [s.strip() for s in all_sql.split(";") if s.strip() and not s.strip().startswith("--")]:
+        r = w.statement_execution.execute_statement(
+            warehouse_id=wh_id, statement=stmt, wait_timeout="50s",
+        )
+        max_wait = 120
+        start = time.time()
+        while True:
+            state = r.status.state
+            if state == StatementState.SUCCEEDED:
+                break
+            if state in (StatementState.FAILED, StatementState.CANCELED, StatementState.CLOSED):
+                err = r.status.error
+                print(f"  {_yellow('WARN')} SQL failed: {err}")
+                break
+            if time.time() - start > max_wait:
+                print(f"  {_yellow('WARN')} SQL timed out")
+                break
+            time.sleep(2)
+            r = w.statement_execution.get_statement(r.statement_id)
+
+    print(f"  {_green('✓')} Tables created in both dev and prod catalogs")
+
+
+def _create_prod_catalog(prod_state: dict) -> None:
+    """Create prod catalog with same schema but no data."""
+    try:
+        _create_tables_via_sdk_for_prod(prod_state)
+    except Exception as exc:
+        print(f"  {_yellow('WARN')} Could not create prod catalog: {exc}")
+
+
+def _create_tables_via_sdk_for_prod(prod_state: dict) -> None:
+    """Create prod catalog tables."""
+    import hcl2 as _hcl2
+
+    auth_file = Path(prod_state.get("test_envs_dir", "")) / "dev" / "auth.auto.tfvars"
+    if not Path(auth_file).exists():
+        return
+    with open(auth_file) as f:
+        cfg = _hcl2.load(f)
+
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+    host = _s(cfg.get("databricks_workspace_host", ""))
+    client_id = _s(cfg.get("databricks_client_id", ""))
+    client_secret = _s(cfg.get("databricks_client_secret", ""))
+
+    from databricks.sdk import WorkspaceClient
+    w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+
+    catalog_storage_base = _s(cfg.get("catalog_storage_base", ""))
+    try:
+        storage = f"{catalog_storage_base.rstrip('/')}/{PROD_CATALOG}" if catalog_storage_base else None
+        w.catalogs.create(name=PROD_CATALOG, comment="Australian bank demo — prod", storage_root=storage)
+    except Exception:
+        pass
+    try:
+        w.schemas.create(name=SCHEMA, catalog_name=PROD_CATALOG)
+    except Exception:
+        pass
+    print(f"  {_green('✓')} Prod catalog {PROD_CATALOG} ready")
+
+
+def _create_genie_space(dev_state: dict) -> str:
+    """Create a Genie Space pointing at dev bank tables."""
+    genie_script = SCRIPTS_DIR / "genie_space.sh"
+    if not genie_script.exists():
+        print(f"  {_yellow('WARN')} genie_space.sh not found — create the Genie Space manually")
+        return ""
+
+    import hcl2 as _hcl2
+    auth_file = Path(dev_state.get("test_envs_dir", "")) / "dev" / "auth.auto.tfvars"
+    with open(auth_file) as f:
+        cfg = _hcl2.load(f)
+
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+    host = _s(cfg.get("databricks_workspace_host", ""))
+    client_id = _s(cfg.get("databricks_client_id", ""))
+    client_secret = _s(cfg.get("databricks_client_secret", ""))
+
+    # Find warehouse
+    from databricks.sdk import WorkspaceClient
+    w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+    wh_id = ""
+    for wh in w.warehouses.list():
+        if wh.id:
+            wh_id = wh.id
+            break
+
+    tables = f"{DEV_CATALOG}.{SCHEMA}.*"
+
+    env = {
+        **os.environ,
+        "DATABRICKS_HOST": host,
+        "DATABRICKS_CLIENT_ID": client_id,
+        "DATABRICKS_CLIENT_SECRET": client_secret,
+    }
+
+    result = subprocess.run(
+        ["bash", str(genie_script), "create", host, "", "Kookaburra Bank Analytics", wh_id,
+         "--tables", tables],
+        env=env, capture_output=True, text=True,
+    )
+    # Extract space ID from output
+    space_id = ""
+    for line in (result.stdout or "").split("\n"):
+        if "space_id" in line.lower() or "genie_space_id" in line.lower():
+            # Try to extract ID
+            import re
+            m = re.search(r'["\']?([0-9a-f]{16,})["\']?', line)
+            if m:
+                space_id = m.group(1)
+                break
+    if not space_id:
+        # Try parsing JSON from stdout
+        for line in (result.stdout or "").split("\n"):
+            try:
+                data = json.loads(line)
+                space_id = data.get("space_id", data.get("id", ""))
+                if space_id:
+                    break
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+    if space_id:
+        print(f"  {_green('✓')} Genie Space created: {space_id}")
+    else:
+        print(f"  {_yellow('WARN')} Genie Space creation output unclear — check manually")
+        print(f"  stdout: {(result.stdout or '')[:200]}")
+        print(f"  stderr: {(result.stderr or '')[:200]}")
+
+    return space_id
+
+
+def cmd_status() -> None:
+    """Show current demo state."""
+    state = _load_state()
+    if not state:
+        print("  No demo environment provisioned.")
+        return
+    print("=" * 64)
+    print("  Australian Bank Demo — Status")
+    print("=" * 64)
+    print(f"  Cloud:          {state.get('cloud', '?')}")
+    print(f"  Dev workspace:  {state.get('dev', {}).get('workspace_host', '?')}")
+    print(f"  Prod workspace: {state.get('prod', {}).get('workspace_host', '?')}")
+    print(f"  Genie Space ID: {state.get('genie_space_id', '?')}")
+    print(f"  Dev catalog:    {state.get('dev_catalog', '?')}")
+    print(f"  Prod catalog:   {state.get('prod_catalog', '?')}")
+    print(f"  State file:     {STATE_FILE}")
+    print("=" * 64)
+
+
+def cmd_teardown(env_file: Path) -> None:
+    """Tear down both workspaces and all cloud resources."""
+    state = _load_state()
+    if not state:
+        print("  No demo environment to tear down.")
+        return
+
+    cloud = state.get("cloud", _default_cloud)
+
+    print("=" * 64)
+    print("  Australian Bank Demo — Teardown")
+    print("=" * 64)
+
+    for env_name in ["prod", "dev"]:
+        env_state_file = state.get(env_name, {}).get("state_file", "")
+        if env_state_file and Path(env_state_file).exists():
+            _step(f"Tearing down {env_name} workspace...")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPTS_DIR / "provision_test_env.py"),
+                 "teardown", "--env-file", str(env_file)],
+                cwd=str(CLOUD_ROOT),
+                env={
+                    **os.environ,
+                    "CLOUD_PROVIDER": cloud,
+                    "CLOUD_ROOT": str(CLOUD_ROOT),
+                    "_PARALLEL_STATE_FILE": env_state_file,
+                },
+                text=True,
+            )
+            if result.returncode == 0:
+                print(f"  {_green('✓')} {env_name} workspace torn down")
+            else:
+                print(f"  {_yellow('WARN')} {env_name} teardown had errors (exit {result.returncode})")
+
+    # Clean local state
+    for f in SCRIPT_DIR.glob(".demo_*"):
+        f.unlink()
+    if STATE_FILE.exists():
+        STATE_FILE.unlink()
+
+    print(f"\n  {_green('✓')} Teardown complete")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Australian Bank Demo — Setup and Teardown",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument("command", choices=["provision", "status", "teardown"],
+                       help="provision: create demo env | status: show state | teardown: destroy everything")
+    parser.add_argument("--env-file", default=str(SCRIPTS_DIR / f"account-admin.{_default_cloud}.env"),
+                       help="Path to account admin credentials env file")
+    args = parser.parse_args()
+
+    env_file = Path(args.env_file).resolve()
+
+    if args.command == "provision":
+        if not env_file.exists():
+            print(f"ERROR: Credentials file not found: {env_file}")
+            sys.exit(1)
+        cmd_provision(env_file)
+    elif args.command == "status":
+        cmd_status()
+    elif args.command == "teardown":
+        cmd_teardown(env_file)
+
+
+if __name__ == "__main__":
+    main()
