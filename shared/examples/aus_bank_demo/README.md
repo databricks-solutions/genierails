@@ -93,20 +93,12 @@ vi envs/dev/env.auto.tfvars
 ```
 
 ```hcl
-uc_tables = [
-  "dev_bank.retail.customers",
-  "dev_bank.retail.accounts",
-  "dev_bank.retail.transactions",
-  "dev_bank.retail.credit_cards",
-]
-
 genie_spaces = [
   {
     genie_space_id = "01ef7b3c2a4d5e6f"   # paste your ID from setup output
+    # tables and warehouse are auto-discovered from the existing Space
   },
 ]
-
-sql_warehouse_id = ""   # paste from setup output, or leave empty to auto-create
 ```
 
 ### 2b. Generate ABAC governance
