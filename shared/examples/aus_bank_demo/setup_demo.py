@@ -435,7 +435,21 @@ def _create_prod_workspace(cfg: dict, cloud: str, metastore_id: str, dev_state: 
         }
 
     print(f"  Creating workspace: {prod_ws_name} in {region}...")
-    ws = a.workspaces.create(workspace_name=prod_ws_name, **ws_kwargs).result()
+    try:
+        from databricks.sdk.service.provisioning import (
+            CustomerFacingComputeMode,
+            PricingTier,
+        )
+        ws = a.workspaces.create_and_wait(
+            workspace_name=prod_ws_name,
+            pricing_tier=PricingTier.ENTERPRISE,
+            compute_mode=CustomerFacingComputeMode.SERVERLESS,
+            **ws_kwargs,
+        )
+    except (ImportError, TypeError):
+        # Fallback for older SDK versions without compute_mode
+        ws = a.workspaces.create(workspace_name=prod_ws_name, **ws_kwargs).result()
+
     prod_host = (f"https://{ws.deployment_name}.cloud.databricks.com"
                  if cloud == "aws" else (ws.workspace_url or ""))
     prod_ws_id = str(ws.workspace_id)
