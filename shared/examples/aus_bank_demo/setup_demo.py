@@ -333,12 +333,30 @@ def cmd_provision(env_file: Path) -> None:
 
     # Write env.auto.tfvars with genie_space_id
     env_tfvars = CLOUD_ROOT / "envs" / "dev" / "env.auto.tfvars"
-    env_tfvars.write_text(f"""\
+    if genie_space_id:
+        env_tfvars.write_text(f"""\
 genie_spaces = [
   {{
     genie_space_id = "{genie_space_id}"
   }},
 ]
+""")
+    else:
+        # Genie Space creation failed — write tables so user can create Space manually
+        env_tfvars.write_text(f"""\
+uc_tables = [
+  "{DEV_CATALOG}.{SCHEMA}.customers",
+  "{DEV_CATALOG}.{SCHEMA}.accounts",
+  "{DEV_CATALOG}.{SCHEMA}.transactions",
+  "{DEV_CATALOG}.{SCHEMA}.credit_cards",
+]
+
+# Create a Genie Space manually in the UI, then paste the ID:
+# genie_spaces = [
+#   {{
+#     genie_space_id = ""
+#   }},
+# ]
 """)
     print(f"  {_green('✓')} envs/dev/ configured (auth + env.auto.tfvars)")
 
@@ -591,109 +609,98 @@ def _create_prod_catalog_via_sdk(dev_state: dict) -> None:
 
 
 def _create_genie_space(dev_state: dict) -> str:
-    """Create a Genie Space pointing at dev bank tables."""
-    genie_script = SCRIPTS_DIR / "genie_space.sh"
-    if not genie_script.exists():
-        print(f"  {_yellow('WARN')} genie_space.sh not found — create the Genie Space manually")
-        return ""
-
+    """Create a Genie Space pointing at dev bank tables via REST API directly."""
     import hcl2 as _hcl2
+    import urllib.request
+    import urllib.error
+
     auth_file = Path(dev_state.get("test_envs_dir", "")) / "dev" / "auth.auto.tfvars"
     with open(auth_file) as f:
         cfg = _hcl2.load(f)
 
     _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
-    host = _s(cfg.get("databricks_workspace_host", ""))
+    host = _s(cfg.get("databricks_workspace_host", "")).rstrip("/")
     client_id = _s(cfg.get("databricks_client_id", ""))
     client_secret = _s(cfg.get("databricks_client_secret", ""))
 
-    from databricks.sdk import WorkspaceClient
-    w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
-
-    # Ensure SP has sql access + workspace access entitlements (needed for Genie Space creation)
-    try:
-        from databricks.sdk.service.iam import PatchSchema
-        sp_me = w.current_user.me()
-        for entitlement in ["databricks-sql-access", "workspace-access"]:
-            try:
-                w.service_principals.patch(
-                    id=sp_me.id,
-                    operations=[{
-                        "op": "add",
-                        "path": "entitlements",
-                        "value": [{"value": entitlement}],
-                    }],
-                    schemas=[PatchSchema.URN_IETF_PARAMS_SCIM_API_MESSAGES_2_0_PATCH_OP],
-                )
-            except Exception:
-                pass
-    except Exception:
-        pass  # may already have it or SDK version difference
+    # Get OAuth token
+    import urllib.parse
+    token_url = f"{host}/oidc/v1/token"
+    token_data = urllib.parse.urlencode({
+        "grant_type": "client_credentials",
+        "scope": "all-apis",
+    }).encode()
+    token_req = urllib.request.Request(
+        token_url, data=token_data, method="POST",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": "Basic " + __import__("base64").b64encode(
+                f"{client_id}:{client_secret}".encode()
+            ).decode(),
+        },
+    )
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    with urllib.request.urlopen(token_req, context=ctx) as resp:
+        token = json.loads(resp.read())["access_token"]
 
     # Find warehouse
+    from databricks.sdk import WorkspaceClient
+    w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
     wh_id = ""
     for wh in w.warehouses.list():
         if wh.id:
             wh_id = wh.id
             break
 
-    # Use explicit table names (not wildcards) to avoid UC API propagation delay
-    tables = ",".join([
+    # Build Genie Space payload
+    tables = [
         f"{DEV_CATALOG}.{SCHEMA}.customers",
         f"{DEV_CATALOG}.{SCHEMA}.accounts",
         f"{DEV_CATALOG}.{SCHEMA}.transactions",
         f"{DEV_CATALOG}.{SCHEMA}.credit_cards",
-    ])
+    ]
+    serialized_space = json.dumps({
+        "version": 2,
+        "data_sources": {
+            "tables": [{"identifier": t} for t in sorted(tables)]
+        },
+    }, separators=(",", ":"))
 
-    env = {
-        **os.environ,
-        "DATABRICKS_HOST": host,
-        "DATABRICKS_CLIENT_ID": client_id,
-        "DATABRICKS_CLIENT_SECRET": client_secret,
-        "GENIE_TABLES_CSV": tables,
-        "GENIE_WAREHOUSE_ID": wh_id,
-        "GENIE_TITLE": "Kookaburra Bank Analytics",
-    }
+    body = json.dumps({
+        "warehouse_id": wh_id,
+        "title": "Kookaburra Bank Analytics",
+        "serialized_space": serialized_space,
+    })
 
-    result = subprocess.run(
-        ["bash", str(genie_script), "create"],
-        env=env, capture_output=True, text=True,
+    # Create via REST API
+    create_req = urllib.request.Request(
+        f"{host}/api/2.0/genie/spaces",
+        data=body.encode(),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
     )
-    # Extract space ID from output
-    # genie_space.sh prints: "Genie Space created: <space_id>"
-    import re
-    space_id = ""
-    all_output = (result.stdout or "") + "\n" + (result.stderr or "")
-    for line in all_output.split("\n"):
-        # Match "Genie Space created: 01ef..." or "space_id": "01ef..."
-        m = re.search(r'(?:created|space_id)["\s:]+([0-9a-f]{10,})', line, re.IGNORECASE)
-        if m:
-            space_id = m.group(1)
-            break
-    if not space_id:
-        # Try parsing JSON from any line
-        for line in all_output.split("\n"):
-            try:
-                data = json.loads(line)
-                space_id = data.get("space_id", data.get("id", ""))
-                if space_id:
-                    break
-            except (json.JSONDecodeError, TypeError):
-                continue
-
-    if space_id:
-        print(f"  {_green('✓')} Genie Space created: {space_id}")
-    else:
-        print(f"  {_yellow('WARN')} Genie Space may have been created but ID not captured")
-        print(f"  Check the dev workspace UI for the space.")
-        if result.stdout:
-            print(f"  stdout: {result.stdout.strip()[:300]}")
-        if result.stderr:
-            print(f"  stderr: {result.stderr.strip()[:300]}")
-        if result.returncode != 0:
-            print(f"  exit code: {result.returncode}")
-
-    return space_id
+    try:
+        with urllib.request.urlopen(create_req, context=ctx) as resp:
+            result = json.loads(resp.read())
+            space_id = result.get("space_id", "")
+            if space_id:
+                print(f"  {_green('✓')} Genie Space created: {space_id}")
+                return space_id
+            else:
+                print(f"  {_yellow('WARN')} Created but no space_id in response: {result}")
+                return ""
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode()[:300]
+        print(f"  {_red('ERROR')} Genie Space creation failed (HTTP {e.code}): {error_body}")
+        print(f"  The SP may need to be granted Genie Space permissions in the workspace.")
+        print(f"  Try opening {host} in a browser and creating the Space manually.")
+        return ""
 
 
 def cmd_status() -> None:
