@@ -280,7 +280,7 @@ def cmd_provision(env_file: Path) -> None:
 
     # Phase 3: Create tables via SDK (both dev data + prod empty schema)
     _step("Creating Australian banking tables in dev workspace...")
-    _create_tables_via_sdk(dev_state)
+    warehouse_id = _create_tables_via_sdk(dev_state)
 
     # Create prod catalog (same schema, no data) — uses same metastore
     _step("Creating prod catalog (empty schema for promotion)...")
@@ -306,6 +306,7 @@ def cmd_provision(env_file: Path) -> None:
             "workspace_id": prod_ws_id,
         },
         "genie_space_id": genie_space_id,
+        "warehouse_id": warehouse_id,
         "dev_catalog": DEV_CATALOG,
         "prod_catalog": PROD_CATALOG,
     }
@@ -342,6 +343,8 @@ genie_spaces = [
     genie_space_id = "{genie_space_id}"
   }},
 ]
+
+sql_warehouse_id = "{warehouse_id}"
 """)
     else:
         # Genie Space creation failed — write tables so user can create Space manually
@@ -380,8 +383,8 @@ uc_tables = [
     print()
 
 
-def _create_tables_via_sdk(dev_state: dict) -> None:
-    """Create tables directly via Databricks SDK."""
+def _create_tables_via_sdk(dev_state: dict) -> str:
+    """Create tables directly via Databricks SDK. Returns warehouse ID."""
     import hcl2 as _hcl2
 
     auth_file = Path(dev_state.get("test_envs_dir", "")) / "dev" / "auth.auto.tfvars"
@@ -472,7 +475,8 @@ def _create_tables_via_sdk(dev_state: dict) -> None:
             time.sleep(2)
             r = w.statement_execution.get_statement(r.statement_id)
 
-    print(f"  {_green('✓')} Tables created in both dev and prod catalogs")
+    print(f"  {_green('✓')} Tables created")
+    return wh_id
 
 
 def _create_prod_workspace(cfg: dict, cloud: str, metastore_id: str, dev_state: dict) -> tuple[str, str]:
