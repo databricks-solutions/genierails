@@ -18,10 +18,27 @@ An end-to-end demo of GenieRails for an Australian retail bank. Shows the full c
 
 The setup script provisions two isolated workspaces and creates sample Australian banking data.
 
+### 1. Create credentials file
+
 ```bash
 cd aws   # or: cd azure
 
-# Provision dev + prod workspaces, create tables, create Genie Space
+# Copy the example and fill in your Account Admin SP credentials
+cp shared/scripts/account-admin.aws.env.example shared/scripts/account-admin.aws.env
+vi shared/scripts/account-admin.aws.env
+```
+
+You need:
+- `DATABRICKS_ACCOUNT_ID` — your Databricks account UUID ([Account Console](https://accounts.cloud.databricks.com) → top-right menu)
+- `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` — Account Admin service principal OAuth credentials
+- `DATABRICKS_AWS_REGION` — AWS region (default: `ap-southeast-2`)
+- AWS credentials (IAM keys, SSO profile, or instance role) — for S3 bucket + IAM role creation
+
+See [Prerequisites](../../docs/prerequisites.md) for detailed setup instructions.
+
+### 2. Provision the demo
+
+```bash
 python shared/examples/aus_bank_demo/setup_demo.py provision \
     --env-file shared/scripts/account-admin.aws.env
 ```
