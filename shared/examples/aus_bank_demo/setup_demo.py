@@ -236,7 +236,7 @@ def _load_state() -> dict:
 # ---------------------------------------------------------------------------
 
 def cmd_provision(env_file: Path) -> None:
-    """Provision dev + prod workspaces, create tables, create Genie Space."""
+    """Provision dev + prod workspaces (shared metastore), create tables, create Genie Space."""
     cfg = _load_env_file(env_file)
     cloud = _default_cloud
 
@@ -247,8 +247,8 @@ def cmd_provision(env_file: Path) -> None:
     print(f"  Credentials: {env_file}")
     print()
 
-    # Delegate to provision_test_env.py for the heavy lifting
-    _step("Provisioning dev workspace (this takes ~3-5 minutes)...")
+    # Phase 1: Provision dev workspace + metastore + storage via provision_test_env.py
+    _step("Provisioning dev workspace + shared metastore (this takes ~3-5 minutes)...")
     dev_state_file = SCRIPT_DIR / f".demo_dev_state.{cloud}.json"
     result = subprocess.run(
         [sys.executable, str(SCRIPTS_DIR / "provision_test_env.py"),
@@ -270,55 +270,23 @@ def cmd_provision(env_file: Path) -> None:
     dev_host = dev_state.get("workspace_host", "")
     dev_ws_id = dev_state.get("workspace_id", "")
     run_id = dev_state.get("run_id", "")
+    metastore_id = dev_state.get("metastore_id", "")
     print(f"  {_green('✓')} Dev workspace ready: {dev_host}")
+    print(f"  {_green('✓')} Shared metastore: {metastore_id}")
 
-    # Provision prod workspace
-    _step("Provisioning prod workspace...")
-    prod_state_file = SCRIPT_DIR / f".demo_prod_state.{cloud}.json"
-    result = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "provision_test_env.py"),
-         "provision", "--force", "--env-file", str(env_file)],
-        cwd=str(CLOUD_ROOT),
-        env={
-            **os.environ,
-            "CLOUD_PROVIDER": cloud,
-            "CLOUD_ROOT": str(CLOUD_ROOT),
-            "_PARALLEL_STATE_FILE": str(prod_state_file),
-        },
-        text=True,
-    )
-    if result.returncode != 0:
-        print(f"\n  {_red('ERROR')} Prod workspace provisioning failed (exit {result.returncode})")
-        sys.exit(1)
+    # Phase 2: Create prod workspace and assign it to the SAME metastore
+    _step("Creating prod workspace (sharing the same metastore)...")
+    prod_host, prod_ws_id = _create_prod_workspace(cfg, cloud, metastore_id, dev_state)
 
-    prod_state = json.loads(prod_state_file.read_text())
-    prod_host = prod_state.get("workspace_host", "")
-    print(f"  {_green('✓')} Prod workspace ready: {prod_host}")
-
-    # Create tables in dev workspace
+    # Phase 3: Create tables via SDK (both dev data + prod empty schema)
     _step("Creating Australian banking tables in dev workspace...")
-    dev_auth = Path(dev_state.get("test_envs_dir", "")) / "dev" / "auth.auto.tfvars"
-    result = subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "setup_test_data.py"),
-         "--auth-file", str(dev_auth),
-         "--custom-sql", "-"],
-        input=SETUP_SQL + "\n" + SAMPLE_DATA_SQL,
-        cwd=str(CLOUD_ROOT),
-        env={**os.environ, "CLOUD_PROVIDER": cloud, "CLOUD_ROOT": str(CLOUD_ROOT)},
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        # Fallback: run SQL directly via the SDK
-        print(f"  {_yellow('WARN')} setup_test_data.py custom-sql not supported, using SDK directly")
-        _create_tables_via_sdk(dev_state)
-    else:
-        print(f"  {_green('✓')} Dev tables created")
+    _create_tables_via_sdk(dev_state)
 
-    # Create prod catalog (same schema, no data)
+    # Create prod catalog (same schema, no data) — uses same metastore
     _step("Creating prod catalog (empty schema for promotion)...")
-    _create_prod_catalog(prod_state)
+    _create_prod_catalog_via_sdk(dev_state)  # same workspace client — shared metastore
 
-    # Create Genie Space
+    # Phase 4: Create Genie Space
     _step("Creating Genie Space 'Kookaburra Bank Analytics'...")
     genie_space_id = _create_genie_space(dev_state)
 
@@ -326,6 +294,7 @@ def cmd_provision(env_file: Path) -> None:
     state = {
         "cloud": cloud,
         "run_id": run_id,
+        "metastore_id": metastore_id,
         "dev": {
             "workspace_host": dev_host,
             "workspace_id": dev_ws_id,
@@ -334,9 +303,7 @@ def cmd_provision(env_file: Path) -> None:
         },
         "prod": {
             "workspace_host": prod_host,
-            "workspace_id": prod_state.get("workspace_id", ""),
-            "state_file": str(prod_state_file),
-            "envs_dir": prod_state.get("test_envs_dir", ""),
+            "workspace_id": prod_ws_id,
         },
         "genie_space_id": genie_space_id,
         "dev_catalog": DEV_CATALOG,
@@ -435,20 +402,77 @@ def _create_tables_via_sdk(dev_state: dict) -> None:
     print(f"  {_green('✓')} Tables created in both dev and prod catalogs")
 
 
-def _create_prod_catalog(prod_state: dict) -> None:
-    """Create prod catalog with same schema but no data."""
+def _create_prod_workspace(cfg: dict, cloud: str, metastore_id: str, dev_state: dict) -> tuple[str, str]:
+    """Create a second workspace and assign it to the shared metastore.
+
+    Returns (prod_host, prod_workspace_id).
+    """
+    from databricks.sdk import AccountClient
+
+    account_host = "https://accounts.azuredatabricks.net" if cloud == "azure" else "https://accounts.cloud.databricks.com"
+    a = AccountClient(
+        host=account_host,
+        account_id=cfg.get("DATABRICKS_ACCOUNT_ID", ""),
+        client_id=cfg.get("DATABRICKS_CLIENT_ID", ""),
+        client_secret=cfg.get("DATABRICKS_CLIENT_SECRET", ""),
+    )
+
+    # Import the cloud provider to create the workspace
+    sys.path.insert(0, str(SCRIPTS_DIR / "cloud_providers"))
+    if cloud == "aws":
+        from aws_provider import AWSProvider
+        provider = AWSProvider()
+    else:
+        from azure_provider import AzureProvider
+        provider = AzureProvider()
+
+    import secrets
+    prod_run_id = "demo-prod-" + secrets.token_hex(4)
+    prod_ws_name = f"genie-demo-prod-{secrets.token_hex(5)}"
+    region = dev_state.get("region", cfg.get("DATABRICKS_AWS_REGION", "ap-southeast-2"))
+
+    print(f"  Creating workspace: {prod_ws_name} in {region}...")
+    ws = a.workspaces.create(
+        workspace_name=prod_ws_name,
+        **provider.workspace_create_kwargs(cfg, region),
+    ).result()
+    prod_host = f"https://{ws.deployment_name}.cloud.databricks.com" if cloud == "aws" else ws.workspace_url
+    prod_ws_id = str(ws.workspace_id)
+    print(f"  {_green('✓')} Prod workspace created: {prod_host}")
+
+    # Assign shared metastore
+    print(f"  Assigning shared metastore {metastore_id}...")
     try:
-        _create_tables_via_sdk_for_prod(prod_state)
-    except Exception as exc:
-        print(f"  {_yellow('WARN')} Could not create prod catalog: {exc}")
+        a.metastores.assign(workspace_id=int(prod_ws_id), metastore_id=metastore_id,
+                            default_catalog_name="main")
+        print(f"  {_green('✓')} Metastore assigned to prod workspace")
+    except Exception as e:
+        print(f"  {_yellow('WARN')} Metastore assignment: {e}")
+
+    # Grant SP workspace admin on prod
+    sp_id = cfg.get("DATABRICKS_CLIENT_ID", "")
+    if sp_id:
+        try:
+            time.sleep(15)  # wait for workspace identity propagation
+            from databricks.sdk import WorkspaceClient
+            w = WorkspaceClient(host=prod_host, client_id=sp_id,
+                                client_secret=cfg.get("DATABRICKS_CLIENT_SECRET", ""))
+            # Verify connectivity
+            me = w.current_user.me()
+            print(f"  {_green('✓')} SP authenticated on prod workspace as {me.user_name}")
+        except Exception as e:
+            print(f"  {_yellow('WARN')} Prod workspace auth: {e}")
+
+    return prod_host, prod_ws_id
 
 
-def _create_tables_via_sdk_for_prod(prod_state: dict) -> None:
-    """Create prod catalog tables."""
+def _create_prod_catalog_via_sdk(dev_state: dict) -> None:
+    """Create prod catalog in the shared metastore (via dev workspace client)."""
     import hcl2 as _hcl2
 
-    auth_file = Path(prod_state.get("test_envs_dir", "")) / "dev" / "auth.auto.tfvars"
+    auth_file = Path(dev_state.get("test_envs_dir", "")) / "dev" / "auth.auto.tfvars"
     if not Path(auth_file).exists():
+        print(f"  {_yellow('WARN')} Auth file not found: {auth_file}")
         return
     with open(auth_file) as f:
         cfg = _hcl2.load(f)
@@ -457,21 +481,43 @@ def _create_tables_via_sdk_for_prod(prod_state: dict) -> None:
     host = _s(cfg.get("databricks_workspace_host", ""))
     client_id = _s(cfg.get("databricks_client_id", ""))
     client_secret = _s(cfg.get("databricks_client_secret", ""))
+    catalog_storage_base = _s(cfg.get("catalog_storage_base", ""))
 
     from databricks.sdk import WorkspaceClient
     w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
 
-    catalog_storage_base = _s(cfg.get("catalog_storage_base", ""))
+    storage = f"{catalog_storage_base.rstrip('/')}/{PROD_CATALOG}" if catalog_storage_base else None
     try:
-        storage = f"{catalog_storage_base.rstrip('/')}/{PROD_CATALOG}" if catalog_storage_base else None
-        w.catalogs.create(name=PROD_CATALOG, comment="Australian bank demo — prod", storage_root=storage)
+        w.catalogs.create(name=PROD_CATALOG, comment="Australian bank demo — prod",
+                          storage_root=storage)
     except Exception:
-        pass
+        pass  # already exists
     try:
         w.schemas.create(name=SCHEMA, catalog_name=PROD_CATALOG)
     except Exception:
-        pass
-    print(f"  {_green('✓')} Prod catalog {PROD_CATALOG} ready")
+        pass  # already exists
+
+    # Create empty tables in prod catalog
+    from databricks.sdk.service.sql import StatementState
+    wh_id = ""
+    for wh in w.warehouses.list():
+        if wh.id:
+            wh_id = wh.id
+            break
+
+    if wh_id:
+        for stmt in [s.strip() for s in PROD_SETUP_SQL.split(";") if s.strip() and not s.strip().startswith("--")]:
+            try:
+                r = w.statement_execution.execute_statement(
+                    warehouse_id=wh_id, statement=stmt, wait_timeout="50s")
+                while r.status.state not in (StatementState.SUCCEEDED, StatementState.FAILED,
+                                              StatementState.CANCELED, StatementState.CLOSED):
+                    time.sleep(2)
+                    r = w.statement_execution.get_statement(r.statement_id)
+            except Exception:
+                pass
+
+    print(f"  {_green('✓')} Prod catalog {PROD_CATALOG} ready (empty tables)")
 
 
 def _create_genie_space(dev_state: dict) -> str:
@@ -572,33 +618,53 @@ def cmd_teardown(env_file: Path) -> None:
         return
 
     cloud = state.get("cloud", _default_cloud)
+    cfg = _load_env_file(env_file)
 
     print("=" * 64)
     print("  Australian Bank Demo — Teardown")
     print("=" * 64)
 
-    for env_name in ["prod", "dev"]:
-        env_state_file = state.get(env_name, {}).get("state_file", "")
-        if env_state_file and Path(env_state_file).exists():
-            _step(f"Tearing down {env_name} workspace...")
-            result = subprocess.run(
-                [sys.executable, str(SCRIPTS_DIR / "provision_test_env.py"),
-                 "teardown", "--env-file", str(env_file)],
-                cwd=str(CLOUD_ROOT),
-                env={
-                    **os.environ,
-                    "CLOUD_PROVIDER": cloud,
-                    "CLOUD_ROOT": str(CLOUD_ROOT),
-                    "_PARALLEL_STATE_FILE": env_state_file,
-                },
-                text=True,
+    # Step 1: Delete prod workspace via Account API
+    # (prod was created directly, not via provision_test_env.py)
+    prod_ws_id = state.get("prod", {}).get("workspace_id", "")
+    if prod_ws_id:
+        _step("Deleting prod workspace...")
+        try:
+            from databricks.sdk import AccountClient
+            account_host = "https://accounts.azuredatabricks.net" if cloud == "azure" else "https://accounts.cloud.databricks.com"
+            a = AccountClient(
+                host=account_host,
+                account_id=cfg.get("DATABRICKS_ACCOUNT_ID", ""),
+                client_id=cfg.get("DATABRICKS_CLIENT_ID", ""),
+                client_secret=cfg.get("DATABRICKS_CLIENT_SECRET", ""),
             )
-            if result.returncode == 0:
-                print(f"  {_green('✓')} {env_name} workspace torn down")
-            else:
-                print(f"  {_yellow('WARN')} {env_name} teardown had errors (exit {result.returncode})")
+            a.workspaces.delete(workspace_id=int(prod_ws_id))
+            print(f"  {_green('✓')} Prod workspace deleted")
+        except Exception as e:
+            print(f"  {_yellow('WARN')} Prod workspace deletion: {e}")
 
-    # Clean local state
+    # Step 2: Tear down dev workspace + metastore + storage via provision_test_env.py
+    dev_state_file = state.get("dev", {}).get("state_file", "")
+    if dev_state_file and Path(dev_state_file).exists():
+        _step("Tearing down dev workspace + metastore + storage...")
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "provision_test_env.py"),
+             "teardown", "--env-file", str(env_file)],
+            cwd=str(CLOUD_ROOT),
+            env={
+                **os.environ,
+                "CLOUD_PROVIDER": cloud,
+                "CLOUD_ROOT": str(CLOUD_ROOT),
+                "_PARALLEL_STATE_FILE": dev_state_file,
+            },
+            text=True,
+        )
+        if result.returncode == 0:
+            print(f"  {_green('✓')} Dev workspace + metastore torn down")
+        else:
+            print(f"  {_yellow('WARN')} Dev teardown had errors (exit {result.returncode})")
+
+    # Clean local state files
     for f in SCRIPT_DIR.glob(".demo_*"):
         f.unlink()
     if STATE_FILE.exists():
