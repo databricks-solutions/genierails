@@ -377,8 +377,12 @@ def _create_tables_via_sdk(dev_state: dict) -> None:
         except Exception:
             pass  # already exists
 
-    # Run SQL — strip comment-only lines before executing
-    all_sql = SETUP_SQL + "\n" + SAMPLE_DATA_SQL
+    # Run SQL — set default catalog first, then strip comment-only lines
+    all_sql = (
+        f"USE CATALOG {DEV_CATALOG};\n"
+        f"USE SCHEMA {SCHEMA};\n"
+        + SETUP_SQL + "\n" + SAMPLE_DATA_SQL
+    )
     stmts = []
     for raw in all_sql.split(";"):
         # Strip leading comment lines (keep SQL that follows comments)
@@ -564,21 +568,25 @@ def _create_genie_space(dev_state: dict) -> str:
     from databricks.sdk import WorkspaceClient
     w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
 
-    # Ensure SP has sql access entitlement (needed for Genie Space creation)
+    # Ensure SP has sql access + workspace access entitlements (needed for Genie Space creation)
     try:
-        from databricks.sdk.service.iam import PatchOp, PatchSchema
+        from databricks.sdk.service.iam import PatchSchema
         sp_me = w.current_user.me()
-        w.service_principals.patch(
-            id=sp_me.id,
-            operations=[{
-                "op": "add",
-                "path": "entitlements",
-                "value": [{"value": "databricks-sql-access"}],
-            }],
-            schemas=[PatchSchema.URN_IETF_PARAMS_SCIM_API_MESSAGES_2_0_PATCH_OP],
-        )
+        for entitlement in ["databricks-sql-access", "workspace-access"]:
+            try:
+                w.service_principals.patch(
+                    id=sp_me.id,
+                    operations=[{
+                        "op": "add",
+                        "path": "entitlements",
+                        "value": [{"value": entitlement}],
+                    }],
+                    schemas=[PatchSchema.URN_IETF_PARAMS_SCIM_API_MESSAGES_2_0_PATCH_OP],
+                )
+            except Exception:
+                pass
     except Exception:
-        pass  # may already have it or not supported
+        pass  # may already have it or SDK version difference
 
     # Find warehouse
     wh_id = ""
