@@ -331,23 +331,16 @@ def cmd_provision(env_file: Path) -> None:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
 
-    # Write env.auto.tfvars with genie_space_id AND uc_tables
-    # Both are needed: uc_tables for generation (serialized_space may not be ready),
-    # genie_space_id for attaching governance to the existing Space
+    # Write env.auto.tfvars with genie_space_id only.
+    # Tables are auto-discovered from the Genie Space API.
+    # NOTE: The Genie API needs a few minutes to populate serialized_space
+    # for newly created spaces. Opening the Space in the UI triggers this.
     env_tfvars = CLOUD_ROOT / "envs" / "dev" / "env.auto.tfvars"
     if genie_space_id:
         env_tfvars.write_text(f"""\
-uc_tables = [
-  "{DEV_CATALOG}.{SCHEMA}.customers",
-  "{DEV_CATALOG}.{SCHEMA}.accounts",
-  "{DEV_CATALOG}.{SCHEMA}.transactions",
-  "{DEV_CATALOG}.{SCHEMA}.credit_cards",
-]
-
 genie_spaces = [
   {{
     genie_space_id = "{genie_space_id}"
-    name           = "Kookaburra Bank Analytics"
   }},
 ]
 """)
