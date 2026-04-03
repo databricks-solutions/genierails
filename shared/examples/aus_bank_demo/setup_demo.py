@@ -377,9 +377,16 @@ def _create_tables_via_sdk(dev_state: dict) -> None:
         except Exception:
             pass  # already exists
 
-    # Run SQL
-    all_sql = SETUP_SQL + "\n" + SAMPLE_DATA_SQL + "\n" + PROD_SETUP_SQL
-    for stmt in [s.strip() for s in all_sql.split(";") if s.strip() and not s.strip().startswith("--")]:
+    # Run SQL — strip comment-only lines before executing
+    all_sql = SETUP_SQL + "\n" + SAMPLE_DATA_SQL
+    stmts = []
+    for raw in all_sql.split(";"):
+        # Strip leading comment lines (keep SQL that follows comments)
+        lines = [l for l in raw.strip().splitlines() if l.strip() and not l.strip().startswith("--")]
+        cleaned = "\n".join(lines).strip()
+        if cleaned:
+            stmts.append(cleaned)
+    for stmt in stmts:
         r = w.statement_execution.execute_statement(
             warehouse_id=wh_id, statement=stmt, wait_timeout="50s",
         )
@@ -554,9 +561,26 @@ def _create_genie_space(dev_state: dict) -> str:
     client_id = _s(cfg.get("databricks_client_id", ""))
     client_secret = _s(cfg.get("databricks_client_secret", ""))
 
-    # Find warehouse
     from databricks.sdk import WorkspaceClient
     w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+
+    # Ensure SP has sql access entitlement (needed for Genie Space creation)
+    try:
+        from databricks.sdk.service.iam import PatchOp, PatchSchema
+        sp_me = w.current_user.me()
+        w.service_principals.patch(
+            id=sp_me.id,
+            operations=[{
+                "op": "add",
+                "path": "entitlements",
+                "value": [{"value": "databricks-sql-access"}],
+            }],
+            schemas=[PatchSchema.URN_IETF_PARAMS_SCIM_API_MESSAGES_2_0_PATCH_OP],
+        )
+    except Exception:
+        pass  # may already have it or not supported
+
+    # Find warehouse
     wh_id = ""
     for wh in w.warehouses.list():
         if wh.id:
