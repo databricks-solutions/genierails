@@ -377,12 +377,23 @@ def _create_tables_via_sdk(dev_state: dict) -> None:
         except Exception:
             pass  # already exists
 
-    # Run SQL — set default catalog first, then strip comment-only lines
-    all_sql = (
-        f"USE CATALOG {DEV_CATALOG};\n"
-        f"USE SCHEMA {SCHEMA};\n"
-        + SETUP_SQL + "\n" + SAMPLE_DATA_SQL
-    )
+    # Wait for catalog/schema to propagate before running DDL
+    print(f"  Waiting for catalog {DEV_CATALOG}.{SCHEMA} to propagate...")
+    for _wait in range(12):
+        try:
+            r = w.statement_execution.execute_statement(
+                warehouse_id=wh_id,
+                statement=f"DESCRIBE SCHEMA {DEV_CATALOG}.{SCHEMA}",
+                wait_timeout="30s",
+            )
+            if r.status and r.status.state.value == "SUCCEEDED":
+                break
+        except Exception:
+            pass
+        time.sleep(5)
+
+    # Run SQL — all statements use fully qualified names (catalog.schema.table)
+    all_sql = SETUP_SQL + "\n" + SAMPLE_DATA_SQL
     stmts = []
     for raw in all_sql.split(";"):
         # Strip leading comment lines (keep SQL that follows comments)
