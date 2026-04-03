@@ -700,12 +700,28 @@ def _create_genie_space(dev_state: dict) -> str:
         with urllib.request.urlopen(create_req, context=ctx) as resp:
             result = json.loads(resp.read())
             space_id = result.get("space_id", "")
-            if space_id:
-                print(f"  {_green('✓')} Genie Space created: {space_id}")
-                return space_id
-            else:
+            if not space_id:
                 print(f"  {_yellow('WARN')} Created but no space_id in response: {result}")
                 return ""
+            print(f"  {_green('✓')} Genie Space created: {space_id}")
+
+            # PATCH to persist tables — the POST create ignores serialized_space
+            patch_req = urllib.request.Request(
+                f"{host}/api/2.0/genie/spaces/{space_id}",
+                data=json.dumps({"serialized_space": serialized_space}).encode(),
+                method="PATCH",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(patch_req, context=ctx) as patch_resp:
+                    print(f"  {_green('✓')} Tables added to Genie Space via PATCH")
+            except Exception as pe:
+                print(f"  {_yellow('WARN')} PATCH tables: {pe}")
+
+            return space_id
     except urllib.error.HTTPError as e:
         error_body = e.read().decode()[:300]
         print(f"  {_red('ERROR')} Genie Space creation failed (HTTP {e.code}): {error_body}")
