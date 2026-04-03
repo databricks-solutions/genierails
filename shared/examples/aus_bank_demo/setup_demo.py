@@ -182,10 +182,10 @@ INSERT INTO {DEV_CATALOG}.{SCHEMA}.credit_cards VALUES
 
 # Prod catalog gets same schema but no data
 PROD_SETUP_SQL = f"""
-CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.customers LIKE {DEV_CATALOG}.{SCHEMA}.customers;
-CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.accounts LIKE {DEV_CATALOG}.{SCHEMA}.accounts;
-CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.transactions LIKE {DEV_CATALOG}.{SCHEMA}.transactions;
-CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.credit_cards LIKE {DEV_CATALOG}.{SCHEMA}.credit_cards;
+CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.customers AS SELECT * FROM {DEV_CATALOG}.{SCHEMA}.customers WHERE 1=0;
+CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.accounts AS SELECT * FROM {DEV_CATALOG}.{SCHEMA}.accounts WHERE 1=0;
+CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.transactions AS SELECT * FROM {DEV_CATALOG}.{SCHEMA}.transactions WHERE 1=0;
+CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.credit_cards AS SELECT * FROM {DEV_CATALOG}.{SCHEMA}.credit_cards WHERE 1=0;
 """
 
 
@@ -458,8 +458,10 @@ def _create_prod_workspace(cfg: dict, cloud: str, metastore_id: str, dev_state: 
     # Assign shared metastore
     print(f"  Assigning shared metastore {metastore_id}...")
     try:
-        a.metastores.assign(workspace_id=int(prod_ws_id), metastore_id=metastore_id,
-                            default_catalog_name="main")
+        a.metastore_assignments.create(
+            workspace_id=int(prod_ws_id),
+            metastore_id=metastore_id,
+        )
         print(f"  {_green('✓')} Metastore assigned to prod workspace")
     except Exception as e:
         print(f"  {_yellow('WARN')} Metastore assignment: {e}")
@@ -568,11 +570,13 @@ def _create_genie_space(dev_state: dict) -> str:
         "DATABRICKS_HOST": host,
         "DATABRICKS_CLIENT_ID": client_id,
         "DATABRICKS_CLIENT_SECRET": client_secret,
+        "GENIE_TABLES_CSV": tables,
+        "GENIE_WAREHOUSE_ID": wh_id,
+        "GENIE_TITLE": "Kookaburra Bank Analytics",
     }
 
     result = subprocess.run(
-        ["bash", str(genie_script), "create", host, "", "Kookaburra Bank Analytics", wh_id,
-         "--tables", tables],
+        ["bash", str(genie_script), "create"],
         env=env, capture_output=True, text=True,
     )
     # Extract space ID from output
