@@ -311,19 +311,9 @@ def cmd_provision(env_file: Path) -> None:
     }
     _save_state(state)
 
-    # Copy auth files from provisioned envs/test/ to envs/dev/ and envs/account/
-    # so that `make apply ENV=dev` can find them without manual copying
-    _step("Setting up envs/dev/ and envs/account/ for make apply...")
+    # Store the auth source path for the next steps
     test_envs = Path(dev_state.get("test_envs_dir", ""))
-    import shutil
-    for src, dst in [
-        (test_envs / "dev" / "auth.auto.tfvars", CLOUD_ROOT / "envs" / "dev" / "auth.auto.tfvars"),
-        (test_envs / "account" / "auth.auto.tfvars", CLOUD_ROOT / "envs" / "account" / "auth.auto.tfvars"),
-    ]:
-        if src.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-    print(f"  {_green('✓')} Auth credentials copied to envs/dev/ and envs/account/")
+    auth_source = test_envs / "dev" / "auth.auto.tfvars"
 
     # Print summary
     print()
@@ -338,8 +328,19 @@ def cmd_provision(env_file: Path) -> None:
     print(f"  State file:      {STATE_FILE}")
     print()
     print("  Next steps:")
-    print(f"    1. Open {dev_host} and explore the ungoverned Genie Space")
-    print(f"    2. Follow shared/examples/aus_bank_demo/README.md")
+    print()
+    print("    # 1. Set up the environment")
+    print("    make setup ENV=dev")
+    print()
+    print("    # 2. Copy auth credentials (run after make setup)")
+    print(f"    cp {auth_source} envs/dev/auth.auto.tfvars")
+    print(f"    cp {test_envs / 'account' / 'auth.auto.tfvars'} envs/account/auth.auto.tfvars")
+    print()
+    print("    # 3. Edit envs/dev/env.auto.tfvars — paste these values:")
+    print(f"    #    genie_space_id = \"{genie_space_id}\"")
+    print(f"    #    sql_warehouse_id = \"<from warehouse list above>\"")
+    print()
+    print("    # 4. Follow shared/examples/aus_bank_demo/README.md for the demo")
     print()
 
 
