@@ -152,11 +152,8 @@ Open the Genie Space and query as different groups:
 make promote SOURCE_ENV=dev DEST_ENV=prod \
     DEST_CATALOG_MAP="dev_bank=prod_bank"
 
-# Copy auth credentials for prod workspace
-cp envs/dev/auth.auto.tfvars envs/prod/auth.auto.tfvars
-# Edit envs/prod/auth.auto.tfvars with prod workspace host + credentials
-
-# Deploy to production (creates a NEW Genie Space in prod)
+# Deploy to production (creates a NEW Genie Space in prod workspace)
+# Auth credentials for prod are already configured by setup_demo.py
 make apply ENV=prod
 ```
 

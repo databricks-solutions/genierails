@@ -317,13 +317,14 @@ def cmd_provision(env_file: Path) -> None:
     test_envs = Path(dev_state.get("test_envs_dir", ""))
     import shutil
 
-    # Run make setup ENV=dev to create directory structure
-    subprocess.run(
-        ["make", "--no-print-directory", "setup", "ENV=dev"],
-        cwd=str(CLOUD_ROOT), capture_output=True, text=True,
-    )
+    # Run make setup for both dev and prod
+    for env_name in ["dev", "prod"]:
+        subprocess.run(
+            ["make", "--no-print-directory", "setup", f"ENV={env_name}"],
+            cwd=str(CLOUD_ROOT), capture_output=True, text=True,
+        )
 
-    # Copy auth credentials
+    # Copy auth credentials for dev (uses dev workspace host)
     for src, dst in [
         (test_envs / "dev" / "auth.auto.tfvars", CLOUD_ROOT / "envs" / "dev" / "auth.auto.tfvars"),
         (test_envs / "account" / "auth.auto.tfvars", CLOUD_ROOT / "envs" / "account" / "auth.auto.tfvars"),
@@ -331,6 +332,27 @@ def cmd_provision(env_file: Path) -> None:
         if src.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
+
+    # Create prod auth with prod workspace host
+    # (same SP credentials, different workspace)
+    dev_auth = CLOUD_ROOT / "envs" / "dev" / "auth.auto.tfvars"
+    prod_auth = CLOUD_ROOT / "envs" / "prod" / "auth.auto.tfvars"
+    if dev_auth.exists():
+        prod_auth.parent.mkdir(parents=True, exist_ok=True)
+        auth_text = dev_auth.read_text()
+        # Replace dev workspace host/id with prod
+        import re
+        auth_text = re.sub(
+            r'databricks_workspace_host\s*=\s*"[^"]*"',
+            f'databricks_workspace_host = "{prod_host}"',
+            auth_text,
+        )
+        auth_text = re.sub(
+            r'databricks_workspace_id\s*=\s*"[^"]*"',
+            f'databricks_workspace_id = "{prod_ws_id}"',
+            auth_text,
+        )
+        prod_auth.write_text(auth_text)
 
     # Write env.auto.tfvars with just genie_space_id.
     # Tables are auto-discovered from the Genie Space API
