@@ -1,0 +1,37 @@
+# ============================================================================
+# Healthcare Example — Workspace Layer (Genie Space configuration)
+# ============================================================================
+# This file lives at envs/<env>/abac.auto.tfvars
+# ============================================================================
+
+groups = {
+  "Nurse"                 = { description = "Bedside care — partial PII, limited clinical notes" }
+  "Physician"             = { description = "Full clinical access, full PII for their region" }
+  "Billing_Clerk"         = { description = "Financial records — masked PHI, no clinical notes" }
+  "Chief_Medical_Officer" = { description = "Full unrestricted access across all regions" }
+  "US_East_Staff"         = { description = "Row access limited to US_EAST facility data" }
+  "US_West_Staff"         = { description = "Row access limited to US_WEST facility data" }
+}
+
+genie_space_configs = {
+  "Clinical Analytics" = {
+    title       = "Clinical Analytics"
+    description = "AI-powered analytics for clinical data with HIPAA-compliant governance."
+
+    instructions = <<-EOT
+      You are a healthcare data assistant for clinical staff. Follow HIPAA
+      minimum necessary principles — only show data relevant to the question.
+      When discussing diagnoses, use ICD-10 codes. Do not reveal raw SSN,
+      MRN, or insurance IDs — the masking policies handle this automatically.
+      For billing questions, note that non-billing staff see rounded amounts.
+    EOT
+
+    acl_groups = ["Nurse", "Physician", "Billing_Clerk", "Chief_Medical_Officer"]
+
+    sample_questions = [
+      "How many patients were admitted last week?",
+      "What are the most common diagnoses in the US_EAST region?",
+      "Show me billing totals by encounter type for this quarter.",
+    ]
+  }
+}

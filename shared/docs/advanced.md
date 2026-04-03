@@ -109,4 +109,6 @@ That moves root working files into `envs/dev/` and rewrites any legacy top-level
 
 ## Examples
 
-A pre-built finance demo is available in `examples/finance/` if you want to try the flow without AI generation. Sample healthcare DDLs are in `examples/healthcare/ddl/` for testing `make generate`.
+Pre-built examples with 3-layer configs (account, data access, workspace) are available in:
+- `examples/finance/` — 5-group finance demo with PII, PCI, and AML governance
+- `examples/healthcare/` — 6-group healthcare demo with HIPAA-compliant PHI, PII, and regional row filters ([walkthrough](../examples/healthcare/healthcare_walkthrough.md))

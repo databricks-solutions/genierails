@@ -33,10 +33,10 @@ report() {
   local msg="$2"
   if [ "$status" = "PASS" ]; then
     echo "  ✓ $msg"
-    ((PASS++))
+    ((PASS++)) || true
   else
     echo "  ✗ $msg"
-    ((FAIL++))
+    ((FAIL++)) || true
     ERRORS="${ERRORS}\n  - ${msg}"
   fi
 }
@@ -53,42 +53,51 @@ if ! python3 -c "import hcl2" 2>/dev/null; then
 fi
 
 # --- Validate finance example ---
+# Examples use the 3-layer split format. Concatenate account + data_access for validation.
 echo "--- Finance Example ---"
-FINANCE_TFVARS="examples/finance/finance.tfvars.example"
+FINANCE_ACCOUNT="examples/finance/account/abac.auto.tfvars.example"
+FINANCE_DA="examples/finance/data_access/abac.auto.tfvars.example"
 FINANCE_SQL="examples/finance/0.1finance_abac_functions.sql"
 
-if [ -f "$FINANCE_TFVARS" ]; then
-  if python3 validate_abac.py "$FINANCE_TFVARS" "$FINANCE_SQL" > /dev/null 2>&1; then
+if [ -f "$FINANCE_ACCOUNT" ] && [ -f "$FINANCE_DA" ]; then
+  FINANCE_COMBINED=$(mktemp)
+  cat "$FINANCE_ACCOUNT" "$FINANCE_DA" > "$FINANCE_COMBINED"
+  if python3 validate_abac.py "$FINANCE_COMBINED" "$FINANCE_SQL" > /dev/null 2>&1; then
     report "PASS" "finance: validate_abac.py passed"
   else
     report "FAIL" "finance: validate_abac.py failed"
   fi
+  rm -f "$FINANCE_COMBINED"
 else
-  report "FAIL" "finance: $FINANCE_TFVARS not found"
+  report "FAIL" "finance: example files not found"
 fi
 
 # --- Validate healthcare example ---
 echo ""
 echo "--- Healthcare Example ---"
-HC_TFVARS="examples/healthcare/healthcare.tfvars.example"
+HC_ACCOUNT="examples/healthcare/account/abac.auto.tfvars.example"
+HC_DA="examples/healthcare/data_access/abac.auto.tfvars.example"
 HC_SQL="examples/healthcare/masking_functions.sql"
 
-if [ -f "$HC_TFVARS" ]; then
+if [ -f "$HC_ACCOUNT" ] && [ -f "$HC_DA" ]; then
+  HC_COMBINED=$(mktemp)
+  cat "$HC_ACCOUNT" "$HC_DA" > "$HC_COMBINED"
   if [ -f "$HC_SQL" ]; then
-    if python3 validate_abac.py "$HC_TFVARS" "$HC_SQL" > /dev/null 2>&1; then
+    if python3 validate_abac.py "$HC_COMBINED" "$HC_SQL" > /dev/null 2>&1; then
       report "PASS" "healthcare: validate_abac.py passed"
     else
       report "FAIL" "healthcare: validate_abac.py failed"
     fi
   else
-    if python3 validate_abac.py "$HC_TFVARS" > /dev/null 2>&1; then
+    if python3 validate_abac.py "$HC_COMBINED" > /dev/null 2>&1; then
       report "PASS" "healthcare: validate_abac.py passed (no SQL file)"
     else
       report "FAIL" "healthcare: validate_abac.py failed"
     fi
   fi
+  rm -f "$HC_COMBINED"
 else
-  report "FAIL" "healthcare: $HC_TFVARS not found"
+  report "FAIL" "healthcare: example files not found"
 fi
 
 # --- Validate abac.auto.tfvars.example skeleton ---
@@ -114,7 +123,10 @@ if ! $SKIP_TF; then
   TMPDIR_TF=$(mktemp -d)
   trap 'rm -rf "$TMPDIR_TF"' EXIT
 
-  cp "$FINANCE_TFVARS" "$TMPDIR_TF/abac.auto.tfvars" 2>/dev/null || true
+  FINANCE_COMBINED_TF=$(mktemp)
+  cat "$FINANCE_ACCOUNT" "$FINANCE_DA" > "$FINANCE_COMBINED_TF" 2>/dev/null || true
+  cp "$FINANCE_COMBINED_TF" "$TMPDIR_TF/abac.auto.tfvars" 2>/dev/null || true
+  rm -f "$FINANCE_COMBINED_TF"
   cp auth.auto.tfvars.example "$TMPDIR_TF/auth.auto.tfvars" 2>/dev/null || true
   cp env.auto.tfvars.example "$TMPDIR_TF/env.auto.tfvars" 2>/dev/null || true
 

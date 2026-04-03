@@ -1,0 +1,37 @@
+# ============================================================================
+# Finance Example — Workspace Layer (Genie Space configuration)
+# ============================================================================
+# This file lives at envs/<env>/abac.auto.tfvars
+# It defines Genie Space configs and group lookups for the workspace layer.
+# ============================================================================
+
+# Groups referenced here must exist in the account layer
+groups = {
+  "Junior_Analyst"     = { description = "Masked PII, last-4 card, rounded amounts" }
+  "Senior_Analyst"     = { description = "Full PII, full card, full amounts" }
+  "US_Region_Staff"    = { description = "Row access limited to US data" }
+  "EU_Region_Staff"    = { description = "Row access limited to EU data" }
+  "Compliance_Officer" = { description = "Full unmasked access" }
+}
+
+genie_space_configs = {
+  "Finance Analytics" = {
+    title       = "Finance Analytics"
+    description = "AI-powered analytics for the finance domain with role-based data governance."
+
+    instructions = <<-EOT
+      You are a financial data assistant. When users ask about transactions,
+      default to completed transactions only. Always format currency with
+      two decimal places. Do not reveal raw SSN, card numbers, or CVV values —
+      the masking policies handle this automatically.
+    EOT
+
+    acl_groups = ["Junior_Analyst", "Senior_Analyst", "Compliance_Officer"]
+
+    sample_questions = [
+      "What were the total transactions last month?",
+      "Show me the top 10 customers by transaction volume.",
+      "Which accounts have the highest credit limits?",
+    ]
+  }
+}

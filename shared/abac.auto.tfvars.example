@@ -39,7 +39,7 @@
 #   2. Generate a draft with `make generate`
 #   3. Tune the draft, then run `make promote` and `make apply`
 #
-# For a complete working example see examples/finance/finance.tfvars.example.
+# For complete working examples see examples/finance/ and examples/healthcare/.
 # ============================================================================
 
 # === Groups: one entry per access tier ===
