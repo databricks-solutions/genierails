@@ -586,18 +586,19 @@ def _create_genie_space(dev_state: dict) -> str:
         env=env, capture_output=True, text=True,
     )
     # Extract space ID from output
+    # genie_space.sh prints: "Genie Space created: <space_id>"
+    import re
     space_id = ""
-    for line in (result.stdout or "").split("\n"):
-        if "space_id" in line.lower() or "genie_space_id" in line.lower():
-            # Try to extract ID
-            import re
-            m = re.search(r'["\']?([0-9a-f]{16,})["\']?', line)
-            if m:
-                space_id = m.group(1)
-                break
+    all_output = (result.stdout or "") + "\n" + (result.stderr or "")
+    for line in all_output.split("\n"):
+        # Match "Genie Space created: 01ef..." or "space_id": "01ef..."
+        m = re.search(r'(?:created|space_id)["\s:]+([0-9a-f]{10,})', line, re.IGNORECASE)
+        if m:
+            space_id = m.group(1)
+            break
     if not space_id:
-        # Try parsing JSON from stdout
-        for line in (result.stdout or "").split("\n"):
+        # Try parsing JSON from any line
+        for line in all_output.split("\n"):
             try:
                 data = json.loads(line)
                 space_id = data.get("space_id", data.get("id", ""))
@@ -609,9 +610,14 @@ def _create_genie_space(dev_state: dict) -> str:
     if space_id:
         print(f"  {_green('✓')} Genie Space created: {space_id}")
     else:
-        print(f"  {_yellow('WARN')} Genie Space creation output unclear — check manually")
-        print(f"  stdout: {(result.stdout or '')[:200]}")
-        print(f"  stderr: {(result.stderr or '')[:200]}")
+        print(f"  {_yellow('WARN')} Genie Space may have been created but ID not captured")
+        print(f"  Check the dev workspace UI for the space.")
+        if result.stdout:
+            print(f"  stdout: {result.stdout.strip()[:300]}")
+        if result.stderr:
+            print(f"  stderr: {result.stderr.strip()[:300]}")
+        if result.returncode != 0:
+            print(f"  exit code: {result.returncode}")
 
     return space_id
 
