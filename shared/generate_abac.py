@@ -685,7 +685,11 @@ def fetch_tables_from_genie_space(
 
     print(f"  Querying Genie Space {space_id}...")
     try:
-        resp = w.api_client.do("GET", f"/api/2.0/genie/spaces/{space_id}")
+        resp = w.api_client.do(
+            "GET",
+            f"/api/2.0/genie/spaces/{space_id}",
+            query={"include_serialized_space": "true"},
+        )
     except Exception as e:
         print(f"  WARNING: Could not reach Genie Space {space_id}: {e}")
         return [], {}, ""
@@ -710,7 +714,11 @@ def fetch_tables_from_genie_space(
                   f"retrying in {delay}s (attempt {attempt}/{len(retry_delays)})...")
             _time.sleep(delay)
             try:
-                resp = w.api_client.do("GET", f"/api/2.0/genie/spaces/{space_id}")
+                resp = w.api_client.do(
+                    "GET",
+                    f"/api/2.0/genie/spaces/{space_id}",
+                    query={"include_serialized_space": "true"},
+                )
                 space_title = resp.get("title", space_title)
                 description = resp.get("description", description)
                 serialized = resp.get("serialized_space", "")

@@ -331,24 +331,15 @@ def cmd_provision(env_file: Path) -> None:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
 
-    # Write env.auto.tfvars with genie_space_id + uc_tables.
-    # uc_tables tells generate which tables to analyze.
-    # genie_space_id tells apply to attach governance to the existing Space
-    # (rather than creating a new one).
+    # Write env.auto.tfvars with just genie_space_id.
+    # Tables are auto-discovered from the Genie Space API
+    # (via include_serialized_space=true query parameter).
     env_tfvars = CLOUD_ROOT / "envs" / "dev" / "env.auto.tfvars"
     if genie_space_id:
         env_tfvars.write_text(f"""\
-uc_tables = [
-  "{DEV_CATALOG}.{SCHEMA}.customers",
-  "{DEV_CATALOG}.{SCHEMA}.accounts",
-  "{DEV_CATALOG}.{SCHEMA}.transactions",
-  "{DEV_CATALOG}.{SCHEMA}.credit_cards",
-]
-
 genie_spaces = [
   {{
     genie_space_id = "{genie_space_id}"
-    name           = "Kookaburra Bank Analytics"
   }},
 ]
 """)
