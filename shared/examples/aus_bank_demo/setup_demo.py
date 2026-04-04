@@ -368,12 +368,18 @@ def cmd_provision(env_file: Path) -> None:
     # Tables are auto-discovered from the Genie Space API
     # (via include_serialized_space=true query parameter).
     env_tfvars = CLOUD_ROOT / "envs" / "dev" / "env.auto.tfvars"
+    tables_hcl = "\n".join(
+        f'      "{DEV_CATALOG}.{SCHEMA}.{t}",' for t in ["customers", "accounts", "transactions", "credit_cards"]
+    )
     if genie_space_id:
         env_tfvars.write_text(f"""\
 genie_spaces = [
   {{
     genie_space_id = "{genie_space_id}"
     name           = "Kookaburra Bank Analytics"
+    uc_tables = [
+{tables_hcl}
+    ]
   }},
 ]
 
