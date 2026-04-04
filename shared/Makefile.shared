@@ -253,7 +253,7 @@ print(', '.join(cats) if cats else '(none detected)') \
 		echo "=== Cross-env promote: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
 		$(MAKE) --no-print-directory _prepare-env ENV="$(DEST_ENV)" ENV_DIR="$(DEST_ENV_DIR)"; \
 		dest_env_dir="$(DEST_ENV_DIR)"; \
-		python3 -c 'import hcl2, sys; dest = sys.argv[1]; cfg = hcl2.load(open("$(SOURCE_ENV_DIR)/env.auto.tfvars")); pairs = {k.strip(): v.strip() for k, v in (p.split("=", 1) for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p)}; remap = lambda t: (lambda p: pairs.get(p[0], p[0]) + "." + p[1] if len(p) == 2 else t)(t.split(".", 1)); spaces = cfg.get("genie_spaces", []); space_lines = lambda s: ["  {", "    name             = \"" + (s.get("name") or "") + "\"", "    genie_space_id   = \"\"", "    sql_warehouse_id = \"" + (s.get("sql_warehouse_id") or "") + "\"", "    uc_tables = ["] + ["      \"" + remap(t) + "\"," for t in (s.get("uc_tables") or [])] + ["    ]", "  },"]; lines = ["genie_spaces = ["] + [line for s in spaces for line in space_lines(s)] + ["]", "", "sql_warehouse_id = \"\"  # auto-create in dest workspace"]; open(dest + "/env.auto.tfvars", "w").write("\n".join(lines) + "\n"); print("  Wrote " + dest + "/env.auto.tfvars"); [print("  Catalog remap: " + s + " -> " + d) for s, d in pairs.items()]' "$$dest_env_dir" || exit 1; \
+		python3 "$(SHARED_ROOT)/scripts/remap_env_config.py" "$(SOURCE_ENV_DIR)" "$$dest_env_dir" "$(DEST_CATALOG_MAP)" || exit 1; \
 		mkdir -p "$$dest_env_dir/generated"; \
 		map_flags=$$(python3 -c 'pairs = [p.strip() for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p]; print(" ".join("--map " + p for p in pairs))'); \
 		python3 "$(SHARED_ROOT)/scripts/remap_generated_config.py" \
