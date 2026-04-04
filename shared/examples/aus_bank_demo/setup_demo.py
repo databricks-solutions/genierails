@@ -368,11 +368,21 @@ def cmd_provision(env_file: Path) -> None:
     # Tables are auto-discovered from the Genie Space API
     # (via include_serialized_space=true query parameter).
     env_tfvars = CLOUD_ROOT / "envs" / "dev" / "env.auto.tfvars"
+    tables = [
+        f"{DEV_CATALOG}.{SCHEMA}.customers",
+        f"{DEV_CATALOG}.{SCHEMA}.accounts",
+        f"{DEV_CATALOG}.{SCHEMA}.transactions",
+        f"{DEV_CATALOG}.{SCHEMA}.credit_cards",
+    ]
+    tables_hcl = "\n".join(f'      "{t}",' for t in tables)
     if genie_space_id:
         env_tfvars.write_text(f"""\
 genie_spaces = [
   {{
     genie_space_id = "{genie_space_id}"
+    uc_tables = [
+{tables_hcl}
+    ]
   }},
 ]
 
