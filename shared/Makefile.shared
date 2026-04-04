@@ -347,7 +347,22 @@ _apply-layer:
 		echo "=== Auto-importing existing data_access resources (idempotent apply) ==="; \
 		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(SHARED_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
 	fi; \
-	LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; \
+	if [ "$$layer" = "workspace" ]; then \
+		for _retry in 1 2 3; do \
+			if LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; then \
+				break; \
+			else \
+				if [ "$$_retry" -lt 3 ]; then \
+					echo "=== Workspace apply failed — retrying in 30s (attempt $$_retry/3, group propagation) ==="; \
+					sleep 30; \
+				else \
+					exit 1; \
+				fi; \
+			fi; \
+		done; \
+	else \
+		LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; \
+	fi; \
 	if [ "$$layer" = "account" ]; then \
 		$(MAKE) --no-print-directory sync-tags; \
 	fi; \
