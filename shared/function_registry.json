@@ -1,0 +1,210 @@
+{
+  "_comment": "Canonical masking function registry. Maps LLM-generated function name variations to canonical names.",
+  "functions": {
+    "mask_pii_partial": {
+      "category": "pii",
+      "signature": "mask_pii_partial(input STRING) RETURNS STRING",
+      "aliases": ["mask_pii", "mask_partial", "mask_name_partial", "mask_pii_mask"]
+    },
+    "mask_ssn": {
+      "category": "pii",
+      "signature": "mask_ssn(ssn STRING) RETURNS STRING",
+      "aliases": ["mask_ssn_last4", "mask_ssn_partial", "mask_social_security"]
+    },
+    "mask_email": {
+      "category": "pii",
+      "signature": "mask_email(email STRING) RETURNS STRING",
+      "aliases": ["mask_email_finance", "mask_email_address", "mask_email_partial"]
+    },
+    "mask_phone": {
+      "category": "pii",
+      "signature": "mask_phone(phone STRING) RETURNS STRING",
+      "aliases": ["mask_phone_last4", "mask_phone_number", "mask_phone_partial"]
+    },
+    "mask_full_name": {
+      "category": "pii",
+      "signature": "mask_full_name(name STRING) RETURNS STRING",
+      "aliases": ["mask_name", "mask_name_initials", "mask_customer_name"]
+    },
+    "mask_redact": {
+      "category": "generic",
+      "signature": "mask_redact(input STRING) RETURNS STRING",
+      "aliases": ["mask_redact_address", "mask_redact_cvv", "mask_redact_full", "mask_redact_string", "mask_address", "redact"]
+    },
+    "mask_hash": {
+      "category": "generic",
+      "signature": "mask_hash(input STRING) RETURNS STRING",
+      "aliases": ["mask_sha256", "mask_name_hash", "mask_hash_string"]
+    },
+    "mask_nullify": {
+      "category": "generic",
+      "signature": "mask_nullify(input STRING) RETURNS STRING",
+      "aliases": ["mask_null", "mask_nullify_string"]
+    },
+    "mask_nullify_int": {
+      "category": "generic",
+      "signature": "mask_nullify_int(input INT) RETURNS INT",
+      "aliases": []
+    },
+    "mask_nullify_long": {
+      "category": "generic",
+      "signature": "mask_nullify_long(input BIGINT) RETURNS BIGINT",
+      "aliases": []
+    },
+    "mask_nullify_double": {
+      "category": "generic",
+      "signature": "mask_nullify_double(input DOUBLE) RETURNS DOUBLE",
+      "aliases": []
+    },
+    "mask_nullify_date": {
+      "category": "generic",
+      "signature": "mask_nullify_date(dt DATE) RETURNS DATE",
+      "aliases": []
+    },
+    "mask_nullify_boolean": {
+      "category": "generic",
+      "signature": "mask_nullify_boolean(input BOOLEAN) RETURNS BOOLEAN",
+      "aliases": []
+    },
+    "mask_credit_card_last4": {
+      "category": "financial",
+      "signature": "mask_credit_card_last4(card_number STRING) RETURNS STRING",
+      "aliases": ["mask_card_last4", "mask_cc_last4", "mask_card_number", "mask_pan_last4"]
+    },
+    "mask_credit_card_full": {
+      "category": "financial",
+      "signature": "mask_credit_card_full(card_number STRING) RETURNS STRING",
+      "aliases": ["mask_card_full", "mask_cc_full", "mask_pan_full", "mask_card"]
+    },
+    "mask_account_number": {
+      "category": "financial",
+      "signature": "mask_account_number(account_id STRING) RETURNS STRING",
+      "aliases": ["mask_account_last4", "mask_account", "mask_account_partial"]
+    },
+    "mask_amount_rounded": {
+      "category": "financial",
+      "signature": "mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2)",
+      "aliases": ["mask_amount_round", "mask_amount", "mask_round_amount", "mask_rounded_amount"]
+    },
+    "mask_iban": {
+      "category": "financial",
+      "signature": "mask_iban(iban STRING) RETURNS STRING",
+      "aliases": ["mask_iban_partial"]
+    },
+    "mask_routing": {
+      "category": "financial",
+      "signature": "mask_routing(routing STRING) RETURNS STRING",
+      "aliases": ["mask_routing_number", "mask_routing_last4"]
+    },
+    "mask_mrn": {
+      "category": "health",
+      "signature": "mask_mrn(mrn STRING) RETURNS STRING",
+      "aliases": ["mask_medical_record", "mask_patient_id", "mask_mrn_last4"]
+    },
+    "mask_diagnosis_code": {
+      "category": "health",
+      "signature": "mask_diagnosis_code(code STRING) RETURNS STRING",
+      "aliases": ["mask_diagnosis", "mask_icd", "mask_icd_code"]
+    },
+    "mask_date_to_year": {
+      "category": "temporal",
+      "signature": "mask_date_to_year(dt DATE) RETURNS DATE",
+      "aliases": ["mask_dob_year", "mask_date_year", "mask_year_only"]
+    },
+    "mask_timestamp_to_day": {
+      "category": "temporal",
+      "signature": "mask_timestamp_to_day(ts TIMESTAMP) RETURNS TIMESTAMP",
+      "aliases": ["mask_ts_to_day", "mask_timestamp_day"]
+    },
+    "mask_tfn": {
+      "category": "anz",
+      "signature": "mask_tfn(tfn STRING) RETURNS STRING",
+      "aliases": ["mask_tax_file_number", "mask_tfn_last3"]
+    },
+    "mask_medicare": {
+      "category": "anz",
+      "signature": "mask_medicare(medicare STRING) RETURNS STRING",
+      "aliases": ["mask_medicare_number", "mask_medicare_last4"]
+    },
+    "mask_bsb": {
+      "category": "anz",
+      "signature": "mask_bsb(bsb STRING) RETURNS STRING",
+      "aliases": ["mask_bsb_number", "mask_bsb_last3"]
+    },
+    "mask_licence_number": {
+      "category": "anz",
+      "signature": "mask_licence_number(licence STRING) RETURNS STRING",
+      "aliases": ["mask_driver_licence", "mask_dl_anz"]
+    },
+    "mask_abn": {
+      "category": "anz",
+      "signature": "mask_abn(abn STRING) RETURNS STRING",
+      "aliases": ["mask_business_number"]
+    },
+    "mask_crn": {
+      "category": "anz",
+      "signature": "mask_crn(crn STRING) RETURNS STRING",
+      "aliases": ["mask_centrelink"]
+    },
+    "mask_ird": {
+      "category": "anz",
+      "signature": "mask_ird(ird STRING) RETURNS STRING",
+      "aliases": ["mask_ird_number"]
+    },
+    "mask_nhi": {
+      "category": "anz",
+      "signature": "mask_nhi(nhi STRING) RETURNS STRING",
+      "aliases": ["mask_nhi_number"]
+    },
+    "mask_passport": {
+      "category": "anz",
+      "signature": "mask_passport(passport STRING) RETURNS STRING",
+      "aliases": ["mask_passport_number"]
+    },
+    "mask_aadhaar": {
+      "category": "india",
+      "signature": "mask_aadhaar(aadhaar STRING) RETURNS STRING",
+      "aliases": ["mask_aadhar", "mask_aadhaar_last4"]
+    },
+    "mask_pan_india": {
+      "category": "india",
+      "signature": "mask_pan_india(pan STRING) RETURNS STRING",
+      "aliases": ["mask_pan", "mask_pan_number"]
+    },
+    "filter_aml_compliance": {
+      "category": "row_filter",
+      "signature": "filter_aml_compliance() RETURNS BOOLEAN",
+      "aliases": ["filter_aml_clearance", "filter_aml_compliance_only", "filter_aml", "filter_high_risk_aml_only", "filter_aml_restricted"]
+    },
+    "filter_by_region_us": {
+      "category": "row_filter",
+      "signature": "filter_by_region_us() RETURNS BOOLEAN",
+      "aliases": ["filter_region_us", "filter_us_only", "filter_facility_us_east"]
+    },
+    "filter_by_region_eu": {
+      "category": "row_filter",
+      "signature": "filter_by_region_eu() RETURNS BOOLEAN",
+      "aliases": ["filter_region_eu", "filter_eu_only", "filter_facility_us_west"]
+    },
+    "filter_by_region_apac": {
+      "category": "row_filter",
+      "signature": "filter_by_region_apac() RETURNS BOOLEAN",
+      "aliases": ["filter_region_apac", "filter_apac_only"]
+    },
+    "filter_trading_hours": {
+      "category": "row_filter",
+      "signature": "filter_trading_hours() RETURNS BOOLEAN",
+      "aliases": ["filter_market_hours"]
+    },
+    "filter_audit_expiry": {
+      "category": "row_filter",
+      "signature": "filter_audit_expiry() RETURNS BOOLEAN",
+      "aliases": ["filter_audit_access", "filter_temporary_audit"]
+    },
+    "filter_compliance_only": {
+      "category": "row_filter",
+      "signature": "filter_compliance_only() RETURNS BOOLEAN",
+      "aliases": ["filter_compliance", "filter_compliance_restricted"]
+    }
+  }
+}
