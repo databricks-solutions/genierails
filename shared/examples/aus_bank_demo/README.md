@@ -1,6 +1,6 @@
-# Australian Bank Demo — Champion Flow
+# Australian Bank Demo — End-to-End
 
-An end-to-end demo of GenieRails for an Australian retail bank. Shows the full champion flow: start with an ungoverned Genie Space, import it into code, generate ABAC governance with ANZ + financial services overlays, deploy, and promote to production.
+An end-to-end demo of GenieRails for an Australian retail bank. Start with an existing Genie Space, import it into code, generate ABAC governance with ANZ + financial services overlays, deploy, and promote to production.
 
 **What you'll show:**
 - ANZ-specific masking: Tax File Numbers (TFN), Medicare numbers, BSB codes
