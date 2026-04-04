@@ -249,25 +249,7 @@ print(', '.join(cats) if cats else '(none detected)') \
 			echo '    DEST_CATALOG_MAP="<src_catalog>=<dest_catalog>[,<src2>=<dest2>...]"'; \
 			exit 1; \
 		fi; \
-		python3 -c '\
-import hcl2, sys, os;\
-cfg = hcl2.load(open("$(SOURCE_ENV_DIR)/env.auto.tfvars"));\
-spaces = cfg.get("genie_spaces", []);\
-tables = [t for s in spaces for t in (s.get("uc_tables") or [])];\
-src_cats = sorted(set(t.split(".")[0] for t in tables if t.count(".") >= 2));\
-if not src_cats:\
-    for f in [os.path.join("$(SOURCE_ENV_DIR)", d, "abac.auto.tfvars") for d in ["generated", "data_access"]]:\
-        try:\
-            gcfg = hcl2.load(open(f));\
-            src_cats = sorted(set(ta.get("entity_name","").split(".")[0] for ta in gcfg.get("tag_assignments",[]) if ta.get("entity_name","").count(".")>=2) - {""});\
-        except Exception: pass\
-        if src_cats: break\
-pairs = {k.strip(): v.strip() for k, v in (p.split("=", 1) for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p)};\
-missing = [c for c in src_cats if c not in pairs];\
-extra = [k for k in pairs if k not in src_cats];\
-if missing: print("ERROR: DEST_CATALOG_MAP is missing mappings for: " + ", ".join(missing)); print("       Detected source catalogs: " + ", ".join(src_cats)); sys.exit(1)\
-if extra: print("ERROR: DEST_CATALOG_MAP references unknown source catalogs: " + ", ".join(extra)); print("       Check for typos. Detected source catalogs: " + ", ".join(src_cats)); sys.exit(1)\
-' || exit 1; \
+		python3 "$(SHARED_ROOT)/scripts/validate_catalog_map.py" "$(SOURCE_ENV_DIR)" "$(DEST_CATALOG_MAP)" || exit 1; \
 		echo "=== Cross-env promote: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
 		$(MAKE) --no-print-directory _prepare-env ENV="$(DEST_ENV)" ENV_DIR="$(DEST_ENV_DIR)"; \
 		dest_env_dir="$(DEST_ENV_DIR)"; \
