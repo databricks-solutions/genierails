@@ -373,6 +373,7 @@ def cmd_provision(env_file: Path) -> None:
 genie_spaces = [
   {{
     genie_space_id = "{genie_space_id}"
+    name           = "Kookaburra Bank Analytics"
   }},
 ]
 
