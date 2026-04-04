@@ -1,6 +1,8 @@
 # From UI to Production
 
 > **This is the recommended starting point.** Most users already have a Genie Space configured in the Databricks UI and want to add governance and deploy it to production.
+>
+> **See it in action:** The [Australian Bank Demo](../examples/aus_bank_demo/) walks through this entire flow with a realistic banking scenario — ANZ-specific masking, PCI compliance, and dev-to-prod promotion.
 
 ## What you'll achieve
 

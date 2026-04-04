@@ -249,11 +249,11 @@ print(', '.join(cats) if cats else '(none detected)') \
 			echo '    DEST_CATALOG_MAP="<src_catalog>=<dest_catalog>[,<src2>=<dest2>...]"'; \
 			exit 1; \
 		fi; \
-		python3 -c 'import hcl2, sys; cfg = hcl2.load(open("$(SOURCE_ENV_DIR)/env.auto.tfvars")); spaces = cfg.get("genie_spaces", []); tables = [t for s in spaces for t in (s.get("uc_tables") or [])]; src_cats = sorted(set(t.split(".")[0] for t in tables if t.count(".") >= 2)); pairs = {k.strip(): v.strip() for k, v in (p.split("=", 1) for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p)}; missing = [c for c in src_cats if c not in pairs]; extra = [k for k in pairs if k not in src_cats]; (print("ERROR: DEST_CATALOG_MAP is missing mappings for: " + ", ".join(missing)) or print("       Detected source catalogs in $(SOURCE_ENV)/env.auto.tfvars: " + ", ".join(src_cats)) or sys.exit(1)) if missing else None; (print("ERROR: DEST_CATALOG_MAP references unknown source catalogs: " + ", ".join(extra)) or print("       Check for typos. Detected source catalogs: " + ", ".join(src_cats)) or sys.exit(1)) if extra else None' || exit 1; \
+		python3 "$(SHARED_ROOT)/scripts/validate_catalog_map.py" "$(SOURCE_ENV_DIR)" "$(DEST_CATALOG_MAP)" || exit 1; \
 		echo "=== Cross-env promote: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
 		$(MAKE) --no-print-directory _prepare-env ENV="$(DEST_ENV)" ENV_DIR="$(DEST_ENV_DIR)"; \
 		dest_env_dir="$(DEST_ENV_DIR)"; \
-		python3 -c 'import hcl2, sys; dest = sys.argv[1]; cfg = hcl2.load(open("$(SOURCE_ENV_DIR)/env.auto.tfvars")); pairs = {k.strip(): v.strip() for k, v in (p.split("=", 1) for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p)}; remap = lambda t: (lambda p: pairs.get(p[0], p[0]) + "." + p[1] if len(p) == 2 else t)(t.split(".", 1)); spaces = cfg.get("genie_spaces", []); space_lines = lambda s: ["  {", "    name             = \"" + (s.get("name") or "") + "\"", "    genie_space_id   = \"\"", "    sql_warehouse_id = \"" + (s.get("sql_warehouse_id") or "") + "\"", "    uc_tables = ["] + ["      \"" + remap(t) + "\"," for t in (s.get("uc_tables") or [])] + ["    ]", "  },"]; wh_id = cfg.get("sql_warehouse_id", ""); wh_id = (wh_id[0] if isinstance(wh_id, list) else wh_id) or ""; lines = ["genie_spaces = ["] + [line for s in spaces for line in space_lines(s)] + ["]", "", "sql_warehouse_id = \"" + wh_id + "\""]; open(dest + "/env.auto.tfvars", "w").write("\n".join(lines) + "\n"); print("  Wrote " + dest + "/env.auto.tfvars"); [print("  Catalog remap: " + s + " -> " + d) for s, d in pairs.items()]' "$$dest_env_dir" || exit 1; \
+		python3 "$(SHARED_ROOT)/scripts/remap_env_config.py" "$(SOURCE_ENV_DIR)" "$$dest_env_dir" "$(DEST_CATALOG_MAP)" || exit 1; \
 		mkdir -p "$$dest_env_dir/generated"; \
 		map_flags=$$(python3 -c 'pairs = [p.strip() for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p]; print(" ".join("--map " + p for p in pairs))'); \
 		python3 "$(SHARED_ROOT)/scripts/remap_generated_config.py" \
@@ -347,7 +347,22 @@ _apply-layer:
 		echo "=== Auto-importing existing data_access resources (idempotent apply) ==="; \
 		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(SHARED_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
 	fi; \
-	LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; \
+	if [ "$$layer" = "workspace" ]; then \
+		for _retry in 1 2 3; do \
+			if LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; then \
+				break; \
+			else \
+				if [ "$$_retry" -lt 3 ]; then \
+					echo "=== Workspace apply failed — retrying in 30s (attempt $$_retry/3, group propagation) ==="; \
+					sleep 30; \
+				else \
+					exit 1; \
+				fi; \
+			fi; \
+		done; \
+	else \
+		LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; \
+	fi; \
 	if [ "$$layer" = "account" ]; then \
 		$(MAKE) --no-print-directory sync-tags; \
 	fi; \

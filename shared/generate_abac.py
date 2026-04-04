@@ -685,7 +685,11 @@ def fetch_tables_from_genie_space(
 
     print(f"  Querying Genie Space {space_id}...")
     try:
-        resp = w.api_client.do("GET", f"/api/2.0/genie/spaces/{space_id}")
+        resp = w.api_client.do(
+            "GET",
+            f"/api/2.0/genie/spaces/{space_id}",
+            query={"include_serialized_space": "true"},
+        )
     except Exception as e:
         print(f"  WARNING: Could not reach Genie Space {space_id}: {e}")
         return [], {}, ""
@@ -710,7 +714,11 @@ def fetch_tables_from_genie_space(
                   f"retrying in {delay}s (attempt {attempt}/{len(retry_delays)})...")
             _time.sleep(delay)
             try:
-                resp = w.api_client.do("GET", f"/api/2.0/genie/spaces/{space_id}")
+                resp = w.api_client.do(
+                    "GET",
+                    f"/api/2.0/genie/spaces/{space_id}",
+                    query={"include_serialized_space": "true"},
+                )
                 space_title = resp.get("title", space_title)
                 description = resp.get("description", description)
                 serialized = resp.get("serialized_space", "")
@@ -3462,6 +3470,45 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
     return categories or {"generic"}
 
 
+def autofix_canonical_function_names(tfvars_path: Path, sql_path: Path | None = None) -> int:
+    """Normalize function names to canonical forms using the function registry.
+
+    Renames both:
+    - function_name references in FGAC policies (HCL)
+    - CREATE FUNCTION definitions in masking SQL
+
+    E.g., mask_card_last4 -> mask_credit_card_last4,
+          filter_aml_clearance -> filter_aml_compliance
+
+    Returns the total number of renames.
+    """
+    try:
+        from function_registry import FUNCTION_REGISTRY
+    except ImportError:
+        return 0
+
+    total = 0
+
+    # Normalize HCL (function_name references in FGAC policies)
+    text = tfvars_path.read_text()
+    new_text, hcl_count = FUNCTION_REGISTRY.normalize_hcl(text)
+    if hcl_count:
+        tfvars_path.write_text(new_text)
+        total += hcl_count
+        print(f"  [AUTOFIX] Normalized {hcl_count} function name(s) in ABAC config")
+
+    # Normalize SQL (CREATE FUNCTION definitions)
+    if sql_path and sql_path.exists():
+        sql_text = sql_path.read_text()
+        new_sql, sql_count = FUNCTION_REGISTRY.normalize_sql(sql_text)
+        if sql_count:
+            sql_path.write_text(new_sql)
+            total += sql_count
+            print(f"  [AUTOFIX] Normalized {sql_count} function name(s) in masking SQL")
+
+    return total
+
+
 def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = None) -> int:
     """Fix FGAC policies referencing functions that don't exist in the SQL file.
 
@@ -5351,6 +5398,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_acl:
             print(f"  Auto-fixed: populated acl_groups for {n_acl} genie space(s)")
 
+        n_fn_canonical = autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
+        if n_fn_canonical:
+            print(f"  Auto-fixed: normalized {n_fn_canonical} function name(s) to canonical forms")
+
         n_fn_refs = autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
         if n_fn_refs:
             print(f"  Auto-fixed: corrected {n_fn_refs} invalid function reference(s) in fgac_policies")
@@ -5415,6 +5466,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_policy_count(tfvars_path)
                     autofix_genie_config_fields(tfvars_path)
+                    autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
                     autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_arg_count_mismatch(tfvars_path, sql_path if sql_block else None)
                     autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)

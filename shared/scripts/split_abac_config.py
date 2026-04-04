@@ -264,6 +264,44 @@ def _strip_var_refs(space_cfg: dict) -> dict:
     }
 
 
+def _convert_legacy_to_genie_space_configs(cfg: dict) -> dict | None:
+    """Convert legacy single-space keys to genie_space_configs format.
+
+    Legacy keys: genie_space_title, genie_instructions, genie_benchmarks,
+    genie_sql_filters, genie_sql_expressions, genie_sql_measures, etc.
+
+    Returns a genie_space_configs dict, or None if no legacy keys found.
+    """
+    title = cfg.get("genie_space_title", "")
+    if isinstance(title, list):
+        title = title[0] if title else ""
+    if not title:
+        return None
+
+    def _val(key, default=""):
+        v = cfg.get(key, default)
+        if isinstance(v, list) and len(v) == 1 and isinstance(v[0], (str, list)):
+            v = v[0]
+        return v
+
+    space_config = {
+        "title": title,
+        "description": _val("genie_space_description", ""),
+        "instructions": _val("genie_instructions", ""),
+        "sample_questions": _val("genie_sample_questions", []),
+        "benchmarks": _val("genie_benchmarks", []),
+        "sql_filters": _val("genie_sql_filters", []),
+        "sql_expressions": _val("genie_sql_expressions", []),
+        "sql_measures": _val("genie_sql_measures", []),
+        "join_specs": _val("genie_join_specs", []),
+    }
+    # Strip empty values
+    space_config = {k: v for k, v in space_config.items() if v not in ("", [], {}, None)}
+
+    print(f"  [SPLIT] Converted legacy genie keys to genie_space_configs[\"{title}\"]")
+    return {title: space_config}
+
+
 def build_workspace_config(full_cfg: dict) -> dict:
     cfg: dict = {}
     for key in WORKSPACE_KEYS:
@@ -282,6 +320,22 @@ def build_workspace_config(full_cfg: dict) -> dict:
         if isinstance(value, str) and "${var." in value:
             continue
         cfg[key] = value
+
+    # Convert legacy single-space keys to genie_space_configs if needed
+    if "genie_space_configs" not in cfg:
+        converted = _convert_legacy_to_genie_space_configs(full_cfg)
+        if converted:
+            cfg["genie_space_configs"] = converted
+            # Remove legacy keys since they're now in genie_space_configs
+            for legacy_key in (
+                "genie_space_title", "genie_space_description",
+                "genie_sample_questions", "genie_instructions",
+                "genie_benchmarks", "genie_sql_filters",
+                "genie_sql_expressions", "genie_sql_measures",
+                "genie_join_specs",
+            ):
+                cfg.pop(legacy_key, None)
+
     return cfg
 
 

@@ -22,6 +22,8 @@ Check the [Prerequisites](shared/docs/prerequisites.md) first (Python, Terraform
 | AWS   | [`aws/README.md`](aws/README.md) |
 | Azure | [`azure/README.md`](azure/README.md) |
 
+> **Want to see it in action first?** The [Australian Bank Demo](shared/examples/aus_bank_demo/) provisions a complete environment and walks through the full flow in ~20 minutes — ANZ-specific masking, PCI compliance, AML row filters, and dev-to-prod promotion.
+
 ## Repository Layout
 
 ```
