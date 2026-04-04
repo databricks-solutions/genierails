@@ -317,8 +317,18 @@ def cmd_provision(env_file: Path) -> None:
     test_envs = Path(dev_state.get("test_envs_dir", ""))
     import shutil
 
-    # Run make setup for both dev and prod
+    # Clean stale Terraform state from previous runs, then run make setup
     for env_name in ["dev", "prod"]:
+        env_dir = CLOUD_ROOT / "envs" / env_name
+        for stale in env_dir.rglob("terraform.tfstate*"):
+            stale.unlink()
+        for stale in env_dir.rglob(".terraform"):
+            shutil.rmtree(stale, ignore_errors=True)
+        account_dir = CLOUD_ROOT / "envs" / "account"
+        for stale in account_dir.rglob("terraform.tfstate*"):
+            stale.unlink()
+        for stale in account_dir.rglob(".terraform"):
+            shutil.rmtree(stale, ignore_errors=True)
         subprocess.run(
             ["make", "--no-print-directory", "setup", f"ENV={env_name}"],
             cwd=str(CLOUD_ROOT), capture_output=True, text=True,
