@@ -775,26 +775,9 @@ def _create_genie_space(dev_state: dict) -> str:
                     {"id": _gen_id(), "alias": "transaction_count", "sql": ["COUNT(DISTINCT transaction_id)"]},
                 ],
             },
-            "join_specs": [
-                {
-                    "id": _gen_id(),
-                    "left": {"identifier": f"{DEV_CATALOG}.{SCHEMA}.customers"},
-                    "right": {"identifier": f"{DEV_CATALOG}.{SCHEMA}.accounts"},
-                    "sql": ["customers.customer_id = accounts.customer_id"],
-                },
-                {
-                    "id": _gen_id(),
-                    "left": {"identifier": f"{DEV_CATALOG}.{SCHEMA}.accounts"},
-                    "right": {"identifier": f"{DEV_CATALOG}.{SCHEMA}.transactions"},
-                    "sql": ["accounts.account_id = transactions.account_id"],
-                },
-                {
-                    "id": _gen_id(),
-                    "left": {"identifier": f"{DEV_CATALOG}.{SCHEMA}.customers"},
-                    "right": {"identifier": f"{DEV_CATALOG}.{SCHEMA}.credit_cards"},
-                    "sql": ["customers.customer_id = credit_cards.customer_id"],
-                },
-            ],
+            # join_specs omitted — the Genie API's proto parser is strict about
+            # the SQL format and rejects most join conditions. Genie infers joins
+            # from foreign key relationships in the table schemas automatically.
         },
         "benchmarks": {
             "questions": [
