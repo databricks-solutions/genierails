@@ -582,15 +582,32 @@ def _create_prod_workspace(cfg: dict, cloud: str, metastore_id: str, dev_state: 
     except Exception as e:
         print(f"  {_yellow('WARN')} Metastore assignment: {e}")
 
-    # Grant SP workspace admin on prod
+    # Grant SP workspace admin on prod via account-level permission assignment
     sp_id = cfg.get("DATABRICKS_CLIENT_ID", "")
     if sp_id:
+        try:
+            from databricks.sdk.service.iam import PermissionLevel
+            # Look up the SP's account-level ID to assign workspace permissions
+            sp_list = list(a.service_principals.list(filter=f'applicationId eq "{sp_id}"'))
+            if sp_list:
+                sp_account_id = sp_list[0].id
+                a.workspace_assignment.update(
+                    workspace_id=int(prod_ws_id),
+                    principal_id=sp_account_id,
+                    permissions=[PermissionLevel.ADMIN],
+                )
+                print(f"  {_green('✓')} SP granted workspace admin on prod")
+            else:
+                print(f"  {_yellow('WARN')} Could not find SP {sp_id} in account — skipping admin grant")
+        except Exception as e:
+            print(f"  {_yellow('WARN')} SP admin grant on prod: {e}")
+
+        # Verify connectivity
         try:
             time.sleep(15)  # wait for workspace identity propagation
             from databricks.sdk import WorkspaceClient
             w = WorkspaceClient(host=prod_host, client_id=sp_id,
                                 client_secret=cfg.get("DATABRICKS_CLIENT_SECRET", ""))
-            # Verify connectivity
             me = w.current_user.me()
             print(f"  {_green('✓')} SP authenticated on prod workspace as {me.user_name}")
         except Exception as e:
