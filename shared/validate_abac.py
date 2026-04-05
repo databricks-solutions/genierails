@@ -861,7 +861,11 @@ def main():
         if country_codes:
             hints, func_cats = _load_country_categories(country_codes)
             _country_hint_to_category.update(hints)
-            FUNCTION_EXPECTED_CATEGORIES.update(func_cats)
+            # Merge overlay categories with base categories (don't replace).
+            # The overlay adds specificity (e.g. mask_email → customer_pii) but
+            # the base category (e.g. email) is still valid for column inference.
+            for fn, cats in func_cats.items():
+                FUNCTION_EXPECTED_CATEGORIES[fn] = FUNCTION_EXPECTED_CATEGORIES.get(fn, set()) | cats
             if hints:
                 print(f"  Country overlays loaded: {', '.join(country_codes)} "
                       f"({len(hints)} column hints, {len(func_cats)} function mappings)")
@@ -871,7 +875,9 @@ def main():
         if industry_codes:
             hints, func_cats = _load_industry_categories(industry_codes)
             _country_hint_to_category.update(hints)
-            FUNCTION_EXPECTED_CATEGORIES.update(func_cats)
+            # Merge overlay categories with base categories (don't replace).
+            for fn, cats in func_cats.items():
+                FUNCTION_EXPECTED_CATEGORIES[fn] = FUNCTION_EXPECTED_CATEGORIES.get(fn, set()) | cats
             if hints:
                 print(f"  Industry overlays loaded: {', '.join(industry_codes)} "
                       f"({len(hints)} column hints, {len(func_cats)} function mappings)")
