@@ -4388,7 +4388,11 @@ def bootstrap_per_space_dirs(out_dir: Path, auth_cfg: dict, hcl_text: str) -> No
     )
 
 
-def run_validation(out_dir: Path) -> bool:
+def run_validation(
+    out_dir: Path,
+    countries: list[str] | None = None,
+    industries: list[str] | None = None,
+) -> bool:
     """Run validate_abac.py on the generated files. Returns True if passed."""
     validator = SCRIPT_DIR / "validate_abac.py"
     resolved_out_dir = out_dir.resolve()
@@ -4402,6 +4406,10 @@ def run_validation(out_dir: Path) -> bool:
     cmd = [sys.executable, str(validator), str(tfvars_path)]
     if sql_path.exists():
         cmd.append(str(sql_path))
+    if countries:
+        cmd.extend(["--country", ",".join(countries)])
+    if industries:
+        cmd.extend(["--industry", ",".join(industries)])
 
     print("\n  Running validation...\n")
     result = subprocess.run(cmd, cwd=str(WORK_DIR))
@@ -5555,7 +5563,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
     # Governance mode + full mode: validate when both HCL and SQL blocks are present.
     _can_validate = hcl_block and sql_block and args.mode != "genie"
     if _can_validate and not args.skip_validation:
-        passed = run_validation(validation_dir)
+        passed = run_validation(validation_dir, countries=countries, industries=industries)
         if not passed:
             print("\n  Validation found errors. Review the output above and fix before running terraform apply.")
             sys.exit(1)
