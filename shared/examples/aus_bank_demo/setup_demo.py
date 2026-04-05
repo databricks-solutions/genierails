@@ -700,17 +700,129 @@ def _create_genie_space(dev_state: dict) -> str:
             wh_id = wh.id
             break
 
-    # Build Genie Space payload
+    # Build Genie Space payload — pre-populate with sample questions, instructions,
+    # benchmarks, SQL expressions, measures, filters, and join specs to simulate a
+    # Genie Space that a user has already configured in the UI. The generate command
+    # imports these verbatim from the API and does not regenerate them.
+    _id_counter = [0]
+
+    def _gen_id():
+        """Generate a monotonically increasing UUID-like ID for serialized_space entries.
+
+        The Genie API requires all ID-bearing lists (join_specs, sample_questions,
+        benchmarks, etc.) to be sorted by id. Using a counter ensures natural
+        insertion order is already sorted.
+        """
+        _id_counter[0] += 1
+        # Use counter as the low bits to guarantee sort order
+        hi = 0x0000000000001000  # minimal valid UUID v1 high bits
+        lo = 0x8000000000000000 | _id_counter[0]
+        return f"{hi:016x}{lo:016x}"
+
     tables = [
         f"{DEV_CATALOG}.{SCHEMA}.customers",
         f"{DEV_CATALOG}.{SCHEMA}.accounts",
         f"{DEV_CATALOG}.{SCHEMA}.transactions",
         f"{DEV_CATALOG}.{SCHEMA}.credit_cards",
     ]
+
     serialized_space = json.dumps({
         "version": 2,
         "data_sources": {
             "tables": [{"identifier": t} for t in sorted(tables)]
+        },
+        "config": {
+            "sample_questions": [
+                {"id": _gen_id(), "question": [q]} for q in [
+                    "Which customers have high-risk AML flags?",
+                    "What is the total balance by account type?",
+                    "Show me all international transactions over $10,000",
+                    "List credit cards expiring in the next 6 months",
+                    "What are the top 5 merchants by transaction volume?",
+                ]
+            ],
+        },
+        "instructions": {
+            "text_instructions": [{
+                "id": _gen_id(),
+                "content": [
+                    "You are a banking analytics assistant for Kookaburra Bank, "
+                    "an Australian retail bank. All monetary values are in Australian "
+                    "Dollars (AUD). BSB (Bank-State-Branch) numbers identify bank "
+                    "branches — format is XXX-XXX. TFN (Tax File Number) is a unique "
+                    "9-digit identifier issued by the ATO. AML risk flags indicate "
+                    "Anti-Money Laundering assessment: CLEAR (no concerns), REVIEW "
+                    "(under investigation), HIGH_RISK (escalated to compliance), "
+                    "BLOCKED (frozen). When asked about customer balances, include "
+                    "both everyday and savings accounts. For transaction analysis, "
+                    "note that negative amounts are debits and positive amounts are "
+                    "credits."
+                ],
+            }],
+            "sql_snippets": {
+                "filters": [
+                    {"id": _gen_id(), "display_name": "Australian domestic only", "sql": ["country = 'AU'"]},
+                    {"id": _gen_id(), "display_name": "Active cards only", "sql": ["status = 'ACTIVE'"]},
+                ],
+                "expressions": [
+                    {"id": _gen_id(), "alias": "customer_full_name", "sql": ["first_name || ' ' || last_name"]},
+                    {"id": _gen_id(), "alias": "masked_bsb", "sql": ["SUBSTRING(bsb, 1, 3) || '-***'"]},
+                    {"id": _gen_id(), "alias": "transaction_year_month", "sql": ["DATE_FORMAT(transaction_date, 'yyyy-MM')"]},
+                ],
+                "measures": [
+                    {"id": _gen_id(), "alias": "total_balance", "sql": ["SUM(balance)"]},
+                    {"id": _gen_id(), "alias": "avg_transaction_amount", "sql": ["AVG(ABS(amount))"]},
+                    {"id": _gen_id(), "alias": "transaction_count", "sql": ["COUNT(DISTINCT transaction_id)"]},
+                ],
+            },
+            "join_specs": [
+                {
+                    "id": _gen_id(),
+                    "left": {"identifier": f"{DEV_CATALOG}.{SCHEMA}.customers"},
+                    "right": {"identifier": f"{DEV_CATALOG}.{SCHEMA}.accounts"},
+                    "sql": [f"{DEV_CATALOG}.{SCHEMA}.customers.customer_id = {DEV_CATALOG}.{SCHEMA}.accounts.customer_id"],
+                },
+                {
+                    "id": _gen_id(),
+                    "left": {"identifier": f"{DEV_CATALOG}.{SCHEMA}.accounts"},
+                    "right": {"identifier": f"{DEV_CATALOG}.{SCHEMA}.transactions"},
+                    "sql": [f"{DEV_CATALOG}.{SCHEMA}.accounts.account_id = {DEV_CATALOG}.{SCHEMA}.transactions.account_id"],
+                },
+                {
+                    "id": _gen_id(),
+                    "left": {"identifier": f"{DEV_CATALOG}.{SCHEMA}.customers"},
+                    "right": {"identifier": f"{DEV_CATALOG}.{SCHEMA}.credit_cards"},
+                    "sql": [f"{DEV_CATALOG}.{SCHEMA}.customers.customer_id = {DEV_CATALOG}.{SCHEMA}.credit_cards.customer_id"],
+                },
+            ],
+        },
+        "benchmarks": {
+            "questions": [
+                {
+                    "id": _gen_id(),
+                    "question": ["How many customers are in each state?"],
+                    "answer": [{"format": "SQL", "content": [
+                        f"SELECT state, COUNT(*) as customer_count FROM {DEV_CATALOG}.{SCHEMA}.customers GROUP BY state ORDER BY customer_count DESC"
+                    ]}],
+                },
+                {
+                    "id": _gen_id(),
+                    "question": ["What is the total balance across all savings accounts?"],
+                    "answer": [{"format": "SQL", "content": [
+                        f"SELECT SUM(balance) as total_savings FROM {DEV_CATALOG}.{SCHEMA}.accounts WHERE account_type = 'SAVINGS'"
+                    ]}],
+                },
+                {
+                    "id": _gen_id(),
+                    "question": ["Show all HIGH_RISK or BLOCKED transactions"],
+                    "answer": [{"format": "SQL", "content": [
+                        f"SELECT t.*, c.first_name, c.last_name FROM {DEV_CATALOG}.{SCHEMA}.transactions t "
+                        f"JOIN {DEV_CATALOG}.{SCHEMA}.accounts a ON t.account_id = a.account_id "
+                        f"JOIN {DEV_CATALOG}.{SCHEMA}.customers c ON a.customer_id = c.customer_id "
+                        f"WHERE t.aml_risk_flag IN ('HIGH_RISK', 'BLOCKED') ORDER BY t.transaction_date DESC"
+                    ]}],
+                },
+            ],
         },
     }, separators=(",", ":"))
 
@@ -739,7 +851,10 @@ def _create_genie_space(dev_state: dict) -> str:
                 return ""
             print(f"  {_green('✓')} Genie Space created: {space_id}")
 
-            # PATCH to persist tables — the POST create ignores serialized_space
+            # PATCH to persist full config — the POST create ignores serialized_space.
+            # This populates tables, sample questions, instructions, benchmarks,
+            # SQL expressions, measures, filters, and join specs — simulating a
+            # user who has configured the Space in the UI before running GenieRails.
             patch_req = urllib.request.Request(
                 f"{host}/api/2.0/genie/spaces/{space_id}",
                 data=json.dumps({"serialized_space": serialized_space}).encode(),
@@ -751,9 +866,9 @@ def _create_genie_space(dev_state: dict) -> str:
             )
             try:
                 with urllib.request.urlopen(patch_req, context=ctx) as patch_resp:
-                    print(f"  {_green('✓')} Tables added to Genie Space via PATCH")
+                    print(f"  {_green('✓')} Genie Space configured (tables, instructions, benchmarks, SQL config)")
             except Exception as pe:
-                print(f"  {_yellow('WARN')} PATCH tables: {pe}")
+                print(f"  {_yellow('WARN')} PATCH config: {pe}")
 
             return space_id
     except urllib.error.HTTPError as e:

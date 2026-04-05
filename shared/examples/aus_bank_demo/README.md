@@ -110,7 +110,29 @@ CREATE OR REPLACE FUNCTION mask_card_last4(card STRING) ...
 -- Shows: **** **** **** 9010
 ```
 
-**Key message:** _"The AI knows Australian regulations — TFN, Medicare, BSB masking are all generated automatically from the column names and the ANZ overlay."_
+**Key message:** _"The AI knows Australian regulations — TFN, Medicare, BSB masking are all generated automatically from the column names and the ANZ overlay. Meanwhile, the Genie Space config you already set up in the UI — instructions, sample questions, benchmarks, SQL expressions — is imported verbatim, not regenerated."_
+
+### 2b. Review, tune & validate
+
+The generated config is a draft, not a final answer. Review it before applying:
+
+- Open `envs/dev/generated/abac.auto.tfvars` — check groups, tag policies, tag assignments, FGAC policies
+- Open `envs/dev/generated/masking_functions.sql` — check the SQL UDF implementations
+- See `envs/dev/generated/TUNING.md` for guidance on what to adjust
+
+Once you're satisfied, validate the generated config:
+
+```bash
+make validate-generated ENV=dev COUNTRY=ANZ INDUSTRY=financial_services
+```
+
+This checks for:
+- Tag assignments referencing undefined tag policies
+- FGAC policies referencing missing masking functions
+- Masking function SQL syntax issues
+- Missing or inconsistent group references
+
+Fix any issues the validator flags, then proceed to apply.
 
 ---
 
