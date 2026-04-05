@@ -942,6 +942,35 @@ def cmd_teardown(env_file: Path) -> None:
     if STATE_FILE.exists():
         STATE_FILE.unlink()
 
+    # Clean generated config in envs/ so the next provision starts fresh.
+    # Remove auth, env, abac configs, terraform state, and generated/ dirs
+    # for dev, prod, and account environments.
+    import shutil
+    for env_name in ["dev", "prod", "account"]:
+        env_dir = CLOUD_ROOT / "envs" / env_name
+        if not env_dir.exists():
+            continue
+        for pattern in [
+            "auth.auto.tfvars",
+            "env.auto.tfvars",
+            "abac.auto.tfvars",
+            "terraform.tfstate",
+            "terraform.tfstate.backup",
+            ".terraform",
+            ".*.apply.sha",
+        ]:
+            for stale in env_dir.rglob(pattern):
+                if stale.is_dir():
+                    shutil.rmtree(stale, ignore_errors=True)
+                else:
+                    stale.unlink(missing_ok=True)
+        # Remove generated/ and ddl/ dirs
+        for subdir in ["generated", "ddl"]:
+            d = env_dir / subdir
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
+    print(f"  {_green('✓')} Cleaned envs/dev, envs/prod, envs/account")
+
     print(f"\n  {_green('✓')} Teardown complete")
 
 
