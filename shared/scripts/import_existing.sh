@@ -561,8 +561,9 @@ client_secret = _str(auth.get('databricks_client_secret', '')) or os.environ.get
 try:
     from databricks.sdk import WorkspaceClient
     w = WorkspaceClient(host=host, client_id=client_id, client_secret=client_secret)
+    warehouse_names = {'ABAC Governance Warehouse', 'ABAC Serverless Warehouse'}
     for wh in w.warehouses.list():
-        if wh.name == 'ABAC Governance Warehouse':
+        if wh.name in warehouse_names:
             print(str(wh.id))
             break
 except Exception as e:
