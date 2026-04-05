@@ -764,9 +764,7 @@ fi
 
 if $IMPORT_WAREHOUSE; then
   echo "--- SQL Warehouse ---"
-  if [ "$LAYER" != "data_access" ]; then
-    echo "  Skipping warehouse import outside envs/<workspace>/data_access"
-  else
+  if [ "$LAYER" = "data_access" ]; then
     wh_id=$(extract_warehouse_id_by_name)
     if [ -z "$wh_id" ]; then
       echo "  No orphaned warehouse found (or sql_warehouse_id is already set)."
@@ -774,6 +772,16 @@ if $IMPORT_WAREHOUSE; then
       run_import "module.data_access.databricks_sql_endpoint.warehouse[0]" "$wh_id"
       ((imported++)) || true
     fi
+  elif [ "$LAYER" = "workspace" ]; then
+    wh_id=$(extract_warehouse_id_by_name)
+    if [ -z "$wh_id" ]; then
+      echo "  No orphaned warehouse found (or sql_warehouse_id is already set)."
+    else
+      run_import "module.workspace.databricks_sql_endpoint.warehouse[0]" "$wh_id"
+      ((imported++)) || true
+    fi
+  else
+    echo "  Skipping warehouse import outside data_access/workspace layers"
   fi
   echo ""
 fi

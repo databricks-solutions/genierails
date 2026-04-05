@@ -348,6 +348,8 @@ _apply-layer:
 		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(SHARED_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
 	fi; \
 	if [ "$$layer" = "workspace" ]; then \
+		echo "=== Auto-importing existing workspace resources (idempotent apply) ==="; \
+		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(SHARED_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
 		for _retry in 1 2 3; do \
 			if LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; then \
 				break; \
