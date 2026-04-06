@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="shared/docs/genierails-logo.png" alt="GenieRails" width="500">
+</p>
+
 # GenieRails
 
 Put Genie onboarding on rails — with built-in guardrails. Point GenieRails at your tables, and it generates everything you need to run a governed Genie Space: groups, tag policies, column masks, row filters, ACLs, entitlements, and the Space itself. No Terraform to write.
