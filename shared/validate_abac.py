@@ -292,10 +292,12 @@ def _infer_column_categories(entity_name: str) -> set[str]:
 
 GENERIC_SAFE_FUNCTIONS = {"mask_pii_partial", "mask_redact", "mask_nullify", "mask_hash"}
 FUNCTION_EXPECTED_CATEGORIES = {
-    "mask_email": {"email"},
-    "mask_phone": {"phone"},
-    "mask_ssn": {"ssn"},
-    "mask_full_name": {"name"},
+    "mask_email": {"email", "customer_pii"},
+    "mask_phone": {"phone", "customer_pii"},
+    "mask_ssn": {"ssn", "customer_pii"},
+    "mask_ssn_last4": {"ssn", "customer_pii"},
+    "mask_full_name": {"name", "customer_pii"},
+    "mask_name": {"name", "customer_pii"},
     "mask_credit_card_full": {"card", "payment_card"},
     "mask_credit_card_last4": {"card", "payment_card"},
     "mask_card_last4": {"card", "payment_card"},
