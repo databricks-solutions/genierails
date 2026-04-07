@@ -1453,26 +1453,6 @@ def call_with_retries(
         # If we exhausted retries on a valid model (non-model-ID errors), stop
         break
 
-    # Cross-provider fallback: if ALL Databricks FMAPI models failed with
-    # "not found" errors, try the Anthropic API directly as a last resort.
-    all_model_not_found = all(
-        _is_model_not_found(e) for e in [last_error] if e
-    ) if last_error else False
-
-    if all_model_not_found and call_fn.__name__ == "call_databricks":
-        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if anthropic_key:
-            anthropic_model = PROVIDERS["anthropic"]["default_model"]
-            anthropic_fn = PROVIDERS["anthropic"]["call"]
-            print(f"\n  All Databricks FMAPI models unavailable. "
-                  f"Falling back to Anthropic API ({anthropic_model})...")
-            try:
-                with Spinner("Calling Anthropic API (cross-provider fallback)"):
-                    return anthropic_fn(prompt, anthropic_model)
-            except Exception as e:
-                last_error = e
-                print(f"\n  Anthropic fallback also failed: {e}")
-
     raise RuntimeError(f"All models failed. Last error: {last_error}")
 
 
