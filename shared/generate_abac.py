@@ -1338,6 +1338,7 @@ def call_databricks(prompt: str, model: str) -> str:
 # Databricks occasionally renames or deprecates model endpoints, so having
 # fallbacks prevents CI failures when the primary model is temporarily unavailable.
 DATABRICKS_MODEL_FALLBACKS = [
+    "databricks-claude-sonnet-4-6",
     "databricks-claude-sonnet-4",
     "databricks-claude-sonnet-4-1",
     "databricks-claude-sonnet-4-20250514",
