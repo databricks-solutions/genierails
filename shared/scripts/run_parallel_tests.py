@@ -338,6 +338,32 @@ def main():
         print(f"  {_yellow('WARN')} Cleanup failed: {exc}")
     print()
 
+    # Phase 0.5: Pre-create shared S3 bucket (AWS only)
+    # All parallel scenarios share one S3 bucket. Creating it upfront avoids
+    # race conditions (BucketAlreadyOwnedByYou) and ensures the bucket exists
+    # with the correct region before any workspace tries to use it.
+    if cloud == "aws":
+        print("── Phase 0.5: Pre-creating shared S3 bucket (AWS)")
+        try:
+            sys.path.insert(0, str(SCRIPT_DIR / "cloud_providers"))
+            from aws_provider import _aws_session, _ensure_s3_bucket
+            _cfg_aws = {}
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line and not line.startswith("#"):
+                        k, v = line.split("=", 1)
+                        _cfg_aws[k.strip()] = v.strip()
+            _region = _cfg_aws.get("DATABRICKS_AWS_REGION", "ap-southeast-2")
+            _session = _aws_session(_cfg_aws, _region)
+            _aws_account_id = _session.client("sts", region_name=_region).get_caller_identity()["Account"]
+            _bucket = f"genie-uc-test-{_aws_account_id}"
+            _ensure_s3_bucket(_cfg_aws, _bucket, _region)
+            print(f"  Shared bucket ready: s3://{_bucket} (region={_region})")
+        except Exception as exc:
+            print(f"  {_yellow('WARN')} Pre-create bucket failed: {exc}")
+        print()
+
     # Phase 1: Unit tests
     print("── Phase 1: Unit Tests")
     r = subprocess.run([sys.executable, "-m", "pytest", "tests/", "-v", "--tb=short"],
