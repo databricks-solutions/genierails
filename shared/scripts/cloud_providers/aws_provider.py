@@ -203,6 +203,12 @@ def _ensure_s3_bucket(cfg: dict, bucket_name: str, region: str) -> bool:
         _ok(f"S3 bucket created: s3://{bucket_name}")
         return True
     except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        # In parallel provisioning, another process may have created the bucket
+        # between our head_bucket check and create_bucket call.
+        if code in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+            _ok(f"S3 bucket already exists (parallel race): s3://{bucket_name}")
+            return False
         _err(f"Could not create S3 bucket s3://{bucket_name}: {exc}")
         raise
 
