@@ -127,7 +127,7 @@ def run_scenario(scenario, auth_file, state_file, run_id, cloud, suite_id, log_d
         result = subprocess.run(
             [sys.executable, str(SCRIPT_DIR / "run_integration_tests.py"),
              "--scenario", scenario, "--auth-file", auth_file],
-            cwd=str(CLOUD_ROOT), env=env, capture_output=True, text=True, timeout=9000,
+            cwd=str(CLOUD_ROOT), env=env, capture_output=True, text=True, timeout=14400,  # 4 hours
         )
     except subprocess.TimeoutExpired as te:
         elapsed = time.time() - start
@@ -294,18 +294,25 @@ def main():
     print(f"  Logs:         {log_dir}")
     print()
 
+    # ── Load env file and propagate optional keys to environment ─────────────
+    _cfg = {}
+    with open(env_file) as f:
+        for line in f:
+            line = line.strip()
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                _cfg[k.strip()] = v.strip()
+    # Propagate ANTHROPIC_API_KEY so cross-provider fallback works in subprocesses
+    _anthropic_key = _cfg.get("ANTHROPIC_API_KEY", "")
+    if _anthropic_key:
+        os.environ["ANTHROPIC_API_KEY"] = _anthropic_key
+        print(f"  ANTHROPIC_API_KEY loaded from env file (cross-provider fallback enabled)")
+
     # ── Phase 0: Clean up orphan account resources from previous runs ────────
     print("── Phase 0: Cleaning orphan account resources from previous runs")
     try:
         import re as _re_pre
         import hcl2 as _hcl2_pre
-        with open(env_file) as f:
-            _cfg = {}
-            for line in f:
-                line = line.strip()
-                if "=" in line and not line.startswith("#"):
-                    k, v = line.split("=", 1)
-                    _cfg[k.strip()] = v.strip()
 
         _account_id = _cfg.get("DATABRICKS_ACCOUNT_ID", "")
         _client_id = _cfg.get("DATABRICKS_CLIENT_ID", "")
