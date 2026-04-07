@@ -1411,20 +1411,32 @@ def call_with_retries(
     tries fallback_models in order before giving up. This handles Databricks
     FMAPI model renames/deprecations gracefully.
     """
+    _MODEL_NOT_FOUND_PATTERNS = [
+        "model identifier is invalid",
+        "model not found",
+        "failed to find",
+        "endpoint not found",
+        "resource does not exist",
+    ]
+
+    def _is_model_not_found(err: Exception) -> bool:
+        s = str(err).lower()
+        return any(p in s for p in _MODEL_NOT_FOUND_PATTERNS)
+
     models_to_try = [model] + (fallback_models or [])
     last_error = None
 
-    for current_model in models_to_try:
+    for i, current_model in enumerate(models_to_try):
+        model_unavailable = False
         for attempt in range(1, max_retries + 1):
             try:
                 with Spinner(f"Calling LLM (attempt {attempt}/{max_retries})"):
                     return call_fn(prompt, current_model)
             except Exception as e:
                 last_error = e
-                error_str = str(e).lower()
-                # If the model ID itself is invalid, skip retries and try next model
-                if "model identifier is invalid" in error_str or "model not found" in error_str:
+                if _is_model_not_found(e):
                     print(f"\n  Model '{current_model}' not available: {e}")
+                    model_unavailable = True
                     break  # skip remaining retries, try next model
                 if attempt < max_retries:
                     wait = min(2 ** attempt, 60)
@@ -1434,11 +1446,9 @@ def call_with_retries(
                 else:
                     print(f"\n  Attempt {attempt} failed: {e}")
 
-        # If we broke out of retry loop due to invalid model, continue to next
-        if last_error and "model identifier is invalid" in str(last_error).lower():
-            if current_model != models_to_try[-1]:
-                next_model = models_to_try[models_to_try.index(current_model) + 1]
-                print(f"  Falling back to: {next_model}")
+        if model_unavailable:
+            if i < len(models_to_try) - 1:
+                print(f"  Falling back to: {models_to_try[i + 1]}")
             continue
         # If we exhausted retries on a valid model (non-model-ID errors), stop
         break
