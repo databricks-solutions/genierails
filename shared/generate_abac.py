@@ -1334,23 +1334,10 @@ def call_databricks(prompt: str, model: str) -> str:
     return response.choices[0].message.content
 
 
-# Ordered fallback list for Databricks FMAPI. The first available model is used.
-# Databricks occasionally renames or deprecates model endpoints, so having
-# fallbacks prevents CI failures when the primary model is temporarily unavailable.
-DATABRICKS_MODEL_FALLBACKS = [
-    "databricks-claude-sonnet-4-6",
-    "databricks-claude-sonnet-4",
-    "databricks-claude-sonnet-4-1",
-    "databricks-claude-sonnet-4-20250514",
-    "databricks-gpt-4o",
-    "databricks-gpt-4o-mini",
-]
-
 PROVIDERS = {
     "databricks": {
         "call": call_databricks,
-        "default_model": DATABRICKS_MODEL_FALLBACKS[0],
-        "fallback_models": DATABRICKS_MODEL_FALLBACKS[1:],
+        "default_model": "databricks-claude-sonnet-4-6",
     },
     "anthropic": {
         "call": call_anthropic,
@@ -1399,62 +1386,23 @@ class Spinner:
             self._stop.wait(0.1)
 
 
-def call_with_retries(
-    call_fn,
-    prompt: str,
-    model: str,
-    max_retries: int,
-    fallback_models: list[str] | None = None,
-) -> str:
-    """Call an LLM provider with exponential backoff retries and model fallback.
-
-    When the primary model returns an "invalid model" error, automatically
-    tries fallback_models in order before giving up. This handles Databricks
-    FMAPI model renames/deprecations gracefully.
-    """
-    _MODEL_NOT_FOUND_PATTERNS = [
-        "model identifier is invalid",
-        "model not found",
-        "failed to find",
-        "endpoint not found",
-        "resource does not exist",
-    ]
-
-    def _is_model_not_found(err: Exception) -> bool:
-        s = str(err).lower()
-        return any(p in s for p in _MODEL_NOT_FOUND_PATTERNS)
-
-    models_to_try = [model] + (fallback_models or [])
+def call_with_retries(call_fn, prompt: str, model: str, max_retries: int) -> str:
+    """Call an LLM provider with exponential backoff retries."""
     last_error = None
-
-    for i, current_model in enumerate(models_to_try):
-        model_unavailable = False
-        for attempt in range(1, max_retries + 1):
-            try:
-                with Spinner(f"Calling LLM (attempt {attempt}/{max_retries})"):
-                    return call_fn(prompt, current_model)
-            except Exception as e:
-                last_error = e
-                if _is_model_not_found(e):
-                    print(f"\n  Model '{current_model}' not available: {e}")
-                    model_unavailable = True
-                    break  # skip remaining retries, try next model
-                if attempt < max_retries:
-                    wait = min(2 ** attempt, 60)
-                    print(f"\n  Attempt {attempt} failed: {e}")
-                    print(f"  Retrying in {wait}s...")
-                    time.sleep(wait)
-                else:
-                    print(f"\n  Attempt {attempt} failed: {e}")
-
-        if model_unavailable:
-            if i < len(models_to_try) - 1:
-                print(f"  Falling back to: {models_to_try[i + 1]}")
-            continue
-        # If we exhausted retries on a valid model (non-model-ID errors), stop
-        break
-
-    raise RuntimeError(f"All models failed. Last error: {last_error}")
+    for attempt in range(1, max_retries + 1):
+        try:
+            with Spinner(f"Calling LLM (attempt {attempt}/{max_retries})"):
+                return call_fn(prompt, model)
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                wait = min(2 ** attempt, 60)
+                print(f"\n  Attempt {attempt} failed: {e}")
+                print(f"  Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"\n  Attempt {attempt} failed: {e}")
+    raise RuntimeError(f"All {max_retries} attempts failed. Last error: {last_error}")
 
 
 def fix_hcl_syntax(tfvars_path: Path) -> int:
@@ -4595,8 +4543,7 @@ def _run_delta_mode(auth_file: Path) -> None:
     provider_cfg = PROVIDERS["databricks"]
     call_fn = provider_cfg["call"]
     model = provider_cfg["default_model"]
-    response_text = call_with_retries(call_fn, prompt, model, 3,
-                                      fallback_models=provider_cfg.get("fallback_models"))
+    response_text = call_with_retries(call_fn, prompt, model, 3)
 
     # ── Parse LLM response into tag_assignments ─────────────────────────
     new_assignments: list[dict] = []
@@ -5181,13 +5128,11 @@ def main():
     provider_cfg = PROVIDERS[args.provider]
     model = args.model or provider_cfg["default_model"]
     call_fn = provider_cfg["call"]
-    # Only use fallbacks when the user didn't explicitly choose a model
-    fallbacks = provider_cfg.get("fallback_models") if not args.model else None
 
     _semantic_retry_count = 0
     _semantic_max_retries = args.max_retries
 
-    response_text = call_with_retries(call_fn, prompt, model, args.max_retries, fallback_models=fallbacks)
+    response_text = call_with_retries(call_fn, prompt, model, args.max_retries)
 
     sql_block, hcl_block = extract_code_blocks(response_text)
 
@@ -5514,7 +5459,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 for err in semantic_errors:
                     print(f"    - {err}")
                 print(f"  Re-generating with LLM...")
-                response_text = call_with_retries(call_fn, prompt, model, 1, fallback_models=fallbacks)
+                response_text = call_with_retries(call_fn, prompt, model, 1)
                 new_sql, new_hcl = extract_code_blocks(response_text)
                 if new_hcl:
                     hcl_block = new_hcl
