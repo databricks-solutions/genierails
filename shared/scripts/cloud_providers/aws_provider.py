@@ -330,9 +330,11 @@ class AWSProvider(CloudProvider):
         _ensure_boto3()
         session = _aws_session(cfg, region)
         aws_account_id = session.client("sts", region_name=region).get_caller_identity()["Account"]
-        bucket_name = f"genie-uc-test-{aws_account_id}"
+        # Per-run bucket avoids S3 race conditions and regional endpoint caching
+        # issues when multiple parallel scenarios share a single bucket.
+        bucket_name = f"genie-uc-test-{aws_account_id}-{run_id}"
 
-        # Step 0: Ensure S3 bucket exists
+        # Step 0: Create S3 bucket for this run
         bucket_created = _ensure_s3_bucket(cfg, bucket_name, region)
 
         # Step 1: Create IAM role
