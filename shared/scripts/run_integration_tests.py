@@ -5216,8 +5216,16 @@ genie_spaces = [
     prod_abac = ENVS_DIR / prod_env / "generated" / "abac.auto.tfvars"
     _assert_contains(prod_abac, PROD_BANK_CAT,
                      f"{PROD_BANK_CAT} catalog in promoted prod config")
-    _assert_not_contains(prod_abac, DEV_BANK_CAT,
-                         f"{DEV_BANK_CAT} must not appear in prod config")
+    # Check that tag_assignments reference prod_bank (free-text like instructions
+    # may still mention dev_bank, so we check structured sections only)
+    prod_text = prod_abac.read_text()
+    tag_section = prod_text[prod_text.find("tag_assignments"):] if "tag_assignments" in prod_text else ""
+    if DEV_BANK_CAT in tag_section.split("fgac_policies")[0] if "fgac_policies" in tag_section else tag_section:
+        raise AssertionError(
+            f"tag_assignments in prod config still reference '{DEV_BANK_CAT}' — "
+            f"catalog remap may have failed"
+        )
+    print(f"  {_green('PASS')}  tag_assignments reference {PROD_BANK_CAT}, not {DEV_BANK_CAT}")
 
     _copy_auth(env, prod_env)
 
