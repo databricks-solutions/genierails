@@ -4503,6 +4503,85 @@ def autofix_inject_overlay_functions(
     return len(injected)
 
 
+def autofix_cross_catalog_function_deployment(tfvars_path: Path, sql_path: Path | None = None) -> int:
+    """Ensure masking functions are deployed to all catalog.schema pairs referenced in FGAC policies.
+
+    When the LLM generates FGAC policies for multiple catalogs but only defines
+    masking functions under one catalog's USE CATALOG/USE SCHEMA block, the
+    functions won't be deployed to the other catalog. This autofix duplicates
+    function definitions to all required catalog.schema pairs.
+
+    Returns the number of function definitions added.
+    """
+    if not sql_path or not sql_path.exists() or not tfvars_path.exists():
+        return 0
+    try:
+        import hcl2
+        cfg = hcl2.loads(tfvars_path.read_text())
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies", []) or []
+    if not policies:
+        return 0
+
+    # Collect (catalog, schema, function_name) triples from policies
+    needed: dict[tuple[str, str], set[str]] = {}  # (cat, sch) -> {fn_names}
+    for p in policies:
+        fn = p.get("function_name", "")
+        fn_cat = p.get("function_catalog", "")
+        fn_sch = p.get("function_schema", "")
+        if fn and fn_cat and fn_sch:
+            needed.setdefault((fn_cat, fn_sch), set()).add(fn)
+
+    if not needed:
+        return 0
+
+    sql_text = sql_path.read_text()
+
+    # Parse which functions exist in which schema
+    functions_by_schema = _parse_sql_functions_by_schema(sql_path)
+
+    # Find schemas where functions are needed but missing
+    added = 0
+    for (cat, sch), fn_names in needed.items():
+        existing = functions_by_schema.get((cat, sch), set())
+        missing = fn_names - existing
+        if not missing:
+            continue
+
+        # Find function definitions from other schemas to copy
+        fn_bodies: dict[str, str] = {}
+        for fn_name in missing:
+            for (src_cat, src_sch), src_fns in functions_by_schema.items():
+                if fn_name in src_fns:
+                    # Extract the function definition from the SQL
+                    pattern = re.compile(
+                        rf"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+{re.escape(fn_name)}\s*\(.*?\).*?;"
+                        , re.IGNORECASE | re.DOTALL,
+                    )
+                    m = pattern.search(sql_text)
+                    if m:
+                        fn_bodies[fn_name] = m.group(0)
+                    break
+
+        if not fn_bodies:
+            continue
+
+        # Append a new catalog/schema section with the missing functions
+        section = f"\n-- === {cat}.{sch} functions (auto-deployed for cross-catalog FGAC policies) ===\n"
+        section += f"USE CATALOG {cat};\nUSE SCHEMA {sch};\n\n"
+        for fn_name, body in sorted(fn_bodies.items()):
+            section += body + "\n\n"
+            added += 1
+            print(f"  [AUTOFIX] Deployed '{fn_name}' to {cat}.{sch} (cross-catalog FGAC policy)")
+
+        sql_text = sql_text.rstrip() + "\n" + section
+        sql_path.write_text(sql_text)
+
+    return added
+
+
 def sanitize_space_key(name: str) -> str:
     """Convert a human-readable space name to a safe directory/Terraform key.
 
@@ -5722,6 +5801,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
         n_unsafe_filters = autofix_unsafe_row_filters(sql_path if sql_block else None)
         if n_unsafe_filters:
             print(f"  Auto-fixed: rewrote {n_unsafe_filters} row filter(s) with hallucinated column references")
+
+        n_cross_cat = autofix_cross_catalog_function_deployment(tfvars_path, sql_path if sql_block else None)
+        if n_cross_cat:
+            print(f"  Auto-fixed: deployed {n_cross_cat} function(s) to additional catalog.schema pairs")
 
         # Final cleanup: re-run invalid tag values + ambiguous to catch anything
         # introduced by intermediate autofixes (e.g. autofix_missing_fgac_policies).
