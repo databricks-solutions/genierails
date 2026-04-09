@@ -4888,28 +4888,17 @@ def _setup_bank_data(auth_file: Path, warehouse_id: str) -> str:
                 break
     if not wh:
         print("  No warehouse found — creating one for bank data setup...")
-        try:
-            create_resp = w.warehouses.create(
-                name="Demo Warehouse",
-                cluster_size="2X-Small",
-                warehouse_type="PRO",
-                auto_stop_mins=15,
-                enable_serverless_compute=True,
-            )
-            # .result() blocks until ready; handle both Wait and direct response
-            created_wh = create_resp.result() if hasattr(create_resp, "result") else create_resp
-            wh = created_wh.id if hasattr(created_wh, "id") else str(created_wh)
-        except Exception as e:
-            # Fallback: try without warehouse_type (older SDK)
-            print(f"  Warehouse create failed ({e}), retrying without warehouse_type...")
-            create_resp = w.warehouses.create(
-                name="Demo Warehouse",
-                cluster_size="2X-Small",
-                auto_stop_mins=15,
-                enable_serverless_compute=True,
-            )
-            created_wh = create_resp.result() if hasattr(create_resp, "result") else create_resp
-            wh = created_wh.id if hasattr(created_wh, "id") else str(created_wh)
+        from databricks.sdk.service.sql import EndpointInfoWarehouseType
+        create_resp = w.warehouses.create(
+            name="Demo Warehouse",
+            cluster_size="2X-Small",
+            warehouse_type=EndpointInfoWarehouseType.PRO,
+            max_num_clusters=1,
+            auto_stop_mins=15,
+            enable_serverless_compute=True,
+        )
+        created_wh = create_resp.result() if hasattr(create_resp, "result") else create_resp
+        wh = created_wh.id if hasattr(created_wh, "id") else str(created_wh)
         print(f"  Created warehouse: {wh}")
 
     # Create catalogs + schemas
