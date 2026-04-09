@@ -3227,9 +3227,11 @@ uc_tables = [
     )
     for section in ("tag_assignments", "fgac_policies"):
         _assert_contains(gov_gen, section, f"'{section}' present in governance output")
+    # Check for the actual HCL block, not just the name string — the LLM sometimes
+    # leaves comments mentioning genie_space_configs even after the block is stripped.
     _assert_not_contains(
-        gov_gen, "genie_space_configs",
-        "genie_space_configs absent in governance output (governance mode)",
+        gov_gen, "genie_space_configs =",
+        "genie_space_configs block absent in governance output (governance mode)",
     )
 
     _step("Phase 1 — Applying governance layers (account + data_access only)")
