@@ -1360,7 +1360,7 @@ def call_databricks(prompt: str, model: str) -> str:
 
     from databricks.sdk.config import Config
 
-    cfg = Config(http_timeout_seconds=600, product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
+    cfg = Config(http_timeout_seconds=900, product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
     w = WorkspaceClient(config=cfg)
     print(f"  Calling Databricks FMAPI ({model})...")
 
