@@ -4483,8 +4483,12 @@ def autofix_inject_overlay_functions(
     else:
         return 0  # can't determine where to put functions
 
-    # Inject missing functions at the end of the SQL file
-    injected = []
+    # Inject missing functions at the end of the SQL file with explicit catalog/schema context
+    injected = [
+        f"\n-- === Overlay functions injected (LLM omitted these) ===\n"
+        f"USE CATALOG {target_catalog};\n"
+        f"USE SCHEMA {target_schema};\n"
+    ]
     for name, defn in sorted(missing.items()):
         fn_sql = (
             f"\n-- Injected from overlay (LLM omitted this function)\n"
