@@ -37,7 +37,7 @@ SCENARIOS = [
     "quickstart", "multi-catalog", "multi-space", "per-space", "promote",
     "multi-env", "attach-promote", "self-service-genie", "abac-only",
     "multi-space-import", "schema-drift", "genie-only", "country-overlay",
-    "industry-overlay", "genie-import-no-abac",
+    "industry-overlay", "genie-import-no-abac", "aus-bank-demo",
 ]
 
 
