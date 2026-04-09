@@ -4473,15 +4473,17 @@ def autofix_inject_overlay_functions(
         return 0
 
     # Determine the catalog.schema for the injected functions
-    # Use the first catalog.schema from the generated SQL, or fall back to provided list
-    schema_match = re.search(r"USE CATALOG\s+(\S+).*?USE SCHEMA\s+(\S+)", sql_text, re.IGNORECASE | re.DOTALL)
-    if schema_match:
-        target_catalog = schema_match.group(1).rstrip(";")
-        target_schema = schema_match.group(2).rstrip(";")
-    elif catalog_schemas:
+    # Prefer the explicit catalog_schemas from env config (authoritative),
+    # fall back to parsing the SQL file's USE CATALOG/USE SCHEMA blocks.
+    if catalog_schemas:
         target_catalog, target_schema = catalog_schemas[0]
     else:
-        return 0  # can't determine where to put functions
+        schema_match = re.search(r"USE CATALOG\s+(\S+).*?USE SCHEMA\s+(\S+)", sql_text, re.IGNORECASE | re.DOTALL)
+        if schema_match:
+            target_catalog = schema_match.group(1).rstrip(";")
+            target_schema = schema_match.group(2).rstrip(";")
+        else:
+            return 0  # can't determine where to put functions
 
     # Inject missing functions at the end of the SQL file with explicit catalog/schema context
     injected = [
