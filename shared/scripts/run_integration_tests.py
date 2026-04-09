@@ -4879,7 +4879,7 @@ def _setup_bank_data(auth_file: Path, warehouse_id: str) -> str:
 
     w = _WC_bank(host=host, client_id=client_id, client_secret=client_secret)
 
-    # Resolve warehouse
+    # Resolve warehouse — create one if none exists (fresh workspace)
     wh = warehouse_id
     if not wh:
         for warehouse in w.warehouses.list():
@@ -4887,7 +4887,16 @@ def _setup_bank_data(auth_file: Path, warehouse_id: str) -> str:
                 wh = warehouse.id
                 break
     if not wh:
-        raise RuntimeError("No SQL warehouse found for bank data setup")
+        print("  No warehouse found — creating one for bank data setup...")
+        created_wh = w.warehouses.create(
+            name="Demo Warehouse",
+            cluster_size="2X-Small",
+            warehouse_type="PRO",
+            auto_stop_mins=15,
+            enable_serverless_compute=True,
+        ).result()
+        wh = created_wh.id
+        print(f"  Created warehouse: {wh}")
 
     # Create catalogs + schemas
     for cat in [DEV_BANK_CAT, PROD_BANK_CAT]:
