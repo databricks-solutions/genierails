@@ -113,7 +113,16 @@ def main():
     for tp in desired_policies:
         key = tp["key"]
         desired_values = set(tp["values"])
+        # Exact match first, then suffix match (Terraform appends _<hex> suffix
+        # to tag keys for account-level isolation in parallel test environments).
         current_values = existing.get(key)
+        actual_key = key
+        if current_values is None:
+            for db_key, db_vals in existing.items():
+                if db_key == key or db_key.startswith(key + "_"):
+                    current_values = db_vals
+                    actual_key = db_key
+                    break
 
         if current_values is None:
             continue
@@ -124,9 +133,9 @@ def main():
 
         try:
             w.tag_policies.update_tag_policy(
-                tag_key=key,
+                tag_key=actual_key,
                 tag_policy=TagPolicy(
-                    tag_key=key,
+                    tag_key=actual_key,
                     values=[Value(name=v) for v in desired_list],
                 ),
                 update_mask="values",
@@ -138,7 +147,7 @@ def main():
                 changes.append(f"removed {sorted(removed)}")
             if not changes:
                 changes.append("reasserted desired values")
-            print(f"  [SYNC] {key}: {', '.join(changes)}")
+            print(f"  [SYNC] {actual_key}: {', '.join(changes)}")
             updated += 1
         except Exception as e:
             print(f"  [ERROR] {key}: {e}")

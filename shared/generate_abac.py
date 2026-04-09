@@ -811,6 +811,48 @@ def fetch_tables_from_databricks(
     return ddl_text, catalog_schemas
 
 
+def _organize_ddl_by_catalog(ddl_text: str) -> str:
+    """Organize DDL text with catalog section headers.
+
+    When DDL spans multiple catalogs, adds clear headers so the LLM
+    tracks all catalogs and doesn't "forget" one in its output.
+    Single-catalog DDL is returned as a plain code block unchanged.
+    """
+    # Parse catalog names from CREATE TABLE / DESCRIBE TABLE statements
+    catalog_blocks: dict[str, list[str]] = {}
+    current_block: list[str] = []
+    current_catalog = ""
+
+    for line in ddl_text.split("\n"):
+        # Detect table statements like "CREATE ... TABLE catalog.schema.table"
+        # or "-- Table: catalog.schema.table" from DESCRIBE output
+        m = re.match(r"(?:CREATE\s.*TABLE\s+|--\s*Table:\s*)(\w+)\.\w+\.\w+", line, re.IGNORECASE)
+        if m:
+            if current_block and current_catalog:
+                catalog_blocks.setdefault(current_catalog, []).append("\n".join(current_block))
+            current_catalog = m.group(1)
+            current_block = [line]
+        else:
+            current_block.append(line)
+
+    if current_block and current_catalog:
+        catalog_blocks.setdefault(current_catalog, []).append("\n".join(current_block))
+
+    # Single catalog or no catalog detected: return as-is
+    if len(catalog_blocks) <= 1:
+        return f"```sql\n{ddl_text}\n```"
+
+    # Multiple catalogs: add section headers
+    parts = []
+    for catalog, blocks in catalog_blocks.items():
+        table_count = len(blocks)
+        parts.append(f"#### CATALOG: {catalog} ({table_count} table{'s' if table_count != 1 else ''})")
+        parts.append(f"**You MUST generate tag_assignments and fgac_policies for ALL tables in this catalog.**\n")
+        joined = "\n\n".join(blocks)
+        parts.append(f"```sql\n{joined}\n```")
+    return "\n\n".join(parts)
+
+
 def build_prompt(ddl_text: str,
                  catalog_schemas: list[tuple[str, str]] | None = None,
                  group_names: list[str] | None = None,
@@ -957,7 +999,7 @@ def build_prompt(ddl_text: str,
             f"{space_names_lines}"
             f"### MY TABLES\n\n"
             f"{cs_lines}\n"
-            f"```sql\n{ddl_text}\n```\n"
+            f"{_organize_ddl_by_catalog(ddl_text)}\n"
         )
         prompt = prompt_body + user_input
 
@@ -1269,7 +1311,7 @@ def call_anthropic(prompt: str, model: str) -> str:
 
     message = client.messages.create(
         model=model,
-        max_tokens=8192,
+        max_tokens=32768,
         temperature=0,
         messages=[{"role": "user", "content": prompt}],
     )
@@ -1300,7 +1342,7 @@ def call_openai(prompt: str, model: str) -> str:
             {"role": "system", "content": "You are a Databricks Unity Catalog ABAC expert."},
             {"role": "user", "content": prompt},
         ],
-        max_tokens=8192,
+        max_tokens=32768,
         temperature=0,
     )
     return response.choices[0].message.content
@@ -1328,7 +1370,7 @@ def call_databricks(prompt: str, model: str) -> str:
             ChatMessage(role=ChatMessageRole.SYSTEM, content="You are a Databricks Unity Catalog ABAC expert."),
             ChatMessage(role=ChatMessageRole.USER, content=prompt),
         ],
-        max_tokens=8192,
+        max_tokens=32768,
         temperature=0,
     )
     return response.choices[0].message.content
@@ -3735,10 +3777,27 @@ def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = N
         return 0
 
     bad_policy_names = {bp[0] for bp in bad_policies}
-    # Map policy name → replacement function (if one can be found).
+    # Build per-schema function lookup so replacements stay in the same catalog/schema.
+    functions_by_schema = _parse_sql_functions_by_schema(sql_path)
+
+    # Map policy name → (replacement_fn, catalog, schema) if one can be found.
     replacements: dict[str, str] = {}
     for pname, old_fn, ptype, expected_args in bad_policies:
-        candidates = sorted(fns_by_args.get(expected_args, []))
+        # Find the policy's catalog/schema to scope replacement candidates
+        policy_cat, policy_sch = "", ""
+        for p in policies:
+            if p.get("name") == pname:
+                policy_cat = p.get("function_catalog", "")
+                policy_sch = p.get("function_schema", "")
+                break
+
+        # Prefer functions in the SAME catalog/schema with the right arg count
+        same_schema_fns = functions_by_schema.get((policy_cat, policy_sch), set())
+        candidates = sorted(fn for fn in same_schema_fns
+                           if fn_arg_counts.get(fn) == expected_args)
+        if not candidates:
+            # Fallback to any function with the right arg count
+            candidates = sorted(fns_by_args.get(expected_args, []))
         # Prefer functions matching the naming convention (mask_ for columns, filter_ for rows).
         prefix = "filter_" if ptype == "POLICY_TYPE_ROW_FILTER" else "mask_"
         typed_candidates = [c for c in candidates if c.startswith(prefix)]
@@ -4283,6 +4342,83 @@ def autofix_malformed_conditions(tfvars_path: Path) -> int:
     return len(bad_names)
 
 
+def autofix_unsafe_row_filters(sql_path: Path) -> int:
+    """Rewrite row filter functions that reference column names to use only group-based access.
+
+    The LLM sometimes generates row filters like:
+        RETURN aml_flag = 'CLEAR' OR is_account_group_member('Compliance_Officer')
+    where 'aml_flag' is a hallucinated column. These break at apply time with
+    UNRESOLVED_COLUMN errors.
+
+    Safe row filters use only is_account_group_member() and current_user() — no
+    column references. This autofix detects column-referencing row filters and
+    rewrites them to keep only the is_account_group_member() calls.
+
+    Returns the number of functions rewritten.
+    """
+    if not sql_path or not sql_path.exists():
+        return 0
+
+    text = sql_path.read_text()
+    rewritten = 0
+
+    # Match zero-arg RETURNS BOOLEAN functions (row filters)
+    pattern = re.compile(
+        r"(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(\S+)\s*\(\s*\)\s*"
+        r"RETURNS\s+BOOLEAN\s*"
+        r"(?:COMMENT\s+'[^']*'\s*)?"
+        r"RETURN\s+)(.*?)(?=;\s*$|\s*;?\s*(?:CREATE\s|$))",
+        re.IGNORECASE | re.DOTALL | re.MULTILINE,
+    )
+
+    def _rewrite_body(match: re.Match) -> str:
+        prefix = match.group(1)
+        fn_name = match.group(2).split(".")[-1]
+        body = match.group(3).strip().rstrip(";")
+
+        # Extract is_account_group_member('...') calls
+        group_calls = re.findall(
+            r"is_account_group_member\s*\(\s*'[^']+'\s*\)",
+            body, re.IGNORECASE,
+        )
+
+        if not group_calls:
+            # No group-based access at all — leave as-is (might be intentional)
+            return match.group(0)
+
+        # Check if body has bare identifiers that could be column references.
+        # Strip string literals and function calls to isolate bare identifiers.
+        body_clean = re.sub(r"'[^']*'", "", body)  # remove string literals
+        body_clean = re.sub(r"is_account_group_member\s*\([^)]*\)", "", body_clean, flags=re.IGNORECASE)
+        body_clean = re.sub(r"current_user\s*\(\s*\)", "", body_clean, flags=re.IGNORECASE)
+
+        # What's left should be only SQL keywords and operators
+        safe_tokens = {
+            "return", "case", "when", "then", "else", "end", "and", "or", "not",
+            "true", "false", "null", "is", "",
+        }
+        remaining = re.findall(r"\b([a-z][a-z0-9_]*)\b", body_clean.lower())
+        unsafe = [t for t in remaining if t not in safe_tokens]
+
+        if not unsafe:
+            # Body is safe — no column references
+            return match.group(0)
+
+        # Rewrite: keep only the group-based calls joined with OR
+        new_body = " OR ".join(group_calls)
+        print(f"  [AUTOFIX] Rewrote row filter '{fn_name}': removed column reference(s) "
+              f"{unsafe[:3]}, keeping group-based access only")
+        nonlocal rewritten
+        rewritten += 1
+        return f"{prefix}{new_body};"
+
+    new_text = pattern.sub(_rewrite_body, text)
+    if rewritten:
+        sql_path.write_text(new_text)
+
+    return rewritten
+
+
 def sanitize_space_key(name: str) -> str:
     """Convert a human-readable space name to a safe directory/Terraform key.
 
@@ -4655,6 +4791,20 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]
                     f"{len(returns)} RETURNS clause(s) — likely malformed function definition"
                 )
 
+    # Check 3b: HCL contains '...' ellipsis placeholder (LLM laziness)
+    # The LLM sometimes outputs '...' instead of generating full content.
+    hcl_text = tfvars_path.read_text()
+    ellipsis_lines = [
+        i + 1 for i, line in enumerate(hcl_text.split("\n"))
+        if re.match(r"^\s*\.{3}\s*$", line)  # line is just "..."
+        or re.search(r'=\s*"[^"]*\.\.\.[^"]*"', line)  # value contains "..."
+    ]
+    if ellipsis_lines:
+        errors.append(
+            f"Generated HCL contains '...' ellipsis placeholder at line(s) {ellipsis_lines[:5]}. "
+            f"This is incomplete output — regenerate with full content."
+        )
+
     # Check 4: no forbidden condition functions in FGAC policies
     _forbidden_funcs = ["columnName(", "tableName(", " IN (", " IN("]
     for pol in cfg.get("fgac_policies", []):
@@ -4744,6 +4894,41 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]
                 errors.append(
                     f"fgac_policy '{pol.get('name', '?')}' uses non-canonical "
                     f"hasTag('{key}')"
+                )
+
+    # Check 6: all input catalogs are represented in tag_assignments
+    # When DDL spans multiple catalogs, the LLM sometimes "forgets" one.
+    uc_tables = auth_cfg.get("uc_tables", []) or []
+    # Also collect tables from genie_spaces[].uc_tables
+    for sp in auth_cfg.get("genie_spaces", []) or []:
+        if isinstance(sp, dict):
+            sp_tables = sp.get("uc_tables", []) or []
+            uc_tables = list(uc_tables) + list(sp_tables)
+    if isinstance(uc_tables, list) and len(uc_tables) > 0:
+        # Extract unique catalogs from input table refs
+        input_catalogs = set()
+        for ref in uc_tables:
+            if isinstance(ref, str):
+                parts = ref.split(".")
+                if len(parts) >= 3:
+                    input_catalogs.add(parts[0])
+
+        if len(input_catalogs) > 1:
+            # Check which catalogs have tag_assignments
+            covered_catalogs = set()
+            for ta in cfg.get("tag_assignments", []):
+                entity = ta.get("entity_name", "")
+                if isinstance(entity, str):
+                    parts = entity.split(".")
+                    if len(parts) >= 3:
+                        covered_catalogs.add(parts[0])
+
+            missing = input_catalogs - covered_catalogs
+            if missing:
+                errors.append(
+                    f"tag_assignments missing for catalog(s): {sorted(missing)}. "
+                    f"Input had {sorted(input_catalogs)} but output only covers {sorted(covered_catalogs)}. "
+                    f"Generate tag_assignments for ALL catalogs."
                 )
 
     return errors
@@ -5330,7 +5515,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
         # The LLM generates genie_space_configs from DDL, but for spaces with a
         # genie_space_id the UI config is authoritative. Replace the LLM-generated
         # block with the verbatim parse from the Genie Space API.
-        if api_genie_configs:
+        # Skip in governance mode — genie_space_configs is managed by BU teams.
+        if api_genie_configs and args.mode != "governance":
             hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_configs")
             injected_hcl = (
                 "\n# genie_space_configs parsed verbatim from the existing Genie Space(s).\n"
@@ -5393,18 +5579,21 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_fixed_2:
             print(f"  Auto-fixed {n_fixed_2} additional missing tag_policy value(s) (second pass)")
 
-        n_fields = autofix_genie_config_fields(tfvars_path)
-        if n_fields:
-            print(f"  Auto-fixed: added {n_fields} missing required field(s) in genie_space_configs")
+        # Skip Genie config autofixes in governance mode — genie_space_configs
+        # was already stripped and these autofixes would re-add it.
+        if args.mode != "governance":
+            n_fields = autofix_genie_config_fields(tfvars_path)
+            if n_fields:
+                print(f"  Auto-fixed: added {n_fields} missing required field(s) in genie_space_configs")
 
-        n_missing_spaces = autofix_missing_genie_space_entries(tfvars_path, auth_cfg)
-        if n_missing_spaces:
-            print(f"  Auto-fixed: added {n_missing_spaces} missing genie_space_configs entr(y/ies)")
+            n_missing_spaces = autofix_missing_genie_space_entries(tfvars_path, auth_cfg)
+            if n_missing_spaces:
+                print(f"  Auto-fixed: added {n_missing_spaces} missing genie_space_configs entr(y/ies)")
 
-        env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
-        n_acl = autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
-        if n_acl:
-            print(f"  Auto-fixed: populated acl_groups for {n_acl} genie space(s)")
+            env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
+            n_acl = autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
+            if n_acl:
+                print(f"  Auto-fixed: populated acl_groups for {n_acl} genie space(s)")
 
         n_fn_canonical = autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
         if n_fn_canonical:
@@ -5438,6 +5627,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_malformed:
             print(f"  Auto-fixed: removed {n_malformed} fgac_policy/ies with malformed conditions")
 
+        n_unsafe_filters = autofix_unsafe_row_filters(sql_path if sql_block else None)
+        if n_unsafe_filters:
+            print(f"  Auto-fixed: rewrote {n_unsafe_filters} row filter(s) with hallucinated column references")
+
         # Final cleanup: re-run invalid tag values + ambiguous to catch anything
         # introduced by intermediate autofixes (e.g. autofix_missing_fgac_policies).
         n_final_bad = autofix_invalid_tag_values(tfvars_path)
@@ -5449,6 +5642,17 @@ Before you apply, tune for your business roles, security requirements, and Genie
         n_final_canonical = autofix_canonical_tag_vocabulary(tfvars_path)
         if n_final_canonical:
             print(f"  Auto-fixed (final pass): normalized {n_final_canonical} tag vocabulary reference(s)")
+
+        # ── Final governance mode safety strip ─────────────────────────────────
+        # Multiple code paths (autofixes, semantic retries) can re-introduce
+        # genie_space_configs after the initial strip. This final pass ensures
+        # the file is clean before validation.
+        if args.mode == "governance":
+            _gov_text = tfvars_path.read_text()
+            _gov_cleaned = remove_hcl_top_level_block(_gov_text, "genie_space_configs")
+            if _gov_cleaned != _gov_text:
+                tfvars_path.write_text(_gov_cleaned)
+                print("  [governance mode] Final strip: removed genie_space_configs re-introduced by autofixes")
 
         # ── Semantic quality check (catches LLM issues that autofix can't fix) ──
         semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)
@@ -5463,6 +5667,9 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 new_sql, new_hcl = extract_code_blocks(response_text)
                 if new_hcl:
                     hcl_block = new_hcl
+                    # Re-apply governance mode strip on retry output
+                    if args.mode == "governance":
+                        hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_configs")
                     extra_comments = overlay_detection_comments if overlay_detection_comments else ""
                     tfvars_path.write_text(hcl_header + extra_comments + hcl_block + "\n")
                     fix_hcl_syntax(tfvars_path)
@@ -5473,7 +5680,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_undefined_tag_refs(tfvars_path)
                     autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_policy_count(tfvars_path)
-                    autofix_genie_config_fields(tfvars_path)
+                    if args.mode != "governance":
+                        autofix_genie_config_fields(tfvars_path)
                     autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
                     autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_arg_count_mismatch(tfvars_path, sql_path if sql_block else None)
@@ -5481,6 +5689,13 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_forbidden_conditions(tfvars_path)
                     autofix_invalid_condition_values(tfvars_path)
                     autofix_malformed_conditions(tfvars_path)
+                    # Final governance strip after retry autofixes
+                    if args.mode == "governance":
+                        _retry_text = tfvars_path.read_text()
+                        _retry_cleaned = remove_hcl_top_level_block(_retry_text, "genie_space_configs")
+                        if _retry_cleaned != _retry_text:
+                            tfvars_path.write_text(_retry_cleaned)
+                            print("  [governance mode] Final strip (retry): removed genie_space_configs")
                 if new_sql:
                     sql_block = new_sql
                     sql_path = out_dir / "masking_functions.sql"
