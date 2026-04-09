@@ -4919,7 +4919,9 @@ def _setup_bank_data(auth_file: Path, warehouse_id: str) -> str:
                 statement=f"DESCRIBE SCHEMA {DEV_BANK_CAT}.{BANK_SCHEMA}",
                 wait_timeout="30s",
             )
-            if r.status and r.status.state == _SS_bank.SUCCEEDED:
+            st = r.status.state if r.status else None
+            st_str = st.value if hasattr(st, "value") else str(st) if st else ""
+            if st_str == "SUCCEEDED":
                 break
         except Exception:
             pass
@@ -4934,6 +4936,10 @@ def _setup_bank_data(auth_file: Path, warehouse_id: str) -> str:
         if cleaned:
             stmts.append(cleaned)
 
+    def _state_str(state) -> str:
+        """Normalize StatementState to string (handles both enum and str)."""
+        return state.value if hasattr(state, "value") else str(state)
+
     for stmt in stmts:
         r = w.statement_execution.execute_statement(
             warehouse_id=wh, statement=stmt, wait_timeout="50s",
@@ -4941,10 +4947,10 @@ def _setup_bank_data(auth_file: Path, warehouse_id: str) -> str:
         max_wait = 120
         start = _time_bank.time()
         while True:
-            st = r.status.state
-            if st == _SS_bank.SUCCEEDED:
+            st = _state_str(r.status.state)
+            if st == "SUCCEEDED":
                 break
-            if st in (_SS_bank.FAILED, _SS_bank.CANCELED, _SS_bank.CLOSED):
+            if st in ("FAILED", "CANCELED", "CLOSED"):
                 err = r.status.error
                 print(f"  {_yellow('WARN')} SQL failed: {err}")
                 break
