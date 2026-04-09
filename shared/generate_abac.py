@@ -4419,6 +4419,90 @@ def autofix_unsafe_row_filters(sql_path: Path) -> int:
     return rewritten
 
 
+def autofix_inject_overlay_functions(
+    sql_path: Path,
+    countries: list[str] | None = None,
+    industries: list[str] | None = None,
+    catalog_schemas: list[tuple[str, str]] | None = None,
+) -> int:
+    """Inject overlay-provided masking functions missing from the LLM's SQL output.
+
+    Country and industry overlays define complete SQL function bodies. When the
+    LLM omits these functions, inject them deterministically from the YAML source.
+    This ensures overlay-specific masking (e.g., mask_tfn, mask_medicare) is always
+    available regardless of LLM non-determinism.
+
+    Returns the number of functions injected.
+    """
+    if not sql_path or not sql_path.exists():
+        return 0
+    if not countries and not industries:
+        return 0
+
+    import yaml
+
+    # Collect overlay function definitions
+    overlay_fns: dict[str, dict] = {}  # name -> {signature, body, comment}
+    for source_dir, codes in [(COUNTRIES_DIR, countries or []), (INDUSTRIES_DIR, industries or [])]:
+        for code in codes:
+            yaml_path = source_dir / f"{code.strip().upper() if source_dir == COUNTRIES_DIR else code.strip().lower()}.yaml"
+            if not yaml_path.exists():
+                continue
+            with open(yaml_path) as f:
+                data = yaml.safe_load(f)
+            for fn in data.get("masking_functions", []):
+                name = fn.get("name", "")
+                sig = fn.get("signature", "")
+                body = fn.get("body", "")
+                comment = fn.get("comment", "")
+                if name and sig and body:
+                    overlay_fns[name] = {"signature": sig, "body": body, "comment": comment}
+
+    if not overlay_fns:
+        return 0
+
+    # Check which functions are already in the SQL file
+    sql_text = sql_path.read_text()
+    existing = set(re.findall(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*(\w+)\s*\(",
+        sql_text, re.IGNORECASE,
+    ))
+
+    missing = {name: defn for name, defn in overlay_fns.items() if name not in existing}
+    if not missing:
+        return 0
+
+    # Determine the catalog.schema for the injected functions
+    # Use the first catalog.schema from the generated SQL, or fall back to provided list
+    schema_match = re.search(r"USE CATALOG\s+(\S+).*?USE SCHEMA\s+(\S+)", sql_text, re.IGNORECASE | re.DOTALL)
+    if schema_match:
+        target_catalog = schema_match.group(1).rstrip(";")
+        target_schema = schema_match.group(2).rstrip(";")
+    elif catalog_schemas:
+        target_catalog, target_schema = catalog_schemas[0]
+    else:
+        return 0  # can't determine where to put functions
+
+    # Inject missing functions at the end of the SQL file
+    injected = []
+    for name, defn in sorted(missing.items()):
+        fn_sql = (
+            f"\n-- Injected from overlay (LLM omitted this function)\n"
+            f"CREATE OR REPLACE FUNCTION {defn['signature']}\n"
+        )
+        if defn["comment"]:
+            fn_sql += f"COMMENT '{defn['comment']}'\n"
+        fn_sql += f"RETURN {defn['body'].rstrip().rstrip(';')};\n"
+        injected.append(fn_sql)
+        print(f"  [AUTOFIX] Injected overlay function '{name}' into masking_functions.sql")
+
+    if injected:
+        sql_text = sql_text.rstrip() + "\n" + "\n".join(injected) + "\n"
+        sql_path.write_text(sql_text)
+
+    return len(injected)
+
+
 def sanitize_space_key(name: str) -> str:
     """Convert a human-readable space name to a safe directory/Terraform key.
 
@@ -5594,6 +5678,14 @@ Before you apply, tune for your business roles, security requirements, and Genie
             n_acl = autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
             if n_acl:
                 print(f"  Auto-fixed: populated acl_groups for {n_acl} genie space(s)")
+
+        n_overlay_fns = autofix_inject_overlay_functions(
+            sql_path if sql_block else None,
+            countries=countries, industries=industries,
+            catalog_schemas=catalog_schemas,
+        )
+        if n_overlay_fns:
+            print(f"  Auto-fixed: injected {n_overlay_fns} overlay-provided masking function(s)")
 
         n_fn_canonical = autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
         if n_fn_canonical:
