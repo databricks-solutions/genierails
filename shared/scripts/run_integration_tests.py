@@ -5134,8 +5134,7 @@ def scenario_aus_bank_demo(
     _preamble_cleanup(env, prod_env, fresh_env=fresh_env)
 
     _step("Phase 1 — Creating Australian banking tables")
-    resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
-    resolved_wh = _setup_bank_data(auth_file, resolved_wh)
+    resolved_wh = _setup_bank_data(auth_file, warehouse_id)
 
     _step("Phase 1 — Creating rich Genie Space via API")
     space_id = _create_bank_genie_space_via_api(auth_file, resolved_wh)
