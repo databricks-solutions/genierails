@@ -2661,6 +2661,14 @@ def scenario_multi_env(
     _make(f"apply", f"ENV={bu2_env}", retries=3, retry_delay_seconds=120)
     _assert_genie_space_id_file(bu2_env, "Clinical Analytics")
 
+    # Re-sync tag policies after both envs applied — ensures all merged values
+    # (including bu2's phi_level entries like redacted_notes) are pushed to Databricks.
+    # Without this, tag policy values from bu2's promote may not propagate before verify.
+    _step("bu2 — Re-syncing tag policies after both environments applied")
+    _make("sync-tags")
+    import time as _time_multienv
+    _time_multienv.sleep(30)  # wait for tag policy propagation
+
     _step("bu2 — Verifying Clinical Analytics ABAC governance")
     # Verify dev_clinical tables exist and tags/masks applied
     _verify_data(auth_file, dev=True, warehouse_id=warehouse_id)
