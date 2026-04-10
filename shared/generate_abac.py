@@ -3584,6 +3584,7 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
 
     # Replacement: (policy_name, old_fn, new_fn, old_sch, new_sch, old_cat, new_cat)
     replacements: list[tuple[str, str, str, str, str, str, str]] = []
+    removals: list[str] = []  # policy names to remove (no replacement found)
     for p in policies:
         fn = p.get("function_name", "")
         fn_cat = p.get("function_catalog", "")
@@ -3655,8 +3656,13 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
 
         if new_fn:
             replacements.append((pname, fn, new_fn, fn_sch, new_sch, fn_cat, new_cat))
+        else:
+            # No replacement found — mark for removal
+            removals.append(pname)
+            print(f"  [AUTOFIX] Removing fgac_policy '{pname}': function '{fn}' not found "
+                  f"in SQL file and no suitable replacement available")
 
-    if not replacements:
+    if not replacements and not removals:
         return 0
 
     section = _find_bracket_section(text, "fgac_policies")
@@ -3674,6 +3680,16 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
         if not name_m:
             continue
         pname = name_m.group(1)
+
+        # Remove policies with no replacement available
+        if pname in removals:
+            # Remove the entire block (including leading comma/whitespace)
+            pre = rewritten[:blk_start].rstrip(" \t")
+            if pre.endswith(","):
+                pre = pre[:-1]
+            rewritten = pre + rewritten[blk_end + 1:]
+            fixes += 1
+            continue
 
         matching = [r for r in replacements if r[0] == pname]
         if not matching:

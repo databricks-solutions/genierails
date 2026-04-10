@@ -301,7 +301,7 @@ FUNCTION_EXPECTED_CATEGORIES = {
     "mask_credit_card_full": {"card", "payment_card"},
     "mask_credit_card_last4": {"card", "payment_card"},
     "mask_card_last4": {"card", "payment_card"},
-    "mask_amount_rounded": {"amount"},
+    "mask_amount_rounded": {"amount", "transaction"},
     "mask_date_to_year": {"date", "customer_pii", "patient_pii"},
     "mask_dob_year": {"date", "customer_pii", "patient_pii"},
     "mask_timestamp_to_day": {"date"},
