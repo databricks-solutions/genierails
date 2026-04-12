@@ -262,32 +262,52 @@ def deploy(sql_file: str, warehouse_id: str) -> None:
     print(f"  Deploying {total} function(s) via Statement Execution API...")
 
     failed = 0
+    max_retries = 3
     for i, (catalog, schema, stmt) in enumerate(blocks, 1):
         func_name = extract_function_name(stmt)
         target = f"{catalog}.{schema}" if catalog and schema else "<default>"
         print(f"  [{i}/{total}] {target}.{func_name} ...", end=" ", flush=True)
 
-        try:
-            resp = w.statement_execution.execute_statement(
-                warehouse_id=warehouse_id,
-                statement=stmt,
-                catalog=catalog,
-                schema=schema,
-                wait_timeout="30s",
-            )
-        except Exception as e:
-            print(f"ERROR: {e}")
-            failed += 1
-            continue
+        succeeded = False
+        for attempt in range(1, max_retries + 1):
+            try:
+                resp = w.statement_execution.execute_statement(
+                    warehouse_id=warehouse_id,
+                    statement=stmt,
+                    catalog=catalog,
+                    schema=schema,
+                    wait_timeout="30s",
+                )
+            except Exception as e:
+                if attempt < max_retries:
+                    import time as _t
+                    print(f"RETRY ({e}) ...", end=" ", flush=True)
+                    _t.sleep(5 * attempt)
+                    continue
+                print(f"ERROR: {e}")
+                break
 
-        state = resp.status.state
-        if state == StatementState.SUCCEEDED:
-            print("OK")
-        else:
-            error_msg = ""
-            if resp.status.error:
-                error_msg = resp.status.error.message or str(resp.status.error)
-            print(f"FAILED ({state.value}): {error_msg}")
+            state = resp.status.state
+            if state == StatementState.SUCCEEDED:
+                print("OK")
+                succeeded = True
+                break
+            else:
+                error_msg = ""
+                if resp.status.error:
+                    error_msg = resp.status.error.message or str(resp.status.error)
+                # Retry on transient service errors, not on SQL/schema errors
+                is_transient = any(k in error_msg.lower() for k in
+                                   ["service", "timeout", "throttl", "temporarily", "unavailable"])
+                if is_transient and attempt < max_retries:
+                    import time as _t
+                    print(f"RETRY ({error_msg[:60]}) ...", end=" ", flush=True)
+                    _t.sleep(5 * attempt)
+                    continue
+                print(f"FAILED ({state.value}): {error_msg}")
+                break
+
+        if not succeeded:
             failed += 1
 
     print()

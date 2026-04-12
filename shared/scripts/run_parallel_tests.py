@@ -351,14 +351,18 @@ def main():
             break
     print()
 
-    # Phase 2: Provision all in parallel (with 1 retry for failures)
-    print(f"── Phase 2: Provisioning {len(scenarios)} environments (all concurrent)")
+    # Phase 2: Provision all in parallel (with 1 retry for failures).
+    # Stagger submissions with jitter to avoid API rate-limit bursts.
+    import random as _rand_prov
+    print(f"── Phase 2: Provisioning {len(scenarios)} environments (staggered, max {len(scenarios)} concurrent)")
     provision_results = {}
     with ThreadPoolExecutor(max_workers=len(scenarios)) as executor:
-        futures = {
-            executor.submit(provision_for_scenario, s, env_file, cloud, suite_id, log_dir): s
-            for s in scenarios
-        }
+        futures = {}
+        for i, s in enumerate(scenarios):
+            if i > 0:
+                jitter = 2 + _rand_prov.random() * 3  # 2-5s between submissions
+                time.sleep(jitter)
+            futures[executor.submit(provision_for_scenario, s, env_file, cloud, suite_id, log_dir)] = s
         for f in as_completed(futures):
             s = futures[f]
             try:
