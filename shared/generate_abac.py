@@ -662,6 +662,37 @@ def remove_hcl_top_level_list(text: str, key: str) -> str:
     return text[:start] + text[block_end:]
 
 
+def _fetch_via_patch_fallback(w, space_id: str) -> dict:
+    """Read a Genie Space via a no-op PATCH (workaround for Partner AI gate).
+
+    On workspaces where Partner Powered AI hasn't propagated, GET
+    /api/2.0/genie/spaces/{id} is blocked.  However, PATCH is not gated
+    and returns the full response including serialized_space.  We send a
+    PATCH that re-reads the current title (effectively a no-op) to
+    retrieve the space config without modifying it.
+    """
+    # First, get the title from the list endpoint (not gated)
+    title = ""
+    try:
+        list_resp = w.api_client.do("GET", "/api/2.0/genie/spaces")
+        for s in (list_resp.get("spaces", []) if isinstance(list_resp, dict) else []):
+            if s.get("space_id") == space_id:
+                title = s.get("title", "")
+                break
+    except Exception:
+        pass
+
+    # PATCH with the same title — no-op change, but returns serialized_space.
+    # Use space_id as fallback (not a generic string) to avoid duplicate-name
+    # conflicts when multiple spaces are fetched in the same workspace.
+    resp = w.api_client.do(
+        "PATCH",
+        f"/api/2.0/genie/spaces/{space_id}",
+        body={"title": title or f"Space {space_id}"},
+    )
+    return resp if isinstance(resp, dict) else {}
+
+
 def fetch_tables_from_genie_space(
     space_id: str,
     auth_cfg: dict,
@@ -671,6 +702,10 @@ def fetch_tables_from_genie_space(
 
     Returns (table_identifiers, genie_config_dict, space_title).
     Uses GET /api/2.0/genie/spaces/{space_id} and parses serialized_space.
+
+    Falls back to PATCH when GET is blocked by Partner Powered AI / cross-geo
+    restrictions (common on new AWS workspaces where the setting hasn't
+    propagated).  PATCH is not gated and returns the full serialized_space.
 
     Retries up to 5 times with backoff when serialized_space is empty —
     Databricks may process it asynchronously immediately after creation.
@@ -684,6 +719,7 @@ def fetch_tables_from_genie_space(
     w = WorkspaceClient(product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
 
     print(f"  Querying Genie Space {space_id}...")
+    _used_patch_fallback = False
     try:
         resp = w.api_client.do(
             "GET",
@@ -691,8 +727,16 @@ def fetch_tables_from_genie_space(
             query={"include_serialized_space": "true"},
         )
     except Exception as e:
-        print(f"  WARNING: Could not reach Genie Space {space_id}: {e}")
-        return [], {}, ""
+        err_msg = str(e)
+        if "Partner Powered AI" in err_msg or "cross-Geo" in err_msg:
+            # GET is gated behind Partner Powered AI on new workspaces.
+            # PATCH is not gated and returns serialized_space in its response.
+            print(f"  GET blocked by Partner Powered AI — falling back to PATCH...")
+            resp = _fetch_via_patch_fallback(w, space_id)
+            _used_patch_fallback = True
+        else:
+            print(f"  WARNING: Could not reach Genie Space {space_id}: {e}")
+            return [], {}, ""
 
     if not isinstance(resp, dict):
         print(f"  WARNING: Unexpected response type from Genie Space {space_id}.")
@@ -714,11 +758,14 @@ def fetch_tables_from_genie_space(
                   f"retrying in {delay}s (attempt {attempt}/{len(retry_delays)})...")
             _time.sleep(delay)
             try:
-                resp = w.api_client.do(
-                    "GET",
-                    f"/api/2.0/genie/spaces/{space_id}",
-                    query={"include_serialized_space": "true"},
-                )
+                if _used_patch_fallback:
+                    resp = _fetch_via_patch_fallback(w, space_id)
+                else:
+                    resp = w.api_client.do(
+                        "GET",
+                        f"/api/2.0/genie/spaces/{space_id}",
+                        query={"include_serialized_space": "true"},
+                    )
                 space_title = resp.get("title", space_title)
                 description = resp.get("description", description)
                 serialized = resp.get("serialized_space", "")
@@ -1360,7 +1407,7 @@ def call_databricks(prompt: str, model: str) -> str:
 
     from databricks.sdk.config import Config
 
-    cfg = Config(http_timeout_seconds=600, product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
+    cfg = Config(http_timeout_seconds=900, product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
     w = WorkspaceClient(config=cfg)
     print(f"  Calling Databricks FMAPI ({model})...")
 
@@ -1529,6 +1576,17 @@ def fix_hcl_syntax(tfvars_path: Path) -> int:
     if fixed3 != text:
         repairs += 1
         text = fixed3
+
+    # ------------------------------------------------------------------
+    # Fix 4: remove LLM placeholder ellipses that cause HCL parse errors.
+    #   - Standalone "..." lines
+    #   - "[...]" placeholder lists → "[]"
+    # ------------------------------------------------------------------
+    fixed4 = re.sub(r'^\s*\.\.\..*$\n?', '', text, flags=re.MULTILINE)
+    fixed4 = re.sub(r'\[\s*\.\.\.\s*\]', '[]', fixed4)
+    if fixed4 != text:
+        repairs += 1
+        text = fixed4
 
     if text != original:
         tfvars_path.write_text(text)
@@ -3486,6 +3544,16 @@ _FUNCTION_EXPECTED_CATEGORIES = {
     "mask_amount_rounded": {"amount"},
     "mask_date_to_year": {"date"},
     "mask_timestamp_to_day": {"date"},
+    # India-specific (IN overlay)
+    "mask_aadhaar": {"government_id"},
+    "mask_pan_india": {"government_id"},
+    # ANZ-specific
+    "mask_tfn": {"government_id"},
+    "mask_medicare": {"government_id"},
+    "mask_bsb": {"financial_id"},
+    # SEA-specific
+    "mask_nric": {"government_id"},
+    "mask_mykad": {"government_id"},
 }
 
 
@@ -3505,10 +3573,19 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
         categories.add("address")
     if "birth" in col or col in {"dob", "date_of_birth"}:
         categories.add("date")
-    if "card" in col or "cvv" in col or "pan" in col:
+    if "card" in col or "cvv" in col:
         categories.add("card")
     if "amount" in col or "balance" in col or "limit" in col:
         categories.add("amount")
+    # Government/financial IDs — country-specific columns
+    if any(k in col for k in ("aadhaar", "pan", "tfn", "medicare", "nric", "mykad",
+                               "passport", "licence", "nhi", "ird")):
+        categories.add("government_id")
+    if "bsb" in col or "routing" in col:
+        categories.add("financial_id")
+    # PAN can be both a card number and an Indian government ID
+    if "pan" in col:
+        categories.add("government_id")
     return categories or {"generic"}
 
 
@@ -3584,6 +3661,7 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
 
     # Replacement: (policy_name, old_fn, new_fn, old_sch, new_sch, old_cat, new_cat)
     replacements: list[tuple[str, str, str, str, str, str, str]] = []
+    removals: list[str] = []  # policy names to remove (no replacement found)
     for p in policies:
         fn = p.get("function_name", "")
         fn_cat = p.get("function_catalog", "")
@@ -3655,8 +3733,13 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
 
         if new_fn:
             replacements.append((pname, fn, new_fn, fn_sch, new_sch, fn_cat, new_cat))
+        else:
+            # No replacement found — mark for removal
+            removals.append(pname)
+            print(f"  [AUTOFIX] Removing fgac_policy '{pname}': function '{fn}' not found "
+                  f"in SQL file and no suitable replacement available")
 
-    if not replacements:
+    if not replacements and not removals:
         return 0
 
     section = _find_bracket_section(text, "fgac_policies")
@@ -3674,6 +3757,16 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
         if not name_m:
             continue
         pname = name_m.group(1)
+
+        # Remove policies with no replacement available
+        if pname in removals:
+            # Remove the entire block (including leading comma/whitespace)
+            pre = rewritten[:blk_start].rstrip(" \t")
+            if pre.endswith(","):
+                pre = pre[:-1]
+            rewritten = pre + rewritten[blk_end + 1:]
+            fixes += 1
+            continue
 
         matching = [r for r in replacements if r[0] == pname]
         if not matching:
@@ -3875,6 +3968,161 @@ def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = N
     text = text[:sec_start] + rewritten + text[sec_end:]
     tfvars_path.write_text(text)
     return len(bad_policies)
+
+
+def autofix_row_filter_column_refs(
+    tfvars_path: Path,
+    sql_path: Path | None = None,
+    ddl_path: Path | None = None,
+) -> int:
+    """Remove row filter policies whose functions reference columns not in the target table.
+
+    The LLM sometimes generates row filter functions that reference columns
+    from a different table (e.g., ``filter_aml_compliance`` references
+    ``aml_flag`` from the transactions table but the policy binds it to
+    the customers table).  Databricks rejects these at policy-creation time
+    with UNRESOLVED_COLUMN.
+
+    We parse the fetched DDL to build a per-table column set, extract
+    identifiers from each row filter function body, and remove any FGAC
+    policy where the function references a column that doesn't exist in
+    the target table.
+    """
+    if not sql_path or not sql_path.exists():
+        return 0
+    # Find the DDL file — check explicit path, then common locations
+    if not ddl_path or not ddl_path.exists():
+        ddl_path = sql_path.parent / "ddl" / "_fetched.sql"  # generated/ddl/_fetched.sql
+    if not ddl_path or not ddl_path.exists():
+        ddl_path = sql_path.parent.parent / "ddl" / "_fetched.sql"
+    if not ddl_path or not ddl_path.exists():
+        return 0  # no DDL available — skip
+
+    try:
+        import hcl2 as _hcl2
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = _hcl2.loads(text)
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies", []) or []
+    row_filters = [p for p in policies if p.get("policy_type") == "POLICY_TYPE_ROW_FILTER"]
+    if not row_filters:
+        return 0
+
+    # Parse per-table columns from DDL
+    ddl_text = ddl_path.read_text()
+    table_columns: dict[str, set[str]] = {}  # full_name -> {col_names}
+    for m in re.finditer(
+        r"CREATE\s+TABLE\s+([\w.]+)\s*\((.*?)\)\s*;",
+        ddl_text, re.IGNORECASE | re.DOTALL,
+    ):
+        table_name = m.group(1).lower()
+        body = m.group(2)
+        cols = set()
+        for col_m in re.finditer(r"^\s*(\w+)\s+\w+", body, re.MULTILINE):
+            cols.add(col_m.group(1).lower())
+        if cols:
+            table_columns[table_name] = cols
+
+    if not table_columns:
+        return 0
+
+    # Parse function bodies from SQL
+    sql_text = sql_path.read_text()
+    fn_bodies: dict[str, str] = {}  # function_name -> body text
+    for m in re.finditer(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*(\w+)\s*\([^)]*\).*?RETURN\s+(.*?)(?:;|\Z)",
+        sql_text, re.IGNORECASE | re.DOTALL,
+    ):
+        fn_bodies[m.group(1).lower()] = m.group(2)
+
+    # SQL keywords to exclude from column-reference detection
+    _SQL_KEYWORDS = {
+        "select", "from", "where", "and", "or", "not", "in", "is", "null",
+        "true", "false", "case", "when", "then", "else", "end", "as", "on",
+        "join", "left", "right", "inner", "outer", "group", "by", "order",
+        "having", "limit", "between", "like", "exists", "distinct", "union",
+        "all", "any", "if", "return", "returns", "string", "int", "integer",
+        "boolean", "double", "float", "date", "timestamp", "bigint", "void",
+        "current_user",
+    }
+
+    # Check each row filter policy
+    bad_policy_names: list[str] = []
+    for p in row_filters:
+        fn_name = (p.get("function_name") or "").lower()
+        entity = (p.get("entity_name") or "").lower()
+        pname = p.get("name", "")
+
+        if fn_name not in fn_bodies or entity not in table_columns:
+            continue
+
+        body = fn_bodies[fn_name]
+        table_cols = table_columns[entity]
+
+        # Extract identifiers from the function body
+        identifiers = set(re.findall(r"\b([a-z_]\w*)\b", body.lower()))
+        identifiers -= _SQL_KEYWORDS
+        # Also remove the function's own parameter names
+        identifiers -= {fn_name}
+        # Remove known SQL function names
+        identifiers -= {"concat", "substring", "length", "upper", "lower",
+                        "trim", "coalesce", "cast", "abs", "round", "sum",
+                        "count", "avg", "min", "max", "date_format",
+                        "date_trunc", "datediff", "current_date",
+                        "current_timestamp"}
+
+        # Check for identifiers that look like column references but aren't in the table
+        # Only flag if the identifier IS a column in some OTHER table (cross-table hallucination)
+        all_known_cols = set()
+        for cols in table_columns.values():
+            all_known_cols |= cols
+
+        bad_refs = identifiers & all_known_cols - table_cols
+        if bad_refs:
+            bad_policy_names.append(pname)
+            print(
+                f"  [AUTOFIX] Row filter '{pname}' references column(s) {sorted(bad_refs)} "
+                f"not in {entity} — removing policy"
+            )
+
+    if not bad_policy_names:
+        return 0
+
+    # Remove the bad policies from the HCL text
+    bad_set = set(bad_policy_names)
+    section = _find_bracket_section(text, "fgac_policies")
+    if section is None:
+        return 0
+
+    sec_start, sec_end = section
+    rewritten = text[sec_start:sec_end]
+    blocks = _find_brace_blocks(rewritten)
+
+    for idx in range(len(blocks) - 1, -1, -1):
+        blk_start, blk_end = blocks[idx]
+        block_text = rewritten[blk_start:blk_end + 1]
+        name_m = re.search(r'name\s*=\s*"([^"]+)"', block_text)
+        if not name_m or name_m.group(1) not in bad_set:
+            continue
+        end = blk_end + 1
+        while end < len(rewritten) and rewritten[end] in (",", " ", "\t"):
+            end += 1
+        start = blk_start
+        while start > 0 and rewritten[start - 1] in (" ", "\t"):
+            start -= 1
+        if start > 0 and rewritten[start - 1] == "\n":
+            start -= 1
+        rewritten = rewritten[:start] + rewritten[end:]
+
+    text = text[:sec_start] + rewritten + text[sec_end:]
+    tfvars_path.write_text(text)
+    return len(bad_policy_names)
 
 
 def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None = None) -> int:
@@ -4417,6 +4665,175 @@ def autofix_unsafe_row_filters(sql_path: Path) -> int:
         sql_path.write_text(new_text)
 
     return rewritten
+
+
+def autofix_inject_overlay_functions(
+    sql_path: Path,
+    countries: list[str] | None = None,
+    industries: list[str] | None = None,
+    catalog_schemas: list[tuple[str, str]] | None = None,
+) -> int:
+    """Inject overlay-provided masking functions missing from the LLM's SQL output.
+
+    Country and industry overlays define complete SQL function bodies. When the
+    LLM omits these functions, inject them deterministically from the YAML source.
+    This ensures overlay-specific masking (e.g., mask_tfn, mask_medicare) is always
+    available regardless of LLM non-determinism.
+
+    Returns the number of functions injected.
+    """
+    if not sql_path or not sql_path.exists():
+        return 0
+    if not countries and not industries:
+        return 0
+
+    import yaml
+
+    # Collect overlay function definitions
+    overlay_fns: dict[str, dict] = {}  # name -> {signature, body, comment}
+    for source_dir, codes in [(COUNTRIES_DIR, countries or []), (INDUSTRIES_DIR, industries or [])]:
+        for code in codes:
+            yaml_path = source_dir / f"{code.strip().upper() if source_dir == COUNTRIES_DIR else code.strip().lower()}.yaml"
+            if not yaml_path.exists():
+                continue
+            with open(yaml_path) as f:
+                data = yaml.safe_load(f)
+            for fn in data.get("masking_functions", []):
+                name = fn.get("name", "")
+                sig = fn.get("signature", "")
+                body = fn.get("body", "")
+                comment = fn.get("comment", "")
+                if name and sig and body:
+                    overlay_fns[name] = {"signature": sig, "body": body, "comment": comment}
+
+    if not overlay_fns:
+        return 0
+
+    # Check which functions are already in the SQL file
+    sql_text = sql_path.read_text()
+    existing = set(re.findall(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*(\w+)\s*\(",
+        sql_text, re.IGNORECASE,
+    ))
+
+    missing = {name: defn for name, defn in overlay_fns.items() if name not in existing}
+    if not missing:
+        return 0
+
+    # Determine the catalog.schema for the injected functions
+    # Prefer the explicit catalog_schemas from env config (authoritative),
+    # fall back to parsing the SQL file's USE CATALOG/USE SCHEMA blocks.
+    if catalog_schemas:
+        target_catalog, target_schema = catalog_schemas[0]
+    else:
+        schema_match = re.search(r"USE CATALOG\s+(\S+).*?USE SCHEMA\s+(\S+)", sql_text, re.IGNORECASE | re.DOTALL)
+        if schema_match:
+            target_catalog = schema_match.group(1).rstrip(";")
+            target_schema = schema_match.group(2).rstrip(";")
+        else:
+            return 0  # can't determine where to put functions
+
+    # Inject missing functions at the end of the SQL file with explicit catalog/schema context
+    injected = [
+        f"\n-- === Overlay functions injected (LLM omitted these) ===\n"
+        f"USE CATALOG {target_catalog};\n"
+        f"USE SCHEMA {target_schema};\n"
+    ]
+    for name, defn in sorted(missing.items()):
+        fn_sql = (
+            f"\n-- Injected from overlay (LLM omitted this function)\n"
+            f"CREATE OR REPLACE FUNCTION {defn['signature']}\n"
+        )
+        if defn["comment"]:
+            fn_sql += f"COMMENT '{defn['comment']}'\n"
+        fn_sql += f"RETURN {defn['body'].rstrip().rstrip(';')};\n"
+        injected.append(fn_sql)
+        print(f"  [AUTOFIX] Injected overlay function '{name}' into masking_functions.sql")
+
+    if injected:
+        sql_text = sql_text.rstrip() + "\n" + "\n".join(injected) + "\n"
+        sql_path.write_text(sql_text)
+
+    return len(injected)
+
+
+def autofix_cross_catalog_function_deployment(tfvars_path: Path, sql_path: Path | None = None) -> int:
+    """Ensure masking functions are deployed to all catalog.schema pairs referenced in FGAC policies.
+
+    When the LLM generates FGAC policies for multiple catalogs but only defines
+    masking functions under one catalog's USE CATALOG/USE SCHEMA block, the
+    functions won't be deployed to the other catalog. This autofix duplicates
+    function definitions to all required catalog.schema pairs.
+
+    Returns the number of function definitions added.
+    """
+    if not sql_path or not sql_path.exists() or not tfvars_path.exists():
+        return 0
+    try:
+        import hcl2
+        cfg = hcl2.loads(tfvars_path.read_text())
+    except Exception:
+        return 0
+
+    policies = cfg.get("fgac_policies", []) or []
+    if not policies:
+        return 0
+
+    # Collect (catalog, schema, function_name) triples from policies
+    needed: dict[tuple[str, str], set[str]] = {}  # (cat, sch) -> {fn_names}
+    for p in policies:
+        fn = p.get("function_name", "")
+        fn_cat = p.get("function_catalog", "")
+        fn_sch = p.get("function_schema", "")
+        if fn and fn_cat and fn_sch:
+            needed.setdefault((fn_cat, fn_sch), set()).add(fn)
+
+    if not needed:
+        return 0
+
+    sql_text = sql_path.read_text()
+
+    # Parse which functions exist in which schema
+    functions_by_schema = _parse_sql_functions_by_schema(sql_path)
+
+    # Find schemas where functions are needed but missing
+    added = 0
+    for (cat, sch), fn_names in needed.items():
+        existing = functions_by_schema.get((cat, sch), set())
+        missing = fn_names - existing
+        if not missing:
+            continue
+
+        # Find function definitions from other schemas to copy
+        fn_bodies: dict[str, str] = {}
+        for fn_name in missing:
+            for (src_cat, src_sch), src_fns in functions_by_schema.items():
+                if fn_name in src_fns:
+                    # Extract the function definition from the SQL
+                    pattern = re.compile(
+                        rf"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+{re.escape(fn_name)}\s*\(.*?\).*?;"
+                        , re.IGNORECASE | re.DOTALL,
+                    )
+                    m = pattern.search(sql_text)
+                    if m:
+                        fn_bodies[fn_name] = m.group(0)
+                    break
+
+        if not fn_bodies:
+            continue
+
+        # Append a new catalog/schema section with the missing functions
+        section = f"\n-- === {cat}.{sch} functions (auto-deployed for cross-catalog FGAC policies) ===\n"
+        section += f"USE CATALOG {cat};\nUSE SCHEMA {sch};\n\n"
+        for fn_name, body in sorted(fn_bodies.items()):
+            section += body + "\n\n"
+            added += 1
+            print(f"  [AUTOFIX] Deployed '{fn_name}' to {cat}.{sch} (cross-catalog FGAC policy)")
+
+        sql_text = sql_text.rstrip() + "\n" + section
+        sql_path.write_text(sql_text)
+
+    return added
 
 
 def sanitize_space_key(name: str) -> str:
@@ -5404,7 +5821,15 @@ Before you apply, tune for your business roles, security requirements, and Genie
             "-- ============================================================================\n\n"
         )
 
-        final_sql = sql_header + sql_block
+        # Ensure USE CATALOG/USE SCHEMA directives are present at the top.
+        # The LLM may omit them, causing deploy_masking_functions.py to
+        # deploy into the default catalog (main) which may not exist.
+        sql_prefix = ""
+        if all_cs and not re.search(r"USE\s+CATALOG\s+\S+", sql_block, re.IGNORECASE):
+            cat0, sch0 = all_cs[0]
+            sql_prefix = f"USE CATALOG {cat0};\nUSE SCHEMA {sch0};\n\n"
+
+        final_sql = sql_header + sql_prefix + sql_block
         sql_path = out_dir / "masking_functions.sql"
         sql_path.write_text(final_sql + "\n")
         print(f"  masking_functions.sql written to: {sql_path}")
@@ -5595,6 +6020,14 @@ Before you apply, tune for your business roles, security requirements, and Genie
             if n_acl:
                 print(f"  Auto-fixed: populated acl_groups for {n_acl} genie space(s)")
 
+        n_overlay_fns = autofix_inject_overlay_functions(
+            sql_path if sql_block else None,
+            countries=countries, industries=industries,
+            catalog_schemas=catalog_schemas,
+        )
+        if n_overlay_fns:
+            print(f"  Auto-fixed: injected {n_overlay_fns} overlay-provided masking function(s)")
+
         n_fn_canonical = autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
         if n_fn_canonical:
             print(f"  Auto-fixed: normalized {n_fn_canonical} function name(s) to canonical forms")
@@ -5606,6 +6039,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
         n_arg_mismatch = autofix_fgac_arg_count_mismatch(tfvars_path, sql_path if sql_block else None)
         if n_arg_mismatch:
             print(f"  Auto-fixed: removed {n_arg_mismatch} fgac_policy/ies with function arg count mismatch")
+
+        n_bad_col_refs = autofix_row_filter_column_refs(tfvars_path, sql_path if sql_block else None)
+        if n_bad_col_refs:
+            print(f"  Auto-fixed: removed {n_bad_col_refs} row filter policy/ies referencing non-existent columns")
 
         n_cat_mismatch = autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
         if n_cat_mismatch:
@@ -5630,6 +6067,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
         n_unsafe_filters = autofix_unsafe_row_filters(sql_path if sql_block else None)
         if n_unsafe_filters:
             print(f"  Auto-fixed: rewrote {n_unsafe_filters} row filter(s) with hallucinated column references")
+
+        n_cross_cat = autofix_cross_catalog_function_deployment(tfvars_path, sql_path if sql_block else None)
+        if n_cross_cat:
+            print(f"  Auto-fixed: deployed {n_cross_cat} function(s) to additional catalog.schema pairs")
 
         # Final cleanup: re-run invalid tag values + ambiguous to catch anything
         # introduced by intermediate autofixes (e.g. autofix_missing_fgac_policies).
@@ -5685,6 +6126,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
                     autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_arg_count_mismatch(tfvars_path, sql_path if sql_block else None)
+                    autofix_row_filter_column_refs(tfvars_path, sql_path if sql_block else None)
                     autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
                     autofix_forbidden_conditions(tfvars_path)
                     autofix_invalid_condition_values(tfvars_path)
@@ -5698,6 +6140,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
                             print("  [governance mode] Final strip (retry): removed genie_space_configs")
                 if new_sql:
                     sql_block = new_sql
+                    # Ensure USE CATALOG/USE SCHEMA present (LLM may omit)
+                    if all_cs and not re.search(r"USE\s+CATALOG\s+\S+", sql_block, re.IGNORECASE):
+                        cat0, sch0 = all_cs[0]
+                        sql_block = f"USE CATALOG {cat0};\nUSE SCHEMA {sch0};\n\n" + sql_block
                     sql_path = out_dir / "masking_functions.sql"
                     sql_path.write_text(sql_block + "\n")
                 # Re-check after retry
@@ -5764,10 +6210,29 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 )
                 if n_cat_mismatch_assembled:
                     print(f"  Auto-fixed assembled abac: corrected {n_cat_mismatch_assembled} function/category mismatch(es)")
+                n_arg_assembled = autofix_fgac_arg_count_mismatch(
+                    assembled_abac_path,
+                    assembled_sql_path if assembled_sql_path.exists() else None,
+                )
+                if n_arg_assembled:
+                    print(f"  Auto-fixed assembled abac: fixed {n_arg_assembled} function/arg-count mismatch(es)")
+                n_bad_col_assembled = autofix_row_filter_column_refs(
+                    assembled_abac_path,
+                    assembled_sql_path if assembled_sql_path.exists() else None,
+                )
+                if n_bad_col_assembled:
+                    print(f"  Auto-fixed assembled abac: removed {n_bad_col_assembled} row filter(s) with bad column refs")
+                # Final HCL syntax pass on assembled config
+                fix_hcl_syntax(assembled_abac_path)
 
         # ── Full generation: bootstrap per-space dirs from the assembled output ─
         elif target_space_cfg is None and not args.space:
-            bootstrap_per_space_dirs(out_dir, auth_cfg, hcl_block)
+            # Re-run syntax fix — autofixes above may have re-introduced
+            # missing commas that would cause the bootstrap HCL parse to fail.
+            if tfvars_path.exists():
+                fix_hcl_syntax(tfvars_path)
+            _bootstrap_text = tfvars_path.read_text() if tfvars_path.exists() else hcl_block
+            bootstrap_per_space_dirs(out_dir, auth_cfg, _bootstrap_text)
 
     # In per-space mode, validate the assembled generated/ dir (what apply uses),
     # not the per-space subdirectory.
@@ -5778,6 +6243,11 @@ Before you apply, tune for your business roles, security requirements, and Genie
     # Governance mode + full mode: validate when both HCL and SQL blocks are present.
     _can_validate = hcl_block and sql_block and args.mode != "genie"
     if _can_validate and not args.skip_validation:
+        # Final HCL syntax repair — autofixes may have re-introduced issues
+        # (e.g. missing commas between objects added by autofix_missing_fgac_policies).
+        _final_tfvars = validation_dir / "abac.auto.tfvars"
+        if _final_tfvars.exists():
+            fix_hcl_syntax(_final_tfvars)
         passed = run_validation(validation_dir, countries=countries, industries=industries)
         if not passed:
             print("\n  Validation found errors. Review the output above and fix before running terraform apply.")

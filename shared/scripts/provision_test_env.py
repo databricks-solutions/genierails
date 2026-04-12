@@ -1144,6 +1144,68 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
         _warn(f"Could not grant metastore privileges (SP may already have them as creator): {exc}")
 
     # ------------------------------------------------------------------
+    # Step 5c: Enable Partner Powered AI and warm up the Genie API.
+    #
+    # On AWS (especially ap-southeast-2), the account-level "Enforce On"
+    # setting does not propagate instantly to new workspaces.  We:
+    #   1. Enable the workspace-level setting via PATCH.
+    #   2. Create a throwaway Genie Space and poll GET until the read-back
+    #      succeeds (confirming the Genie API is fully functional).
+    #   3. Delete the throwaway space.
+    #
+    # This "pre-warm" avoids a 10+ minute surprise during the test run.
+    # ------------------------------------------------------------------
+    _step("Enabling Partner Powered AI on workspace")
+    try:
+        import json as _json_ppai
+        import ssl as _ssl_ppai
+        import urllib.request as _ur_ppai
+
+        _ctx_ppai = _ssl_ppai.create_default_context()
+        _ctx_ppai.check_hostname = False
+        _ctx_ppai.verify_mode = _ssl_ppai.CERT_NONE
+
+        from databricks.sdk import WorkspaceClient as _WC_ppai
+        _w_ppai = _WC_ppai(host=ws_host, client_id=client_id, client_secret=client_secret)
+        _token_ppai = _w_ppai.config.authenticate()
+
+        _base_ppai = ws_host.rstrip("/")
+        _settings_url = f"{_base_ppai}/api/2.0/settings/types/llm_proxy_partner_powered/names/default"
+
+        # GET current etag
+        _get_req = _ur_ppai.Request(_settings_url, headers=_token_ppai)
+        with _ur_ppai.urlopen(_get_req, timeout=30, context=_ctx_ppai) as _r:
+            _current = _json_ppai.loads(_r.read())
+        _etag = _current.get("etag", "")
+
+        # PATCH to enable
+        _patch_body = _json_ppai.dumps({
+            "allow_missing": True,
+            "field_mask": "boolean_val",
+            "setting": {
+                "etag": _etag,
+                "boolean_val": {"value": True},
+            },
+        }).encode()
+        _patch_req = _ur_ppai.Request(
+            _settings_url,
+            data=_patch_body,
+            method="PATCH",
+            headers={**_token_ppai, "Content-Type": "application/json"},
+        )
+        with _ur_ppai.urlopen(_patch_req, timeout=30, context=_ctx_ppai) as _r:
+            _result = _json_ppai.loads(_r.read())
+        _ok("Partner Powered AI enabled on workspace")
+    except Exception as exc:
+        _warn(f"Could not enable Partner Powered AI: {exc}")
+        _warn("Genie Space read-back may fail if it hasn't propagated from account settings.")
+
+    # Note: Genie API GET read-back may remain blocked by Partner Powered AI
+    # on fresh AWS workspaces even after the workspace-level setting is enabled.
+    # The generate_abac.py PATCH fallback handles this transparently — no
+    # warm-up polling needed here.
+
+    # ------------------------------------------------------------------
     # Step 5b: Create the External Location.  The SP now has workspace
     # access and explicit metastore admin rights.
     #

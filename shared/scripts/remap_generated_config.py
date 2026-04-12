@@ -95,6 +95,9 @@ def remap_hcl(text: str, pairs: list[tuple[str, str]]) -> str:
     - Catalog-prefixed table refs:  "src.schema.table"  -> "dest.schema.table"
     - Standalone catalog fields:    catalog = "src"     -> catalog = "dest"
     - function_catalog fields:      function_catalog = "src" -> function_catalog = "dest"
+    - Bare quoted catalog names:    "src"               -> "dest"
+      (catches references in genie_space_configs where the LLM may use the
+      catalog name without a trailing dot, e.g. in comments or descriptions)
     """
     result = text
     for src, dest in pairs:
@@ -110,6 +113,14 @@ def remap_hcl(text: str, pairs: list[tuple[str, str]]) -> str:
                 result,
                 flags=re.MULTILINE,
             )
+
+        # Replace bare quoted catalog name anywhere (e.g. "dev_fin" → "prod_fin").
+        # Uses word boundaries to avoid partial matches inside longer names.
+        result = re.sub(
+            rf'"{re.escape(src)}"',
+            f'"{dest}"',
+            result,
+        )
     return result
 
 
