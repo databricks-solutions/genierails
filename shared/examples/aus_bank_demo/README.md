@@ -10,18 +10,20 @@ An end-to-end demo of GenieRails for an Australian retail bank. Start with an ex
 
 **Time:** ~20 minutes (5 min setup, 15 min demo)
 
-**Prerequisites:** [Prerequisites](../../docs/prerequisites.md) — Python 3, Terraform, account admin credentials
+**Prerequisites:** [Prerequisites](../../docs/prerequisites.md) — Python 3, Terraform, account admin credentials. Azure users: also see [Azure Prerequisites](../../../azure/docs/azure-prerequisites.md).
 
 ---
 
 ## Setup (~5 min)
 
-The setup script provisions two isolated workspaces and creates sample Australian banking data.
+The setup script provisions two isolated workspaces and creates sample Australian banking data. It works on both AWS and Azure.
 
 ### 1. Create credentials file
 
+#### AWS
+
 ```bash
-cd aws   # or: cd azure
+cd aws
 
 # Copy the example and fill in your Account Admin SP credentials
 cp ../shared/scripts/account-admin.aws.env.example ../shared/scripts/account-admin.aws.env
@@ -36,17 +38,50 @@ You need:
 
 See [Prerequisites](../../docs/prerequisites.md) for detailed setup instructions.
 
+#### Azure
+
+```bash
+cd azure
+
+# Copy the example and fill in your credentials
+cp ../shared/scripts/account-admin.azure.env.example ../shared/scripts/account-admin.azure.env
+vi ../shared/scripts/account-admin.azure.env
+```
+
+You need:
+- `DATABRICKS_ACCOUNT_ID` — your Databricks account UUID ([Account Console](https://accounts.azuredatabricks.net) → top-right menu)
+- `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` — Account Admin service principal OAuth credentials
+- `AZURE_SUBSCRIPTION_ID` — your Azure subscription
+- `AZURE_RESOURCE_GROUP` — resource group for test resources (must already exist)
+- `AZURE_REGION` — Azure region matching your workspace (e.g., `australiaeast`, `eastus2`)
+- `AZURE_TENANT_ID` — your Azure AD tenant ID
+- `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` — Azure AD App Registration credentials
+
+The Azure SP needs **Contributor** and **Storage Blob Data Contributor** RBAC roles on the resource group. See [Azure Prerequisites](../../../azure/docs/azure-prerequisites.md) for details.
+
 ### 2. Provision the demo
+
+#### AWS
 
 ```bash
 python ../shared/examples/aus_bank_demo/setup_demo.py provision \
     --env-file ../shared/scripts/account-admin.aws.env
 ```
 
+#### Azure
+
+```bash
+CLOUD_PROVIDER=azure CLOUD_ROOT=$(pwd) \
+python ../shared/examples/aus_bank_demo/setup_demo.py provision \
+    --env-file ../shared/scripts/account-admin.azure.env
+```
+
 When complete, you'll see:
 ```
-  Dev workspace:   https://dbc-xxx.cloud.databricks.com
-  Prod workspace:  https://dbc-yyy.cloud.databricks.com
+  Dev workspace:   https://dbc-xxx.cloud.databricks.com          (AWS)
+                   https://adb-xxx.12.azuredatabricks.net        (Azure)
+  Prod workspace:  https://dbc-yyy.cloud.databricks.com          (AWS)
+                   https://adb-yyy.12.azuredatabricks.net        (Azure)
   Genie Space ID:  01ef7b3c2a4d5e6f
 ```
 
@@ -191,13 +226,24 @@ make apply ENV=prod
 ## Cleanup
 
 ```bash
-# Remove Terraform-managed resources
+# Remove Terraform-managed resources (same for both clouds)
 make destroy ENV=prod
 make destroy ENV=dev
+```
 
-# Tear down workspaces, metastores, cloud storage — everything
+#### AWS
+
+```bash
 python ../shared/examples/aus_bank_demo/setup_demo.py teardown \
     --env-file ../shared/scripts/account-admin.aws.env
+```
+
+#### Azure
+
+```bash
+CLOUD_PROVIDER=azure CLOUD_ROOT=$(pwd) \
+python ../shared/examples/aus_bank_demo/setup_demo.py teardown \
+    --env-file ../shared/scripts/account-admin.azure.env
 ```
 
 ---

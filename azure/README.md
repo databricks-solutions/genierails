@@ -51,6 +51,10 @@ databricks_workspace_host = "https://adb-1234567890.12.azuredatabricks.net"
 | **I already have a Genie Space** | A space configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](../shared/docs/from-ui-to-production.md) |
 | **I'm starting from scratch** | Tables in Unity Catalog, no Genie Space yet | [Quickstart](../shared/docs/quickstart.md) |
 
+### Want to see it in action first?
+
+The [Australian Bank Demo](../shared/examples/aus_bank_demo/) provisions a complete environment and walks through the full GenieRails flow in ~20 minutes — ANZ-specific masking, PCI compliance, AML row filters, and dev-to-prod promotion. Works on both AWS and Azure.
+
 ---
 
 ## Documentation
@@ -60,4 +64,5 @@ databricks_workspace_host = "https://adb-1234567890.12.azuredatabricks.net"
 - [Quickstart](../shared/docs/quickstart.md) — create a Genie Space from scratch
 - [Playbook](../shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios
 - [Architecture](../shared/docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
+- [Australian Bank Demo](../shared/examples/aus_bank_demo/) — end-to-end demo with ANZ banking data, governance, and promotion
 - [All documentation](../shared/docs/) — full list
