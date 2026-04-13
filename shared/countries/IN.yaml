@@ -42,6 +42,8 @@ identifiers:
       - gst_number
       - gst_no
       - gst_id
+      - gst_registration
+      - gstin_number
     format: "15 characters (state code + PAN + entity code + check digit)"
     sensitivity: confidential
     masking_function: mask_gstin
@@ -91,6 +93,41 @@ identifiers:
     masking_function: mask_email
     category: financial_id
 
+  - name: UAN (Universal Account Number)
+    country: IN
+    column_hints:
+      - uan
+      - uan_number
+      - epf_uan
+      - pf_number
+    format: "12 digits (EPF/provident fund universal account number)"
+    sensitivity: restricted
+    masking_function: mask_uan
+    category: financial_id
+
+  - name: Ration Card Number
+    country: IN
+    column_hints:
+      - ration_card
+      - ration_number
+      - ration_card_no
+    format: "State-specific alphanumeric (typically 10-15 characters)"
+    sensitivity: restricted
+    masking_function: mask_ration_card
+    category: government_id
+
+  - name: Vehicle Registration Number
+    country: IN
+    column_hints:
+      - vehicle_reg
+      - registration_number
+      - rc_number
+      - vehicle_number
+    format: "State code + district + series + number (e.g. MH-12-AB-1234)"
+    sensitivity: confidential
+    masking_function: mask_vehicle_reg
+    category: government_id
+
 masking_functions:
   - name: mask_aadhaar
     signature: "mask_aadhaar(aadhaar STRING) RETURNS STRING"
@@ -105,12 +142,12 @@ masking_functions:
 
   - name: mask_pan_india
     signature: "mask_pan_india(pan STRING) RETURNS STRING"
-    comment: "Indian PAN — show first 3 and last character (ABC****7A)"
+    comment: "Indian PAN — show first 2 and last character only (AB*******A). Hides entity type (4th char)."
     body: |
       CASE
         WHEN pan IS NULL THEN NULL
         WHEN LENGTH(UPPER(TRIM(pan))) = 10 THEN
-          CONCAT(LEFT(UPPER(TRIM(pan)), 3), '****', RIGHT(UPPER(TRIM(pan)), 1))
+          CONCAT(LEFT(UPPER(TRIM(pan)), 2), '*******', RIGHT(UPPER(TRIM(pan)), 1))
         ELSE '[INVALID PAN]'
       END
 
@@ -144,6 +181,41 @@ masking_functions:
         WHEN dl IS NULL THEN NULL
         WHEN LENGTH(TRIM(dl)) >= 6 THEN
           CONCAT(LEFT(TRIM(dl), 2), REPEAT('*', LENGTH(TRIM(dl)) - 6), RIGHT(TRIM(dl), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_uan
+    signature: "mask_uan(uan STRING) RETURNS STRING"
+    comment: "Indian UAN (EPF universal account, 12 digits) — show last 4 only"
+    body: |
+      CASE
+        WHEN uan IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(uan, '[^0-9]', '')) = 12 THEN
+          CONCAT('XXXXXXXX', RIGHT(REGEXP_REPLACE(uan, '[^0-9]', ''), 4))
+        WHEN LENGTH(REGEXP_REPLACE(uan, '[^0-9]', '')) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(uan, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(uan, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_ration_card
+    signature: "mask_ration_card(rc STRING) RETURNS STRING"
+    comment: "Indian ration card — show last 4 characters only"
+    body: |
+      CASE
+        WHEN rc IS NULL THEN NULL
+        WHEN LENGTH(TRIM(rc)) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(TRIM(rc)) - 4), RIGHT(TRIM(rc), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_vehicle_reg
+    signature: "mask_vehicle_reg(reg STRING) RETURNS STRING"
+    comment: "Indian vehicle registration — show state code (first 2) and last 4 characters"
+    body: |
+      CASE
+        WHEN reg IS NULL THEN NULL
+        WHEN LENGTH(TRIM(reg)) >= 6 THEN
+          CONCAT(LEFT(TRIM(reg), 2), REPEAT('*', LENGTH(TRIM(reg)) - 6), RIGHT(TRIM(reg), 4))
         ELSE '[REDACTED]'
       END
 
@@ -183,23 +255,41 @@ prompt_overlay: |
   - Indian mobile numbers: +91 followed by 10 digits. Columns: `mobile`, `phone`.
     Use existing `mask_phone` — last 4 digits visible.
 
+  **Financial / Employment:**
+  - UAN (Universal Account Number): 12-digit EPF member number.
+    Columns: `uan`, `uan_number`, `pf_number`. Use `mask_uan` — last 4 digits visible.
+  - Vehicle Registration: State code + district + series + number (e.g. MH-12-AB-1234).
+    Columns: `vehicle_reg`, `registration_number`, `rc_number`. Use `mask_vehicle_reg`.
+  - Ration Card: State-specific, 10-15 chars. Columns: `ration_card`, `ration_number`.
+    Use `mask_ration_card` — last 4 visible.
+
   **Available India-Specific Masking Functions:**
-  - `mask_aadhaar(aadhaar STRING) RETURNS STRING` — Aadhaar, last 4 digits visible (XXXX XXXX 9012)
-  - `mask_pan_india(pan STRING) RETURNS STRING` — PAN, first 3 + last 1 visible (ABC****7A)
-  - `mask_gstin(gstin STRING) RETURNS STRING` — GSTIN, state code + last 3 visible
-  - `mask_voter_id(voter_id STRING) RETURNS STRING` — Voter ID, first letter + last 3 visible
-  - `mask_dl_india(dl STRING) RETURNS STRING` — driving licence, state code + last 4 visible
+  - `mask_aadhaar(aadhaar STRING)` — Aadhaar, last 4 digits visible (XXXX XXXX 9012)
+  - `mask_pan_india(pan STRING)` — PAN, first 2 + last 1 visible (AB*******A)
+  - `mask_gstin(gstin STRING)` — GSTIN, state code + last 3 visible
+  - `mask_voter_id(voter_id STRING)` — Voter ID, first letter + last 3 visible
+  - `mask_dl_india(dl STRING)` — driving licence, state code + last 4 visible
+  - `mask_uan(uan STRING)` — UAN/EPF, last 4 digits visible
+  - `mask_ration_card(rc STRING)` — ration card, last 4 visible
+  - `mask_vehicle_reg(reg STRING)` — vehicle registration, state code + last 4
 
   **Regulatory context:**
   - Aadhaar Act 2016: Aadhaar numbers are classified as sensitive — unauthorized disclosure
-    carries penalties. Even partial Aadhaar exposure is regulated.
+    carries penalties. Even partial Aadhaar exposure is regulated. Consider virtual Aadhaar
+    or tokenization as alternatives to storing raw Aadhaar numbers.
   - Digital Personal Data Protection Act 2023 (DPDP Act): India's comprehensive data
-    protection law. Requires purpose limitation and data minimization for personal data.
+    protection law, now in active enforcement. Requires purpose limitation, data
+    minimization, and consent-based processing for personal data. Significant penalties
+    for non-compliance (up to INR 250 crore).
   - RBI Data Localization Circular 2018: Mandates that payment system data must be stored
     and processed within India. This affects where financial data can flow.
+  - Income Tax Act 1961: PAN is mandatory for financial transactions above specified
+    thresholds. PAN masking must preserve verifiability for tax compliance.
 
   When you encounter columns matching these patterns, prefer the India-specific masking
   functions over generic ones. Pay special attention to:
   1. `pan` columns — these are Indian PAN (tax ID), NOT credit card PAN. Use `mask_pan_india`.
   2. `aadhaar` vs `aadhar` — both spellings are common in Indian datasets.
   3. Format normalization — Aadhaar functions strip non-digit characters before masking.
+  4. `mask_pan_india` hides the entity type character (4th position: C=Company, P=Personal,
+     H=HUF, F=Firm, T=Trust) to prevent entity type inference from masked values.

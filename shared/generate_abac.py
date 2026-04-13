@@ -3551,9 +3551,31 @@ _FUNCTION_EXPECTED_CATEGORIES = {
     "mask_tfn": {"government_id"},
     "mask_medicare": {"government_id"},
     "mask_bsb": {"financial_id"},
-    # SEA-specific
+    # SEA-specific (SG/MY)
     "mask_nric": {"government_id"},
+    "mask_fin": {"government_id"},
     "mask_mykad": {"government_id"},
+    "mask_tin_my": {"government_id"},
+    "mask_uen": {"business_id"},
+    "mask_ssm": {"business_id"},
+    "mask_epf": {"financial_id"},
+    # SEA-specific (TH/ID/PH/VN)
+    "mask_thai_id": {"government_id"},
+    "mask_nik": {"government_id"},
+    "mask_npwp": {"government_id"},
+    "mask_bpjs": {"financial_id"},
+    "mask_philsys": {"government_id"},
+    "mask_tin_ph": {"government_id"},
+    "mask_sss_ph": {"financial_id"},
+    "mask_cccd": {"government_id"},
+    "mask_mst": {"government_id"},
+    # India-specific (additional)
+    "mask_gstin": {"business_id"},
+    "mask_voter_id": {"government_id"},
+    "mask_dl_india": {"government_id"},
+    "mask_uan": {"financial_id"},
+    "mask_ration_card": {"government_id"},
+    "mask_vehicle_reg": {"government_id"},
 }
 
 
@@ -3578,11 +3600,23 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
     if "amount" in col or "balance" in col or "limit" in col:
         categories.add("amount")
     # Government/financial IDs — country-specific columns
-    if any(k in col for k in ("aadhaar", "pan", "tfn", "medicare", "nric", "mykad",
-                               "passport", "licence", "nhi", "ird")):
+    if any(k in col for k in (
+        # ANZ
+        "tfn", "medicare", "nhi", "ird", "licence", "passport", "abn", "acn", "crn",
+        # India
+        "aadhaar", "aadhar", "pan", "gstin", "voter_id", "epic", "driving_licence",
+        "uan", "ration_card",
+        # SEA (SG/MY)
+        "nric", "mykad", "mykas", "mytentera", "fin_number",
+        # SEA (TH/ID/PH/VN)
+        "thai_id", "nik", "ktp", "npwp", "bpjs", "philsys", "psn",
+        "cccd", "cmnd", "can_cuoc",
+    )):
         categories.add("government_id")
-    if "bsb" in col or "routing" in col:
+    if any(k in col for k in ("bsb", "routing", "epf", "kwsp", "cpf", "sss")):
         categories.add("financial_id")
+    if any(k in col for k in ("uen", "ssm", "company_reg")):
+        categories.add("business_id")
     # PAN can be both a card number and an Indian government ID
     if "pan" in col:
         categories.add("government_id")

@@ -15,8 +15,8 @@ Each overlay is a self-contained YAML file under `shared/countries/`.
 | Code | Region | Key identifiers |
 |------|--------|-----------------|
 | `ANZ` | Australia & New Zealand | TFN, Medicare, BSB, IRD, NHI |
-| `IN` | India | Aadhaar, PAN, GSTIN, IFSC, UPI |
-| `SEA` | Singapore & Malaysia | NRIC, FIN, MyKad, UEN, EPF |
+| `IN` | India | Aadhaar, PAN, GSTIN, UAN, Voter ID, Driving Licence |
+| `SEA` | Southeast Asia (SG, MY, TH, ID, PH, VN) | NRIC, MyKad, Thai ID, NIK, PhilSys, CCCD |
 
 ---
 

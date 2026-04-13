@@ -1,8 +1,12 @@
 code: SEA
-name: Singapore & Malaysia
+name: Southeast Asia (SG, MY, TH, ID, PH, VN)
 regulations:
   - Personal Data Protection Act 2012 (SG PDPA)
   - Personal Data Protection Act 2010 (MY PDPA)
+  - Personal Data Protection Act B.E. 2562 (TH PDPA, 2019)
+  - Personal Data Protection Law No. 27/2022 (ID PDP Law)
+  - Data Privacy Act of 2012 (PH DPA, Republic Act 10173)
+  - Decree 13/2023/ND-CP on Personal Data Protection (VN PDPD)
   - MAS Technology Risk Management Guidelines (SG)
   - Bank Negara Malaysia Risk Management in Technology
 
@@ -124,6 +128,173 @@ identifiers:
     masking_function: mask_epf
     category: financial_id
 
+  # ── Thailand ──────────────────────────────────────────────────────────────
+  - name: Thai National ID
+    country: TH
+    column_hints:
+      - thai_id
+      - national_id_th
+      - batt_prachachon
+      - thai_citizen_id
+      - th_id
+    format: "13 digits (X-XXXX-XXXXX-XX-X with check digit)"
+    sensitivity: restricted
+    masking_function: mask_thai_id
+    category: government_id
+
+  - name: Thai Tax ID
+    country: TH
+    column_hints:
+      - tax_id_th
+      - tin_th
+      - thai_tax
+    format: "13 digits (same as National ID for individuals)"
+    sensitivity: confidential
+    masking_function: mask_thai_id
+    category: government_id
+
+  - name: Thai Passport
+    country: TH
+    column_hints:
+      - passport_th
+      - thai_passport
+    format: "2 letters + 7 digits"
+    sensitivity: restricted
+    masking_function: mask_passport
+    category: government_id
+
+  - name: Thai Bank Account
+    country: TH
+    column_hints:
+      - bank_account_th
+      - thai_account
+    format: "10-12 digits"
+    sensitivity: restricted
+    masking_function: mask_epf
+    category: financial_id
+
+  # ── Indonesia ─────────────────────────────────────────────────────────────
+  - name: NIK (Nomor Induk Kependudukan)
+    country: ID
+    column_hints:
+      - nik
+      - nik_number
+      - ktp_number
+      - nomor_ktp
+      - nomor_induk
+    format: "16 digits (province + city + district + DOB + sequence). First 6 encode birthdate."
+    sensitivity: restricted
+    masking_function: mask_nik
+    category: government_id
+
+  - name: NPWP (Tax ID)
+    country: ID
+    column_hints:
+      - npwp
+      - npwp_number
+      - tax_id_id
+      - nomor_pajak
+    format: "15-16 digits (tax registration number)"
+    sensitivity: confidential
+    masking_function: mask_npwp
+    category: government_id
+
+  - name: Indonesian Passport
+    country: ID
+    column_hints:
+      - passport_id
+      - indonesian_passport
+    format: "1-2 letters + 7 digits"
+    sensitivity: restricted
+    masking_function: mask_passport
+    category: government_id
+
+  - name: BPJS Number (Social Insurance)
+    country: ID
+    column_hints:
+      - bpjs
+      - bpjs_number
+      - bpjs_kesehatan
+      - bpjs_ketenagakerjaan
+    format: "13 digits (social insurance member number)"
+    sensitivity: restricted
+    masking_function: mask_bpjs
+    category: financial_id
+
+  # ── Philippines ───────────────────────────────────────────────────────────
+  - name: PhilSys ID (Philippine Identification System)
+    country: PH
+    column_hints:
+      - philsys
+      - psn
+      - philippine_id
+      - philsys_number
+      - phil_id
+    format: "12 digits (Philippine Statistics Authority national ID)"
+    sensitivity: restricted
+    masking_function: mask_philsys
+    category: government_id
+
+  - name: TIN (Philippines Tax ID)
+    country: PH
+    column_hints:
+      - tin_ph
+      - tax_id_ph
+      - bir_tin
+      - philippine_tin
+    format: "9-12 digits (Bureau of Internal Revenue tax number)"
+    sensitivity: confidential
+    masking_function: mask_tin_ph
+    category: government_id
+
+  - name: SSS Number (Social Security System)
+    country: PH
+    column_hints:
+      - sss
+      - sss_number
+      - sss_no
+      - social_security_ph
+    format: "10 digits (XX-XXXXXXX-X)"
+    sensitivity: restricted
+    masking_function: mask_sss_ph
+    category: financial_id
+
+  # ── Vietnam ───────────────────────────────────────────────────────────────
+  - name: CCCD (Citizen Identity Card)
+    country: VN
+    column_hints:
+      - cccd
+      - cmnd
+      - citizen_id_vn
+      - can_cuoc
+      - so_cccd
+    format: "12 digits (first 3 encode province, next 1 encodes gender/century)"
+    sensitivity: restricted
+    masking_function: mask_cccd
+    category: government_id
+
+  - name: MST (Tax Code)
+    country: VN
+    column_hints:
+      - mst
+      - ma_so_thue
+      - tax_id_vn
+      - vietnam_tax
+    format: "10 or 13 digits (10 for individuals, 13 for branches)"
+    sensitivity: confidential
+    masking_function: mask_mst
+    category: government_id
+
+  - name: Vietnamese Passport
+    country: VN
+    column_hints:
+      - passport_vn
+      - vietnam_passport
+    format: "1 letter + 8 digits"
+    sensitivity: restricted
+    masking_function: mask_passport
+    category: government_id
+
 masking_functions:
   # ── Singapore ──────────────────────────────────────────────────────────────
   - name: mask_nric
@@ -204,13 +375,123 @@ masking_functions:
         ELSE '[REDACTED]'
       END
 
-prompt_overlay: |
-  ### Country-Specific Identifiers: Singapore & Malaysia (SEA)
+  # ── Thailand ──────────────────────────────────────────────────────────────
+  - name: mask_thai_id
+    signature: "mask_thai_id(tid STRING) RETURNS STRING"
+    comment: "Thai National ID (13 digits) — show last 4 digits only"
+    body: |
+      CASE
+        WHEN tid IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(tid, '[^0-9]', '')) = 13 THEN
+          CONCAT('XXXXXXXXX', RIGHT(REGEXP_REPLACE(tid, '[^0-9]', ''), 4))
+        WHEN LENGTH(REGEXP_REPLACE(tid, '[^0-9]', '')) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(tid, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(tid, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
 
-  When analyzing Southeast Asian datasets, be aware of these regulated identifiers.
-  Singapore and Malaysia share some column naming patterns (both use `nric`, `ic_number`)
-  but the formats differ significantly — pay attention to format/length to choose the
-  correct masking function.
+  # ── Indonesia ─────────────────────────────────────────────────────────────
+  - name: mask_nik
+    signature: "mask_nik(nik STRING) RETURNS STRING"
+    comment: "Indonesian NIK/KTP (16 digits) — show last 4 only. First 6 encode birthdate."
+    body: |
+      CASE
+        WHEN nik IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(nik, '[^0-9]', '')) = 16 THEN
+          CONCAT('XXXXXXXXXXXX', RIGHT(REGEXP_REPLACE(nik, '[^0-9]', ''), 4))
+        WHEN LENGTH(REGEXP_REPLACE(nik, '[^0-9]', '')) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(nik, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(nik, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_npwp
+    signature: "mask_npwp(npwp STRING) RETURNS STRING"
+    comment: "Indonesian NPWP tax ID (15-16 digits) — show last 4 only"
+    body: |
+      CASE
+        WHEN npwp IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(npwp, '[^0-9]', '')) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(npwp, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(npwp, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_bpjs
+    signature: "mask_bpjs(bpjs STRING) RETURNS STRING"
+    comment: "Indonesian BPJS social insurance (13 digits) — show last 4 only"
+    body: |
+      CASE
+        WHEN bpjs IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(bpjs, '[^0-9]', '')) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(bpjs, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(bpjs, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  # ── Philippines ───────────────────────────────────────────────────────────
+  - name: mask_philsys
+    signature: "mask_philsys(psn STRING) RETURNS STRING"
+    comment: "Philippine PhilSys national ID (12 digits) — show last 4 only"
+    body: |
+      CASE
+        WHEN psn IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(psn, '[^0-9]', '')) = 12 THEN
+          CONCAT('XXXXXXXX', RIGHT(REGEXP_REPLACE(psn, '[^0-9]', ''), 4))
+        WHEN LENGTH(REGEXP_REPLACE(psn, '[^0-9]', '')) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(psn, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(psn, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_tin_ph
+    signature: "mask_tin_ph(tin STRING) RETURNS STRING"
+    comment: "Philippine TIN (9-12 digits) — show last 4 only"
+    body: |
+      CASE
+        WHEN tin IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(tin, '[^0-9]', '')) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(tin, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(tin, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_sss_ph
+    signature: "mask_sss_ph(sss STRING) RETURNS STRING"
+    comment: "Philippine SSS number (10 digits, XX-XXXXXXX-X) — show last 4 only"
+    body: |
+      CASE
+        WHEN sss IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(sss, '[^0-9]', '')) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(sss, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(sss, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  # ── Vietnam ───────────────────────────────────────────────────────────────
+  - name: mask_cccd
+    signature: "mask_cccd(cccd STRING) RETURNS STRING"
+    comment: "Vietnamese CCCD citizen ID (12 digits) — show last 4 only. First 3 encode province."
+    body: |
+      CASE
+        WHEN cccd IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(cccd, '[^0-9]', '')) = 12 THEN
+          CONCAT('XXXXXXXX', RIGHT(REGEXP_REPLACE(cccd, '[^0-9]', ''), 4))
+        WHEN LENGTH(REGEXP_REPLACE(cccd, '[^0-9]', '')) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(cccd, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(cccd, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_mst
+    signature: "mask_mst(mst STRING) RETURNS STRING"
+    comment: "Vietnamese MST tax code (10 or 13 digits) — show last 4 only"
+    body: |
+      CASE
+        WHEN mst IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(mst, '[^0-9]', '')) >= 4 THEN
+          CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(mst, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(mst, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+prompt_overlay: |
+  ### Country-Specific Identifiers: Southeast Asia (SG, MY, TH, ID, PH, VN)
+
+  When analyzing Southeast Asian datasets, be aware of these regulated identifiers
+  across six ASEAN countries. Pay attention to column naming patterns and data
+  format/length to choose the correct masking function.
 
   **Singapore — Government IDs:**
   - NRIC (National Registration Identity Card): 1 letter (S/T for citizens, F/G/M for foreigners)
@@ -221,11 +502,8 @@ prompt_overlay: |
     Columns: `fin`, `fin_number`. Use `mask_fin` — same pattern as NRIC.
   - CPF Account Number: Same as the individual's NRIC.
     Columns: `cpf`, `cpf_account`. Use `mask_nric`.
-
-  **Singapore — Business:**
   - UEN (Unique Entity Number): 9-10 character business registration.
-    Columns: `uen`, `uen_number`, `company_uen`. Less sensitive but sometimes restricted.
-    Use `mask_uen` — show last 4 chars.
+    Columns: `uen`, `uen_number`, `company_uen`. Use `mask_uen` — show last 4 chars.
 
   **Malaysia — Government IDs:**
   - MyKad (Malaysian IC/NRIC): 12 digits with format YYMMDD-PB-NNNG.
@@ -233,18 +511,44 @@ prompt_overlay: |
     encode birthplace. Even partial exposure of a MyKad reveals sensitive personal data.
     Columns: `mykad`, `ic_number`, `ic_no`, `kad_pengenalan`, `no_kp`.
     Regulated by PDPA 2010. Use `mask_mykad` — show last 4 digits ONLY.
-  - MyKAS (temporary foreign worker ID) and MyTentera (military ID) use the same
-    12-digit format. Columns: `mykas`, `mytentera`. Use `mask_mykad`.
-  - Malaysian TIN: Tax identification, variable format.
-    Columns: `tin`, `tax_id`, `cukai`. Use `mask_tin_my` — show last 4.
+  - MyKAS, MyTentera: Same 12-digit format. Use `mask_mykad`.
+  - Malaysian TIN: Columns: `tin`, `tax_id`, `cukai`. Use `mask_tin_my`.
+  - SSM Registration: Columns: `ssm`, `ssm_number`, `company_reg`. Use `mask_ssm`.
+  - EPF/KWSP: Columns: `epf`, `kwsp`, `epf_number`. Use `mask_epf`.
 
-  **Malaysia — Business:**
-  - SSM Registration: Company registration number.
-    Columns: `ssm`, `ssm_number`, `company_reg`. Use `mask_ssm` — show last 4.
+  **Thailand — Government IDs:**
+  - Thai National ID: 13 digits (X-XXXX-XXXXX-XX-X).
+    Columns: `thai_id`, `national_id_th`, `th_id`.
+    Regulated by PDPA B.E. 2562 (2019). Use `mask_thai_id` — show last 4 digits.
+  - Thai Tax ID: Same 13-digit format as National ID for individuals.
+    Columns: `tax_id_th`, `tin_th`. Use `mask_thai_id`.
 
-  **Malaysia — Financial:**
-  - EPF/KWSP Number: Employee Provident Fund member number.
-    Columns: `epf`, `kwsp`, `epf_number`. Use `mask_epf` — show last 4.
+  **Indonesia — Government IDs:**
+  - NIK (Nomor Induk Kependudukan): 16 digits. CRITICAL: First 6 digits encode
+    birthdate (like Malaysian MyKad). Digits 7-10 encode district.
+    Columns: `nik`, `nik_number`, `ktp_number`, `nomor_ktp`.
+    Regulated by PDP Law No. 27/2022. Use `mask_nik` — show last 4 digits ONLY.
+  - NPWP (Tax ID): 15-16 digits.
+    Columns: `npwp`, `npwp_number`, `tax_id_id`. Use `mask_npwp` — show last 4.
+  - BPJS (Social Insurance): 13 digits.
+    Columns: `bpjs`, `bpjs_number`. Use `mask_bpjs` — show last 4.
+
+  **Philippines — Government IDs:**
+  - PhilSys ID (Philippine National ID): 12 digits.
+    Columns: `philsys`, `psn`, `philippine_id`.
+    Regulated by DPA 2012 (RA 10173). Use `mask_philsys` — show last 4 digits.
+  - TIN (Bureau of Internal Revenue): 9-12 digits.
+    Columns: `tin_ph`, `tax_id_ph`, `bir_tin`. Use `mask_tin_ph` — show last 4.
+  - SSS (Social Security System): 10 digits (XX-XXXXXXX-X).
+    Columns: `sss`, `sss_number`. Use `mask_sss_ph` — show last 4.
+
+  **Vietnam — Government IDs:**
+  - CCCD (Citizen Identity Card): 12 digits. First 3 encode province,
+    digit 4 encodes gender and birth century.
+    Columns: `cccd`, `cmnd`, `citizen_id_vn`, `can_cuoc`.
+    Regulated by Decree 13/2023/ND-CP. Use `mask_cccd` — show last 4 digits.
+  - MST (Tax Code): 10 digits (individuals) or 13 digits (branches).
+    Columns: `mst`, `ma_so_thue`, `tax_id_vn`. Use `mask_mst` — show last 4.
 
   **Disambiguating SG vs MY NRIC columns:**
   Both countries use `nric` and `ic_number` as column names, but:
@@ -253,23 +557,43 @@ prompt_overlay: |
   If the dataset contains records from both countries, check the data format/length.
   When in doubt, use the more restrictive masking (show fewer characters).
 
+  **Embedded birthdate warning:** Indonesian NIK (first 6 digits), Malaysian MyKad
+  (first 6 digits), and Vietnamese CCCD (digit 4 encodes century) all embed
+  demographic data in the ID number. Always mask aggressively — show last 4 only.
+
   **Available SEA Masking Functions:**
-  - `mask_nric(nric STRING) RETURNS STRING` — SG NRIC, first letter + last 4 chars (S****567D)
-  - `mask_fin(fin STRING) RETURNS STRING` — SG FIN, first letter + last 4 chars
-  - `mask_uen(uen STRING) RETURNS STRING` — SG UEN, last 4 chars visible
-  - `mask_mykad(ic STRING) RETURNS STRING` — MY MyKad, last 4 digits only (XXXXXXXX1234)
-  - `mask_tin_my(tin STRING) RETURNS STRING` — MY tax ID, last 4 chars visible
-  - `mask_ssm(ssm STRING) RETURNS STRING` — MY SSM registration, last 4 chars visible
-  - `mask_epf(epf STRING) RETURNS STRING` — MY EPF/KWSP, last 4 chars visible
+  - `mask_nric(nric STRING)` — SG NRIC, first letter + last 4 chars (S****567D)
+  - `mask_fin(fin STRING)` — SG FIN, first letter + last 4 chars
+  - `mask_uen(uen STRING)` — SG UEN, last 4 chars visible
+  - `mask_mykad(ic STRING)` — MY MyKad, last 4 digits only (XXXXXXXX1234)
+  - `mask_tin_my(tin STRING)` — MY tax ID, last 4 chars visible
+  - `mask_ssm(ssm STRING)` — MY SSM registration, last 4 chars visible
+  - `mask_epf(epf STRING)` — MY EPF/KWSP, last 4 chars visible
+  - `mask_thai_id(tid STRING)` — TH National ID, last 4 digits (XXXXXXXXX1234)
+  - `mask_nik(nik STRING)` — ID NIK/KTP, last 4 digits (XXXXXXXXXXXX1234)
+  - `mask_npwp(npwp STRING)` — ID NPWP tax, last 4 digits
+  - `mask_bpjs(bpjs STRING)` — ID BPJS social insurance, last 4 digits
+  - `mask_philsys(psn STRING)` — PH PhilSys national ID, last 4 digits
+  - `mask_tin_ph(tin STRING)` — PH TIN, last 4 digits
+  - `mask_sss_ph(sss STRING)` — PH SSS, last 4 digits
+  - `mask_cccd(cccd STRING)` — VN CCCD citizen ID, last 4 digits
+  - `mask_mst(mst STRING)` — VN MST tax code, last 4 digits
 
   **Regulatory context:**
-  - PDPA 2012 (Singapore): Comprehensive data protection. NRIC collection was restricted
-    in 2019 — organizations should not collect NRIC unless legally required.
-  - PDPA 2010 (Malaysia): Governs commercial processing of personal data. MyKad numbers
-    are classified as sensitive due to embedded biometric and demographic data.
-  - MAS Technology Risk Management Guidelines: Financial institutions in SG must implement
-    data masking for sensitive customer identifiers.
+  - PDPA 2012 (Singapore): NRIC collection restricted since 2019.
+  - PDPA 2010 (Malaysia): MyKad classified as sensitive (embedded biometrics).
+  - PDPA B.E. 2562 (Thailand, 2019): Comprehensive data protection, effective June 2022.
+    Significant fines for non-compliance (up to THB 5 million).
+  - PDP Law No. 27/2022 (Indonesia): Enacted October 2022, enforcement from October 2024.
+    Heavy penalties (up to 2% of annual revenue). NIK is classified as specific personal data.
+  - DPA 2012 / RA 10173 (Philippines): Enforced by National Privacy Commission.
+    PhilSys data has additional protections under RA 11055.
+  - Decree 13/2023/ND-CP (Vietnam): Personal data protection effective July 2023.
+    Cross-border data transfer requires impact assessment.
+  - MAS Technology Risk Management Guidelines (Singapore): Financial institutions must
+    implement data masking for sensitive customer identifiers.
 
   When you encounter columns matching these patterns, prefer the SEA-specific masking
-  functions over generic ones. Pay special attention to MyKad — its embedded DOB means
-  even partial exposure is a privacy risk.
+  functions over generic ones. Pay special attention to NIK (Indonesia) and MyKad
+  (Malaysia) — their embedded demographic data means even partial exposure is a
+  privacy risk.

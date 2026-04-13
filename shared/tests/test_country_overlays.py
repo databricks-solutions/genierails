@@ -105,7 +105,8 @@ class TestYamlFileIntegrity:
                 continue  # IFSC etc. intentionally have no masking function
             # Allow reuse of base library functions (mask_email, mask_phone, etc.)
             base_fns = {"mask_email", "mask_phone", "mask_account_number",
-                        "mask_redact", "mask_hash", "mask_nullify"}
+                        "mask_redact", "mask_hash", "mask_nullify",
+                        "mask_passport"}
             if fn not in base_fns:
                 assert fn in defined_fns, (
                     f"{code}.yaml identifier '{ident['name']}' references "
@@ -196,7 +197,7 @@ class TestINContent:
 # ===========================================================================
 
 class TestSEAContent:
-    """Verify SEA overlay contains expected SG and MY identifiers."""
+    """Verify SEA overlay contains expected identifiers for all 6 countries."""
 
     def _load(self):
         with open(COUNTRIES_DIR / "SEA.yaml") as f:
@@ -214,17 +215,59 @@ class TestSEAContent:
         assert "MyKad (Malaysian NRIC)" in names
         assert "EPF Number (KWSP)" in names
 
+    def test_has_thailand_identifiers(self):
+        data = self._load()
+        names = {i["name"] for i in data["identifiers"]}
+        assert "Thai National ID" in names
+        assert "Thai Tax ID" in names
+
+    def test_has_indonesia_identifiers(self):
+        data = self._load()
+        names = {i["name"] for i in data["identifiers"]}
+        assert "NIK (Nomor Induk Kependudukan)" in names
+        assert "NPWP (Tax ID)" in names
+        assert "BPJS Number (Social Insurance)" in names
+
+    def test_has_philippines_identifiers(self):
+        data = self._load()
+        names = {i["name"] for i in data["identifiers"]}
+        assert "PhilSys ID (Philippine Identification System)" in names
+        assert "SSS Number (Social Security System)" in names
+
+    def test_has_vietnam_identifiers(self):
+        data = self._load()
+        names = {i["name"] for i in data["identifiers"]}
+        assert "CCCD (Citizen Identity Card)" in names
+        assert "MST (Tax Code)" in names
+
     def test_mykad_warns_about_dob_encoding(self):
         """MyKad overlay should warn that first 6 digits encode date of birth."""
         data = self._load()
         overlay = data["prompt_overlay"]
         assert "DOB" in overlay or "date of birth" in overlay.lower() or "birthdate" in overlay.lower()
 
+    def test_nik_warns_about_embedded_birthdate(self):
+        """Indonesian NIK overlay should warn about embedded birthdate."""
+        data = self._load()
+        overlay = data["prompt_overlay"]
+        assert "NIK" in overlay
+        assert "birthdate" in overlay.lower() or "birthdate" in overlay or "encode" in overlay.lower()
+
     def test_overlay_disambiguates_sg_vs_my_nric(self):
         data = self._load()
         overlay = data["prompt_overlay"]
         assert "9 char" in overlay.lower() or "9 characters" in overlay.lower()
         assert "12 digit" in overlay.lower() or "12 digits" in overlay.lower()
+
+    def test_overlay_covers_all_six_regulations(self):
+        data = self._load()
+        overlay = data["prompt_overlay"]
+        assert "PDPA 2012" in overlay  # Singapore
+        assert "PDPA 2010" in overlay  # Malaysia
+        assert "B.E. 2562" in overlay or "Thailand" in overlay  # Thailand
+        assert "PDP Law" in overlay or "27/2022" in overlay  # Indonesia
+        assert "RA 10173" in overlay or "DPA 2012" in overlay  # Philippines
+        assert "Decree 13" in overlay or "13/2023" in overlay  # Vietnam
 
 
 # ===========================================================================
