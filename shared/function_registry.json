@@ -205,6 +205,66 @@
       "category": "row_filter",
       "signature": "filter_compliance_only() RETURNS BOOLEAN",
       "aliases": ["filter_compliance", "filter_compliance_restricted"]
+    },
+    "mask_thai_id": {
+      "category": "sea",
+      "signature": "mask_thai_id(tid STRING) RETURNS STRING",
+      "aliases": ["mask_thai_national_id", "mask_batt_prachachon"]
+    },
+    "mask_nik": {
+      "category": "sea",
+      "signature": "mask_nik(nik STRING) RETURNS STRING",
+      "aliases": ["mask_ktp", "mask_nik_number", "mask_nomor_induk"]
+    },
+    "mask_npwp": {
+      "category": "sea",
+      "signature": "mask_npwp(npwp STRING) RETURNS STRING",
+      "aliases": ["mask_npwp_number", "mask_nomor_pajak"]
+    },
+    "mask_bpjs": {
+      "category": "sea",
+      "signature": "mask_bpjs(bpjs STRING) RETURNS STRING",
+      "aliases": ["mask_bpjs_number", "mask_bpjs_kesehatan"]
+    },
+    "mask_philsys": {
+      "category": "sea",
+      "signature": "mask_philsys(psn STRING) RETURNS STRING",
+      "aliases": ["mask_psn", "mask_philippine_id"]
+    },
+    "mask_tin_ph": {
+      "category": "sea",
+      "signature": "mask_tin_ph(tin STRING) RETURNS STRING",
+      "aliases": ["mask_bir_tin", "mask_philippine_tin"]
+    },
+    "mask_sss_ph": {
+      "category": "sea",
+      "signature": "mask_sss_ph(sss STRING) RETURNS STRING",
+      "aliases": ["mask_sss", "mask_sss_number"]
+    },
+    "mask_cccd": {
+      "category": "sea",
+      "signature": "mask_cccd(cccd STRING) RETURNS STRING",
+      "aliases": ["mask_cmnd", "mask_can_cuoc", "mask_citizen_id_vn"]
+    },
+    "mask_mst": {
+      "category": "sea",
+      "signature": "mask_mst(mst STRING) RETURNS STRING",
+      "aliases": ["mask_ma_so_thue", "mask_tax_id_vn"]
+    },
+    "mask_uan": {
+      "category": "india",
+      "signature": "mask_uan(uan STRING) RETURNS STRING",
+      "aliases": ["mask_uan_number", "mask_epf_uan", "mask_pf_number"]
+    },
+    "mask_ration_card": {
+      "category": "india",
+      "signature": "mask_ration_card(rc STRING) RETURNS STRING",
+      "aliases": ["mask_ration_number"]
+    },
+    "mask_vehicle_reg": {
+      "category": "india",
+      "signature": "mask_vehicle_reg(reg STRING) RETURNS STRING",
+      "aliases": ["mask_registration_number", "mask_rc_number", "mask_vehicle_number"]
     }
   }
 }
