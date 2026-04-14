@@ -291,7 +291,8 @@ CREATE OR REPLACE TABLE {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers (
   voter_id        STRING    COMMENT 'Voter ID (EPIC) — Electoral Photo Identity Card',
   date_of_birth   DATE      COMMENT 'Date of birth',
   uan             STRING    COMMENT 'Universal Account Number — 12-digit EPF/provident fund identifier',
-  upi_id          STRING    COMMENT 'UPI Virtual Payment Address — registered payment instrument'
+  upi_id          STRING    COMMENT 'UPI Virtual Payment Address — registered payment instrument',
+  gstin           STRING    COMMENT 'GSTIN — GST Identification Number for business customers (15 chars)'
 )
 USING delta
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
@@ -323,20 +324,6 @@ CREATE OR REPLACE TABLE {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.transactions (
 USING delta
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 
-CREATE OR REPLACE TABLE {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.loans (
-  loan_id         BIGINT       COMMENT 'Unique loan identifier',
-  customer_id     BIGINT       COMMENT 'FK to customers',
-  loan_type       STRING       COMMENT 'HOME_LOAN, PERSONAL, VEHICLE, BUSINESS, GOLD',
-  principal       DECIMAL(18,2) COMMENT 'Loan principal in INR',
-  outstanding     DECIMAL(18,2) COMMENT 'Outstanding balance in INR',
-  interest_rate   DECIMAL(5,2) COMMENT 'Annual interest rate',
-  gstin           STRING       COMMENT 'GSTIN for business loans — GST Identification Number (15 chars)',
-  disbursed_date  DATE         COMMENT 'Date loan was disbursed',
-  status          STRING       COMMENT 'ACTIVE, CLOSED, NPA, RESTRUCTURED'
-)
-USING delta
-TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
-
 CREATE OR REPLACE TABLE {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards (
   card_id         BIGINT       COMMENT 'Unique card identifier',
   customer_id     BIGINT       COMMENT 'FK to customers',
@@ -353,11 +340,11 @@ TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 
 INDIA_BANK_SAMPLE_DATA_SQL = f"""
 INSERT INTO {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers VALUES
-(1001, 'Arjun',    'Sharma',     'arjun.sharma@email.in',       '+91 98765 43210', '42 MG Road',          'Mumbai',      'Maharashtra',  '400001', '2345 6789 0123', 'ABCPS1234D', 'GDL1234567', '1985-03-14', '100123456789', 'arjun@okaxis'),
-(1002, 'Priya',    'Krishnan',   'priya.k@email.in',            '+91 87654 32109', '15 Brigade Road',     'Bangalore',   'Karnataka',    '560001', '3456 7890 1234', 'BCDPK2345E', 'KAR2345678', '1978-07-22', '100234567890', 'priya@ybl'),
-(1003, 'Rajesh',   'Patel',      'rajesh.patel@email.in',       '+91 76543 21098', '8 Ashram Road',       'Ahmedabad',   'Gujarat',      '380001', '4567 8901 2345', 'CDEPR3456F', 'GJR3456789', '1992-11-05', '100345678901', 'rajesh@oksbi'),
-(1004, 'Deepa',    'Iyer',       'deepa.iyer@email.in',         '+91 65432 10987', '23 Anna Salai',       'Chennai',     'Tamil Nadu',   '600001', '5678 9012 3456', 'DEFDI4567G', 'TN04567890', '1970-01-30', '100456789012', 'deepa@paytm'),
-(1005, 'Amit',     'Kumar',      'amit.kumar@email.in',         '+91 54321 09876', '5 Rajpath',           'Delhi',       'Delhi',        '110001', '6789 0123 4567', 'EFGAK5678H', 'DL05678901', '1988-09-18', '100567890123', 'amit@okicici');
+(1001, 'Arjun',    'Sharma',     'arjun.sharma@email.in',       '+91 98765 43210', '42 MG Road',          'Mumbai',      'Maharashtra',  '400001', '2345 6789 0123', 'ABCPS1234D', 'GDL1234567', '1985-03-14', '100123456789', 'arjun@okaxis',  NULL),
+(1002, 'Priya',    'Krishnan',   'priya.k@email.in',            '+91 87654 32109', '15 Brigade Road',     'Bangalore',   'Karnataka',    '560001', '3456 7890 1234', 'BCDPK2345E', 'KAR2345678', '1978-07-22', '100234567890', 'priya@ybl',     NULL),
+(1003, 'Rajesh',   'Patel',      'rajesh.patel@email.in',       '+91 76543 21098', '8 Ashram Road',       'Ahmedabad',   'Gujarat',      '380001', '4567 8901 2345', 'CDEPR3456F', 'GJR3456789', '1992-11-05', '100345678901', 'rajesh@oksbi',  '24AADCP1234F1Z5'),
+(1004, 'Deepa',    'Iyer',       'deepa.iyer@email.in',         '+91 65432 10987', '23 Anna Salai',       'Chennai',     'Tamil Nadu',   '600001', '5678 9012 3456', 'DEFDI4567G', 'TN04567890', '1970-01-30', '100456789012', 'deepa@paytm',   NULL),
+(1005, 'Amit',     'Kumar',      'amit.kumar@email.in',         '+91 54321 09876', '5 Rajpath',           'Delhi',       'Delhi',        '110001', '6789 0123 4567', 'EFGAK5678H', 'DL05678901', '1988-09-18', '100567890123', 'amit@okicici',  '36AADCR5678G1Z8');
 
 INSERT INTO {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.accounts VALUES
 (2001, 1001, 'SBIN0001234', '12345678901', 'SAVINGS',   254200.50,  '2015-03-10', 'Fort Mumbai'),
@@ -374,13 +361,6 @@ INSERT INTO {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.transactions VALUES
 (3005, 2004, '2024-11-15 08:30:00', 52000.00,    'Salary Credit',         'NEFT',  'CLEAR',     false, 'IN'),
 (3006, 2005, '2024-11-13 11:00:00', -5000000.00, 'Hawala Network Ltd',    'RTGS',  'HIGH_RISK', true,  'AE');
 
-INSERT INTO {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.loans VALUES
-(5001, 1001, 'HOME_LOAN', 5000000.00, 4200000.00, 8.50,  NULL,               '2020-03-15', 'ACTIVE'),
-(5002, 1002, 'PERSONAL',   300000.00,  180000.00, 12.00, NULL,               '2023-06-01', 'ACTIVE'),
-(5003, 1003, 'BUSINESS',  2000000.00, 1500000.00, 10.50, '24AADCS1234F1Z5', '2021-09-10', 'ACTIVE'),
-(5004, 1004, 'GOLD',       200000.00,       0.00, 9.00,  NULL,               '2022-01-20', 'CLOSED'),
-(5005, 1005, 'VEHICLE',    800000.00,  650000.00, 9.50,  NULL,               '2023-03-01', 'NPA');
-
 INSERT INTO {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards VALUES
 (4001, 1001, '4000 1234 5678 9010', '123', '12/26', 500000.00, 'VISA',       'ACTIVE'),
 (4002, 1002, '5100 2345 6789 0121', '456', '03/27', 300000.00, 'MASTERCARD', 'ACTIVE'),
@@ -393,7 +373,6 @@ INDIA_BANK_PROD_SETUP_SQL = f"""
 CREATE OR REPLACE TABLE {PROD_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers AS SELECT * FROM {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers WHERE 1=0;
 CREATE OR REPLACE TABLE {PROD_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.accounts AS SELECT * FROM {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.accounts WHERE 1=0;
 CREATE OR REPLACE TABLE {PROD_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.transactions AS SELECT * FROM {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.transactions WHERE 1=0;
-CREATE OR REPLACE TABLE {PROD_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.loans AS SELECT * FROM {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.loans WHERE 1=0;
 CREATE OR REPLACE TABLE {PROD_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards AS SELECT * FROM {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards WHERE 1=0;
 """
 
@@ -5726,7 +5705,6 @@ def _create_india_bank_genie_space_via_api(
         f"{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers",
         f"{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.accounts",
         f"{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.transactions",
-        f"{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.loans",
         f"{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards",
     ]
     return _create_genie_space_via_api(
@@ -5770,7 +5748,6 @@ genie_spaces = [
       "{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers",
       "{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.accounts",
       "{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.transactions",
-      "{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.loans",
       "{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards",
     ]
   }},

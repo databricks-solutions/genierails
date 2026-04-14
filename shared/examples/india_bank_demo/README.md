@@ -92,7 +92,7 @@ When complete, you'll see:
 
 ## Part 1: The Challenge (2 min)
 
-Open the Genie Space "Lakshmi Bank Analytics" in the dev workspace UI. Show the five tables — customers, accounts, transactions, loans, credit cards.
+Open the Genie Space "Lakshmi Bank Analytics" in the dev workspace UI. Show the four tables — customers, accounts, transactions, credit cards.
 
 **Set the scene:**
 
@@ -107,9 +107,8 @@ Point out what's in the tables:
 - **GSTIN** — GST identification for business customers
 - **Full credit card PANs and CVVs** — PCI-DSS regulated
 - **AML risk flags** (`HIGH_RISK`, `BLOCKED`) — restricted to compliance team
-- **NPA status** — Non-Performing Asset classification (RBI regulated)
 
-> _"We need to onboard 5 different teams — tellers, relationship managers, compliance, marketing, and branch managers. Each team needs different access levels. A teller should see masked Aadhaar (last 4 digits). A compliance officer needs full access to investigate AML flags and NPA loans. Marketing should only see anonymized, aggregated data."_
+> _"We need to onboard 5 different teams — tellers, relationship managers, compliance, marketing, and branch managers. Each team needs different access levels. A teller should see masked Aadhaar (last 4 digits). A compliance officer needs full access to investigate AML flags. Marketing should only see anonymized, aggregated data."_
 
 > _"Setting this up manually — groups, tag policies, masking functions, row filters, ACLs, entitlements — would take weeks. Let's do it in 10 minutes."_
 
@@ -125,7 +124,7 @@ The setup script already configured `envs/dev/` with auth credentials, tables, a
 make generate ENV=dev COUNTRY=IN INDUSTRY=financial_services
 ```
 
-**What happens:** GenieRails discovers the 5 tables from the existing Genie Space, fetches their schemas from Unity Catalog, and calls the Databricks Foundation Model with India country + financial services industry overlays.
+**What happens:** GenieRails discovers the 4 tables from the existing Genie Space, fetches their schemas from Unity Catalog, and calls the Databricks Foundation Model with India country + financial services industry overlays.
 
 **Show the output** (`envs/dev/generated/abac.auto.tfvars`):
 
@@ -207,9 +206,8 @@ Open the Genie Space and query as different groups:
 | GSTIN | `27**********1Z5` | `27AADCS1234F1Z5` | `[REDACTED]` |
 | UPI ID | `[REDACTED]` | `arjun@okaxis` | `[REDACTED]` |
 | AML risk flag | Not visible | `HIGH_RISK` | Not visible |
-| NPA status | Not visible | `NPA` | Not visible |
 
-**Key message:** _"Same Genie Space, same tables, but every group sees exactly what they should. The compliance officer investigates AML-flagged transactions and NPA loans, the teller serves customers with masked Aadhaar and PAN, and marketing only sees aggregated anonymized data."_
+**Key message:** _"Same Genie Space, same tables, but every group sees exactly what they should. The compliance officer investigates AML-flagged transactions with full PII access, the teller serves customers with masked Aadhaar and PAN, and marketing only sees aggregated anonymized data."_
 
 ---
 
@@ -266,7 +264,7 @@ python ../shared/examples/india_bank_demo/setup_demo.py teardown \
 - _"India overlay automatically identifies Aadhaar, PAN, GSTIN, Voter ID, UAN, and UPI columns — no manual classification needed"_
 - _"DPDP Act 2023 is in active enforcement with INR 250 crore penalties — this overlay keeps you compliant from day one"_
 - _"PAN masking hides the entity type character to prevent P=Personal vs C=Company inference"_
-- _"AML-flagged transactions and NPA loans are row-filtered to the compliance team only"_
+- _"AML-flagged transactions are row-filtered to the compliance team only"_
 
 ### For data platform teams
 - _"Everything is Terraform — version controlled, auditable, reproducible"_

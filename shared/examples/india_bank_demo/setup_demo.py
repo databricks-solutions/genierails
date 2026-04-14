@@ -5,7 +5,7 @@ India Bank Demo — Setup and Teardown
 Provisions a complete demo environment for the GenieRails champion flow:
   - Dev workspace + prod workspace (fresh, isolated)
   - Unity Catalog metastore with cloud storage
-  - Sample Indian banking tables (customers, accounts, transactions, loans, credit_cards)
+  - Sample Indian banking tables (customers, accounts, transactions, credit_cards)
   - An ungoverned Genie Space pointing at the dev tables
 
 After setup, follow the README.md to run the demo.
@@ -73,7 +73,8 @@ CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.customers (
   voter_id        STRING    COMMENT 'Voter ID (EPIC) — Electoral Photo Identity Card',
   date_of_birth   DATE      COMMENT 'Date of birth',
   uan             STRING    COMMENT 'Universal Account Number — 12-digit EPF/provident fund identifier',
-  upi_id          STRING    COMMENT 'UPI Virtual Payment Address — registered payment instrument'
+  upi_id          STRING    COMMENT 'UPI Virtual Payment Address — registered payment instrument',
+  gstin           STRING    COMMENT 'GSTIN — GST Identification Number for business customers (15 chars)'
 )
 USING delta
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
@@ -107,21 +108,6 @@ CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.transactions (
 USING delta
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 
--- ── Loans ────────────────────────────────────────────────────────────────
-CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.loans (
-  loan_id         BIGINT       COMMENT 'Unique loan identifier',
-  customer_id     BIGINT       COMMENT 'FK to customers',
-  loan_type       STRING       COMMENT 'HOME_LOAN, PERSONAL, VEHICLE, BUSINESS, GOLD',
-  principal       DECIMAL(18,2) COMMENT 'Loan principal in INR',
-  outstanding     DECIMAL(18,2) COMMENT 'Outstanding balance in INR',
-  interest_rate   DECIMAL(5,2) COMMENT 'Annual interest rate',
-  gstin           STRING       COMMENT 'GSTIN for business loans — GST Identification Number (15 chars)',
-  disbursed_date  DATE         COMMENT 'Date loan was disbursed',
-  status          STRING       COMMENT 'ACTIVE, CLOSED, NPA, RESTRUCTURED'
-)
-USING delta
-TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
-
 -- ── Credit Cards ─────────────────────────────────────────────────────────
 CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.credit_cards (
   card_id         BIGINT       COMMENT 'Unique card identifier',
@@ -140,16 +126,16 @@ TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 SAMPLE_DATA_SQL = f"""
 -- ── Customers (realistic Indian data) ──────────────────────────────────
 INSERT INTO {DEV_CATALOG}.{SCHEMA}.customers VALUES
-(1001, 'Arjun',    'Sharma',     'arjun.sharma@email.in',      '+91 98201 45678', '42 Marine Drive',        'Mumbai',      'Maharashtra',    '400001', '2345 6789 0123', 'ABCPS1234D', 'MH/01/234/567890', '1985-03-14', '100123456789', 'arjun@okaxis'),
-(1002, 'Priya',    'Krishnan',   'priya.krishnan@email.in',    '+91 98450 56789', '15 MG Road',             'Bangalore',   'Karnataka',      '560001', '3456 7890 1234', 'BCDPK2345E', 'KA/02/345/678901', '1978-07-22', '200234567890', 'priya@oksbi'),
-(1003, 'Rajesh',   'Patel',      'rajesh.patel@email.in',      '+91 99780 67890', '8 CG Road',              'Ahmedabad',   'Gujarat',        '380001', '4567 8901 2345', 'CDEPR3456F', 'GJ/03/456/789012', '1992-11-05', '300345678901', 'rajesh@okhdfcbank'),
-(1004, 'Deepa',    'Iyer',       'deepa.iyer@email.in',        '+91 98410 78901', '23 Anna Salai',          'Chennai',     'Tamil Nadu',     '600001', '5678 9012 3456', 'DEFPI4567G', 'TN/04/567/890123', '1970-01-30', '400456789012', 'deepa@ybl'),
-(1005, 'Amit',     'Kumar',      'amit.kumar@email.in',        '+91 98100 89012', '5 Connaught Place',      'Delhi',       'Delhi',          '110001', '6789 0123 4567', 'EFGPA5678H', 'DL/05/678/901234', '1988-09-18', '500567890123', 'amit@paytm'),
-(1006, 'Sunita',   'Das',        'sunita.das@email.in',        '+91 98300 90123', '12 Park Street',         'Kolkata',     'West Bengal',    '700001', '7890 1234 5678', 'FGHPS6789I', 'WB/06/789/012345', '1995-04-12', '600678901234', 'sunita@okicici'),
-(1007, 'Vikram',   'Singh',      'vikram.singh@email.in',      '+91 98290 01234', '31 MI Road',             'Jaipur',      'Rajasthan',      '302001', '8901 2345 6789', 'GHIPV7890J', 'RJ/07/890/123456', '1982-12-25', '700789012345', 'vikram@okaxis'),
-(1008, 'Ananya',   'Reddy',      'ananya.reddy@email.in',      '+91 98490 12345', '7 Banjara Hills',        'Hyderabad',   'Telangana',      '500001', '9012 3456 7890', 'HIJPA8901K', 'TS/08/901/234567', '1990-06-08', '800890123456', 'ananya@oksbi'),
-(1009, 'Suresh',   'Menon',      'suresh.menon@email.in',      '+91 98220 23456', '19 FC Road',             'Pune',        'Maharashtra',    '411001', '0123 4567 8901', 'IJKPS9012L', 'MH/09/012/345678', '1975-08-20', '900901234567', 'suresh@okhdfcbank'),
-(1010, 'Kavita',   'Joshi',      'kavita.joshi@email.in',      '+91 98390 34567', '4 Hazratganj',           'Lucknow',     'Uttar Pradesh',  '226001', '1234 5678 9012', 'JKLPK0123M', 'UP/10/123/456789', '1998-02-14', '101012345678', 'kavita@ybl');
+(1001, 'Arjun',    'Sharma',     'arjun.sharma@email.in',      '+91 98201 45678', '42 Marine Drive',        'Mumbai',      'Maharashtra',    '400001', '2345 6789 0123', 'ABCPS1234D', 'MH/01/234/567890', '1985-03-14', '100123456789', 'arjun@okaxis',  NULL),
+(1002, 'Priya',    'Krishnan',   'priya.krishnan@email.in',    '+91 98450 56789', '15 MG Road',             'Bangalore',   'Karnataka',      '560001', '3456 7890 1234', 'BCDPK2345E', 'KA/02/345/678901', '1978-07-22', '200234567890', 'priya@oksbi',   NULL),
+(1003, 'Rajesh',   'Patel',      'rajesh.patel@email.in',      '+91 99780 67890', '8 CG Road',              'Ahmedabad',   'Gujarat',        '380001', '4567 8901 2345', 'CDEPR3456F', 'GJ/03/456/789012', '1992-11-05', '300345678901', 'rajesh@okhdfcbank', '24AADCP1234F1Z5'),
+(1004, 'Deepa',    'Iyer',       'deepa.iyer@email.in',        '+91 98410 78901', '23 Anna Salai',          'Chennai',     'Tamil Nadu',     '600001', '5678 9012 3456', 'DEFPI4567G', 'TN/04/567/890123', '1970-01-30', '400456789012', 'deepa@ybl',     NULL),
+(1005, 'Amit',     'Kumar',      'amit.kumar@email.in',        '+91 98100 89012', '5 Connaught Place',      'Delhi',       'Delhi',          '110001', '6789 0123 4567', 'EFGPA5678H', 'DL/05/678/901234', '1988-09-18', '500567890123', 'amit@paytm',    NULL),
+(1006, 'Sunita',   'Das',        'sunita.das@email.in',        '+91 98300 90123', '12 Park Street',         'Kolkata',     'West Bengal',    '700001', '7890 1234 5678', 'FGHPS6789I', 'WB/06/789/012345', '1995-04-12', '600678901234', 'sunita@okicici', NULL),
+(1007, 'Vikram',   'Singh',      'vikram.singh@email.in',      '+91 98290 01234', '31 MI Road',             'Jaipur',      'Rajasthan',      '302001', '8901 2345 6789', 'GHIPV7890J', 'RJ/07/890/123456', '1982-12-25', '700789012345', 'vikram@okaxis',  NULL),
+(1008, 'Ananya',   'Reddy',      'ananya.reddy@email.in',      '+91 98490 12345', '7 Banjara Hills',        'Hyderabad',   'Telangana',      '500001', '9012 3456 7890', 'HIJPA8901K', 'TS/08/901/234567', '1990-06-08', '800890123456', 'ananya@oksbi',  '36AADCR5678G1Z8'),
+(1009, 'Suresh',   'Menon',      'suresh.menon@email.in',      '+91 98220 23456', '19 FC Road',             'Pune',        'Maharashtra',    '411001', '0123 4567 8901', 'IJKPS9012L', 'MH/09/012/345678', '1975-08-20', '900901234567', 'suresh@okhdfcbank', NULL),
+(1010, 'Kavita',   'Joshi',      'kavita.joshi@email.in',      '+91 98390 34567', '4 Hazratganj',           'Lucknow',     'Uttar Pradesh',  '226001', '1234 5678 9012', 'JKLPK0123M', 'UP/10/123/456789', '1998-02-14', '101012345678', 'kavita@ybl',    NULL);
 
 -- ── Accounts ─────────────────────────────────────────────────────────────
 INSERT INTO {DEV_CATALOG}.{SCHEMA}.accounts VALUES
@@ -182,19 +168,6 @@ INSERT INTO {DEV_CATALOG}.{SCHEMA}.transactions VALUES
 (3014, 2001, '2024-11-15 15:00:00', -10000.00,   'ATM Withdrawal',       'ATM',   'CLEAR',     false, 'IN'),
 (3015, 2006, '2024-11-14 06:00:00', -175000.00,  'SWIFT Transfer',       'NEFT',  'REVIEW',    true,  'US');
 
--- ── Loans ────────────────────────────────────────────────────────────────
-INSERT INTO {DEV_CATALOG}.{SCHEMA}.loans VALUES
-(5001, 1001, 'HOME_LOAN', 7500000.00,  6200000.00,  8.50, NULL,                '2019-06-15', 'ACTIVE'),
-(5002, 1002, 'PERSONAL',  500000.00,   320000.00,  12.00, NULL,                '2022-03-10', 'ACTIVE'),
-(5003, 1003, 'BUSINESS',  2500000.00,  1800000.00, 10.50, '24AADCP1234F1Z5',  '2021-08-20', 'ACTIVE'),
-(5004, 1004, 'HOME_LOAN', 4500000.00,  3900000.00,  8.75, NULL,                '2019-09-20', 'NPA'),
-(5005, 1005, 'VEHICLE',   800000.00,   450000.00,  9.25, NULL,                 '2023-01-15', 'ACTIVE'),
-(5006, 1006, 'GOLD',      300000.00,   150000.00,  7.50, NULL,                 '2023-06-01', 'ACTIVE'),
-(5007, 1007, 'PERSONAL',  200000.00,   0.00,       11.50, NULL,                '2020-11-10', 'CLOSED'),
-(5008, 1008, 'BUSINESS',  5000000.00,  4200000.00, 10.00, '36AADCR5678G1Z8',  '2022-04-05', 'RESTRUCTURED'),
-(5009, 1009, 'HOME_LOAN', 6000000.00,  5500000.00,  8.25, NULL,                '2020-02-28', 'ACTIVE'),
-(5010, 1010, 'VEHICLE',   600000.00,   480000.00,  9.50, NULL,                 '2024-01-20', 'NPA');
-
 -- ── Credit Cards ─────────────────────────────────────────────────────────
 INSERT INTO {DEV_CATALOG}.{SCHEMA}.credit_cards VALUES
 (4001, 1001, '4000 1234 5678 9010', '123', '12/26', 500000.00,  'VISA',       'ACTIVE'),
@@ -214,7 +187,6 @@ PROD_SETUP_SQL = f"""
 CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.customers AS SELECT * FROM {DEV_CATALOG}.{SCHEMA}.customers WHERE 1=0;
 CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.accounts AS SELECT * FROM {DEV_CATALOG}.{SCHEMA}.accounts WHERE 1=0;
 CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.transactions AS SELECT * FROM {DEV_CATALOG}.{SCHEMA}.transactions WHERE 1=0;
-CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.loans AS SELECT * FROM {DEV_CATALOG}.{SCHEMA}.loans WHERE 1=0;
 CREATE OR REPLACE TABLE {PROD_CATALOG}.{SCHEMA}.credit_cards AS SELECT * FROM {DEV_CATALOG}.{SCHEMA}.credit_cards WHERE 1=0;
 """
 
@@ -399,7 +371,7 @@ def cmd_provision(env_file: Path) -> None:
     # (via include_serialized_space=true query parameter).
     env_tfvars = CLOUD_ROOT / "envs" / "dev" / "env.auto.tfvars"
     tables_hcl = "\n".join(
-        f'      "{DEV_CATALOG}.{SCHEMA}.{t}",' for t in ["customers", "accounts", "transactions", "loans", "credit_cards"]
+        f'      "{DEV_CATALOG}.{SCHEMA}.{t}",' for t in ["customers", "accounts", "transactions", "credit_cards"]
     )
     if genie_space_id:
         env_tfvars.write_text(f"""\
@@ -422,7 +394,6 @@ uc_tables = [
   "{DEV_CATALOG}.{SCHEMA}.customers",
   "{DEV_CATALOG}.{SCHEMA}.accounts",
   "{DEV_CATALOG}.{SCHEMA}.transactions",
-  "{DEV_CATALOG}.{SCHEMA}.loans",
   "{DEV_CATALOG}.{SCHEMA}.credit_cards",
 ]
 
@@ -755,7 +726,6 @@ def _create_genie_space(dev_state: dict) -> str:
         f"{DEV_CATALOG}.{SCHEMA}.customers",
         f"{DEV_CATALOG}.{SCHEMA}.accounts",
         f"{DEV_CATALOG}.{SCHEMA}.transactions",
-        f"{DEV_CATALOG}.{SCHEMA}.loans",
         f"{DEV_CATALOG}.{SCHEMA}.credit_cards",
     ]
 
@@ -768,9 +738,9 @@ def _create_genie_space(dev_state: dict) -> str:
             "sample_questions": [
                 {"id": _gen_id(), "question": [q]} for q in [
                     "Which customers have high-risk AML flags?",
-                    "What is the total outstanding loan amount by loan type?",
+                    "What is the total balance by account type?",
                     "Show me all UPI transactions over ₹1,00,000",
-                    "List all NPA or restructured loans with customer details",
+                    "List all customers with GSTIN (business customers)",
                     "What are the top 5 merchants by transaction volume?",
                 ]
             ],
@@ -791,8 +761,8 @@ def _create_genie_space(dev_state: dict) -> str:
                     "Interface) is India's real-time payment system — upi_id is "
                     "the customer's Virtual Payment Address. GSTIN is a "
                     "15-character GST identification number for business entities. "
-                    "NPA = Non-Performing Asset (loan default classification per "
-                    "RBI guidelines). AML risk flags: CLEAR, REVIEW, HIGH_RISK, "
+                    "GSTIN is a 15-character GST identification number for business "
+                    "entities. AML risk flags: CLEAR, REVIEW, HIGH_RISK, "
                     "BLOCKED. For transaction analysis, negative amounts are "
                     "debits and positive amounts are credits."
                 ],
@@ -800,7 +770,7 @@ def _create_genie_space(dev_state: dict) -> str:
             "sql_snippets": {
                 "filters": [
                     {"id": _gen_id(), "display_name": "India domestic only", "sql": ["country = 'IN'"]},
-                    {"id": _gen_id(), "display_name": "Active loans only", "sql": ["status = 'ACTIVE'"]},
+                    {"id": _gen_id(), "display_name": "Active cards only", "sql": ["status = 'ACTIVE'"]},
                 ],
                 "expressions": [
                     {"id": _gen_id(), "alias": "customer_full_name", "sql": ["first_name || ' ' || last_name"]},
@@ -810,7 +780,7 @@ def _create_genie_space(dev_state: dict) -> str:
                 "measures": [
                     {"id": _gen_id(), "alias": "total_balance", "sql": ["SUM(balance)"]},
                     {"id": _gen_id(), "alias": "avg_transaction_amount", "sql": ["AVG(ABS(amount))"]},
-                    {"id": _gen_id(), "alias": "total_outstanding", "sql": ["SUM(outstanding)"]},
+                    {"id": _gen_id(), "alias": "transaction_count", "sql": ["COUNT(DISTINCT transaction_id)"]},
                 ],
             },
             # join_specs omitted — the Genie API's proto parser is strict about

@@ -340,7 +340,7 @@ the next one starts.
 | **country-overlay** | — | Country/region overlays (ANZ, IN, SEA) — full cycle per region + multi-region generation |
 | **industry-overlay** | — | Industry overlays (financial\_services, healthcare, retail) — full cycle per industry + multi-industry + country+industry composition (COUNTRY=ANZ INDUSTRY=healthcare) |
 | **aus-bank-demo** | — | Australian bank demo — champion flow (ANZ + financial\_services, import + promote with `dev_bank`→`prod_bank` catalog remap) |
-| **india-bank-demo** | — | India bank demo — champion flow (IN + financial\_services, 5 tables incl. loans with GSTIN/NPA, import + promote with `dev_lakshmi`→`prod_lakshmi`) |
+| **india-bank-demo** | — | India bank demo — champion flow (IN + financial\_services, Aadhaar/PAN/GSTIN/UPI masking, import + promote with `dev_lakshmi`→`prod_lakshmi`) |
 | **asean-bank-demo** | — | ASEAN bank demo — champion flow (SEA + financial\_services, 6 nullable national ID columns, multi-currency, import + promote with `dev_asean_bank`→`prod_asean_bank`) |
 
 ---
