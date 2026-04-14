@@ -287,7 +287,7 @@ CREATE OR REPLACE TABLE {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers (
   state           STRING    COMMENT 'Indian state (Maharashtra, Karnataka, etc.)',
   pincode         STRING    COMMENT 'Indian PIN code (6 digits)',
   aadhaar         STRING    COMMENT 'Aadhaar number — 12-digit unique identity issued by UIDAI',
-  pan             STRING    COMMENT 'Permanent Account Number — 10-char tax identifier (Income Tax Act)',
+  pan_number      STRING    COMMENT 'Permanent Account Number — 10-char tax identifier (Income Tax Act)',
   voter_id        STRING    COMMENT 'Voter ID (EPIC) — Electoral Photo Identity Card',
   date_of_birth   DATE      COMMENT 'Date of birth',
   uan             STRING    COMMENT 'Universal Account Number — 12-digit EPF/provident fund identifier',
@@ -5791,11 +5791,11 @@ genie_spaces = [
         print(f"  {_yellow('WARN')}  {DEV_LAKSHMI_CAT} not found in generated abac — may have been pruned by autofix policy cap")
 
     abac_text = (gen_dir / "abac.auto.tfvars").read_text()
-    india_columns_found = sum(1 for col in ["aadhaar", "pan", "upi_id", "aml_risk_flag", "card_number"]
+    india_columns_found = sum(1 for col in ["aadhaar", "pan_number", "upi_id", "aml_risk_flag", "card_number"]
                               if col in abac_text.lower())
     if india_columns_found < 2:
         raise AssertionError(
-            f"Expected India-sensitive columns (aadhaar, pan, upi_id, aml_risk_flag, card_number) in "
+            f"Expected India-sensitive columns (aadhaar, pan_number, upi_id, aml_risk_flag, card_number) in "
             f"tag_assignments, but only found {india_columns_found}/5"
         )
     print(f"  {_green('PASS')}  India-sensitive columns tagged: {india_columns_found}/5 found in tag_assignments")

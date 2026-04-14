@@ -69,7 +69,7 @@ CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.customers (
   state           STRING    COMMENT 'Indian state (Maharashtra, Karnataka, etc.)',
   pincode         STRING    COMMENT 'Indian PIN code (6 digits)',
   aadhaar         STRING    COMMENT 'Aadhaar number — 12-digit unique identity issued by UIDAI',
-  pan             STRING    COMMENT 'Permanent Account Number — 10-char tax identifier (Income Tax Act)',
+  pan_number      STRING    COMMENT 'Permanent Account Number — 10-char tax identifier (Income Tax Act)',
   voter_id        STRING    COMMENT 'Voter ID (EPIC) — Electoral Photo Identity Card',
   date_of_birth   DATE      COMMENT 'Date of birth',
   uan             STRING    COMMENT 'Universal Account Number — 12-digit EPF/provident fund identifier',
