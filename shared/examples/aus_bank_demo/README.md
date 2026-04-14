@@ -3,10 +3,22 @@
 An end-to-end demo of GenieRails for an Australian retail bank. Start with an existing Genie Space, import it into code, generate ABAC governance with ANZ + financial services overlays, deploy, and promote to production.
 
 **What you'll show:**
-- ANZ-specific masking: Tax File Numbers (TFN), Medicare numbers, BSB codes
+- ANZ-specific masking: Tax File Numbers (TFN), Medicare numbers, BSB codes, ABN, Centrelink CRN, NZ IRD/NHI
 - Financial services governance: PCI-DSS card masking, AML risk row filters, transaction amount rounding
+- Multi-region overlays: combine ANZ with ASEAN (6 countries) and India overlays for pan-APJ governance
+- Multi-industry overlays: financial services, healthcare, and retail — composable in a single command
 - Role-based access: 5 groups (Bank Teller → Compliance Officer) with different views of the same data
 - Dev → prod promotion with catalog remapping across workspaces
+
+**Available overlays:**
+| Type | Code | Coverage | Identifiers | Masking Functions |
+|------|------|----------|-------------|-------------------|
+| Country | `ANZ` | Australia, New Zealand | 12 | 10 |
+| Country | `IN` | India | 10 | 8 |
+| Country | `SEA` | Singapore, Malaysia, Thailand, Indonesia, Philippines, Vietnam | 24 | 16 |
+| Industry | `financial_services` | PCI-DSS, SOX, AML/BSA, GLBA | 7 | 6 |
+| Industry | `healthcare` | HIPAA, HITECH, 42 CFR Part 2 | 7 | 6 |
+| Industry | `retail` | CCPA, GDPR, CAN-SPAM, PCI-DSS | 7 | 6 |
 
 **Time:** ~20 minutes (5 min setup, 15 min demo)
 
@@ -125,27 +137,48 @@ make generate ENV=dev COUNTRY=ANZ INDUSTRY=financial_services
 **Show the output** (`envs/dev/generated/abac.auto.tfvars`):
 
 - **Groups generated:** Bank_Teller, Relationship_Manager, Compliance_Officer, Marketing_Analyst, Branch_Manager
-- **ANZ-specific tags:** `pii_level=masked_tfn`, `pii_level=masked_medicare`, `pii_level=masked_bsb`
+- **ANZ-specific tags:** `pii_level=masked_tfn`, `pii_level=masked_medicare`, `pii_level=masked_bsb`, `pii_level=masked_abn`, `pii_level=masked_crn`
 - **Financial tags:** `pci_level=masked_card_last4`, `compliance_scope=aml_restricted`, `financial_sensitivity=rounded_amounts`
-- **Masking functions:** `mask_tfn()` shows last 3 digits, `mask_medicare()` shows last 4, `mask_bsb()` partially masks BSB
+- **Masking functions:** 10 ANZ functions + 6 financial services functions generated automatically
 
 **Show the masking SQL** (`envs/dev/generated/masking_functions.sql`):
 
 ```sql
--- ANZ-specific: Tax File Number masking
+-- ANZ-specific: Tax File Number masking (Privacy Act 1988)
 CREATE OR REPLACE FUNCTION mask_tfn(tfn STRING) ...
 -- Shows: XXX XXX 789 (last 3 digits visible per ATO guidelines)
 
--- ANZ-specific: Medicare number masking
+-- ANZ-specific: Medicare number masking (My Health Records Act 2012)
 CREATE OR REPLACE FUNCTION mask_medicare(medicare STRING) ...
 -- Shows: XXXX XXXX X (fully masked per My Health Records Act)
+
+-- ANZ-specific: Australian Business Number masking
+CREATE OR REPLACE FUNCTION mask_abn(abn STRING) ...
+-- Shows: 51 XXX XXX XX3 (first 2 + last 3 visible)
+
+-- NZ-specific: IRD number masking (Tax Administration Act 1994)
+CREATE OR REPLACE FUNCTION mask_ird(ird STRING) ...
+-- Shows: XXXXX 789 (last 3 digits visible)
 
 -- PCI-DSS: Credit card last 4
 CREATE OR REPLACE FUNCTION mask_card_last4(card STRING) ...
 -- Shows: **** **** **** 9010
 ```
 
-**Key message:** _"The AI knows Australian regulations — TFN, Medicare, BSB masking are all generated automatically from the column names and the ANZ overlay. Meanwhile, the Genie Space config you already set up in the UI — instructions, sample questions, benchmarks, SQL expressions — is imported verbatim, not regenerated."_
+**Key message:** _"The AI knows Australian and New Zealand regulations — TFN, Medicare, BSB, ABN, CRN, IRD, and NHI masking are all generated automatically from the column names and the ANZ overlay. 10 masking functions covering both AU and NZ identifiers, plus 6 more from the financial services overlay. Meanwhile, the Genie Space config you already set up in the UI — instructions, sample questions, benchmarks, SQL expressions — is imported verbatim, not regenerated."_
+
+### Optional: Show multi-region composition
+
+For APJ-wide demos, show how overlays compose:
+
+```bash
+# Pan-APJ: Australia + ASEAN (6 countries) + India
+make generate ENV=dev COUNTRY=ANZ,SEA,IN INDUSTRY=financial_services
+```
+
+This generates **46 country-specific identifiers** and **34 masking functions** in one pass — covering TFN (AU), IRD (NZ), NRIC (SG), MyKad (MY), Thai National ID, NIK (ID), PhilSys (PH), CCCD (VN), Aadhaar, PAN, and more. Each function respects the specific country's privacy legislation.
+
+**Embedded demographic data protection:** The generator flags identifiers like Malaysia's MyKad and Indonesia's NIK that encode date of birth and location in their structure, applying aggressive masking (last 4 digits only) to prevent demographic inference.
 
 ### 2b. Review, tune & validate
 
@@ -166,6 +199,7 @@ This checks for:
 - FGAC policies referencing missing masking functions
 - Masking function SQL syntax issues
 - Missing or inconsistent group references
+- Cross-overlay conflicts (e.g., NRIC disambiguation between Singapore and Malaysia formats)
 
 Fix any issues the validator flags, then proceed to apply.
 
@@ -252,15 +286,24 @@ python ../shared/examples/aus_bank_demo/setup_demo.py teardown \
 
 ### For compliance / risk audiences
 - _"GenieRails ensures every Genie Space has governance from day one — not as an afterthought"_
-- _"ANZ country overlay automatically identifies TFN, Medicare, and BSB columns — no manual classification needed"_
+- _"ANZ country overlay automatically identifies TFN, Medicare, BSB, ABN, CRN, and NZ IRD/NHI columns — no manual classification needed"_
 - _"AML-flagged transactions are row-filtered to the compliance team only"_
+- _"Each overlay encodes the specific legislation — Privacy Act 1988 (AU), PDPA (SG/MY/TH), DPDP Act 2023 (India), PDP Law 2022 (Indonesia) — not just generic PII rules"_
+
+### For APJ / multi-region audiences
+- _"One command covers 9 countries across ANZ + ASEAN + India — 46 identifiers, 34 masking functions"_
+- _"Embedded demographic data in MyKad (MY) and NIK (ID) is automatically detected and aggressively masked to prevent date-of-birth inference"_
+- _"NRIC disambiguation between Singapore (9-char alphanumeric) and Malaysia (12-digit numeric) is handled automatically"_
+- _"India's DPDP Act 2023 and Indonesia's PDP Law 2022 are both in active enforcement — this overlay keeps you compliant from day one"_
 
 ### For data platform teams
 - _"Everything is Terraform — version controlled, auditable, reproducible"_
 - _"Dev → prod promotion in one command with catalog remapping"_
 - _"No vendor lock-in — after generation, it's standard Databricks resources"_
+- _"Overlays compose: `COUNTRY=ANZ,SEA,IN INDUSTRY=financial_services,healthcare` — mix and match for your use case"_
 
 ### For executive sponsors
 - _"Time to governed Genie Space: 15 minutes, not 15 days"_
 - _"Consistent governance across all Genie Spaces — same groups, same policies, same masking"_
 - _"Scales to hundreds of Genie Spaces with the same pattern"_
+- _"3 country overlays (ANZ, India, ASEAN-6) and 3 industry overlays (financial services, healthcare, retail) — covering the entire APJ region"_
