@@ -1,4 +1,4 @@
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay
+.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 
 # ── Variables expected from the including Makefile ──────────────
 # SHARED_ROOT  — absolute path to shared/
@@ -615,6 +615,24 @@ test-industry-overlay: _bootstrap _guard-workspace-target ## Scenario: industry 
 test-genie-import-no-abac: _bootstrap _guard-workspace-target ## Scenario: import existing Genie, deploy to prod without ABAC
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario genie-import-no-abac \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-aus-bank-demo: _bootstrap _guard-workspace-target ## Scenario: Australian bank demo — champion flow (ANZ + financial_services)
+	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario aus-bank-demo \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-india-bank-demo: _bootstrap _guard-workspace-target ## Scenario: India bank demo — champion flow (IN + financial_services)
+	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario india-bank-demo \
+		--auth-file "$(_ITEST_AUTH)" \
+		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
+
+test-asean-bank-demo: _bootstrap _guard-workspace-target ## Scenario: ASEAN bank demo — champion flow (SEA + financial_services)
+	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
+		--scenario asean-bank-demo \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 

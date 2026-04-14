@@ -158,6 +158,16 @@ DEV_BANK_CAT  = "dev_bank"
 PROD_BANK_CAT = "prod_bank"
 BANK_SCHEMA   = "retail"
 
+# India bank demo catalogs (mirrors shared/examples/india_bank_demo/setup_demo.py)
+DEV_LAKSHMI_CAT  = "dev_lakshmi"
+PROD_LAKSHMI_CAT = "prod_lakshmi"
+LAKSHMI_SCHEMA   = "retail"
+
+# ASEAN bank demo catalogs (mirrors shared/examples/asean_bank_demo/setup_demo.py)
+DEV_ASEAN_CAT  = "dev_asean_bank"
+PROD_ASEAN_CAT = "prod_asean_bank"
+ASEAN_SCHEMA   = "retail"
+
 # ---------------------------------------------------------------------------
 # Australian banking table SQL (mirrors shared/examples/aus_bank_demo/setup_demo.py)
 # ---------------------------------------------------------------------------
@@ -259,6 +269,279 @@ CREATE OR REPLACE TABLE {PROD_BANK_CAT}.{BANK_SCHEMA}.customers AS SELECT * FROM
 CREATE OR REPLACE TABLE {PROD_BANK_CAT}.{BANK_SCHEMA}.accounts AS SELECT * FROM {DEV_BANK_CAT}.{BANK_SCHEMA}.accounts WHERE 1=0;
 CREATE OR REPLACE TABLE {PROD_BANK_CAT}.{BANK_SCHEMA}.transactions AS SELECT * FROM {DEV_BANK_CAT}.{BANK_SCHEMA}.transactions WHERE 1=0;
 CREATE OR REPLACE TABLE {PROD_BANK_CAT}.{BANK_SCHEMA}.credit_cards AS SELECT * FROM {DEV_BANK_CAT}.{BANK_SCHEMA}.credit_cards WHERE 1=0;
+"""
+
+# ---------------------------------------------------------------------------
+# India bank demo table SQL (mirrors shared/examples/india_bank_demo/setup_demo.py)
+# ---------------------------------------------------------------------------
+
+INDIA_BANK_SETUP_SQL = f"""
+CREATE OR REPLACE TABLE {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers (
+  customer_id     BIGINT    COMMENT 'Unique customer identifier',
+  first_name      STRING    COMMENT 'Customer first name',
+  last_name       STRING    COMMENT 'Customer last name',
+  email           STRING    COMMENT 'Contact email address',
+  phone           STRING    COMMENT 'Indian mobile number (+91 format)',
+  address         STRING    COMMENT 'Residential address',
+  city            STRING    COMMENT 'City',
+  state           STRING    COMMENT 'Indian state (Maharashtra, Karnataka, etc.)',
+  pincode         STRING    COMMENT 'Indian PIN code (6 digits)',
+  aadhaar         STRING    COMMENT 'Aadhaar number — 12-digit unique identity issued by UIDAI',
+  pan             STRING    COMMENT 'Permanent Account Number — 10-char tax identifier (Income Tax Act)',
+  voter_id        STRING    COMMENT 'Voter ID (EPIC) — Electoral Photo Identity Card',
+  date_of_birth   DATE      COMMENT 'Date of birth',
+  uan             STRING    COMMENT 'Universal Account Number — 12-digit EPF/provident fund identifier',
+  upi_id          STRING    COMMENT 'UPI Virtual Payment Address — registered payment instrument'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+
+CREATE OR REPLACE TABLE {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.accounts (
+  account_id      BIGINT       COMMENT 'Unique account identifier',
+  customer_id     BIGINT       COMMENT 'FK to customers',
+  ifsc            STRING       COMMENT 'IFSC code — Indian Financial System Code (11 chars)',
+  account_number  STRING       COMMENT 'Bank account number',
+  account_type    STRING       COMMENT 'SAVINGS, CURRENT, FD, RD, HOME_LOAN',
+  balance         DECIMAL(18,2) COMMENT 'Current balance in INR',
+  opened_date     DATE         COMMENT 'Date account was opened',
+  branch          STRING       COMMENT 'Branch name'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+
+CREATE OR REPLACE TABLE {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.transactions (
+  transaction_id  BIGINT       COMMENT 'Unique transaction identifier',
+  account_id      BIGINT       COMMENT 'FK to accounts',
+  transaction_date TIMESTAMP   COMMENT 'Date and time of transaction',
+  amount          DECIMAL(18,2) COMMENT 'Transaction amount in INR',
+  merchant        STRING       COMMENT 'Merchant or payee name',
+  category        STRING       COMMENT 'Transaction category (UPI, NEFT, RTGS, IMPS, POS, ATM)',
+  aml_risk_flag   STRING       COMMENT 'AML risk assessment: CLEAR, REVIEW, HIGH_RISK, BLOCKED',
+  cross_border    BOOLEAN      COMMENT 'True if international transaction',
+  country         STRING       COMMENT 'Destination country code (IN, SG, US, AE, etc.)'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+
+CREATE OR REPLACE TABLE {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.loans (
+  loan_id         BIGINT       COMMENT 'Unique loan identifier',
+  customer_id     BIGINT       COMMENT 'FK to customers',
+  loan_type       STRING       COMMENT 'HOME_LOAN, PERSONAL, VEHICLE, BUSINESS, GOLD',
+  principal       DECIMAL(18,2) COMMENT 'Loan principal in INR',
+  outstanding     DECIMAL(18,2) COMMENT 'Outstanding balance in INR',
+  interest_rate   DECIMAL(5,2) COMMENT 'Annual interest rate',
+  gstin           STRING       COMMENT 'GSTIN for business loans — GST Identification Number (15 chars)',
+  disbursed_date  DATE         COMMENT 'Date loan was disbursed',
+  status          STRING       COMMENT 'ACTIVE, CLOSED, NPA, RESTRUCTURED'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+
+CREATE OR REPLACE TABLE {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards (
+  card_id         BIGINT       COMMENT 'Unique card identifier',
+  customer_id     BIGINT       COMMENT 'FK to customers',
+  card_number     STRING       COMMENT 'Full credit card PAN — PCI-DSS sensitive',
+  cvv             STRING       COMMENT 'Card verification value — PCI-DSS sensitive',
+  expiry_date     STRING       COMMENT 'Card expiry (MM/YY)',
+  credit_limit    DECIMAL(18,2) COMMENT 'Credit limit in INR',
+  card_type       STRING       COMMENT 'VISA, MASTERCARD, RUPAY',
+  status          STRING       COMMENT 'ACTIVE, BLOCKED, EXPIRED'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+"""
+
+INDIA_BANK_SAMPLE_DATA_SQL = f"""
+INSERT INTO {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers VALUES
+(1001, 'Arjun',    'Sharma',     'arjun.sharma@email.in',       '+91 98765 43210', '42 MG Road',          'Mumbai',      'Maharashtra',  '400001', '2345 6789 0123', 'ABCPS1234D', 'GDL1234567', '1985-03-14', '100123456789', 'arjun@okaxis'),
+(1002, 'Priya',    'Krishnan',   'priya.k@email.in',            '+91 87654 32109', '15 Brigade Road',     'Bangalore',   'Karnataka',    '560001', '3456 7890 1234', 'BCDPK2345E', 'KAR2345678', '1978-07-22', '100234567890', 'priya@ybl'),
+(1003, 'Rajesh',   'Patel',      'rajesh.patel@email.in',       '+91 76543 21098', '8 Ashram Road',       'Ahmedabad',   'Gujarat',      '380001', '4567 8901 2345', 'CDEPR3456F', 'GJR3456789', '1992-11-05', '100345678901', 'rajesh@oksbi'),
+(1004, 'Deepa',    'Iyer',       'deepa.iyer@email.in',         '+91 65432 10987', '23 Anna Salai',       'Chennai',     'Tamil Nadu',   '600001', '5678 9012 3456', 'DEFDI4567G', 'TN04567890', '1970-01-30', '100456789012', 'deepa@paytm'),
+(1005, 'Amit',     'Kumar',      'amit.kumar@email.in',         '+91 54321 09876', '5 Rajpath',           'Delhi',       'Delhi',        '110001', '6789 0123 4567', 'EFGAK5678H', 'DL05678901', '1988-09-18', '100567890123', 'amit@okicici');
+
+INSERT INTO {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.accounts VALUES
+(2001, 1001, 'SBIN0001234', '12345678901', 'SAVINGS',   254200.50,  '2015-03-10', 'Fort Mumbai'),
+(2002, 1001, 'SBIN0001234', '12345678902', 'CURRENT',  1542000.00,  '2018-05-15', 'Fort Mumbai'),
+(2003, 1002, 'HDFC0002345', '23456789012', 'SAVINGS',    87500.25,  '2018-07-15', 'MG Road Bangalore'),
+(2004, 1003, 'ICIC0003456', '34567890123', 'FD',        500000.00,  '2022-01-05', 'CG Road Ahmedabad'),
+(2005, 1004, 'UTIB0004567', '45678901234', 'HOME_LOAN',-4850000.00, '2019-09-20', 'Anna Nagar Chennai');
+
+INSERT INTO {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.transactions VALUES
+(3001, 2001, '2024-11-15 10:23:00', -850.00,     'Reliance Fresh',        'UPI',   'CLEAR',     false, 'IN'),
+(3002, 2001, '2024-11-15 14:10:00', -25000.00,   'IRCTC Booking',         'NEFT',  'CLEAR',     false, 'IN'),
+(3003, 2002, '2024-11-14 09:00:00', -1500000.00, 'Wire Transfer',         'RTGS',  'REVIEW',    true,  'SG'),
+(3004, 2003, '2024-11-15 16:45:00', -428.00,     'Swiggy Order',          'UPI',   'CLEAR',     false, 'IN'),
+(3005, 2004, '2024-11-15 08:30:00', 52000.00,    'Salary Credit',         'NEFT',  'CLEAR',     false, 'IN'),
+(3006, 2005, '2024-11-13 11:00:00', -5000000.00, 'Hawala Network Ltd',    'RTGS',  'HIGH_RISK', true,  'AE');
+
+INSERT INTO {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.loans VALUES
+(5001, 1001, 'HOME_LOAN', 5000000.00, 4200000.00, 8.50,  NULL,               '2020-03-15', 'ACTIVE'),
+(5002, 1002, 'PERSONAL',   300000.00,  180000.00, 12.00, NULL,               '2023-06-01', 'ACTIVE'),
+(5003, 1003, 'BUSINESS',  2000000.00, 1500000.00, 10.50, '24AADCS1234F1Z5', '2021-09-10', 'ACTIVE'),
+(5004, 1004, 'GOLD',       200000.00,       0.00, 9.00,  NULL,               '2022-01-20', 'CLOSED'),
+(5005, 1005, 'VEHICLE',    800000.00,  650000.00, 9.50,  NULL,               '2023-03-01', 'NPA');
+
+INSERT INTO {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards VALUES
+(4001, 1001, '4000 1234 5678 9010', '123', '12/26', 500000.00, 'VISA',       'ACTIVE'),
+(4002, 1002, '5100 2345 6789 0121', '456', '03/27', 300000.00, 'MASTERCARD', 'ACTIVE'),
+(4003, 1003, '6521 3456 7890 1232', '789', '06/25', 200000.00, 'RUPAY',      'ACTIVE'),
+(4004, 1004, '4000 4567 8901 2343', '234', '09/26', 750000.00, 'VISA',       'ACTIVE'),
+(4005, 1005, '5100 5678 9012 3454', '567', '01/28', 150000.00, 'MASTERCARD', 'BLOCKED');
+"""
+
+INDIA_BANK_PROD_SETUP_SQL = f"""
+CREATE OR REPLACE TABLE {PROD_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers AS SELECT * FROM {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers WHERE 1=0;
+CREATE OR REPLACE TABLE {PROD_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.accounts AS SELECT * FROM {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.accounts WHERE 1=0;
+CREATE OR REPLACE TABLE {PROD_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.transactions AS SELECT * FROM {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.transactions WHERE 1=0;
+CREATE OR REPLACE TABLE {PROD_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.loans AS SELECT * FROM {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.loans WHERE 1=0;
+CREATE OR REPLACE TABLE {PROD_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards AS SELECT * FROM {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards WHERE 1=0;
+"""
+
+# ---------------------------------------------------------------------------
+# ASEAN bank demo table SQL (mirrors shared/examples/asean_bank_demo/setup_demo.py)
+# ---------------------------------------------------------------------------
+
+ASEAN_BANK_SETUP_SQL = f"""
+CREATE OR REPLACE TABLE {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.customers (
+  customer_id     BIGINT    COMMENT 'Unique customer identifier',
+  first_name      STRING    COMMENT 'Customer first name',
+  last_name       STRING    COMMENT 'Customer last name',
+  email           STRING    COMMENT 'Contact email address',
+  phone           STRING    COMMENT 'Phone number (country-specific format)',
+  address         STRING    COMMENT 'Residential address',
+  city            STRING    COMMENT 'City',
+  country         STRING    COMMENT 'Country code (SG, MY, TH, ID, PH, VN)',
+  postal_code     STRING    COMMENT 'Postal/ZIP code',
+  nric            STRING    COMMENT 'Singapore NRIC — National Registration Identity Card (9 chars)',
+  mykad           STRING    COMMENT 'Malaysian MyKad — national IC number (12 digits, encodes date of birth)',
+  thai_id         STRING    COMMENT 'Thai National ID — 13-digit citizen identification number',
+  nik             STRING    COMMENT 'Indonesian NIK — Nomor Induk Kependudukan (16 digits, encodes date of birth and district)',
+  philsys         STRING    COMMENT 'Philippine PhilSys national ID — 12-digit Philippine Identification System number',
+  cccd            STRING    COMMENT 'Vietnamese CCCD — Can Cuoc Cong Dan citizen identity card (12 digits)',
+  date_of_birth   DATE      COMMENT 'Date of birth'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+
+CREATE OR REPLACE TABLE {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.accounts (
+  account_id      BIGINT       COMMENT 'Unique account identifier',
+  customer_id     BIGINT       COMMENT 'FK to customers',
+  account_number  STRING       COMMENT 'Bank account number',
+  account_type    STRING       COMMENT 'SAVINGS, CURRENT, FIXED_DEPOSIT, MORTGAGE',
+  currency        STRING       COMMENT 'Account currency (SGD, MYR, THB, IDR, PHP, VND)',
+  balance         DECIMAL(18,2) COMMENT 'Current balance in account currency',
+  opened_date     DATE         COMMENT 'Date account was opened',
+  branch          STRING       COMMENT 'Branch name and country'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+
+CREATE OR REPLACE TABLE {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.transactions (
+  transaction_id  BIGINT       COMMENT 'Unique transaction identifier',
+  account_id      BIGINT       COMMENT 'FK to accounts',
+  transaction_date TIMESTAMP   COMMENT 'Date and time of transaction',
+  amount          DECIMAL(18,2) COMMENT 'Transaction amount in account currency',
+  currency        STRING       COMMENT 'Transaction currency',
+  merchant        STRING       COMMENT 'Merchant or payee name',
+  category        STRING       COMMENT 'Transaction category (RETAIL, TRANSFER, ATM, REMITTANCE, CROSS_BORDER)',
+  aml_risk_flag   STRING       COMMENT 'AML risk assessment: CLEAR, REVIEW, HIGH_RISK, BLOCKED',
+  cross_border    BOOLEAN      COMMENT 'True if cross-border transaction',
+  source_country  STRING       COMMENT 'Originating country code',
+  dest_country    STRING       COMMENT 'Destination country code'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+
+CREATE OR REPLACE TABLE {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.credit_cards (
+  card_id         BIGINT       COMMENT 'Unique card identifier',
+  customer_id     BIGINT       COMMENT 'FK to customers',
+  card_number     STRING       COMMENT 'Full credit card PAN — PCI-DSS sensitive',
+  cvv             STRING       COMMENT 'Card verification value — PCI-DSS sensitive',
+  expiry_date     STRING       COMMENT 'Card expiry (MM/YY)',
+  credit_limit    DECIMAL(18,2) COMMENT 'Credit limit in SGD equivalent',
+  currency        STRING       COMMENT 'Card billing currency',
+  card_type       STRING       COMMENT 'VISA, MASTERCARD, UNIONPAY, JCB',
+  status          STRING       COMMENT 'ACTIVE, BLOCKED, EXPIRED'
+)
+USING delta
+TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+"""
+
+ASEAN_BANK_SAMPLE_DATA_SQL = f"""
+-- Each customer populates ONLY their country's national ID column; others are NULL
+INSERT INTO {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.customers VALUES
+(1001, 'Wei Liang', 'Tan',          'wl.tan@email.sg',      '+65 9123 4567', '42 Orchard Rd',        'Singapore',      'SG', '238879', 'S8712345D',  NULL,           NULL,            NULL,               NULL,             NULL,             '1987-06-15'),
+(1002, 'Mei Ling',  'Wong',         'ml.wong@email.sg',     '+65 8234 5678', '15 Marina Blvd',       'Singapore',      'SG', '068912', 'T0198765A',  NULL,           NULL,            NULL,               NULL,             NULL,             '2001-03-22'),
+(1003, 'Ahmad',     'bin Ismail',   'ahmad.i@email.my',     '+60 12-345 6789','8 Jalan Bukit Bintang','Kuala Lumpur',   'MY', '50450',  NULL,         '850615085123', NULL,            NULL,               NULL,             NULL,             '1985-06-15'),
+(1004, 'Nurul Huda','binti Abdullah','nurul.h@email.my',    '+60 13-456 7890','23 Gurney Drive',      'Penang',         'MY', '10050',  NULL,         '920304146234', NULL,            NULL,               NULL,             NULL,             '1992-03-04'),
+(1005, 'Somchai',   'Wongprasert',  'somchai.w@email.th',   '+66 81 234 5678','5 Sukhumvit Rd',       'Bangkok',        'TH', '10110',  NULL,         NULL,           '1100112345678', NULL,               NULL,             NULL,             '1980-11-20'),
+(1006, 'Siriporn',  'Chaiyasit',    'siriporn.c@email.th',  '+66 89 345 6789','12 Nimmanhaemin Rd',   'Chiang Mai',     'TH', '50200',  NULL,         NULL,           '5340100567890', NULL,               NULL,             NULL,             '1995-08-10');
+
+INSERT INTO {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.customers VALUES
+(1007, 'Budi',      'Santoso',      'budi.s@email.id',      '+62 812 3456 7890','42 Jalan Sudirman',  'Jakarta',        'ID', '10110',  NULL,         NULL,           NULL,            '3201151290870001', NULL,             NULL,             '1990-12-15'),
+(1008, 'Dewi',      'Kartika',      'dewi.k@email.id',      '+62 813 4567 8901','15 Jalan Tunjungan', 'Surabaya',       'ID', '60271',  NULL,         NULL,           NULL,            '3578064508950002', NULL,             NULL,             '1995-08-04'),
+(1009, 'Juan',      'dela Cruz',    'juan.dc@email.ph',     '+63 917 123 4567', '8 Ayala Ave',        'Manila',         'PH', '1226',   NULL,         NULL,           NULL,            NULL,               '123456789012',   NULL,             '1988-04-25'),
+(1010, 'Maria',     'Santos',       'maria.s@email.ph',     '+63 918 234 5678', '23 Osmena Blvd',     'Cebu',           'PH', '6000',   NULL,         NULL,           NULL,            NULL,               '234567890123',   NULL,             '1992-09-12'),
+(1011, 'Van Minh',  'Nguyen',       'minh.n@email.vn',      '+84 90 123 4567',  '5 Le Loi St',        'Ho Chi Minh City','VN','700000', NULL,         NULL,           NULL,            NULL,               NULL,             '001085012345',   '1985-10-08'),
+(1012, 'Thi Lan',   'Tran',         'lan.t@email.vn',       '+84 91 234 5678',  '12 Hoan Kiem St',    'Hanoi',          'VN', '100000', NULL,         NULL,           NULL,            NULL,               NULL,             '024092045678',   '1990-02-14');
+
+INSERT INTO {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.accounts VALUES
+(2001, 1001, 'SG1234567890', 'SAVINGS',       'SGD',    85200.50,    '2015-03-10', 'Orchard Singapore'),
+(2002, 1002, 'SG2345678901', 'CURRENT',       'SGD',   152000.00,    '2020-07-15', 'Marina Singapore'),
+(2003, 1003, 'MY3456789012', 'SAVINGS',       'MYR',    43500.25,    '2018-06-20', 'KLCC Kuala Lumpur'),
+(2004, 1004, 'MY4567890123', 'FIXED_DEPOSIT', 'MYR',   200000.00,    '2022-01-05', 'Gurney Penang'),
+(2005, 1005, 'TH5678901234', 'SAVINGS',       'THB',   750000.00,    '2019-09-20', 'Sukhumvit Bangkok'),
+(2006, 1006, 'TH6789012345', 'CURRENT',       'THB',   320000.00,    '2021-04-12', 'Nimmanhaemin Chiang Mai');
+
+INSERT INTO {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.accounts VALUES
+(2007, 1007, 'ID7890123456', 'SAVINGS',       'IDR', 125000000.00,   '2020-11-30', 'Sudirman Jakarta'),
+(2008, 1008, 'ID8901234567', 'CURRENT',       'IDR',  48000000.00,   '2023-01-08', 'Tunjungan Surabaya'),
+(2009, 1009, 'PH9012345678', 'SAVINGS',       'PHP',   350000.00,    '2017-08-15', 'Makati Manila'),
+(2010, 1010, 'PH0123456789', 'SAVINGS',       'PHP',   180000.00,    '2022-03-22', 'Cebu IT Park'),
+(2011, 1011, 'VN1234509876', 'SAVINGS',       'VND', 450000000.00,   '2019-05-10', 'District 1 HCMC'),
+(2012, 1012, 'VN2345610987', 'CURRENT',       'VND', 180000000.00,   '2021-12-01', 'Hoan Kiem Hanoi');
+
+INSERT INTO {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.transactions VALUES
+(3001, 2001, '2024-11-15 10:23:00', -85.50,      'SGD', 'NTUC FairPrice',     'RETAIL',       'CLEAR',     false, 'SG', 'SG'),
+(3002, 2001, '2024-11-15 14:10:00', -2500.00,    'SGD', 'DBS PayLah Transfer','REMITTANCE',   'CLEAR',     true,  'SG', 'MY'),
+(3003, 2003, '2024-11-14 09:00:00', -15000.00,   'MYR', 'Grab Malaysia',      'RETAIL',       'CLEAR',     false, 'MY', 'MY'),
+(3004, 2005, '2024-11-15 16:45:00', -4280.00,    'THB', 'Shopee Thailand',    'RETAIL',       'CLEAR',     false, 'TH', 'TH'),
+(3005, 2007, '2024-11-15 08:30:00', 52000000.00, 'IDR', 'Salary Deposit',     'TRANSFER',     'CLEAR',     false, 'ID', 'ID'),
+(3006, 2001, '2024-11-13 11:00:00', -50000.00,   'SGD', 'Shell Company BVI',  'CROSS_BORDER', 'HIGH_RISK', true,  'SG', 'VG');
+
+INSERT INTO {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.transactions VALUES
+(3007, 2009, '2024-11-15 00:00:00', -12000.00,   'PHP', 'GCash Transfer',     'REMITTANCE',   'CLEAR',     true,  'PH', 'SG'),
+(3008, 2011, '2024-11-14 20:15:00', -1800000.00, 'VND', 'MoMo Payment',       'RETAIL',       'CLEAR',     false, 'VN', 'VN'),
+(3009, 2003, '2024-11-12 03:00:00', -85000.00,   'MYR', 'Offshore Holdings',  'CROSS_BORDER', 'HIGH_RISK', true,  'MY', 'VG'),
+(3010, 2005, '2024-11-15 12:00:00', -150000.00,  'THB', 'PromptPay Transfer', 'REMITTANCE',   'REVIEW',    true,  'TH', 'VN'),
+(3011, 2007, '2024-11-15 07:30:00', -3200000.00, 'IDR', 'Tokopedia',          'RETAIL',       'CLEAR',     false, 'ID', 'ID'),
+(3012, 2012, '2024-11-15 13:20:00', -25000000.00,'VND', 'Unknown Wire',       'CROSS_BORDER', 'BLOCKED',   true,  'VN', 'MM'),
+(3013, 2002, '2024-11-15 15:00:00', -200.00,     'SGD', 'ATM Withdrawal',     'ATM',          'CLEAR',     false, 'SG', 'SG'),
+(3014, 2004, '2024-11-14 06:00:00', -8000.00,    'MYR', 'Cross-border Wire',  'REMITTANCE',   'REVIEW',    true,  'MY', 'ID'),
+(3015, 2008, '2024-11-14 11:00:00', -15000000.00,'IDR', 'Salary Transfer',    'TRANSFER',     'CLEAR',     false, 'ID', 'ID');
+
+INSERT INTO {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.credit_cards VALUES
+(4001, 1001, '4000 1234 5678 9010', '123', '12/26', 15000.00, 'SGD', 'VISA',       'ACTIVE'),
+(4002, 1002, '5100 2345 6789 0121', '456', '03/27', 20000.00, 'SGD', 'MASTERCARD', 'ACTIVE'),
+(4003, 1003, '6222 3456 7890 1232', '789', '06/25', 50000.00, 'MYR', 'UNIONPAY',   'ACTIVE'),
+(4004, 1004, '5100 4567 8901 2343', '234', '09/26', 30000.00, 'MYR', 'MASTERCARD', 'ACTIVE'),
+(4005, 1005, '3528 5678 9012 3454', '567', '01/28', 200000.00,'THB', 'JCB',        'ACTIVE'),
+(4006, 1006, '4000 6789 0123 4565', '890', '11/25', 150000.00,'THB', 'VISA',       'EXPIRED');
+
+INSERT INTO {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.credit_cards VALUES
+(4007, 1007, '4000 7890 1234 5676', '012', '07/27', 25000000.00,'IDR', 'VISA',       'ACTIVE'),
+(4008, 1008, '5100 8901 2345 6787', '345', '04/26', 15000000.00,'IDR', 'MASTERCARD', 'ACTIVE'),
+(4009, 1009, '4000 9012 3456 7898', '678', '08/25', 250000.00,  'PHP', 'VISA',       'BLOCKED'),
+(4010, 1010, '5100 0123 4567 8909', '901', '02/28', 150000.00,  'PHP', 'MASTERCARD', 'ACTIVE'),
+(4011, 1011, '4000 1234 5678 0011', '234', '05/27', 50000000.00,'VND', 'VISA',       'ACTIVE'),
+(4012, 1012, '5100 2345 6789 0122', '567', '10/26', 30000000.00,'VND', 'MASTERCARD', 'ACTIVE');
+"""
+
+ASEAN_BANK_PROD_SETUP_SQL = f"""
+CREATE OR REPLACE TABLE {PROD_ASEAN_CAT}.{ASEAN_SCHEMA}.customers AS SELECT * FROM {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.customers WHERE 1=0;
+CREATE OR REPLACE TABLE {PROD_ASEAN_CAT}.{ASEAN_SCHEMA}.accounts AS SELECT * FROM {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.accounts WHERE 1=0;
+CREATE OR REPLACE TABLE {PROD_ASEAN_CAT}.{ASEAN_SCHEMA}.transactions AS SELECT * FROM {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.transactions WHERE 1=0;
+CREATE OR REPLACE TABLE {PROD_ASEAN_CAT}.{ASEAN_SCHEMA}.credit_cards AS SELECT * FROM {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.credit_cards WHERE 1=0;
 """
 
 # ---------------------------------------------------------------------------
@@ -5319,6 +5602,542 @@ genie_spaces = [
 
 
 # ---------------------------------------------------------------------------
+# Scenario: india-bank-demo — India bank champion flow
+# ---------------------------------------------------------------------------
+
+def _setup_india_bank_data(auth_file: Path, warehouse_id: str) -> str:
+    """Create dev_lakshmi and prod_lakshmi catalogs with Indian banking tables.
+
+    Returns the warehouse ID used.
+    """
+    import time as _time_india
+    import hcl2 as _hcl2_india
+    from databricks.sdk import WorkspaceClient as _WC_india
+    from databricks.sdk.service.sql import StatementState as _SS_india
+
+    def _s(v): return (v[0] if isinstance(v, list) else (v or "")).strip()
+
+    with open(auth_file) as f:
+        cfg = _hcl2_india.load(f)
+
+    host = _s(cfg.get("databricks_workspace_host", ""))
+    client_id = _s(cfg.get("databricks_client_id", ""))
+    client_secret = _s(cfg.get("databricks_client_secret", ""))
+    catalog_storage_base = _s(cfg.get("catalog_storage_base", ""))
+
+    w = _WC_india(host=host, client_id=client_id, client_secret=client_secret)
+
+    wh = warehouse_id
+    if not wh:
+        for warehouse in w.warehouses.list():
+            if warehouse.id:
+                wh = warehouse.id
+                break
+    if not wh:
+        print("  No warehouse found — creating one for India bank data setup...")
+        from databricks.sdk.service.sql import EndpointInfoWarehouseType
+        create_resp = w.warehouses.create(
+            name="Demo Warehouse",
+            cluster_size="2X-Small",
+            warehouse_type=EndpointInfoWarehouseType.PRO,
+            max_num_clusters=1,
+            auto_stop_mins=15,
+            enable_serverless_compute=True,
+        )
+        created_wh = create_resp.result() if hasattr(create_resp, "result") else create_resp
+        wh = created_wh.id if hasattr(created_wh, "id") else str(created_wh)
+
+    for cat in [DEV_LAKSHMI_CAT, PROD_LAKSHMI_CAT]:
+        storage = f"{catalog_storage_base.rstrip('/')}/{cat}" if catalog_storage_base else None
+        try:
+            w.catalogs.create(name=cat, comment=f"india-bank-demo — {cat}", storage_root=storage)
+        except Exception:
+            pass
+        try:
+            w.schemas.create(name=LAKSHMI_SCHEMA, catalog_name=cat)
+        except Exception:
+            pass
+
+    print(f"  Waiting for catalog {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA} to propagate...")
+    for _ in range(12):
+        try:
+            r = w.statement_execution.execute_statement(
+                warehouse_id=wh,
+                statement=f"DESCRIBE SCHEMA {DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}",
+                wait_timeout="30s",
+            )
+            st = r.status.state if r.status else None
+            st_str = st.value if hasattr(st, "value") else str(st) if st else ""
+            if st_str == "SUCCEEDED":
+                break
+        except Exception:
+            pass
+        _time_india.sleep(5)
+
+    all_sql = INDIA_BANK_SETUP_SQL + "\n" + INDIA_BANK_SAMPLE_DATA_SQL + "\n" + INDIA_BANK_PROD_SETUP_SQL
+    stmts = []
+    for raw in all_sql.split(";"):
+        lines = [l for l in raw.strip().splitlines() if l.strip() and not l.strip().startswith("--")]
+        cleaned = "\n".join(lines).strip()
+        if cleaned:
+            stmts.append(cleaned)
+
+    def _state_str(state) -> str:
+        return state.value if hasattr(state, "value") else str(state)
+
+    for stmt in stmts:
+        r = w.statement_execution.execute_statement(
+            warehouse_id=wh, statement=stmt, wait_timeout="50s",
+        )
+        max_wait = 120
+        start = _time_india.time()
+        while True:
+            st = _state_str(r.status.state)
+            if st == "SUCCEEDED":
+                break
+            if st in ("FAILED", "CANCELED", "CLOSED"):
+                err = r.status.error
+                print(f"  {_yellow('WARN')} SQL failed: {err}")
+                break
+            if _time_india.time() - start > max_wait:
+                print(f"  {_yellow('WARN')} SQL timed out")
+                break
+            _time_india.sleep(2)
+            r = w.statement_execution.get_statement(r.statement_id)
+
+    print(f"  {_green('OK')}  India bank tables created in {DEV_LAKSHMI_CAT} + {PROD_LAKSHMI_CAT}")
+    return wh
+
+
+def _create_india_bank_genie_space_via_api(
+    auth_file: Path,
+    warehouse_id: str,
+) -> str:
+    """Create a Genie Space for Lakshmi Bank Analytics via REST API."""
+    india_tables = [
+        f"{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers",
+        f"{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.accounts",
+        f"{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.transactions",
+        f"{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.loans",
+        f"{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards",
+    ]
+    return _create_genie_space_via_api(
+        auth_file, "Lakshmi Bank Analytics", india_tables, warehouse_id,
+    )
+
+
+def scenario_india_bank_demo(
+    auth_file: Path,
+    warehouse_id: str = "",
+    keep_data: bool = False,
+    fresh_env: bool = False,
+) -> None:
+    """India bank demo — champion flow (IN + financial_services, import + promote)."""
+    _banner("Scenario: india-bank-demo — India bank champion flow (IN + financial_services)")
+    env = "dev"
+    prod_env = "prod"
+
+    _ensure_packages()
+
+    # ── Phase 1: Setup ───────────────────────────────────────────────────────
+    _preamble_cleanup(env, prod_env, fresh_env=fresh_env)
+
+    _step("Phase 1 — Creating Indian banking tables")
+    resolved_wh = _setup_india_bank_data(auth_file, warehouse_id)
+
+    _step("Phase 1 — Creating rich Genie Space via API")
+    space_id = _create_india_bank_genie_space_via_api(auth_file, resolved_wh)
+
+    # ── Phase 2: Generate with IN + financial_services ──────────────────────
+    _step("Phase 2 — Configuring env with genie_space_id + uc_tables (attach mode)")
+    _make("setup", f"ENV={env}")
+    _make("setup", f"ENV={prod_env}")
+
+    india_tables_hcl = f"""\
+genie_spaces = [
+  {{
+    name           = "Lakshmi Bank Analytics"
+    genie_space_id = "{space_id}"
+    uc_tables = [
+      "{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers",
+      "{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.accounts",
+      "{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.transactions",
+      "{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.loans",
+      "{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards",
+    ]
+  }},
+]
+"""
+    _write_env_tfvars(env, india_tables_hcl, resolved_wh)
+
+    _step("Phase 2 — Running make generate with COUNTRY=IN INDUSTRY=financial_services")
+    _make("generate", f"ENV={env}", "COUNTRY=IN", "INDUSTRY=financial_services", retries=3)
+
+    _step("Asserting India-specific masking functions in generated output")
+    gen_dir = ENVS_DIR / env / "generated"
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated")
+    _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated")
+    _assert_contains(gen_dir / "abac.auto.tfvars", DEV_LAKSHMI_CAT,
+                     f"{DEV_LAKSHMI_CAT} catalog referenced in generated policies")
+
+    abac_text = (gen_dir / "abac.auto.tfvars").read_text()
+    india_columns_found = sum(1 for col in ["aadhaar", "pan", "upi_id", "aml_risk_flag", "card_number"]
+                              if col in abac_text.lower())
+    if india_columns_found < 3:
+        raise AssertionError(
+            f"Expected India-sensitive columns (aadhaar, pan, upi_id, aml_risk_flag, card_number) in "
+            f"tag_assignments, but only found {india_columns_found}/5"
+        )
+    print(f"  {_green('PASS')}  India-sensitive columns tagged: {india_columns_found}/5 found in tag_assignments")
+
+    masking_sql = gen_dir / "masking_functions.sql"
+    sql_text = masking_sql.read_text()
+    india_fns_found = [fn for fn in ["mask_aadhaar", "mask_pan_india", "mask_voter_id"]
+                       if fn in sql_text]
+    if not india_fns_found:
+        raise AssertionError(
+            f"Expected at least one India-specific masking function (mask_aadhaar, mask_pan_india, mask_voter_id) "
+            f"in masking_functions.sql, but none found"
+        )
+    print(f"  {_green('PASS')}  India-specific masking functions present: {india_fns_found}")
+
+    _assert_contains(gen_dir / "abac.auto.tfvars", "Lakshmi Bank Analytics",
+                     "Lakshmi Bank Analytics genie_space_configs entry present")
+
+    # ── Phase 3: Apply governance ────────────────────────────────────────────
+    _step("Phase 3 — Applying governance (space must survive, not be created/deleted)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Asserting space NOT created by Terraform (no .genie_space_id_* file)")
+    id_files = list((ENVS_DIR / env).glob(".genie_space_id_*"))
+    legacy = ENVS_DIR / env / ".genie_space_id"
+    if id_files or legacy.exists():
+        raise AssertionError(
+            "Terraform created a new Genie Space in attach mode — expected no "
+            ".genie_space_id_* file. The existing space should be used as-is."
+        )
+    print(f"  {_green('PASS')}  No .genie_space_id_* file: Terraform did not create a new space")
+
+    # ── Phase 4: Promote to prod ─────────────────────────────────────────────
+    _step(f"Phase 4 — Promoting {env} -> {prod_env} ({DEV_LAKSHMI_CAT} -> {PROD_LAKSHMI_CAT})")
+    _make(
+        "promote",
+        f"SOURCE_ENV={env}",
+        f"DEST_ENV={prod_env}",
+        f"DEST_CATALOG_MAP={DEV_LAKSHMI_CAT}={PROD_LAKSHMI_CAT}",
+    )
+
+    _assert_file_exists(
+        ENVS_DIR / prod_env / "env.auto.tfvars",
+        "prod env.auto.tfvars written by promote",
+    )
+    prod_abac = ENVS_DIR / prod_env / "generated" / "abac.auto.tfvars"
+    _assert_contains(prod_abac, PROD_LAKSHMI_CAT,
+                     f"{PROD_LAKSHMI_CAT} catalog in promoted prod config")
+    prod_text = prod_abac.read_text()
+    tag_section = prod_text[prod_text.find("tag_assignments"):] if "tag_assignments" in prod_text else ""
+    if DEV_LAKSHMI_CAT in (tag_section.split("fgac_policies")[0] if "fgac_policies" in tag_section else tag_section):
+        raise AssertionError(
+            f"tag_assignments in prod config still reference '{DEV_LAKSHMI_CAT}' — "
+            f"catalog remap may have failed"
+        )
+    print(f"  {_green('PASS')}  tag_assignments reference {PROD_LAKSHMI_CAT}, not {DEV_LAKSHMI_CAT}")
+
+    _copy_auth(env, prod_env)
+
+    _step("Phase 4 — Applying prod governance")
+    _force_account_reapply("india-bank-demo prod apply")
+    _make("apply", f"ENV={prod_env}", retries=3, retry_delay_seconds=120)
+
+    _step("Verifying prod config references prod_lakshmi")
+    prod_env_tfvars = ENVS_DIR / prod_env / "env.auto.tfvars"
+    _assert_contains(prod_env_tfvars, PROD_LAKSHMI_CAT,
+                     f"prod env.auto.tfvars references {PROD_LAKSHMI_CAT}")
+
+    # ── Teardown ─────────────────────────────────────────────────────────────
+    if not keep_data:
+        for cat in [DEV_LAKSHMI_CAT, PROD_LAKSHMI_CAT]:
+            try:
+                _sdk_run_sql(auth_file, f"DROP CATALOG IF EXISTS {cat} CASCADE",
+                             warehouse_id=resolved_wh)
+            except Exception as exc:
+                print(f"  {_yellow('WARN')} Could not drop {cat}: {exc}")
+        _try_destroy(prod_env)
+        _try_destroy(env)
+        _try_destroy_account()
+        _delete_genie_space_via_api(auth_file, space_id)
+
+    print(f"\n  {_green(_bold('PASSED'))}  india-bank-demo")
+
+
+# ---------------------------------------------------------------------------
+# Scenario: asean-bank-demo — ASEAN bank champion flow
+# ---------------------------------------------------------------------------
+
+def _setup_asean_bank_data(auth_file: Path, warehouse_id: str) -> str:
+    """Create dev_asean_bank and prod_asean_bank catalogs with ASEAN banking tables.
+
+    Returns the warehouse ID used.
+    """
+    import time as _time_asean
+    import hcl2 as _hcl2_asean
+    from databricks.sdk import WorkspaceClient as _WC_asean
+    from databricks.sdk.service.sql import StatementState as _SS_asean
+
+    def _s(v): return (v[0] if isinstance(v, list) else (v or "")).strip()
+
+    with open(auth_file) as f:
+        cfg = _hcl2_asean.load(f)
+
+    host = _s(cfg.get("databricks_workspace_host", ""))
+    client_id = _s(cfg.get("databricks_client_id", ""))
+    client_secret = _s(cfg.get("databricks_client_secret", ""))
+    catalog_storage_base = _s(cfg.get("catalog_storage_base", ""))
+
+    w = _WC_asean(host=host, client_id=client_id, client_secret=client_secret)
+
+    wh = warehouse_id
+    if not wh:
+        for warehouse in w.warehouses.list():
+            if warehouse.id:
+                wh = warehouse.id
+                break
+    if not wh:
+        print("  No warehouse found — creating one for ASEAN bank data setup...")
+        from databricks.sdk.service.sql import EndpointInfoWarehouseType
+        create_resp = w.warehouses.create(
+            name="Demo Warehouse",
+            cluster_size="2X-Small",
+            warehouse_type=EndpointInfoWarehouseType.PRO,
+            max_num_clusters=1,
+            auto_stop_mins=15,
+            enable_serverless_compute=True,
+        )
+        created_wh = create_resp.result() if hasattr(create_resp, "result") else create_resp
+        wh = created_wh.id if hasattr(created_wh, "id") else str(created_wh)
+
+    for cat in [DEV_ASEAN_CAT, PROD_ASEAN_CAT]:
+        storage = f"{catalog_storage_base.rstrip('/')}/{cat}" if catalog_storage_base else None
+        try:
+            w.catalogs.create(name=cat, comment=f"asean-bank-demo — {cat}", storage_root=storage)
+        except Exception:
+            pass
+        try:
+            w.schemas.create(name=ASEAN_SCHEMA, catalog_name=cat)
+        except Exception:
+            pass
+
+    print(f"  Waiting for catalog {DEV_ASEAN_CAT}.{ASEAN_SCHEMA} to propagate...")
+    for _ in range(12):
+        try:
+            r = w.statement_execution.execute_statement(
+                warehouse_id=wh,
+                statement=f"DESCRIBE SCHEMA {DEV_ASEAN_CAT}.{ASEAN_SCHEMA}",
+                wait_timeout="30s",
+            )
+            st = r.status.state if r.status else None
+            st_str = st.value if hasattr(st, "value") else str(st) if st else ""
+            if st_str == "SUCCEEDED":
+                break
+        except Exception:
+            pass
+        _time_asean.sleep(5)
+
+    all_sql = ASEAN_BANK_SETUP_SQL + "\n" + ASEAN_BANK_SAMPLE_DATA_SQL + "\n" + ASEAN_BANK_PROD_SETUP_SQL
+    stmts = []
+    for raw in all_sql.split(";"):
+        lines = [l for l in raw.strip().splitlines() if l.strip() and not l.strip().startswith("--")]
+        cleaned = "\n".join(lines).strip()
+        if cleaned:
+            stmts.append(cleaned)
+
+    def _state_str(state) -> str:
+        return state.value if hasattr(state, "value") else str(state)
+
+    for stmt in stmts:
+        r = w.statement_execution.execute_statement(
+            warehouse_id=wh, statement=stmt, wait_timeout="50s",
+        )
+        max_wait = 120
+        start = _time_asean.time()
+        while True:
+            st = _state_str(r.status.state)
+            if st == "SUCCEEDED":
+                break
+            if st in ("FAILED", "CANCELED", "CLOSED"):
+                err = r.status.error
+                print(f"  {_yellow('WARN')} SQL failed: {err}")
+                break
+            if _time_asean.time() - start > max_wait:
+                print(f"  {_yellow('WARN')} SQL timed out")
+                break
+            _time_asean.sleep(2)
+            r = w.statement_execution.get_statement(r.statement_id)
+
+    print(f"  {_green('OK')}  ASEAN bank tables created in {DEV_ASEAN_CAT} + {PROD_ASEAN_CAT}")
+    return wh
+
+
+def _create_asean_bank_genie_space_via_api(
+    auth_file: Path,
+    warehouse_id: str,
+) -> str:
+    """Create a Genie Space for ASEAN Regional Banking Analytics via REST API."""
+    asean_tables = [
+        f"{DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.customers",
+        f"{DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.accounts",
+        f"{DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.transactions",
+        f"{DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.credit_cards",
+    ]
+    return _create_genie_space_via_api(
+        auth_file, "ASEAN Regional Banking Analytics", asean_tables, warehouse_id,
+    )
+
+
+def scenario_asean_bank_demo(
+    auth_file: Path,
+    warehouse_id: str = "",
+    keep_data: bool = False,
+    fresh_env: bool = False,
+) -> None:
+    """ASEAN bank demo — champion flow (SEA + financial_services, import + promote)."""
+    _banner("Scenario: asean-bank-demo — ASEAN bank champion flow (SEA + financial_services)")
+    env = "dev"
+    prod_env = "prod"
+
+    _ensure_packages()
+
+    # ── Phase 1: Setup ───────────────────────────────────────────────────────
+    _preamble_cleanup(env, prod_env, fresh_env=fresh_env)
+
+    _step("Phase 1 — Creating ASEAN banking tables")
+    resolved_wh = _setup_asean_bank_data(auth_file, warehouse_id)
+
+    _step("Phase 1 — Creating rich Genie Space via API")
+    space_id = _create_asean_bank_genie_space_via_api(auth_file, resolved_wh)
+
+    # ── Phase 2: Generate with SEA + financial_services ─────────────────────
+    _step("Phase 2 — Configuring env with genie_space_id + uc_tables (attach mode)")
+    _make("setup", f"ENV={env}")
+    _make("setup", f"ENV={prod_env}")
+
+    asean_tables_hcl = f"""\
+genie_spaces = [
+  {{
+    name           = "ASEAN Regional Banking Analytics"
+    genie_space_id = "{space_id}"
+    uc_tables = [
+      "{DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.customers",
+      "{DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.accounts",
+      "{DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.transactions",
+      "{DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.credit_cards",
+    ]
+  }},
+]
+"""
+    _write_env_tfvars(env, asean_tables_hcl, resolved_wh)
+
+    _step("Phase 2 — Running make generate with COUNTRY=SEA INDUSTRY=financial_services")
+    _make("generate", f"ENV={env}", "COUNTRY=SEA", "INDUSTRY=financial_services", retries=3)
+
+    _step("Asserting SEA-specific masking functions in generated output")
+    gen_dir = ENVS_DIR / env / "generated"
+    _assert_file_exists(gen_dir / "abac.auto.tfvars", "abac.auto.tfvars generated")
+    _assert_file_exists(gen_dir / "masking_functions.sql", "masking_functions.sql generated")
+    _assert_contains(gen_dir / "abac.auto.tfvars", DEV_ASEAN_CAT,
+                     f"{DEV_ASEAN_CAT} catalog referenced in generated policies")
+
+    abac_text = (gen_dir / "abac.auto.tfvars").read_text()
+    sea_columns_found = sum(1 for col in ["nric", "mykad", "thai_id", "nik", "philsys", "cccd"]
+                            if col in abac_text.lower())
+    if sea_columns_found < 3:
+        raise AssertionError(
+            f"Expected SEA-sensitive columns (nric, mykad, thai_id, nik, philsys, cccd) in "
+            f"tag_assignments, but only found {sea_columns_found}/6"
+        )
+    print(f"  {_green('PASS')}  SEA-sensitive columns tagged: {sea_columns_found}/6 found in tag_assignments")
+
+    masking_sql = gen_dir / "masking_functions.sql"
+    sql_text = masking_sql.read_text()
+    sea_fns_found = [fn for fn in ["mask_nric", "mask_mykad", "mask_nik"]
+                     if fn in sql_text]
+    if not sea_fns_found:
+        raise AssertionError(
+            f"Expected at least one SEA-specific masking function (mask_nric, mask_mykad, mask_nik) "
+            f"in masking_functions.sql, but none found"
+        )
+    print(f"  {_green('PASS')}  SEA-specific masking functions present: {sea_fns_found}")
+
+    _assert_contains(gen_dir / "abac.auto.tfvars", "ASEAN Regional Banking Analytics",
+                     "ASEAN Regional Banking Analytics genie_space_configs entry present")
+
+    # ── Phase 3: Apply governance ────────────────────────────────────────────
+    _step("Phase 3 — Applying governance (space must survive, not be created/deleted)")
+    _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
+
+    _step("Asserting space NOT created by Terraform (no .genie_space_id_* file)")
+    id_files = list((ENVS_DIR / env).glob(".genie_space_id_*"))
+    legacy = ENVS_DIR / env / ".genie_space_id"
+    if id_files or legacy.exists():
+        raise AssertionError(
+            "Terraform created a new Genie Space in attach mode — expected no "
+            ".genie_space_id_* file. The existing space should be used as-is."
+        )
+    print(f"  {_green('PASS')}  No .genie_space_id_* file: Terraform did not create a new space")
+
+    # ── Phase 4: Promote to prod ─────────────────────────────────────────────
+    _step(f"Phase 4 — Promoting {env} -> {prod_env} ({DEV_ASEAN_CAT} -> {PROD_ASEAN_CAT})")
+    _make(
+        "promote",
+        f"SOURCE_ENV={env}",
+        f"DEST_ENV={prod_env}",
+        f"DEST_CATALOG_MAP={DEV_ASEAN_CAT}={PROD_ASEAN_CAT}",
+    )
+
+    _assert_file_exists(
+        ENVS_DIR / prod_env / "env.auto.tfvars",
+        "prod env.auto.tfvars written by promote",
+    )
+    prod_abac = ENVS_DIR / prod_env / "generated" / "abac.auto.tfvars"
+    _assert_contains(prod_abac, PROD_ASEAN_CAT,
+                     f"{PROD_ASEAN_CAT} catalog in promoted prod config")
+    prod_text = prod_abac.read_text()
+    tag_section = prod_text[prod_text.find("tag_assignments"):] if "tag_assignments" in prod_text else ""
+    if DEV_ASEAN_CAT in (tag_section.split("fgac_policies")[0] if "fgac_policies" in tag_section else tag_section):
+        raise AssertionError(
+            f"tag_assignments in prod config still reference '{DEV_ASEAN_CAT}' — "
+            f"catalog remap may have failed"
+        )
+    print(f"  {_green('PASS')}  tag_assignments reference {PROD_ASEAN_CAT}, not {DEV_ASEAN_CAT}")
+
+    _copy_auth(env, prod_env)
+
+    _step("Phase 4 — Applying prod governance")
+    _force_account_reapply("asean-bank-demo prod apply")
+    _make("apply", f"ENV={prod_env}", retries=3, retry_delay_seconds=120)
+
+    _step("Verifying prod config references prod_asean_bank")
+    prod_env_tfvars = ENVS_DIR / prod_env / "env.auto.tfvars"
+    _assert_contains(prod_env_tfvars, PROD_ASEAN_CAT,
+                     f"prod env.auto.tfvars references {PROD_ASEAN_CAT}")
+
+    # ── Teardown ─────────────────────────────────────────────────────────────
+    if not keep_data:
+        for cat in [DEV_ASEAN_CAT, PROD_ASEAN_CAT]:
+            try:
+                _sdk_run_sql(auth_file, f"DROP CATALOG IF EXISTS {cat} CASCADE",
+                             warehouse_id=resolved_wh)
+            except Exception as exc:
+                print(f"  {_yellow('WARN')} Could not drop {cat}: {exc}")
+        _try_destroy(prod_env)
+        _try_destroy(env)
+        _try_destroy_account()
+        _delete_genie_space_via_api(auth_file, space_id)
+
+    print(f"\n  {_green(_bold('PASSED'))}  asean-bank-demo")
+
+
+# ---------------------------------------------------------------------------
 # Scenario registry
 # ---------------------------------------------------------------------------
 
@@ -5339,6 +6158,8 @@ SCENARIOS: dict[str, tuple[str, Callable]] = {
     "industry-overlay": ("Industry overlays (financial/healthcare/retail) + country+industry combo", scenario_industry_overlay),
     "genie-import-no-abac": ("Import Genie Space, deploy to prod without ABAC",            scenario_genie_import_no_abac),
     "aus-bank-demo": ("Australian bank demo — champion flow (ANZ + financial_services, import + promote)", scenario_aus_bank_demo),
+    "india-bank-demo": ("India bank demo — champion flow (IN + financial_services, import + promote)", scenario_india_bank_demo),
+    "asean-bank-demo": ("ASEAN bank demo — champion flow (SEA + financial_services, import + promote)", scenario_asean_bank_demo),
 }
 
 
