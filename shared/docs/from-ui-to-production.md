@@ -2,7 +2,7 @@
 
 > **This is the recommended starting point.** Most users already have a Genie Space configured in the Databricks UI and want to add governance and deploy it to production.
 >
-> **See it in action:** The [Australian Bank Demo](../examples/aus_bank_demo/) walks through this entire flow with a realistic banking scenario — ANZ-specific masking, PCI compliance, and dev-to-prod promotion.
+> **See it in action:** The [Australian Bank Demo](../examples/aus_bank_demo/) walks through this entire flow with a realistic banking scenario — ANZ-specific masking, PCI compliance, and dev-to-prod promotion. Also available: [India Bank Demo](../examples/india_bank_demo/) (Aadhaar, PAN, GSTIN, NPA) and [ASEAN Bank Demo](../examples/asean_bank_demo/) (6-country national IDs, multi-currency).
 
 ## What you'll achieve
 

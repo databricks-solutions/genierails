@@ -111,5 +111,7 @@ That moves root working files into `envs/dev/` and rewrites any legacy top-level
 
 Pre-built examples with 3-layer configs (account, data access, workspace) are available in:
 - `examples/aus_bank_demo/` — **end-to-end champion flow** for an Australian bank with ANZ + financial services overlays, dev-to-prod promotion ([README](../examples/aus_bank_demo/README.md))
+- `examples/india_bank_demo/` — **India champion flow** for Lakshmi Bank with India + financial services overlays, 5 tables incl. loans (GSTIN, NPA), Aadhaar/PAN/UPI masking ([README](../examples/india_bank_demo/README.md))
+- `examples/asean_bank_demo/` — **ASEAN champion flow** for a Singapore-HQ regional bank with SEA + financial services overlays, 6-country national IDs, multi-currency ([README](../examples/asean_bank_demo/README.md))
 - `examples/finance/` — 5-group finance demo with PII, PCI, and AML governance
 - `examples/healthcare/` — 6-group healthcare demo with HIPAA-compliant PHI, PII, and regional row filters ([walkthrough](../examples/healthcare/healthcare_walkthrough.md))
