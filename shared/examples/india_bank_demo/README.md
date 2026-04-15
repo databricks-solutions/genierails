@@ -1,24 +1,13 @@
-# Australian Bank Demo — End-to-End
+# India Bank Demo — End-to-End
 
-An end-to-end demo of GenieRails for an Australian retail bank. Start with an existing Genie Space, import it into code, generate ABAC governance with ANZ + financial services overlays, deploy, and promote to production.
+An end-to-end demo of GenieRails for an Indian retail bank. Start with an existing Genie Space, import it into code, generate ABAC governance with India + financial services overlays, deploy, and promote to production.
 
 **What you'll show:**
-- ANZ-specific masking: Tax File Numbers (TFN), Medicare numbers, BSB codes, ABN, Centrelink CRN, NZ IRD/NHI
+- India-specific masking: Aadhaar numbers, PAN, Voter ID, UAN, GSTIN, UPI IDs
 - Financial services governance: PCI-DSS card masking, AML risk row filters, transaction amount rounding
-- Multi-region overlays: combine ANZ with ASEAN (6 countries) and India overlays for pan-APJ governance
-- Multi-industry overlays: financial services, healthcare, and retail — composable in a single command
+- DPDP Act 2023 compliance: India's Digital Personal Data Protection Act — active enforcement with INR 250 crore penalties
 - Role-based access: 5 groups (Bank Teller → Compliance Officer) with different views of the same data
 - Dev → prod promotion with catalog remapping across workspaces
-
-**Available overlays:**
-| Type | Code | Coverage | Identifiers | Masking Functions |
-|------|------|----------|-------------|-------------------|
-| Country | `ANZ` | Australia, New Zealand | 12 | 10 |
-| Country | `IN` | India | 10 | 8 |
-| Country | `SEA` | Singapore, Malaysia, Thailand, Indonesia, Philippines, Vietnam | 24 | 16 |
-| Industry | `financial_services` | PCI-DSS, SOX, AML/BSA, GLBA | 7 | 6 |
-| Industry | `healthcare` | HIPAA, HITECH, 42 CFR Part 2 | 7 | 6 |
-| Industry | `retail` | CCPA, GDPR, CAN-SPAM, PCI-DSS | 7 | 6 |
 
 **Time:** ~20 minutes (5 min setup, 15 min demo)
 
@@ -28,7 +17,7 @@ An end-to-end demo of GenieRails for an Australian retail bank. Start with an ex
 
 ## Setup (~5 min)
 
-The setup script provisions two isolated workspaces and creates sample Australian banking data. It works on both AWS and Azure.
+The setup script provisions two isolated workspaces and creates sample Indian banking data. It works on both AWS and Azure.
 
 ### 1. Create credentials file
 
@@ -65,7 +54,7 @@ You need:
 - `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` — Account Admin service principal OAuth credentials
 - `AZURE_SUBSCRIPTION_ID` — your Azure subscription
 - `AZURE_RESOURCE_GROUP` — resource group for test resources (must already exist)
-- `AZURE_REGION` — Azure region matching your workspace (e.g., `australiaeast`, `eastus2`)
+- `AZURE_REGION` — Azure region matching your workspace (e.g., `centralindia`, `eastus2`)
 - `AZURE_TENANT_ID` — your Azure AD tenant ID
 - `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` — Azure AD App Registration credentials
 
@@ -76,7 +65,7 @@ The Azure SP needs **Contributor** and **Storage Blob Data Contributor** RBAC ro
 #### AWS
 
 ```bash
-python ../shared/examples/aus_bank_demo/setup_demo.py provision \
+python ../shared/examples/india_bank_demo/setup_demo.py provision \
     --env-file ../shared/scripts/account-admin.aws.env
 ```
 
@@ -84,7 +73,7 @@ python ../shared/examples/aus_bank_demo/setup_demo.py provision \
 
 ```bash
 CLOUD_PROVIDER=azure CLOUD_ROOT=$(pwd) \
-python ../shared/examples/aus_bank_demo/setup_demo.py provision \
+python ../shared/examples/india_bank_demo/setup_demo.py provision \
     --env-file ../shared/scripts/account-admin.azure.env
 ```
 
@@ -97,26 +86,29 @@ When complete, you'll see:
   Genie Space ID:  01ef7b3c2a4d5e6f
 ```
 
-**Before the demo:** Open the dev workspace and show the Genie Space in the UI. Point out that anyone can see raw TFN numbers, full credit card PANs, and AML risk flags — no governance at all.
+**Before the demo:** Open the dev workspace and show the Genie Space in the UI. Point out that anyone can see raw Aadhaar numbers, full PAN, UPI IDs, and AML risk flags — no governance at all.
 
 ---
 
 ## Part 1: The Challenge (2 min)
 
-Open the Genie Space "Kookaburra Bank Analytics" in the dev workspace UI. Show the four tables — customers, accounts, transactions, credit cards.
+Open the Genie Space "Lakshmi Bank Analytics" in the dev workspace UI. Show the four tables — customers, accounts, transactions, credit cards.
 
 **Set the scene:**
 
 > _"The data platform team has built this Genie Space for our retail banking analysts. The tables are ready, the Space is configured — but we can't onboard business users yet. Why? Because these tables contain highly sensitive data:"_
 
 Point out what's in the tables:
-- **Tax File Numbers (TFN)** — protected under Privacy Act 1988
-- **Medicare numbers** — protected under My Health Records Act
+- **Aadhaar numbers** — 12-digit unique identity, protected under Aadhaar Act 2016 and DPDP Act 2023
+- **PAN (Permanent Account Number)** — tax identifier under Income Tax Act 1961
+- **Voter ID (EPIC)** — electoral identity document
+- **UAN (Universal Account Number)** — EPF/provident fund identifier
+- **UPI IDs** — virtual payment addresses linked to bank accounts
+- **GSTIN** — GST identification for business customers
 - **Full credit card PANs and CVVs** — PCI-DSS regulated
-- **AML risk flags** (`HIGH_RISK`, `BLOCKED`) — restricted to the compliance team
-- **BSB + account numbers** — financial identity risk
+- **AML risk flags** (`HIGH_RISK`, `BLOCKED`) — restricted to compliance team
 
-> _"We need to onboard 5 different teams — tellers, relationship managers, compliance, marketing, and branch managers. Each team needs different access levels. A teller should see masked TFN and last-4 of cards. A compliance officer needs full access to investigate AML flags. Marketing should only see anonymized, aggregated data."_
+> _"We need to onboard 5 different teams — tellers, relationship managers, compliance, marketing, and branch managers. Each team needs different access levels. A teller should see masked Aadhaar (last 4 digits). A compliance officer needs full access to investigate AML flags. Marketing should only see anonymized, aggregated data."_
 
 > _"Setting this up manually — groups, tag policies, masking functions, row filters, ACLs, entitlements — would take weeks. Let's do it in 10 minutes."_
 
@@ -129,56 +121,39 @@ Point out what's in the tables:
 The setup script already configured `envs/dev/` with auth credentials, tables, and the Genie Space ID.
 
 ```bash
-make generate ENV=dev COUNTRY=ANZ INDUSTRY=financial_services
+make generate ENV=dev COUNTRY=IN INDUSTRY=financial_services
 ```
 
-**What happens:** GenieRails discovers the 4 tables from the existing Genie Space, fetches their schemas from Unity Catalog, and calls the Databricks Foundation Model with ANZ country + financial services industry overlays.
+**What happens:** GenieRails discovers the 4 tables from the existing Genie Space, fetches their schemas from Unity Catalog, and calls the Databricks Foundation Model with India country + financial services industry overlays.
 
 **Show the output** (`envs/dev/generated/abac.auto.tfvars`):
 
 - **Groups generated:** Bank_Teller, Relationship_Manager, Compliance_Officer, Marketing_Analyst, Branch_Manager
-- **ANZ-specific tags:** `pii_level=masked_tfn`, `pii_level=masked_medicare`, `pii_level=masked_bsb`, `pii_level=masked_abn`, `pii_level=masked_crn`
+- **India-specific tags:** `pii_level=masked_aadhaar`, `pii_level=masked_pan`, `pii_level=masked_voter_id`, `pii_level=masked_uan`
 - **Financial tags:** `pci_level=masked_card_last4`, `compliance_scope=aml_restricted`, `financial_sensitivity=rounded_amounts`
-- **Masking functions:** 10 ANZ functions + 6 financial services functions generated automatically
+- **Masking functions:** 8 India functions + 6 financial services functions generated automatically
 
 **Show the masking SQL** (`envs/dev/generated/masking_functions.sql`):
 
 ```sql
--- ANZ-specific: Tax File Number masking (Privacy Act 1988)
-CREATE OR REPLACE FUNCTION mask_tfn(tfn STRING) ...
--- Shows: XXX XXX 789 (last 3 digits visible per ATO guidelines)
+-- India-specific: Aadhaar masking (Aadhaar Act 2016 / DPDP Act 2023)
+CREATE OR REPLACE FUNCTION mask_aadhaar(aadhaar STRING) ...
+-- Shows: XXXX XXXX 0123 (last 4 digits visible)
 
--- ANZ-specific: Medicare number masking (My Health Records Act 2012)
-CREATE OR REPLACE FUNCTION mask_medicare(medicare STRING) ...
--- Shows: XXXX XXXX X (fully masked per My Health Records Act)
+-- India-specific: PAN masking (Income Tax Act 1961)
+CREATE OR REPLACE FUNCTION mask_pan_india(pan STRING) ...
+-- Shows: AB*******D (first 2 + last 1 visible, hides entity type)
 
--- ANZ-specific: Australian Business Number masking
-CREATE OR REPLACE FUNCTION mask_abn(abn STRING) ...
--- Shows: 51 XXX XXX XX3 (first 2 + last 3 visible)
-
--- NZ-specific: IRD number masking (Tax Administration Act 1994)
-CREATE OR REPLACE FUNCTION mask_ird(ird STRING) ...
--- Shows: XXXXX 789 (last 3 digits visible)
+-- India-specific: GSTIN masking
+CREATE OR REPLACE FUNCTION mask_gstin(gstin STRING) ...
+-- Shows: 27**********1Z5 (state code + last 3 visible)
 
 -- PCI-DSS: Credit card last 4
 CREATE OR REPLACE FUNCTION mask_card_last4(card STRING) ...
 -- Shows: **** **** **** 9010
 ```
 
-**Key message:** _"The AI knows Australian and New Zealand regulations — TFN, Medicare, BSB, ABN, CRN, IRD, and NHI masking are all generated automatically from the column names and the ANZ overlay. 10 masking functions covering both AU and NZ identifiers, plus 6 more from the financial services overlay. Meanwhile, the Genie Space config you already set up in the UI — instructions, sample questions, benchmarks, SQL expressions — is imported verbatim, not regenerated."_
-
-### Optional: Show multi-region composition
-
-For APJ-wide demos, show how overlays compose:
-
-```bash
-# Pan-APJ: Australia + ASEAN (6 countries) + India
-make generate ENV=dev COUNTRY=ANZ,SEA,IN INDUSTRY=financial_services
-```
-
-This generates **46 country-specific identifiers** and **34 masking functions** in one pass — covering TFN (AU), IRD (NZ), NRIC (SG), MyKad (MY), Thai National ID, NIK (ID), PhilSys (PH), CCCD (VN), Aadhaar, PAN, and more. Each function respects the specific country's privacy legislation.
-
-**Embedded demographic data protection:** The generator flags identifiers like Malaysia's MyKad and Indonesia's NIK that encode date of birth and location in their structure, applying aggressive masking (last 4 digits only) to prevent demographic inference.
+**Key message:** _"The AI knows Indian regulations — Aadhaar, PAN, GSTIN, Voter ID, and UAN masking are all generated automatically from the column names and the India overlay. The PAN masking even hides the entity type character (4th position: P=Personal, C=Company) to prevent entity type inference. 8 masking functions from India's DPDP Act, plus 6 more from the financial services overlay."_
 
 ### 2b. Review, tune & validate
 
@@ -191,7 +166,7 @@ The generated config is a draft, not a final answer. Review it before applying:
 Once you're satisfied, validate the generated config:
 
 ```bash
-make validate-generated ENV=dev COUNTRY=ANZ INDUSTRY=financial_services
+make validate-generated ENV=dev COUNTRY=IN INDUSTRY=financial_services
 ```
 
 This checks for:
@@ -199,7 +174,7 @@ This checks for:
 - FGAC policies referencing missing masking functions
 - Masking function SQL syntax issues
 - Missing or inconsistent group references
-- Cross-overlay conflicts (e.g., NRIC disambiguation between Singapore and Malaysia formats)
+- PAN disambiguation (India PAN vs credit card PAN)
 
 Fix any issues the validator flags, then proceed to apply.
 
@@ -225,14 +200,14 @@ Open the Genie Space and query as different groups:
 
 | Data | Bank Teller | Compliance Officer | Marketing Analyst |
 |------|-------------|-------------------|-------------------|
-| TFN | `XXX XXX 789` | `123 456 789` | `[REDACTED]` |
-| Medicare | `XXXX XXXX X` | `2123 45670 1` | `[REDACTED]` |
+| Aadhaar | `XXXX XXXX 0123` | `2345 6789 0123` | `[REDACTED]` |
+| PAN | `AB*******D` | `ABCPS1234D` | `[REDACTED]` |
 | Card number | `**** **** **** 9010` | `4000 1234 5678 9010` | Not visible |
-| Transaction amount | `$15,000` → `$15,000` | `$15,000.00` | `$15,000` |
+| GSTIN | `27**********1Z5` | `27AADCS1234F1Z5` | `[REDACTED]` |
+| UPI ID | `[REDACTED]` | `arjun@okaxis` | `[REDACTED]` |
 | AML risk flag | Not visible | `HIGH_RISK` | Not visible |
-| BSB | `062-***` | `062-000` | `[REDACTED]` |
 
-**Key message:** _"Same Genie Space, same tables, but every group sees exactly what they should. The compliance officer investigates AML-flagged transactions, the teller serves customers with masked PII, and marketing only sees aggregated anonymized data."_
+**Key message:** _"Same Genie Space, same tables, but every group sees exactly what they should. The compliance officer investigates AML-flagged transactions with full PII access, the teller serves customers with masked Aadhaar and PAN, and marketing only sees aggregated anonymized data."_
 
 ---
 
@@ -241,7 +216,7 @@ Open the Genie Space and query as different groups:
 ```bash
 # Promote dev config to prod with catalog remapping
 make promote SOURCE_ENV=dev DEST_ENV=prod \
-    DEST_CATALOG_MAP="dev_bank=prod_bank"
+    DEST_CATALOG_MAP="dev_lakshmi=prod_lakshmi"
 
 # Deploy to production (creates a NEW Genie Space in prod workspace)
 # Auth credentials for prod are already configured by setup_demo.py
@@ -249,8 +224,8 @@ make apply ENV=prod
 ```
 
 **What happens:**
-- All governance config is remapped: `dev_bank.retail.*` → `prod_bank.retail.*`
-- A new "Kookaburra Bank Analytics" Genie Space is created in the prod workspace
+- All governance config is remapped: `dev_lakshmi.retail.*` → `prod_lakshmi.retail.*`
+- A new "Lakshmi Bank Analytics" Genie Space is created in the prod workspace
 - Same groups, same masking, same ACLs — fully governed from day one
 
 **Key message:** _"One command to replicate governance to production. No manual configuration, no risk of missing a masking rule."_
@@ -268,7 +243,7 @@ make destroy ENV=dev
 #### AWS
 
 ```bash
-python ../shared/examples/aus_bank_demo/setup_demo.py teardown \
+python ../shared/examples/india_bank_demo/setup_demo.py teardown \
     --env-file ../shared/scripts/account-admin.aws.env
 ```
 
@@ -276,7 +251,7 @@ python ../shared/examples/aus_bank_demo/setup_demo.py teardown \
 
 ```bash
 CLOUD_PROVIDER=azure CLOUD_ROOT=$(pwd) \
-python ../shared/examples/aus_bank_demo/setup_demo.py teardown \
+python ../shared/examples/india_bank_demo/setup_demo.py teardown \
     --env-file ../shared/scripts/account-admin.azure.env
 ```
 
@@ -286,24 +261,19 @@ python ../shared/examples/aus_bank_demo/setup_demo.py teardown \
 
 ### For compliance / risk audiences
 - _"GenieRails ensures every Genie Space has governance from day one — not as an afterthought"_
-- _"ANZ country overlay automatically identifies TFN, Medicare, BSB, ABN, CRN, and NZ IRD/NHI columns — no manual classification needed"_
+- _"India overlay automatically identifies Aadhaar, PAN, GSTIN, Voter ID, UAN, and UPI columns — no manual classification needed"_
+- _"DPDP Act 2023 is in active enforcement with INR 250 crore penalties — this overlay keeps you compliant from day one"_
+- _"PAN masking hides the entity type character to prevent P=Personal vs C=Company inference"_
 - _"AML-flagged transactions are row-filtered to the compliance team only"_
-- _"Each overlay encodes the specific legislation — Privacy Act 1988 (AU), PDPA (SG/MY/TH), DPDP Act 2023 (India), PDP Law 2022 (Indonesia) — not just generic PII rules"_
-
-### For APJ / multi-region audiences
-- _"One command covers 9 countries across ANZ + ASEAN + India — 46 identifiers, 34 masking functions"_
-- _"Embedded demographic data in MyKad (MY) and NIK (ID) is automatically detected and aggressively masked to prevent date-of-birth inference"_
-- _"NRIC disambiguation between Singapore (9-char alphanumeric) and Malaysia (12-digit numeric) is handled automatically"_
-- _"India's DPDP Act 2023 and Indonesia's PDP Law 2022 are both in active enforcement — this overlay keeps you compliant from day one"_
 
 ### For data platform teams
 - _"Everything is Terraform — version controlled, auditable, reproducible"_
 - _"Dev → prod promotion in one command with catalog remapping"_
 - _"No vendor lock-in — after generation, it's standard Databricks resources"_
-- _"Overlays compose: `COUNTRY=ANZ,SEA,IN INDUSTRY=financial_services,healthcare` — mix and match for your use case"_
+- _"Overlays compose: `COUNTRY=IN,ANZ INDUSTRY=financial_services` — mix and match for your use case"_
 
 ### For executive sponsors
 - _"Time to governed Genie Space: 15 minutes, not 15 days"_
 - _"Consistent governance across all Genie Spaces — same groups, same policies, same masking"_
 - _"Scales to hundreds of Genie Spaces with the same pattern"_
-- _"3 country overlays (ANZ, India, ASEAN-6) and 3 industry overlays (financial services, healthcare, retail) — covering the entire APJ region"_
+- _"RBI data localization and DPDP Act compliance built in — not bolted on"_

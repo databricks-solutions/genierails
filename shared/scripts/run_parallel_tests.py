@@ -38,6 +38,7 @@ SCENARIOS = [
     "multi-env", "attach-promote", "self-service-genie", "abac-only",
     "multi-space-import", "schema-drift", "genie-only", "country-overlay",
     "industry-overlay", "genie-import-no-abac", "aus-bank-demo",
+    "india-bank-demo", "asean-bank-demo",
 ]
 
 
@@ -127,7 +128,7 @@ def run_scenario(scenario, auth_file, state_file, run_id, cloud, suite_id, log_d
         result = subprocess.run(
             [sys.executable, str(SCRIPT_DIR / "run_integration_tests.py"),
              "--scenario", scenario, "--auth-file", auth_file],
-            cwd=str(CLOUD_ROOT), env=env, capture_output=True, text=True, timeout=14400,  # 4 hours
+            cwd=str(CLOUD_ROOT), env=env, capture_output=True, text=True, timeout=21600,  # 6 hours
         )
     except subprocess.TimeoutExpired as te:
         elapsed = time.time() - start

@@ -339,6 +339,9 @@ the next one starts.
 | **genie-import-no-abac** | § 3 + § 7 | Import an existing Genie Space and deploy to prod **without any ABAC governance** — validates the genie-only import-to-prod workflow when a separate team manages ABAC centrally |
 | **country-overlay** | — | Country/region overlays (ANZ, IN, SEA) — full cycle per region + multi-region generation |
 | **industry-overlay** | — | Industry overlays (financial\_services, healthcare, retail) — full cycle per industry + multi-industry + country+industry composition (COUNTRY=ANZ INDUSTRY=healthcare) |
+| **aus-bank-demo** | — | Australian bank demo — champion flow (ANZ + financial\_services, import + promote with `dev_bank`→`prod_bank` catalog remap) |
+| **india-bank-demo** | — | India bank demo — champion flow (IN + financial\_services, Aadhaar/PAN/GSTIN/UPI masking, import + promote with `dev_lakshmi`→`prod_lakshmi`) |
+| **asean-bank-demo** | — | ASEAN bank demo — champion flow (SEA + financial\_services, 6 nullable national ID columns, multi-currency, import + promote with `dev_asean_bank`→`prod_asean_bank`) |
 
 ---
 
@@ -406,6 +409,9 @@ make test-genie-only
 make test-genie-import-no-abac
 make test-country-overlay
 make test-industry-overlay
+make test-aus-bank-demo
+make test-india-bank-demo
+make test-asean-bank-demo
 
 # All targets accept WAREHOUSE_ID= and KEEP_DATA=1
 make test-promote WAREHOUSE_ID=abc123ef KEEP_DATA=1

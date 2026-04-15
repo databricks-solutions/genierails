@@ -26,7 +26,10 @@ Check the [Prerequisites](shared/docs/prerequisites.md) first (Python, Terraform
 | AWS   | [`aws/README.md`](aws/README.md) |
 | Azure | [`azure/README.md`](azure/README.md) |
 
-> **Want to see it in action first?** The [Australian Bank Demo](shared/examples/aus_bank_demo/) provisions a complete environment and walks through the full flow in ~20 minutes — ANZ-specific masking, PCI compliance, AML row filters, and dev-to-prod promotion.
+> **Want to see it in action first?** Three end-to-end demos walk through the full flow in ~20 minutes each:
+> - [Australian Bank Demo](shared/examples/aus_bank_demo/) — ANZ-specific masking (TFN, Medicare, BSB), PCI compliance, AML row filters
+> - [India Bank Demo](shared/examples/india_bank_demo/) — Aadhaar, PAN, GSTIN, UPI masking, NPA loan compliance (DPDP Act 2023)
+> - [ASEAN Bank Demo](shared/examples/asean_bank_demo/) — 6-country national IDs (NRIC, MyKad, Thai ID, NIK, PhilSys, CCCD), multi-currency, cross-border remittances
 
 ## Repository Layout
 
