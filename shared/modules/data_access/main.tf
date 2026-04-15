@@ -105,7 +105,7 @@ resource "databricks_sql_endpoint" "warehouse" {
 
   provider         = databricks.workspace
   name             = var.warehouse_name
-  cluster_size     = "Small"
+  cluster_size     = var.warehouse_cluster_size
   max_num_clusters = 1
 
   enable_serverless_compute = true

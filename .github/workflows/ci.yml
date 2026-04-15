@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '0 2 * * 1-5'  # weekday nightly at 2 AM UTC
 
 jobs:
   unit-tests:
@@ -40,7 +42,7 @@ jobs:
   integration-tests-aws:
     name: Integration Tests (AWS)
     runs-on: ubuntu-latest
-    if: contains(github.event.pull_request.labels.*.name, 'run-integration')
+    if: contains(github.event.pull_request.labels.*.name, 'run-integration') || github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +73,14 @@ jobs:
           CLOUD_PROVIDER: aws
         run: python shared/scripts/run_integration_tests.py
 
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-logs-aws
+          path: shared/scripts/logs/
+          retention-days: 7
+
       - name: Teardown test environment
         if: always()
         env:
@@ -84,7 +94,7 @@ jobs:
   integration-tests-azure:
     name: Integration Tests (Azure)
     runs-on: ubuntu-latest
-    if: contains(github.event.pull_request.labels.*.name, 'run-integration')
+    if: contains(github.event.pull_request.labels.*.name, 'run-integration') || github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v4
 
@@ -117,6 +127,14 @@ jobs:
           DATABRICKS_CLIENT_SECRET: ${{ secrets.AZURE_DATABRICKS_CLIENT_SECRET }}
           CLOUD_PROVIDER: azure
         run: python shared/scripts/run_integration_tests.py
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-logs-azure
+          path: shared/scripts/logs/
+          retention-days: 7
 
       - name: Teardown test environment
         if: always()

@@ -75,6 +75,12 @@ variable "warehouse_name" {
   description = "Name of the auto-created governance warehouse."
 }
 
+variable "warehouse_cluster_size" {
+  type        = string
+  default     = "Small"
+  description = "Cluster size for the auto-created governance warehouse (2X-Small, Small, Medium, Large, X-Large, 2X-Large, 3X-Large, 4X-Large)."
+}
+
 variable "masking_sql_file" {
   type        = string
   description = "Path to masking_functions.sql owned by the data_access layer."
