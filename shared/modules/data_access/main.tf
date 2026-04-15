@@ -115,14 +115,17 @@ resource "databricks_sql_endpoint" "warehouse" {
 }
 
 resource "null_resource" "deploy_masking_functions" {
+  # NOTE: Only non-sensitive values belong in triggers (stored in tfstate plaintext).
+  # Credentials are passed via environment blocks using var.* references.
+  # The destroy provisioner uses self.triggers for host/client_id (non-secret)
+  # and nonsensitive() for the secret to avoid tfstate exposure.
   triggers = {
-    sql_hash      = filemd5(var.masking_sql_file)
-    sql_file      = var.masking_sql_file
-    script        = var.deploy_masking_script
-    warehouse_id  = local.effective_warehouse_id
-    host          = var.databricks_workspace_host
-    client_id     = var.databricks_client_id
-    client_secret = var.databricks_client_secret
+    sql_hash     = filemd5(var.masking_sql_file)
+    sql_file     = var.masking_sql_file
+    script       = var.deploy_masking_script
+    warehouse_id = local.effective_warehouse_id
+    host         = var.databricks_workspace_host
+    client_id    = var.databricks_client_id
   }
 
   provisioner "local-exec" {
@@ -131,7 +134,7 @@ resource "null_resource" "deploy_masking_functions" {
     environment = {
       DATABRICKS_HOST          = self.triggers.host
       DATABRICKS_CLIENT_ID     = self.triggers.client_id
-      DATABRICKS_CLIENT_SECRET = self.triggers.client_secret
+      DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
     }
   }
 
@@ -142,7 +145,7 @@ resource "null_resource" "deploy_masking_functions" {
     environment = {
       DATABRICKS_HOST          = self.triggers.host
       DATABRICKS_CLIENT_ID     = self.triggers.client_id
-      DATABRICKS_CLIENT_SECRET = self.triggers.client_secret
+      DATABRICKS_CLIENT_SECRET = nonsensitive(var.databricks_client_secret)
     }
   }
 
