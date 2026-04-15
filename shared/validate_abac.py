@@ -680,7 +680,7 @@ def validate_fgac_policies(
                 f"or split governance across multiple catalogs."
             )
         elif count > 8:
-            result.warning(
+            result.warn(
                 f"Catalog '{cat}': {count} fgac_policies is close to the platform limit of 10. "
                 f"Consider consolidating to leave headroom."
             )
