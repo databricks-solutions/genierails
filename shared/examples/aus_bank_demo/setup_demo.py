@@ -447,10 +447,12 @@ def _create_tables_via_sdk(dev_state: dict) -> str:
             wh_id = wh.id
             break
     if not wh_id:
+        from databricks.sdk.service.sql import CreateWarehouseRequestWarehouseType
         wh = w.warehouses.create(
             name="Demo Warehouse",
             cluster_size="2X-Small",
-            warehouse_type="PRO",
+            warehouse_type=CreateWarehouseRequestWarehouseType.PRO,
+            max_num_clusters=1,
             auto_stop_mins=15,
             enable_serverless_compute=True,
         ).result()
@@ -544,31 +546,91 @@ def _create_prod_workspace(cfg: dict, cloud: str, metastore_id: str, dev_state: 
     else:
         ws_kwargs = {
             "location": region,
-            "managed_resource_group_id": (
-                f"/subscriptions/{cfg.get('AZURE_SUBSCRIPTION_ID', '')}"
-                f"/resourceGroups/{prod_ws_name}-managed"
-            ),
         }
 
     print(f"  Creating workspace: {prod_ws_name} in {region}...")
-    try:
-        from databricks.sdk.service.provisioning import (
-            CustomerFacingComputeMode,
-            PricingTier,
-        )
-        ws = a.workspaces.create_and_wait(
-            workspace_name=prod_ws_name,
-            pricing_tier=PricingTier.ENTERPRISE,
-            compute_mode=CustomerFacingComputeMode.SERVERLESS,
-            **ws_kwargs,
-        )
-    except (ImportError, TypeError):
-        # Fallback for older SDK versions without compute_mode
-        ws = a.workspaces.create(workspace_name=prod_ws_name, **ws_kwargs).result()
+    if cloud == "azure":
+        # Azure workspaces must be created via ARM REST API, not the account SDK
+        import json
+        import urllib.request
+        import urllib.error
+        from azure.identity import ClientSecretCredential
 
-    prod_host = (f"https://{ws.deployment_name}.cloud.databricks.com"
-                 if cloud == "aws" else (ws.workspace_url or ""))
-    prod_ws_id = str(ws.workspace_id)
+        subscription_id = cfg.get("AZURE_SUBSCRIPTION_ID", "")
+        resource_group = cfg.get("AZURE_RESOURCE_GROUP", "")
+        arm_cred = ClientSecretCredential(
+            tenant_id=cfg.get("AZURE_TENANT_ID", ""),
+            client_id=cfg.get("AZURE_CLIENT_ID", ""),
+            client_secret=cfg.get("AZURE_CLIENT_SECRET", ""),
+        )
+        arm_token = arm_cred.get_token("https://management.azure.com/.default").token
+        arm_api_version = "2025-10-01-preview"
+
+        arm_url = (
+            f"https://management.azure.com/subscriptions/{subscription_id}"
+            f"/resourceGroups/{resource_group}"
+            f"/providers/Microsoft.Databricks/workspaces/{prod_ws_name}"
+            f"?api-version={arm_api_version}"
+        )
+        arm_body = json.dumps({
+            "location": region,
+            "sku": {"name": "premium"},
+            "properties": {"computeMode": "Serverless"},
+            "tags": {"ManagedBy": "setup_demo"},
+        }).encode()
+
+        req = urllib.request.Request(arm_url, data=arm_body, method="PUT", headers={
+            "Authorization": f"Bearer {arm_token}",
+            "Content-Type": "application/json",
+        })
+        try:
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")
+            raise RuntimeError(f"ARM PUT {e.code}: {detail}") from e
+
+        # Poll until Succeeded
+        import time as _time
+        deadline = _time.time() + 600
+        while _time.time() < deadline:
+            _time.sleep(15)
+            get_req = urllib.request.Request(arm_url, headers={"Authorization": f"Bearer {arm_token}"})
+            with urllib.request.urlopen(get_req) as resp:
+                data = json.loads(resp.read())
+            props = data.get("properties", {})
+            prov_state = props.get("provisioningState", "Unknown")
+            elapsed = int(_time.time() - (deadline - 600))
+            print(f"  [{elapsed}s]  {prov_state}")
+            if prov_state == "Succeeded":
+                break
+            if prov_state in ("Failed", "Canceled"):
+                raise RuntimeError(f"Workspace creation {prov_state}")
+        else:
+            raise TimeoutError("Workspace did not reach Succeeded within 10 minutes")
+
+        props = data.get("properties", {})
+        prod_ws_id = str(props["workspaceId"])
+        ws_url = props["workspaceUrl"]
+        prod_host = f"https://{ws_url}" if not ws_url.startswith("https://") else ws_url
+    else:
+        try:
+            from databricks.sdk.service.provisioning import (
+                CustomerFacingComputeMode,
+                PricingTier,
+            )
+            ws = a.workspaces.create_and_wait(
+                workspace_name=prod_ws_name,
+                pricing_tier=PricingTier.ENTERPRISE,
+                compute_mode=CustomerFacingComputeMode.SERVERLESS,
+                **ws_kwargs,
+            )
+        except (ImportError, TypeError):
+            # Fallback for older SDK versions without compute_mode
+            ws = a.workspaces.create(workspace_name=prod_ws_name, **ws_kwargs).result()
+
+        prod_host = f"https://{ws.deployment_name}.cloud.databricks.com"
+        prod_ws_id = str(ws.workspace_id)
     print(f"  {_green('✓')} Prod workspace created: {prod_host}")
 
     # Assign shared metastore

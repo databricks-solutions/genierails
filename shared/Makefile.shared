@@ -191,9 +191,9 @@ generate: _bootstrap _guard-workspace-target ## Run generate_abac.py in the sele
 			echo "  then use 'make generate SPACE=\"$(SPACE)\"' to add or update individual spaces."; \
 			exit 1; \
 		fi; \
-		cd "$(ENV_DIR)" && python "$(SHARED_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),) --space "$(SPACE)"; \
+		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),) --space "$(SPACE)"; \
 	else \
-		cd "$(ENV_DIR)" && python "$(SHARED_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
+		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
 
 audit-schema: _bootstrap _guard-workspace-target ## Report untagged sensitive columns and stale tag assignments in managed tables
@@ -207,18 +207,18 @@ generate-delta: _bootstrap _guard-workspace-target ## Detect schema drift and ge
 validate-generated: _bootstrap _guard-workspace-target ## Validate generated/ files in the selected workspace environment
 	@echo "=== Validate (generated/) [$(ENV)] ==="
 	@cd "$(ENV_DIR)" && if [ -f generated/masking_functions.sql ]; then \
-		python "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars generated/masking_functions.sql $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
+		python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars generated/masking_functions.sql $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	else \
-		python "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
+		python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
 
 validate: _bootstrap ## Validate split config in the selected environment
 	@echo "=== Validate ($(ENV)) ==="
 	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
-		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); fi; \
+		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); fi; \
 	else \
-		cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); fi; \
-		cd "$(ENV_DIR)" && python "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
+		cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); fi; \
+		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
 
 promote: _bootstrap _guard-workspace-target ## Split generated/ into layers (same-env), or cross-env: make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_cat=prod_cat"
@@ -264,9 +264,9 @@ print(', '.join(cats) if cats else '(none detected)') \
 			$$map_flags; \
 		cd "$$dest_env_dir" && python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" generated/abac.auto.tfvars ../$(ACCOUNT_ENV)/abac.auto.tfvars $(DATA_ACCESS_SUBDIR)/abac.auto.tfvars abac.auto.tfvars; \
 		cp "$$dest_env_dir/generated/masking_functions.sql" "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/masking_functions.sql"; \
-		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; fi; \
-		cd "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql; fi; \
-		cd "$$dest_env_dir" && python "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; \
+		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; fi; \
+		cd "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql; fi; \
+		cd "$$dest_env_dir" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; \
 		echo ""; \
 		echo "=== Promote complete: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
 		echo "  Next: edit $$dest_env_dir/auth.auto.tfvars  ($(DEST_ENV) workspace credentials)"; \
@@ -281,17 +281,17 @@ print(', '.join(cats) if cats else '(none detected)') \
 		fi; \
 		echo "=== Split generated/ to account + data_access + workspace ($(ENV)) ==="; \
 		if [ -f "$(ENV_DIR)/generated/masking_functions.sql" ]; then \
-			cd "$(ENV_DIR)" && python "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars generated/masking_functions.sql; \
+			cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars generated/masking_functions.sql; \
 		else \
-			cd "$(ENV_DIR)" && python "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars; \
+			cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars; \
 		fi; \
 		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" generated/abac.auto.tfvars ../$(ACCOUNT_ENV)/abac.auto.tfvars $(DATA_ACCESS_SUBDIR)/abac.auto.tfvars abac.auto.tfvars; \
 		if [ -f "$(ENV_DIR)/generated/masking_functions.sql" ]; then \
 			cp "$(ENV_DIR)/generated/masking_functions.sql" "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/masking_functions.sql"; \
 		fi; \
-		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; fi; \
-		cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql; fi; \
-		cd "$(ENV_DIR)" && python "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; \
+		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; fi; \
+		cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql; fi; \
+		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; \
 	fi
 
 _plan-layer:
@@ -722,7 +722,7 @@ integration-test: ## Run the full end-to-end integration test (setup → generat
 	@echo "========================================================"
 	@echo ""
 	@echo "── Step 1: Create test catalogs (dev + prod) ──────────"
-	cd "$(CLOUD_ROOT)" && python $(SHARED_ROOT)/scripts/setup_test_data.py \
+	cd "$(CLOUD_ROOT)" && python3 $(SHARED_ROOT)/scripts/setup_test_data.py \
 		--auth-file "$(ITEST_AUTH)" $(ITEST_WH_FLAG) --prod
 	@echo ""
 	@echo "── Step 2: Env scaffolding ─────────────────────────────"
@@ -738,7 +738,7 @@ integration-test: ## Run the full end-to-end integration test (setup → generat
 	$(MAKE) --no-print-directory apply ENV="$(ENV)"
 	@echo ""
 	@echo "── Step 6: Verify dev (row counts + ABAC governance) ───"
-	cd "$(CLOUD_ROOT)" && python $(SHARED_ROOT)/scripts/setup_test_data.py \
+	cd "$(CLOUD_ROOT)" && python3 $(SHARED_ROOT)/scripts/setup_test_data.py \
 		--auth-file "$(ITEST_AUTH)" $(ITEST_WH_FLAG) --verify
 	@echo ""
 	@echo "── Step 7: Per-space generation test (Finance only) ────"
@@ -753,12 +753,12 @@ integration-test: ## Run the full end-to-end integration test (setup → generat
 	$(MAKE) --no-print-directory apply ENV="$(ITEST_DEST_ENV)"
 	@echo ""
 	@echo "── Step 10: Verify prod (row counts + ABAC governance) ─"
-	cd "$(CLOUD_ROOT)" && python $(SHARED_ROOT)/scripts/setup_test_data.py \
+	cd "$(CLOUD_ROOT)" && python3 $(SHARED_ROOT)/scripts/setup_test_data.py \
 		--auth-file "$(ITEST_AUTH)" $(ITEST_WH_FLAG) --verify-prod
 	@echo ""
 	@if [ -z "$(KEEP_DATA)" ]; then \
 		echo "── Step 11: Teardown ────────────────────────────────────"; \
-		cd "$(CLOUD_ROOT)" && python $(SHARED_ROOT)/scripts/setup_test_data.py \
+		cd "$(CLOUD_ROOT)" && python3 $(SHARED_ROOT)/scripts/setup_test_data.py \
 			--auth-file "$(ITEST_AUTH)" $(ITEST_WH_FLAG) --teardown --teardown-prod; \
 		$(MAKE) --no-print-directory destroy ENV="$(ITEST_DEST_ENV)"; \
 		$(MAKE) --no-print-directory destroy ENV="$(ENV)"; \
