@@ -31,6 +31,15 @@ Check the [Prerequisites](shared/docs/prerequisites.md) first (Python, Terraform
 > - [India Bank Demo](shared/examples/india_bank_demo/) — Aadhaar, PAN, GSTIN, UPI masking, DPDP Act 2023 compliance
 > - [ASEAN Bank Demo](shared/examples/asean_bank_demo/) — 6-country national IDs (NRIC, MyKad, Thai ID, NIK, PhilSys, CCCD), multi-currency, cross-border remittances
 
+**Where to start:**
+
+| Your situation | Start here | Time |
+|---|---|---|
+| Want to see a demo first | [Australian Bank Demo](shared/examples/aus_bank_demo/), [India](shared/examples/india_bank_demo/), or [ASEAN](shared/examples/asean_bank_demo/) | ~20 min |
+| Have an existing Genie Space in the UI | [From UI to Production](shared/docs/from-ui-to-production.md) | ~45 min |
+| Starting from scratch (no Genie Space yet) | [Quickstart](shared/docs/quickstart.md) | ~30 min |
+| Need the full reference | [Playbook](shared/docs/playbook.md) | Reference |
+
 ## Repository Layout
 
 ```

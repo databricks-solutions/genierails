@@ -104,12 +104,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fcntl
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -136,7 +136,6 @@ CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / _default_cl
 # All helpers that reference ENVS_DIR use the module-level variable so that
 # changing it once in main() propagates everywhere.
 ENVS_DIR    = Path(os.environ.get("ENVS_DIR", CLOUD_ROOT / "envs"))
-ACCOUNT_OPS_LOCK = CLOUD_ROOT / ".parallel_account_ops.lock"
 
 _parallel_state = os.environ.get("_PARALLEL_STATE_FILE", "")
 PROVISION_STATE_FILE = Path(_parallel_state) if _parallel_state else SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
@@ -653,15 +652,29 @@ def _needs_account_ops_lock(items: tuple[str, ...]) -> bool:
     )
 
 
+# Allow up to N concurrent account-level operations instead of serializing
+# them behind an exclusive lock.  Each parallel scenario already uses unique
+# suffixed names so there are no naming conflicts — the only concern is API
+# rate-limiting, which a small concurrency cap handles.
+_ACCOUNT_OPS_CONCURRENCY = int(os.environ.get("ACCOUNT_OPS_CONCURRENCY", "8"))
+_account_ops_semaphore: threading.Semaphore | None = None
+
+
+def _get_account_semaphore() -> threading.Semaphore:
+    global _account_ops_semaphore
+    if _account_ops_semaphore is None:
+        _account_ops_semaphore = threading.Semaphore(_ACCOUNT_OPS_CONCURRENCY)
+    return _account_ops_semaphore
+
+
 @contextlib.contextmanager
 def _account_ops_lock(reason: str):
-    ACCOUNT_OPS_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with open(ACCOUNT_OPS_LOCK, "w") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    sem = _get_account_semaphore()
+    sem.acquire()
+    try:
+        yield
+    finally:
+        sem.release()
 
 
 def _make(

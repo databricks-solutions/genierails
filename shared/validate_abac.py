@@ -305,6 +305,10 @@ FUNCTION_EXPECTED_CATEGORIES = {
     "mask_date_to_year": {"date", "customer_pii", "patient_pii"},
     "mask_dob_year": {"date", "customer_pii", "patient_pii"},
     "mask_timestamp_to_day": {"date"},
+    # India PAN (Permanent Account Number) is a government ID but the LLM
+    # often groups it with credit-card columns under the same tag value in
+    # banking schemas.  Accept card categories to avoid false-positive mismatches.
+    "mask_pan_india": {"government_id", "card", "payment_card"},
 }
 
 
@@ -661,6 +665,28 @@ def validate_fgac_policies(
             result.error(
                 f"fgac policy '{p.get('name', '')}' uses function '{fn}' for columns with "
                 f"categories {sorted(categories)}; expected only {sorted(expected)}"
+            )
+
+    # Per-catalog FGAC policy count check (Databricks enforces max 10 per catalog)
+    catalog_counts: dict[str, int] = {}
+    for p in policies:
+        if not isinstance(p, dict):
+            continue
+        cat = p.get("catalog", "") or "_unknown"
+        if isinstance(cat, list):
+            cat = cat[0] if cat else "_unknown"
+        catalog_counts[cat] = catalog_counts.get(cat, 0) + 1
+    for cat, count in sorted(catalog_counts.items()):
+        if count > 10:
+            result.error(
+                f"Catalog '{cat}': {count} fgac_policies exceeds Databricks platform limit of 10. "
+                f"Consolidate policies by reusing masking functions across columns with the same tag, "
+                f"or split governance across multiple catalogs."
+            )
+        elif count > 8:
+            result.warn(
+                f"Catalog '{cat}': {count} fgac_policies is close to the platform limit of 10. "
+                f"Consider consolidating to leave headroom."
             )
 
     result.ok(f"fgac_policies: {len(policies)} policy/ies, {len(referenced_functions)} unique function(s)")

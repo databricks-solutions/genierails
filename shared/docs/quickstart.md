@@ -2,6 +2,8 @@
 
 > **Already have a Genie Space?** Most users do — see [From UI to Production](from-ui-to-production.md) instead.
 
+> **Using country or industry overlays?** Add `COUNTRY=ANZ` and/or `INDUSTRY=financial_services` to your `make generate` command for region-specific masking. See [Country Overlays](country-overlays.md) and [Industry Overlays](industry-overlays.md).
+
 Use this when you don't have an existing Genie Space yet and want to create everything from scratch.
 
 ## Step-by-step
