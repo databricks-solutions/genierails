@@ -22,6 +22,11 @@
         "masked_pan",
         "masked_nric",
         "masked_mykad",
+        "masked_nik",
+        "masked_thai_id",
+        "masked_philsys",
+        "masked_cccd",
+        "masked_fin",
         "redacted_address"
       ],
       "key_aliases": [],
@@ -34,7 +39,12 @@
         "redacted_aadhaar": "masked_aadhaar",
         "redacted_pan": "masked_pan",
         "redacted_nric": "masked_nric",
-        "redacted_mykad": "masked_mykad"
+        "redacted_mykad": "masked_mykad",
+        "redacted_nik": "masked_nik",
+        "redacted_thai_id": "masked_thai_id",
+        "redacted_philsys": "masked_philsys",
+        "redacted_cccd": "masked_cccd",
+        "redacted_fin": "masked_fin"
       }
     },
     "pci_level": {
