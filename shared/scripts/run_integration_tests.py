@@ -104,7 +104,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fcntl
 import os
 import re
 import shutil
@@ -137,7 +136,6 @@ CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / _default_cl
 # All helpers that reference ENVS_DIR use the module-level variable so that
 # changing it once in main() propagates everywhere.
 ENVS_DIR    = Path(os.environ.get("ENVS_DIR", CLOUD_ROOT / "envs"))
-ACCOUNT_OPS_LOCK = CLOUD_ROOT / ".parallel_account_ops.lock"
 
 _parallel_state = os.environ.get("_PARALLEL_STATE_FILE", "")
 PROVISION_STATE_FILE = Path(_parallel_state) if _parallel_state else SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
