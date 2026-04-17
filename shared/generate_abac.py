@@ -2233,6 +2233,14 @@ def autofix_fgac_policy_count(tfvars_path: Path) -> int:
             return 100
         if any(tok in blob for tok in ("card_number", "credit_card")):
             return 95
+        # Country-specific regulated identifiers (ANZ, India, ASEAN)
+        if any(tok in blob for tok in (
+            "tfn", "tax_file", "medicare", "bsb", "ird", "nhi",       # ANZ
+            "aadhaar", "pan_number", "uan", "ifsc",                    # India
+            "nric", "fin_number", "mykad", "nik",                      # ASEAN
+            "aml_risk", "compliance", "audit",                         # Compliance flags
+        )):
+            return 90
         if any(tok in blob for tok in ("address", "birth", "dob", "date_of_birth")):
             return 80
         if any(tok in blob for tok in ("email", "phone", "name")):
@@ -3546,7 +3554,7 @@ _FUNCTION_EXPECTED_CATEGORIES = {
     "mask_timestamp_to_day": {"date"},
     # India-specific (IN overlay)
     "mask_aadhaar": {"government_id"},
-    "mask_pan_india": {"government_id"},
+    "mask_pan_india": {"government_id", "card", "payment_card"},
     # ANZ-specific
     "mask_tfn": {"government_id"},
     "mask_medicare": {"government_id"},

@@ -305,6 +305,10 @@ FUNCTION_EXPECTED_CATEGORIES = {
     "mask_date_to_year": {"date", "customer_pii", "patient_pii"},
     "mask_dob_year": {"date", "customer_pii", "patient_pii"},
     "mask_timestamp_to_day": {"date"},
+    # India PAN (Permanent Account Number) is a government ID but the LLM
+    # often groups it with credit-card columns under the same tag value in
+    # banking schemas.  Accept card categories to avoid false-positive mismatches.
+    "mask_pan_india": {"government_id", "card", "payment_card"},
 }
 
 

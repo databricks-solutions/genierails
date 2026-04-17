@@ -1053,13 +1053,40 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     # fine-grained, path-scoped access instead of a metastore-wide root.
     # ------------------------------------------------------------------
     _step(f"Creating Unity Catalog metastore: {ms_name}")
-    ms_resp = a.metastores.create(
-        metastore_info=CreateAccountsMetastore(
-            name=ms_name,
-            region=region,
-            # No storage_root — catalogs will use an explicit External Location.
+    try:
+        ms_resp = a.metastores.create(
+            metastore_info=CreateAccountsMetastore(
+                name=ms_name,
+                region=region,
+                # No storage_root — catalogs will use an explicit External Location.
+            )
         )
-    )
+    except Exception as exc:
+        # Metastore creation failed (e.g. region limit reached).
+        # Clean up the workspace, group, and storage that were already created
+        # so they don't become permanent orphans.
+        _err(f"Metastore creation failed: {exc}")
+        _err("Cleaning up already-created resources to prevent orphans...")
+        try:
+            provider.teardown_storage(cfg, state)
+        except Exception:
+            pass
+        ws_id_cleanup = state.get("workspace_id")
+        if ws_id_cleanup:
+            try:
+                if hasattr(provider, 'teardown_workspace') and callable(getattr(provider, 'teardown_workspace', None)):
+                    provider.teardown_workspace(cfg, state)
+                else:
+                    a.workspaces.delete(workspace_id=int(ws_id_cleanup))
+            except Exception:
+                pass
+        grp_id_cleanup = state.get("admin_group_id")
+        if grp_id_cleanup:
+            try:
+                a.groups.delete(id=grp_id_cleanup)
+            except Exception:
+                pass
+        raise
     ms_info = getattr(ms_resp, "metastore_info", None) or ms_resp
     ms_id   = ms_info.metastore_id
     state["metastore_id"] = ms_id

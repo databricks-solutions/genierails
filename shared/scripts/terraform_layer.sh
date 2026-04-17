@@ -66,8 +66,17 @@ if [ -f .terraform.lock.hcl ]; then
   INIT_CMD+=(-lockfile=readonly)
 fi
 
+# Serialize terraform init per root directory — concurrent inits in the same
+# working directory corrupt provider resolution even with isolated TF_DATA_DIR.
+# Use mkdir as a portable lock (atomic on all POSIX systems including macOS).
+INIT_LOCK="$ROOT_DIR/.terraform-init.lock.d"
+_unlock_init() { rmdir "$INIT_LOCK" 2>/dev/null || true; }
+while ! mkdir "$INIT_LOCK" 2>/dev/null; do sleep 0.2; done
+trap _unlock_init EXIT
 echo "+ ${INIT_CMD[*]}"
 "${INIT_CMD[@]}" >/dev/null
+_unlock_init
+trap - EXIT
 
 VAR_ARGS=()
 for tfvars in auth.auto.tfvars env.auto.tfvars abac.auto.tfvars; do
