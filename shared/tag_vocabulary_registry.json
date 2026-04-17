@@ -26,6 +26,7 @@
         "masked_thai_id",
         "masked_philsys",
         "masked_cccd",
+        "masked_fin",
         "redacted_address"
       ],
       "key_aliases": [],
@@ -42,7 +43,8 @@
         "redacted_nik": "masked_nik",
         "redacted_thai_id": "masked_thai_id",
         "redacted_philsys": "masked_philsys",
-        "redacted_cccd": "masked_cccd"
+        "redacted_cccd": "masked_cccd",
+        "redacted_fin": "masked_fin"
       }
     },
     "pci_level": {
