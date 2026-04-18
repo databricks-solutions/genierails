@@ -35,6 +35,7 @@ Check the [Prerequisites](shared/docs/prerequisites.md) first (Python, Terraform
 
 | Your situation | Start here | Time |
 |---|---|---|
+| **Use Claude Code** (recommended) | [Claude Code Skill Guide](shared/docs/claude-code-skill.md) — guided setup, generation, deployment | ~15 min |
 | Want to see a demo first | [Australian Bank Demo](shared/examples/aus_bank_demo/), [India](shared/examples/india_bank_demo/), or [ASEAN](shared/examples/asean_bank_demo/) | ~20 min |
 | Have an existing Genie Space in the UI | [From UI to Production](shared/docs/from-ui-to-production.md) | ~45 min |
 | Starting from scratch (no Genie Space yet) | [Quickstart](shared/docs/quickstart.md) | ~30 min |
@@ -54,6 +55,7 @@ genierails/
 ## Documentation
 
 **Getting Started:**
+- [Claude Code Skill](shared/docs/claude-code-skill.md) — guided workflows via `/genierails` (setup, generate, apply, promote)
 - [Prerequisites](shared/docs/prerequisites.md) — OS, Python, Terraform, network, Databricks account, cloud credentials
 - [From UI to Production](shared/docs/from-ui-to-production.md) — import your existing Genie Space, add governance, promote to prod
 - [Quickstart](shared/docs/quickstart.md) — create a Genie Space from scratch

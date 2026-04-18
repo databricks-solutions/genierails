@@ -6,6 +6,7 @@ GenieRails puts Genie onboarding on rails — import your existing Genie Space, 
 
 | Starting point | You have... | Guide |
 |---|---|---|
+| **Using Claude Code** | Claude Code installed — want guided setup and generation | [Claude Code Skill](claude-code-skill.md) |
 | **I already have a Genie Space** | A space configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](from-ui-to-production.md) |
 | **I'm starting from scratch** | Tables in Unity Catalog, no Genie Space yet | [Quickstart](quickstart.md) |
 
