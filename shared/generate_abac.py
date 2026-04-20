@@ -4758,7 +4758,27 @@ def autofix_inject_overlay_functions(
         sql_text, re.IGNORECASE,
     ))
 
-    missing = {name: defn for name, defn in overlay_fns.items() if name not in existing}
+    # Also check arg counts of existing functions — if the LLM generated a
+    # function with the wrong number of arguments (e.g. 2-arg mask_amount_rounded
+    # instead of 1-arg), the overlay's correct version should override it.
+    try:
+        from validate_abac import parse_sql_function_arg_counts
+        existing_arg_counts = parse_sql_function_arg_counts(sql_path)
+    except Exception:
+        existing_arg_counts = {}
+
+    missing = {}
+    for name, defn in overlay_fns.items():
+        if name not in existing:
+            missing[name] = defn
+        elif name in existing_arg_counts:
+            # Count args in overlay signature to compare
+            overlay_sig = defn.get("signature", "")
+            overlay_args = overlay_sig.split("(", 1)[-1].rsplit(")", 1)[0].strip()
+            overlay_arg_count = len([a for a in overlay_args.split(",") if a.strip()]) if overlay_args else 0
+            if existing_arg_counts[name] != overlay_arg_count:
+                missing[name] = defn  # override LLM's wrong-arg-count version
+
     if not missing:
         return 0
 
