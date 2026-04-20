@@ -1513,6 +1513,20 @@ def call_with_retries(call_fn, prompt: str, model: str, max_retries: int) -> str
     raise RuntimeError(f"All {max_retries} attempts failed. Last error: {last_error}")
 
 
+def _cleanup_stray_commas(text: str) -> str:
+    """Remove stray commas left behind by block removals in HCL text.
+
+    Handles bare comma lines, consecutive commas, and trailing commas before ]
+    (but preserves valid trailing commas after ``}`` or quoted strings).
+    """
+    text = re.sub(r'^\s*,\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r',(\s*,)+', ',', text)
+    # Only strip a comma before ] when preceded by whitespace (bare/stray comma),
+    # not when preceded by } or " (valid HCL trailing comma).
+    text = re.sub(r'(?<![}"\']),(\s*\])', r'\1', text)
+    return text
+
+
 def fix_hcl_syntax(tfvars_path: Path) -> int:
     """Repair common HCL syntax errors introduced by the LLM.
 
@@ -1609,13 +1623,8 @@ def fix_hcl_syntax(tfvars_path: Path) -> int:
 
     # ------------------------------------------------------------------
     # Fix 5: remove stray commas left by autofix block removals.
-    #   - Bare comma lines
-    #   - Consecutive commas
-    #   - Trailing comma before ]
     # ------------------------------------------------------------------
-    fixed5 = re.sub(r'^\s*,\s*$', '', text, flags=re.MULTILINE)
-    fixed5 = re.sub(r',(\s*,)+', ',', fixed5)
-    fixed5 = re.sub(r',(\s*\])', r'\1', fixed5)
+    fixed5 = _cleanup_stray_commas(text)
     if fixed5 != text:
         repairs += 1
         text = fixed5
@@ -2553,9 +2562,7 @@ def autofix_fgac_policy_count(tfvars_path: Path) -> int:
 
     if removed or assignments_removed:
         # Clean up stray commas and double-blank lines left by removal
-        text = re.sub(r'^\s*,\s*$', '', text, flags=re.MULTILINE)
-        text = re.sub(r',(\s*,)+', ',', text)
-        text = re.sub(r',(\s*\])', r'\1', text)
+        text = _cleanup_stray_commas(text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         tfvars_path.write_text(text)
 
@@ -3872,9 +3879,7 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
         return 0
 
     # Clean up stray commas left behind by block removals
-    rewritten = re.sub(r'^\s*,\s*$', '', rewritten, flags=re.MULTILINE)  # bare comma lines
-    rewritten = re.sub(r',(\s*,)+', ',', rewritten)  # consecutive commas
-    rewritten = re.sub(r',(\s*\])', r'\1', rewritten)  # trailing comma before ]
+    rewritten = _cleanup_stray_commas(rewritten)
 
     text = text[:sec_start] + rewritten + text[sec_end:]
 
@@ -4482,9 +4487,7 @@ def autofix_duplicate_column_masks(tfvars_path: Path) -> int:
             print(f"    Removed duplicate mask policy '{name}' (generic function on column already covered by specific policy)")
 
     if removed:
-        # Clean up any leftover double commas or trailing commas before ]
-        text = re.sub(r',\s*,', ',', text)
-        text = re.sub(r',\s*\]', '\n  ]', text)
+        text = _cleanup_stray_commas(text)
         tfvars_path.write_text(text)
     return removed
 
@@ -4537,8 +4540,7 @@ def autofix_forbidden_conditions(tfvars_path: Path) -> int:
             removed += 1
 
     if removed:
-        text = re.sub(r',\s*,', ',', text)
-        text = re.sub(r',\s*\]', '\n  ]', text)
+        text = _cleanup_stray_commas(text)
         tfvars_path.write_text(text)
     return removed
 
@@ -4622,8 +4624,7 @@ def autofix_invalid_condition_values(tfvars_path: Path) -> int:
         )
         text = pattern.sub("", text, count=1)
 
-    text = re.sub(r',\s*,', ',', text)
-    text = re.sub(r',\s*\]', '\n  ]', text)
+    text = _cleanup_stray_commas(text)
     tfvars_path.write_text(text)
     return len(bad_names)
 
@@ -4697,8 +4698,7 @@ def autofix_malformed_conditions(tfvars_path: Path) -> int:
         )
         text = pattern.sub("", text, count=1)
 
-    text = re.sub(r',\s*,', ',', text)
-    text = re.sub(r',\s*\]', '\n  ]', text)
+    text = _cleanup_stray_commas(text)
     tfvars_path.write_text(text)
     return len(bad_names)
 

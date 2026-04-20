@@ -564,7 +564,7 @@ def _create_prod_workspace(cfg: dict, cloud: str, metastore_id: str, dev_state: 
             client_secret=cfg.get("AZURE_CLIENT_SECRET", ""),
         )
         arm_token = arm_cred.get_token("https://management.azure.com/.default").token
-        arm_api_version = "2025-10-01-preview"
+        arm_api_version = "2024-05-01"
 
         arm_url = (
             f"https://management.azure.com/subscriptions/{subscription_id}"
@@ -596,8 +596,14 @@ def _create_prod_workspace(cfg: dict, cloud: str, metastore_id: str, dev_state: 
         while _time.time() < deadline:
             _time.sleep(15)
             get_req = urllib.request.Request(arm_url, headers={"Authorization": f"Bearer {arm_token}"})
-            with urllib.request.urlopen(get_req) as resp:
-                data = json.loads(resp.read())
+            try:
+                with urllib.request.urlopen(get_req) as resp:
+                    data = json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                if e.code >= 500:
+                    print(f"  Transient error ({e.code}), retrying...")
+                    continue
+                raise
             props = data.get("properties", {})
             prov_state = props.get("provisioningState", "Unknown")
             elapsed = int(_time.time() - (deadline - 600))

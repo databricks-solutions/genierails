@@ -244,7 +244,7 @@ class AzureProvider(CloudProvider):
         return {"location": region}
 
     # ARM preview API version that supports computeMode=Serverless
-    _ARM_API_VERSION = "2025-10-01-preview"
+    _ARM_API_VERSION = "2024-05-01"
 
     def _azure_credential(self, cfg: dict[str, str]):
         """Return an Azure credential from config (SP preferred, else DefaultAzureCredential)."""
@@ -310,8 +310,14 @@ class AzureProvider(CloudProvider):
         while time.time() < deadline:
             time.sleep(poll_interval)
             get_req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-            with urllib.request.urlopen(get_req) as resp:
-                data = json.loads(resp.read())
+            try:
+                with urllib.request.urlopen(get_req) as resp:
+                    data = json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                if e.code >= 500:
+                    print(f"  Transient error ({e.code}), retrying...")
+                    continue
+                raise
             props = data.get("properties", {})
             state = props.get("provisioningState", "Unknown")
             elapsed = int(time.time() - (deadline - 600))
