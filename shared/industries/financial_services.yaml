@@ -80,6 +80,30 @@ identifiers:
     masking_function: mask_email
     category: customer_pii
 
+  - name: Card Verification Value (CVV)
+    column_hints:
+      - cvv
+      - cvc
+      - card_verification_value
+      - security_code
+      - cvv2
+    format: "3-4 digits"
+    sensitivity: restricted
+    masking_function: mask_cvv_redact
+    category: payment_card
+
+  - name: AML Risk Flag
+    column_hints:
+      - aml_risk_flag
+      - aml_flag
+      - risk_flag
+      - aml_status
+      - compliance_flag
+    format: "Categorical (CLEAR, REVIEW, HIGH_RISK, BLOCKED)"
+    sensitivity: restricted
+    masking_function: mask_aml_flag
+    category: compliance_risk
+
 masking_functions:
   - name: mask_account_last4
     signature: "mask_account_last4(acct STRING) RETURNS STRING"
@@ -144,6 +168,21 @@ masking_functions:
         ELSE '[REDACTED]'
       END
 
+  - name: mask_cvv_redact
+    signature: "mask_cvv_redact(cvv STRING) RETURNS STRING"
+    comment: "CVV/CVC — full redaction, PCI DSS prohibits any display or storage"
+    body: "CASE WHEN cvv IS NULL THEN NULL ELSE '[REDACTED]' END"
+
+  - name: mask_aml_flag
+    signature: "mask_aml_flag(flag STRING) RETURNS STRING"
+    comment: "AML risk flag — visible only to compliance/fraud teams, masked for others"
+    body: |
+      CASE
+        WHEN flag IS NULL THEN NULL
+        WHEN is_account_group_member('fraud_team') OR is_account_group_member('compliance_officer') THEN flag
+        ELSE '[RESTRICTED]'
+      END
+
   - name: filter_aml_compliance
     signature: "filter_aml_compliance() RETURNS BOOLEAN"
     comment: "AML row filter — only compliance and fraud teams see all rows"
@@ -194,10 +233,17 @@ prompt_overlay: |
     Use `mask_routing` — show last 4 digits.
   - Credit Card Number (PAN): 13-19 digits. Columns: `card_number`, `credit_card`, `pan`.
     Use `mask_card_last4` — PCI DSS compliant, last 4 digits only.
+  - Card Verification Value (CVV/CVC): 3-4 digits. Columns: `cvv`, `cvc`, `security_code`.
+    Use `mask_cvv_redact` — PCI DSS prohibits any display; always fully redact.
 
   **Transaction Data:**
   - Transaction Amount: Decimal currency. Columns: `transaction_amount`, `txn_amount`, `amount`.
     Use `mask_amount_round` — round to nearest thousand for non-privileged users.
+
+  **Compliance / Risk:**
+  - AML Risk Flag: Categorical. Columns: `aml_risk_flag`, `aml_flag`, `risk_flag`.
+    Use `mask_aml_flag` — restricted to fraud_team and compliance_officer groups.
+    Values like HIGH_RISK and BLOCKED must not be visible to general users.
 
   **Customer PII:**
   - SSN: 9 digits. Columns: `ssn`, `social_security`, `tax_id`.
@@ -214,6 +260,8 @@ prompt_overlay: |
   - `mask_amount_round(amount DOUBLE) RETURNS STRING` — rounded to nearest thousand
   - `mask_ssn_last4(ssn STRING) RETURNS STRING` — last 4 digits visible
   - `mask_name(name STRING) RETURNS STRING` — first initial only
+  - `mask_cvv_redact(cvv STRING) RETURNS STRING` — full redaction (PCI DSS)
+  - `mask_aml_flag(flag STRING) RETURNS STRING` — visible to compliance/fraud only
 
   **Suggested Group Structure:**
   - `fraud_team` / `compliance_officer`: Full access to all data (AML/SOX compliance)
@@ -224,6 +272,7 @@ prompt_overlay: |
   **Regulatory Context:**
   - PCI DSS: Card numbers (PAN) must never be displayed in full to non-privileged users.
     Only first 6 and last 4 digits may be shown; prefer showing only last 4.
+    CVV/CVC must NEVER be displayed or stored — always use full redaction.
   - SOX: Financial data access must be auditable. Consider audit logging.
   - GLBA: Customer financial information must be protected from unauthorized access.
   - BSA/AML: Transaction monitoring teams (fraud_team) need full access to detect
