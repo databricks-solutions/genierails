@@ -47,7 +47,7 @@ identifiers:
       - transfer_amount
     format: "Decimal currency value"
     sensitivity: confidential
-    masking_function: mask_amount_round
+    masking_function: mask_amount_rounded
     category: transaction
 
   - name: Customer SSN
@@ -114,13 +114,22 @@ masking_functions:
         ELSE '[REDACTED]'
       END
 
-  - name: mask_amount_round
-    signature: "mask_amount_round(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2)"
+  - name: mask_amount_rounded
+    signature: "mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2)"
     comment: "Transaction amount — round to nearest hundred for non-privileged users"
     body: |
       CASE
         WHEN amount IS NULL THEN NULL
         ELSE ROUND(amount, -2)
+      END
+
+  - name: mask_date_to_year
+    signature: "mask_date_to_year(dt DATE) RETURNS DATE"
+    comment: "Date — truncate to January 1st of the same year"
+    body: |
+      CASE
+        WHEN dt IS NULL THEN NULL
+        ELSE DATE_TRUNC('YEAR', dt)
       END
 
   - name: mask_ssn_last4
@@ -206,7 +215,8 @@ prompt_overlay: |
   - `mask_account_last4(acct STRING) RETURNS STRING` — last 4 digits visible
   - `mask_routing(rtn STRING) RETURNS STRING` — last 4 digits visible
   - `mask_card_last4(card STRING) RETURNS STRING` — PCI compliant, last 4 digits
-  - `mask_amount_round(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2)` — rounded to nearest hundred
+  - `mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2)` — rounded to nearest hundred
+  - `mask_date_to_year(dt DATE) RETURNS DATE` — truncate to year (for date_of_birth, opened_date, etc.)
   - `mask_ssn_last4(ssn STRING) RETURNS STRING` — last 4 digits visible
   - `mask_name(name STRING) RETURNS STRING` — first initial only
 
