@@ -244,7 +244,7 @@ class AzureProvider(CloudProvider):
         return {"location": region}
 
     # ARM preview API version that supports computeMode=Serverless
-    _ARM_API_VERSION = "2024-05-01"
+    _ARM_API_VERSION = "2025-10-01-preview"
 
     def _azure_credential(self, cfg: dict[str, str]):
         """Return an Azure credential from config (SP preferred, else DefaultAzureCredential)."""

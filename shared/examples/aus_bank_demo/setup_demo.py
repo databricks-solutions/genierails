@@ -564,7 +564,7 @@ def _create_prod_workspace(cfg: dict, cloud: str, metastore_id: str, dev_state: 
             client_secret=cfg.get("AZURE_CLIENT_SECRET", ""),
         )
         arm_token = arm_cred.get_token("https://management.azure.com/.default").token
-        arm_api_version = "2024-05-01"
+        arm_api_version = "2025-10-01-preview"
 
         arm_url = (
             f"https://management.azure.com/subscriptions/{subscription_id}"
