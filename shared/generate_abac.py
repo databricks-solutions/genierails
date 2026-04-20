@@ -5206,6 +5206,24 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]
                 f"(expected for {len(genie_spaces)} configured genie_space(s))"
             )
 
+    # Check 1b: tag_assignments and fgac_policies must not be empty when tables
+    # are configured.  An empty governance config means the LLM produced an
+    # incomplete response (e.g. only groups + tag_policies without the FGAC
+    # sections), which would wipe all existing governance on apply.
+    uc_tables = auth_cfg.get("uc_tables", [])
+    if not uc_tables:
+        for gs in auth_cfg.get("genie_spaces", []):
+            uc_tables.extend(gs.get("uc_tables", []))
+    if uc_tables:
+        ta = cfg.get("tag_assignments", []) or []
+        fp = cfg.get("fgac_policies", []) or []
+        if not ta and not fp:
+            errors.append(
+                f"Generated config has 0 tag_assignments and 0 fgac_policies "
+                f"but {len(uc_tables)} table(s) are configured. "
+                f"This is incomplete output — regenerate with full content."
+            )
+
     # Check 2: tag_assignment values are valid for their key in the live policy
     live = _fetch_live_tag_policy_values()
     if live:
