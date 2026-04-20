@@ -1143,6 +1143,21 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     except Exception as exc:
         _warn(f"Could not grant metastore privileges (SP may already have them as creator): {exc}")
 
+    # Also grant metastore privileges to the admin group so its members
+    # can see and manage catalogs, schemas, and tables.
+    try:
+        w_admin.grants.update(
+            securable_type="metastore",
+            full_name=ms_id,
+            changes=[PermissionsChange(
+                principal=group_name,
+                add=[Privilege.CREATE_CATALOG, Privilege.CREATE_EXTERNAL_LOCATION],
+            )],
+        )
+        _ok(f"Metastore privileges granted to admin group: {group_name}")
+    except Exception as exc:
+        _warn(f"Could not grant metastore privileges to admin group: {exc}")
+
     # ------------------------------------------------------------------
     # Step 5c: Enable Partner Powered AI and warm up the Genie API.
     #
@@ -1246,11 +1261,11 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
             print("  Catalog creation requires an External Location. Aborting.")
             sys.exit(1)
 
-    # Note: we intentionally do NOT transfer metastore ownership to the admin
-    # group here.  The SP (account admin and metastore creator) retains its
-    # implicit metastore admin status, which grants CREATE CATALOG and all
-    # other UC privileges needed for the integration tests.  Transferring
-    # ownership would strip those rights and cause catalog creation to fail.
+    # Note: we do NOT transfer metastore *ownership* to the admin group —
+    # that would strip the SP's implicit admin rights and break catalog
+    # creation.  Instead, the admin group receives explicit CREATE_CATALOG
+    # and CREATE_EXTERNAL_LOCATION grants (Step 5a-2 above) so its members
+    # can see and manage UC objects without needing metastore ownership.
 
     # Workspace admin assignment already done in Step 5a above.
 

@@ -74,6 +74,7 @@ class AzureProvider(CloudProvider):
         # Storage account name: must be globally unique, 3-24 lowercase alphanumeric
         sa_name = f"genietest{run_id}"[:24].lower()
         container_name = "genie-test"
+        owner = cfg.get("AZURE_CLIENT_ID", cfg.get("DATABRICKS_CLIENT_ID", "unknown"))
 
         _step(f"Creating Azure Storage Account: {sa_name}")
         storage_client = StorageManagementClient(credential, subscription_id)
@@ -86,7 +87,7 @@ class AzureProvider(CloudProvider):
                 kind=Kind.STORAGE_V2,
                 location=region,
                 is_hns_enabled=True,  # ADLS Gen2 (hierarchical namespace)
-                tags={"ManagedBy": "provision_test_env", "RunId": run_id},
+                tags={"ManagedBy": "provision_test_env", "RunId": run_id, "owner": owner},
             ),
         )
         poller.result()
@@ -113,7 +114,7 @@ class AzureProvider(CloudProvider):
             AccessConnector(
                 location=region,
                 identity=ManagedServiceIdentity(type="SystemAssigned"),
-                tags={"ManagedBy": "provision_test_env", "RunId": run_id},
+                tags={"ManagedBy": "provision_test_env", "RunId": run_id, "owner": owner},
             ),
         )
         ac = poller.result()
@@ -276,6 +277,7 @@ class AzureProvider(CloudProvider):
         subscription_id = cfg["AZURE_SUBSCRIPTION_ID"]
         resource_group = cfg["AZURE_RESOURCE_GROUP"]
         token = self._arm_token(cfg)
+        owner = cfg.get("AZURE_CLIENT_ID", cfg.get("DATABRICKS_CLIENT_ID", "unknown"))
 
         url = (
             f"https://management.azure.com/subscriptions/{subscription_id}"
@@ -287,7 +289,7 @@ class AzureProvider(CloudProvider):
             "location": region,
             "sku": {"name": "premium"},
             "properties": {"computeMode": "Serverless"},
-            "tags": {"ManagedBy": "provision_test_env"},
+            "tags": {"ManagedBy": "provision_test_env", "owner": owner},
         }).encode()
 
         _step(f"Creating serverless Azure Databricks workspace: {ws_name}")

@@ -572,11 +572,12 @@ def _create_prod_workspace(cfg: dict, cloud: str, metastore_id: str, dev_state: 
             f"/providers/Microsoft.Databricks/workspaces/{prod_ws_name}"
             f"?api-version={arm_api_version}"
         )
+        owner = cfg.get("AZURE_CLIENT_ID", cfg.get("DATABRICKS_CLIENT_ID", "unknown"))
         arm_body = json.dumps({
             "location": region,
             "sku": {"name": "premium"},
             "properties": {"computeMode": "Serverless"},
-            "tags": {"ManagedBy": "setup_demo"},
+            "tags": {"ManagedBy": "setup_demo", "owner": owner},
         }).encode()
 
         req = urllib.request.Request(arm_url, data=arm_body, method="PUT", headers={
