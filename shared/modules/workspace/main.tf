@@ -95,6 +95,28 @@ resource "databricks_sql_endpoint" "warehouse" {
   auto_stop_mins = 15
 }
 
+# ── Grant CAN_USE on the SQL warehouse to every ABAC group ──────────────────
+
+resource "databricks_permissions" "warehouse_usage" {
+  count = var.genie_only ? 0 : 1
+
+  provider         = databricks.workspace
+  sql_endpoint_id  = local.shared_warehouse_id
+
+  dynamic "access_control" {
+    for_each = local.group_ids
+    content {
+      group_name       = access_control.key
+      permission_level = "CAN_USE"
+    }
+  }
+
+  depends_on = [
+    databricks_sql_endpoint.warehouse,
+    databricks_entitlements.group_entitlements,
+  ]
+}
+
 # ── Existing spaces: apply ACLs + config (when config is defined) ─────────────
 
 resource "null_resource" "genie_space_acls" {
