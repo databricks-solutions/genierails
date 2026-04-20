@@ -6031,6 +6031,18 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_undef:
             print(f"  Auto-fixed: removed {n_undef} item(s) referencing undefined tag_key(s)")
 
+        # Inject overlay-provided functions BEFORE adding missing FGAC policies,
+        # so that row filter functions (e.g. filter_aml_compliance) are available
+        # when autofix_missing_fgac_policies looks for a function to cover
+        # uncovered tag assignments.
+        n_overlay_fns = autofix_inject_overlay_functions(
+            sql_path if sql_block else None,
+            countries=countries, industries=industries,
+            catalog_schemas=catalog_schemas,
+        )
+        if n_overlay_fns:
+            print(f"  Auto-fixed: injected {n_overlay_fns} overlay-provided masking function(s)")
+
         n_repaired = autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
         if n_repaired:
             print(f"  Auto-fixed: added {n_repaired} fgac_policy/ies for uncovered sensitive tags")
@@ -6061,14 +6073,6 @@ Before you apply, tune for your business roles, security requirements, and Genie
             n_acl = autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
             if n_acl:
                 print(f"  Auto-fixed: populated acl_groups for {n_acl} genie space(s)")
-
-        n_overlay_fns = autofix_inject_overlay_functions(
-            sql_path if sql_block else None,
-            countries=countries, industries=industries,
-            catalog_schemas=catalog_schemas,
-        )
-        if n_overlay_fns:
-            print(f"  Auto-fixed: injected {n_overlay_fns} overlay-provided masking function(s)")
 
         n_fn_canonical = autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
         if n_fn_canonical:
