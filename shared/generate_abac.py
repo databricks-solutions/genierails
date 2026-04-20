@@ -1105,18 +1105,34 @@ def extract_code_blocks(response_text: str) -> tuple[str | None, str | None]:
         candidate = "\n".join(candidate_lines).strip()
         return candidate if _looks_like_hcl(candidate) else None
 
+    hcl_candidates: list[str] = []
+    sql_candidates: list[str] = []
     for lang, content in blocks:
         content = content.strip()
         lang_lower = lang.lower()
 
-        if lang_lower == "sql" and sql_block is None:
-            sql_block = content
-        elif lang_lower in ("hcl", "terraform") and hcl_block is None:
-            hcl_block = content
-        elif not lang and sql_block is None and "CREATE" in content.upper() and "FUNCTION" in content.upper():
-            sql_block = content
-        elif not lang and hcl_block is None and _looks_like_hcl(content):
-            hcl_block = content
+        if lang_lower == "sql":
+            sql_candidates.append(content)
+        elif lang_lower in ("hcl", "terraform"):
+            hcl_candidates.append(content)
+        elif not lang and "CREATE" in content.upper() and "FUNCTION" in content.upper():
+            sql_candidates.append(content)
+        elif not lang and _looks_like_hcl(content):
+            hcl_candidates.append(content)
+
+    # Pick the largest SQL block (most CREATE FUNCTION statements)
+    if sql_candidates:
+        sql_block = max(sql_candidates, key=lambda c: (c.upper().count("CREATE"), len(c)))
+
+    # Pick the most complete HCL block — the one with the most top-level keys
+    # (groups, tag_policies, tag_assignments, fgac_policies, genie_space_configs).
+    # The LLM often emits partial blocks before the final complete one.
+    if hcl_candidates:
+        def _key_count(c: str) -> int:
+            keys = ("groups", "tag_policies", "tag_assignments", "fgac_policies",
+                    "genie_space_configs", "genie_space_title", "group_members")
+            return sum(1 for k in keys if re.search(rf"(?m)^\s*{k}\s*=", c))
+        hcl_block = max(hcl_candidates, key=lambda c: (_key_count(c), len(c)))
 
     if hcl_block is None:
         hcl_block = _extract_hcl_fallback(response_text)
@@ -1149,6 +1165,9 @@ def sanitize_tfvars_hcl(hcl_block: str) -> str:
         if re.match(r"^\s*#\s*Authentication\b", line, re.IGNORECASE):
             continue
         if re.match(r"^\s*#\s*Databricks\s+Authentication\b", line, re.IGNORECASE):
+            continue
+        # Strip SQL-style comments that the LLM sometimes emits into HCL output
+        if re.match(r"^\s*--", line):
             continue
 
         m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=", line)
@@ -1494,6 +1513,20 @@ def call_with_retries(call_fn, prompt: str, model: str, max_retries: int) -> str
     raise RuntimeError(f"All {max_retries} attempts failed. Last error: {last_error}")
 
 
+def _cleanup_stray_commas(text: str) -> str:
+    """Remove stray commas left behind by block removals in HCL text.
+
+    Handles bare comma lines, consecutive commas, and trailing commas before ]
+    (but preserves valid trailing commas after ``}`` or quoted strings).
+    """
+    text = re.sub(r'^\s*,\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r',(\s*,)+', ',', text)
+    # Only strip a comma before ] when preceded by whitespace (bare/stray comma),
+    # not when preceded by } or " (valid HCL trailing comma).
+    text = re.sub(r'(?<![}"\']),(\s*\])', r'\1', text)
+    return text
+
+
 def fix_hcl_syntax(tfvars_path: Path) -> int:
     """Repair common HCL syntax errors introduced by the LLM.
 
@@ -1529,7 +1562,7 @@ def fix_hcl_syntax(tfvars_path: Path) -> int:
             # Look ahead: find the next non-blank, non-comment line
             j = i + 1
             while j < len(lines) and (
-                lines[j].strip() == '' or lines[j].lstrip().startswith('#')
+                lines[j].strip() == '' or lines[j].lstrip().startswith('#') or lines[j].lstrip().startswith('--')
             ):
                 j += 1
             if j < len(lines):
@@ -1587,6 +1620,14 @@ def fix_hcl_syntax(tfvars_path: Path) -> int:
     if fixed4 != text:
         repairs += 1
         text = fixed4
+
+    # ------------------------------------------------------------------
+    # Fix 5: remove stray commas left by autofix block removals.
+    # ------------------------------------------------------------------
+    fixed5 = _cleanup_stray_commas(text)
+    if fixed5 != text:
+        repairs += 1
+        text = fixed5
 
     if text != original:
         tfvars_path.write_text(text)
@@ -2528,7 +2569,8 @@ def autofix_fgac_policy_count(tfvars_path: Path) -> int:
         )
 
     if removed or assignments_removed:
-        # Clean up double-blank lines left by removal
+        # Clean up stray commas and double-blank lines left by removal
+        text = _cleanup_stray_commas(text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         tfvars_path.write_text(text)
 
@@ -3844,7 +3886,49 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
     if not fixes:
         return 0
 
+    # Clean up stray commas left behind by block removals
+    rewritten = _cleanup_stray_commas(rewritten)
+
     text = text[:sec_start] + rewritten + text[sec_end:]
+
+    # --- Remove orphaned tag_assignments left by removed policies ----------
+    # Collect tag key/value pairs that the removed policies covered.
+    removed_tag_pairs: set[tuple[str, str]] = set()
+    for pname in removals:
+        # Find the original policy in the parsed list and extract its match condition
+        for p in policies:
+            if p.get("name") == pname:
+                for field in ("match_condition", "when_condition"):
+                    cond = p.get(field, "") or ""
+                    for m in re.finditer(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", cond):
+                        removed_tag_pairs.add((m.group(1), m.group(2)))
+
+    if removed_tag_pairs:
+        # Check which of these pairs are still covered by a surviving policy
+        surviving_pairs: set[tuple[str, str]] = set()
+        for p in policies:
+            if p.get("name") in removals:
+                continue
+            for field in ("match_condition", "when_condition"):
+                cond = p.get(field, "") or ""
+                for m in re.finditer(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", cond):
+                    surviving_pairs.add((m.group(1), m.group(2)))
+
+        orphaned_pairs = removed_tag_pairs - surviving_pairs
+        if orphaned_pairs:
+            for tag_key, tag_value in orphaned_pairs:
+                # Remove matching tag_assignment lines
+                pattern = re.compile(
+                    r'[ \t]*\{[^}]*tag_key\s*=\s*"' + re.escape(tag_key)
+                    + r'"[^}]*tag_value\s*=\s*"' + re.escape(tag_value)
+                    + r'"[^}]*\}\s*,?\s*\n?',
+                )
+                new_text, n = pattern.subn('', text)
+                if n:
+                    text = new_text
+                    print(f"  [AUTOFIX] Removed {n} orphaned tag_assignment(s) for "
+                          f"{tag_key} = '{tag_value}' (policy removed)")
+
     tfvars_path.write_text(text)
     return fixes
 
@@ -4411,9 +4495,7 @@ def autofix_duplicate_column_masks(tfvars_path: Path) -> int:
             print(f"    Removed duplicate mask policy '{name}' (generic function on column already covered by specific policy)")
 
     if removed:
-        # Clean up any leftover double commas or trailing commas before ]
-        text = re.sub(r',\s*,', ',', text)
-        text = re.sub(r',\s*\]', '\n  ]', text)
+        text = _cleanup_stray_commas(text)
         tfvars_path.write_text(text)
     return removed
 
@@ -4466,8 +4548,7 @@ def autofix_forbidden_conditions(tfvars_path: Path) -> int:
             removed += 1
 
     if removed:
-        text = re.sub(r',\s*,', ',', text)
-        text = re.sub(r',\s*\]', '\n  ]', text)
+        text = _cleanup_stray_commas(text)
         tfvars_path.write_text(text)
     return removed
 
@@ -4551,8 +4632,7 @@ def autofix_invalid_condition_values(tfvars_path: Path) -> int:
         )
         text = pattern.sub("", text, count=1)
 
-    text = re.sub(r',\s*,', ',', text)
-    text = re.sub(r',\s*\]', '\n  ]', text)
+    text = _cleanup_stray_commas(text)
     tfvars_path.write_text(text)
     return len(bad_names)
 
@@ -4626,8 +4706,7 @@ def autofix_malformed_conditions(tfvars_path: Path) -> int:
         )
         text = pattern.sub("", text, count=1)
 
-    text = re.sub(r',\s*,', ',', text)
-    text = re.sub(r',\s*\]', '\n  ]', text)
+    text = _cleanup_stray_commas(text)
     tfvars_path.write_text(text)
     return len(bad_names)
 

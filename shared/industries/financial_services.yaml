@@ -144,6 +144,11 @@ masking_functions:
         ELSE '[REDACTED]'
       END
 
+  - name: filter_aml_compliance
+    signature: "filter_aml_compliance() RETURNS BOOLEAN"
+    comment: "AML row filter — only compliance and fraud teams see all rows"
+    body: "is_account_group_member('fraud_team') OR is_account_group_member('compliance_officer')"
+
 group_templates:
   fraud_team:
     description: "Full access to all financial data for fraud investigation and AML compliance"
