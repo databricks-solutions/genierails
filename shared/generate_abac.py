@@ -6152,6 +6152,16 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 print(f"  Re-generating with LLM...")
                 response_text = call_with_retries(call_fn, prompt, model, 1)
                 new_sql, new_hcl = extract_code_blocks(response_text)
+                # Write new SQL FIRST so that HCL autofixes can see the
+                # correct set of available functions (including overlay injects).
+                if new_sql:
+                    sql_block = new_sql
+                    # Ensure USE CATALOG/USE SCHEMA present (LLM may omit)
+                    if all_cs and not re.search(r"USE\s+CATALOG\s+\S+", sql_block, re.IGNORECASE):
+                        cat0, sch0 = all_cs[0]
+                        sql_block = f"USE CATALOG {cat0};\nUSE SCHEMA {sch0};\n\n" + sql_block
+                    sql_path = out_dir / "masking_functions.sql"
+                    sql_path.write_text(sql_block + "\n")
                 if new_hcl:
                     hcl_block = new_hcl
                     # Re-apply governance mode strip on retry output
@@ -6165,6 +6175,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_invalid_tag_values(tfvars_path)
                     autofix_tag_policies(tfvars_path)
                     autofix_undefined_tag_refs(tfvars_path)
+                    # Re-inject overlay functions (retry LLM may omit them)
+                    autofix_inject_overlay_functions(
+                        sql_path if sql_block else None,
+                        countries=countries, industries=industries,
+                        catalog_schemas=catalog_schemas,
+                    )
                     autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_policy_count(tfvars_path)
                     if args.mode != "governance":
@@ -6184,14 +6200,6 @@ Before you apply, tune for your business roles, security requirements, and Genie
                         if _retry_cleaned != _retry_text:
                             tfvars_path.write_text(_retry_cleaned)
                             print("  [governance mode] Final strip (retry): removed genie_space_configs")
-                if new_sql:
-                    sql_block = new_sql
-                    # Ensure USE CATALOG/USE SCHEMA present (LLM may omit)
-                    if all_cs and not re.search(r"USE\s+CATALOG\s+\S+", sql_block, re.IGNORECASE):
-                        cat0, sch0 = all_cs[0]
-                        sql_block = f"USE CATALOG {cat0};\nUSE SCHEMA {sch0};\n\n" + sql_block
-                    sql_path = out_dir / "masking_functions.sql"
-                    sql_path.write_text(sql_block + "\n")
                 # Re-check after retry
                 semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)
             if semantic_errors:
