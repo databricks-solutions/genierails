@@ -6284,13 +6284,15 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_overlay_fns:
             print(f"  Auto-fixed: injected {n_overlay_fns} overlay-provided masking function(s)")
 
-        n_pii_tags = autofix_untagged_pii_columns(
-            tfvars_path,
-            ddl_path=out_dir / "ddl" / "_fetched.sql" if out_dir else None,
-            sql_path=sql_path if sql_block else None,
-        )
-        if n_pii_tags:
-            print(f"  Auto-fixed: added {n_pii_tags} tag_assignment(s) for untagged PII columns")
+        # Skip PII autofix in genie mode — tag_assignments are managed by the governance team
+        if args.mode != "genie":
+            n_pii_tags = autofix_untagged_pii_columns(
+                tfvars_path,
+                ddl_path=out_dir / "ddl" / "_fetched.sql" if out_dir else None,
+                sql_path=sql_path if sql_block else None,
+            )
+            if n_pii_tags:
+                print(f"  Auto-fixed: added {n_pii_tags} tag_assignment(s) for untagged PII columns")
 
         n_repaired = autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
         if n_repaired:
