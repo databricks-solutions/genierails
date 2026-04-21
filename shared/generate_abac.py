@@ -5403,7 +5403,7 @@ def _run_delta_mode(auth_file: Path) -> None:
     print("=" * 60)
 
 
-def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]:
+def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict, mode: str = "") -> list[str]:
     """Check generated config for known LLM failure modes that autofix can't handle.
 
     Returns a list of error strings (empty = all checks passed).
@@ -5432,11 +5432,12 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]
     # are configured.  An empty governance config means the LLM produced an
     # incomplete response (e.g. only groups + tag_policies without the FGAC
     # sections), which would wipe all existing governance on apply.
+    # Skip in genie mode — 0 tag_assignments is correct (governance team manages ABAC).
     uc_tables = auth_cfg.get("uc_tables", [])
     if not uc_tables:
         for gs in auth_cfg.get("genie_spaces", []):
             uc_tables.extend(gs.get("uc_tables", []))
-    if uc_tables:
+    if uc_tables and mode != "genie":
         ta = cfg.get("tag_assignments", []) or []
         fp = cfg.get("fgac_policies", []) or []
         if not ta and not fp:
@@ -6399,7 +6400,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 print("  [governance mode] Final strip: removed genie_space_configs re-introduced by autofixes")
 
         # ── Semantic quality check (catches LLM issues that autofix can't fix) ──
-        semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)
+        semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg, mode=args.mode)
         if semantic_errors:
             _semantic_retry_count += 1
             if _semantic_retry_count < _semantic_max_retries:
@@ -6421,9 +6422,14 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     sql_path.write_text(sql_block + "\n")
                 if new_hcl:
                     hcl_block = new_hcl
-                    # Re-apply governance mode strip on retry output
+                    # Re-apply mode-specific stripping on retry output
                     if args.mode == "governance":
                         hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_configs")
+                    elif args.mode == "genie":
+                        for _gk in ("groups", "tag_policies", "group_members"):
+                            hcl_block = remove_hcl_top_level_block(hcl_block, _gk)
+                        for _gk in ("tag_assignments", "fgac_policies"):
+                            hcl_block = remove_hcl_top_level_list(hcl_block, _gk)
                     extra_comments = overlay_detection_comments if overlay_detection_comments else ""
                     tfvars_path.write_text(hcl_header + extra_comments + hcl_block + "\n")
                     fix_hcl_syntax(tfvars_path)
@@ -6458,7 +6464,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                             tfvars_path.write_text(_retry_cleaned)
                             print("  [governance mode] Final strip (retry): removed genie_space_configs")
                 # Re-check after retry
-                semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)
+                semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg, mode=args.mode)
             if semantic_errors:
                 print(f"\n  [SEMANTIC CHECK] Warnings after {_semantic_retry_count + 1} attempt(s):")
                 for err in semantic_errors:
