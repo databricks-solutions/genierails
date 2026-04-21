@@ -6293,6 +6293,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
             )
             if n_pii_tags:
                 print(f"  Auto-fixed: added {n_pii_tags} tag_assignment(s) for untagged PII columns")
+                # PII autofix may introduce new tag keys (e.g. financial_sensitivity)
+                # that don't exist in tag_policies yet.  Run tag_policies autofix now
+                # so the new keys/values are registered before missing-policy detection.
+                n_pii_tp = autofix_tag_policies(tfvars_path)
+                if n_pii_tp:
+                    print(f"  Auto-fixed: added {n_pii_tp} tag_policy value(s) for PII-detected tags")
 
         n_repaired = autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
         if n_repaired:
