@@ -6381,6 +6381,13 @@ Before you apply, tune for your business roles, security requirements, and Genie
         # (e.g. missing commas between objects added by autofix_missing_fgac_policies).
         _final_tfvars = validation_dir / "abac.auto.tfvars"
         if _final_tfvars.exists():
+            # Clean stray commas left by policy/assignment removals
+            _ft = _final_tfvars.read_text()
+            _ft_cleaned = re.sub(r'^\s*,\s*$', '', _ft, flags=re.MULTILINE)
+            _ft_cleaned = re.sub(r',([ \t]*,)+', ',', _ft_cleaned)
+            _ft_cleaned = re.sub(r'(?<![}"\']),([ \t]*\])', r'\1', _ft_cleaned)
+            if _ft_cleaned != _ft:
+                _final_tfvars.write_text(_ft_cleaned)
             fix_hcl_syntax(_final_tfvars)
         passed = run_validation(validation_dir, countries=countries, industries=industries)
         if not passed:
