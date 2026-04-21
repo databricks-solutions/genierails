@@ -4745,6 +4745,146 @@ def autofix_unsafe_row_filters(sql_path: Path) -> int:
     return rewritten
 
 
+# ---------------------------------------------------------------------------
+# PII column patterns → tag assignments.  Used by autofix_untagged_pii_columns
+# to detect columns that the LLM forgot to tag.
+# ---------------------------------------------------------------------------
+_PII_COLUMN_TAG_MAP: list[tuple[list[str], str, str]] = [
+    # (column name substrings, tag_key, tag_value)
+    (["email", "email_address", "contact_email"],            "pii_level", "masked_email"),
+    (["phone", "mobile", "telephone", "contact_number"],     "pii_level", "masked_phone"),
+    (["address", "street_address", "residential_address"],   "pii_level", "redacted_address"),
+    (["date_of_birth", "dob", "birth_date", "birthdate"],    "pii_level", "masked_dob"),
+    (["ssn", "social_security"],                             "pii_level", "masked_ssn"),
+    # ANZ
+    (["tfn", "tax_file_number"],                             "pii_level", "masked_tfn"),
+    (["medicare", "medicare_number"],                        "pii_level", "masked_medicare"),
+    (["bsb", "bsb_number"],                                 "pii_level", "masked_bsb"),
+    # India
+    (["aadhaar", "aadhar"],                                  "pii_level", "masked_aadhaar"),
+    # SEA
+    (["nric"],                                               "pii_level", "masked_nric"),
+    (["mykad"],                                              "pii_level", "masked_mykad"),
+    # Financial
+    (["account_number", "bank_account"],                     "pii_level", "masked_account"),
+    (["card_number", "credit_card", "pan"],                  "pci_level", "masked_card_last4"),
+    (["cvv", "cvc", "card_verification"],                    "pci_level", "redacted_cvv"),
+]
+
+# Columns that look like amounts/balances → financial_sensitivity tag
+_FINANCIAL_COLUMN_TAG_MAP: list[tuple[list[str], str, str]] = [
+    (["balance", "amount", "credit_limit", "debit_amount",
+      "transaction_amount", "transfer_amount"],              "financial_sensitivity", "rounded_amounts"),
+]
+
+
+def autofix_untagged_pii_columns(
+    tfvars_path: Path,
+    ddl_path: Path | None = None,
+    sql_path: Path | None = None,
+) -> int:
+    """Detect PII/sensitive columns in the DDL that the LLM forgot to tag.
+
+    Scans the fetched DDL for column names matching known PII patterns and
+    adds tag_assignment entries for any that are missing.  This prevents the
+    common failure where the LLM generates groups and policies but omits
+    tag assignments for obvious columns like email, phone, or address.
+
+    Returns the number of tag assignments added.
+    """
+    # Find DDL file
+    if not ddl_path or not ddl_path.exists():
+        if sql_path and sql_path.exists():
+            ddl_path = sql_path.parent / "ddl" / "_fetched.sql"
+            if not ddl_path.exists():
+                ddl_path = sql_path.parent.parent / "ddl" / "_fetched.sql"
+    if not ddl_path or not ddl_path.exists():
+        return 0
+
+    try:
+        import hcl2 as _hcl2
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = _hcl2.loads(text)
+    except Exception:
+        return 0
+
+    # Build set of already-tagged columns
+    existing_tags: set[str] = set()
+    for ta in cfg.get("tag_assignments", []) or []:
+        if ta.get("entity_type") == "columns":
+            existing_tags.add(ta.get("entity_name", ""))
+
+    # Parse DDL to extract catalog.schema.table.column names
+    ddl_text = ddl_path.read_text()
+    # Match CREATE TABLE catalog.schema.table (...columns...)
+    table_pattern = re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+([\w.]+)\s*\((.*?)\)\s*(?:USING|;|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    all_columns: list[tuple[str, str]] = []  # (full_name, column_name)
+    for m in table_pattern.finditer(ddl_text):
+        table_fqn = m.group(1)  # catalog.schema.table
+        cols_block = m.group(2)
+        for line in cols_block.split("\n"):
+            line = line.strip().rstrip(",")
+            if not line or line.startswith("--") or line.startswith(")"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                col_name = parts[0].strip("`\"")
+                if col_name.upper() in ("CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "CHECK"):
+                    continue
+                full_name = f"{table_fqn}.{col_name}"
+                all_columns.append((full_name, col_name.lower()))
+
+    if not all_columns:
+        return 0
+
+    # Check each column against PII patterns
+    new_assignments: list[dict] = []
+    all_patterns = _PII_COLUMN_TAG_MAP + _FINANCIAL_COLUMN_TAG_MAP
+    for full_name, col_name in all_columns:
+        if full_name in existing_tags:
+            continue
+        for hints, tag_key, tag_value in all_patterns:
+            if col_name in hints or any(h in col_name for h in hints):
+                new_assignments.append({
+                    "entity_type": "columns",
+                    "entity_name": full_name,
+                    "tag_key": tag_key,
+                    "tag_value": tag_value,
+                })
+                break  # first match wins
+
+    if not new_assignments:
+        return 0
+
+    # Inject new tag assignments into the HCL text
+    # Find the tag_assignments section and append before the closing ]
+    ta_section = re.search(r"(tag_assignments\s*=\s*\[)(.*?)(\])", text, re.DOTALL)
+    if not ta_section:
+        return 0
+
+    insert_pos = ta_section.end(2)  # before the ]
+    lines = []
+    for ta in new_assignments:
+        lines.append(
+            f'  {{ entity_type = "columns", entity_name = "{ta["entity_name"]}", '
+            f'tag_key = "{ta["tag_key"]}", tag_value = "{ta["tag_value"]}" }},'
+        )
+        print(f"  [AUTOFIX] Added tag_assignment: {ta['entity_name']} ({ta['tag_key']} = '{ta['tag_value']}')")
+
+    injection = "\n" + "\n".join(lines) + "\n"
+    text = text[:insert_pos] + injection + text[insert_pos:]
+    tfvars_path.write_text(text)
+    return len(new_assignments)
+
+
 def autofix_inject_overlay_functions(
     sql_path: Path,
     countries: list[str] | None = None,
@@ -6129,6 +6269,14 @@ Before you apply, tune for your business roles, security requirements, and Genie
         )
         if n_overlay_fns:
             print(f"  Auto-fixed: injected {n_overlay_fns} overlay-provided masking function(s)")
+
+        n_pii_tags = autofix_untagged_pii_columns(
+            tfvars_path,
+            ddl_path=out_dir / "ddl" / "_fetched.sql" if out_dir else None,
+            sql_path=sql_path if sql_block else None,
+        )
+        if n_pii_tags:
+            print(f"  Auto-fixed: added {n_pii_tags} tag_assignment(s) for untagged PII columns")
 
         n_repaired = autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
         if n_repaired:
