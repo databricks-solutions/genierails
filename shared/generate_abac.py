@@ -2154,8 +2154,15 @@ def autofix_invalid_tag_values(tfvars_path: Path) -> int:
     return len(remove_indices)
 
 
-# Databricks platform limit for ABAC column-mask/row-filter policies per catalog.
-_FGAC_PER_CATALOG_LIMIT = 10  # Databricks platform hard cap
+# Databricks platform limits for ABAC policies.
+# Ref: https://docs.databricks.com/en/data-governance/unity-catalog/abac/policies#policy-quotas
+#   Metastore: 10,000 | Catalog: 100 | Schema: 100 | Table: 50
+#   Principals per policy: 20 (soft limits — contact Databricks to increase)
+# The autofix enforces the per-catalog limit.  The per-table limit (50) is
+# not enforced here because tag-based policies match columns indirectly;
+# a single policy can cover multiple tables.  In practice, schemas rarely
+# exceed 50 policies per table.
+_FGAC_PER_CATALOG_LIMIT = 100  # max policies per catalog
 
 
 def autofix_fgac_policy_count(tfvars_path: Path) -> int:
