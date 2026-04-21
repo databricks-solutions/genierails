@@ -137,6 +137,36 @@ masking_functions:
     comment: "AML row filter — only compliance and fraud teams see all rows"
     body: "is_account_group_member('fraud_team') OR is_account_group_member('compliance_officer')"
 
+  - name: mask_redact
+    signature: "mask_redact(val STRING) RETURNS STRING"
+    comment: "Full redaction — returns [REDACTED]"
+    body: "CASE WHEN val IS NULL THEN NULL ELSE '[REDACTED]' END"
+
+  - name: mask_email
+    signature: "mask_email(email STRING) RETURNS STRING"
+    comment: "Email — mask local part, keep domain"
+    body: |
+      CASE
+        WHEN email IS NULL THEN NULL
+        WHEN INSTR(email, '@') > 1 THEN CONCAT(LEFT(email, 1), '****@', SUBSTRING(email, INSTR(email, '@') + 1))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_phone
+    signature: "mask_phone(phone STRING) RETURNS STRING"
+    comment: "Phone number — show last 4 digits only"
+    body: |
+      CASE
+        WHEN phone IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(phone, '[^0-9]', '')) >= 4 THEN CONCAT('***-***-', RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_credit_card_full
+    signature: "mask_credit_card_full(card STRING) RETURNS STRING"
+    comment: "Full card redaction — PCI DSS"
+    body: "CASE WHEN card IS NULL THEN NULL ELSE '[REDACTED]' END"
+
   - name: mask_ssn_last4
     signature: "mask_ssn_last4(ssn STRING) RETURNS STRING"
     comment: "Social Security Number — show last 4 digits only"

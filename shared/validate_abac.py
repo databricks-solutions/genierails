@@ -701,16 +701,17 @@ def validate_fgac_policies(
         if isinstance(cat, list):
             cat = cat[0] if cat else "_unknown"
         catalog_counts[cat] = catalog_counts.get(cat, 0) + 1
+    # Platform limits: 100 per catalog, 50 per table (soft limits).
+    # Ref: https://docs.databricks.com/en/data-governance/unity-catalog/abac/policies#policy-quotas
     for cat, count in sorted(catalog_counts.items()):
-        if count > 10:
+        if count > 100:
             result.error(
-                f"Catalog '{cat}': {count} fgac_policies exceeds Databricks platform limit of 10. "
-                f"Consolidate policies by reusing masking functions across columns with the same tag, "
-                f"or split governance across multiple catalogs."
+                f"Catalog '{cat}': {count} fgac_policies exceeds Databricks platform limit of 100. "
+                f"Consolidate policies or split governance across multiple catalogs."
             )
-        elif count > 8:
+        elif count > 80:
             result.warn(
-                f"Catalog '{cat}': {count} fgac_policies is close to the platform limit of 10. "
+                f"Catalog '{cat}': {count} fgac_policies is close to the platform limit of 100. "
                 f"Consider consolidating to leave headroom."
             )
 
