@@ -3142,8 +3142,15 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
                 preferred.append("mask_redact")
         # Only add generic masking fallbacks for column-level assignments.
         # Row filter functions must take 0 arguments; masking functions take 1.
+        # IMPORTANT: mask_redact returns STRING — never use it for columns tagged
+        # with non-STRING values (amounts/dates).  These need type-specific masks.
         if not is_table:
-            preferred.extend(["mask_redact", "mask_nullify", "mask_pii_partial"])
+            is_numeric_or_date = any(tok in blob for tok in (
+                "amount", "balance", "limit", "rounded", "price", "cost", "salary",
+                "dob", "birth", "date", "opened_date", "expiry",
+            ))
+            if not is_numeric_or_date:
+                preferred.extend(["mask_redact", "mask_nullify", "mask_pii_partial"])
         for fn in preferred:
             if (not available_functions or fn in available_functions) and _arg_count_ok(fn):
                 return fn
@@ -4228,6 +4235,28 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
         if categories.issubset(expected):
             continue
 
+        # Check if the matched columns are numeric/date — if so, replace
+        # with the correct type-specific function, not mask_redact (STRING).
+        matched_blob = " ".join(
+            ta.get("entity_name", "") + " " + ta.get("tag_value", "") for ta in matched
+        ).lower()
+        is_numeric = any(tok in matched_blob for tok in (
+            "amount", "balance", "limit", "rounded", "price", "cost", "salary",
+        ))
+        is_date = any(tok in matched_blob for tok in (
+            "dob", "birth", "date", "opened_date", "expiry",
+        ))
+        if is_numeric:
+            type_fn = "mask_amount_rounded"
+            if not available_functions or type_fn in available_functions:
+                replacements.append((p.get("name", ""), fn, type_fn))
+            continue
+        if is_date:
+            type_fn = "mask_date_to_year"
+            if not available_functions or type_fn in available_functions:
+                replacements.append((p.get("name", ""), fn, type_fn))
+            continue
+
         generic_fn = None
         for gfn in _GENERIC_FUNCTION_PREFS:
             if not available_functions or gfn in available_functions:
@@ -4758,7 +4787,40 @@ def autofix_inject_overlay_functions(
         sql_text, re.IGNORECASE,
     ))
 
-    missing = {name: defn for name, defn in overlay_fns.items() if name not in existing}
+    # Also check arg counts of existing functions — if the LLM generated a
+    # function with the wrong number of arguments (e.g. 2-arg mask_amount_rounded
+    # instead of 1-arg), the overlay's correct version should override it.
+    try:
+        from validate_abac import parse_sql_function_arg_counts
+        existing_arg_counts = parse_sql_function_arg_counts(sql_path)
+    except Exception:
+        existing_arg_counts = {}
+
+    # Overlay functions that return non-STRING types (DECIMAL, DATE, BOOLEAN)
+    # are type-critical — the return type must exactly match the column type.
+    # Always override the LLM's version for these, since the LLM often gets
+    # the return type wrong (e.g. RETURNS STRING instead of RETURNS DECIMAL).
+    _NON_STRING_RETURNS = re.compile(
+        r"RETURNS\s+(DECIMAL|DATE|TIMESTAMP|BOOLEAN|INT|BIGINT|DOUBLE|FLOAT)",
+        re.IGNORECASE,
+    )
+
+    missing = {}
+    for name, defn in overlay_fns.items():
+        if name not in existing:
+            missing[name] = defn
+        else:
+            overlay_sig = defn.get("signature", "")
+            # Always override for type-critical functions (non-STRING return)
+            if _NON_STRING_RETURNS.search(overlay_sig):
+                missing[name] = defn
+            elif name in existing_arg_counts:
+                # For STRING functions, only override if arg count is wrong
+                overlay_args = overlay_sig.split("(", 1)[-1].rsplit(")", 1)[0].strip()
+                overlay_arg_count = len([a for a in overlay_args.split(",") if a.strip()]) if overlay_args else 0
+                if existing_arg_counts[name] != overlay_arg_count:
+                    missing[name] = defn
+
     if not missing:
         return 0
 
@@ -5204,6 +5266,24 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]
             errors.append(
                 "genie_space_configs section missing from LLM output "
                 f"(expected for {len(genie_spaces)} configured genie_space(s))"
+            )
+
+    # Check 1b: tag_assignments and fgac_policies must not be empty when tables
+    # are configured.  An empty governance config means the LLM produced an
+    # incomplete response (e.g. only groups + tag_policies without the FGAC
+    # sections), which would wipe all existing governance on apply.
+    uc_tables = auth_cfg.get("uc_tables", [])
+    if not uc_tables:
+        for gs in auth_cfg.get("genie_spaces", []):
+            uc_tables.extend(gs.get("uc_tables", []))
+    if uc_tables:
+        ta = cfg.get("tag_assignments", []) or []
+        fp = cfg.get("fgac_policies", []) or []
+        if not ta and not fp:
+            errors.append(
+                f"Generated config has 0 tag_assignments and 0 fgac_policies "
+                f"but {len(uc_tables)} table(s) are configured. "
+                f"This is incomplete output — regenerate with full content."
             )
 
     # Check 2: tag_assignment values are valid for their key in the live policy
@@ -6031,6 +6111,18 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_undef:
             print(f"  Auto-fixed: removed {n_undef} item(s) referencing undefined tag_key(s)")
 
+        # Inject overlay-provided functions BEFORE adding missing FGAC policies,
+        # so that row filter functions (e.g. filter_aml_compliance) are available
+        # when autofix_missing_fgac_policies looks for a function to cover
+        # uncovered tag assignments.
+        n_overlay_fns = autofix_inject_overlay_functions(
+            sql_path if sql_block else None,
+            countries=countries, industries=industries,
+            catalog_schemas=catalog_schemas,
+        )
+        if n_overlay_fns:
+            print(f"  Auto-fixed: injected {n_overlay_fns} overlay-provided masking function(s)")
+
         n_repaired = autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
         if n_repaired:
             print(f"  Auto-fixed: added {n_repaired} fgac_policy/ies for uncovered sensitive tags")
@@ -6061,14 +6153,6 @@ Before you apply, tune for your business roles, security requirements, and Genie
             n_acl = autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
             if n_acl:
                 print(f"  Auto-fixed: populated acl_groups for {n_acl} genie space(s)")
-
-        n_overlay_fns = autofix_inject_overlay_functions(
-            sql_path if sql_block else None,
-            countries=countries, industries=industries,
-            catalog_schemas=catalog_schemas,
-        )
-        if n_overlay_fns:
-            print(f"  Auto-fixed: injected {n_overlay_fns} overlay-provided masking function(s)")
 
         n_fn_canonical = autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
         if n_fn_canonical:
@@ -6148,6 +6232,16 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 print(f"  Re-generating with LLM...")
                 response_text = call_with_retries(call_fn, prompt, model, 1)
                 new_sql, new_hcl = extract_code_blocks(response_text)
+                # Write new SQL FIRST so that HCL autofixes can see the
+                # correct set of available functions (including overlay injects).
+                if new_sql:
+                    sql_block = new_sql
+                    # Ensure USE CATALOG/USE SCHEMA present (LLM may omit)
+                    if all_cs and not re.search(r"USE\s+CATALOG\s+\S+", sql_block, re.IGNORECASE):
+                        cat0, sch0 = all_cs[0]
+                        sql_block = f"USE CATALOG {cat0};\nUSE SCHEMA {sch0};\n\n" + sql_block
+                    sql_path = out_dir / "masking_functions.sql"
+                    sql_path.write_text(sql_block + "\n")
                 if new_hcl:
                     hcl_block = new_hcl
                     # Re-apply governance mode strip on retry output
@@ -6161,6 +6255,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_invalid_tag_values(tfvars_path)
                     autofix_tag_policies(tfvars_path)
                     autofix_undefined_tag_refs(tfvars_path)
+                    # Re-inject overlay functions (retry LLM may omit them)
+                    autofix_inject_overlay_functions(
+                        sql_path if sql_block else None,
+                        countries=countries, industries=industries,
+                        catalog_schemas=catalog_schemas,
+                    )
                     autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_policy_count(tfvars_path)
                     if args.mode != "governance":
@@ -6180,14 +6280,6 @@ Before you apply, tune for your business roles, security requirements, and Genie
                         if _retry_cleaned != _retry_text:
                             tfvars_path.write_text(_retry_cleaned)
                             print("  [governance mode] Final strip (retry): removed genie_space_configs")
-                if new_sql:
-                    sql_block = new_sql
-                    # Ensure USE CATALOG/USE SCHEMA present (LLM may omit)
-                    if all_cs and not re.search(r"USE\s+CATALOG\s+\S+", sql_block, re.IGNORECASE):
-                        cat0, sch0 = all_cs[0]
-                        sql_block = f"USE CATALOG {cat0};\nUSE SCHEMA {sch0};\n\n" + sql_block
-                    sql_path = out_dir / "masking_functions.sql"
-                    sql_path.write_text(sql_block + "\n")
                 # Re-check after retry
                 semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)
             if semantic_errors:
@@ -6289,6 +6381,13 @@ Before you apply, tune for your business roles, security requirements, and Genie
         # (e.g. missing commas between objects added by autofix_missing_fgac_policies).
         _final_tfvars = validation_dir / "abac.auto.tfvars"
         if _final_tfvars.exists():
+            # Clean stray commas left by policy/assignment removals
+            _ft = _final_tfvars.read_text()
+            _ft_cleaned = re.sub(r'^\s*,\s*$', '', _ft, flags=re.MULTILINE)
+            _ft_cleaned = re.sub(r',([ \t]*,)+', ',', _ft_cleaned)
+            _ft_cleaned = re.sub(r'(?<![}"\']),([ \t]*\])', r'\1', _ft_cleaned)
+            if _ft_cleaned != _ft:
+                _final_tfvars.write_text(_ft_cleaned)
             fix_hcl_syntax(_final_tfvars)
         passed = run_validation(validation_dir, countries=countries, industries=industries)
         if not passed:

@@ -111,19 +111,44 @@ def parse_sql_function_arg_counts(path: Path) -> dict[str, int]:
     """Extract function names and their argument counts from SQL file.
 
     Returns a dict mapping function name to argument count (0 for no args).
+    Handles nested parentheses in type declarations like DECIMAL(18,2).
     """
     text = path.read_text()
+    # Match function name and the start of the argument list
     pattern = re.compile(
         r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+"
         r"(?:[\w]+\.[\w]+\.)?"   # optional catalog.schema. prefix
-        r"([\w]+)\s*\(([^)]*)\)",
+        r"([\w]+)\s*\(",
         re.IGNORECASE,
     )
     result = {}
     for m in pattern.finditer(text):
         name = m.group(1)
-        args = m.group(2).strip()
-        result[name] = 0 if not args else len([a for a in args.split(",") if a.strip()])
+        # Find the matching closing paren, handling nested parens (e.g. DECIMAL(18,2))
+        start = m.end()  # position after the opening (
+        depth = 1
+        pos = start
+        while pos < len(text) and depth > 0:
+            if text[pos] == '(':
+                depth += 1
+            elif text[pos] == ')':
+                depth -= 1
+            pos += 1
+        args_str = text[start:pos - 1].strip()
+        if not args_str:
+            result[name] = 0
+        else:
+            # Count top-level commas only (skip commas inside nested parens)
+            count = 1
+            d = 0
+            for ch in args_str:
+                if ch == '(':
+                    d += 1
+                elif ch == ')':
+                    d -= 1
+                elif ch == ',' and d == 0:
+                    count += 1
+            result[name] = count
     return result
 
 
