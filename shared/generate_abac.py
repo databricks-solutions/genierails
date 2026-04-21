@@ -4235,6 +4235,18 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
         if categories.issubset(expected):
             continue
 
+        # Check if the matched columns are numeric/date — if so, don't
+        # replace with mask_redact (STRING) as it causes CAST_INVALID_INPUT.
+        matched_names = " ".join(ta.get("entity_name", "") for ta in matched)
+        tag_vals = " ".join(ta.get("tag_value", "") for ta in matched)
+        is_numeric_or_date = any(tok in (matched_names + " " + tag_vals).lower() for tok in (
+            "amount", "balance", "limit", "rounded", "price", "cost", "salary",
+            "dob", "birth", "date", "opened_date", "expiry",
+        ))
+        if is_numeric_or_date:
+            # Don't replace with STRING-returning generic functions
+            continue
+
         generic_fn = None
         for gfn in _GENERIC_FUNCTION_PREFS:
             if not available_functions or gfn in available_functions:
