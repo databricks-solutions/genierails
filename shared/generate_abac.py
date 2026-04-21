@@ -3142,8 +3142,15 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
                 preferred.append("mask_redact")
         # Only add generic masking fallbacks for column-level assignments.
         # Row filter functions must take 0 arguments; masking functions take 1.
+        # IMPORTANT: mask_redact returns STRING — never use it for columns tagged
+        # with non-STRING values (amounts/dates).  These need type-specific masks.
         if not is_table:
-            preferred.extend(["mask_redact", "mask_nullify", "mask_pii_partial"])
+            is_numeric_or_date = any(tok in blob for tok in (
+                "amount", "balance", "limit", "rounded", "price", "cost", "salary",
+                "dob", "birth", "date", "opened_date", "expiry",
+            ))
+            if not is_numeric_or_date:
+                preferred.extend(["mask_redact", "mask_nullify", "mask_pii_partial"])
         for fn in preferred:
             if (not available_functions or fn in available_functions) and _arg_count_ok(fn):
                 return fn
