@@ -3947,14 +3947,27 @@ def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = N
         if not candidates:
             # Fallback to any function with the right arg count
             candidates = sorted(fns_by_args.get(expected_args, []))
-        # Prefer functions matching the naming convention (mask_ for columns, filter_ for rows).
-        prefix = "filter_" if ptype == "POLICY_TYPE_ROW_FILTER" else "mask_"
-        typed_candidates = [c for c in candidates if c.startswith(prefix)]
-        # Pick a generic fallback from typed candidates.
-        if typed_candidates:
-            replacements[pname] = typed_candidates[0]
-        elif candidates:
-            replacements[pname] = candidates[0]
+        # Check if this policy covers numeric/date columns — use type-specific replacement
+        policy_match = ""
+        for p in policies:
+            if p.get("name") == pname:
+                policy_match = (p.get("match_condition", "") or "") + " " + (p.get("when_condition", "") or "")
+                break
+        is_numeric = any(tok in policy_match.lower() for tok in ("rounded", "amount", "balance", "limit"))
+        is_date = any(tok in policy_match.lower() for tok in ("dob", "birth", "date"))
+
+        if is_numeric and "mask_amount_rounded" in (available_functions or set()):
+            replacements[pname] = "mask_amount_rounded"
+        elif is_date and "mask_date_to_year" in (available_functions or set()):
+            replacements[pname] = "mask_date_to_year"
+        else:
+            # Prefer functions matching the naming convention (mask_ for columns, filter_ for rows).
+            prefix = "filter_" if ptype == "POLICY_TYPE_ROW_FILTER" else "mask_"
+            typed_candidates = [c for c in candidates if c.startswith(prefix)]
+            if typed_candidates:
+                replacements[pname] = typed_candidates[0]
+            elif candidates:
+                replacements[pname] = candidates[0]
 
     # Apply replacements or removals in the file.
     section = _find_bracket_section(text, "fgac_policies")
@@ -6078,8 +6091,9 @@ Before you apply, tune for your business roles, security requirements, and Genie
         print("  [genie mode] Skipping masking_functions.sql (managed by governance team)")
         sql_block = None
 
+    all_cs = catalog_schemas if catalog_schemas else [(catalog, schema)] if catalog and schema else []
+
     if sql_block:
-        all_cs = catalog_schemas if catalog_schemas else [(catalog, schema)]
         targets = ", ".join(f"{c}.{s}" for c, s in all_cs)
         sql_header = (
             "-- ============================================================================\n"
