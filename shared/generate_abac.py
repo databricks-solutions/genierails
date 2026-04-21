@@ -4235,16 +4235,26 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
         if categories.issubset(expected):
             continue
 
-        # Check if the matched columns are numeric/date — if so, don't
-        # replace with mask_redact (STRING) as it causes CAST_INVALID_INPUT.
-        matched_names = " ".join(ta.get("entity_name", "") for ta in matched)
-        tag_vals = " ".join(ta.get("tag_value", "") for ta in matched)
-        is_numeric_or_date = any(tok in (matched_names + " " + tag_vals).lower() for tok in (
+        # Check if the matched columns are numeric/date — if so, replace
+        # with the correct type-specific function, not mask_redact (STRING).
+        matched_blob = " ".join(
+            ta.get("entity_name", "") + " " + ta.get("tag_value", "") for ta in matched
+        ).lower()
+        is_numeric = any(tok in matched_blob for tok in (
             "amount", "balance", "limit", "rounded", "price", "cost", "salary",
+        ))
+        is_date = any(tok in matched_blob for tok in (
             "dob", "birth", "date", "opened_date", "expiry",
         ))
-        if is_numeric_or_date:
-            # Don't replace with STRING-returning generic functions
+        if is_numeric:
+            type_fn = "mask_amount_rounded"
+            if not available_functions or type_fn in available_functions:
+                replacements.append((p.get("name", ""), fn, type_fn))
+            continue
+        if is_date:
+            type_fn = "mask_date_to_year"
+            if not available_functions or type_fn in available_functions:
+                replacements.append((p.get("name", ""), fn, type_fn))
             continue
 
         generic_fn = None
