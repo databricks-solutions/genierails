@@ -4774,17 +4774,30 @@ def autofix_inject_overlay_functions(
     except Exception:
         existing_arg_counts = {}
 
+    # Overlay functions that return non-STRING types (DECIMAL, DATE, BOOLEAN)
+    # are type-critical — the return type must exactly match the column type.
+    # Always override the LLM's version for these, since the LLM often gets
+    # the return type wrong (e.g. RETURNS STRING instead of RETURNS DECIMAL).
+    _NON_STRING_RETURNS = re.compile(
+        r"RETURNS\s+(DECIMAL|DATE|TIMESTAMP|BOOLEAN|INT|BIGINT|DOUBLE|FLOAT)",
+        re.IGNORECASE,
+    )
+
     missing = {}
     for name, defn in overlay_fns.items():
         if name not in existing:
             missing[name] = defn
-        elif name in existing_arg_counts:
-            # Count args in overlay signature to compare
+        else:
             overlay_sig = defn.get("signature", "")
-            overlay_args = overlay_sig.split("(", 1)[-1].rsplit(")", 1)[0].strip()
-            overlay_arg_count = len([a for a in overlay_args.split(",") if a.strip()]) if overlay_args else 0
-            if existing_arg_counts[name] != overlay_arg_count:
-                missing[name] = defn  # override LLM's wrong-arg-count version
+            # Always override for type-critical functions (non-STRING return)
+            if _NON_STRING_RETURNS.search(overlay_sig):
+                missing[name] = defn
+            elif name in existing_arg_counts:
+                # For STRING functions, only override if arg count is wrong
+                overlay_args = overlay_sig.split("(", 1)[-1].rsplit(")", 1)[0].strip()
+                overlay_arg_count = len([a for a in overlay_args.split(",") if a.strip()]) if overlay_args else 0
+                if existing_arg_counts[name] != overlay_arg_count:
+                    missing[name] = defn
 
     if not missing:
         return 0
