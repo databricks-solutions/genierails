@@ -327,7 +327,7 @@ FUNCTION_EXPECTED_CATEGORIES = {
     "mask_credit_card_last4": {"card", "payment_card"},
     "mask_card_last4": {"card", "payment_card"},
     "mask_amount_rounded": {"amount", "transaction"},
-    "mask_date_to_year": {"date", "customer_pii", "patient_pii"},
+    "mask_date_to_year": {"date", "customer_pii", "patient_pii", "generic"},
     "mask_dob_year": {"date", "customer_pii", "patient_pii"},
     "mask_timestamp_to_day": {"date"},
     # India PAN (Permanent Account Number) is a government ID but the LLM
