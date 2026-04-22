@@ -6473,6 +6473,11 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 except Exception:
                     pass
 
+        # Repair HCL syntax before condition-checking autofixes — intermediate
+        # autofixes (e.g. autofix_missing_fgac_policies) may introduce issues
+        # that cause hcl2.loads() to fail, silently skipping these checks.
+        fix_hcl_syntax(tfvars_path)
+
         n_dup_masks = autofix_duplicate_column_masks(tfvars_path)
         if n_dup_masks:
             print(f"  Auto-fixed: removed {n_dup_masks} duplicate column mask policy/ies")
@@ -6586,7 +6591,23 @@ Before you apply, tune for your business roles, security requirements, and Genie
                             print("  [governance mode] Final strip (retry): removed genie_space_configs")
                 # Re-check after retry
                 semantic_errors, semantic_warnings = post_generate_semantic_check(tfvars_path, auth_cfg, mode=args.mode)
-            all_warnings = (semantic_warnings or []) + (semantic_errors or [])
+            # Critical errors (empty governance output) should NOT be downgraded
+            # to warnings — exit with failure so the outer retry loop can kick in.
+            _critical_errors = [
+                e for e in (semantic_errors or [])
+                if "0 tag_assignments and 0 fgac_policies" in e
+            ]
+            _non_critical_errors = [
+                e for e in (semantic_errors or [])
+                if "0 tag_assignments and 0 fgac_policies" not in e
+            ]
+            if _critical_errors:
+                print(f"\n  [SEMANTIC CHECK FAILED] Critical errors after {_semantic_retry_count + 1} attempt(s):")
+                for err in _critical_errors:
+                    print(f"    - {err}")
+                print(f"  Exiting with failure — LLM produced incomplete output.")
+                sys.exit(1)
+            all_warnings = (semantic_warnings or []) + _non_critical_errors
             if all_warnings:
                 print(f"\n  [SEMANTIC CHECK] Warnings after {_semantic_retry_count + 1} attempt(s):")
                 for w in all_warnings:
