@@ -4247,6 +4247,16 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
                 if tag_key == key:
                     matched.extend(items)
         if not matched:
+            # No matching tag assignments — but the policy may still have a wrong
+            # function (e.g. duplicate _2/_3 policies).  Check the condition keywords
+            # to detect type mismatches even without matched assignments.
+            cond = (p.get("match_condition", "") or "").lower()
+            cond_is_numeric = any(tok in cond for tok in ("rounded", "amount", "balance", "limit"))
+            cond_is_date = any(tok in cond for tok in ("dob", "birth", "date"))
+            if cond_is_numeric and fn != "mask_amount_rounded" and "mask_amount_rounded" in (available_functions or set()):
+                replacements.append((p.get("name", ""), fn, "mask_amount_rounded"))
+            elif cond_is_date and fn != "mask_date_to_year" and "mask_date_to_year" in (available_functions or set()):
+                replacements.append((p.get("name", ""), fn, "mask_date_to_year"))
             continue
 
         categories = set()
