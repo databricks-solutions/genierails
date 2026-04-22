@@ -4355,6 +4355,38 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
     return fixes
 
 
+def _remove_policy_block_by_name(text: str, policy_name: str, section: str = "fgac_policies") -> tuple[str, bool]:
+    """Remove a policy block from HCL text using brace-counting (handles nested blocks).
+
+    Unlike regex with ``[^}]*``, this correctly handles nested structures like
+    ``column_mask = { ... }`` inside policy blocks.
+
+    Returns (new_text, was_removed).
+    """
+    sec = _find_bracket_section(text, section)
+    if not sec:
+        return text, False
+    sec_start, sec_end = sec
+    sec_txt = text[sec_start:sec_end]
+    blocks = _find_brace_blocks(sec_txt)
+    name_pat = re.compile(r'name\s*=\s*"' + re.escape(policy_name) + r'"')
+    for bs, be in reversed(blocks):
+        bt = sec_txt[bs:be + 1]
+        if name_pat.search(bt):
+            abs_s = sec_start + bs
+            abs_e = sec_start + be + 1
+            # Include trailing comma and whitespace
+            while abs_e < len(text) and text[abs_e] in (",", " ", "\t"):
+                abs_e += 1
+            # Include leading whitespace and newline
+            while abs_s > 0 and text[abs_s - 1] in (" ", "\t"):
+                abs_s -= 1
+            if abs_s > 0 and text[abs_s - 1] == "\n":
+                abs_s -= 1
+            return text[:abs_s] + text[abs_e:], True
+    return text, False
+
+
 def autofix_duplicate_column_masks(tfvars_path: Path) -> int:
     """Remove FGAC policies that would cause multiple column masks on the same column.
 
@@ -4472,22 +4504,12 @@ def autofix_duplicate_column_masks(tfvars_path: Path) -> int:
         name = _s(p.get("name", ""))
         if not name:
             continue
-        # Remove the policy block from fgac_policies list
-        escaped = re.escape(name)
-        pattern = re.compile(
-            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
-            re.DOTALL,
-        )
-        new_text = pattern.sub("", text, count=1)
-        if new_text != text:
-            text = new_text
+        text, was_removed = _remove_policy_block_by_name(text, name)
+        if was_removed:
             removed += 1
             print(f"    Removed duplicate mask policy '{name}' (generic function on column already covered by specific policy)")
 
     if removed:
-        # Clean up any leftover double commas or trailing commas before ]
-        text = re.sub(r',\s*,', ',', text)
-        text = re.sub(r',\s*\]', '\n  ]', text)
         tfvars_path.write_text(text)
     return removed
 
@@ -4529,19 +4551,11 @@ def autofix_forbidden_conditions(tfvars_path: Path) -> int:
         name = _s(p.get("name", ""))
         if not name:
             continue
-        escaped = _re_fc.escape(name)
-        pattern = _re_fc.compile(
-            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
-            re.DOTALL,
-        )
-        new_text = pattern.sub("", text, count=1)
-        if new_text != text:
-            text = new_text
+        text, was_removed = _remove_policy_block_by_name(text, name)
+        if was_removed:
             removed += 1
 
     if removed:
-        text = re.sub(r',\s*,', ',', text)
-        text = re.sub(r',\s*\]', '\n  ]', text)
         tfvars_path.write_text(text)
     return removed
 
@@ -4618,15 +4632,8 @@ def autofix_invalid_condition_values(tfvars_path: Path) -> int:
 
     text = tfvars_path.read_text()
     for name in bad_names:
-        escaped = re.escape(name)
-        pattern = re.compile(
-            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
-            re.DOTALL,
-        )
-        text = pattern.sub("", text, count=1)
+        text, _ = _remove_policy_block_by_name(text, name)
 
-    text = re.sub(r',\s*,', ',', text)
-    text = re.sub(r',\s*\]', '\n  ]', text)
     tfvars_path.write_text(text)
     return len(bad_names)
 
@@ -4693,15 +4700,8 @@ def autofix_malformed_conditions(tfvars_path: Path) -> int:
 
     text = tfvars_path.read_text()
     for name in bad_names:
-        escaped = re.escape(name)
-        pattern = re.compile(
-            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
-            re.DOTALL,
-        )
-        text = pattern.sub("", text, count=1)
+        text, _ = _remove_policy_block_by_name(text, name)
 
-    text = re.sub(r',\s*,', ',', text)
-    text = re.sub(r',\s*\]', '\n  ]', text)
     tfvars_path.write_text(text)
     return len(bad_names)
 
@@ -6418,33 +6418,56 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     _tc_cfg = _hcl_tc.loads(tfvars_path.read_text())
                     _tc_text = tfvars_path.read_text()
                     _tc_removed = 0
-                    # Remove policies referencing this tag
+                    # Remove policies referencing this tag — use brace-counting
+                    # (nested blocks like column_mask = { ... } break [^}]* regex)
                     for _p in _tc_cfg.get("fgac_policies", []):
                         _cond = (_p.get("match_condition", "") or "") + " " + (_p.get("when_condition", "") or "")
                         if _tag_val in _cond:
                             _pname = _p.get("name", "")
                             if _pname:
-                                _pat = re.compile(
-                                    r'\s*\{[^}]*name\s*=\s*"' + re.escape(_pname) + r'"[^}]*\}\s*,?\s*',
-                                    re.DOTALL,
-                                )
-                                _tc_text, _n = _pat.subn('', _tc_text, count=1)
-                                if _n:
-                                    _tc_removed += 1
+                                _sec = _find_bracket_section(_tc_text, "fgac_policies")
+                                if _sec:
+                                    _sec_start, _sec_end = _sec
+                                    _sec_txt = _tc_text[_sec_start:_sec_end]
+                                    _blks = _find_brace_blocks(_sec_txt)
+                                    for _bs, _be in reversed(_blks):
+                                        _bt = _sec_txt[_bs:_be + 1]
+                                        if re.search(r'name\s*=\s*"' + re.escape(_pname) + r'"', _bt):
+                                            # Determine removal range including trailing comma/whitespace
+                                            _abs_s = _sec_start + _bs
+                                            _abs_e = _sec_start + _be + 1
+                                            while _abs_e < len(_tc_text) and _tc_text[_abs_e] in (",", " ", "\t"):
+                                                _abs_e += 1
+                                            while _abs_s > 0 and _tc_text[_abs_s - 1] in (" ", "\t"):
+                                                _abs_s -= 1
+                                            if _abs_s > 0 and _tc_text[_abs_s - 1] == "\n":
+                                                _abs_s -= 1
+                                            _tc_text = _tc_text[:_abs_s] + _tc_text[_abs_e:]
+                                            _tc_removed += 1
+                                            break
                     # Always remove tag assignments for this tag_key+tag_value
                     # (even if 0 policies removed — LLM may generate tags without policies)
-                    _ta_pat = re.compile(
-                        r'\s*\{[^}]*tag_key\s*=\s*"' + re.escape(_tag_key)
-                        + r'"[^}]*tag_value\s*=\s*"' + re.escape(_tag_val)
-                        + r'"[^}]*\}\s*,?\s*',
-                        re.DOTALL,
-                    )
-                    _tc_text_new = _ta_pat.sub('', _tc_text)
-                    _ta_removed = _tc_text != _tc_text_new
-                    _tc_text = _tc_text_new
+                    _ta_sec = _find_bracket_section(_tc_text, "tag_assignments")
+                    _ta_removed = False
+                    if _ta_sec:
+                        _ta_start, _ta_end = _ta_sec
+                        _ta_sec_txt = _tc_text[_ta_start:_ta_end]
+                        _ta_blks = _find_brace_blocks(_ta_sec_txt)
+                        for _bs, _be in reversed(_ta_blks):
+                            _bt = _ta_sec_txt[_bs:_be + 1]
+                            if (re.search(r'tag_key\s*=\s*"' + re.escape(_tag_key) + r'"', _bt)
+                                    and re.search(r'tag_value\s*=\s*"' + re.escape(_tag_val) + r'"', _bt)):
+                                _abs_s = _ta_start + _bs
+                                _abs_e = _ta_start + _be + 1
+                                while _abs_e < len(_tc_text) and _tc_text[_abs_e] in (",", " ", "\t"):
+                                    _abs_e += 1
+                                while _abs_s > 0 and _tc_text[_abs_s - 1] in (" ", "\t"):
+                                    _abs_s -= 1
+                                if _abs_s > 0 and _tc_text[_abs_s - 1] == "\n":
+                                    _abs_s -= 1
+                                _tc_text = _tc_text[:_abs_s] + _tc_text[_abs_e:]
+                                _ta_removed = True
                     if _tc_removed or _ta_removed:
-                        _tc_text = re.sub(r'^\s*,\s*$', '', _tc_text, flags=re.MULTILINE)
-                        _tc_text = re.sub(r',([ \t]*,)+', ',', _tc_text)
                         tfvars_path.write_text(_tc_text)
                         print(f"  [AUTOFIX] Removed {_tag_key}={_tag_val} policies/tags (function '{_required_fn}' not in SQL)")
                 except Exception:
