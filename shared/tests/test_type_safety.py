@@ -199,3 +199,29 @@ CREATE TABLE dev_bank.retail.products (
 """)
         n = autofix_untagged_pii_columns(tfvars, ddl_path=ddl)
         assert n == 0
+
+    def test_trailing_comma_after_insertion(self, tmp_path):
+        """Inserting new entries after a last entry without trailing comma must not break HCL."""
+        tfvars = tmp_path / "abac.auto.tfvars"
+        # Last entry has NO trailing comma — this is the case that broke hcl2.loads()
+        tfvars.write_text("""\
+tag_assignments = [
+  { entity_type = "columns", entity_name = "dev_bank.retail.customers.customer_id", tag_key = "pii_level", tag_value = "public" }
+]
+fgac_policies = []
+""")
+        ddl = self._write_ddl(tmp_path, """\
+CREATE TABLE dev_bank.retail.customers (
+  customer_id BIGINT,
+  email STRING,
+  phone STRING
+);
+""")
+        n = autofix_untagged_pii_columns(tfvars, ddl_path=ddl)
+        assert n == 2
+        text = tfvars.read_text()
+        # Verify the output is parseable by hcl2
+        import hcl2, io
+        cfg = hcl2.load(io.StringIO(text))
+        # Should have 3 tag_assignments total (1 existing + 2 new)
+        assert len(cfg.get("tag_assignments", [])) == 3

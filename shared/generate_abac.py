@@ -4928,6 +4928,17 @@ def autofix_untagged_pii_columns(
         return 0
 
     insert_pos = ta_section.end(2)  # before the ]
+
+    # Ensure the last existing entry has a trailing comma to prevent
+    # "missing comma" HCL syntax errors when we append new entries.
+    preceding = text[ta_section.end(1):insert_pos].rstrip()
+    if preceding and preceding.endswith("}") and not preceding.endswith("},"):
+        last_brace_idx = ta_section.end(1) + len(preceding) - 1
+        text = text[:last_brace_idx + 1] + "," + text[last_brace_idx + 1:]
+        # Re-find section since text shifted by 1 character
+        ta_section = re.search(r"(tag_assignments\s*=\s*\[)(.*?)(\])", text, re.DOTALL)
+        insert_pos = ta_section.end(2)
+
     lines = []
     for ta in new_assignments:
         lines.append(
@@ -6348,6 +6359,11 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 n_pii_tp = autofix_tag_policies(tfvars_path)
                 if n_pii_tp:
                     print(f"  Auto-fixed: added {n_pii_tp} tag_policy value(s) for PII-detected tags")
+
+        # Repair HCL before missing-policy detection — autofix_untagged_pii_columns
+        # inserts tag_assignments via regex which can leave missing commas between
+        # the last existing entry and the new entries, causing hcl2 parse failures.
+        fix_hcl_syntax(tfvars_path)
 
         n_repaired = autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
         if n_repaired:
