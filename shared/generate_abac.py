@@ -4155,10 +4155,23 @@ def autofix_row_filter_column_refs(
             all_known_cols |= cols
 
         bad_refs = identifiers & all_known_cols - table_cols
-        if bad_refs:
+        # Also check for hallucinated columns: identifiers that look like
+        # column names (contain _ and are not SQL builtins) but don't exist
+        # in the target table.  Only flag identifiers that are plausible
+        # column names (contain underscore, typical of generated schemas).
+        hallucinated = {
+            ident for ident in identifiers - table_cols - all_known_cols
+            if "_" in ident and ident not in {
+                "is_account_group_member", "is_member", "current_user",
+                "account_group_member",
+            }
+        }
+        all_bad = bad_refs | hallucinated
+        if all_bad:
             bad_policy_names.append(pname)
+            desc = "cross-table" if bad_refs else "hallucinated"
             print(
-                f"  [AUTOFIX] Row filter '{pname}' references column(s) {sorted(bad_refs)} "
+                f"  [AUTOFIX] Row filter '{pname}' references {desc} column(s) {sorted(all_bad)} "
                 f"not in {entity} — removing policy"
             )
 
@@ -5443,14 +5456,18 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict, mode: str = 
         import hcl2 as _hcl2
         cfg = _hcl2.loads(tfvars_path.read_text())
     except Exception:
-        return errors  # can't parse — let validation handle it
+        return errors, []  # can't parse — let validation handle it
 
-    # Check 1: genie_space_configs present when genie_spaces is configured
+    # Check 1: genie_space_configs present when genie_spaces is configured.
+    # This is a WARNING not an error — autofix_missing_genie_space_entries
+    # handles it.  Don't trigger a retry for this since the autofix adds the
+    # entries and the retry would overwrite them.
+    warnings: list[str] = []
     genie_spaces = auth_cfg.get("genie_spaces", [])
     if genie_spaces:
         gsc = cfg.get("genie_space_configs") or {}
         if not gsc:
-            errors.append(
+            warnings.append(
                 "genie_space_configs section missing from LLM output "
                 f"(expected for {len(genie_spaces)} configured genie_space(s))"
             )
@@ -5658,7 +5675,7 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict, mode: str = 
                     f"Generate tag_assignments for ALL catalogs."
                 )
 
-    return errors
+    return errors, warnings
 
 
 def main():
@@ -6470,7 +6487,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 print("  [governance mode] Final strip: removed genie_space_configs re-introduced by autofixes")
 
         # ── Semantic quality check (catches LLM issues that autofix can't fix) ──
-        semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg, mode=args.mode)
+        semantic_errors, semantic_warnings = post_generate_semantic_check(tfvars_path, auth_cfg, mode=args.mode)
         if semantic_errors:
             _semantic_retry_count += 1
             if _semantic_retry_count < _semantic_max_retries:
@@ -6534,11 +6551,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
                             tfvars_path.write_text(_retry_cleaned)
                             print("  [governance mode] Final strip (retry): removed genie_space_configs")
                 # Re-check after retry
-                semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg, mode=args.mode)
-            if semantic_errors:
+                semantic_errors, semantic_warnings = post_generate_semantic_check(tfvars_path, auth_cfg, mode=args.mode)
+            all_warnings = (semantic_warnings or []) + (semantic_errors or [])
+            if all_warnings:
                 print(f"\n  [SEMANTIC CHECK] Warnings after {_semantic_retry_count + 1} attempt(s):")
-                for err in semantic_errors:
-                    print(f"    - {err}")
+                for w in all_warnings:
+                    print(f"    - {w}")
                 print(f"  Proceeding with best effort.")
 
         # ── Per-space mode: bootstrap per-space dir, then merge into assembled ──
