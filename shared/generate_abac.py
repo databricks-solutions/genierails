@@ -6379,6 +6379,49 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_cat_mismatch:
             print(f"  Auto-fixed: corrected {n_cat_mismatch} function/category mismatch(es) in fgac_policies")
 
+        # Remove policies that reference type-specific tags (e.g. financial_sensitivity)
+        # when the required masking function isn't available. The LLM sometimes generates
+        # these tags even without the corresponding overlay — leave them uncovered so
+        # the cleanup removes both the policy and the tag assignment.
+        _avail = _parse_sql_function_names(sql_path if sql_block else None)
+        _type_tag_fn_map = {
+            "financial_sensitivity": "mask_amount_rounded",
+        }
+        for _tag_key, _required_fn in _type_tag_fn_map.items():
+            if _avail and _required_fn not in _avail:
+                try:
+                    import hcl2 as _hcl_tc
+                    _tc_cfg = _hcl_tc.loads(tfvars_path.read_text())
+                    _tc_text = tfvars_path.read_text()
+                    _tc_removed = 0
+                    for _p in _tc_cfg.get("fgac_policies", []):
+                        _cond = (_p.get("match_condition", "") or "") + " " + (_p.get("when_condition", "") or "")
+                        if _tag_key in _cond:
+                            _pname = _p.get("name", "")
+                            if _pname:
+                                # Remove the policy block
+                                _pat = re.compile(
+                                    r'\s*\{[^}]*name\s*=\s*"' + re.escape(_pname) + r'"[^}]*\}\s*,?\s*',
+                                    re.DOTALL,
+                                )
+                                _tc_text, _n = _pat.subn('', _tc_text, count=1)
+                                if _n:
+                                    _tc_removed += 1
+                    if _tc_removed:
+                        # Also remove corresponding tag assignments
+                        _ta_pat = re.compile(
+                            r'\s*\{[^}]*tag_key\s*=\s*"' + re.escape(_tag_key) + r'"[^}]*\}\s*,?\s*',
+                            re.DOTALL,
+                        )
+                        _tc_text = _ta_pat.sub('', _tc_text)
+                        # Clean stray commas
+                        _tc_text = re.sub(r'^\s*,\s*$', '', _tc_text, flags=re.MULTILINE)
+                        _tc_text = re.sub(r',([ \t]*,)+', ',', _tc_text)
+                        tfvars_path.write_text(_tc_text)
+                        print(f"  [AUTOFIX] Removed {_tc_removed} {_tag_key} policy/ies (function '{_required_fn}' not in SQL)")
+                except Exception:
+                    pass
+
         n_dup_masks = autofix_duplicate_column_masks(tfvars_path)
         if n_dup_masks:
             print(f"  Auto-fixed: removed {n_dup_masks} duplicate column mask policy/ies")
