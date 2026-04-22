@@ -139,10 +139,26 @@ CREATE TABLE dev_bank.retail.accounts (
   credit_limit DECIMAL(18,2)
 );
 """)
-        n = autofix_untagged_pii_columns(tfvars, ddl_path=ddl)
+        # Financial columns require mask_amount_rounded in SQL to be tagged
+        sql = tmp_path / "masking_functions.sql"
+        sql.write_text("CREATE FUNCTION mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN ROUND(amount, -2);")
+        n = autofix_untagged_pii_columns(tfvars, ddl_path=ddl, sql_path=sql)
         assert n == 2  # balance + credit_limit
         text = tfvars.read_text()
         assert "rounded_amounts" in text
+
+    def test_skips_financial_columns_without_overlay(self, tmp_path):
+        """Financial columns should NOT be tagged when mask_amount_rounded is not in SQL."""
+        tfvars = tmp_path / "abac.auto.tfvars"
+        tfvars.write_text("tag_assignments = []\nfgac_policies = []\n")
+        ddl = self._write_ddl(tmp_path, """\
+CREATE TABLE dev_bank.retail.accounts (
+  account_id BIGINT,
+  balance DECIMAL(18,2)
+);
+""")
+        n = autofix_untagged_pii_columns(tfvars, ddl_path=ddl)
+        assert n == 0  # no mask_amount_rounded → skip financial tags
 
     def test_detects_anz_identifiers(self, tmp_path):
         tfvars = tmp_path / "abac.auto.tfvars"

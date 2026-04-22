@@ -3153,8 +3153,8 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
         # with non-STRING values (amounts/dates).  These need type-specific masks.
         if not is_table:
             is_numeric_or_date = any(tok in blob for tok in (
-                "amount", "balance", "limit", "rounded", "price", "cost", "salary",
-                "dob", "birth", "date", "opened_date", "expiry",
+                "amount", "balance", "credit_limit", "rounded", "price", "cost", "salary",
+                "dob", "birth", "date_of_birth", "opened_date", "expiry",
             ))
             if not is_numeric_or_date:
                 preferred.extend(["mask_redact", "mask_nullify", "mask_pii_partial"])
@@ -3953,7 +3953,7 @@ def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = N
             if p.get("name") == pname:
                 policy_match = (p.get("match_condition", "") or "") + " " + (p.get("when_condition", "") or "")
                 break
-        is_numeric = any(tok in policy_match.lower() for tok in ("rounded", "amount", "balance", "limit"))
+        is_numeric = any(tok in policy_match.lower() for tok in ("rounded", "amount", "balance", "credit_limit"))
         is_date = any(tok in policy_match.lower() for tok in ("dob", "birth", "date"))
 
         if is_numeric and "mask_amount_rounded" in (available_functions or set()):
@@ -4251,7 +4251,7 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
             # function (e.g. duplicate _2/_3 policies).  Check the condition keywords
             # to detect type mismatches even without matched assignments.
             cond = (p.get("match_condition", "") or "").lower()
-            cond_is_numeric = any(tok in cond for tok in ("rounded", "amount", "balance", "limit"))
+            cond_is_numeric = any(tok in cond for tok in ("rounded", "amount", "balance", "credit_limit"))
             cond_is_date = any(tok in cond for tok in ("dob", "birth", "date"))
             if cond_is_numeric and fn != "mask_amount_rounded" and "mask_amount_rounded" in (available_functions or set()):
                 replacements.append((p.get("name", ""), fn, "mask_amount_rounded"))
@@ -4271,10 +4271,10 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
             ta.get("entity_name", "") + " " + ta.get("tag_value", "") for ta in matched
         ).lower()
         is_numeric = any(tok in matched_blob for tok in (
-            "amount", "balance", "limit", "rounded", "price", "cost", "salary",
+            "amount", "balance", "credit_limit", "rounded", "price", "cost", "salary",
         ))
         is_date = any(tok in matched_blob for tok in (
-            "dob", "birth", "date", "opened_date", "expiry",
+            "dob", "birth", "date_of_birth", "opened_date", "expiry",
         ))
         if is_numeric:
             type_fn = "mask_amount_rounded"
@@ -4868,13 +4868,28 @@ def autofix_untagged_pii_columns(
     if not all_columns:
         return 0
 
+    # Check which masking functions are available in the SQL file.
+    # Only add financial tags (rounded_amounts) if mask_amount_rounded is available,
+    # and only add date tags (masked_dob) if mask_date_to_year is available.
+    # Without the required function, the tag assignment would be uncovered.
+    available_fns: set[str] = set()
+    if sql_path and sql_path.exists():
+        available_fns = set(re.findall(
+            r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*(\w+)\s*\(",
+            sql_path.read_text(), re.IGNORECASE,
+        ))
+
+    # Filter patterns: only include financial patterns if mask_amount_rounded is available
+    active_patterns = list(_PII_COLUMN_TAG_MAP)
+    if "mask_amount_rounded" in available_fns:
+        active_patterns.extend(_FINANCIAL_COLUMN_TAG_MAP)
+
     # Check each column against PII patterns
     new_assignments: list[dict] = []
-    all_patterns = _PII_COLUMN_TAG_MAP + _FINANCIAL_COLUMN_TAG_MAP
     for full_name, col_name in all_columns:
         if full_name in existing_tags:
             continue
-        for hints, tag_key, tag_value in all_patterns:
+        for hints, tag_key, tag_value in active_patterns:
             if col_name in hints or any(h in col_name for h in hints):
                 new_assignments.append({
                     "entity_type": "columns",
