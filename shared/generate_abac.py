@@ -3151,11 +3151,11 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
         # Row filter functions must take 0 arguments; masking functions take 1.
         # IMPORTANT: mask_redact returns STRING — never use it for columns tagged
         # with non-STRING values (amounts/dates).  These need type-specific masks.
+        is_numeric_or_date = any(tok in blob for tok in (
+            "amount", "balance", "credit_limit", "rounded", "price", "cost", "salary",
+            "dob", "birth", "date_of_birth", "opened_date", "expiry",
+        ))
         if not is_table:
-            is_numeric_or_date = any(tok in blob for tok in (
-                "amount", "balance", "credit_limit", "rounded", "price", "cost", "salary",
-                "dob", "birth", "date_of_birth", "opened_date", "expiry",
-            ))
             if not is_numeric_or_date:
                 preferred.extend(["mask_redact", "mask_nullify", "mask_pii_partial"])
         for fn in preferred:
@@ -3165,7 +3165,9 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
         # file rather than returning None (which causes the autofix to skip adding
         # coverage and lets validation fail). Row filters take 0 args; column masks
         # take 1, so we look for the appropriate naming convention AND verify arg count.
-        if available_functions:
+        # Skip last-resort for numeric/date columns — a wrong-type function is worse
+        # than no policy (the tag assignment will be removed as uncovered instead).
+        if available_functions and not is_numeric_or_date:
             if is_table:
                 filter_fns = sorted(f for f in available_functions if f.startswith("filter_") and _arg_count_ok(f))
                 if filter_fns:
