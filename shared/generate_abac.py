@@ -6579,6 +6579,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_fgac_arg_count_mismatch(tfvars_path, sql_path if sql_block else None)
                     autofix_row_filter_column_refs(tfvars_path, sql_path if sql_block else None)
                     autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
+                    # Repair HCL before condition autofixes (same as main path)
+                    fix_hcl_syntax(tfvars_path)
                     autofix_forbidden_conditions(tfvars_path)
                     autofix_invalid_condition_values(tfvars_path)
                     autofix_malformed_conditions(tfvars_path)
