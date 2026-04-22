@@ -4894,8 +4894,12 @@ def autofix_untagged_pii_columns(
             sql_path.read_text(), re.IGNORECASE,
         ))
 
-    # Filter patterns: only include financial patterns if mask_amount_rounded is available
-    active_patterns = list(_PII_COLUMN_TAG_MAP)
+    # Filter patterns: only include tags that have covering functions available.
+    # Without the function, the tag assignment would be uncovered and cause validation failure.
+    active_patterns = [
+        (hints, key, val) for hints, key, val in _PII_COLUMN_TAG_MAP
+        if not (val == "masked_dob" and "mask_date_to_year" not in available_fns)
+    ]
     if "mask_amount_rounded" in available_fns:
         active_patterns.extend(_FINANCIAL_COLUMN_TAG_MAP)
 
@@ -6401,22 +6405,25 @@ Before you apply, tune for your business roles, security requirements, and Genie
         # these tags even without the corresponding overlay — leave them uncovered so
         # the cleanup removes both the policy and the tag assignment.
         _avail = _parse_sql_function_names(sql_path if sql_block else None)
-        _type_tag_fn_map = {
-            "financial_sensitivity": "mask_amount_rounded",
-        }
-        for _tag_key, _required_fn in _type_tag_fn_map.items():
+        # Map: (tag_key, tag_value) → required function.
+        # If the function isn't available, remove both policies AND tag assignments.
+        _type_tag_fn_map = [
+            ("financial_sensitivity", "rounded_amounts", "mask_amount_rounded"),
+            ("pii_level", "masked_dob", "mask_date_to_year"),
+        ]
+        for _tag_key, _tag_val, _required_fn in _type_tag_fn_map:
             if _avail and _required_fn not in _avail:
                 try:
                     import hcl2 as _hcl_tc
                     _tc_cfg = _hcl_tc.loads(tfvars_path.read_text())
                     _tc_text = tfvars_path.read_text()
                     _tc_removed = 0
+                    # Remove policies referencing this tag
                     for _p in _tc_cfg.get("fgac_policies", []):
                         _cond = (_p.get("match_condition", "") or "") + " " + (_p.get("when_condition", "") or "")
-                        if _tag_key in _cond:
+                        if _tag_val in _cond:
                             _pname = _p.get("name", "")
                             if _pname:
-                                # Remove the policy block
                                 _pat = re.compile(
                                     r'\s*\{[^}]*name\s*=\s*"' + re.escape(_pname) + r'"[^}]*\}\s*,?\s*',
                                     re.DOTALL,
@@ -6424,18 +6431,22 @@ Before you apply, tune for your business roles, security requirements, and Genie
                                 _tc_text, _n = _pat.subn('', _tc_text, count=1)
                                 if _n:
                                     _tc_removed += 1
-                    if _tc_removed:
-                        # Also remove corresponding tag assignments
-                        _ta_pat = re.compile(
-                            r'\s*\{[^}]*tag_key\s*=\s*"' + re.escape(_tag_key) + r'"[^}]*\}\s*,?\s*',
-                            re.DOTALL,
-                        )
-                        _tc_text = _ta_pat.sub('', _tc_text)
-                        # Clean stray commas
+                    # Always remove tag assignments for this tag_key+tag_value
+                    # (even if 0 policies removed — LLM may generate tags without policies)
+                    _ta_pat = re.compile(
+                        r'\s*\{[^}]*tag_key\s*=\s*"' + re.escape(_tag_key)
+                        + r'"[^}]*tag_value\s*=\s*"' + re.escape(_tag_val)
+                        + r'"[^}]*\}\s*,?\s*',
+                        re.DOTALL,
+                    )
+                    _tc_text_new = _ta_pat.sub('', _tc_text)
+                    _ta_removed = _tc_text != _tc_text_new
+                    _tc_text = _tc_text_new
+                    if _tc_removed or _ta_removed:
                         _tc_text = re.sub(r'^\s*,\s*$', '', _tc_text, flags=re.MULTILINE)
                         _tc_text = re.sub(r',([ \t]*,)+', ',', _tc_text)
                         tfvars_path.write_text(_tc_text)
-                        print(f"  [AUTOFIX] Removed {_tc_removed} {_tag_key} policy/ies (function '{_required_fn}' not in SQL)")
+                        print(f"  [AUTOFIX] Removed {_tag_key}={_tag_val} policies/tags (function '{_required_fn}' not in SQL)")
                 except Exception:
                     pass
 
