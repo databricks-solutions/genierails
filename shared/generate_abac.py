@@ -6554,7 +6554,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 new_sql, new_hcl = extract_code_blocks(response_text)
                 # Write new SQL FIRST so that HCL autofixes can see the
                 # correct set of available functions (including overlay injects).
-                if new_sql:
+                if new_sql and args.mode != "genie":
                     sql_block = new_sql
                     # Ensure USE CATALOG/USE SCHEMA present (LLM may omit)
                     if all_cs and not re.search(r"USE\s+CATALOG\s+\S+", sql_block, re.IGNORECASE):
