@@ -4491,6 +4491,26 @@ def autofix_duplicate_column_masks(tfvars_path: Path) -> int:
             # Remove generic ones — specific function is preferred
             for pidx, e in generic:
                 remove_indices.add(e[0])  # original policy index
+        elif len(specific) > 1:
+            # Multiple specific functions overlap on the same column.
+            # Keep the one whose function name best matches the column name
+            # (e.g. mask_date_to_year for date_of_birth, mask_diagnosis_code
+            # for diagnosis_code).  Fall back to keeping the one that covers
+            # fewer columns (most targeted).
+            col_lower = col.split(".")[-1].lower()
+            scored: list[tuple[int, int, int, tuple]] = []
+            for pidx, e in specific:
+                fn = _s(e[1].get("function_name", "")).lower()
+                # Score: how many words in the column name appear in the function name
+                col_words = set(col_lower.replace("_", " ").split())
+                fn_words = set(fn.replace("mask_", "").replace("_", " ").split())
+                name_overlap = len(col_words & fn_words)
+                num_cols = len(e[2])  # number of columns matched by this policy
+                scored.append((-name_overlap, num_cols, pidx, e))
+            scored.sort()
+            # Keep the best match (first after sort), remove the rest
+            for _, _, pidx, e in scored[1:]:
+                remove_indices.add(e[0])
 
     if not remove_indices:
         return 0
