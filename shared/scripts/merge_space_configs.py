@@ -437,11 +437,15 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
         key = (ta.get("entity_type", ""), ta.get("entity_name", ""), ta.get("tag_key", ""))
         existing_assignment = existing_ta_keys.get(key)
         if existing_assignment and existing_assignment.get("tag_value") != ta.get("tag_value"):
-            raise ValueError(
-                "Per-space merge conflict for "
+            # Per-space generate takes precedence — it's a more focused, recent
+            # call specifically for the target space's tables.  Update in place.
+            print(
+                f"    tag_assignments: resolved merge conflict for "
                 f"{ta.get('entity_name', '')} / {ta.get('tag_key', '')}: "
-                f"'{existing_assignment.get('tag_value')}' vs '{ta.get('tag_value')}'"
+                f"'{existing_assignment.get('tag_value')}' → '{ta.get('tag_value')}'"
             )
+            existing_assignment["tag_value"] = ta.get("tag_value")
+            continue
         if key not in existing_ta_keys:
             merged_tag_assignments.append(ta)
             existing_ta_keys[key] = ta

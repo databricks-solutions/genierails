@@ -84,8 +84,15 @@ fgac_policies = []
 """
         )
 
-        with pytest.raises(ValueError, match="Per-space merge conflict"):
-            merge_into_assembled(generated_dir, "finance")
+        # Per-space generate takes precedence — conflict is resolved, not raised
+        merge_into_assembled(generated_dir, "finance")
+        import hcl2, io
+        result = hcl2.load(io.StringIO((generated_dir / "abac.auto.tfvars").read_text()))
+        ta_list = result.get("tag_assignments", [])
+        # The per-space value should win
+        card_ta = [t for t in ta_list if "card_number" in t.get("entity_name", "")]
+        assert len(card_ta) == 1
+        assert card_ta[0]["tag_value"] == "redacted_card_full"  # canonical of "restricted_card"
 
     def test_merge_into_assembled_normalizes_alias_values(self, tmp_path):
         generated_dir = tmp_path / "generated"

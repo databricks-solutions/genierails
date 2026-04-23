@@ -5527,8 +5527,16 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict, mode: str = 
 
     # Check 3: masking SQL has basic syntactic validity
     sql_path = tfvars_path.parent / "masking_functions.sql"
+    fgac_policies = cfg.get("fgac_policies", []) or []
     if sql_path.exists():
         sql_text = sql_path.read_text()
+        # If FGAC policies exist but SQL has no functions, the output is incomplete
+        sql_fn_count = len(re.findall(r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION', sql_text, re.IGNORECASE))
+        if fgac_policies and sql_fn_count == 0:
+            errors.append(
+                f"fgac_policies reference functions but masking_functions.sql has "
+                f"0 CREATE FUNCTION statements — SQL output is incomplete."
+            )
         # Check for common LLM SQL errors
         if sql_text.strip():
             # Unmatched CASE/END
@@ -6420,6 +6428,9 @@ Before you apply, tune for your business roles, security requirements, and Genie
         # when the required masking function isn't available. The LLM sometimes generates
         # these tags even without the corresponding overlay — leave them uncovered so
         # the cleanup removes both the policy and the tag assignment.
+        # Repair HCL first — intermediate autofixes may have introduced syntax issues
+        # that would cause hcl2.loads() to fail silently in the cleanup below.
+        fix_hcl_syntax(tfvars_path)
         _avail = _parse_sql_function_names(sql_path if sql_block else None)
         # Map: (tag_key, tag_value) → required function.
         # If the function isn't available, remove both policies AND tag assignments.
@@ -6611,13 +6622,17 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 semantic_errors, semantic_warnings = post_generate_semantic_check(tfvars_path, auth_cfg, mode=args.mode)
             # Critical errors (empty governance output) should NOT be downgraded
             # to warnings — exit with failure so the outer retry loop can kick in.
+            _CRITICAL_PATTERNS = [
+                "0 tag_assignments and 0 fgac_policies",
+                "SQL output is incomplete",
+            ]
             _critical_errors = [
                 e for e in (semantic_errors or [])
-                if "0 tag_assignments and 0 fgac_policies" in e
+                if any(p in e for p in _CRITICAL_PATTERNS)
             ]
             _non_critical_errors = [
                 e for e in (semantic_errors or [])
-                if "0 tag_assignments and 0 fgac_policies" not in e
+                if not any(p in e for p in _CRITICAL_PATTERNS)
             ]
             if _critical_errors:
                 print(f"\n  [SEMANTIC CHECK FAILED] Critical errors after {_semantic_retry_count + 1} attempt(s):")
