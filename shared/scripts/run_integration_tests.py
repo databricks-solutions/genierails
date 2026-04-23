@@ -1093,6 +1093,13 @@ def _preserve_existing_tag_policy_values(new_abac: Path, existing_abac: Path) ->
         tp_section = _re_pres2.search(r"(tag_policies\s*=\s*\[)(.*?)(\])", new_text, _re_pres2.DOTALL)
         if tp_section:
             insert_pos = tp_section.end(2)
+            # Ensure trailing comma on last existing entry
+            preceding = new_text[tp_section.end(1):insert_pos].rstrip()
+            if preceding and preceding.endswith("}") and not preceding.endswith("},"):
+                last_brace = tp_section.end(1) + len(preceding) - 1
+                new_text = new_text[:last_brace + 1] + "," + new_text[last_brace + 1:]
+                tp_section = _re_pres2.search(r"(tag_policies\s*=\s*\[)(.*?)(\])", new_text, _re_pres2.DOTALL)
+                insert_pos = tp_section.end(2)
             blocks = []
             for k in missing_keys:
                 vals_str = ", ".join(f'"{v}"' for v in sorted(existing_vals[k]))
