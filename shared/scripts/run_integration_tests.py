@@ -1056,6 +1056,8 @@ def _preserve_existing_tag_policy_values(new_abac: Path, existing_abac: Path) ->
 
     # Find values in existing that are missing from new
     added = 0
+    new_keys = {tp.get("key", "") for tp in new_cfg.get("tag_policies", [])}
+
     for tp in new_cfg.get("tag_policies", []):
         k = tp.get("key", "")
         new_vals = tp.get("values", [])
@@ -1080,6 +1082,25 @@ def _preserve_existing_tag_policy_values(new_abac: Path, existing_abac: Path) ->
             added += len(missing)
             for v in missing:
                 print(f"  [PRESERVE] Kept existing tag_policy value '{v}' for key '{k}'")
+
+    # Also preserve entire tag_policy entries that exist in the old config
+    # but are completely missing from the new config (e.g. phi_level exists
+    # in dev but bu2's LLM didn't generate it at all).
+    missing_keys = sorted(set(existing_vals.keys()) - new_keys)
+    if missing_keys:
+        # Find the tag_policies = [...] section and append the missing entries
+        import re as _re_pres2
+        tp_section = _re_pres2.search(r"(tag_policies\s*=\s*\[)(.*?)(\])", new_text, _re_pres2.DOTALL)
+        if tp_section:
+            insert_pos = tp_section.end(2)
+            blocks = []
+            for k in missing_keys:
+                vals_str = ", ".join(f'"{v}"' for v in sorted(existing_vals[k]))
+                blocks.append(f'  {{\n    key    = "{k}"\n    values = [{vals_str}]\n  }},')
+                print(f"  [PRESERVE] Kept entire tag_policy '{k}' with {len(existing_vals[k])} value(s)")
+                added += len(existing_vals[k])
+            injection = "\n" + "\n".join(blocks) + "\n"
+            new_text = new_text[:insert_pos] + injection + new_text[insert_pos:]
 
     if added:
         new_abac.write_text(new_text)
