@@ -1088,18 +1088,29 @@ def _preserve_existing_tag_policy_values(new_abac: Path, existing_abac: Path) ->
     # in dev but bu2's LLM didn't generate it at all).
     missing_keys = sorted(set(existing_vals.keys()) - new_keys)
     if missing_keys:
-        # Find the tag_policies = [...] section and append the missing entries
+        # Find the tag_policies = [...] section using bracket-depth counting
+        # (the naive regex `(.*?)(\])` matches the FIRST `]` which is inside
+        # a `values = [...]` block, not the outer `]` of tag_policies).
         import re as _re_pres2
-        tp_section = _re_pres2.search(r"(tag_policies\s*=\s*\[)(.*?)(\])", new_text, _re_pres2.DOTALL)
-        if tp_section:
-            insert_pos = tp_section.end(2)
+        tp_match = _re_pres2.search(r"tag_policies\s*=\s*\[", new_text)
+        if tp_match:
+            bracket_start = tp_match.end()  # position after opening [
+            depth = 1
+            i = bracket_start
+            while i < len(new_text) and depth > 0:
+                ch = new_text[i]
+                if ch == "[":
+                    depth += 1
+                elif ch == "]":
+                    depth -= 1
+                i += 1
+            insert_pos = i - 1  # position of the closing ]
             # Ensure trailing comma on last existing entry
-            preceding = new_text[tp_section.end(1):insert_pos].rstrip()
+            preceding = new_text[bracket_start:insert_pos].rstrip()
             if preceding and preceding.endswith("}") and not preceding.endswith("},"):
-                last_brace = tp_section.end(1) + len(preceding) - 1
+                last_brace = bracket_start + len(preceding) - 1
                 new_text = new_text[:last_brace + 1] + "," + new_text[last_brace + 1:]
-                tp_section = _re_pres2.search(r"(tag_policies\s*=\s*\[)(.*?)(\])", new_text, _re_pres2.DOTALL)
-                insert_pos = tp_section.end(2)
+                insert_pos += 1  # shifted by 1 due to comma insertion
             blocks = []
             for k in missing_keys:
                 vals_str = ", ".join(f'"{v}"' for v in sorted(existing_vals[k]))
