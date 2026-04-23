@@ -91,12 +91,12 @@ def parse_sql_blocks(sql_text: str) -> list:
 
         m = re.match(r"USE\s+CATALOG\s+(\S+)", stmt, re.IGNORECASE)
         if m:
-            catalog = m.group(1)
+            catalog = m.group(1).rstrip(";")
             continue
 
         m = re.match(r"USE\s+SCHEMA\s+(\S+)", stmt, re.IGNORECASE)
         if m:
-            schema = m.group(1)
+            schema = m.group(1).rstrip(";")
             continue
 
         if stmt.upper().startswith("CREATE"):
@@ -118,8 +118,8 @@ def parse_sql_blocks(sql_text: str) -> list:
         # Re-extract catalog/schema from USE directives
         cat_m = re.search(r"USE\s+CATALOG\s+(\S+)", sql_text, re.IGNORECASE)
         sch_m = re.search(r"USE\s+SCHEMA\s+(\S+)", sql_text, re.IGNORECASE)
-        fb_cat = cat_m.group(1) if cat_m else catalog
-        fb_sch = sch_m.group(1) if sch_m else schema
+        fb_cat = cat_m.group(1).rstrip(";") if cat_m else catalog
+        fb_sch = sch_m.group(1).rstrip(";") if sch_m else schema
         # Extract each missing function as a complete statement
         for fn_name in missing:
             pattern = re.compile(
