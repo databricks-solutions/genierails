@@ -4810,10 +4810,6 @@ def autofix_unsafe_row_filters(sql_path: Path) -> int:
             body, re.IGNORECASE,
         )
 
-        if not group_calls:
-            # No group-based access at all — leave as-is (might be intentional)
-            return match.group(0)
-
         # Check if body has bare identifiers that could be column references.
         # Strip string literals and function calls to isolate bare identifiers.
         body_clean = re.sub(r"'[^']*'", "", body)  # remove string literals
@@ -4832,12 +4828,22 @@ def autofix_unsafe_row_filters(sql_path: Path) -> int:
             # Body is safe — no column references
             return match.group(0)
 
-        # Rewrite: keep only the group-based calls joined with OR
-        new_body = " OR ".join(group_calls)
-        print(f"  [AUTOFIX] Rewrote row filter '{fn_name}': removed column reference(s) "
-              f"{unsafe[:3]}, keeping group-based access only")
         nonlocal rewritten
         rewritten += 1
+
+        if group_calls:
+            # Has group-based fallback — keep those, drop column refs
+            new_body = " OR ".join(group_calls)
+            print(f"  [AUTOFIX] Rewrote row filter '{fn_name}': removed column reference(s) "
+                  f"{unsafe[:3]}, keeping group-based access only")
+        else:
+            # No group-based fallback — replace with TRUE (permissive no-op).
+            # TRUE means "no filter applied" at query time. The row filter policy
+            # still exists but has no effect. Safer than leaving the unresolved
+            # column reference which causes UNRESOLVED_COLUMN at deploy time.
+            new_body = "TRUE"
+            print(f"  [AUTOFIX] Replaced row filter '{fn_name}' body with TRUE "
+                  f"(had unresolved column reference(s) {unsafe[:3]} and no group fallback)")
         return f"{prefix}{new_body};"
 
     new_text = pattern.sub(_rewrite_body, text)
