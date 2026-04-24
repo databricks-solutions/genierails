@@ -6923,6 +6923,18 @@ Before you apply, tune for your business roles, security requirements, and Genie
                         countries=countries, industries=industries,
                         catalog_schemas=catalog_schemas,
                     )
+                    # Rewrite row filter fns with hallucinated column refs — must
+                    # run before deploy to prevent UNRESOLVED_COLUMN errors.
+                    autofix_unsafe_row_filters(sql_path if sql_block else None)
+                    # Add PII tags for untagged columns (BEFORE missing_fgac_policies
+                    # so the new tags get coverage).
+                    if args.mode != "genie":
+                        autofix_untagged_pii_columns(
+                            tfvars_path,
+                            ddl_path=out_dir / "ddl" / "_fetched.sql" if out_dir else None,
+                            sql_path=sql_path if sql_block else None,
+                        )
+                        autofix_tag_policies(tfvars_path)  # register new PII tag values
                     autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_policy_count(tfvars_path)
                     if args.mode != "governance":
@@ -6931,6 +6943,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
                         # genie_space_configs entry. Retry LLM output may drop
                         # space names that the test assertion checks for.
                         autofix_missing_genie_space_entries(tfvars_path, auth_cfg)
+                        env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
+                        autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
                     autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
                     autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_arg_count_mismatch(tfvars_path, sql_path if sql_block else None)
@@ -6938,9 +6952,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
                     # Repair HCL before condition autofixes (same as main path)
                     fix_hcl_syntax(tfvars_path)
+                    autofix_duplicate_column_masks(tfvars_path)
                     autofix_forbidden_conditions(tfvars_path)
                     autofix_invalid_condition_values(tfvars_path)
                     autofix_malformed_conditions(tfvars_path)
+                    # Deploy overlay-injected fns cross-catalog (multi-catalog support)
+                    autofix_cross_catalog_function_deployment(tfvars_path, sql_path if sql_block else None)
                     # Last-resort: drop uncovered tag_assignments
                     autofix_remove_uncovered_tags(tfvars_path, sql_path if sql_block else None)
                     # Final governance strip after retry autofixes
