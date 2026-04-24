@@ -3162,20 +3162,37 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
             if (not available_functions or fn in available_functions) and _arg_count_ok(fn):
                 return fn
         # Last-resort: pick any available function of the right type from the SQL
-        # file rather than returning None (which causes the autofix to skip adding
-        # coverage and lets validation fail). Row filters take 0 args; column masks
-        # take 1, so we look for the appropriate naming convention AND verify arg count.
-        # Skip last-resort for numeric/date columns — a wrong-type function is worse
-        # than no policy (the tag assignment will be removed as uncovered instead).
+        # file. Use semantic matching (token overlap with tag_value) to avoid
+        # picking arbitrary alphabetical first (which caused mask_abn to be
+        # chosen for every uncategorized string column when ANZ overlay is loaded).
+        # Skip last-resort for numeric/date columns — a wrong-type function is
+        # worse than no policy (the tag assignment will be removed as uncovered).
         if available_functions and not is_numeric_or_date:
+            # Extract semantic tokens from the tag value (strip common prefixes)
+            tv_norm = tval.replace("masked_", "").replace("redacted_", "")
+            tv_tokens = set(t for t in tv_norm.split("_") if t)
+
+            def _score_fn(fn: str, fn_prefix: str) -> int:
+                fn_tokens = set(fn.replace(fn_prefix, "", 1).split("_"))
+                return len(fn_tokens & tv_tokens)
+
             if is_table:
-                filter_fns = sorted(f for f in available_functions if f.startswith("filter_") and _arg_count_ok(f))
+                filter_fns = [f for f in available_functions if f.startswith("filter_") and _arg_count_ok(f)]
                 if filter_fns:
-                    return filter_fns[0]
+                    ranked = sorted(filter_fns, key=lambda f: (-_score_fn(f, "filter_"), f))
+                    if _score_fn(ranked[0], "filter_") > 0:
+                        return ranked[0]
+                    # No semantic match — don't pick random filter (would cause
+                    # category mismatch at query time). Return None so the tag
+                    # stays uncovered and gets removed by autofix_remove_uncovered_tags.
             else:
-                mask_fns = sorted(f for f in available_functions if f.startswith("mask_") and _arg_count_ok(f))
+                mask_fns = [f for f in available_functions if f.startswith("mask_") and _arg_count_ok(f)]
                 if mask_fns:
-                    return mask_fns[0]
+                    ranked = sorted(mask_fns, key=lambda f: (-_score_fn(f, "mask_"), f))
+                    if _score_fn(ranked[0], "mask_") > 0:
+                        return ranked[0]
+                    # No semantic match — don't pick random mask (would cause
+                    # category mismatch at query time).
         return None
 
     def _policy_matches_assignment(
