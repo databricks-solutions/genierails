@@ -6927,6 +6927,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_fgac_policy_count(tfvars_path)
                     if args.mode != "governance":
                         autofix_genie_config_fields(tfvars_path)
+                        # CRITICAL: Ensure every configured genie_space has a
+                        # genie_space_configs entry. Retry LLM output may drop
+                        # space names that the test assertion checks for.
+                        autofix_missing_genie_space_entries(tfvars_path, auth_cfg)
                     autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
                     autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_arg_count_mismatch(tfvars_path, sql_path if sql_block else None)
