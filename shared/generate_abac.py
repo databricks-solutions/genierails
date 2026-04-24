@@ -3970,14 +3970,33 @@ def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = N
                 replacements[pname] = "mask_date_to_year"
             # else: leave out of replacements → policy will be removed
         else:
-            # Non-numeric, non-date: alphabetical fallback with naming convention
-            # (mask_ for columns, filter_ for rows).
+            # Non-numeric, non-date: semantic matching by tag_value tokens.
+            # The naive "first alphabetical mask_*" pick causes systematic
+            # category mismatches (e.g. mask_abn used for every string column
+            # because it sorts first). Instead, prefer functions whose names
+            # share tokens with the tag_value or match_condition.
             prefix = "filter_" if ptype == "POLICY_TYPE_ROW_FILTER" else "mask_"
             typed_candidates = [c for c in candidates if c.startswith(prefix)]
             if typed_candidates:
-                replacements[pname] = typed_candidates[0]
-            elif candidates:
-                replacements[pname] = candidates[0]
+                # Extract tokens from the policy's tag_value references
+                tag_values = re.findall(r"hasTagValue\(\s*'[^']+'\s*,\s*'([^']+)'\s*\)", policy_match)
+                tokens = set()
+                for tv in tag_values:
+                    # Strip common prefixes to get the meaningful tokens
+                    normalized = tv.lower().replace("masked_", "").replace("redacted_", "")
+                    tokens.update(normalized.split("_"))
+                # Score candidates: how many of their name tokens overlap with tag tokens
+                def _semantic_score(fn: str) -> int:
+                    fn_tokens = set(fn.lower().replace(prefix, "").split("_"))
+                    return len(fn_tokens & tokens)
+                scored = sorted(typed_candidates, key=lambda fn: (-_semantic_score(fn), fn))
+                best = scored[0]
+                # Only use it if there's a positive semantic match — otherwise
+                # remove the policy rather than pick a random (likely miscategorized)
+                # function. The uncovered-tag cleanup will then drop the tag.
+                if _semantic_score(best) > 0:
+                    replacements[pname] = best
+                # else: leave out of replacements → policy will be removed
 
     # Apply replacements or removals in the file.
     section = _find_bracket_section(text, "fgac_policies")
