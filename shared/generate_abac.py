@@ -3958,12 +3958,20 @@ def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = N
         is_numeric = any(tok in policy_match.lower() for tok in ("rounded", "amount", "balance", "credit_limit"))
         is_date = any(tok in policy_match.lower() for tok in ("dob", "birth", "date"))
 
-        if is_numeric and "mask_amount_rounded" in (available_functions or set()):
-            replacements[pname] = "mask_amount_rounded"
-        elif is_date and "mask_date_to_year" in (available_functions or set()):
-            replacements[pname] = "mask_date_to_year"
+        if is_numeric:
+            # Numeric columns need type-safe replacement — never fall through
+            # to alphabetical (which could pick mask_credit_card_full for amounts).
+            if "mask_amount_rounded" in (available_functions or set()):
+                replacements[pname] = "mask_amount_rounded"
+            # else: leave out of replacements → policy will be removed
+        elif is_date:
+            # Same rule for DATE columns — mask_date_to_year or nothing.
+            if "mask_date_to_year" in (available_functions or set()):
+                replacements[pname] = "mask_date_to_year"
+            # else: leave out of replacements → policy will be removed
         else:
-            # Prefer functions matching the naming convention (mask_ for columns, filter_ for rows).
+            # Non-numeric, non-date: alphabetical fallback with naming convention
+            # (mask_ for columns, filter_ for rows).
             prefix = "filter_" if ptype == "POLICY_TYPE_ROW_FILTER" else "mask_"
             typed_candidates = [c for c in candidates if c.startswith(prefix)]
             if typed_candidates:
@@ -4835,6 +4843,27 @@ _FINANCIAL_COLUMN_TAG_MAP: list[tuple[list[str], str, str]] = [
       "transaction_amount", "transfer_amount"],              "financial_sensitivity", "rounded_amounts"),
 ]
 
+# Maps each tag_value added by PII autofix to the list of masking functions
+# that could cover it. A tag is only added if at least one covering function
+# is available in the SQL file — otherwise the tag would be uncovered and
+# fail validation.
+_PII_TAG_REQUIRED_FUNCTIONS: dict[str, list[str]] = {
+    "masked_email":     ["mask_email", "mask_pii_partial", "mask_redact"],
+    "masked_phone":     ["mask_phone", "mask_pii_partial", "mask_redact"],
+    "redacted_address": ["mask_redact", "mask_pii_partial"],
+    "masked_dob":       ["mask_date_to_year"],
+    "masked_ssn":       ["mask_ssn", "mask_redact", "mask_pii_partial"],
+    "masked_tfn":       ["mask_tfn", "mask_redact"],
+    "masked_medicare":  ["mask_medicare", "mask_redact"],
+    "masked_bsb":       ["mask_bsb", "mask_redact"],
+    "masked_aadhaar":   ["mask_aadhaar", "mask_pan_india", "mask_redact"],
+    "masked_nric":      ["mask_nric", "mask_redact"],
+    "masked_mykad":     ["mask_mykad", "mask_redact"],
+    "masked_account":   ["mask_redact", "mask_pii_partial"],
+    "masked_card_last4": ["mask_credit_card_last4", "mask_credit_card_full", "mask_redact"],
+    "redacted_cvv":     ["mask_redact", "mask_nullify"],
+}
+
 
 def autofix_untagged_pii_columns(
     tfvars_path: Path,
@@ -4914,11 +4943,20 @@ def autofix_untagged_pii_columns(
             sql_path.read_text(), re.IGNORECASE,
         ))
 
-    # Filter patterns: only include tags that have covering functions available.
-    # Without the function, the tag assignment would be uncovered and cause validation failure.
+    # Filter patterns: only include tags that have at least one covering function
+    # available in the SQL file. Without a covering function, the tag assignment
+    # would be uncovered and cause validation failure.
+    def _any_covering_fn_available(tag_value: str) -> bool:
+        required = _PII_TAG_REQUIRED_FUNCTIONS.get(tag_value)
+        if required is None:
+            return True  # unknown tag — pass through
+        if not available_fns:
+            return True  # no SQL file yet — don't over-filter
+        return any(fn in available_fns for fn in required)
+
     active_patterns = [
         (hints, key, val) for hints, key, val in _PII_COLUMN_TAG_MAP
-        if not (val == "masked_dob" and "mask_date_to_year" not in available_fns)
+        if _any_covering_fn_available(val)
     ]
     if "mask_amount_rounded" in available_fns:
         active_patterns.extend(_FINANCIAL_COLUMN_TAG_MAP)
@@ -4971,6 +5009,207 @@ def autofix_untagged_pii_columns(
     text = text[:insert_pos] + injection + text[insert_pos:]
     tfvars_path.write_text(text)
     return len(new_assignments)
+
+
+def autofix_remove_uncovered_tags(tfvars_path: Path) -> int:
+    """Last-resort: remove tag_assignments that no active FGAC policy covers.
+
+    After all other autofixes have had a chance, any non-public tag_assignment
+    that is not matched by any COLUMN_MASK or ROW_FILTER policy will fail
+    validation with "is not covered by any active fgac_policy".  Removing the
+    tag is safer than blocking the apply — the governance surface is reduced
+    but deploy succeeds.
+
+    This catches cases the targeted cleanups miss:
+    - PII tags (masked_email, masked_phone, etc.) whose covering functions
+      weren't generated by the LLM
+    - LLM-generated row-filter tags (phi_level, compliance_scope) without
+      matching filter_* functions
+    - Financial tags that escaped the financial_sensitivity cleanup
+    - Any uncovered tag from an unusual autofix interaction
+    """
+    try:
+        import hcl2
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    assignments = cfg.get("tag_assignments", []) or []
+    if isinstance(assignments, list) and len(assignments) == 1 and isinstance(assignments[0], list):
+        assignments = assignments[0]
+    policies = cfg.get("fgac_policies", []) or []
+    if isinstance(policies, list) and len(policies) == 1 and isinstance(policies[0], list):
+        policies = policies[0]
+
+    if not assignments:
+        return 0
+
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+
+    def _requires_coverage(tag_value: str) -> bool:
+        return tag_value.strip().lower() not in {"public", "general", "exact"}
+
+    # Normalize assignments to dicts
+    flat_assignments = []
+    for ta in assignments:
+        if isinstance(ta, list):
+            ta = ta[0] if ta else {}
+        flat_assignments.append(ta)
+
+    flat_policies = []
+    for p in policies:
+        if isinstance(p, list):
+            p = p[0] if p else {}
+        flat_policies.append(p)
+
+    # Build column/table tag maps (for condition evaluation)
+    col_tags: dict[str, dict[str, set[str]]] = {}
+    table_tags: dict[str, dict[str, set[str]]] = {}
+    for ta in flat_assignments:
+        etype = _s(ta.get("entity_type", ""))
+        ename = _s(ta.get("entity_name", ""))
+        tkey = _s(ta.get("tag_key", ""))
+        tval = _s(ta.get("tag_value", ""))
+        if not ename or not tkey:
+            continue
+        if etype == "columns":
+            col_tags.setdefault(ename, {}).setdefault(tkey, set()).add(tval)
+        elif etype == "tables":
+            table_tags.setdefault(ename, {}).setdefault(tkey, set()).add(tval)
+
+    def _condition_matches(condition: str, tags: dict[str, set[str]]) -> bool:
+        if not condition:
+            return True
+        expr = condition
+
+        def repl_value(match: re.Match) -> str:
+            key, value = match.group(1), match.group(2)
+            return str(value in tags.get(key, set()))
+
+        def repl_key(match: re.Match) -> str:
+            key = match.group(1)
+            return str(key in tags and bool(tags[key]))
+
+        expr = re.sub(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", repl_value, expr)
+        expr = re.sub(r"hasTag\(\s*'([^']+)'\s*\)", repl_key, expr)
+        expr = re.sub(r"\bAND\b", " and ", expr)
+        expr = re.sub(r"\bOR\b", " or ", expr)
+        if re.search(r"[^()\sA-Za-z]", expr):
+            return False
+        try:
+            return bool(eval(expr, {"__builtins__": {}}, {}))
+        except Exception:
+            return False
+
+    def _table_of(etype: str, ename: str) -> str:
+        if etype == "tables":
+            return ename
+        if etype == "columns":
+            return ".".join(ename.split(".")[:3])
+        return ""
+
+    def _policy_covers(policy: dict, ta: dict) -> bool:
+        etype = _s(ta.get("entity_type", ""))
+        ename = _s(ta.get("entity_name", ""))
+        ptype = _s(policy.get("policy_type", ""))
+        p_cat = _s(policy.get("catalog", "")) or _s(policy.get("function_catalog", ""))
+        table_fqn = _table_of(etype, ename)
+        if not table_fqn:
+            return False
+        entity_catalog = table_fqn.split(".")[0] if "." in table_fqn else table_fqn
+        if p_cat and entity_catalog != p_cat:
+            return False
+
+        match_cond = _s(policy.get("match_condition", ""))
+        when_cond = _s(policy.get("when_condition", ""))
+
+        if etype == "columns":
+            if ptype != "POLICY_TYPE_COLUMN_MASK":
+                return False
+            ctags = col_tags.get(ename, {})
+            ttags = table_tags.get(table_fqn, {})
+            if not _condition_matches(match_cond, ctags):
+                return False
+            return _condition_matches(when_cond, ttags)
+
+        if etype == "tables":
+            if ptype != "POLICY_TYPE_ROW_FILTER":
+                return False
+            if not when_cond:
+                return False
+            return _condition_matches(when_cond, table_tags.get(ename, {}))
+
+        return False
+
+    # Identify uncovered non-public tag_assignments
+    uncovered: list[dict] = []
+    for ta in flat_assignments:
+        tval = _s(ta.get("tag_value", ""))
+        if not _requires_coverage(tval):
+            continue
+        if not any(_policy_covers(p, ta) for p in flat_policies):
+            uncovered.append(ta)
+
+    if not uncovered:
+        return 0
+
+    # Remove uncovered blocks via brace-counting (handles nested blocks safely)
+    section = _find_bracket_section(text, "tag_assignments")
+    if not section:
+        return 0
+
+    sec_start, sec_end = section
+    sec_txt = text[sec_start:sec_end]
+    blocks = _find_brace_blocks(sec_txt)
+
+    def _block_matches_ta(block_text: str, ta: dict) -> bool:
+        ename = _s(ta.get("entity_name", ""))
+        tkey = _s(ta.get("tag_key", ""))
+        tval = _s(ta.get("tag_value", ""))
+        return bool(
+            re.search(r'entity_name\s*=\s*"' + re.escape(ename) + r'"', block_text)
+            and re.search(r'tag_key\s*=\s*"' + re.escape(tkey) + r'"', block_text)
+            and re.search(r'tag_value\s*=\s*"' + re.escape(tval) + r'"', block_text)
+        )
+
+    # Process blocks in reverse so earlier offsets stay valid
+    remaining_uncovered = list(uncovered)
+    removed = 0
+    for bs, be in reversed(blocks):
+        if not remaining_uncovered:
+            break
+        bt = sec_txt[bs:be + 1]
+        matched_ta = None
+        for ta in remaining_uncovered:
+            if _block_matches_ta(bt, ta):
+                matched_ta = ta
+                break
+        if not matched_ta:
+            continue
+        abs_s = sec_start + bs
+        abs_e = sec_start + be + 1
+        while abs_e < len(text) and text[abs_e] in (",", " ", "\t"):
+            abs_e += 1
+        while abs_s > 0 and text[abs_s - 1] in (" ", "\t"):
+            abs_s -= 1
+        if abs_s > 0 and text[abs_s - 1] == "\n":
+            abs_s -= 1
+        text = text[:abs_s] + text[abs_e:]
+        removed += 1
+        ename = _s(matched_ta.get("entity_name", ""))
+        tkey = _s(matched_ta.get("tag_key", ""))
+        tval = _s(matched_ta.get("tag_value", ""))
+        print(f"  [AUTOFIX] Removed uncovered tag_assignment: {ename} ({tkey}={tval})")
+        remaining_uncovered.remove(matched_ta)
+
+    if removed:
+        tfvars_path.write_text(text)
+    return removed
 
 
 def autofix_inject_overlay_functions(
@@ -6561,6 +6800,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_final_canonical:
             print(f"  Auto-fixed (final pass): normalized {n_final_canonical} tag vocabulary reference(s)")
 
+        # Last-resort: drop tag_assignments that no active FGAC policy covers.
+        # Prevents "is not covered by any active fgac_policy" validation failures.
+        n_uncovered = autofix_remove_uncovered_tags(tfvars_path)
+        if n_uncovered:
+            print(f"  Auto-fixed (final pass): removed {n_uncovered} uncovered tag_assignment(s)")
+
         # ── Final governance mode safety strip ─────────────────────────────────
         # Multiple code paths (autofixes, semantic retries) can re-introduce
         # genie_space_configs after the initial strip. This final pass ensures
@@ -6631,6 +6876,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_forbidden_conditions(tfvars_path)
                     autofix_invalid_condition_values(tfvars_path)
                     autofix_malformed_conditions(tfvars_path)
+                    # Last-resort: drop uncovered tag_assignments
+                    autofix_remove_uncovered_tags(tfvars_path)
                     # Final governance strip after retry autofixes
                     if args.mode == "governance":
                         _retry_text = tfvars_path.read_text()
