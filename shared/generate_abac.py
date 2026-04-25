@@ -4941,6 +4941,61 @@ def autofix_unsafe_row_filters(sql_path: Path) -> int:
     return rewritten
 
 
+def autofix_remove_bodyless_functions(sql_path: Path) -> int:
+    """Remove CREATE FUNCTION statements that lack a body (no RETURN clause).
+
+    The LLM occasionally emits a function header followed only by a semicolon —
+    e.g. ``CREATE OR REPLACE FUNCTION filter_aml_compliance(aml_flag BOOLEAN);``.
+    Databricks rejects these at deploy time with "SQL functions should have a
+    function definition" and the entire deploy fails. Strip them so any overlay
+    injection (or simple removal) can recover.
+
+    Detection: a CREATE FUNCTION statement is "bodyless" if, after stripping
+    line and block comments, it contains no standalone ``RETURN`` keyword.
+    ``RETURNS`` (the type declaration) is excluded by the word boundary —
+    ``\\bRETURN\\b`` does not match ``RETURNS`` because ``S`` is a word char.
+    """
+    if not sql_path or not sql_path.exists():
+        return 0
+
+    sql_text = sql_path.read_text()
+
+    # Split into (statement, separator) pairs using the same separator pattern
+    # as deploy_masking_functions.parse_sql_blocks. The capture group preserves
+    # the original separators so unaffected text stays byte-identical.
+    parts = re.split(r"(;\s*(?:--[^\n]*)?\n)", sql_text)
+
+    out: list[str] = []
+    removed: list[str] = []
+    i = 0
+    while i < len(parts):
+        stmt = parts[i]
+        sep = parts[i + 1] if i + 1 < len(parts) else ""
+
+        m = re.search(
+            r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*(\w+)\s*\(",
+            stmt, re.IGNORECASE,
+        )
+        if m:
+            cleaned = re.sub(r"--[^\n]*", "", stmt)
+            cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
+            if not re.search(r"\bRETURN\b", cleaned, re.IGNORECASE):
+                removed.append(m.group(1))
+                i += 2
+                continue
+
+        out.append(stmt)
+        out.append(sep)
+        i += 2
+
+    if removed:
+        for name in removed:
+            print(f"  [AUTOFIX] Removed bodyless function '{name}' from masking_functions.sql")
+        sql_path.write_text("".join(out))
+
+    return len(removed)
+
+
 # ---------------------------------------------------------------------------
 # PII column patterns → tag assignments.  Used by autofix_untagged_pii_columns
 # to detect columns that the LLM forgot to tag.
@@ -6747,6 +6802,14 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_undef:
             print(f"  Auto-fixed: removed {n_undef} item(s) referencing undefined tag_key(s)")
 
+        # Strip bodyless CREATE FUNCTION statements (LLM sometimes emits a
+        # signature with no RETURN). They fail Databricks deploy with "SQL
+        # functions should have a function definition" — must run BEFORE
+        # overlay injection so the overlay's correct version replaces them.
+        n_bodyless = autofix_remove_bodyless_functions(sql_path if sql_block else None)
+        if n_bodyless:
+            print(f"  Auto-fixed: removed {n_bodyless} bodyless CREATE FUNCTION statement(s)")
+
         # Inject overlay-provided functions BEFORE adding missing FGAC policies,
         # so that row filter functions (e.g. filter_aml_compliance) are available
         # when autofix_missing_fgac_policies looks for a function to cover
@@ -7005,6 +7068,9 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_invalid_tag_values(tfvars_path)
                     autofix_tag_policies(tfvars_path)
                     autofix_undefined_tag_refs(tfvars_path)
+                    # Strip bodyless CREATE FUNCTION statements before
+                    # overlay injection — see main path comment above.
+                    autofix_remove_bodyless_functions(sql_path if sql_block else None)
                     # Re-inject overlay functions (retry LLM may omit them)
                     autofix_inject_overlay_functions(
                         sql_path if sql_block else None,
