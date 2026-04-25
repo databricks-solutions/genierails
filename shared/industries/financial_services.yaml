@@ -47,7 +47,7 @@ identifiers:
       - transfer_amount
     format: "Decimal currency value"
     sensitivity: confidential
-    masking_function: mask_amount_round
+    masking_function: mask_amount_rounded
     category: transaction
 
   - name: Customer SSN
@@ -114,14 +114,58 @@ masking_functions:
         ELSE '[REDACTED]'
       END
 
-  - name: mask_amount_round
-    signature: "mask_amount_round(amount DOUBLE) RETURNS STRING"
-    comment: "Transaction amount — round to nearest thousand for non-privileged users"
+  - name: mask_amount_rounded
+    signature: "mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2)"
+    comment: "Transaction amount — round to nearest hundred for non-privileged users"
     body: |
       CASE
         WHEN amount IS NULL THEN NULL
-        ELSE CONCAT('$', CAST(ROUND(amount, -3) AS STRING))
+        ELSE ROUND(amount, -2)
       END
+
+  - name: mask_date_to_year
+    signature: "mask_date_to_year(dt DATE) RETURNS DATE"
+    comment: "Date — truncate to January 1st of the same year"
+    body: |
+      CASE
+        WHEN dt IS NULL THEN NULL
+        ELSE DATE_TRUNC('YEAR', dt)
+      END
+
+  - name: filter_aml_compliance
+    signature: "filter_aml_compliance() RETURNS BOOLEAN"
+    comment: "AML row filter — only compliance and fraud teams see all rows"
+    body: "is_account_group_member('fraud_team') OR is_account_group_member('compliance_officer')"
+
+  - name: mask_redact
+    signature: "mask_redact(val STRING) RETURNS STRING"
+    comment: "Full redaction — returns [REDACTED]"
+    body: "CASE WHEN val IS NULL THEN NULL ELSE '[REDACTED]' END"
+
+  - name: mask_email
+    signature: "mask_email(email STRING) RETURNS STRING"
+    comment: "Email — mask local part, keep domain"
+    body: |
+      CASE
+        WHEN email IS NULL THEN NULL
+        WHEN INSTR(email, '@') > 1 THEN CONCAT(LEFT(email, 1), '****@', SUBSTRING(email, INSTR(email, '@') + 1))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_phone
+    signature: "mask_phone(phone STRING) RETURNS STRING"
+    comment: "Phone number — show last 4 digits only"
+    body: |
+      CASE
+        WHEN phone IS NULL THEN NULL
+        WHEN LENGTH(REGEXP_REPLACE(phone, '[^0-9]', '')) >= 4 THEN CONCAT('***-***-', RIGHT(REGEXP_REPLACE(phone, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_credit_card_full
+    signature: "mask_credit_card_full(card STRING) RETURNS STRING"
+    comment: "Full card redaction — PCI DSS"
+    body: "CASE WHEN card IS NULL THEN NULL ELSE '[REDACTED]' END"
 
   - name: mask_ssn_last4
     signature: "mask_ssn_last4(ssn STRING) RETURNS STRING"
@@ -211,7 +255,8 @@ prompt_overlay: |
   - `mask_account_last4(acct STRING) RETURNS STRING` — last 4 digits visible
   - `mask_routing(rtn STRING) RETURNS STRING` — last 4 digits visible
   - `mask_card_last4(card STRING) RETURNS STRING` — PCI compliant, last 4 digits
-  - `mask_amount_round(amount DOUBLE) RETURNS STRING` — rounded to nearest thousand
+  - `mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2)` — rounded to nearest hundred
+  - `mask_date_to_year(dt DATE) RETURNS DATE` — truncate to year (for date_of_birth, opened_date, etc.)
   - `mask_ssn_last4(ssn STRING) RETURNS STRING` — last 4 digits visible
   - `mask_name(name STRING) RETURNS STRING` — first initial only
 

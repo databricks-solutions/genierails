@@ -531,7 +531,7 @@ PYEOF
   # node already exists in the space (title was set during create; PATCH must
   # not include it again or the API returns RESOURCE_ALREADY_EXISTS).
   if [[ "$http_code" != "200" && "$http_code" != "201" ]]; then
-    if echo "$response_body" | grep -q 'RESOURCE_ALREADY_EXISTS' && \
+    if echo "$response_body" | grep -qE 'ALREADY_EXISTS|RESOURCE_ALREADY_EXISTS' && \
        echo "$response_body" | grep -q 'Node named'; then
       echo "Genie API: title node already exists in space (set during create). Retrying without title..."
       patch_body=$(build_patch_body 0 1)
