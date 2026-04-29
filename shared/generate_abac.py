@@ -4702,10 +4702,21 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
         for ta in matched:
             categories.update(_infer_column_categories_full(ta.get("entity_name", "")))
 
-        # Check type-incompatibility FIRST: STRING masks must never be applied
-        # to numeric or date columns. If the policy's columns include any
-        # numeric/date column, promote to the correct type-specific function
-        # regardless of category overlap.
+        # Permissive category check FIRST: if the function is appropriate for
+        # AT LEAST ONE matched column, keep it. The LLM may have over-tagged
+        # (e.g. tagged credit_cards.card_number AND credit_cards.expiry_date
+        # under the same `redacted_card_full` value), and demoting/promoting
+        # the whole policy because of one mis-typed column would corrupt the
+        # function call for the columns that ARE correct. Type-incompatible
+        # columns will fail at deploy time or be cleaned up by other
+        # autofixes; that's the right place to handle that, not here.
+        if categories & expected:
+            continue
+
+        # Function is wrong for ALL matched columns. Now consider type
+        # promotion — but only if every matched column has a non-string
+        # type indicator. If columns are mixed (some string, some date),
+        # promotion to a date function would corrupt the string columns.
         matched_blob = " ".join(
             ta.get("entity_name", "") + " " + ta.get("tag_value", "") for ta in matched
         ).lower()
@@ -4715,27 +4726,26 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
         is_date = any(tok in matched_blob for tok in (
             "dob", "birth", "date_of_birth", "opened_date", "expiry",
         ))
-        if is_numeric:
+        # Heuristic guard: the matched_blob picks up tokens from any column
+        # name. A policy that mixes a string column (e.g. card_number) with
+        # a date column (expiry_date) would have is_date=True even though
+        # only one of the two columns is actually a date. Detect string-typed
+        # columns in the same blob and skip the promotion when found.
+        has_string_column = any(tok in matched_blob for tok in (
+            "name", "email", "phone", "address", "card_number", "ssn",
+            "aadhaar", "aadhar", "pan", "gstin", "voter", "uan", "upi",
+            "ration", "vehicle", "nric", "mykad", "thai_id", "nik", "ktp",
+            "npwp", "philsys", "cccd", "tfn", "medicare", "passport",
+        ))
+        if is_numeric and not has_string_column:
             type_fn = "mask_amount_rounded"
             if fn != type_fn and (not available_functions or type_fn in available_functions):
                 replacements.append((p.get("name", ""), fn, type_fn))
             continue
-        if is_date:
+        if is_date and not has_string_column:
             type_fn = "mask_date_to_year"
             if fn != type_fn and (not available_functions or type_fn in available_functions):
                 replacements.append((p.get("name", ""), fn, type_fn))
-            continue
-
-        # Permissive category check: accept the function if AT LEAST ONE
-        # matched column falls into the function's expected categories.
-        # Strict subset (the previous behavior) reverts mask_full_name to
-        # mask_redact whenever the LLM groups e.g. first_name/last_name
-        # alongside a `generic`-categorized column like `merchant` under the
-        # same masked_name tag — even though mask_full_name is the correct
-        # function for the name columns and produces reasonable output for
-        # merchant too. Strict subset is too aggressive and leaves the
-        # dedicated function orphaned.
-        if categories & expected:
             continue
 
         generic_fn = None
