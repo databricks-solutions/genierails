@@ -6,7 +6,10 @@ Guidelines for deploying GenieRails governance at scale.
 
 | Resource | Limit | Scope | Notes |
 |----------|-------|-------|-------|
-| FGAC policies | 10 | Per catalog | Includes both column masks and row filters |
+| FGAC policies | 10,000 | Per metastore | Column masks + row filters combined ([ref](https://docs.databricks.com/gcp/en/data-governance/unity-catalog/abac/requirements#policy-quotas)) |
+| FGAC policies | 100 | Per catalog or schema | Same combined count |
+| FGAC policies | 50 | Per table | Same combined count |
+| Principals per policy | 20 | TO + EXCEPT clauses | Hard limit |
 | Tag policies | Unlimited | Per metastore | Each policy has a value limit |
 | Tag policy values | 1000 | Per tag policy key | e.g., `pii_level` can have up to 1000 distinct values |
 | Groups | 10,000 | Per account | Shared across all workspaces |

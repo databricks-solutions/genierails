@@ -2621,6 +2621,41 @@ def _find_bracket_section(text: str, section_name: str) -> tuple[int, int] | Non
     return None
 
 
+def _match_close_brace(text: str, open_idx: int) -> int:
+    """Return the index of the ``}`` matching the ``{`` at *open_idx*.
+
+    Respects quoted strings, so ``{`` and ``}`` characters inside HCL string
+    values do not affect depth. Returns ``-1`` if no matching brace is found.
+    """
+    if open_idx >= len(text) or text[open_idx] != "{":
+        return -1
+    depth = 1
+    in_string = False
+    escape_next = False
+    j = open_idx + 1
+    while j < len(text) and depth > 0:
+        ch = text[j]
+        if escape_next:
+            escape_next = False
+            j += 1
+            continue
+        if ch == "\\":
+            escape_next = True
+            j += 1
+            continue
+        if ch == '"':
+            in_string = not in_string
+        elif not in_string:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return j
+        j += 1
+    return -1
+
+
 def _find_brace_blocks(text: str) -> list[tuple[int, int]]:
     """Return (start, end) ranges for each top-level ``{ ... }`` block in *text*.
 
@@ -3297,7 +3332,15 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
     ]
     uncovered.sort(key=_assignment_priority, reverse=True)
 
-    new_policies: list[dict] = []
+    # Group uncovered assignments by (catalog, policy_type, tag_key, tag_value).
+    # Every assignment in a group resolves to the same match_condition
+    # (hasTagValue('<tag_key>', '<tag_value>')), so ONE fgac_policy covers all
+    # of them. Emitting one policy per assignment would create N policies with
+    # identical match_condition + to_principals, which Databricks rejects at
+    # query time with MULTIPLE_MASKS and which the prompt's "One Mask Per
+    # Column Per Group" rule explicitly forbids.
+    grouped: dict[tuple[str, str, str, str], list[dict]] = {}
+    group_order: list[tuple[str, str, str, str]] = []
     for ta in uncovered:
         entity_type = ta.get("entity_type", "")
         entity_name = ta.get("entity_name", "")
@@ -3305,9 +3348,31 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
         tag_value = ta.get("tag_value", "")
         if not (entity_type and entity_name and tag_key and tag_value):
             continue
-        catalog, schema = entity_name.split(".")[:2]
+        try:
+            catalog = entity_name.split(".")[0]
+        except (AttributeError, IndexError):
+            continue
         policy_type = "POLICY_TYPE_ROW_FILTER" if entity_type == "tables" else "POLICY_TYPE_COLUMN_MASK"
-        fn = _infer_function(ta)
+        key = (catalog, policy_type, tag_key, tag_value)
+        if key not in grouped:
+            grouped[key] = []
+            group_order.append(key)
+        grouped[key].append(ta)
+
+    new_policies: list[dict] = []
+    for key in group_order:
+        group_assignments = grouped[key]
+        catalog, policy_type, tag_key, tag_value = key
+        # Representative is the highest-priority assignment (uncovered was
+        # already sorted by _assignment_priority desc upstream). Function
+        # inference, schema, and comment are anchored to the representative.
+        representative = group_assignments[0]
+        rep_entity = representative.get("entity_name", "")
+        try:
+            _, schema = rep_entity.split(".")[:2]
+        except ValueError:
+            continue
+        fn = _infer_function(representative)
         if not fn:
             continue
         template = _find_template_policy(catalog, policy_type, tag_key)
@@ -3331,12 +3396,20 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
             suffix += 1
         existing_names.add(name)
 
+        if len(group_assignments) == 1:
+            comment = f"Auto-repaired coverage for {rep_entity} ({tag_key} = '{tag_value}')"
+        else:
+            comment = (
+                f"Auto-repaired coverage for {len(group_assignments)} entities "
+                f"with {tag_key} = '{tag_value}'"
+            )
+
         policy = {
             "name": name,
             "policy_type": policy_type,
             "catalog": catalog,
             "to_principals": to_principals,
-            "comment": f"Auto-repaired coverage for {entity_name} ({tag_key} = '{tag_value}')",
+            "comment": comment,
             "function_name": fn,
             "function_catalog": catalog,
             "function_schema": schema,
@@ -3558,17 +3631,30 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
             # If no specific groups found, use all groups (backward compat)
             space_groups = sorted(groups.keys())
 
-        # Insert acl_groups into the HCL text for this space
-        # Find the space's config block and add acl_groups before the closing }
+        # Find the space's config block opening and locate its *matching* closing
+        # brace via depth counting. A regex with [^}]*? would stop at the first
+        # `}` it encounters, which for nested benchmarks/sql_filters/sql_measures
+        # is a child object's brace — inserting acl_groups there would put it
+        # inside the first benchmark instead of at the space level.
         import re
-        # Match the space's config block: "Space Name" = { ... }
         escaped_name = re.escape(space_name)
-        pattern = rf'("{escaped_name}"\s*=\s*\{{[^}}]*?)(\n\s*\}})'
-        acl_line = "\n    acl_groups = [\n" + "".join(f'      "{g}",\n' for g in space_groups) + "    ]"
-        new_text, count = re.subn(pattern, rf'\1{acl_line}\2', text, count=1, flags=re.DOTALL)
-        if count > 0:
-            text = new_text
-            fixed += 1
+        header_re = re.compile(rf'"{escaped_name}"\s*=\s*\{{')
+        m = header_re.search(text)
+        if not m:
+            continue
+        open_idx = m.end() - 1  # position of `{`
+        close_idx = _match_close_brace(text, open_idx)
+        if close_idx < 0:
+            continue
+        # Walk backward from `}` to skip whitespace so the new field lands
+        # right after the last existing field, before the closing brace's
+        # indentation/newline.
+        insertion_idx = close_idx
+        while insertion_idx > 0 and text[insertion_idx - 1] in (" ", "\t", "\n"):
+            insertion_idx -= 1
+        acl_block = "\n    acl_groups = [\n" + "".join(f'      "{g}",\n' for g in space_groups) + "    ]"
+        text = text[:insertion_idx] + acl_block + text[insertion_idx:]
+        fixed += 1
 
     if fixed:
         tfvars_path.write_text(text)
@@ -3706,6 +3792,130 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
     return categories or {"generic"}
 
 
+def _normalize_sql_param_signature(params: str) -> str:
+    """Strip parameter NAMES from a SQL function parameter list, keeping only
+    the type tokens. Used to dedupe function definitions that differ only in
+    parameter name (e.g., ``(input STRING)`` vs ``(cvv STRING)``).
+    Handles nested parens like ``DECIMAL(18,2)``.
+    """
+    parts: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for ch in params:
+        if ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth -= 1
+            cur.append(ch)
+        elif ch == "," and depth == 0:
+            parts.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    last = "".join(cur).strip()
+    if last:
+        parts.append(last)
+    types: list[str] = []
+    for p in parts:
+        toks = p.split(None, 1)
+        if len(toks) == 2:
+            types.append(toks[1].upper().strip())
+        elif len(toks) == 1:
+            types.append(toks[0].upper().strip())
+    return ", ".join(types)
+
+
+def _find_create_function_blocks(sql_text: str) -> list[tuple[int, int, str, str]]:
+    """Locate every ``CREATE OR REPLACE FUNCTION`` block.
+
+    Returns a list of ``(block_start, block_end, function_name, signature)``
+    tuples where ``signature`` is the parameter-type list with names stripped.
+    A block ends at the first ``;`` that is the last non-whitespace character
+    on its line (the codebase's documented termination rule for CREATE blocks).
+    """
+    import re
+    header_re = re.compile(r"CREATE\s+OR\s+REPLACE\s+FUNCTION\s+(\w+)\s*\(", re.IGNORECASE)
+    blocks: list[tuple[int, int, str, str]] = []
+    pos = 0
+    n = len(sql_text)
+    while pos < n:
+        m = header_re.search(sql_text, pos)
+        if not m:
+            break
+        block_start = m.start()
+        name = m.group(1)
+        # Walk paren depth from the `(` we matched (last char of m.group(0)).
+        params_open = m.end() - 1
+        depth = 1
+        i = params_open + 1
+        while i < n and depth > 0:
+            ch = sql_text[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth != 0:
+            break
+        params_text = sql_text[params_open + 1:i]
+        # Find terminating ;\n (allow trailing spaces/tabs before the newline).
+        block_end = -1
+        j = i + 1
+        while j < n:
+            if sql_text[j] == ";":
+                k = j + 1
+                while k < n and sql_text[k] in (" ", "\t"):
+                    k += 1
+                if k == n or sql_text[k] == "\n":
+                    block_end = (k + 1) if k < n else k
+                    break
+            j += 1
+        if block_end < 0:
+            break
+        sig = _normalize_sql_param_signature(params_text)
+        blocks.append((block_start, block_end, name.lower(), sig))
+        pos = block_end
+    return blocks
+
+
+def _dedupe_sql_function_definitions(sql_text: str) -> tuple[str, int]:
+    """Drop duplicate ``CREATE OR REPLACE FUNCTION`` blocks that share both
+    function name and parameter-type signature.
+
+    This is exclusively defense for the rename pass: when the function
+    registry maps an alias (e.g. ``mask_redact_cvv``) onto a canonical name
+    that already exists in the SQL (``mask_redact``), the rewrite produces two
+    ``CREATE OR REPLACE FUNCTION mask_redact(STRING)`` blocks. ``CREATE OR
+    REPLACE`` is idempotent so it doesn't fail at deploy, but it's noise and
+    a footgun if the bodies ever diverge.
+    """
+    blocks = _find_create_function_blocks(sql_text)
+    seen: set[tuple[str, str]] = set()
+    drop_ranges: list[tuple[int, int]] = []
+    for start, end, name, sig in blocks:
+        key = (name, sig)
+        if key in seen:
+            drop_ranges.append((start, end))
+        else:
+            seen.add(key)
+    if not drop_ranges:
+        return sql_text, 0
+    new_text = sql_text
+    for start, end in reversed(drop_ranges):
+        # Also peel one preceding blank line so we don't leave a double blank.
+        s = start
+        if s > 0 and new_text[s - 1] == "\n":
+            s -= 1
+            if s > 0 and new_text[s - 1] == "\n":
+                # Two consecutive newlines — keep one; strip the other.
+                s = start - 1
+        new_text = new_text[:s] + new_text[end:]
+    return new_text, len(drop_ranges)
+
+
 def autofix_canonical_function_names(tfvars_path: Path, sql_path: Path | None = None) -> int:
     """Normalize function names to canonical forms using the function registry.
 
@@ -3715,6 +3925,10 @@ def autofix_canonical_function_names(tfvars_path: Path, sql_path: Path | None = 
 
     E.g., mask_card_last4 -> mask_credit_card_last4,
           filter_aml_clearance -> filter_aml_compliance
+
+    After renaming, dedupe SQL definitions that now share both name and
+    parameter-type signature (rename can collapse distinct aliases like
+    ``mask_redact_cvv`` and ``mask_redact`` into the same canonical name).
 
     Returns the total number of renames.
     """
@@ -3733,14 +3947,19 @@ def autofix_canonical_function_names(tfvars_path: Path, sql_path: Path | None = 
         total += hcl_count
         print(f"  [AUTOFIX] Normalized {hcl_count} function name(s) in ABAC config")
 
-    # Normalize SQL (CREATE FUNCTION definitions)
+    # Normalize SQL (CREATE FUNCTION definitions), then dedupe.
     if sql_path and sql_path.exists():
         sql_text = sql_path.read_text()
         new_sql, sql_count = FUNCTION_REGISTRY.normalize_sql(sql_text)
         if sql_count:
-            sql_path.write_text(new_sql)
             total += sql_count
             print(f"  [AUTOFIX] Normalized {sql_count} function name(s) in masking SQL")
+        deduped, drop_count = _dedupe_sql_function_definitions(new_sql)
+        if drop_count:
+            print(f"  [AUTOFIX] Removed {drop_count} duplicate CREATE FUNCTION block(s) after canonical rename")
+            new_sql = deduped
+        if sql_count or drop_count:
+            sql_path.write_text(new_sql)
 
     return total
 
@@ -4638,6 +4857,16 @@ def autofix_duplicate_column_masks(tfvars_path: Path) -> int:
             scored.sort()
             # Keep the best match (first after sort), remove the rest
             for _, _, pidx, e in scored[1:]:
+                remove_indices.add(e[0])
+        elif len(generic) > 1:
+            # Multiple policies overlap and ALL use generic functions
+            # (typically created by autofix_missing_fgac_policies emitting one
+            # policy per uncovered tag_assignment when the upstream grouping
+            # fix isn't applied). Databricks rejects multiple column masks on
+            # the same column with MULTIPLE_MASKS — keep the first by original
+            # policy index, remove the rest.
+            sorted_generic = sorted(generic, key=lambda pe: pe[1][0])
+            for _, e in sorted_generic[1:]:
                 remove_indices.add(e[0])
 
     if not remove_indices:

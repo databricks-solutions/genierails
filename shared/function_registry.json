@@ -265,6 +265,21 @@
       "category": "india",
       "signature": "mask_vehicle_reg(reg STRING) RETURNS STRING",
       "aliases": ["mask_registration_number", "mask_rc_number", "mask_vehicle_number"]
+    },
+    "mask_voter_id": {
+      "category": "india",
+      "signature": "mask_voter_id(voter_id STRING) RETURNS STRING",
+      "aliases": ["mask_voterid", "mask_epic", "mask_voter_id_last4"]
+    },
+    "mask_upi_id": {
+      "category": "india",
+      "signature": "mask_upi_id(upi_id STRING) RETURNS STRING",
+      "aliases": ["mask_upi", "mask_vpa", "mask_virtual_payment_address"]
+    },
+    "mask_gstin": {
+      "category": "india",
+      "signature": "mask_gstin(gstin STRING) RETURNS STRING",
+      "aliases": ["mask_gst", "mask_gst_number", "mask_gstin_number"]
     }
   }
 }

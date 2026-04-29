@@ -102,17 +102,17 @@ The LLM may misclassify columns (e.g., applying `mask_pan_india` to credit card 
 3. Edit `envs/<env>/generated/abac.auto.tfvars` to fix misclassifications, then run `make validate-generated`
 4. The autofix system catches some mismatches (function category vs. column category), but not all
 
-### FGAC policy limit exceeded (max 10 per catalog)
+### FGAC policy limit exceeded (max 100 per catalog/schema)
 
-Databricks enforces a platform limit of 10 FGAC policies per catalog. If your schema has many sensitive columns, the LLM may generate more than 10 policies.
+Databricks platform limits ([ref](https://docs.databricks.com/gcp/en/data-governance/unity-catalog/abac/requirements#policy-quotas)): **100 policies per catalog or schema, 50 per table, 10,000 per metastore, 20 principals per policy**. Hitting these is uncommon — most schemas need fewer than 30 policies.
 
-**Symptoms:** `make validate-generated` errors with "exceeds Databricks platform limit of 10", or `make apply` fails with a provider error.
+**Symptoms:** `make validate-generated` errors with "exceeds Databricks platform limit of 100", or `make apply` fails with a provider error.
 
 **Solutions:**
-1. Consolidate policies: use one masking function for multiple columns with the same sensitivity level
-2. Use tag-based conditions to group columns (e.g., all `pii_level=masked` columns share one policy)
-3. Split tables across multiple catalogs if governance requirements differ
-4. The autofix system automatically drops excess policies — review which survived in the generated config
+1. Consolidate only when masking behavior is genuinely identical: use one masking function for multiple columns with the same sensitivity level *and* the same `to_principals`
+2. Use tag-based conditions to group columns (e.g., all `pii_level=masked` columns share one policy) — but never duplicate the same `match_condition` across multiple policies that share `to_principals` (Databricks rejects with `MULTIPLE_MASKS` at query time)
+3. Split tables across multiple catalogs/schemas if governance requirements differ
+4. The autofix system automatically drops excess policies past the per-catalog limit — review which survived in the generated config
 
 ### Terraform state conflicts or corruption
 

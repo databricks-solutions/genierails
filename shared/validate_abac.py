@@ -692,7 +692,7 @@ def validate_fgac_policies(
                 f"categories {sorted(categories)}; expected only {sorted(expected)}"
             )
 
-    # Per-catalog FGAC policy count check (Databricks enforces max 10 per catalog)
+    # Per-catalog FGAC policy count check (Databricks platform limit: 100 per catalog/schema)
     catalog_counts: dict[str, int] = {}
     for p in policies:
         if not isinstance(p, dict):

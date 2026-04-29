@@ -383,9 +383,7 @@ Before outputting, perform this coverage check:
 2. For each assignment, check whether at least one `fgac_policy` has a condition that can evaluate to true for that assignment. This can be:
    - an exact `hasTagValue('that_key', 'that_value')`, OR
    - a broader but still valid condition that includes that tag value and any additional scoping conditions
-3. If a tag value has no matching policy, you MUST either:
-   - Add an `fgac_policy` entry for it, OR
-   - If the 8-policy limit is already hit, explicitly note in a comment inside `tag_assignments` that this value is intentionally unmasked (e.g., "restricted — no policy due to quota limit; address this manually")
+3. If a tag value has no matching policy, add an `fgac_policy` entry for it. There is normally plenty of headroom under the platform quotas (see "Quota guidance" below) — do not skip coverage to "save slots".
 
 **Untagged columns are always visible to all users** — there is no default masking. Only columns with tags that match an active FGAC policy condition will have their data masked. Tagging alone is not enough.
 
@@ -410,7 +408,17 @@ Before outputting, perform this coverage check:
 4. Design tag policies — one per sensitivity dimension (e.g., `pii_level`, `pci_clearance`)
 5. Map tags to the user's specific columns. **Use distinct tag values to differentiate columns that need different masking** — do NOT use `columnName()` in conditions. Table-level tags (entity_type = "tables") are optional — use them to scope column masks or row filters to specific tables, or for governance. **Always use fully qualified entity names** (e.g. `catalog.schema.Table` for tables, `catalog.schema.Table.Column` for columns). **Do not assign more than one value of the same `tag_key` to the same entity.**
 6. Select masking functions from the library above (or create new ones)
-7. Generate both output files. For entity names in tag_assignments, always use **fully qualified** names (`catalog.schema.table` or `catalog.schema.table.column`). For function_name in fgac_policies, use relative names only (e.g. `mask_pii`). Every fgac_policy MUST include `catalog`, `function_catalog`, and `function_schema`. **CRITICAL**: set `function_schema` to the schema where the tagged columns actually live — do NOT default all policies to the first schema. In `masking_functions.sql`, group the `CREATE FUNCTION` statements by schema with separate `USE SCHEMA` blocks. **For every fgac_policy, the function must be defined under the `USE SCHEMA` block that matches `function_schema` exactly.** If the same function (e.g. `mask_nullify`) is used by policies in different schemas, duplicate the `CREATE OR REPLACE FUNCTION` definition once per schema that needs it. **HARD LIMIT**: generate at most **8 fgac_policies per catalog** (Databricks enforces a platform limit of 10; staying at 8 leaves headroom). If the limit would be exceeded, apply this priority order — drop from the bottom first:
+7. Generate both output files. For entity names in tag_assignments, always use **fully qualified** names (`catalog.schema.table` or `catalog.schema.table.column`). For function_name in fgac_policies, use relative names only (e.g. `mask_pii`). Every fgac_policy MUST include `catalog`, `function_catalog`, and `function_schema`. **CRITICAL**: set `function_schema` to the schema where the tagged columns actually live — do NOT default all policies to the first schema. In `masking_functions.sql`, group the `CREATE FUNCTION` statements by schema with separate `USE SCHEMA` blocks. **For every fgac_policy, the function must be defined under the `USE SCHEMA` block that matches `function_schema` exactly.** If the same function (e.g. `mask_nullify`) is used by policies in different schemas, duplicate the `CREATE OR REPLACE FUNCTION` definition once per schema that needs it.
+
+   **Quota guidance** (Databricks ABAC platform limits, ref https://docs.databricks.com/gcp/en/data-governance/unity-catalog/abac/requirements#policy-quotas):
+   - 100 policies per catalog/schema, 50 per table, 10,000 per metastore, 20 principals per policy
+   - Headroom is generous — produce one dedicated policy per **distinct masking need** rather than consolidating
+   - Distinct identifier types (e.g. Aadhaar, PAN, voter_id, UAN, UPI ID, GSTIN; or SSN, MRN, account_number) MUST use **distinct tag values** and **dedicated mask functions**, not a generic `masked` catch-all. Each gets its own canonical tag value (e.g. `masked_aadhaar`, `masked_voter_id`, `masked_uan`) and its own SQL function
+   - Only consolidate two columns under a single tag value when their masking behavior is genuinely identical AND the same `to_principals` apply
+
+   **Correctness rule (always)**: never emit two `POLICY_TYPE_COLUMN_MASK` policies that share both the same `to_principals` set AND the same `match_condition` — this triggers `MULTIPLE_MASKS` at query time. The "One Mask Per Column Per Group" rule above is the authoritative version of this.
+
+   If you ever do need to drop coverage (rare — only at >100/catalog), apply this priority order — drop from the bottom first:
    1. **Regulatory direct identifiers** — columns that regulations (PCI DSS, HIPAA, GDPR, SOX) explicitly require to be masked (card numbers, SSN, MRN, government IDs, biometrics)
    2. **High-risk financial data** — account numbers, IBAN, trading positions, credit limits
    3. **Indirect PII clusters** — names, email, phone (mask when combined exposure creates re-identification risk)
