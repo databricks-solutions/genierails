@@ -3579,18 +3579,21 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
         except Exception:
             pass
 
-    if not space_catalogs:
-        # Fallback: if we can't determine per-space catalogs, assign all groups to all spaces
-        return 0
-
-    # Build group → set of catalogs from fgac_policies
+    # Build group → set of catalogs from fgac_policies, and the union of
+    # all catalogs that any policy operates on. The union acts as a
+    # fallback "scope" for spaces whose own catalogs we couldn't discover
+    # from env.auto.tfvars (e.g., import mode where the user provides only
+    # genie_space_id and lets `make generate` auto-discover the tables).
     group_catalogs: dict[str, set[str]] = {}
+    all_catalogs: set[str] = set()
     for pol in fgac_policies:
         if isinstance(pol, list):
             pol = pol[0] if pol else {}
         catalog = pol.get("catalog") or pol.get("function_catalog") or ""
         if isinstance(catalog, list):
             catalog = catalog[0] if catalog else ""
+        if catalog:
+            all_catalogs.add(catalog)
         principals = pol.get("to_principals") or []
         if isinstance(principals, list) and principals:
             if isinstance(principals[0], list):
@@ -3617,7 +3620,12 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
             if existing_acl:
                 continue  # already set, don't override
 
-        cats = space_catalogs.get(space_name, set())
+        # Prefer per-space catalogs from env.auto.tfvars; fall back to the
+        # union of all governed catalogs from fgac_policies. The fallback
+        # is necessary in import mode where env.auto.tfvars contains only
+        # the genie_space_id (no name, no uc_tables) — without it,
+        # acl_groups silently never gets populated.
+        cats = space_catalogs.get(space_name) or all_catalogs
         if not cats:
             continue
 
@@ -5119,19 +5127,25 @@ def autofix_unsafe_row_filters(sql_path: Path) -> int:
     text = sql_path.read_text()
     rewritten = 0
 
-    # Match zero-arg RETURNS BOOLEAN functions (row filters)
+    # Match zero-arg RETURNS BOOLEAN functions (row filters). Group 1 captures
+    # the header through "RETURN ", group 3 captures the body, and the
+    # terminating `;` is captured by group 4 so the rewrite does not produce
+    # a double semicolon (the previous version added `;` to the replacement
+    # while the lookahead left the original `;` in place — output ended with
+    # ``RETURN TRUE;;`` which is malformed SQL).
     pattern = re.compile(
         r"(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(\S+)\s*\(\s*\)\s*"
         r"RETURNS\s+BOOLEAN\s*"
         r"(?:COMMENT\s+'[^']*'\s*)?"
-        r"RETURN\s+)(.*?)(?=;\s*$|\s*;?\s*(?:CREATE\s|$))",
+        r"RETURN\s+)(.*?)(\s*;)(?=\s*$|\s*(?:CREATE\s|$))",
         re.IGNORECASE | re.DOTALL | re.MULTILINE,
     )
 
     def _rewrite_body(match: re.Match) -> str:
         prefix = match.group(1)
         fn_name = match.group(2).split(".")[-1]
-        body = match.group(3).strip().rstrip(";")
+        body = match.group(3).strip().rstrip(";").strip()
+        terminator = match.group(4)  # original "  ;" preserved verbatim
 
         # Extract is_account_group_member('...') calls
         group_calls = re.findall(
@@ -5166,14 +5180,24 @@ def autofix_unsafe_row_filters(sql_path: Path) -> int:
             print(f"  [AUTOFIX] Rewrote row filter '{fn_name}': removed column reference(s) "
                   f"{unsafe[:3]}, keeping group-based access only")
         else:
-            # No group-based fallback — replace with TRUE (permissive no-op).
-            # TRUE means "no filter applied" at query time. The row filter policy
-            # still exists but has no effect. Safer than leaving the unresolved
-            # column reference which causes UNRESOLVED_COLUMN at deploy time.
-            new_body = "TRUE"
-            print(f"  [AUTOFIX] Replaced row filter '{fn_name}' body with TRUE "
-                  f"(had unresolved column reference(s) {unsafe[:3]} and no group fallback)")
-        return f"{prefix}{new_body};"
+            # No group-based fallback. The platform doesn't expose row data
+            # to row-filter UDFs, so the LLM's column-based intent can't be
+            # preserved. Returning TRUE makes the filter a no-op but keeps
+            # the deploy unblocked. WARN loudly: this is a STUB that does
+            # not enforce the original intent. The corresponding fgac_policy
+            # should be reviewed and either rewritten with a group-based
+            # condition or removed.
+            # Use a block comment (`/* */`) — an inline `--` would extend to
+            # end of line and consume the trailing `;`, leaving the function
+            # without a terminator and breaking SQL parse.
+            new_body = "TRUE /* STUB: original column-based intent cannot be expressed in ABAC row filters; review the fgac_policy that uses this function */"
+            print(f"  [AUTOFIX] WARNING: row filter '{fn_name}' rewritten to TRUE "
+                  f"(STUB — does NOT filter any rows). Original referenced "
+                  f"column(s) {unsafe[:3]} which are not accessible in row "
+                  f"filter UDFs. Review the fgac_policy that uses this "
+                  f"function and either replace it with is_account_group_member() "
+                  f"logic or remove the policy entirely.")
+        return f"{prefix}{new_body}{terminator}"
 
     new_text = pattern.sub(_rewrite_body, text)
     if rewritten:
