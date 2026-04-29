@@ -88,10 +88,10 @@ identifiers:
       - upi
       - upi_id
       - vpa
-    format: "email-like (name@bank)"
+    format: "email-like (name@bank) virtual payment address — NOT an email; mask_email is wrong, use mask_upi_id"
     sensitivity: confidential
-    masking_function: mask_email
-    category: financial_id
+    masking_function: mask_upi_id
+    category: upi_id
 
   - name: UAN (Universal Account Number)
     country: IN
@@ -194,6 +194,17 @@ masking_functions:
           CONCAT('XXXXXXXX', RIGHT(REGEXP_REPLACE(uan, '[^0-9]', ''), 4))
         WHEN LENGTH(REGEXP_REPLACE(uan, '[^0-9]', '')) >= 4 THEN
           CONCAT(REPEAT('*', LENGTH(REGEXP_REPLACE(uan, '[^0-9]', '')) - 4), RIGHT(REGEXP_REPLACE(uan, '[^0-9]', ''), 4))
+        ELSE '[REDACTED]'
+      END
+
+  - name: mask_upi_id
+    signature: "mask_upi_id(upi_id STRING) RETURNS STRING"
+    comment: "Indian UPI ID (Virtual Payment Address, e.g. user@bank) — preserve handle's first char and full bank suffix; mask the rest of the local part"
+    body: |
+      CASE
+        WHEN upi_id IS NULL THEN NULL
+        WHEN upi_id RLIKE '^[^@]+@[^@]+$' THEN
+          CONCAT(LEFT(SPLIT(upi_id, '@')[0], 1), '****', '@', SPLIT(upi_id, '@')[1])
         ELSE '[REDACTED]'
       END
 

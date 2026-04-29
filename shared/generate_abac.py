@@ -3738,13 +3738,19 @@ _FUNCTION_EXPECTED_CATEGORIES = {
     "mask_sss_ph": {"financial_id"},
     "mask_cccd": {"government_id"},
     "mask_mst": {"government_id"},
-    # India-specific (additional)
-    "mask_gstin": {"business_id"},
+    # India-specific (additional). GSTIN / UAN are government-issued identifiers
+    # that the column categorizer classifies as `government_id` alongside other
+    # India PII (Aadhaar, PAN, voter_id, etc.). Without `government_id` in the
+    # expected set, autofix_function_category_mismatch reverts the LLM's
+    # correct dedicated mask back to mask_pii_partial — orphaning the function
+    # and weakening masking quality.
+    "mask_gstin": {"business_id", "government_id"},
     "mask_voter_id": {"government_id"},
     "mask_dl_india": {"government_id"},
-    "mask_uan": {"financial_id"},
+    "mask_uan": {"financial_id", "government_id"},
     "mask_ration_card": {"government_id"},
     "mask_vehicle_reg": {"government_id"},
+    "mask_upi_id": {"upi_id"},
 }
 
 
@@ -3784,11 +3790,17 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
         categories.add("government_id")
     if any(k in col for k in ("bsb", "routing", "epf", "kwsp", "cpf", "sss")):
         categories.add("financial_id")
-    if any(k in col for k in ("uen", "ssm", "company_reg")):
+    if any(k in col for k in ("uen", "ssm", "company_reg", "gstin")):
         categories.add("business_id")
     # PAN can be both a card number and an Indian government ID
     if "pan" in col:
         categories.add("government_id")
+    # UAN is a government-managed financial identifier (EPF Universal Account Number)
+    if "uan" in col:
+        categories.add("financial_id")
+    # UPI is a payment identifier (Unified Payments Interface virtual address)
+    if "upi" in col or "vpa" in col:
+        categories.add("upi_id")
     return categories or {"generic"}
 
 
