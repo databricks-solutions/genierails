@@ -199,7 +199,7 @@ masking_functions:
 
   - name: mask_upi_id
     signature: "mask_upi_id(upi_id STRING) RETURNS STRING"
-    comment: "Indian UPI ID (Virtual Payment Address, e.g. user@bank) — preserve handle's first char and full bank suffix; mask the rest of the local part"
+    comment: "Indian UPI ID (Virtual Payment Address, e.g. user@bank) — preserve the first char of the handle and the full bank suffix; mask the rest of the local part"
     body: |
       CASE
         WHEN upi_id IS NULL THEN NULL

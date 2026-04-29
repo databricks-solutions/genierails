@@ -4644,11 +4644,11 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
         categories = set()
         for ta in matched:
             categories.update(_infer_column_categories_full(ta.get("entity_name", "")))
-        if categories.issubset(expected):
-            continue
 
-        # Check if the matched columns are numeric/date — if so, replace
-        # with the correct type-specific function, not mask_redact (STRING).
+        # Check type-incompatibility FIRST: STRING masks must never be applied
+        # to numeric or date columns. If the policy's columns include any
+        # numeric/date column, promote to the correct type-specific function
+        # regardless of category overlap.
         matched_blob = " ".join(
             ta.get("entity_name", "") + " " + ta.get("tag_value", "") for ta in matched
         ).lower()
@@ -4660,13 +4660,25 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
         ))
         if is_numeric:
             type_fn = "mask_amount_rounded"
-            if not available_functions or type_fn in available_functions:
+            if fn != type_fn and (not available_functions or type_fn in available_functions):
                 replacements.append((p.get("name", ""), fn, type_fn))
             continue
         if is_date:
             type_fn = "mask_date_to_year"
-            if not available_functions or type_fn in available_functions:
+            if fn != type_fn and (not available_functions or type_fn in available_functions):
                 replacements.append((p.get("name", ""), fn, type_fn))
+            continue
+
+        # Permissive category check: accept the function if AT LEAST ONE
+        # matched column falls into the function's expected categories.
+        # Strict subset (the previous behavior) reverts mask_full_name to
+        # mask_redact whenever the LLM groups e.g. first_name/last_name
+        # alongside a `generic`-categorized column like `merchant` under the
+        # same masked_name tag — even though mask_full_name is the correct
+        # function for the name columns and produces reasonable output for
+        # merchant too. Strict subset is too aggressive and leaves the
+        # dedicated function orphaned.
+        if categories & expected:
             continue
 
         generic_fn = None
