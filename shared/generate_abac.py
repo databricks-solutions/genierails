@@ -1105,18 +1105,34 @@ def extract_code_blocks(response_text: str) -> tuple[str | None, str | None]:
         candidate = "\n".join(candidate_lines).strip()
         return candidate if _looks_like_hcl(candidate) else None
 
+    hcl_candidates: list[str] = []
+    sql_candidates: list[str] = []
     for lang, content in blocks:
         content = content.strip()
         lang_lower = lang.lower()
 
-        if lang_lower == "sql" and sql_block is None:
-            sql_block = content
-        elif lang_lower in ("hcl", "terraform") and hcl_block is None:
-            hcl_block = content
-        elif not lang and sql_block is None and "CREATE" in content.upper() and "FUNCTION" in content.upper():
-            sql_block = content
-        elif not lang and hcl_block is None and _looks_like_hcl(content):
-            hcl_block = content
+        if lang_lower == "sql":
+            sql_candidates.append(content)
+        elif lang_lower in ("hcl", "terraform"):
+            hcl_candidates.append(content)
+        elif not lang and "CREATE" in content.upper() and "FUNCTION" in content.upper():
+            sql_candidates.append(content)
+        elif not lang and _looks_like_hcl(content):
+            hcl_candidates.append(content)
+
+    # Pick the largest SQL block (most CREATE FUNCTION statements)
+    if sql_candidates:
+        sql_block = max(sql_candidates, key=lambda c: (c.upper().count("CREATE"), len(c)))
+
+    # Pick the most complete HCL block — the one with the most top-level keys
+    # (groups, tag_policies, tag_assignments, fgac_policies, genie_space_configs).
+    # The LLM often emits partial blocks before the final complete one.
+    if hcl_candidates:
+        def _key_count(c: str) -> int:
+            keys = ("groups", "tag_policies", "tag_assignments", "fgac_policies",
+                    "genie_space_configs", "genie_space_title", "group_members")
+            return sum(1 for k in keys if re.search(rf"(?m)^\s*{k}\s*=", c))
+        hcl_block = max(hcl_candidates, key=lambda c: (_key_count(c), len(c)))
 
     if hcl_block is None:
         hcl_block = _extract_hcl_fallback(response_text)
@@ -1149,6 +1165,9 @@ def sanitize_tfvars_hcl(hcl_block: str) -> str:
         if re.match(r"^\s*#\s*Authentication\b", line, re.IGNORECASE):
             continue
         if re.match(r"^\s*#\s*Databricks\s+Authentication\b", line, re.IGNORECASE):
+            continue
+        # Strip SQL-style comments that the LLM sometimes emits into HCL output
+        if re.match(r"^\s*--", line):
             continue
 
         m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=", line)
@@ -1494,6 +1513,20 @@ def call_with_retries(call_fn, prompt: str, model: str, max_retries: int) -> str
     raise RuntimeError(f"All {max_retries} attempts failed. Last error: {last_error}")
 
 
+def _cleanup_stray_commas(text: str) -> str:
+    """Remove stray commas left behind by block removals in HCL text.
+
+    Handles bare comma lines, consecutive commas, and trailing commas before ]
+    (but preserves valid trailing commas after ``}`` or quoted strings).
+    """
+    text = re.sub(r'^\s*,\s*$', '', text, flags=re.MULTILINE)
+    text = re.sub(r',(\s*,)+', ',', text)
+    # Only strip a comma before ] when preceded by whitespace (bare/stray comma),
+    # not when preceded by } or " (valid HCL trailing comma).
+    text = re.sub(r'(?<![}"\']),(\s*\])', r'\1', text)
+    return text
+
+
 def fix_hcl_syntax(tfvars_path: Path) -> int:
     """Repair common HCL syntax errors introduced by the LLM.
 
@@ -1529,7 +1562,7 @@ def fix_hcl_syntax(tfvars_path: Path) -> int:
             # Look ahead: find the next non-blank, non-comment line
             j = i + 1
             while j < len(lines) and (
-                lines[j].strip() == '' or lines[j].lstrip().startswith('#')
+                lines[j].strip() == '' or lines[j].lstrip().startswith('#') or lines[j].lstrip().startswith('--')
             ):
                 j += 1
             if j < len(lines):
@@ -1587,6 +1620,14 @@ def fix_hcl_syntax(tfvars_path: Path) -> int:
     if fixed4 != text:
         repairs += 1
         text = fixed4
+
+    # ------------------------------------------------------------------
+    # Fix 5: remove stray commas left by autofix block removals.
+    # ------------------------------------------------------------------
+    fixed5 = _cleanup_stray_commas(text)
+    if fixed5 != text:
+        repairs += 1
+        text = fixed5
 
     if text != original:
         tfvars_path.write_text(text)
@@ -2154,8 +2195,15 @@ def autofix_invalid_tag_values(tfvars_path: Path) -> int:
     return len(remove_indices)
 
 
-# Databricks platform limit for ABAC column-mask/row-filter policies per catalog.
-_FGAC_PER_CATALOG_LIMIT = 10  # Databricks platform hard cap
+# Databricks platform limits for ABAC policies.
+# Ref: https://docs.databricks.com/en/data-governance/unity-catalog/abac/policies#policy-quotas
+#   Metastore: 10,000 | Catalog: 100 | Schema: 100 | Table: 50
+#   Principals per policy: 20 (soft limits — contact Databricks to increase)
+# The autofix enforces the per-catalog limit.  The per-table limit (50) is
+# not enforced here because tag-based policies match columns indirectly;
+# a single policy can cover multiple tables.  In practice, schemas rarely
+# exceed 50 policies per table.
+_FGAC_PER_CATALOG_LIMIT = 100  # max policies per catalog
 
 
 def autofix_fgac_policy_count(tfvars_path: Path) -> int:
@@ -2528,7 +2576,8 @@ def autofix_fgac_policy_count(tfvars_path: Path) -> int:
         )
 
     if removed or assignments_removed:
-        # Clean up double-blank lines left by removal
+        # Clean up stray commas and double-blank lines left by removal
+        text = _cleanup_stray_commas(text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         tfvars_path.write_text(text)
 
@@ -3144,29 +3193,48 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
         # Row filter functions must take 0 arguments; masking functions take 1.
         # IMPORTANT: mask_redact returns STRING — never use it for columns tagged
         # with non-STRING values (amounts/dates).  These need type-specific masks.
+        is_numeric_or_date = any(tok in blob for tok in (
+            "amount", "balance", "credit_limit", "rounded", "price", "cost", "salary",
+            "dob", "birth", "date_of_birth", "opened_date", "expiry",
+        ))
         if not is_table:
-            is_numeric_or_date = any(tok in blob for tok in (
-                "amount", "balance", "limit", "rounded", "price", "cost", "salary",
-                "dob", "birth", "date", "opened_date", "expiry",
-            ))
             if not is_numeric_or_date:
                 preferred.extend(["mask_redact", "mask_nullify", "mask_pii_partial"])
         for fn in preferred:
             if (not available_functions or fn in available_functions) and _arg_count_ok(fn):
                 return fn
         # Last-resort: pick any available function of the right type from the SQL
-        # file rather than returning None (which causes the autofix to skip adding
-        # coverage and lets validation fail). Row filters take 0 args; column masks
-        # take 1, so we look for the appropriate naming convention AND verify arg count.
-        if available_functions:
+        # file. Use semantic matching (token overlap with tag_value) to avoid
+        # picking arbitrary alphabetical first (which caused mask_abn to be
+        # chosen for every uncategorized string column when ANZ overlay is loaded).
+        # Skip last-resort for numeric/date columns — a wrong-type function is
+        # worse than no policy (the tag assignment will be removed as uncovered).
+        if available_functions and not is_numeric_or_date:
+            # Extract semantic tokens from the tag value (strip common prefixes)
+            tv_norm = tval.replace("masked_", "").replace("redacted_", "")
+            tv_tokens = set(t for t in tv_norm.split("_") if t)
+
+            def _score_fn(fn: str, fn_prefix: str) -> int:
+                fn_tokens = set(fn.replace(fn_prefix, "", 1).split("_"))
+                return len(fn_tokens & tv_tokens)
+
             if is_table:
-                filter_fns = sorted(f for f in available_functions if f.startswith("filter_") and _arg_count_ok(f))
+                filter_fns = [f for f in available_functions if f.startswith("filter_") and _arg_count_ok(f)]
                 if filter_fns:
-                    return filter_fns[0]
+                    ranked = sorted(filter_fns, key=lambda f: (-_score_fn(f, "filter_"), f))
+                    if _score_fn(ranked[0], "filter_") > 0:
+                        return ranked[0]
+                    # No semantic match — don't pick random filter (would cause
+                    # category mismatch at query time). Return None so the tag
+                    # stays uncovered and gets removed by autofix_remove_uncovered_tags.
             else:
-                mask_fns = sorted(f for f in available_functions if f.startswith("mask_") and _arg_count_ok(f))
+                mask_fns = [f for f in available_functions if f.startswith("mask_") and _arg_count_ok(f)]
                 if mask_fns:
-                    return mask_fns[0]
+                    ranked = sorted(mask_fns, key=lambda f: (-_score_fn(f, "mask_"), f))
+                    if _score_fn(ranked[0], "mask_") > 0:
+                        return ranked[0]
+                    # No semantic match — don't pick random mask (would cause
+                    # category mismatch at query time).
         return None
 
     def _policy_matches_assignment(
@@ -3851,7 +3919,49 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
     if not fixes:
         return 0
 
+    # Clean up stray commas left behind by block removals
+    rewritten = _cleanup_stray_commas(rewritten)
+
     text = text[:sec_start] + rewritten + text[sec_end:]
+
+    # --- Remove orphaned tag_assignments left by removed policies ----------
+    # Collect tag key/value pairs that the removed policies covered.
+    removed_tag_pairs: set[tuple[str, str]] = set()
+    for pname in removals:
+        # Find the original policy in the parsed list and extract its match condition
+        for p in policies:
+            if p.get("name") == pname:
+                for field in ("match_condition", "when_condition"):
+                    cond = p.get(field, "") or ""
+                    for m in re.finditer(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", cond):
+                        removed_tag_pairs.add((m.group(1), m.group(2)))
+
+    if removed_tag_pairs:
+        # Check which of these pairs are still covered by a surviving policy
+        surviving_pairs: set[tuple[str, str]] = set()
+        for p in policies:
+            if p.get("name") in removals:
+                continue
+            for field in ("match_condition", "when_condition"):
+                cond = p.get(field, "") or ""
+                for m in re.finditer(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", cond):
+                    surviving_pairs.add((m.group(1), m.group(2)))
+
+        orphaned_pairs = removed_tag_pairs - surviving_pairs
+        if orphaned_pairs:
+            for tag_key, tag_value in orphaned_pairs:
+                # Remove matching tag_assignment lines
+                pattern = re.compile(
+                    r'[ \t]*\{[^}]*tag_key\s*=\s*"' + re.escape(tag_key)
+                    + r'"[^}]*tag_value\s*=\s*"' + re.escape(tag_value)
+                    + r'"[^}]*\}\s*,?\s*\n?',
+                )
+                new_text, n = pattern.subn('', text)
+                if n:
+                    text = new_text
+                    print(f"  [AUTOFIX] Removed {n} orphaned tag_assignment(s) for "
+                          f"{tag_key} = '{tag_value}' (policy removed)")
+
     tfvars_path.write_text(text)
     return fixes
 
@@ -3940,14 +4050,54 @@ def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = N
         if not candidates:
             # Fallback to any function with the right arg count
             candidates = sorted(fns_by_args.get(expected_args, []))
-        # Prefer functions matching the naming convention (mask_ for columns, filter_ for rows).
-        prefix = "filter_" if ptype == "POLICY_TYPE_ROW_FILTER" else "mask_"
-        typed_candidates = [c for c in candidates if c.startswith(prefix)]
-        # Pick a generic fallback from typed candidates.
-        if typed_candidates:
-            replacements[pname] = typed_candidates[0]
-        elif candidates:
-            replacements[pname] = candidates[0]
+        # Check if this policy covers numeric/date columns — use type-specific replacement
+        policy_match = ""
+        for p in policies:
+            if p.get("name") == pname:
+                policy_match = (p.get("match_condition", "") or "") + " " + (p.get("when_condition", "") or "")
+                break
+        is_numeric = any(tok in policy_match.lower() for tok in ("rounded", "amount", "balance", "credit_limit"))
+        is_date = any(tok in policy_match.lower() for tok in ("dob", "birth", "date"))
+
+        if is_numeric:
+            # Numeric columns need type-safe replacement — never fall through
+            # to alphabetical (which could pick mask_credit_card_full for amounts).
+            if "mask_amount_rounded" in (available_functions or set()):
+                replacements[pname] = "mask_amount_rounded"
+            # else: leave out of replacements → policy will be removed
+        elif is_date:
+            # Same rule for DATE columns — mask_date_to_year or nothing.
+            if "mask_date_to_year" in (available_functions or set()):
+                replacements[pname] = "mask_date_to_year"
+            # else: leave out of replacements → policy will be removed
+        else:
+            # Non-numeric, non-date: semantic matching by tag_value tokens.
+            # The naive "first alphabetical mask_*" pick causes systematic
+            # category mismatches (e.g. mask_abn used for every string column
+            # because it sorts first). Instead, prefer functions whose names
+            # share tokens with the tag_value or match_condition.
+            prefix = "filter_" if ptype == "POLICY_TYPE_ROW_FILTER" else "mask_"
+            typed_candidates = [c for c in candidates if c.startswith(prefix)]
+            if typed_candidates:
+                # Extract tokens from the policy's tag_value references
+                tag_values = re.findall(r"hasTagValue\(\s*'[^']+'\s*,\s*'([^']+)'\s*\)", policy_match)
+                tokens = set()
+                for tv in tag_values:
+                    # Strip common prefixes to get the meaningful tokens
+                    normalized = tv.lower().replace("masked_", "").replace("redacted_", "")
+                    tokens.update(normalized.split("_"))
+                # Score candidates: how many of their name tokens overlap with tag tokens
+                def _semantic_score(fn: str) -> int:
+                    fn_tokens = set(fn.lower().replace(prefix, "").split("_"))
+                    return len(fn_tokens & tokens)
+                scored = sorted(typed_candidates, key=lambda fn: (-_semantic_score(fn), fn))
+                best = scored[0]
+                # Only use it if there's a positive semantic match — otherwise
+                # remove the policy rather than pick a random (likely miscategorized)
+                # function. The uncovered-tag cleanup will then drop the tag.
+                if _semantic_score(best) > 0:
+                    replacements[pname] = best
+                # else: leave out of replacements → policy will be removed
 
     # Apply replacements or removals in the file.
     section = _find_bracket_section(text, "fgac_policies")
@@ -4133,10 +4283,23 @@ def autofix_row_filter_column_refs(
             all_known_cols |= cols
 
         bad_refs = identifiers & all_known_cols - table_cols
-        if bad_refs:
+        # Also check for hallucinated columns: identifiers that look like
+        # column names (contain _ and are not SQL builtins) but don't exist
+        # in the target table.  Only flag identifiers that are plausible
+        # column names (contain underscore, typical of generated schemas).
+        hallucinated = {
+            ident for ident in identifiers - table_cols - all_known_cols
+            if "_" in ident and ident not in {
+                "is_account_group_member", "is_member", "current_user",
+                "account_group_member",
+            }
+        }
+        all_bad = bad_refs | hallucinated
+        if all_bad:
             bad_policy_names.append(pname)
+            desc = "cross-table" if bad_refs else "hallucinated"
             print(
-                f"  [AUTOFIX] Row filter '{pname}' references column(s) {sorted(bad_refs)} "
+                f"  [AUTOFIX] Row filter '{pname}' references {desc} column(s) {sorted(all_bad)} "
                 f"not in {entity} — removing policy"
             )
 
@@ -4227,6 +4390,16 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
                 if tag_key == key:
                     matched.extend(items)
         if not matched:
+            # No matching tag assignments — but the policy may still have a wrong
+            # function (e.g. duplicate _2/_3 policies).  Check the condition keywords
+            # to detect type mismatches even without matched assignments.
+            cond = (p.get("match_condition", "") or "").lower()
+            cond_is_numeric = any(tok in cond for tok in ("rounded", "amount", "balance", "credit_limit"))
+            cond_is_date = any(tok in cond for tok in ("dob", "birth", "date"))
+            if cond_is_numeric and fn != "mask_amount_rounded" and "mask_amount_rounded" in (available_functions or set()):
+                replacements.append((p.get("name", ""), fn, "mask_amount_rounded"))
+            elif cond_is_date and fn != "mask_date_to_year" and "mask_date_to_year" in (available_functions or set()):
+                replacements.append((p.get("name", ""), fn, "mask_date_to_year"))
             continue
 
         categories = set()
@@ -4241,10 +4414,10 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
             ta.get("entity_name", "") + " " + ta.get("tag_value", "") for ta in matched
         ).lower()
         is_numeric = any(tok in matched_blob for tok in (
-            "amount", "balance", "limit", "rounded", "price", "cost", "salary",
+            "amount", "balance", "credit_limit", "rounded", "price", "cost", "salary",
         ))
         is_date = any(tok in matched_blob for tok in (
-            "dob", "birth", "date", "opened_date", "expiry",
+            "dob", "birth", "date_of_birth", "opened_date", "expiry",
         ))
         if is_numeric:
             type_fn = "mask_amount_rounded"
@@ -4308,6 +4481,38 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
     text = text[:sec_start] + rewritten + text[sec_end:]
     tfvars_path.write_text(text)
     return fixes
+
+
+def _remove_policy_block_by_name(text: str, policy_name: str, section: str = "fgac_policies") -> tuple[str, bool]:
+    """Remove a policy block from HCL text using brace-counting (handles nested blocks).
+
+    Unlike regex with ``[^}]*``, this correctly handles nested structures like
+    ``column_mask = { ... }`` inside policy blocks.
+
+    Returns (new_text, was_removed).
+    """
+    sec = _find_bracket_section(text, section)
+    if not sec:
+        return text, False
+    sec_start, sec_end = sec
+    sec_txt = text[sec_start:sec_end]
+    blocks = _find_brace_blocks(sec_txt)
+    name_pat = re.compile(r'name\s*=\s*"' + re.escape(policy_name) + r'"')
+    for bs, be in reversed(blocks):
+        bt = sec_txt[bs:be + 1]
+        if name_pat.search(bt):
+            abs_s = sec_start + bs
+            abs_e = sec_start + be + 1
+            # Include trailing comma and whitespace
+            while abs_e < len(text) and text[abs_e] in (",", " ", "\t"):
+                abs_e += 1
+            # Include leading whitespace and newline
+            while abs_s > 0 and text[abs_s - 1] in (" ", "\t"):
+                abs_s -= 1
+            if abs_s > 0 and text[abs_s - 1] == "\n":
+                abs_s -= 1
+            return text[:abs_s] + text[abs_e:], True
+    return text, False
 
 
 def autofix_duplicate_column_masks(tfvars_path: Path) -> int:
@@ -4414,6 +4619,26 @@ def autofix_duplicate_column_masks(tfvars_path: Path) -> int:
             # Remove generic ones — specific function is preferred
             for pidx, e in generic:
                 remove_indices.add(e[0])  # original policy index
+        elif len(specific) > 1:
+            # Multiple specific functions overlap on the same column.
+            # Keep the one whose function name best matches the column name
+            # (e.g. mask_date_to_year for date_of_birth, mask_diagnosis_code
+            # for diagnosis_code).  Fall back to keeping the one that covers
+            # fewer columns (most targeted).
+            col_lower = col.split(".")[-1].lower()
+            scored: list[tuple[int, int, int, tuple]] = []
+            for pidx, e in specific:
+                fn = _s(e[1].get("function_name", "")).lower()
+                # Score: how many words in the column name appear in the function name
+                col_words = set(col_lower.replace("_", " ").split())
+                fn_words = set(fn.replace("mask_", "").replace("_", " ").split())
+                name_overlap = len(col_words & fn_words)
+                num_cols = len(e[2])  # number of columns matched by this policy
+                scored.append((-name_overlap, num_cols, pidx, e))
+            scored.sort()
+            # Keep the best match (first after sort), remove the rest
+            for _, _, pidx, e in scored[1:]:
+                remove_indices.add(e[0])
 
     if not remove_indices:
         return 0
@@ -4427,22 +4652,13 @@ def autofix_duplicate_column_masks(tfvars_path: Path) -> int:
         name = _s(p.get("name", ""))
         if not name:
             continue
-        # Remove the policy block from fgac_policies list
-        escaped = re.escape(name)
-        pattern = re.compile(
-            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
-            re.DOTALL,
-        )
-        new_text = pattern.sub("", text, count=1)
-        if new_text != text:
-            text = new_text
+        text, was_removed = _remove_policy_block_by_name(text, name)
+        if was_removed:
             removed += 1
             print(f"    Removed duplicate mask policy '{name}' (generic function on column already covered by specific policy)")
 
     if removed:
-        # Clean up any leftover double commas or trailing commas before ]
-        text = re.sub(r',\s*,', ',', text)
-        text = re.sub(r',\s*\]', '\n  ]', text)
+        text = _cleanup_stray_commas(text)
         tfvars_path.write_text(text)
     return removed
 
@@ -4484,19 +4700,12 @@ def autofix_forbidden_conditions(tfvars_path: Path) -> int:
         name = _s(p.get("name", ""))
         if not name:
             continue
-        escaped = _re_fc.escape(name)
-        pattern = _re_fc.compile(
-            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
-            re.DOTALL,
-        )
-        new_text = pattern.sub("", text, count=1)
-        if new_text != text:
-            text = new_text
+        text, was_removed = _remove_policy_block_by_name(text, name)
+        if was_removed:
             removed += 1
 
     if removed:
-        text = re.sub(r',\s*,', ',', text)
-        text = re.sub(r',\s*\]', '\n  ]', text)
+        text = _cleanup_stray_commas(text)
         tfvars_path.write_text(text)
     return removed
 
@@ -4573,15 +4782,9 @@ def autofix_invalid_condition_values(tfvars_path: Path) -> int:
 
     text = tfvars_path.read_text()
     for name in bad_names:
-        escaped = re.escape(name)
-        pattern = re.compile(
-            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
-            re.DOTALL,
-        )
-        text = pattern.sub("", text, count=1)
+        text, _ = _remove_policy_block_by_name(text, name)
 
-    text = re.sub(r',\s*,', ',', text)
-    text = re.sub(r',\s*\]', '\n  ]', text)
+    text = _cleanup_stray_commas(text)
     tfvars_path.write_text(text)
     return len(bad_names)
 
@@ -4648,15 +4851,9 @@ def autofix_malformed_conditions(tfvars_path: Path) -> int:
 
     text = tfvars_path.read_text()
     for name in bad_names:
-        escaped = re.escape(name)
-        pattern = re.compile(
-            r',?\s*\{[^}]*?name\s*=\s*"' + escaped + r'"[^}]*?\}\s*,?',
-            re.DOTALL,
-        )
-        text = pattern.sub("", text, count=1)
+        text, _ = _remove_policy_block_by_name(text, name)
 
-    text = re.sub(r',\s*,', ',', text)
-    text = re.sub(r',\s*\]', '\n  ]', text)
+    text = _cleanup_stray_commas(text)
     tfvars_path.write_text(text)
     return len(bad_names)
 
@@ -4701,10 +4898,6 @@ def autofix_unsafe_row_filters(sql_path: Path) -> int:
             body, re.IGNORECASE,
         )
 
-        if not group_calls:
-            # No group-based access at all — leave as-is (might be intentional)
-            return match.group(0)
-
         # Check if body has bare identifiers that could be column references.
         # Strip string literals and function calls to isolate bare identifiers.
         body_clean = re.sub(r"'[^']*'", "", body)  # remove string literals
@@ -4723,12 +4916,22 @@ def autofix_unsafe_row_filters(sql_path: Path) -> int:
             # Body is safe — no column references
             return match.group(0)
 
-        # Rewrite: keep only the group-based calls joined with OR
-        new_body = " OR ".join(group_calls)
-        print(f"  [AUTOFIX] Rewrote row filter '{fn_name}': removed column reference(s) "
-              f"{unsafe[:3]}, keeping group-based access only")
         nonlocal rewritten
         rewritten += 1
+
+        if group_calls:
+            # Has group-based fallback — keep those, drop column refs
+            new_body = " OR ".join(group_calls)
+            print(f"  [AUTOFIX] Rewrote row filter '{fn_name}': removed column reference(s) "
+                  f"{unsafe[:3]}, keeping group-based access only")
+        else:
+            # No group-based fallback — replace with TRUE (permissive no-op).
+            # TRUE means "no filter applied" at query time. The row filter policy
+            # still exists but has no effect. Safer than leaving the unresolved
+            # column reference which causes UNRESOLVED_COLUMN at deploy time.
+            new_body = "TRUE"
+            print(f"  [AUTOFIX] Replaced row filter '{fn_name}' body with TRUE "
+                  f"(had unresolved column reference(s) {unsafe[:3]} and no group fallback)")
         return f"{prefix}{new_body};"
 
     new_text = pattern.sub(_rewrite_body, text)
@@ -4736,6 +4939,480 @@ def autofix_unsafe_row_filters(sql_path: Path) -> int:
         sql_path.write_text(new_text)
 
     return rewritten
+
+
+def autofix_remove_bodyless_functions(sql_path: Path) -> int:
+    """Remove CREATE FUNCTION statements that lack a body (no RETURN clause).
+
+    The LLM occasionally emits a function header followed only by a semicolon —
+    e.g. ``CREATE OR REPLACE FUNCTION filter_aml_compliance(aml_flag BOOLEAN);``.
+    Databricks rejects these at deploy time with "SQL functions should have a
+    function definition" and the entire deploy fails. Strip them so any overlay
+    injection (or simple removal) can recover.
+
+    Detection: a CREATE FUNCTION statement is "bodyless" if, after stripping
+    line and block comments, it contains no standalone ``RETURN`` keyword.
+    ``RETURNS`` (the type declaration) is excluded by the word boundary —
+    ``\\bRETURN\\b`` does not match ``RETURNS`` because ``S`` is a word char.
+    """
+    if not sql_path or not sql_path.exists():
+        return 0
+
+    sql_text = sql_path.read_text()
+
+    # Split into (statement, separator) pairs using the same separator pattern
+    # as deploy_masking_functions.parse_sql_blocks. The capture group preserves
+    # the original separators so unaffected text stays byte-identical.
+    parts = re.split(r"(;\s*(?:--[^\n]*)?\n)", sql_text)
+
+    out: list[str] = []
+    removed: list[str] = []
+    i = 0
+    while i < len(parts):
+        stmt = parts[i]
+        sep = parts[i + 1] if i + 1 < len(parts) else ""
+
+        m = re.search(
+            r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*(\w+)\s*\(",
+            stmt, re.IGNORECASE,
+        )
+        if m:
+            cleaned = re.sub(r"--[^\n]*", "", stmt)
+            cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
+            if not re.search(r"\bRETURN\b", cleaned, re.IGNORECASE):
+                removed.append(m.group(1))
+                i += 2
+                continue
+
+        out.append(stmt)
+        out.append(sep)
+        i += 2
+
+    if removed:
+        for name in removed:
+            print(f"  [AUTOFIX] Removed bodyless function '{name}' from masking_functions.sql")
+        sql_path.write_text("".join(out))
+
+    return len(removed)
+
+
+# ---------------------------------------------------------------------------
+# PII column patterns → tag assignments.  Used by autofix_untagged_pii_columns
+# to detect columns that the LLM forgot to tag.
+# ---------------------------------------------------------------------------
+_PII_COLUMN_TAG_MAP: list[tuple[list[str], str, str]] = [
+    # (column name substrings, tag_key, tag_value)
+    (["email", "email_address", "contact_email"],            "pii_level", "masked_email"),
+    (["phone", "mobile", "telephone", "contact_number"],     "pii_level", "masked_phone"),
+    (["address", "street_address", "residential_address"],   "pii_level", "redacted_address"),
+    (["date_of_birth", "dob", "birth_date", "birthdate"],    "pii_level", "masked_dob"),
+    (["ssn", "social_security"],                             "pii_level", "masked_ssn"),
+    # ANZ
+    (["tfn", "tax_file_number"],                             "pii_level", "masked_tfn"),
+    (["medicare", "medicare_number"],                        "pii_level", "masked_medicare"),
+    (["bsb", "bsb_number"],                                 "pii_level", "masked_bsb"),
+    # India
+    (["aadhaar", "aadhar"],                                  "pii_level", "masked_aadhaar"),
+    # SEA
+    (["nric"],                                               "pii_level", "masked_nric"),
+    (["mykad"],                                              "pii_level", "masked_mykad"),
+    # Financial
+    (["account_number", "bank_account"],                     "pii_level", "masked_account"),
+    (["card_number", "credit_card", "pan"],                  "pci_level", "masked_card_last4"),
+    (["cvv", "cvc", "card_verification"],                    "pci_level", "redacted_cvv"),
+]
+
+# Columns that look like amounts/balances → financial_sensitivity tag
+_FINANCIAL_COLUMN_TAG_MAP: list[tuple[list[str], str, str]] = [
+    (["balance", "amount", "credit_limit", "debit_amount",
+      "transaction_amount", "transfer_amount"],              "financial_sensitivity", "rounded_amounts"),
+]
+
+# Maps each tag_value added by PII autofix to the list of masking functions
+# that could cover it. A tag is only added if at least one covering function
+# is available in the SQL file — otherwise the tag would be uncovered and
+# fail validation.
+_PII_TAG_REQUIRED_FUNCTIONS: dict[str, list[str]] = {
+    "masked_email":     ["mask_email", "mask_pii_partial", "mask_redact"],
+    "masked_phone":     ["mask_phone", "mask_pii_partial", "mask_redact"],
+    "redacted_address": ["mask_redact", "mask_pii_partial"],
+    "masked_dob":       ["mask_date_to_year"],
+    "masked_ssn":       ["mask_ssn", "mask_redact", "mask_pii_partial"],
+    "masked_tfn":       ["mask_tfn", "mask_redact"],
+    "masked_medicare":  ["mask_medicare", "mask_redact"],
+    "masked_bsb":       ["mask_bsb", "mask_redact"],
+    "masked_aadhaar":   ["mask_aadhaar", "mask_pan_india", "mask_redact"],
+    "masked_nric":      ["mask_nric", "mask_redact"],
+    "masked_mykad":     ["mask_mykad", "mask_redact"],
+    "masked_account":   ["mask_redact", "mask_pii_partial"],
+    "masked_card_last4": ["mask_credit_card_last4", "mask_credit_card_full", "mask_redact"],
+    "redacted_cvv":     ["mask_redact", "mask_nullify"],
+}
+
+
+def autofix_untagged_pii_columns(
+    tfvars_path: Path,
+    ddl_path: Path | None = None,
+    sql_path: Path | None = None,
+) -> int:
+    """Detect PII/sensitive columns in the DDL that the LLM forgot to tag.
+
+    Scans the fetched DDL for column names matching known PII patterns and
+    adds tag_assignment entries for any that are missing.  This prevents the
+    common failure where the LLM generates groups and policies but omits
+    tag assignments for obvious columns like email, phone, or address.
+
+    Returns the number of tag assignments added.
+    """
+    # Find DDL file
+    if not ddl_path or not ddl_path.exists():
+        if sql_path and sql_path.exists():
+            ddl_path = sql_path.parent / "ddl" / "_fetched.sql"
+            if not ddl_path.exists():
+                ddl_path = sql_path.parent.parent / "ddl" / "_fetched.sql"
+    if not ddl_path or not ddl_path.exists():
+        return 0
+
+    try:
+        import hcl2 as _hcl2
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = _hcl2.loads(text)
+    except Exception:
+        return 0
+
+    # Build set of already-tagged columns
+    existing_tags: set[str] = set()
+    for ta in cfg.get("tag_assignments", []) or []:
+        if ta.get("entity_type") == "columns":
+            existing_tags.add(ta.get("entity_name", ""))
+
+    # Parse DDL to extract catalog.schema.table.column names
+    ddl_text = ddl_path.read_text()
+    # Match CREATE TABLE catalog.schema.table (...columns...)
+    table_pattern = re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+([\w.]+)\s*\((.*?)\)\s*(?:USING|;|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    all_columns: list[tuple[str, str]] = []  # (full_name, column_name)
+    for m in table_pattern.finditer(ddl_text):
+        table_fqn = m.group(1)  # catalog.schema.table
+        cols_block = m.group(2)
+        for line in cols_block.split("\n"):
+            line = line.strip().rstrip(",")
+            if not line or line.startswith("--") or line.startswith(")"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                col_name = parts[0].strip("`\"")
+                if col_name.upper() in ("CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "CHECK"):
+                    continue
+                full_name = f"{table_fqn}.{col_name}"
+                all_columns.append((full_name, col_name.lower()))
+
+    if not all_columns:
+        return 0
+
+    # Check which masking functions are available in the SQL file.
+    # Only add financial tags (rounded_amounts) if mask_amount_rounded is available,
+    # and only add date tags (masked_dob) if mask_date_to_year is available.
+    # Without the required function, the tag assignment would be uncovered.
+    available_fns: set[str] = set()
+    if sql_path and sql_path.exists():
+        available_fns = set(re.findall(
+            r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*(\w+)\s*\(",
+            sql_path.read_text(), re.IGNORECASE,
+        ))
+
+    # Filter patterns: only include tags that have at least one covering function
+    # available in the SQL file. Without a covering function, the tag assignment
+    # would be uncovered and cause validation failure.
+    def _any_covering_fn_available(tag_value: str) -> bool:
+        required = _PII_TAG_REQUIRED_FUNCTIONS.get(tag_value)
+        if required is None:
+            return True  # unknown tag — pass through
+        if not available_fns:
+            return True  # no SQL file yet — don't over-filter
+        return any(fn in available_fns for fn in required)
+
+    active_patterns = [
+        (hints, key, val) for hints, key, val in _PII_COLUMN_TAG_MAP
+        if _any_covering_fn_available(val)
+    ]
+    if "mask_amount_rounded" in available_fns:
+        active_patterns.extend(_FINANCIAL_COLUMN_TAG_MAP)
+
+    # Check each column against PII patterns
+    new_assignments: list[dict] = []
+    for full_name, col_name in all_columns:
+        if full_name in existing_tags:
+            continue
+        for hints, tag_key, tag_value in active_patterns:
+            if col_name in hints or any(h in col_name for h in hints):
+                new_assignments.append({
+                    "entity_type": "columns",
+                    "entity_name": full_name,
+                    "tag_key": tag_key,
+                    "tag_value": tag_value,
+                })
+                break  # first match wins
+
+    if not new_assignments:
+        return 0
+
+    # Inject new tag assignments into the HCL text
+    # Find the tag_assignments section and append before the closing ]
+    ta_section = re.search(r"(tag_assignments\s*=\s*\[)(.*?)(\])", text, re.DOTALL)
+    if not ta_section:
+        return 0
+
+    insert_pos = ta_section.end(2)  # before the ]
+
+    # Ensure the last existing entry has a trailing comma to prevent
+    # "missing comma" HCL syntax errors when we append new entries.
+    preceding = text[ta_section.end(1):insert_pos].rstrip()
+    if preceding and preceding.endswith("}") and not preceding.endswith("},"):
+        last_brace_idx = ta_section.end(1) + len(preceding) - 1
+        text = text[:last_brace_idx + 1] + "," + text[last_brace_idx + 1:]
+        # Re-find section since text shifted by 1 character
+        ta_section = re.search(r"(tag_assignments\s*=\s*\[)(.*?)(\])", text, re.DOTALL)
+        insert_pos = ta_section.end(2)
+
+    lines = []
+    for ta in new_assignments:
+        lines.append(
+            f'  {{ entity_type = "columns", entity_name = "{ta["entity_name"]}", '
+            f'tag_key = "{ta["tag_key"]}", tag_value = "{ta["tag_value"]}" }},'
+        )
+        print(f"  [AUTOFIX] Added tag_assignment: {ta['entity_name']} ({ta['tag_key']} = '{ta['tag_value']}')")
+
+    injection = "\n" + "\n".join(lines) + "\n"
+    text = text[:insert_pos] + injection + text[insert_pos:]
+    tfvars_path.write_text(text)
+    return len(new_assignments)
+
+
+def autofix_remove_uncovered_tags(tfvars_path: Path, sql_path: Path | None = None) -> int:
+    """Last-resort: remove tag_assignments that no active FGAC policy covers.
+
+    After all other autofixes have had a chance, any non-public tag_assignment
+    that is not matched by any COLUMN_MASK or ROW_FILTER policy will fail
+    validation with "is not covered by any active fgac_policy".  Removing the
+    tag is safer than blocking the apply — the governance surface is reduced
+    but deploy succeeds.
+
+    A policy is considered "inactive" (doesn't cover tags) if:
+    - It has no match_condition/when_condition for the entity type
+    - Its function_name is not defined in the SQL file (deploy would fail)
+
+    This catches cases the targeted cleanups miss:
+    - PII tags whose covering functions weren't generated by the LLM
+    - LLM-generated row-filter tags without matching filter_* functions
+    - Financial tags that escaped the financial_sensitivity cleanup
+    - Tags covered by policies whose function is missing from SQL
+    """
+    try:
+        import hcl2
+    except ImportError:
+        return 0
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+
+    assignments = cfg.get("tag_assignments", []) or []
+    if isinstance(assignments, list) and len(assignments) == 1 and isinstance(assignments[0], list):
+        assignments = assignments[0]
+    policies = cfg.get("fgac_policies", []) or []
+    if isinstance(policies, list) and len(policies) == 1 and isinstance(policies[0], list):
+        policies = policies[0]
+
+    if not assignments:
+        return 0
+
+    # Parse available SQL functions — policies referencing missing functions
+    # are "inactive" (the validator treats them the same way).
+    available_fns: set[str] = set()
+    if sql_path and sql_path.exists():
+        available_fns = set(re.findall(
+            r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*(\w+)\s*\(",
+            sql_path.read_text(), re.IGNORECASE,
+        ))
+
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+
+    def _requires_coverage(tag_value: str) -> bool:
+        return tag_value.strip().lower() not in {"public", "general", "exact"}
+
+    # Normalize assignments to dicts
+    flat_assignments = []
+    for ta in assignments:
+        if isinstance(ta, list):
+            ta = ta[0] if ta else {}
+        flat_assignments.append(ta)
+
+    flat_policies = []
+    for p in policies:
+        if isinstance(p, list):
+            p = p[0] if p else {}
+        flat_policies.append(p)
+
+    # Build column/table tag maps (for condition evaluation)
+    col_tags: dict[str, dict[str, set[str]]] = {}
+    table_tags: dict[str, dict[str, set[str]]] = {}
+    for ta in flat_assignments:
+        etype = _s(ta.get("entity_type", ""))
+        ename = _s(ta.get("entity_name", ""))
+        tkey = _s(ta.get("tag_key", ""))
+        tval = _s(ta.get("tag_value", ""))
+        if not ename or not tkey:
+            continue
+        if etype == "columns":
+            col_tags.setdefault(ename, {}).setdefault(tkey, set()).add(tval)
+        elif etype == "tables":
+            table_tags.setdefault(ename, {}).setdefault(tkey, set()).add(tval)
+
+    def _condition_matches(condition: str, tags: dict[str, set[str]]) -> bool:
+        if not condition:
+            return True
+        expr = condition
+
+        def repl_value(match: re.Match) -> str:
+            key, value = match.group(1), match.group(2)
+            return str(value in tags.get(key, set()))
+
+        def repl_key(match: re.Match) -> str:
+            key = match.group(1)
+            return str(key in tags and bool(tags[key]))
+
+        expr = re.sub(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", repl_value, expr)
+        expr = re.sub(r"hasTag\(\s*'([^']+)'\s*\)", repl_key, expr)
+        expr = re.sub(r"\bAND\b", " and ", expr)
+        expr = re.sub(r"\bOR\b", " or ", expr)
+        if re.search(r"[^()\sA-Za-z]", expr):
+            return False
+        try:
+            return bool(eval(expr, {"__builtins__": {}}, {}))
+        except Exception:
+            return False
+
+    def _table_of(etype: str, ename: str) -> str:
+        if etype == "tables":
+            return ename
+        if etype == "columns":
+            return ".".join(ename.split(".")[:3])
+        return ""
+
+    def _policy_covers(policy: dict, ta: dict) -> bool:
+        etype = _s(ta.get("entity_type", ""))
+        ename = _s(ta.get("entity_name", ""))
+        ptype = _s(policy.get("policy_type", ""))
+        p_cat = _s(policy.get("catalog", "")) or _s(policy.get("function_catalog", ""))
+        table_fqn = _table_of(etype, ename)
+        if not table_fqn:
+            return False
+        entity_catalog = table_fqn.split(".")[0] if "." in table_fqn else table_fqn
+        if p_cat and entity_catalog != p_cat:
+            return False
+
+        # Policy is inactive if its function isn't in the SQL file —
+        # the validator skips these, so we should too.
+        if available_fns:
+            pfn = _s(policy.get("function_name", "")).split(".")[-1]
+            if pfn and pfn not in available_fns:
+                return False
+
+        match_cond = _s(policy.get("match_condition", ""))
+        when_cond = _s(policy.get("when_condition", ""))
+
+        if etype == "columns":
+            if ptype != "POLICY_TYPE_COLUMN_MASK":
+                return False
+            ctags = col_tags.get(ename, {})
+            ttags = table_tags.get(table_fqn, {})
+            if not _condition_matches(match_cond, ctags):
+                return False
+            return _condition_matches(when_cond, ttags)
+
+        if etype == "tables":
+            if ptype != "POLICY_TYPE_ROW_FILTER":
+                return False
+            if not when_cond:
+                return False
+            return _condition_matches(when_cond, table_tags.get(ename, {}))
+
+        return False
+
+    # Identify uncovered non-public tag_assignments
+    uncovered: list[dict] = []
+    for ta in flat_assignments:
+        tval = _s(ta.get("tag_value", ""))
+        if not _requires_coverage(tval):
+            continue
+        if not any(_policy_covers(p, ta) for p in flat_policies):
+            uncovered.append(ta)
+
+    if not uncovered:
+        return 0
+
+    # Remove uncovered blocks via brace-counting (handles nested blocks safely)
+    section = _find_bracket_section(text, "tag_assignments")
+    if not section:
+        return 0
+
+    sec_start, sec_end = section
+    sec_txt = text[sec_start:sec_end]
+    blocks = _find_brace_blocks(sec_txt)
+
+    def _block_matches_ta(block_text: str, ta: dict) -> bool:
+        ename = _s(ta.get("entity_name", ""))
+        tkey = _s(ta.get("tag_key", ""))
+        tval = _s(ta.get("tag_value", ""))
+        return bool(
+            re.search(r'entity_name\s*=\s*"' + re.escape(ename) + r'"', block_text)
+            and re.search(r'tag_key\s*=\s*"' + re.escape(tkey) + r'"', block_text)
+            and re.search(r'tag_value\s*=\s*"' + re.escape(tval) + r'"', block_text)
+        )
+
+    # Process blocks in reverse so earlier offsets stay valid
+    remaining_uncovered = list(uncovered)
+    removed = 0
+    for bs, be in reversed(blocks):
+        if not remaining_uncovered:
+            break
+        bt = sec_txt[bs:be + 1]
+        matched_ta = None
+        for ta in remaining_uncovered:
+            if _block_matches_ta(bt, ta):
+                matched_ta = ta
+                break
+        if not matched_ta:
+            continue
+        abs_s = sec_start + bs
+        abs_e = sec_start + be + 1
+        while abs_e < len(text) and text[abs_e] in (",", " ", "\t"):
+            abs_e += 1
+        while abs_s > 0 and text[abs_s - 1] in (" ", "\t"):
+            abs_s -= 1
+        if abs_s > 0 and text[abs_s - 1] == "\n":
+            abs_s -= 1
+        text = text[:abs_s] + text[abs_e:]
+        removed += 1
+        ename = _s(matched_ta.get("entity_name", ""))
+        tkey = _s(matched_ta.get("tag_key", ""))
+        tval = _s(matched_ta.get("tag_value", ""))
+        print(f"  [AUTOFIX] Removed uncovered tag_assignment: {ename} ({tkey}={tval})")
+        remaining_uncovered.remove(matched_ta)
+
+    if removed:
+        tfvars_path.write_text(text)
+    return removed
 
 
 def autofix_inject_overlay_functions(
@@ -5243,7 +5920,7 @@ def _run_delta_mode(auth_file: Path) -> None:
     print("=" * 60)
 
 
-def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]:
+def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict, mode: str = "") -> list[str]:
     """Check generated config for known LLM failure modes that autofix can't handle.
 
     Returns a list of error strings (empty = all checks passed).
@@ -5256,14 +5933,18 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]
         import hcl2 as _hcl2
         cfg = _hcl2.loads(tfvars_path.read_text())
     except Exception:
-        return errors  # can't parse — let validation handle it
+        return errors, []  # can't parse — let validation handle it
 
-    # Check 1: genie_space_configs present when genie_spaces is configured
+    # Check 1: genie_space_configs present when genie_spaces is configured.
+    # This is a WARNING not an error — autofix_missing_genie_space_entries
+    # handles it.  Don't trigger a retry for this since the autofix adds the
+    # entries and the retry would overwrite them.
+    warnings: list[str] = []
     genie_spaces = auth_cfg.get("genie_spaces", [])
     if genie_spaces:
         gsc = cfg.get("genie_space_configs") or {}
         if not gsc:
-            errors.append(
+            warnings.append(
                 "genie_space_configs section missing from LLM output "
                 f"(expected for {len(genie_spaces)} configured genie_space(s))"
             )
@@ -5272,11 +5953,12 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]
     # are configured.  An empty governance config means the LLM produced an
     # incomplete response (e.g. only groups + tag_policies without the FGAC
     # sections), which would wipe all existing governance on apply.
+    # Skip in genie mode — 0 tag_assignments is correct (governance team manages ABAC).
     uc_tables = auth_cfg.get("uc_tables", [])
     if not uc_tables:
         for gs in auth_cfg.get("genie_spaces", []):
             uc_tables.extend(gs.get("uc_tables", []))
-    if uc_tables:
+    if uc_tables and mode != "genie":
         ta = cfg.get("tag_assignments", []) or []
         fp = cfg.get("fgac_policies", []) or []
         if not ta and not fp:
@@ -5307,8 +5989,16 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]
 
     # Check 3: masking SQL has basic syntactic validity
     sql_path = tfvars_path.parent / "masking_functions.sql"
+    fgac_policies = cfg.get("fgac_policies", []) or []
     if sql_path.exists():
         sql_text = sql_path.read_text()
+        # If FGAC policies exist but SQL has no functions, the output is incomplete
+        sql_fn_count = len(re.findall(r'CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION', sql_text, re.IGNORECASE))
+        if fgac_policies and sql_fn_count == 0:
+            errors.append(
+                f"fgac_policies reference functions but masking_functions.sql has "
+                f"0 CREATE FUNCTION statements — SQL output is incomplete."
+            )
         # Check for common LLM SQL errors
         if sql_text.strip():
             # Unmatched CASE/END
@@ -5470,7 +6160,7 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict) -> list[str]
                     f"Generate tag_assignments for ALL catalogs."
                 )
 
-    return errors
+    return errors, warnings
 
 
 def main():
@@ -5931,8 +6621,9 @@ Before you apply, tune for your business roles, security requirements, and Genie
         print("  [genie mode] Skipping masking_functions.sql (managed by governance team)")
         sql_block = None
 
+    all_cs = catalog_schemas if catalog_schemas else [(catalog, schema)] if catalog and schema else []
+
     if sql_block:
-        all_cs = catalog_schemas if catalog_schemas else [(catalog, schema)]
         targets = ", ".join(f"{c}.{s}" for c, s in all_cs)
         sql_header = (
             "-- ============================================================================\n"
@@ -6111,6 +6802,14 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_undef:
             print(f"  Auto-fixed: removed {n_undef} item(s) referencing undefined tag_key(s)")
 
+        # Strip bodyless CREATE FUNCTION statements (LLM sometimes emits a
+        # signature with no RETURN). They fail Databricks deploy with "SQL
+        # functions should have a function definition" — must run BEFORE
+        # overlay injection so the overlay's correct version replaces them.
+        n_bodyless = autofix_remove_bodyless_functions(sql_path if sql_block else None)
+        if n_bodyless:
+            print(f"  Auto-fixed: removed {n_bodyless} bodyless CREATE FUNCTION statement(s)")
+
         # Inject overlay-provided functions BEFORE adding missing FGAC policies,
         # so that row filter functions (e.g. filter_aml_compliance) are available
         # when autofix_missing_fgac_policies looks for a function to cover
@@ -6122,6 +6821,27 @@ Before you apply, tune for your business roles, security requirements, and Genie
         )
         if n_overlay_fns:
             print(f"  Auto-fixed: injected {n_overlay_fns} overlay-provided masking function(s)")
+
+        # Skip PII autofix in genie mode — tag_assignments are managed by the governance team
+        if args.mode != "genie":
+            n_pii_tags = autofix_untagged_pii_columns(
+                tfvars_path,
+                ddl_path=out_dir / "ddl" / "_fetched.sql" if out_dir else None,
+                sql_path=sql_path if sql_block else None,
+            )
+            if n_pii_tags:
+                print(f"  Auto-fixed: added {n_pii_tags} tag_assignment(s) for untagged PII columns")
+                # PII autofix may introduce new tag keys (e.g. financial_sensitivity)
+                # that don't exist in tag_policies yet.  Run tag_policies autofix now
+                # so the new keys/values are registered before missing-policy detection.
+                n_pii_tp = autofix_tag_policies(tfvars_path)
+                if n_pii_tp:
+                    print(f"  Auto-fixed: added {n_pii_tp} tag_policy value(s) for PII-detected tags")
+
+        # Repair HCL before missing-policy detection — autofix_untagged_pii_columns
+        # inserts tag_assignments via regex which can leave missing commas between
+        # the last existing entry and the new entries, causing hcl2 parse failures.
+        fix_hcl_syntax(tfvars_path)
 
         n_repaired = autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
         if n_repaired:
@@ -6174,6 +6894,87 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_cat_mismatch:
             print(f"  Auto-fixed: corrected {n_cat_mismatch} function/category mismatch(es) in fgac_policies")
 
+        # Remove policies that reference type-specific tags (e.g. financial_sensitivity)
+        # when the required masking function isn't available. The LLM sometimes generates
+        # these tags even without the corresponding overlay — leave them uncovered so
+        # the cleanup removes both the policy and the tag assignment.
+        # Repair HCL first — intermediate autofixes may have introduced syntax issues
+        # that would cause hcl2.loads() to fail silently in the cleanup below.
+        fix_hcl_syntax(tfvars_path)
+        _avail = _parse_sql_function_names(sql_path if sql_block else None)
+        # Map: (tag_key, tag_value) → required function.
+        # If the function isn't available, remove both policies AND tag assignments.
+        _type_tag_fn_map = [
+            ("financial_sensitivity", "rounded_amounts", "mask_amount_rounded"),
+            ("pii_level", "masked_dob", "mask_date_to_year"),
+        ]
+        for _tag_key, _tag_val, _required_fn in _type_tag_fn_map:
+            if _avail and _required_fn not in _avail:
+                try:
+                    import hcl2 as _hcl_tc
+                    _tc_cfg = _hcl_tc.loads(tfvars_path.read_text())
+                    _tc_text = tfvars_path.read_text()
+                    _tc_removed = 0
+                    # Remove policies referencing this tag — use brace-counting
+                    # (nested blocks like column_mask = { ... } break [^}]* regex)
+                    for _p in _tc_cfg.get("fgac_policies", []):
+                        _cond = (_p.get("match_condition", "") or "") + " " + (_p.get("when_condition", "") or "")
+                        if _tag_val in _cond:
+                            _pname = _p.get("name", "")
+                            if _pname:
+                                _sec = _find_bracket_section(_tc_text, "fgac_policies")
+                                if _sec:
+                                    _sec_start, _sec_end = _sec
+                                    _sec_txt = _tc_text[_sec_start:_sec_end]
+                                    _blks = _find_brace_blocks(_sec_txt)
+                                    for _bs, _be in reversed(_blks):
+                                        _bt = _sec_txt[_bs:_be + 1]
+                                        if re.search(r'name\s*=\s*"' + re.escape(_pname) + r'"', _bt):
+                                            # Determine removal range including trailing comma/whitespace
+                                            _abs_s = _sec_start + _bs
+                                            _abs_e = _sec_start + _be + 1
+                                            while _abs_e < len(_tc_text) and _tc_text[_abs_e] in (",", " ", "\t"):
+                                                _abs_e += 1
+                                            while _abs_s > 0 and _tc_text[_abs_s - 1] in (" ", "\t"):
+                                                _abs_s -= 1
+                                            if _abs_s > 0 and _tc_text[_abs_s - 1] == "\n":
+                                                _abs_s -= 1
+                                            _tc_text = _tc_text[:_abs_s] + _tc_text[_abs_e:]
+                                            _tc_removed += 1
+                                            break
+                    # Always remove tag assignments for this tag_key+tag_value
+                    # (even if 0 policies removed — LLM may generate tags without policies)
+                    _ta_sec = _find_bracket_section(_tc_text, "tag_assignments")
+                    _ta_removed = False
+                    if _ta_sec:
+                        _ta_start, _ta_end = _ta_sec
+                        _ta_sec_txt = _tc_text[_ta_start:_ta_end]
+                        _ta_blks = _find_brace_blocks(_ta_sec_txt)
+                        for _bs, _be in reversed(_ta_blks):
+                            _bt = _ta_sec_txt[_bs:_be + 1]
+                            if (re.search(r'tag_key\s*=\s*"' + re.escape(_tag_key) + r'"', _bt)
+                                    and re.search(r'tag_value\s*=\s*"' + re.escape(_tag_val) + r'"', _bt)):
+                                _abs_s = _ta_start + _bs
+                                _abs_e = _ta_start + _be + 1
+                                while _abs_e < len(_tc_text) and _tc_text[_abs_e] in (",", " ", "\t"):
+                                    _abs_e += 1
+                                while _abs_s > 0 and _tc_text[_abs_s - 1] in (" ", "\t"):
+                                    _abs_s -= 1
+                                if _abs_s > 0 and _tc_text[_abs_s - 1] == "\n":
+                                    _abs_s -= 1
+                                _tc_text = _tc_text[:_abs_s] + _tc_text[_abs_e:]
+                                _ta_removed = True
+                    if _tc_removed or _ta_removed:
+                        tfvars_path.write_text(_tc_text)
+                        print(f"  [AUTOFIX] Removed {_tag_key}={_tag_val} policies/tags (function '{_required_fn}' not in SQL)")
+                except Exception:
+                    pass
+
+        # Repair HCL syntax before condition-checking autofixes — intermediate
+        # autofixes (e.g. autofix_missing_fgac_policies) may introduce issues
+        # that cause hcl2.loads() to fail, silently skipping these checks.
+        fix_hcl_syntax(tfvars_path)
+
         n_dup_masks = autofix_duplicate_column_masks(tfvars_path)
         if n_dup_masks:
             print(f"  Auto-fixed: removed {n_dup_masks} duplicate column mask policy/ies")
@@ -6210,6 +7011,13 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_final_canonical:
             print(f"  Auto-fixed (final pass): normalized {n_final_canonical} tag vocabulary reference(s)")
 
+        # Last-resort: drop tag_assignments that no active FGAC policy covers.
+        # Prevents "is not covered by any active fgac_policy" validation failures.
+        # Pass SQL path so policies referencing missing functions are treated as inactive.
+        n_uncovered = autofix_remove_uncovered_tags(tfvars_path, sql_path if sql_block else None)
+        if n_uncovered:
+            print(f"  Auto-fixed (final pass): removed {n_uncovered} uncovered tag_assignment(s)")
+
         # ── Final governance mode safety strip ─────────────────────────────────
         # Multiple code paths (autofixes, semantic retries) can re-introduce
         # genie_space_configs after the initial strip. This final pass ensures
@@ -6222,7 +7030,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 print("  [governance mode] Final strip: removed genie_space_configs re-introduced by autofixes")
 
         # ── Semantic quality check (catches LLM issues that autofix can't fix) ──
-        semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)
+        semantic_errors, semantic_warnings = post_generate_semantic_check(tfvars_path, auth_cfg, mode=args.mode)
         if semantic_errors:
             _semantic_retry_count += 1
             if _semantic_retry_count < _semantic_max_retries:
@@ -6234,7 +7042,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 new_sql, new_hcl = extract_code_blocks(response_text)
                 # Write new SQL FIRST so that HCL autofixes can see the
                 # correct set of available functions (including overlay injects).
-                if new_sql:
+                if new_sql and args.mode != "genie":
                     sql_block = new_sql
                     # Ensure USE CATALOG/USE SCHEMA present (LLM may omit)
                     if all_cs and not re.search(r"USE\s+CATALOG\s+\S+", sql_block, re.IGNORECASE):
@@ -6244,9 +7052,14 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     sql_path.write_text(sql_block + "\n")
                 if new_hcl:
                     hcl_block = new_hcl
-                    # Re-apply governance mode strip on retry output
+                    # Re-apply mode-specific stripping on retry output
                     if args.mode == "governance":
                         hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_configs")
+                    elif args.mode == "genie":
+                        for _gk in ("groups", "tag_policies", "group_members"):
+                            hcl_block = remove_hcl_top_level_block(hcl_block, _gk)
+                        for _gk in ("tag_assignments", "fgac_policies"):
+                            hcl_block = remove_hcl_top_level_list(hcl_block, _gk)
                     extra_comments = overlay_detection_comments if overlay_detection_comments else ""
                     tfvars_path.write_text(hcl_header + extra_comments + hcl_block + "\n")
                     fix_hcl_syntax(tfvars_path)
@@ -6255,24 +7068,52 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_invalid_tag_values(tfvars_path)
                     autofix_tag_policies(tfvars_path)
                     autofix_undefined_tag_refs(tfvars_path)
+                    # Strip bodyless CREATE FUNCTION statements before
+                    # overlay injection — see main path comment above.
+                    autofix_remove_bodyless_functions(sql_path if sql_block else None)
                     # Re-inject overlay functions (retry LLM may omit them)
                     autofix_inject_overlay_functions(
                         sql_path if sql_block else None,
                         countries=countries, industries=industries,
                         catalog_schemas=catalog_schemas,
                     )
+                    # Rewrite row filter fns with hallucinated column refs — must
+                    # run before deploy to prevent UNRESOLVED_COLUMN errors.
+                    autofix_unsafe_row_filters(sql_path if sql_block else None)
+                    # Add PII tags for untagged columns (BEFORE missing_fgac_policies
+                    # so the new tags get coverage).
+                    if args.mode != "genie":
+                        autofix_untagged_pii_columns(
+                            tfvars_path,
+                            ddl_path=out_dir / "ddl" / "_fetched.sql" if out_dir else None,
+                            sql_path=sql_path if sql_block else None,
+                        )
+                        autofix_tag_policies(tfvars_path)  # register new PII tag values
                     autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_policy_count(tfvars_path)
                     if args.mode != "governance":
                         autofix_genie_config_fields(tfvars_path)
+                        # CRITICAL: Ensure every configured genie_space has a
+                        # genie_space_configs entry. Retry LLM output may drop
+                        # space names that the test assertion checks for.
+                        autofix_missing_genie_space_entries(tfvars_path, auth_cfg)
+                        env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
+                        autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
                     autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
                     autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_arg_count_mismatch(tfvars_path, sql_path if sql_block else None)
                     autofix_row_filter_column_refs(tfvars_path, sql_path if sql_block else None)
                     autofix_function_category_mismatch(tfvars_path, sql_path if sql_block else None)
+                    # Repair HCL before condition autofixes (same as main path)
+                    fix_hcl_syntax(tfvars_path)
+                    autofix_duplicate_column_masks(tfvars_path)
                     autofix_forbidden_conditions(tfvars_path)
                     autofix_invalid_condition_values(tfvars_path)
                     autofix_malformed_conditions(tfvars_path)
+                    # Deploy overlay-injected fns cross-catalog (multi-catalog support)
+                    autofix_cross_catalog_function_deployment(tfvars_path, sql_path if sql_block else None)
+                    # Last-resort: drop uncovered tag_assignments
+                    autofix_remove_uncovered_tags(tfvars_path, sql_path if sql_block else None)
                     # Final governance strip after retry autofixes
                     if args.mode == "governance":
                         _retry_text = tfvars_path.read_text()
@@ -6281,11 +7122,32 @@ Before you apply, tune for your business roles, security requirements, and Genie
                             tfvars_path.write_text(_retry_cleaned)
                             print("  [governance mode] Final strip (retry): removed genie_space_configs")
                 # Re-check after retry
-                semantic_errors = post_generate_semantic_check(tfvars_path, auth_cfg)
-            if semantic_errors:
-                print(f"\n  [SEMANTIC CHECK] Warnings after {_semantic_retry_count + 1} attempt(s):")
-                for err in semantic_errors:
+                semantic_errors, semantic_warnings = post_generate_semantic_check(tfvars_path, auth_cfg, mode=args.mode)
+            # Critical errors (empty governance output) should NOT be downgraded
+            # to warnings — exit with failure so the outer retry loop can kick in.
+            _CRITICAL_PATTERNS = [
+                "0 tag_assignments and 0 fgac_policies",
+                "SQL output is incomplete",
+            ]
+            _critical_errors = [
+                e for e in (semantic_errors or [])
+                if any(p in e for p in _CRITICAL_PATTERNS)
+            ]
+            _non_critical_errors = [
+                e for e in (semantic_errors or [])
+                if not any(p in e for p in _CRITICAL_PATTERNS)
+            ]
+            if _critical_errors:
+                print(f"\n  [SEMANTIC CHECK FAILED] Critical errors after {_semantic_retry_count + 1} attempt(s):")
+                for err in _critical_errors:
                     print(f"    - {err}")
+                print(f"  Exiting with failure — LLM produced incomplete output.")
+                sys.exit(1)
+            all_warnings = (semantic_warnings or []) + _non_critical_errors
+            if all_warnings:
+                print(f"\n  [SEMANTIC CHECK] Warnings after {_semantic_retry_count + 1} attempt(s):")
+                for w in all_warnings:
+                    print(f"    - {w}")
                 print(f"  Proceeding with best effort.")
 
         # ── Per-space mode: bootstrap per-space dir, then merge into assembled ──

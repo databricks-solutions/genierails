@@ -139,15 +139,17 @@ tag_assignments = []
         assert hcl is not None
         assert "admins" in hcl
 
-    def test_multiple_sql_blocks_takes_first(self):
+    def test_multiple_sql_blocks_takes_largest(self):
         response = """```sql
-CREATE OR REPLACE FUNCTION mask_first(val STRING)
-  RETURNS STRING RETURN 'FIRST';
+CREATE OR REPLACE FUNCTION mask_partial(val STRING)
+  RETURNS STRING RETURN 'PARTIAL';
 ```
 
 ```sql
-CREATE OR REPLACE FUNCTION mask_second(val STRING)
-  RETURNS STRING RETURN 'SECOND';
+CREATE OR REPLACE FUNCTION mask_one(val STRING)
+  RETURNS STRING RETURN 'ONE';
+CREATE OR REPLACE FUNCTION mask_two(val STRING)
+  RETURNS STRING RETURN 'TWO';
 ```
 
 ```hcl
@@ -161,8 +163,9 @@ tag_policies = [
 """
         sql, hcl = extract_code_blocks(response)
         assert sql is not None
-        assert "mask_first" in sql
-        assert "mask_second" not in sql
+        assert "mask_one" in sql
+        assert "mask_two" in sql
+        assert "mask_partial" not in sql
 
     def test_prose_between_blocks(self):
         """LLM may add explanatory text between code blocks."""

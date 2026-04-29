@@ -23,6 +23,7 @@ from generate_abac import (
     autofix_undefined_tag_refs,
     autofix_missing_fgac_policies,
     autofix_fgac_policy_count,
+    autofix_remove_bodyless_functions,
     bootstrap_per_space_dirs,
     extract_code_blocks,
 )
@@ -967,3 +968,105 @@ fgac_policies = [
         count = autofix_fgac_policy_count(path)
         assert count == 2
         assert_valid_hcl(path)
+
+
+# ===========================================================================
+#  autofix_remove_bodyless_functions
+# ===========================================================================
+
+class TestAutofixRemoveBodylessFunctions:
+
+    def test_removes_function_with_no_body(self, tmp_sql):
+        sql = """\
+USE CATALOG dev_fin;
+USE SCHEMA finance;
+
+CREATE OR REPLACE FUNCTION mask_email(val STRING) RETURNS STRING
+RETURN CONCAT('***@', SPLIT(val, '@')[1]);
+
+CREATE OR REPLACE FUNCTION filter_aml_compliance(aml_flag BOOLEAN);
+
+CREATE OR REPLACE FUNCTION filter_aml_compliance_stub() RETURNS BOOLEAN
+RETURN TRUE;
+"""
+        path = tmp_sql(sql)
+        n = autofix_remove_bodyless_functions(path)
+        assert n == 1
+        out = path.read_text()
+        assert "filter_aml_compliance(aml_flag BOOLEAN)" not in out
+        assert "mask_email" in out
+        assert "filter_aml_compliance_stub" in out
+
+    def test_returns_zero_when_all_functions_have_bodies(self, tmp_sql):
+        sql = """\
+CREATE OR REPLACE FUNCTION mask_email(val STRING) RETURNS STRING
+RETURN CONCAT('***@', SPLIT(val, '@')[1]);
+
+CREATE OR REPLACE FUNCTION filter_admins() RETURNS BOOLEAN
+RETURN is_account_group_member('admins');
+"""
+        path = tmp_sql(sql)
+        before = path.read_text()
+        n = autofix_remove_bodyless_functions(path)
+        assert n == 0
+        assert path.read_text() == before
+
+    def test_does_not_confuse_returns_with_return(self, tmp_sql):
+        # `RETURNS BOOLEAN` (type declaration) must not count as a body —
+        # only standalone `RETURN` does.
+        sql = """\
+CREATE OR REPLACE FUNCTION foo(x INT) RETURNS BOOLEAN;
+"""
+        path = tmp_sql(sql)
+        n = autofix_remove_bodyless_functions(path)
+        assert n == 1
+        assert "foo" not in path.read_text()
+
+    def test_ignores_return_inside_comment(self, tmp_sql):
+        # Stripping comments before the body check ensures a `RETURN` token
+        # buried in a comment doesn't keep an actually-bodyless function.
+        sql = """\
+CREATE OR REPLACE FUNCTION foo(x INT)
+-- TODO: add RETURN clause here
+;
+
+CREATE OR REPLACE FUNCTION bar(y INT) RETURNS INT
+RETURN y * 2;
+"""
+        path = tmp_sql(sql)
+        n = autofix_remove_bodyless_functions(path)
+        assert n == 1
+        assert "FUNCTION foo" not in path.read_text()
+        assert "FUNCTION bar" in path.read_text()
+
+    def test_no_change_when_sql_path_missing(self, tmp_path):
+        n = autofix_remove_bodyless_functions(tmp_path / "does_not_exist.sql")
+        assert n == 0
+
+    def test_handles_multiple_bodyless_in_one_file(self, tmp_sql):
+        sql = """\
+CREATE OR REPLACE FUNCTION a(x INT);
+CREATE OR REPLACE FUNCTION b(y INT) RETURNS INT RETURN y;
+CREATE OR REPLACE FUNCTION c(z INT);
+"""
+        path = tmp_sql(sql)
+        n = autofix_remove_bodyless_functions(path)
+        assert n == 2
+        out = path.read_text()
+        assert "FUNCTION a(" not in out
+        assert "FUNCTION c(" not in out
+        assert "FUNCTION b(" in out
+
+    def test_preserves_use_statements(self, tmp_sql):
+        sql = """\
+USE CATALOG dev_fin;
+USE SCHEMA finance;
+
+CREATE OR REPLACE FUNCTION orphan(x INT);
+"""
+        path = tmp_sql(sql)
+        n = autofix_remove_bodyless_functions(path)
+        assert n == 1
+        out = path.read_text()
+        assert "USE CATALOG dev_fin;" in out
+        assert "USE SCHEMA finance;" in out

@@ -310,8 +310,14 @@ class AzureProvider(CloudProvider):
         while time.time() < deadline:
             time.sleep(poll_interval)
             get_req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-            with urllib.request.urlopen(get_req) as resp:
-                data = json.loads(resp.read())
+            try:
+                with urllib.request.urlopen(get_req) as resp:
+                    data = json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                if e.code >= 500:
+                    print(f"  Transient error ({e.code}), retrying...")
+                    continue
+                raise
             props = data.get("properties", {})
             state = props.get("provisioningState", "Unknown")
             elapsed = int(time.time() - (deadline - 600))
