@@ -14,18 +14,9 @@ GenieRails includes a built-in Claude Code skill that turns the multi-step CLI w
 
 If you haven't already, install [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (CLI, desktop app, or IDE extension).
 
-### Step 2: Register the Skill
+### Step 2: Verify
 
-Add the GenieRails skill path to your Claude Code settings. Run this from the repo root:
-
-```bash
-# Add to your project-local Claude Code settings
-claude config add --project skills "$(pwd)/shared/.claude/skills/genierails"
-```
-
-### Step 3: Verify
-
-Open Claude Code in the `aws/` or `azure/` directory and type `/genierails`. You should see the skill activate and report your project status.
+The skill ships in-tree at `.claude/skills/genierails/` and is auto-discovered by Claude Code when you open the repo — no install step required. Open Claude Code in the `aws/` or `azure/` directory and type `/genierails`. You should see the skill activate and report your project status.
 
 ---
 

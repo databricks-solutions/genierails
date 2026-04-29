@@ -35,3 +35,9 @@ auth.auto.tfvars
 
 # Parallel test runner logs
 shared/scripts/logs/
+
+# Claude Code: ignore personal overrides and runtime files only — everything else
+# under .claude/ (skills/, commands/, hooks/, agents/, shared settings.json) is
+# shareable project config and should be committed.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
