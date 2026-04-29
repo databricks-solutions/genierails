@@ -271,6 +271,11 @@
       "signature": "mask_voter_id(voter_id STRING) RETURNS STRING",
       "aliases": ["mask_voterid", "mask_epic", "mask_voter_id_last4"]
     },
+    "mask_dl_india": {
+      "category": "india",
+      "signature": "mask_dl_india(dl STRING) RETURNS STRING",
+      "aliases": ["mask_driving_licence_india", "mask_driving_license_india", "mask_dl_in", "mask_indian_driving_licence"]
+    },
     "mask_upi_id": {
       "category": "india",
       "signature": "mask_upi_id(upi_id STRING) RETURNS STRING",

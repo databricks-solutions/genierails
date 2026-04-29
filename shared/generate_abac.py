@@ -3762,6 +3762,49 @@ _FUNCTION_EXPECTED_CATEGORIES = {
 }
 
 
+_OVERLAY_HINT_TO_CATEGORY: dict[str, str] = {}
+
+
+def _load_overlay_hints(country_codes: list[str] | None, industry_codes: list[str] | None) -> None:
+    """Populate ``_OVERLAY_HINT_TO_CATEGORY`` from country/industry YAMLs.
+
+    Mirrors ``validate_abac.py``'s dynamic loading so that the autofix
+    column-category inference stays in sync with the validator. Without this,
+    column hints declared in IN.yaml (e.g. ``gst_number``, ``pf_number``,
+    ``voter_card``) categorize as ``{"generic"}``, the autofix sees no
+    overlap with the dedicated function's expected categories, and reverts
+    correct LLM choices to ``mask_pii_partial``.
+
+    Idempotent — call once after country/industry are resolved in main().
+    """
+    try:
+        import yaml as _yaml
+    except ImportError:
+        return
+    countries_dir = Path(__file__).parent / "countries"
+    industries_dir = Path(__file__).parent / "industries"
+    sources: list[Path] = []
+    for code in (country_codes or []):
+        p = countries_dir / f"{code.upper()}.yaml"
+        if p.exists():
+            sources.append(p)
+    for code in (industry_codes or []):
+        p = industries_dir / f"{code.lower()}.yaml"
+        if p.exists():
+            sources.append(p)
+    for path in sources:
+        try:
+            data = _yaml.safe_load(path.read_text())
+        except Exception:
+            continue
+        for ident in (data.get("identifiers") or []):
+            category = (ident.get("category") or "").strip()
+            if not category:
+                continue
+            for hint in (ident.get("column_hints") or []):
+                _OVERLAY_HINT_TO_CATEGORY[hint.lower()] = category
+
+
 def _infer_column_categories_full(entity_name: str) -> set[str]:
     """Comprehensive column category inference matching validate_abac.py."""
     col = entity_name.split(".")[-1].lower()
@@ -3778,7 +3821,13 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
         categories.add("address")
     if "birth" in col or col in {"dob", "date_of_birth"}:
         categories.add("date")
-    if "card" in col or "cvv" in col:
+    # Cards: payment-card columns. Government IDs that contain "card" in their
+    # name (voter_card, ration_card) must NOT be classified as cards — they're
+    # separately tagged government_id below. Without the exclusion, autofix
+    # would let card-mask functions match a voter_id column.
+    if ("card" in col or "cvv" in col) and not any(
+        gov in col for gov in ("voter_card", "ration_card", "smart_card", "id_card")
+    ):
         categories.add("card")
     if "amount" in col or "balance" in col or "limit" in col:
         categories.add("amount")
@@ -3809,6 +3858,14 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
     # UPI is a payment identifier (Unified Payments Interface virtual address)
     if "upi" in col or "vpa" in col:
         categories.add("upi_id")
+    # Country/industry overlay hints — populated by _load_overlay_hints() at
+    # generate-time. Catches column names declared in YAML overlays that the
+    # hardcoded substring checks above don't cover (e.g. "gst_number",
+    # "pf_number", "uid_number"). Mirrors validate_abac.py's dynamic
+    # _country_hint_to_category so the autofix and validator agree.
+    for hint, category in _OVERLAY_HINT_TO_CATEGORY.items():
+        if hint in col:
+            categories.add(category)
     return categories or {"generic"}
 
 
@@ -6597,6 +6654,12 @@ def main():
             print(f"  Industry: {', '.join(industries)}")
         else:
             industries = None
+
+    # ── Load overlay-aware column hints so autofix categorization matches the
+    # column names declared in country/industry YAMLs. Without this the
+    # autofix sees "gst_number" / "pf_number" / "voter_card" etc. as generic
+    # and reverts dedicated mask functions to mask_pii_partial.
+    _load_overlay_hints(countries, industries)
 
     # ── Per-space mode: resolve the target space and redirect out_dir ────────
     # When --space is given, we only generate config for that one space.
