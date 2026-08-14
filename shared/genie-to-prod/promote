@@ -1,0 +1,1437 @@
+#!/usr/bin/env python3
+"""Interactive wizard for promoting Genie spaces from dev to prod.
+
+Asks for what it needs, discovers everything it can from the workspaces
+(warehouses, existing spaces, folder paths), writes databricks.yml and
+spaces.yml, then hands off to promote_genie.sh.
+
+Run: ./promote
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+# Enables in-line editing at every prompt, so arrow keys move the cursor instead
+# of arriving as raw escape sequences. Not present in every Python build, and the
+# prompts work without it, so a missing module is not fatal.
+try:
+    import readline  # noqa: F401
+except ImportError:
+    pass
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MIN_CLI = (1, 3, 0)
+
+IS_TTY = sys.stdout.isatty()
+BOLD = "\033[1m" if IS_TTY else ""
+DIM = "\033[2m" if IS_TTY else ""
+RED = "\033[31m" if IS_TTY else ""
+GREEN = "\033[32m" if IS_TTY else ""
+YELLOW = "\033[33m" if IS_TTY else ""
+BLUE = "\033[34m" if IS_TTY else ""
+RESET = "\033[0m" if IS_TTY else ""
+
+
+# --- presentation -------------------------------------------------------------
+
+def banner():
+    width = min(shutil.get_terminal_size((80, 24)).columns, 78)
+    print()
+    print(f"{BOLD}{BLUE}{'─' * width}{RESET}")
+    print(f"{BOLD}  Promote Genie Spaces to Production{RESET}")
+    print(f"{DIM}  Databricks Asset Bundles · dev workspace → prod workspace{RESET}")
+    print(f"{BOLD}{BLUE}{'─' * width}{RESET}")
+
+
+def section(number, total, title):
+    print(f"\n{BOLD}{BLUE}[{number}/{total}] {title}{RESET}")
+    print(f"{DIM}{'─' * min(shutil.get_terminal_size((80, 24)).columns, 78)}{RESET}")
+
+
+def ok(message):
+    print(f"  {GREEN}✓{RESET} {message}")
+
+
+def warn(message):
+    print(f"  {YELLOW}!{RESET} {message}")
+
+
+def error(message):
+    print(f"  {RED}✗{RESET} {message}")
+
+
+def die(message):
+    error(message)
+    sys.exit(1)
+
+
+def ask(prompt, default=None, validate=None, help_text=None):
+    """Prompt until a valid answer is given. Enter accepts the default."""
+    if help_text:
+        print(f"  {DIM}{help_text}{RESET}")
+    while True:
+        suffix = f" {DIM}[{default}]{RESET}" if default else ""
+        try:
+            answer = clean_input(input(f"  {BOLD}?{RESET} {prompt}{suffix}: "))
+        except (EOFError, KeyboardInterrupt):
+            print("\n")
+            die("cancelled")
+        if not answer and default is not None:
+            answer = default
+        if not answer:
+            error("required")
+            continue
+        if validate:
+            problem = validate(answer)
+            if problem:
+                error(problem)
+                continue
+        return answer
+
+
+def confirm(prompt, default=False):
+    hint = "Y/n" if default else "y/N"
+    while True:
+        try:
+            answer = clean_input(
+                input(f"  {BOLD}?{RESET} {prompt} {DIM}[{hint}]{RESET}: ")
+            ).lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n")
+            die("cancelled")
+        if not answer:
+            return default
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        error("answer y or n")
+
+
+def choose(prompt, options, labeller=str):
+    """Numbered single-select over a list of options."""
+    print(f"\n  {BOLD}{prompt}{RESET}")
+    for index, option in enumerate(options, 1):
+        print(f"    {BOLD}{index}{RESET}) {labeller(option)}")
+    while True:
+        try:
+            answer = clean_input(input(f"  {BOLD}?{RESET} Choose 1-{len(options)}: "))
+        except (EOFError, KeyboardInterrupt):
+            print("\n")
+            die("cancelled")
+        if answer.isdigit() and 1 <= int(answer) <= len(options):
+            return options[int(answer) - 1]
+        error(f"enter a number between 1 and {len(options)}")
+
+
+PAGE_SIZE = 15
+
+# Arrow keys, Home/End, and friends arrive as escape sequences on a plain
+# input() with no readline editing. Treated as text they became a filter that
+# matched nothing, which looked like a hang.
+ANSI_ESCAPE = re.compile(r"\x1b\[?[0-9;]*[A-Za-z~]?|\x1b")
+
+
+def clean_input(raw):
+    """Strip escape sequences and control characters from a typed answer.
+
+    Returns "" for input that was nothing but an escape sequence, so the caller
+    can treat it as "no answer" instead of a filter.
+    """
+    without_escapes = ANSI_ESCAPE.sub("", raw)
+    printable = "".join(c for c in without_escapes if c.isprintable())
+    return printable.strip()
+
+
+def search_choose(prompt, items, labeller=str, allow_custom=True,
+                  custom_label="Type a name by hand"):
+    """Pick one item from a list, with substring filtering and paging.
+
+    A metastore can hold hundreds of catalogs and thousands of tables, which is
+    far too many to print. Typing a few characters narrows the list; picking a
+    number selects. Filtering happens locally over an already-fetched list, so
+    there is no API call per keystroke.
+    """
+    if not items:
+        return None
+
+    query = ""
+    page = 0
+    first_draw = True
+
+    while True:
+        if query:
+            matches = [i for i in items if query.lower() in labeller(i).lower()]
+        else:
+            matches = list(items)
+
+        total_pages = max(1, (len(matches) + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = min(page, total_pages - 1)
+        window = matches[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+
+        # Only label the list on the first draw; a repeated identical heading
+        # after filtering or paging looks like the input was ignored.
+        if first_draw:
+            print(f"\n  {BOLD}{prompt}{RESET}")
+            first_draw = False
+        else:
+            print()
+
+        if query:
+            print(f"  {DIM}filter: '{query}' — {len(matches)} of {len(items)} match{RESET}")
+        elif len(items) > PAGE_SIZE:
+            print(f"  {DIM}{len(items)} available{RESET}")
+
+        # A filter that matches nothing is a dead end: there are no numbers to
+        # pick, so clear it rather than leaving the customer stuck.
+        if query and not matches:
+            warn(f"nothing matches '{query}' — showing everything again")
+            query, page = "", 0
+            continue
+
+        for offset, item in enumerate(window, 1):
+            print(f"    {BOLD}{page * PAGE_SIZE + offset}{RESET}) {labeller(item)}")
+
+        hints = ["a number to pick"]
+        if total_pages > 1:
+            hints.append(f"n/p for next/prev page ({page + 1}/{total_pages})")
+        hints.append("text to filter")
+        if query:
+            hints.append("'-' to clear the filter")
+        if allow_custom:
+            hints.append("'!' to type a name by hand")
+        print(f"  {DIM}{', '.join(hints)}{RESET}")
+
+        try:
+            answer = clean_input(input(f"  {BOLD}?{RESET} "))
+        except (EOFError, KeyboardInterrupt):
+            print("\n")
+            die("cancelled")
+
+        # Empty, or an arrow key that cleaned away to nothing. Redrawing the
+        # whole list adds noise, so just re-ask.
+        if not answer:
+            first_draw = True
+            continue
+
+        if answer.isdigit():
+            index = int(answer) - 1
+            if 0 <= index < len(matches):
+                return matches[index]
+            error(f"pick a number between 1 and {len(matches)}")
+            continue
+
+        if answer == "-":
+            query, page = "", 0
+            continue
+        if answer.lower() == "n" and total_pages > 1:
+            page = (page + 1) % total_pages
+            continue
+        if answer.lower() == "p" and total_pages > 1:
+            page = (page - 1) % total_pages
+            continue
+        if answer == "!" and allow_custom:
+            return None  # caller falls back to a free-text prompt
+
+        query, page = answer, 0
+
+
+# --- databricks helpers -------------------------------------------------------
+
+# Long enough for a slow workspace, short enough that an unreachable host or a
+# stuck token refresh does not look like a hang with no output.
+CLI_TIMEOUT = 45
+
+
+def run(args, profile=None, check=True, timeout=CLI_TIMEOUT):
+    cmd = ["databricks"] + args
+    if profile:
+        cmd += ["-p", profile]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+    if check and result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def api_get(path, profile):
+    out = run(["api", "get", path], profile=profile)
+    if out is None:
+        return None
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        return None
+
+
+_PROFILE_CACHE = None
+
+
+def list_profiles():
+    """List CLI profiles that have a host.
+
+    Cached because `databricks auth profiles` validates every profile in
+    ~/.databrickscfg and takes several seconds; the wizard asks for this list
+    more than once.
+    """
+    global _PROFILE_CACHE
+    if _PROFILE_CACHE is not None:
+        return _PROFILE_CACHE
+
+    out = run(["auth", "profiles", "-o", "json"], check=False)
+    if not out:
+        _PROFILE_CACHE = []
+        return _PROFILE_CACHE
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        _PROFILE_CACHE = []
+        return _PROFILE_CACHE
+
+    _PROFILE_CACHE = [p for p in data.get("profiles", []) if p.get("host")]
+    return _PROFILE_CACHE
+
+
+def whoami(profile):
+    data = api_get("/api/2.0/preview/scim/v2/Me", profile)
+    if data:
+        return data.get("userName")
+    return None
+
+
+def list_warehouses(profile):
+    data = api_get("/api/2.0/sql/warehouses", profile)
+    if not data:
+        return []
+    return [
+        {"id": w.get("id"), "name": w.get("name"), "state": w.get("state")}
+        for w in data.get("warehouses", [])
+    ]
+
+
+def list_genie_spaces(profile):
+    """List Genie spaces, following pagination."""
+    spaces = []
+    path = "/api/2.0/genie/spaces?page_size=100"
+    for _ in range(20):  # bound the loop; 2000 spaces is far beyond this use case
+        data = api_get(path, profile)
+        if not data:
+            break
+        spaces.extend(data.get("spaces", []))
+        token = data.get("next_page_token")
+        if not token:
+            break
+        path = f"/api/2.0/genie/spaces?page_size=100&page_token={token}"
+    return spaces
+
+
+def list_catalogs(profile):
+    data = api_get("/api/2.1/unity-catalog/catalogs?max_results=0", profile)
+    if not data:
+        data = api_get("/api/2.0/unity-catalog/catalogs", profile)
+    if not data:
+        return []
+    return sorted(c.get("name") for c in data.get("catalogs", []) if c.get("name"))
+
+
+def list_schemas(profile, catalog):
+    data = api_get(
+        f"/api/2.1/unity-catalog/schemas?catalog_name={catalog}&max_results=0",
+        profile,
+    )
+    if not data:
+        return []
+    return sorted(s.get("name") for s in data.get("schemas", []) if s.get("name"))
+
+
+def list_tables(profile, catalog, schema):
+    data = api_get(
+        f"/api/2.1/unity-catalog/tables?catalog_name={catalog}"
+        f"&schema_name={schema}&max_results=0",
+        profile,
+    )
+    if not data:
+        return []
+    return sorted(t.get("name") for t in data.get("tables", []) if t.get("name"))
+
+
+def space_table_names(profile, space_id):
+    """Table FQNs referenced by a dev space, read from its serialized form.
+
+    These are the names that actually need mapping, so offering them beats
+    making the customer recall which catalogs a space touches.
+    """
+    data = api_get(
+        f"/api/2.0/genie/spaces/{space_id}?include_serialized_space=true", profile
+    )
+    if not data:
+        return set()
+
+    serialized = data.get("serialized_space")
+    if isinstance(serialized, str):
+        try:
+            serialized = json.loads(serialized)
+        except json.JSONDecodeError:
+            return set()
+    if serialized is None:
+        return set()
+
+    sys.path.insert(0, os.path.join(HERE, "lib"))
+    import rewrite_catalog
+
+    return rewrite_catalog.extract_tables(serialized)
+
+
+# --- validators ---------------------------------------------------------------
+
+def valid_key(value):
+    if not re.match(r"^[a-z][a-z0-9_]*$", value):
+        return "use lowercase letters, digits and underscores, starting with a letter"
+    return None
+
+
+def valid_host(value):
+    if not value.startswith("https://"):
+        return "must start with https://"
+    return None
+
+
+# --- steps --------------------------------------------------------------------
+
+TOTAL_STEPS = 6
+
+
+def step_preflight():
+    section(1, TOTAL_STEPS, "Checking your setup")
+
+    if not shutil.which("databricks"):
+        die("databricks CLI not found.\n"
+            "      Install: brew tap databricks/tap && brew install databricks")
+
+    version_out = run(["--version"], check=False) or ""
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_out)
+    if not match:
+        die("could not read the databricks CLI version")
+    version = tuple(int(g) for g in match.groups())
+
+    if version < MIN_CLI:
+        die("databricks CLI {} is too old. Genie spaces need {} or newer.\n"
+            "      Upgrade: brew upgrade databricks".format(
+                ".".join(map(str, version)), ".".join(map(str, MIN_CLI))))
+    ok(f"databricks CLI {'.'.join(map(str, version))}")
+
+
+def step_profiles():
+    section(2, TOTAL_STEPS, "Choosing your workspaces")
+
+    profiles = list_profiles()
+    if len(profiles) < 1:
+        die("no authenticated CLI profiles found.\n"
+            "      Set them up first:\n"
+            "        databricks auth login --host https://dev... --profile dev\n"
+            "        databricks auth login --host https://prod... --profile prod")
+
+    print(f"  {DIM}Found {len(profiles)} configured profile(s).{RESET}")
+
+    def label(profile):
+        return f"{profile['name']}  {DIM}{profile.get('host','')}{RESET}"
+
+    dev = choose("Which profile is your DEV workspace (the source)?", profiles, label)
+    remaining = [p for p in profiles if p["name"] != dev["name"]] or profiles
+    prod = choose("Which profile is your PROD workspace (the target)?", remaining, label)
+
+    if dev["name"] == prod["name"]:
+        warn("dev and prod are the same profile; promotion will target one workspace")
+
+    for role, profile in (("dev", dev), ("prod", prod)):
+        # `auth profiles` already reported validity, so only confirm the identity
+        # for profiles it flagged as usable. Probing a stale profile means a
+        # token refresh against an unreachable host, which is slow.
+        if profile.get("valid") is False:
+            die(f"profile '{profile['name']}' is not authenticated.\n"
+                f"      Fix: databricks auth login --profile {profile['name']}")
+
+        print(f"  {DIM}checking {role} profile...{RESET}", flush=True)
+        identity = whoami(profile["name"])
+        if not identity:
+            die(f"profile '{profile['name']}' cannot authenticate.\n"
+                f"      Fix: databricks auth login --profile {profile['name']}")
+        ok(f"{role}: {profile['name']} → {identity}")
+
+    return dev, prod
+
+
+def step_pick_spaces(dev_profile):
+    section(3, TOTAL_STEPS, "Picking Genie spaces to promote")
+
+    print(f"  {DIM}Listing Genie spaces in dev...{RESET}")
+    spaces = list_genie_spaces(dev_profile["name"])
+
+    chosen = []
+
+    if not spaces:
+        warn("no Genie spaces found automatically (the API may be restricted for you).")
+        print(f"  {DIM}Enter space IDs by hand. Find one in its URL: /genie/rooms/<id>{RESET}")
+        while True:
+            dev_id = ask("Dev space ID")
+            title = ask("A short name for it", default=f"space_{len(chosen) + 1}")
+            key = ask("Bundle resource key", default=_suggest_key(title),
+                      validate=valid_key)
+            chosen.append({"key": key, "dev_id": dev_id, "title": title})
+            if not confirm("Add another space?", default=False):
+                break
+        return chosen
+
+    ok(f"found {len(spaces)} space(s) in dev")
+
+    spaces = sorted(spaces, key=lambda s: (s.get("title") or "").lower())
+    picked = _pick_spaces(spaces)
+
+    print()
+    for space in picked:
+        title = space.get("title") or "untitled"
+        suggested = _suggest_key(title)
+        key = ask(f"Resource key for {BOLD}{title}{RESET}",
+                  default=suggested, validate=valid_key)
+        chosen.append({"key": key, "dev_id": space.get("space_id"), "title": title})
+
+    return chosen
+
+
+def _pick_spaces(spaces, labeller=None):
+    """Multi-select over dev spaces, with substring filtering and paging.
+
+    A workspace can hold far more spaces than fit on screen, so this filters
+    rather than printing everything.
+    """
+    if labeller is None:
+        def labeller(space):
+            return space.get("title") or "(untitled)"
+
+    query = ""
+    page = 0
+    selected = []
+    first_draw = True
+
+    while True:
+        if query:
+            matches = [s for s in spaces
+                       if query.lower() in (s.get("title") or "").lower()]
+        else:
+            matches = list(spaces)
+
+        total_pages = max(1, (len(matches) + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = min(page, total_pages - 1)
+        window = matches[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+
+        # The list is redrawn after every keystroke so the check marks stay
+        # accurate. Repeating the same question each time made it look as though
+        # the previous answer had been ignored, so the heading only appears once
+        # and later redraws say what they are.
+        if first_draw:
+            print(f"\n  {BOLD}Which spaces do you want to promote?{RESET}")
+            print(f"  {DIM}Pick one or more, then press Enter to continue.{RESET}")
+            first_draw = False
+        else:
+            print(f"\n  {DIM}Current selection:{RESET}")
+
+        if query:
+            print(f"  {DIM}filter: '{query}' — {len(matches)} of {len(spaces)} match{RESET}")
+
+        if query and not matches:
+            warn(f"nothing matches '{query}' — showing everything again")
+            query, page = "", 0
+            continue
+
+        for offset, space in enumerate(window, 1):
+            number = page * PAGE_SIZE + offset
+            chosen_here = space in selected
+            mark = f"{GREEN}✓{RESET}" if chosen_here else " "
+            shown = labeller(space)
+            colour = GREEN if chosen_here else BOLD
+            print(f"   {mark} {colour}{number:>3}{RESET}) {shown}  "
+                  f"{DIM}{space.get('space_id','')}{RESET}")
+
+        if selected:
+            names = ", ".join((s.get("title") or "untitled") for s in selected)
+            print(f"  {GREEN}{len(selected)} selected:{RESET} {names}")
+            print(f"  {BOLD}Press Enter to continue{RESET}"
+                  f"{DIM}, or keep toggling to change the selection.{RESET}")
+
+        hints = ["numbers to toggle (e.g. 1,3)", "text to filter", "'all'"]
+        if total_pages > 1:
+            hints.append(f"n/p for pages ({page + 1}/{total_pages})")
+        if query:
+            hints.append("'-' to clear filter")
+        print(f"  {DIM}{', '.join(hints)}{RESET}")
+
+        try:
+            answer = clean_input(input(f"  {BOLD}?{RESET} "))
+        except (EOFError, KeyboardInterrupt):
+            print("\n")
+            die("cancelled")
+
+        if not answer:
+            if selected:
+                return selected
+            error("type a number to pick a space first")
+            continue
+
+        lowered = answer.lower()
+        if lowered in ("all", "done", "d", "y", "yes", "ok"):
+            if lowered == "all":
+                return matches
+            # People type a word instead of pressing Enter; honour the intent
+            # rather than turning it into a filter that matches nothing.
+            if selected:
+                return selected
+            error("nothing selected yet")
+            continue
+        if answer == "-":
+            query, page = "", 0
+            continue
+        if lowered == "n" and total_pages > 1:
+            page = (page + 1) % total_pages
+            continue
+        if lowered == "p" and total_pages > 1:
+            page = (page - 1) % total_pages
+            continue
+
+        parts = [p.strip() for p in answer.split(",") if p.strip()]
+        if all(p.isdigit() for p in parts):
+            for part in parts:
+                index = int(part) - 1
+                if 0 <= index < len(matches):
+                    space = matches[index]
+                    title = space.get("title") or "untitled"
+                    # Echo the effect, so entering the same number twice reads as
+                    # a deliberate deselect rather than a prompt that ignored you.
+                    if space in selected:
+                        selected.remove(space)
+                        print(f"  {YELLOW}removed{RESET} {title}")
+                    else:
+                        selected.append(space)
+                        print(f"  {GREEN}added{RESET} {title}")
+                else:
+                    error(f"{part} is not a listed number")
+            continue
+
+        query, page = answer, 0
+
+
+def _suggest_key(title):
+    key = re.sub(r"[^a-z0-9]+", "_", (title or "").lower()).strip("_")
+    key = re.sub(r"_+", "_", key) or "genie_space"
+    if not key[0].isalpha():
+        key = "s_" + key
+    return key[:40]
+
+
+def step_catalog_map(dev_profile, prod_profile, chosen):
+    section(4, TOTAL_STEPS, "Mapping dev tables to prod tables")
+
+    print(f"  {DIM}Genie spaces reference tables by full name, e.g. dev_cat.sales.orders.")
+    print(f"  Those names are rewritten so the prod space reads prod data.{RESET}\n")
+
+    if not confirm("Do any table names differ between dev and prod?", default=True):
+        ok("no rewriting needed; the same tables will be used")
+        return {}
+
+    dev_catalogs = list_catalogs(dev_profile["name"])
+    prod_catalogs = list_catalogs(prod_profile["name"])
+
+    # The spaces themselves name the tables that need mapping, which beats
+    # asking the customer to recall which catalogs each space touches.
+    print(f"  {DIM}Reading the tables your chosen spaces reference...{RESET}")
+    referenced = set()
+    for space in chosen:
+        referenced |= space_table_names(dev_profile["name"], space["dev_id"])
+
+    dev_used_catalogs = sorted({t.split(".")[0] for t in referenced if "." in t})
+    if dev_used_catalogs:
+        ok(f"those spaces reference {len(referenced)} table(s) across "
+           f"{len(dev_used_catalogs)} catalog(s): {', '.join(dev_used_catalogs)}")
+    elif dev_catalogs:
+        print(f"  {DIM}Could not read table names; you can still pick catalogs "
+              f"from the list.{RESET}")
+
+    mapping = {}
+    while True:
+        level = choose(
+            "What differs for this mapping?",
+            [
+                {"parts": 1, "label": "Only the catalog differs",
+                 "example": "dev_analytics.sales.orders → prod_analytics.sales.orders"},
+                {"parts": 2, "label": "Catalog and schema differ",
+                 "example": "dev_analytics.sales.orders → prod_analytics.retail.orders"},
+                {"parts": 3, "label": "The table name differs too",
+                 "example": "dev_analytics.sales.orders → prod_analytics.retail.txns"},
+            ],
+            lambda option: f"{option['label']}\n         {DIM}{option['example']}{RESET}",
+        )
+        parts = level["parts"]
+
+        dev_name = _pick_name(
+            dev_profile["name"], "dev", parts, dev_catalogs,
+            preferred_catalogs=dev_used_catalogs, referenced=referenced,
+        )
+        if dev_name is None:
+            continue
+
+        prod_name = _pick_name(
+            prod_profile["name"], "prod", parts, prod_catalogs,
+            exclude_exact=dev_name,
+        )
+        if prod_name is None:
+            continue
+
+        if dev_name == prod_name:
+            warn("source and target are identical; nothing would change")
+            continue
+
+        mapping[dev_name] = prod_name
+        ok(f"{dev_name} → {prod_name}")
+
+        if not confirm("Add another mapping?", default=False):
+            break
+
+    _report_unmapped(referenced, mapping)
+
+    print(f"\n  {DIM}More specific mappings win: a table-level rule is applied")
+    print(f"  before a catalog-level one, so you can combine them.{RESET}")
+
+    return mapping
+
+
+def _pick_name(profile, side, parts, catalogs, preferred_catalogs=None,
+               referenced=None, exclude_exact=None):
+    """Build a 1-, 2-, or 3-part name by picking each segment from the workspace.
+
+    Returns None if the customer backs out, so the caller can restart the
+    mapping cleanly.
+    """
+    label = {1: "catalog", 2: "catalog.schema", 3: "catalog.schema.table"}[parts]
+    print(f"\n  {BOLD}Choose the {side} {label}{RESET}")
+
+    # On the dev side, offer catalogs the spaces actually use before the rest.
+    ordered = list(catalogs or [])
+    if preferred_catalogs:
+        rest = [c for c in ordered if c not in preferred_catalogs]
+        ordered = list(preferred_catalogs) + rest
+
+    def catalog_label(name):
+        if preferred_catalogs and name in preferred_catalogs:
+            return f"{name}  {YELLOW}← used by your spaces{RESET}"
+        return name
+
+    catalog = None
+    if ordered:
+        catalog = search_choose(f"{side} catalog", ordered, catalog_label)
+    if catalog is None:
+        catalog = ask(f"{side} catalog name",
+                      validate=lambda v: _check_parts(v, 1))
+    if parts == 1:
+        return catalog
+
+    schemas = list_schemas(profile, catalog)
+    schema = None
+    if schemas:
+        schema = search_choose(f"schema in {catalog}", schemas)
+    if schema is None:
+        schema = ask(f"schema name in {catalog}",
+                     validate=lambda v: _check_parts(v, 1))
+    if parts == 2:
+        return f"{catalog}.{schema}"
+
+    tables = list_tables(profile, catalog, schema)
+
+    # On the dev side, narrow to tables the spaces actually reference.
+    if referenced:
+        used = {t.split(".")[2] for t in referenced
+                if t.startswith(f"{catalog}.{schema}.") and t.count(".") == 2}
+        if used:
+            in_use = [t for t in tables if t in used]
+            tables = in_use + [t for t in tables if t not in used]
+
+    table = None
+    if tables:
+        def table_label(name):
+            if referenced and f"{catalog}.{schema}.{name}" in referenced:
+                return f"{name}  {YELLOW}← used by your spaces{RESET}"
+            return name
+        table = search_choose(f"table in {catalog}.{schema}", tables, table_label)
+    if table is None:
+        table = ask(f"table name in {catalog}.{schema}",
+                    validate=lambda v: _check_parts(v, 1))
+
+    return f"{catalog}.{schema}.{table}"
+
+
+def _report_unmapped(referenced, mapping):
+    """Flag referenced tables no mapping touches, before anything is written.
+
+    The rewriter only errors on catalogs that appear in the mapping, so a
+    catalog the customer forgot entirely would otherwise pass silently and
+    reach prod still pointing at dev.
+    """
+    if not referenced or not mapping:
+        return
+
+    sys.path.insert(0, os.path.join(HERE, "lib"))
+    import rewrite_catalog
+
+    missed = sorted(
+        table for table in referenced
+        if rewrite_catalog.rewrite_string(table, mapping)[1] == 0
+    )
+    if not missed:
+        return
+
+    warn(f"{len(missed)} referenced table(s) match no mapping and will point at "
+         f"their current names in prod:")
+    for table in missed[:10]:
+        print(f"        {table}")
+    if len(missed) > 10:
+        print(f"        {DIM}... and {len(missed) - 10} more{RESET}")
+
+
+def _check_parts(value, expected):
+    """Validate a dotted identifier has exactly `expected` parts."""
+    parts = value.split(".")
+    if len(parts) != expected:
+        shapes = {1: "catalog", 2: "catalog.schema", 3: "catalog.schema.table"}
+        return f"expected {shapes[expected]} ({expected} part(s)), got {len(parts)}"
+    if any(not part.strip() for part in parts):
+        return "no empty parts"
+    if not all(re.match(r"^[A-Za-z0-9_]+$", part.strip()) for part in parts):
+        return "use letters, digits and underscores only"
+    return None
+
+
+def step_prod_targets(prod_profile, chosen):
+    section(5, TOTAL_STEPS, "Prod warehouse, folder, and existing spaces")
+
+    warehouses = list_warehouses(prod_profile["name"])
+    if warehouses:
+        def label(warehouse):
+            return f"{warehouse['name']}  {DIM}{warehouse['id']} · {warehouse.get('state','')}{RESET}"
+        warehouse = choose("Which prod SQL warehouse should the spaces use?",
+                           warehouses, label)
+        warehouse_id = warehouse["id"]
+        ok(f"prod warehouse: {warehouse['name']}")
+    else:
+        warn("could not list prod warehouses")
+        warehouse_id = ask("Prod warehouse ID",
+                           help_text="Find it in SQL Warehouses → your warehouse → ID")
+
+    identity = whoami(prod_profile["name"]) or "you@example.com"
+    parent_path = ask("Workspace folder for the prod spaces",
+                      default="/Workspace/Shared/genie")
+    run_as = ask("Who should own the spaces in prod (run_as)", default=identity)
+
+    _resolve_prod_targets(prod_profile, chosen)
+
+    return warehouse_id, parent_path, run_as
+
+
+def _resolve_prod_targets(prod_profile, chosen):
+    """Decide, per space, whether to create new in prod or adopt an existing space.
+
+    Order matters. The bundle's own deployment state is authoritative: if it
+    already tracks a space, that space is bound and there is nothing to ask. Only
+    when a space is not tracked do we fall back to looking at what is in prod,
+    because matching by title is a guess.
+    """
+    print(f"\n  {DIM}Checking what the bundle already tracks in prod...{RESET}")
+
+    bound = _load_binding_state(prod_profile["name"])
+
+    if bound is None:
+        print(f"  {DIM}No previous deployment found for the prod target.{RESET}")
+        bound = {}
+    elif bound:
+        tracked = sum(1 for status, _ in bound.values() if status == "bound")
+        ok(f"the bundle already tracks {tracked} space(s) in prod")
+
+    prod_spaces = None  # fetched lazily; only needed for unbound spaces
+
+    for space in chosen:
+        key = space["key"]
+        status, tracked_id = bound.get(key, ("absent", ""))
+
+        if status == "bound" and tracked_id:
+            # Already managed. Re-binding would be a no-op, and prompting here
+            # would invite the customer to create a pointless duplicate.
+            space["prod_id"] = ""
+            space["already_bound"] = tracked_id
+            print(f"  {GREEN}✓{RESET} {key}: already linked to prod space "
+                  f"{DIM}{tracked_id}{RESET} — will be updated in place")
+            continue
+
+        # Not tracked by the bundle. Be explicit about that before offering options.
+        print(f"\n  {YELLOW}!{RESET} {BOLD}{key}{RESET} is not linked to any prod space yet.")
+        print(f"    {DIM}Nothing in prod is currently managed by the bundle under")
+        print(f"    this name, so the bundle does not know what to update.{RESET}")
+
+        if prod_spaces is None:
+            print(f"    {DIM}Loading the Genie spaces that exist in prod...{RESET}")
+            prod_spaces = list_genie_spaces(prod_profile["name"])
+
+        # A prod space already claimed by another resource must not be offered:
+        # two bundle resources pointing at one space would overwrite each other
+        # on every deploy.
+        claimed = {tid for status, tid in bound.values() if status == "bound" and tid}
+        claimed |= {s["prod_id"] for s in chosen if s.get("prod_id")}
+        available = [s for s in prod_spaces if s.get("space_id") not in claimed]
+
+        if not available:
+            if prod_spaces:
+                print(f"    {DIM}Every prod space is already managed by this bundle, "
+                      f"so this will be created new.{RESET}")
+            else:
+                print(f"    {DIM}No Genie spaces exist in prod, so this will be created new.{RESET}")
+            space["prod_id"] = ""
+            continue
+
+        create_option = {"space_id": "", "title": "Create a new space in prod"}
+        options = [create_option] + available
+
+        # Surface a same-title space first; it is the likely intended match.
+        title = (space.get("title") or "").strip().lower()
+        likely = [s for s in available
+                  if (s.get("title") or "").strip().lower() == title]
+        if likely:
+            print(f"    {DIM}A prod space shares this title, listed with a marker below.{RESET}")
+
+        def label(option):
+            if not option["space_id"]:
+                return f"{GREEN}{option['title']}{RESET}"
+            marker = f"  {YELLOW}← same title as dev{RESET}" if option in likely else ""
+            return (f"Update existing: {option.get('title') or '(untitled)'}"
+                    f"  {DIM}{option['space_id']}{RESET}{marker}")
+
+        picked = choose(f"What should happen for '{key}'?", options, label)
+        space["prod_id"] = picked["space_id"]
+
+        if picked["space_id"]:
+            warn("the bundle will adopt that space, then overwrite it with dev's\n"
+                 "        content on every deploy; prod-side UI edits are lost")
+        else:
+            if likely:
+                warn("prod will end up with two spaces sharing the same title")
+
+
+def _load_binding_state(profile):
+    """Read binding state via lib/binding_state.py. None if it cannot be read."""
+    script = os.path.join(HERE, "lib", "binding_state.py")
+    result = subprocess.run(
+        [sys.executable, script, "--target", "prod", "--profile", profile],
+        capture_output=True, text=True, cwd=HERE,
+    )
+    if result.returncode != 0:
+        return None
+
+    state = {}
+    for line in result.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) == 3:
+            state[parts[0]] = (parts[1], parts[2])
+    return state
+
+
+def step_write_and_run(dev, prod, chosen, catalog_map, warehouse_id,
+                       parent_path, run_as):
+    section(6, TOTAL_STEPS, "Review")
+
+    print(f"  {BOLD}Source{RESET}      {dev['name']}  {DIM}{dev.get('host','')}{RESET}")
+    print(f"  {BOLD}Target{RESET}      {prod['name']}  {DIM}{prod.get('host','')}{RESET}")
+    print(f"  {BOLD}Warehouse{RESET}   {warehouse_id}")
+    print(f"  {BOLD}Folder{RESET}      {parent_path}")
+    print(f"  {BOLD}Owner{RESET}       {run_as}")
+
+    print(f"\n  {BOLD}Catalog rewrites{RESET}")
+    if catalog_map:
+        for dev_catalog, prod_catalog in catalog_map.items():
+            print(f"    {dev_catalog} → {prod_catalog}")
+    else:
+        print(f"    {DIM}none{RESET}")
+
+    print(f"\n  {BOLD}Spaces{RESET}")
+    for space in chosen:
+        if space.get("already_bound"):
+            action = f"update in place {DIM}{space['already_bound']}{RESET}"
+        elif space.get("prod_id"):
+            action = f"{YELLOW}adopt then update{RESET} {DIM}{space['prod_id']}{RESET}"
+        else:
+            action = f"{GREEN}create new{RESET}"
+        print(f"    {space['key']:<24} {action}")
+
+    if not confirm("\n  Write this configuration?", default=True):
+        die("cancelled; nothing was written")
+
+    _write_databricks_yml(dev, prod, warehouse_id, parent_path, run_as)
+    ok("wrote databricks.yml")
+    _write_spaces_yml(chosen, catalog_map)
+    ok("wrote spaces.yml")
+
+    print(f"\n  {DIM}Both files are plain text; edit and re-run any time.{RESET}")
+
+    print(f"\n  {DIM}Next time you run ./promote it will offer to reuse this "
+          f"configuration.{RESET}")
+
+    if not confirm("\n  Run the dry run now?", default=True):
+        print(f"\n  When you are ready:\n"
+              f"    {BOLD}./promote_genie.sh --dev-profile {dev['name']} "
+              f"--prod-profile {prod['name']}{RESET}")
+        return
+
+    _run_promotion(dev, prod)
+
+
+def _write_databricks_yml(dev, prod, warehouse_id, parent_path, run_as):
+    content = f"""# Generated by ./promote -- edit freely and re-run.
+#
+# Genie spaces deploy only under the `direct` engine (the default). Do not set
+# `engine: terraform` here; the Terraform engine cannot deploy Genie spaces.
+
+bundle:
+  name: genie-prod-promotion
+
+include:
+  - resources/*.yml
+
+variables:
+  warehouse_id:
+    description: SQL warehouse backing the Genie spaces in this target.
+  parent_path:
+    description: Workspace folder the Genie spaces are registered under.
+
+targets:
+  # Source workspace. Used for exporting, not for deploying.
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: {dev.get('host', '')}
+    variables:
+      warehouse_id: ""
+      parent_path: {parent_path}
+
+  # Target workspace.
+  prod:
+    mode: production
+    workspace:
+      host: {prod.get('host', '')}
+      root_path: /Workspace/Shared/.bundle/${{bundle.name}}/${{bundle.target}}
+    variables:
+      warehouse_id: "{warehouse_id}"
+      parent_path: {parent_path}
+    run_as:
+      user_name: {run_as}
+"""
+    with open(os.path.join(HERE, "databricks.yml"), "w") as handle:
+        handle.write(content)
+
+
+def _write_spaces_yml(chosen, catalog_map):
+    """Write spaces.yml, with each space's own mapping nested under it.
+
+    A space's own catalog_map wins over the top-level one, which acts as a
+    default for spaces that do not define theirs.
+    """
+    lines = [
+        "# Generated by ./promote -- edit freely and re-run.",
+        "",
+        "# Default dev -> prod table mapping, used by any space below that does",
+        "# not define its own catalog_map. Applied to every table reference in",
+        "# the space, including example SQL and curated instructions.",
+        "catalog_map:",
+    ]
+    if catalog_map:
+        for dev_name, prod_name in catalog_map.items():
+            lines.append(f"  {dev_name}: {prod_name}")
+    else:
+        lines.append("  {}")
+
+    lines += [
+        "",
+        "# Each space may carry its own catalog_map, which overrides the default",
+        "# above -- different spaces usually read different catalogs.",
+        "#",
+        "# prod_id present  -> the bundle adopts (binds) that existing prod space",
+        "#                     and overwrites it with dev's content on deploy.",
+        "# prod_id absent   -> a new space is created; no bind is needed because",
+        "#                     the deploy records the new ID in bundle state.",
+        "spaces:",
+    ]
+    for space in chosen:
+        lines.append(f"  - key: {space['key']}")
+        lines.append(f"    dev_id: {space['dev_id']}")
+        if space.get("title"):
+            lines.append(f"    # title in dev: {space['title']}")
+        if space.get("prod_id"):
+            lines.append(f"    prod_id: {space['prod_id']}")
+        own = space.get("catalog_map") or {}
+        if own:
+            lines.append("    catalog_map:")
+            for dev_name, prod_name in own.items():
+                lines.append(f"      {dev_name}: {prod_name}")
+    lines.append("")
+
+    with open(os.path.join(HERE, "spaces.yml"), "w") as handle:
+        handle.write("\n".join(lines))
+
+
+def load_saved_config():
+    """Read a previous run's spaces.yml and databricks.yml, if usable.
+
+    Returns None when there is nothing to reuse, so the caller falls through to
+    the full wizard.
+    """
+    spaces_path = os.path.join(HERE, "spaces.yml")
+    bundle_path = os.path.join(HERE, "databricks.yml")
+
+    if not (os.path.exists(spaces_path) and os.path.exists(bundle_path)):
+        return None
+
+    try:
+        with open(bundle_path) as handle:
+            bundle_text = handle.read()
+    except OSError:
+        return None
+
+    # A file still carrying placeholders was never completed.
+    if "REPLACE" in bundle_text:
+        return None
+
+    sys.path.insert(0, os.path.join(HERE, "lib"))
+    import read_config
+
+    try:
+        spaces = read_config.parse_spaces(spaces_path)
+        catalog_map = dict(
+            pair.split("=", 1)
+            for pair in read_config.parse_catalog_map(spaces_path)
+            if "=" in pair
+        )
+    except Exception:
+        return None
+
+    if not spaces:
+        return None
+
+    hosts = {}
+    for target in ("dev", "prod"):
+        match = re.search(
+            r"^  " + target + r":.*?^      host:\s*(\S+)",
+            bundle_text,
+            re.MULTILINE | re.DOTALL,
+        )
+        if match:
+            hosts[target] = match.group(1)
+
+    return {
+        "spaces": spaces,
+        "catalog_map": catalog_map,
+        "hosts": hosts,
+        "warehouse_id": read_config.parse_warehouse(bundle_path, "prod"),
+    }
+
+
+def profile_for_host(host):
+    """Find the CLI profile pointing at a host, so saved config maps back.
+
+    Prefers a profile the CLI reports as authenticated: several profiles can
+    share a host, and picking a stale one would fail later for no good reason.
+    """
+    if not host:
+        return None
+
+    wanted = host.rstrip("/")
+    matches = [p for p in list_profiles()
+               if (p.get("host") or "").rstrip("/") == wanted]
+    if not matches:
+        return None
+
+    for profile in matches:
+        if profile.get("valid"):
+            return profile
+    return matches[0]
+
+
+def step_reuse(saved):
+    """Reuse a saved configuration, but always ask which spaces to promote.
+
+    The workspaces, warehouse, folder and table mappings are plumbing: once set
+    they rarely change, so they are reused silently. Which spaces to promote is
+    the actual decision each time, so that question is always asked.
+
+    Returns True when the promotion ran, False to fall through to full setup.
+    """
+    section(2, TOTAL_STEPS, "Using your saved setup")
+
+    print(f"  {BOLD}Source{RESET}      {saved['hosts'].get('dev', '?')}")
+    print(f"  {BOLD}Target{RESET}      {saved['hosts'].get('prod', '?')}")
+    print(f"  {BOLD}Warehouse{RESET}   {saved['warehouse_id'] or '(unset)'}")
+    if saved["catalog_map"]:
+        mappings = ", ".join(f"{k} → {v}" for k, v in saved["catalog_map"].items())
+        print(f"  {BOLD}Mappings{RESET}    {mappings}")
+
+    # This validates every profile in ~/.databrickscfg and can take a few
+    # seconds, so say so rather than sitting silent.
+    print(f"\n  {DIM}Matching those hosts to your CLI profiles...{RESET}",
+          flush=True)
+
+    dev = profile_for_host(saved["hosts"].get("dev"))
+    prod = profile_for_host(saved["hosts"].get("prod"))
+
+    if not dev or not prod:
+        missing = "dev" if not dev else "prod"
+        warn(f"no CLI profile points at the saved {missing} host, so this "
+             f"configuration cannot be reused as-is")
+        print(f"  {DIM}Fix with: databricks auth login --host "
+              f"{saved['hosts'].get(missing, '<host>')} --profile {missing}{RESET}")
+        return False
+
+    ok(f"profiles: {dev['name']} (dev), {prod['name']} (prod)")
+
+    if not confirm("\n  Use this setup?", default=True):
+        change = choose(
+            "What do you want to change?",
+            [
+                {"id": "workspaces", "label": "The dev or prod workspace",
+                 "hint": "also re-asks warehouse, folder and owner"},
+                {"id": "mappings", "label": "Table mappings only",
+                 "hint": "keeps the workspaces; set per space"},
+                {"id": "fresh", "label": "Everything",
+                 "hint": "walks through the full setup again"},
+            ],
+            lambda option: (f"{option['label']}\n         "
+                            f"{DIM}{option['hint']}{RESET}"),
+        )
+        if change["id"] in ("workspaces", "fresh"):
+            return False
+        # Mappings only: drop the saved ones so each space is asked afresh.
+        saved = dict(saved)
+        saved["catalog_map"] = {}
+        saved["spaces"] = [dict(s, catalog_map={}) for s in saved["spaces"]]
+
+    if not _select_spaces_with_saved(saved, dev, prod):
+        return False
+
+    _run_promotion(dev, prod)
+    return True
+
+
+def _select_spaces_with_saved(saved, dev, prod):
+    """Pick which spaces to promote, reusing saved keys and mappings.
+
+    Lists every dev space, marking the ones already configured, and reuses their
+    saved resource key so the bundle keeps tracking the same prod space. Only
+    asks about table mappings when a picked space references something the saved
+    mapping does not cover.
+    """
+    section(3, TOTAL_STEPS, "Picking Genie spaces to promote")
+
+    print(f"  {DIM}Listing Genie spaces in dev...{RESET}", flush=True)
+    all_spaces = list_genie_spaces(dev["name"])
+    if not all_spaces:
+        warn("could not list dev spaces; falling back to full setup")
+        return False
+
+    saved_by_dev_id = {s["dev_id"]: s for s in saved["spaces"]}
+
+    # Configured spaces first: they are the likely repeat choice.
+    ordered = sorted(all_spaces, key=lambda s: (
+        s.get("space_id") not in saved_by_dev_id,
+        (s.get("title") or "").lower(),
+    ))
+
+    def label(space):
+        if space.get("space_id") in saved_by_dev_id:
+            return f"{space.get('title') or '(untitled)'}  {DIM}promoted before{RESET}"
+        return space.get("title") or "(untitled)"
+
+    picked = _pick_spaces(ordered, labeller=label)
+
+    chosen = []
+    taken = set()
+    for space in picked:
+        dev_id = space.get("space_id")
+        title = space.get("title") or "untitled"
+        previous = saved_by_dev_id.get(dev_id)
+
+        if previous:
+            # Reuse the saved key silently. Changing it would make the bundle
+            # treat the space as new and create a duplicate in prod.
+            key = previous["key"]
+            chosen.append({"key": key, "dev_id": dev_id, "title": title,
+                           "prod_id": previous.get("prod_id", "")})
+            taken.add(key)
+            continue
+
+        suggested = _suggest_key(title)
+        while suggested in taken or suggested in {s["key"] for s in saved["spaces"]}:
+            suggested += "_2"
+        print()
+        key = ask(f"Resource key for {BOLD}{title}{RESET}",
+                  default=suggested,
+                  validate=lambda value: ("already used in this run"
+                                          if value in taken else valid_key(value)))
+        taken.add(key)
+        chosen.append({"key": key, "dev_id": dev_id, "title": title})
+
+    # Mappings are per space: each one usually reads its own catalogs.
+    for space in chosen:
+        previous = saved_by_dev_id.get(space["dev_id"]) or {}
+        space["catalog_map"] = dict(previous.get("catalog_map")
+                                   or saved["catalog_map"])
+    _map_each_space(dev, prod, chosen)
+
+    _resolve_prod_targets(prod, chosen)
+
+    # Keep configured-but-unpicked spaces in the file so their prod links are not
+    # lost; promote_genie.sh is told which subset to act on.
+    picked_dev_ids = {s["dev_id"] for s in chosen}
+    retained = [s for s in saved["spaces"] if s["dev_id"] not in picked_dev_ids]
+    # Mappings live on each space now; the top-level one stays as the default for
+    # spaces that carry none of their own.
+    _write_spaces_yml(chosen + retained, saved["catalog_map"])
+
+    if retained:
+        names = ", ".join(s["key"] for s in retained)
+        print(f"  {DIM}Not promoting this run (kept in spaces.yml): {names}{RESET}")
+
+    _write_selection(chosen)
+    ok(f"promoting {len(chosen)} space(s)")
+    return True
+
+
+def _map_each_space(dev, prod, chosen):
+    """Confirm or build a table mapping for each space individually.
+
+    A space whose existing mapping already covers every table it references is
+    left alone; only gaps prompt for input. Spaces read different catalogs, so a
+    single shared mapping cannot express a real setup.
+    """
+    section(4, TOTAL_STEPS, "Table mappings per space")
+
+    sys.path.insert(0, os.path.join(HERE, "lib"))
+    import rewrite_catalog
+
+    for space in chosen:
+        print(f"\n  {BOLD}{space['key']}{RESET}")
+
+        referenced = space_table_names(dev["name"], space["dev_id"])
+        if not referenced:
+            print(f"    {DIM}could not read its tables; leaving its mapping "
+                  f"as-is{RESET}")
+            continue
+
+        current = space.get("catalog_map") or {}
+        if current:
+            for dev_name, prod_name in current.items():
+                print(f"    {DIM}{dev_name} → {prod_name}{RESET}")
+
+        unmapped = sorted(
+            table for table in referenced
+            if rewrite_catalog.rewrite_string(table, current)[1] == 0
+        )
+
+        if not unmapped:
+            ok(f"all {len(referenced)} table(s) covered")
+            if current and not confirm("    Change this mapping?", default=False):
+                continue
+            if current:
+                space["catalog_map"] = step_catalog_map(dev, prod, [space])
+            continue
+
+        warn(f"{len(unmapped)} table(s) not covered by a mapping:")
+        for table in unmapped[:10]:
+            print(f"        {table}")
+        if len(unmapped) > 10:
+            print(f"        {DIM}... and {len(unmapped) - 10} more{RESET}")
+
+        if confirm("    Map them now?", default=True):
+            extra = step_catalog_map(dev, prod, [space])
+            merged = dict(current)
+            merged.update(extra)
+            space["catalog_map"] = merged
+        else:
+            print(f"    {DIM}left unmapped; those tables will keep their dev "
+                  f"names in prod{RESET}")
+
+
+def _write_selection(chosen):
+    """Record which keys this run should act on, for promote_genie.sh."""
+    path = os.path.join(HERE, ".promote-selection")
+    with open(path, "w") as handle:
+        for space in chosen:
+            handle.write(space["key"] + "\n")
+
+
+
+
+def _run_promotion(dev, prod):
+    """Run the dry run, then offer to deploy. Shared by both entry paths."""
+    command = ["./promote_genie.sh", "--dev-profile", dev["name"],
+               "--prod-profile", prod["name"]]
+
+    print(f"\n{BOLD}{BLUE}Dry run{RESET}")
+    print(f"  {DIM}Exports from dev, rewrites table names, and shows what would")
+    print(f"  change in prod -- including what differs inside each space.")
+    print(f"  Nothing is written to prod.{RESET}\n")
+    sys.stdout.flush()
+
+    if subprocess.run(command, cwd=HERE).returncode != 0:
+        die("the dry run reported a problem; fix it and run ./promote again")
+
+    print(f"\n{BOLD}{BLUE}Deploy{RESET}")
+    if not confirm("Deploy to prod now?", default=False):
+        print(f"\n  When you are ready:\n    {BOLD}{' '.join(command)} --apply{RESET}")
+        return
+
+    print()
+    if subprocess.run(command + ["--apply"], cwd=HERE).returncode != 0:
+        die("deploy failed; see the output above")
+
+
+def main():
+    banner()
+
+    reconfigure = "--reconfigure" in sys.argv
+    step_preflight()
+
+    # A selection from a previous run must not silently apply to this one.
+    selection = os.path.join(HERE, ".promote-selection")
+    if os.path.exists(selection):
+        os.unlink(selection)
+
+    saved = None if reconfigure else load_saved_config()
+    if saved and step_reuse(saved):
+        print()
+        return
+
+    dev, prod = step_profiles()
+    chosen = step_pick_spaces(dev)
+    _map_each_space(dev, prod, chosen)
+    warehouse_id, parent_path, run_as = step_prod_targets(prod, chosen)
+    step_write_and_run(dev, prod, chosen, {}, warehouse_id,
+                       parent_path, run_as)
+    _write_selection(chosen)
+    print()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\ncancelled")
+        sys.exit(130)
