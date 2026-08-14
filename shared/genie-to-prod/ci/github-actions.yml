@@ -1,0 +1,88 @@
+# Promote Genie spaces to prod on merge to main.
+#
+# Copy to .github/workflows/promote-genie.yml in your repo.
+#
+# Model: a human curates the space in the dev UI and syncs it into the repo, then
+# CI deploys what was reviewed. CI does not export from dev, because that would
+# deploy whatever dev happens to look like at merge time rather than what was
+# approved in the pull request.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   DATABRICKS_HOST           https://your-prod-workspace.cloud.databricks.com
+#   DATABRICKS_CLIENT_ID      service principal application ID
+#   DATABRICKS_CLIENT_SECRET  service principal OAuth secret
+
+name: Promote Genie spaces
+
+on:
+  pull_request:
+    paths:
+      - 'resources/**'
+      - 'src/**'
+      - 'spaces.yml'
+      - 'databricks.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'resources/**'
+      - 'src/**'
+      - 'spaces.yml'
+      - 'databricks.yml'
+
+jobs:
+  plan:
+    # On a pull request, show what would change without touching prod.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+        with:
+          # Genie spaces are not a bundle resource before 1.3.0. Pin the version
+          # so a CLI release cannot change deployment behaviour unannounced.
+          version: 1.11.0
+
+      - name: Plan
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          # Empty profiles tell the script to authenticate from the environment
+          # instead of ~/.databrickscfg, which does not exist on a runner.
+          DEV_PROFILE: ''
+          PROD_PROFILE: ''
+        run: |
+          databricks bundle validate -t prod
+          databricks bundle plan -t prod
+
+  deploy:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # Attach a required reviewer to this environment in repo settings if you want
+    # a human approval gate before anything reaches prod.
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+        with:
+          version: 1.11.0
+
+      - name: Deploy
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+        run: |
+          databricks bundle deploy -t prod --auto-approve
+
+      - name: Verify
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+        run: |
+          databricks bundle summary -t prod
