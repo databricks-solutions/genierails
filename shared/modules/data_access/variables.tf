@@ -39,6 +39,12 @@ variable "business_access_enabled" {
   description = "Fail-closed exposure gate. Set true only after the coverage gate and schema drift check pass; controls business-group SELECT grants."
 }
 
+variable "enable_classification" {
+  type        = bool
+  default     = false
+  description = "Opt-in to enable UC Data Classification with auto-tagging, scoped to schemas in uc_tables."
+}
+
 variable "tag_assignments" {
   type = list(object({
     entity_type = string

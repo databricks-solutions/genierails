@@ -2,7 +2,7 @@ terraform {
   required_providers {
     databricks = {
       source  = "databricks/databricks"
-      version = "~> 1.91.0"
+      version = "~> 1.111.0"
     }
     null = {
       source  = "hashicorp/null"

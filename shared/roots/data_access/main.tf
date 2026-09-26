@@ -2,7 +2,7 @@ terraform {
   required_providers {
     databricks = {
       source  = "databricks/databricks"
-      version = "~> 1.91.0"
+      version = "~> 1.111.0"
     }
     null = {
       source  = "hashicorp/null"
@@ -87,6 +87,12 @@ variable "business_access_enabled" {
   type        = bool
   default     = false
   description = "Fail-closed exposure gate. Enable only after coverage validation and the schema drift check pass."
+}
+
+variable "enable_classification" {
+  type        = bool
+  default     = false
+  description = "Opt-in to enable UC Data Classification with auto-tagging, scoped to schemas in uc_tables."
 }
 
 variable "manage_groups" {
@@ -227,6 +233,7 @@ module "data_access" {
   groups                    = var.groups
   uc_tables                 = local.full_uc_tables
   business_access_enabled   = var.business_access_enabled
+  enable_classification     = var.enable_classification
   tag_assignments           = var.tag_assignments
   fgac_policies             = var.fgac_policies
   sql_warehouse_id          = var.sql_warehouse_id

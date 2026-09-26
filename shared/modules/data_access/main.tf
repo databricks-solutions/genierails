@@ -2,7 +2,7 @@ terraform {
   required_providers {
     databricks = {
       source                = "databricks/databricks"
-      version               = "~> 1.91.0"
+      version               = "~> 1.111.0"
       configuration_aliases = [databricks.account, databricks.workspace]
     }
     null = {
@@ -55,11 +55,33 @@ locals {
     join(".", slice(split(".", t), 0, 2))
   ])
 
+  classification_catalog_schemas = {
+    for catalog in distinct(local._uc_catalogs) : catalog => distinct([
+      for schema in local.uc_schemas : split(".", schema)[1]
+      if split(".", schema)[0] == catalog
+    ])
+  }
+
   all_catalogs = distinct(concat(
     local._ta_catalogs,
     local._fgac_catalogs,
     local._uc_catalogs,
   ))
+}
+
+# Data Classification is opt-in because deleting this resource disables scans
+# for the catalog. When enabled, scope scans to only the schemas represented by
+# the governed UC table footprint. Omitting auto_tag_configs mirrors the native
+# enablement flow, which enables the catalog's built-in classification tags.
+resource "databricks_data_classification_catalog_config" "classification" {
+  for_each = var.enable_classification ? local.classification_catalog_schemas : {}
+
+  provider = databricks.workspace
+  parent   = "catalogs/${each.key}"
+
+  included_schemas = {
+    names = each.value
+  }
 }
 
 resource "databricks_entity_tag_assignment" "assignments" {
@@ -206,9 +228,9 @@ resource "databricks_policy_info" "policies" {
   match_columns = (
     contains(["POLICY_TYPE_COLUMN_MASK", "POLICY_TYPE_ROW_FILTER"], each.value.policy_type)
     && each.value.match_condition != null
-  ) ? [{
-    condition = each.value.match_condition
-    alias     = each.value.match_alias
+    ) ? [{
+      condition = each.value.match_condition
+      alias     = each.value.match_alias
   }] : null
 
   column_mask = each.value.policy_type == "POLICY_TYPE_COLUMN_MASK" ? {
