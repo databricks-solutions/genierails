@@ -378,22 +378,48 @@ for ta in tag_assignments:
     etype = ta.get('entity_type', '')
     ename = ta.get('entity_name', '')
     tkey  = ta.get('tag_key', '')
-    if not (etype and ename and tkey):
+    tval  = ta.get('tag_value', '')
+    if not (etype and ename and tkey and tval):
         continue
 
     if etype == 'columns':
-        parts = ename.rsplit('.', 1)
-        if len(parts) != 2:
+        parts = ename.split('.')
+        if len(parts) != 4:
             continue
-        table_fqn, col = parts
+        catalog, schema, table, col = parts
+        lookup_sql = (
+            "SELECT tag_value FROM system.information_schema.column_tags "
+            f"WHERE catalog_name = '{catalog}' AND schema_name = '{schema}' "
+            f"AND table_name = '{table}' AND column_name = '{col}' "
+            f"AND tag_name = '{tkey}' LIMIT 1"
+        )
+        table_fqn = '.'.join(parts[:3])
         sql = f"ALTER TABLE {table_fqn} ALTER COLUMN {col} UNSET TAGS ('{tkey}')"
     elif etype == 'tables':
+        parts = ename.split('.')
+        if len(parts) != 3:
+            continue
+        catalog, schema, table = parts
+        lookup_sql = (
+            "SELECT tag_value FROM system.information_schema.table_tags "
+            f"WHERE catalog_name = '{catalog}' AND schema_name = '{schema}' "
+            f"AND table_name = '{table}' AND tag_name = '{tkey}' LIMIT 1"
+        )
         sql = f"ALTER TABLE {ename} UNSET TAGS ('{tkey}')"
     else:
         continue
 
     try:
         from databricks.sdk.service.sql import StatementState as _SS
+        lookup = w.statement_execution.execute_statement(
+            statement=lookup_sql,
+            warehouse_id=warehouse_id,
+            wait_timeout='30s',
+        )
+        rows = getattr(getattr(lookup, 'result', None), 'data_array', None) or []
+        current_value = rows[0][0] if rows and rows[0] else None
+        if current_value in (None, tval):
+            continue
         resp = w.statement_execution.execute_statement(
             statement=sql,
             warehouse_id=warehouse_id,
