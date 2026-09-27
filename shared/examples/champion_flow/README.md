@@ -29,7 +29,7 @@ Gather these once — every phase reuses them:
 | **Deploying Service Principal** `client_id` + `client_secret` | An SP with **Account Admin + Workspace Admin + Metastore Admin** on the *same* account (see Prerequisites). Goes in `envs/<env>/auth.auto.tfvars`. |
 | **Dev / prod catalog names** | Your UC catalogs (e.g. `dev_finance` / `prod_finance`). |
 | **SQL warehouse id** (per env) | An existing serverless warehouse id — **or leave blank** to auto-create a serverless PRO warehouse. |
-| **Curated Genie space id** (optional) | From the Genie UI URL. Leave `genie_spaces = []` for a table-only footprint. |
+| **Curated Genie space** (needed for the agent) | From the Genie UI URL. **To deploy the Genie agent and get Layer-3 `CAN_RUN`, you MUST configure a `genie_spaces` entry** (an existing space id, or `genie_space_id=""` + `uc_tables` to create one). `genie_spaces = []` governs *data only* — no agent, no Layer 3. |
 | **IdP group names** (one per access tier, strictest first) | Your AIM/SCIM-synced groups, e.g. `payments_ops,regional_analysts,viewers`. GenieRails consumes them — it never creates them. |
 | **Shared key column** | One column present in **all** footprint tables (e.g. `customer_id`) — needed by `verify-access` to pair rows. |
 
@@ -78,7 +78,7 @@ The single enforcement key is **`gr_treatment`** — GenieRails derives exactly 
 
 ## Prerequisites
 
-1. **Databricks Terraform provider `~> 1.111.0`** (auto-selected) and **GNU Make** (`make`) + Python 3 + Terraform on your PATH. *(On macOS, Apple's `/usr/bin/make` may be blocked by the Xcode license — install GNU Make.)*
+1. **Databricks Terraform provider `~> 1.111.0`** (auto-selected) and **GNU Make** (`make`) + Python 3 + Terraform on your PATH. *(On macOS, Apple's `/usr/bin/make` and Homebrew may be blocked by an unaccepted Xcode license; install GNU Make another way — e.g. `conda install make` — and ensure it's first on `PATH`.)*
 2. **A deploying Service Principal** whose `client_id` / `client_secret` you put in `envs/<env>/auth.auto.tfvars`. GenieRails authenticates with **this SP's credentials, not a CLI profile.** The SP needs, on the **same** account as the workspace:
    - **Account Admin** (create/read groups, workspace assignment), **Workspace Admin** (Genie, warehouse), **Metastore Admin** (tags, FGAC),
    - **`EXECUTE` on `system.ai.databricks-claude-sonnet-4-6`** (`generate` calls the Foundation Model),
@@ -121,7 +121,7 @@ This applies only the UC Data Classification + auto-tagging config for your foot
 ```sql
 SELECT table_name, column_name, tag_name
 FROM system.information_schema.column_tags
-WHERE catalog_name = '<dev-catalog>' AND schema_name = 'genierails_e2e'
+WHERE catalog_name = '<your-catalog>' AND schema_name = '<your-schema>'
   AND tag_name LIKE 'class.%';
 ```
 > If dev data is sparse, seed **realistic** synthetic PII first — the scanner only tags format-matchable values (fake `example.com` emails / `000-` SSNs are ignored).
@@ -136,10 +136,14 @@ make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,vi
 ```bash
 make coverage-gate      ENV=dev                          # expect: PASS — N columns fully protected
 make validate-generated ENV=dev                          # static checks incl. overlap guard
-make apply              ENV=dev                          # auto-promotes, then account → data_access → workspace
+make apply              ENV=dev                          # gate CLOSED: masks applied; SELECT + Genie CAN_RUN withheld
+
+# --- only after coverage-gate PASSED, flip the gate to exercise verify-access ---
+# edit envs/dev/env.auto.tfvars:  business_access_enabled = true
+make apply              ENV=dev                          # releases SELECT (+ Genie CAN_RUN if a space is configured)
 make verify-access      ENV=dev VERIFY_KEY_COLUMN=customer_id   # query AS each tier: masked vs raw
 ```
-> `verify-access` needs the `SELECT` grant to exist, so set `business_access_enabled = true` in `envs/dev/env.auto.tfvars` and re-`apply` **only after the dev gate is green**. Also confirm the agent still answers useful questions under masking.
+> Do **not** flip `business_access_enabled = true` until the dev `coverage-gate` passes. Also confirm the agent still answers useful questions under masking.
 >
 > **Warehouse access:** if a tier group must run the Genie space's warehouse, grant it `CAN_USE` yourself — GenieRails does not manage warehouse permissions.
 
