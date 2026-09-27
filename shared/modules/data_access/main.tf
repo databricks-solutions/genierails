@@ -64,10 +64,10 @@ locals {
   ])
 
   classification_catalog_schemas = {
-    for catalog in distinct(local._uc_catalogs) : catalog => distinct([
+    for catalog in distinct(local._uc_catalogs) : catalog => distinct(concat([
       for schema in local.uc_schemas : split(".", schema)[1]
       if split(".", schema)[0] == catalog
-    ])
+    ], lookup(var.classification_existing_schemas, catalog, [])))
   }
 
   # Native classifier types exercised by the champion footprint. Auto-tagging
@@ -109,6 +109,13 @@ resource "databricks_data_classification_catalog_config" "classification" {
       auto_tagging_mode  = "AUTO_TAGGING_ENABLED"
     }
   ]
+
+  # Provider imports omit `parent`, although it is required and ForceNew in
+  # configuration. Ignoring that import-only mismatch lets an existing
+  # singleton catalog config be adopted and updated instead of deleted first.
+  lifecycle {
+    ignore_changes = [parent]
+  }
 }
 
 resource "databricks_entity_tag_assignment" "assignments" {

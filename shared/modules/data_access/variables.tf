@@ -45,6 +45,12 @@ variable "enable_classification" {
   description = "Opt-in to enable UC Data Classification with auto-tagging, scoped to schemas in uc_tables."
 }
 
+variable "classification_existing_schemas" {
+  type        = map(list(string))
+  default     = {}
+  description = "Existing schemas to preserve when a catalog classification config is shared across environments."
+}
+
 variable "tag_assignments" {
   type = list(object({
     entity_type = string

@@ -110,6 +110,12 @@ variable "enable_classification" {
   description = "Opt-in to enable UC Data Classification with auto-tagging, scoped to schemas in uc_tables."
 }
 
+variable "classification_existing_schemas" {
+  type        = map(list(string))
+  default     = {}
+  description = "Existing catalog classification scope preserved when adopting a singleton catalog config."
+}
+
 variable "manage_groups" {
   type    = bool
   default = false
@@ -241,20 +247,21 @@ module "data_access" {
     databricks.workspace = databricks.workspace
   }
 
-  databricks_account_id     = var.databricks_account_id
-  databricks_client_id      = var.databricks_client_id
-  databricks_client_secret  = var.databricks_client_secret
-  databricks_workspace_host = var.databricks_workspace_host
-  groups                    = var.groups
-  uc_tables                 = local.full_uc_tables
-  business_access_enabled   = var.business_access_enabled
-  enable_classification     = var.enable_classification
-  tag_assignments           = var.tag_assignments
-  fgac_policies             = var.fgac_policies
-  sql_warehouse_id          = var.sql_warehouse_id
-  warehouse_name            = var.warehouse_name
-  masking_sql_file          = "${var.env_dir}/masking_functions.sql"
-  deploy_masking_script     = "${local.project_root}/deploy_masking_functions.py"
+  databricks_account_id           = var.databricks_account_id
+  databricks_client_id            = var.databricks_client_id
+  databricks_client_secret        = var.databricks_client_secret
+  databricks_workspace_host       = var.databricks_workspace_host
+  groups                          = var.groups
+  uc_tables                       = local.full_uc_tables
+  business_access_enabled         = var.business_access_enabled
+  enable_classification           = var.enable_classification
+  classification_existing_schemas = var.classification_existing_schemas
+  tag_assignments                 = var.tag_assignments
+  fgac_policies                   = var.fgac_policies
+  sql_warehouse_id                = var.sql_warehouse_id
+  warehouse_name                  = var.warehouse_name
+  masking_sql_file                = "${var.env_dir}/masking_functions.sql"
+  deploy_masking_script           = "${local.project_root}/deploy_masking_functions.py"
 }
 
 output "sql_warehouse_id" {

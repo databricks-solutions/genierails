@@ -15,7 +15,8 @@ def test_classification_is_opt_in_and_forwarded_by_the_root():
     body = variables[start : variables.index("}\n", start) + 2]
 
     assert "default     = false" in body
-    assert "enable_classification     = var.enable_classification" in ROOT_MAIN.read_text()
+    assert "enable_classification" in ROOT_MAIN.read_text()
+    assert "= var.enable_classification" in ROOT_MAIN.read_text()
 
 
 def test_classification_is_scoped_to_governed_uc_schemas():
@@ -25,6 +26,7 @@ def test_classification_is_scoped_to_governed_uc_schemas():
     assert 'parent   = "catalogs/${each.key}"' in source
     assert "names = each.value" in source
     assert "distinct(local._uc_catalogs)" in source
+    assert "classification_existing_schemas" in source
 
 
 def test_classification_plan_enables_auto_tagging_for_champion_types():
