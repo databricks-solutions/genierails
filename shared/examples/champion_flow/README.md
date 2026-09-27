@@ -2,7 +2,38 @@
 
 Take a curated Genie agent in **dev** and ship it to **production** without ever exposing sensitive data: Unity Catalog decides *what* is sensitive (native Data Classification), GenieRails derives *how* it's enforced, and a **coverage gate blocks promotion** until every sensitive column the agent can reach is provably covered.
 
+> **No Genie agent yet?** The optional, self-contained
+> [`setup_sample_env.py`](setup_sample_env.py) creates the exact three-table
+> footprint, realistic synthetic PII, and a sample Genie Space. See
+> [Optional sample environment](#optional-sample-environment).
+
 > **New to GenieRails? Read this top-to-bottom once.** Every command runs from the cloud root (`cd aws` or `cd azure`). This flow has been validated end-to-end on real dev + prod Databricks workspaces.
+
+---
+
+## Optional sample environment
+
+This is demo tooling only; skip it when using your own tables and Genie Space.
+It uses no external data source and has one dependency:
+
+```bash
+cd shared/examples/champion_flow
+python -m pip install -r requirements.txt
+python setup_sample_env.py --profile DEFAULT --catalog my_catalog --warehouse-id abc123
+```
+
+The script prints the exact `uc_tables`, `genie_spaces`, and
+`sql_warehouse_id` snippet to paste into `env.auto.tfvars`. Re-runs are safe.
+Teardown relies on a local ownership record and does not infer resources to
+delete:
+
+```bash
+python teardown_sample_env.py --profile DEFAULT --catalog my_catalog
+# Equivalent: add --teardown to the setup command.
+```
+
+Use `--help` to see the `--host`, `--schema`, `--rows`, and environment-variable
+alternatives.
 
 ---
 
