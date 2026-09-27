@@ -2701,6 +2701,40 @@ def derive_enforcement_treatments(tfvars_path: Path) -> int:
     return changes
 
 
+def strip_native_source_assignments(tfvars_path: Path) -> int:
+    """Keep only gr_treatment for native-classification enforcement.
+
+    Native class.* tags already carry the authoritative sensitivity signal.
+    Materializing intermediate pii_level/pci_level values is redundant and can
+    conflict with centrally owned vocabularies; Option B needs only the single
+    derived gr_treatment assignment.
+    """
+    import hcl2
+
+    text = tfvars_path.read_text()
+    cfg = hcl2.loads(text)
+    treatment_cfg = load_treatment_config()
+    mapped_sources = {
+        source for treatment in treatment_cfg.treatments for source in treatment.sources
+    }
+    assignments = cfg.get("tag_assignments", []) or []
+    retained = [
+        assignment for assignment in assignments
+        if not (
+            assignment.get("entity_type") == "columns"
+            and (assignment.get("tag_key"), assignment.get("tag_value")) in mapped_sources
+        )
+    ]
+    removed = len(assignments) - len(retained)
+    if removed:
+        tfvars_path.write_text(_replace_bracket_section(
+            text,
+            "tag_assignments",
+            [_render_tag_assignment_block(item) for item in retained],
+        ))
+    return removed
+
+
 def _parse_sql_function_names(sql_path: Path | None) -> set[str]:
     if not sql_path or not sql_path.exists():
         return set()
@@ -5043,6 +5077,7 @@ def autofix_untagged_pii_columns(
     sql_path: Path | None = None,
     classification_source: SensitivitySource | None = None,
     agent_footprint: list[dict] | None = None,
+    authoritative_classification: bool = False,
 ) -> int:
     """Detect PII/sensitive columns in the DDL that the LLM forgot to tag.
 
@@ -5115,6 +5150,37 @@ def autofix_untagged_pii_columns(
     if not all_columns:
         return 0
 
+    # A live native-classification run is authoritative for the whole declared
+    # footprint.  Remove LLM-produced sensitivity assignments first so they
+    # cannot suppress or augment the real class.* inventory.  Non-sensitivity
+    # governance assignments (for example row-scope tags) are preserved.
+    if authoritative_classification and classification_source is not None:
+        treatment_cfg = load_treatment_config()
+        sensitivity_sources = {
+            source for treatment in treatment_cfg.treatments for source in treatment.sources
+        }
+        all_column_names = {full for full, _ in all_columns}
+        assignments = cfg.get("tag_assignments", []) or []
+        retained_assignments = [
+            assignment for assignment in assignments
+            if not (
+                assignment.get("entity_type") == "columns"
+                and assignment.get("entity_name") in all_column_names
+                and (assignment.get("tag_key"), assignment.get("tag_value")) in sensitivity_sources
+            )
+        ]
+        if len(retained_assignments) != len(assignments):
+            text = _replace_bracket_section(
+                text,
+                "tag_assignments",
+                [_render_tag_assignment_block(item) for item in retained_assignments],
+            )
+            assignments = retained_assignments
+            existing_tags = {
+                item.get("entity_name", "") for item in assignments
+                if item.get("entity_type") == "columns"
+            }
+
     # Check which masking functions are available in the SQL file.
     # Only add financial tags (rounded_amounts) if mask_amount_rounded is available,
     # and only add date tags (masked_dob) if mask_date_to_year is available.
@@ -5186,7 +5252,10 @@ def autofix_untagged_pii_columns(
         return out
 
     llm_source = LLMSource(_ddl_pattern_infer)
-    findings = select_findings(candidate_columns, classification_source, llm_source)
+    if authoritative_classification and classification_source is not None:
+        findings = classification_source.findings_for(candidate_columns)
+    else:
+        findings = select_findings(candidate_columns, classification_source, llm_source)
 
     # Never discard an authoritative classification finding because protection
     # is incomplete. Preserve it in generated config so the blocking coverage
@@ -7119,6 +7188,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 sql_path=sql_path if sql_block else None,
                 classification_source=classification_source,
                 agent_footprint=agent_footprint,
+                authoritative_classification=classification_source is not None,
             )
             if n_pii_tags:
                 print(f"  Auto-fixed: added {n_pii_tags} tag_assignment(s) for untagged PII columns")
@@ -7165,6 +7235,13 @@ Before you apply, tune for your business roles, security requirements, and Genie
             n_treatments = derive_enforcement_treatments(tfvars_path)
             if n_treatments:
                 print(f"  Derived GenieRails enforcement treatments ({n_treatments} change(s))")
+            if classification_source is not None:
+                n_native_sources = strip_native_source_assignments(tfvars_path)
+                if n_native_sources:
+                    print(
+                        "  Native classification authoritative: removed "
+                        f"{n_native_sources} redundant source-family assignment(s)"
+                    )
 
         # Check the hard UC quota after Option-B has collapsed masks to one
         # policy per treatment/catalog. Never delete policies to fit the cap.

@@ -15,6 +15,8 @@ import pytest
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import generate_abac
+
 from generate_abac import (
     fix_hcl_syntax,
     autofix_canonical_tag_vocabulary,
@@ -889,7 +891,6 @@ fgac_policies = [
 """
 
     def test_no_change_when_under_limit(self, tmp_tfvars, monkeypatch):
-        import generate_abac
         monkeypatch.setattr(generate_abac, "_FGAC_PER_CATALOG_LIMIT", 5)
         path = tmp_tfvars(self._make_hcl(["p1", "p2", "p3"]))
         count = autofix_fgac_policy_count(path)
@@ -1072,3 +1073,20 @@ CREATE OR REPLACE FUNCTION orphan(x INT);
         out = path.read_text()
         assert "USE CATALOG dev_fin;" in out
         assert "USE SCHEMA finance;" in out
+
+
+def test_strip_native_source_assignments_keeps_single_treatment(tmp_path):
+    path = tmp_path / "abac.auto.tfvars"
+    path.write_text('''tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.tbl.email", tag_key = "pii_level", tag_value = "masked_email" },
+  { entity_type = "columns", entity_name = "cat.sch.tbl.email", tag_key = "gr_treatment", tag_value = "email_partial" },
+  { entity_type = "columns", entity_name = "cat.sch.tbl.region", tag_key = "gr_row_scope", tag_value = "region_code" }
+]
+''')
+
+    assert generate_abac.strip_native_source_assignments(path) == 1
+    cfg = assert_valid_hcl(path)
+    assert [(a["tag_key"], a["tag_value"]) for a in cfg["tag_assignments"]] == [
+        ("gr_treatment", "email_partial"),
+        ("gr_row_scope", "region_code"),
+    ]

@@ -71,6 +71,15 @@ class TestValidateGroups:
         validate_groups({"groups": {}}, r)
         assert not r.passed
 
+    def test_empty_groups_passes_when_only_builtin_principal_is_referenced(self):
+        r = _result()
+        names = validate_groups({
+            "groups": {},
+            "fgac_policies": [{"to_principals": ["account users"]}],
+        }, r)
+        assert r.passed
+        assert names == set()
+
     def test_multiple_groups_all_returned(self):
         r = _result()
         names = validate_groups(

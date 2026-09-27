@@ -35,6 +35,14 @@ locals {
 
   fgac_policy_map = { for p in var.fgac_policies : p.name => p }
 
+  # Built-in principals such as "account users" are intentionally absent from
+  # the managed groups map, but still need catalog/schema/table grants. Derive
+  # the access set from both managed groups and policy targets.
+  access_principals = distinct(concat(
+    keys(var.groups),
+    flatten([for p in var.fgac_policies : p.to_principals]),
+  ))
+
   _ta_catalogs = [
     for ta in var.tag_assignments :
     split(".", ta.entity_name)[0]
@@ -119,7 +127,7 @@ resource "databricks_grant" "terraform_sp_manage_catalog" {
 
 resource "databricks_grant" "catalog_access" {
   for_each = {
-    for pair in setproduct(local.all_catalogs, keys(var.groups)) :
+    for pair in setproduct(local.all_catalogs, local.access_principals) :
     "${pair[0]}|${pair[1]}" => { catalog = pair[0], group = pair[1] }
   }
 
@@ -131,7 +139,7 @@ resource "databricks_grant" "catalog_access" {
 
 resource "databricks_grant" "schema_access" {
   for_each = {
-    for pair in setproduct(local.uc_schemas, keys(var.groups)) :
+    for pair in setproduct(local.uc_schemas, local.access_principals) :
     "${pair[0]}|${pair[1]}" => { schema = pair[0], group = pair[1] }
   }
 
@@ -143,7 +151,7 @@ resource "databricks_grant" "schema_access" {
 
 resource "databricks_grant" "table_access" {
   for_each = var.business_access_enabled ? {
-    for pair in setproduct(var.uc_tables, keys(var.groups)) :
+    for pair in setproduct(var.uc_tables, local.access_principals) :
     "${pair[0]}|${pair[1]}" => { table = pair[0], group = pair[1] }
   } : {}
 

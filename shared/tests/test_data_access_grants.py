@@ -24,14 +24,14 @@ def test_group_grants_follow_catalog_schema_table_chain():
     schema = _resource_body(source, "schema_access")
     table = _resource_body(source, "table_access")
 
-    assert "setproduct(local.all_catalogs, keys(var.groups))" in catalog
+    assert "setproduct(local.all_catalogs, local.access_principals)" in catalog
     assert 'privileges = ["USE_CATALOG"]' in catalog
 
-    assert "setproduct(local.uc_schemas, keys(var.groups))" in schema
+    assert "setproduct(local.uc_schemas, local.access_principals)" in schema
     assert "schema     = each.value.schema" in schema
     assert 'privileges = ["USE_SCHEMA"]' in schema
 
-    assert "setproduct(var.uc_tables, keys(var.groups))" in table
+    assert "setproduct(var.uc_tables, local.access_principals)" in table
     assert "table      = each.value.table" in table
     assert 'privileges = ["SELECT"]' in table
 
@@ -51,3 +51,10 @@ def test_business_select_is_fail_closed_while_structural_grants_remain():
     assert "for_each = var.business_access_enabled ? {" in _resource_body(source, "table_access")
     assert "var.business_access_enabled" not in _resource_body(source, "catalog_access")
     assert "var.business_access_enabled" not in _resource_body(source, "schema_access")
+
+
+def test_builtin_policy_targets_are_included_in_access_principals():
+    source = MAIN_TF.read_text()
+
+    assert "keys(var.groups)" in source
+    assert "flatten([for p in var.fgac_policies : p.to_principals])" in source

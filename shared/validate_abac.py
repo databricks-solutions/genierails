@@ -559,6 +559,15 @@ FUNCTION_EXPECTED_CATEGORIES = {
 def validate_groups(cfg: dict, result: ValidationResult):
     groups = cfg.get("groups")
     if not groups:
+        referenced = {
+            principal
+            for policy in (cfg.get("fgac_policies") or [])
+            for field in ("to_principals", "except_principals")
+            for principal in (policy.get(field) or [])
+        }
+        if referenced and referenced <= BUILTIN_PRINCIPALS:
+            result.ok("groups: built-in principals only (no managed group definitions required)")
+            return set()
         result.error("'groups' is missing or empty — at least one group is required")
         return set()
     if not isinstance(groups, dict):

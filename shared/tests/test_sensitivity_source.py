@@ -305,6 +305,34 @@ def _paths(tmp_path):
 
 
 class TestAutofixIntegration:
+    def test_authoritative_classification_removes_llm_guesses_for_footprint(self, tmp_path):
+        import generate_abac
+        tfvars = tmp_path / "abac.auto.tfvars"
+        tfvars.write_text('''tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.tbl.email", tag_key = "pii_level", tag_value = "masked_name" },
+  { entity_type = "columns", entity_name = "cat.sch.tbl.contact", tag_key = "pii_level", tag_value = "masked_phone" }
+]
+''')
+        ddl = tmp_path / "ddl" / "_fetched.sql"
+        ddl.parent.mkdir(parents=True)
+        ddl.write_text(_DDL)
+        classification = ClassificationSource(
+            tag_rows=[("cat", "sch", "tbl", "email", "class.email_address", "")],
+        )
+
+        generate_abac.autofix_untagged_pii_columns(
+            tfvars,
+            ddl_path=ddl,
+            classification_source=classification,
+            authoritative_classification=True,
+        )
+
+        cfg = assert_valid_hcl(tfvars)
+        assignments = cfg["tag_assignments"]
+        assert [(a["entity_name"], a["tag_value"]) for a in assignments] == [
+            ("cat.sch.tbl.email", "masked_email")
+        ]
+
     def test_default_none_is_unchanged_legacy_behaviour(self, _paths):
         import generate_abac
         tfvars, ddl = _paths
