@@ -70,6 +70,15 @@ class TestClassificationSourceColumnTags:
             ("pci_level", "redacted_cvv"),
         ]
 
+    def test_maps_documented_location_tag_to_redaction(self):
+        rows = [("cat", "sch", "tbl", "address", "class.location", "")]
+        findings = ClassificationSource(tag_rows=rows).findings_for([
+            "cat.sch.tbl.address",
+        ])
+        assert [(f.tag_key, f.tag_value) for f in findings] == [
+            ("pii_level", "redacted_address"),
+        ]
+
     def test_filters_to_requested_columns(self):
         rows = [
             ("cat", "sch", "tbl", "email", "class.email", ""),

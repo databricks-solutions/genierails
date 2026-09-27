@@ -533,7 +533,8 @@ def _infer_column_categories(entity_name: str) -> set[str]:
         categories.add("address")
     if "birth" in col or col in {"dob", "date_of_birth"}:
         categories.add("date")
-    if "card" in col or "cvv" in col or "pan" in col:
+    if (("card" in col and "cardholder" not in col and "card_holder" not in col)
+            or "cvv" in col or "pan" in col):
         categories.add("card")
     if "amount" in col or "balance" in col or "limit" in col:
         categories.add("amount")

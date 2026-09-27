@@ -338,6 +338,14 @@ variable "business_access_enabled" {
   description = "Fail-closed exposure gate. Enable only after coverage validation and the schema drift check pass."
 }
 
+# Shared env.auto.tfvars is consumed by both workspace and data-access roots.
+# Classification is implemented only in data_access, but declaring the switch
+# here avoids a misleading undeclared-variable warning during full apply.
+variable "enable_classification" {
+  type    = bool
+  default = false
+}
+
 variable "group_members" {
   type    = map(list(string))
   default = {}

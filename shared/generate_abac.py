@@ -3743,7 +3743,7 @@ _FUNCTION_EXPECTED_CATEGORIES = {
     "mask_email": {"email"},
     "mask_phone": {"phone"},
     "mask_ssn": {"ssn"},
-    "mask_full_name": {"name"},
+    "mask_full_name": {"name", "customer_pii", "customer_profile"},
     "mask_credit_card_full": {"card"},
     "mask_credit_card_last4": {"card"},
     "mask_amount_rounded": {"amount"},
@@ -3800,7 +3800,7 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
         categories.add("address")
     if "birth" in col or col in {"dob", "date_of_birth"}:
         categories.add("date")
-    if "card" in col or "cvv" in col:
+    if ("card" in col and "cardholder" not in col and "card_holder" not in col) or "cvv" in col:
         categories.add("card")
     if "amount" in col or "balance" in col or "limit" in col:
         categories.add("amount")
@@ -4504,6 +4504,18 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
             continue
 
         value_refs, key_refs = _extract_tag_refs(p.get("match_condition", ""))
+        treatment_functions = {
+            item.value: item.masking_function
+            for item in load_treatment_config().treatments
+        }
+        # A gr_treatment policy is already type-checked by the treatment
+        # contract. Do not let the generic category repair override its
+        # canonical function (which the coverage gate intentionally enforces).
+        if any(
+            key == "gr_treatment" and treatment_functions.get(value) == fn
+            for key, value in value_refs
+        ):
+            continue
         matched: list[dict] = []
         for key, value in value_refs:
             matched.extend(assignments_by_tag.get((key, value), []))

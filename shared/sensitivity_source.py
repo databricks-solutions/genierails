@@ -123,6 +123,7 @@ _CLASS_TO_GOVERNED: dict[str, tuple[str, str]] = {
     "address": ("pii_level", "redacted_address"),
     "postal_address": ("pii_level", "redacted_address"),
     "street_address": ("pii_level", "redacted_address"),
+    "location": ("pii_level", "redacted_address"),
     "date_of_birth": ("pii_level", "masked_dob"),
     "dob": ("pii_level", "masked_dob"),
     "birth_date": ("pii_level", "masked_dob"),
