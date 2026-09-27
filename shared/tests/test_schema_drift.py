@@ -544,6 +544,30 @@ class TestFindUncoveredTags:
         assert flagged["column"] == "passport_no"
         assert "unknown tag key" in flagged["reason"]
 
+    def test_native_class_tag_is_covered_via_derived_treatment(self):
+        rb = build_rulebook(
+            [{"key": "gr_treatment", "values": ["card_last4"]}],
+            [],
+        )
+        applied = [
+            {"catalog": "prod", "schema": "finance", "table": "payments",
+             "column": "card_number", "tag_key": "class.credit_card", "tag_value": ""},
+        ]
+
+        assert find_uncovered_tags(applied, rb) == []
+
+    def test_native_class_tag_stays_uncovered_when_treatment_not_promoted(self):
+        rb = build_rulebook(
+            [{"key": "gr_treatment", "values": ["redact"]}],
+            [],
+        )
+        applied = [
+            {"catalog": "prod", "schema": "finance", "table": "payments",
+             "column": "card_number", "tag_key": "class.credit_card", "tag_value": ""},
+        ]
+
+        assert len(find_uncovered_tags(applied, rb)) == 1
+
     def test_governed_key_unexpected_value_is_flagged(self):
         """Known key, but a value neither declared nor masked — flagged as value gap."""
         applied = [

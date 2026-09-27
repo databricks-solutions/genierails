@@ -47,6 +47,10 @@ import sys
 import time
 from pathlib import Path
 
+SHARED_ROOT = Path(__file__).resolve().parent.parent
+if str(SHARED_ROOT) not in sys.path:
+    sys.path.insert(0, str(SHARED_ROOT))
+
 PII_COLUMN_PATTERN = re.compile(
     r"(?i)(ssn|social_sec|passport|dob|birth_?date|email|phone|"
     r"address|credit_?card|cvv|account_?num|diagnosis|medication|"
@@ -350,16 +354,44 @@ def build_rulebook(tag_policies: list[dict], fgac_policies: list[dict]) -> dict:
         if key_refs:
             mask_key_refs.setdefault(catalog, set()).update(key_refs)
 
+    # Native classifier tags are facts, not a second enforcement vocabulary.
+    # Resolve each mapped class.* semantic through the same governed-source ->
+    # gr_treatment derivation used by generation. The class fact is covered
+    # when its derived treatment is present in the promoted rulebook.
+    from sensitivity_source import _CLASS_TO_GOVERNED
+    from treatment_derivation import load_treatment_config
+
+    treatment_cfg = load_treatment_config()
+    treatment_by_source = {
+        source: treatment.value
+        for treatment in treatment_cfg.treatments
+        for source in treatment.sources
+    }
+    class_treatments = {
+        semantic: treatment_by_source[source]
+        for semantic, source in _CLASS_TO_GOVERNED.items()
+        if source in treatment_by_source
+    }
+
     return {
         "policy_vocab": policy_vocab,
         "mask_value_refs": mask_value_refs,
         "mask_key_refs": mask_key_refs,
+        "class_treatments": class_treatments,
+        "treatment_tag_key": treatment_cfg.tag_key,
     }
 
 
 def is_tag_covered(catalog: str, tag_key: str, tag_value: str, rulebook: dict) -> bool:
     """True if a tag_policy declares this key/value, or a COLUMN MASK in the SAME
     catalog references it."""
+    if tag_key.lower().startswith("class."):
+        semantic = tag_key.split(".", 1)[1].strip().lower().replace("-", "_").replace(" ", "_")
+        treatment = rulebook.get("class_treatments", {}).get(semantic)
+        if treatment:
+            treatment_key = rulebook.get("treatment_tag_key", "gr_treatment")
+            return is_tag_covered(catalog, treatment_key, treatment, rulebook)
+
     allowed = rulebook["policy_vocab"].get(tag_key)
     if allowed is not None and tag_value in allowed:
         return True
