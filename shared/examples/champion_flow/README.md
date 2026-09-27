@@ -17,9 +17,10 @@ The canonical GenieRails flow: take a **curated Genie agent in dev** and ship it
 | **Facts** | which columns the scanner tagged in *this* workspace | the workspace, via the scan | ❌ re-derived per env |
 | **Identity** | groups + membership | your IdP (AIM/SCIM) | ❌ consumed, never minted |
 
-Governance is **two locks, not one**:
-- **Lock 1 — Access:** the grant chain `USE CATALOG → USE SCHEMA → SELECT` decides *who can reach a table*.
-- **Lock 2 — Masking/ABAC:** column masks + row filters decide *what they see through it*.
+Governance is **three layers, not one** — GenieRails generates all three as code:
+- **Layer 1 — Data access:** the grant chain `USE CATALOG → USE SCHEMA → SELECT` decides *who can reach a table*.
+- **Layer 2 — Masking/ABAC:** column masks + row filters decide *what they see through it*.
+- **Layer 3 — Agent access (workspace + Genie):** workspace assignment (`USER`) + the consumer **entitlement** (`workspace_consume`), warehouse **`CAN_USE`**, and per-space Genie **`CAN_RUN`** ACLs decide *whether a group can reach the workspace, run the warehouse, and open the Genie space at all*. These are released by the same exposure gate (Phase 5).
 
 The single enforcement key is **`gr_treatment`** — GenieRails derives exactly **one** value per column from the column's sensitivity findings, so Unity Catalog's "one mask per column" rule is never violated.
 
@@ -138,7 +139,7 @@ Blocks (non-zero exit) on any **classified-but-unprotected** column — a `gr_tr
 
 ```bash
 make validate-generated ENV=dev   # static validation incl. overlap guard (reject >1 mask/column)
-make apply ENV=dev                 # groups (consumed) → tag policies → gr_treatment assignments → masks → FGAC → Genie ACLs  # needs account-admin auth (see Prereqs 5); consume groups must be workspace-assigned first
+make apply ENV=dev                 # groups (consumed) → tag policies → gr_treatment assignments → masks → FGAC → workspace assignment/entitlement + warehouse CAN_USE + per-space Genie CAN_RUN ACLs  # needs account-admin auth (see Prereqs 5); consume groups must be workspace-assigned first
 ```
 
 Then verify enforcement **by effect** — but note effective-access tests read the **promoted/split** config and require a released grant + a shared key column, so they run *after* `apply` (which promotes first):
@@ -222,11 +223,11 @@ genie_spaces = [
 ```
 
 ```bash
-make apply    ENV=prod    # releases the business SELECT grant (data_access) AND creates the prod Genie space (workspace)
+make apply    ENV=prod    # on green, releases the withheld ACCESS: business SELECT (data_access) + workspace assignment/entitlement + warehouse CAN_USE + per-space Genie CAN_RUN ACLs, and creates the prod Genie space (workspace layer)
 make evidence ENV=prod    # versioned compliance evidence: scan → tag → gr_treatment → policy → grant → approval
 ```
 
-Exposing the agent **is** issuing the withheld SELECT — so fail-closed is mechanical: no grant until the gate is green. (A Genie space is created only when its entry has `genie_space_id = ""` **and** at least one `uc_tables` entry.)
+Exposing the agent **is** releasing the withheld access layer: the business `SELECT` **and** the per-space Genie `CAN_RUN` ACLs are both gated on `business_access_enabled` (the workspace-layer Genie ACLs only apply when it's `true`), so fail-closed is mechanical — no data grant *and* no Genie run access until the gate is green. Workspace assignment, the `workspace_consume` entitlement, and warehouse `CAN_USE` land here too. (A Genie space is created only when its entry has `genie_space_id = ""` **and** at least one `uc_tables` entry.)
 
 ---
 
@@ -278,7 +279,7 @@ On **prod** (`finclear_sdp_demo_catalog`), against **7 real platform-produced `c
 
 - Native detection → one `gr_treatment` per column (`free_text` → `redact` via free-text escalation)
 - Coverage gate PASS on classified columns; WARN (surfaced, not hidden) on unclassified columns
-- Enforcement applied; **business SELECT released only after the gate passed**
+- Enforcement applied; on green, the **business SELECT + workspace entitlement + warehouse CAN_USE + per-space Genie CAN_RUN ACLs** were all released (Genie space created and ACLed)
 - Masked-vs-raw confirmed by query: card `****-4464` vs `5349 1210 3503 4464`, email `c***@…` vs full, cvv/`free_text` `[REDACTED]` vs raw
 
 Dev (`serverless_stable_pyecip_catalog`) proved the same enforcement path plus a region-based row filter (unprivileged sees only in-region rows; privileged exception sees all).
