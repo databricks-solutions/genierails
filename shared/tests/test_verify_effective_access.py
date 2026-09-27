@@ -41,6 +41,13 @@ from verify_effective_access import (  # noqa: E402
 )
 
 
+def test_cli_missing_promoted_tfvars_reports_prerequisite(tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        main(["--from-tfvars", str(tmp_path / "data_access" / "abac.auto.tfvars"), "--print-spec"])
+    assert "promoted data-access config not found" in str(exc.value)
+    assert "make promote" in str(exc.value)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

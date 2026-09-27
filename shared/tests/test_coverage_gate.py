@@ -27,6 +27,23 @@ def test_coverage_gate_passes_fully_covered_classification_set():
     assert "fully protected" in result.info[0]
 
 
+def test_coverage_gate_passes_correctly_classified_card_and_amount_columns():
+    cfg = {
+        "tag_policies": [],
+        "tag_assignments": [
+            {"entity_type": "columns", "entity_name": "cat.sch.payments.credit_card_number", "tag_key": "pci_level", "tag_value": "masked_card_last4"},
+            {"entity_type": "columns", "entity_name": "cat.sch.payments.amount", "tag_key": "financial_sensitivity", "tag_value": "rounded_amounts"},
+        ],
+        "fgac_policies": [],
+    }
+    derived, _ = derive_treatment_model(cfg, load_treatment_config())
+    result = ValidationResult()
+    validate_coverage_gate(
+        derived, {"mask_credit_card_last4", "mask_amount_rounded"}, "", result,
+    )
+    assert result.passed, result.errors
+
+
 def test_coverage_gate_rejects_treatment_only_column_without_mask():
     cfg = {
         "tag_assignments": [{

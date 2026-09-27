@@ -1043,8 +1043,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _load_spec_from_args(args) -> VerificationSpec:
     if args.spec:
+        if not args.spec.is_file():
+            raise SystemExit(f"ERROR: verification spec not found: {args.spec}")
         return load_spec_from_file(args.spec)
     if args.from_tfvars:
+        if not args.from_tfvars.is_file():
+            raise SystemExit(
+                f"ERROR: promoted data-access config not found: {args.from_tfvars}\n"
+                "Run 'make promote' (or 'make apply', which promotes first) before "
+                "verify-access-spec."
+            )
+        if args.account_tfvars and not args.account_tfvars.is_file():
+            raise SystemExit(
+                f"ERROR: promoted account config not found: {args.account_tfvars}\n"
+                "Run 'make promote' (or 'make apply', which promotes first) before "
+                "verify-access-spec."
+            )
         return load_spec_from_tfvars(
             args.from_tfvars, args.account_tfvars, key_column=args.key_column,
         )

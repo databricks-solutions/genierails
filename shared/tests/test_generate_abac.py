@@ -1123,6 +1123,40 @@ fgac_policies = []
     assert [p["key"] for p in cfg["tag_policies"]] == ["gr_treatment"]
 
 
+def test_derived_treatments_restore_configured_functions_before_ref_repair(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text('''tag_policies = []
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.payments.credit_card_number", tag_key = "pci_level", tag_value = "masked_card_last4" },
+  { entity_type = "columns", entity_name = "cat.sch.payments.amount", tag_key = "financial_sensitivity", tag_value = "rounded_amounts" }
+]
+fgac_policies = [
+  { name = "template", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "cat", to_principals = ["users"], function_schema = "sch", match_condition = "hasTagValue('pii_level', 'masked')", function_name = "mask_redact" }
+]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text('''USE CATALOG cat;
+USE SCHEMA sch;
+CREATE FUNCTION mask_redact(input STRING) RETURNS STRING RETURN '***';
+CREATE FUNCTION mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2);
+''')
+
+    generate_abac.autofix_remove_bodyless_functions(sql)
+    generate_abac.derive_and_finalize_treatments(tfvars, native_authoritative=True)
+    assert generate_abac.ensure_derived_treatment_functions(tfvars, sql) == 2
+    generate_abac.autofix_invalid_function_refs(tfvars, sql)
+
+    cfg = assert_valid_hcl(tfvars)
+    functions = {
+        p["match_condition"]: p["function_name"] for p in cfg["fgac_policies"]
+    }
+    assert functions["hasTagValue('gr_treatment', 'card_last4')"] == "mask_credit_card_last4"
+    assert functions["hasTagValue('gr_treatment', 'round_amount')"] == "mask_amount_rounded"
+    sql_text = sql.read_text()
+    assert "FUNCTION mask_credit_card_last4" in sql_text
+    assert "FUNCTION mask_amount_rounded" in sql_text
+
+
 def test_required_native_classification_fails_without_warehouse(monkeypatch):
     import databricks.sdk
 

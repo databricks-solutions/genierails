@@ -14,6 +14,8 @@ class Treatment:
     value: str
     masking_function: str
     sources: frozenset[tuple[str, str]]
+    udf_signature: str = ""
+    udf_body: str = ""
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,8 @@ def load_treatment_config(path: Path = CONFIG_PATH) -> TreatmentConfig:
             value=item["value"],
             masking_function=item["masking_function"],
             sources=frozenset(tuple(source) for source in item["sources"]),
+            udf_signature=item.get("udf_signature", ""),
+            udf_body=item.get("udf_body", ""),
         )
         for item in raw["treatments"]
     )

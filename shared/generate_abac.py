@@ -2778,6 +2778,55 @@ def derive_and_finalize_treatments(
     return derived, stripped
 
 
+def ensure_derived_treatment_functions(tfvars_path: Path, sql_path: Path | None) -> int:
+    """Emit deterministic UDFs required by derived treatment policies.
+
+    A derived ``gr_treatment`` policy is configuration-owned, so a missing or
+    bodyless LLM function must not make the generic reference repair replace its
+    configured function with ``mask_redact``.  Treatments with a deterministic
+    definition in treatment_config.json are restored before reference repair.
+    """
+    if not sql_path or not sql_path.exists():
+        return 0
+    import hcl2
+
+    cfg = hcl2.loads(tfvars_path.read_text())
+    required_values = {
+        value
+        for policy in (cfg.get("fgac_policies", []) or [])
+        for value in re.findall(
+            r"hasTagValue\(\s*'gr_treatment'\s*,\s*'([^']+)'\s*\)",
+            policy.get("match_condition", "") or "",
+        )
+    }
+    existing = _parse_sql_function_names(sql_path)
+    definitions = {
+        treatment.value: treatment
+        for treatment in load_treatment_config().treatments
+        if treatment.udf_signature and treatment.udf_body
+    }
+    missing = [
+        definitions[value] for value in sorted(required_values)
+        if value in definitions and definitions[value].masking_function not in existing
+    ]
+    if not missing:
+        return 0
+
+    sql = sql_path.read_text().rstrip()
+    blocks = ["\n\n-- === Treatment functions restored from treatment_config.json ==="]
+    for treatment in missing:
+        blocks.append(
+            f"\nCREATE OR REPLACE FUNCTION {treatment.udf_signature}\n"
+            f"RETURN {treatment.udf_body};"
+        )
+        print(
+            f"  [AUTOFIX] Restored treatment function "
+            f"'{treatment.masking_function}' from treatment_config.json"
+        )
+    sql_path.write_text(sql + "\n" + "\n".join(blocks) + "\n")
+    return len(missing)
+
+
 def _parse_sql_function_names(sql_path: Path | None) -> set[str]:
     if not sql_path or not sql_path.exists():
         return set()
@@ -7309,6 +7358,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     f"{n_native_sources} redundant source-family assignment(s)"
                 )
 
+            ensure_derived_treatment_functions(
+                tfvars_path, sql_path if sql_block else None,
+            )
+
         # Check the hard UC quota after Option-B has collapsed masks to one
         # policy per treatment/catalog. Never delete policies to fit the cap.
         autofix_fgac_policy_count(tfvars_path)
@@ -7540,6 +7593,9 @@ Before you apply, tune for your business roles, security requirements, and Genie
                         derive_and_finalize_treatments(
                             tfvars_path,
                             native_authoritative=classification_source is not None,
+                        )
+                        ensure_derived_treatment_functions(
+                            tfvars_path, sql_path if sql_block else None,
                         )
                     autofix_fgac_policy_count(tfvars_path)
                     autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
