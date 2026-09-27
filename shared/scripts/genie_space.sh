@@ -427,7 +427,12 @@ if expr_json and expr_json != "[]":
     try:
         expressions = json.loads(expr_json)
         if expressions:
-            items = [{"id": gen_id(), "alias": e["alias"], "sql": [e["sql"]]} for e in expressions]
+            items = [{
+                "id": gen_id(),
+                "alias": e["alias"],
+                "sql": [e["sql"]],
+                "display_name": e["display_name"],
+            } for e in expressions]
             items.sort(key=lambda x: x["id"])
             instructions.setdefault("sql_snippets", {})["expressions"] = items
     except json.JSONDecodeError:
@@ -438,7 +443,12 @@ if meas_json and meas_json != "[]":
     try:
         measures = json.loads(meas_json)
         if measures:
-            items = [{"id": gen_id(), "alias": m["alias"], "sql": [m["sql"]]} for m in measures]
+            items = [{
+                "id": gen_id(),
+                "alias": m["alias"],
+                "sql": [m["sql"]],
+                "display_name": m["display_name"],
+            } for m in measures]
             items.sort(key=lambda x: x["id"])
             instructions.setdefault("sql_snippets", {})["measures"] = items
     except json.JSONDecodeError:
