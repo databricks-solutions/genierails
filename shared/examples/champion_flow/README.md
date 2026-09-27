@@ -7,7 +7,7 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 > footprint, realistic synthetic PII, and a sample Genie Space. See
 > [Optional sample environment](#optional-sample-environment).
 
-> **New to GenieRails? Read this top-to-bottom once.** Every command runs from the cloud root (`cd aws` or `cd azure`). This flow has been validated end-to-end on real dev + prod Databricks workspaces.
+> **New to GenieRails? Read this top-to-bottom once.** Every command runs from the cloud root (`cd aws` or `cd azure`).
 
 ---
 
