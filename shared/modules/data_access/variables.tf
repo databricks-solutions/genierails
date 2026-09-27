@@ -33,6 +33,12 @@ variable "uc_tables" {
   description = "Optional UC table list used to derive catalogs for grants."
 }
 
+variable "classification_uc_tables" {
+  type        = list(string)
+  default     = []
+  description = "Classification-only UC table footprint; never used to derive grants."
+}
+
 variable "business_access_enabled" {
   type        = bool
   default     = false
@@ -42,7 +48,7 @@ variable "business_access_enabled" {
 variable "enable_classification" {
   type        = bool
   default     = false
-  description = "Opt-in to enable UC Data Classification with auto-tagging, scoped to schemas in uc_tables."
+  description = "Opt-in to enable UC Data Classification with auto-tagging, scoped to schemas in classification_uc_tables."
 }
 
 variable "classification_existing_schemas" {

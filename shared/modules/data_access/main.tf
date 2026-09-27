@@ -58,14 +58,24 @@ locals {
     split(".", t)[0]
   ]
 
+  _classification_catalogs = [
+    for t in var.classification_uc_tables :
+    split(".", t)[0]
+  ]
+
   uc_schemas = distinct([
     for t in var.uc_tables :
     join(".", slice(split(".", t), 0, 2))
   ])
 
+  classification_uc_schemas = distinct([
+    for t in var.classification_uc_tables :
+    join(".", slice(split(".", t), 0, 2))
+  ])
+
   classification_catalog_schemas = {
-    for catalog in distinct(local._uc_catalogs) : catalog => distinct(concat([
-      for schema in local.uc_schemas : split(".", schema)[1]
+    for catalog in distinct(local._classification_catalogs) : catalog => distinct(concat([
+      for schema in local.classification_uc_schemas : split(".", schema)[1]
       if split(".", schema)[0] == catalog
     ], lookup(var.classification_existing_schemas, catalog, [])))
   }

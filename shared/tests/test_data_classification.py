@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 
 SHARED = Path(__file__).parents[1]
@@ -7,6 +8,7 @@ MODULE_VARIABLES = SHARED / "modules/data_access/variables.tf"
 ROOT_MAIN = SHARED / "roots/data_access/main.tf"
 MAKEFILE = SHARED / "Makefile.shared"
 VALIDATOR = SHARED / "scripts/validate_classification_config.py"
+ROOT = SHARED / "roots/data_access"
 
 
 def test_classification_is_opt_in_and_forwarded_by_the_root():
@@ -25,7 +27,7 @@ def test_classification_is_scoped_to_governed_uc_schemas():
     assert "var.enable_classification ? local.classification_catalog_schemas : {}" in source
     assert 'parent   = "catalogs/${each.key}"' in source
     assert "names = each.value" in source
-    assert "distinct(local._uc_catalogs)" in source
+    assert "distinct(local._classification_catalogs)" in source
     assert "classification_existing_schemas" in source
 
 
@@ -64,7 +66,39 @@ def test_data_access_root_includes_space_tables_in_classification_footprint():
 
     assert 'variable "genie_spaces"' in source
     assert "flatten([for space in var.genie_spaces : space.uc_tables])" in source
-    assert "for t in local.classification_uc_tables" in source
+    assert "full_uc_tables = [for t in var.uc_tables" in source
+    assert "full_classification_uc_tables = [for t in local.classification_uc_tables" in source
+    assert "classification_uc_tables        = local.full_classification_uc_tables" in source
+
+
+def test_classification_and_grant_footprints_are_independent():
+    source = MODULE_MAIN.read_text()
+
+    assert "for t in var.classification_uc_tables" in source
+    assert "for catalog in distinct(local._classification_catalogs)" in source
+    assert "for schema in local.classification_uc_schemas" in source
+    assert "for t in var.uc_tables" in source
+
+    grant_section = source[source.index('resource "databricks_grant"') :]
+    assert "classification_uc_tables" not in grant_section
+
+
+def test_full_apply_plan_keeps_space_only_tables_out_of_grants():
+    init = subprocess.run(
+        ["terraform", "init", "-backend=false", "-input=false"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert init.returncode == 0, init.stdout + init.stderr
+
+    plan_test = subprocess.run(
+        ["terraform", "test", "-filter=tests/grant_isolation.tftest.hcl"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert plan_test.returncode == 0, plan_test.stdout + plan_test.stderr
 
 
 def test_classification_validator_requires_opt_in_and_accepts_space_footprint(tmp_path):

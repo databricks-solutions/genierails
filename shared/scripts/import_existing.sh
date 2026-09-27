@@ -416,9 +416,18 @@ for ta in tag_assignments:
             warehouse_id=warehouse_id,
             wait_timeout='30s',
         )
+        while getattr(getattr(lookup, 'status', None), 'state', None) in (
+                _SS.PENDING, _SS.RUNNING):
+            import time
+            time.sleep(1)
+            lookup = w.statement_execution.get_statement(lookup.statement_id)
+        raw_lookup_state = getattr(getattr(lookup, 'status', None), 'state', None)
+        lookup_state = (raw_lookup_state.value
+                        if hasattr(raw_lookup_state, 'value')
+                        else str(raw_lookup_state or ''))
         rows = getattr(getattr(lookup, 'result', None), 'data_array', None) or []
         current_value = rows[0][0] if rows and rows[0] else None
-        if current_value in (None, tval):
+        if 'SUCCEEDED' in lookup_state and current_value == tval:
             continue
         resp = w.statement_execution.execute_statement(
             statement=sql,

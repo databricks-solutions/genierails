@@ -41,7 +41,10 @@ locals {
   ))
   # 3-part entries (catalog.schema.table) are already fully qualified and passed through as-is.
   # 2-part entries (schema.table) are prefixed with uc_catalog (legacy schema-relative support).
-  full_uc_tables = [for t in local.classification_uc_tables :
+  full_uc_tables = [for t in var.uc_tables :
+    length(split(".", t)) >= 3 ? t : (var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t)
+  ]
+  full_classification_uc_tables = [for t in local.classification_uc_tables :
     length(split(".", t)) >= 3 ? t : (var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t)
   ]
 }
@@ -253,6 +256,7 @@ module "data_access" {
   databricks_workspace_host       = var.databricks_workspace_host
   groups                          = var.groups
   uc_tables                       = local.full_uc_tables
+  classification_uc_tables        = local.full_classification_uc_tables
   business_access_enabled         = var.business_access_enabled
   enable_classification           = var.enable_classification
   classification_existing_schemas = var.classification_existing_schemas
@@ -270,4 +274,14 @@ output "sql_warehouse_id" {
 
 output "catalogs" {
   value = module.data_access.catalogs
+}
+
+output "grant_uc_tables" {
+  description = "Fully qualified table footprint used for grants."
+  value       = local.full_uc_tables
+}
+
+output "classification_uc_tables" {
+  description = "Fully qualified table footprint used only for classification."
+  value       = local.full_classification_uc_tables
 }
