@@ -47,9 +47,10 @@ The `notes.free_text` column is the interesting one — the scanner tags it `cla
 
 1. **UC Data Classification enabled** on the catalog. GenieRails wires this via the `databricks_data_classification_catalog_config` resource (Databricks provider **`~> 1.111.0`**, i.e. ≥1.111.0 <1.112.0) when `enable_classification = true`, and — critically — also emits `auto_tag_configs = AUTO_TAGGING_ENABLED` so the scan actually **writes** `class.*` tags (without it, classification is "on" but nothing gets tagged). Auto-tagging is enabled for these `class.*` types (which cover this example's PII): `card_security_code, credit_card, date_of_birth, email_address, name, phone_number, us_ssn`. To govern additional types (e.g. `iban_code`, `us_bank_number`), extend `classification_auto_tags` in `shared/modules/data_access/main.tf`.
 2. **The deploying principal needs `APPLY TAG` on the catalog and `ASSIGN` on the `class.*` tags** — enabling auto-tagging requires these, or `apply` fails.
-3. **Groups synced from your IdP via AIM** (GA for Entra ID across clouds; Okta on AWS/GCP; SCIM where AIM isn't available). GenieRails **consumes** these groups by name — it never mints them. *(APJ/Azure note: AIM needs Premium tier + single tenant; cross-tenant estates stay on SCIM.)*
+3. **Groups synced from your IdP via AIM** (GA for Entra ID across clouds; Okta on AWS/GCP; SCIM where AIM isn't available). GenieRails **consumes** these groups by name — it never mints them. *(APJ/Azure note: AIM needs Premium tier + single tenant; cross-tenant estates stay on SCIM.)* These groups must already be **assigned to the workspace** before the data_access layer runs; `manage_groups = false` (consume, not mint) is the module default. Pass their names via `--groups` — never reserved names like `admins`/`users`.
 4. **Per-tier test principals** (one service principal per access tier) so effective access can be verified by querying *as* each tier.
-5. Python 3, Terraform, account-admin credentials — see [Prerequisites](../../docs/prerequisites.md).
+5. **Account-admin auth for the deploy steps.** `make generate` / `coverage-gate` / `validate-generated` run with just the workspace OAuth profile, but `make apply` / `apply-governance` (account + data_access layers: groups, tag policies, tag assignments) require an **Account-Admin OAuth profile or token for the _same_ Databricks account as the workspace** — a workspace-only keyring profile fails account-level operations (`Unable to load OAuth Config` / `Workspace not in account`). Existing classification config is not auto-imported; the first `apply` creates it.
+6. Python 3, Terraform — see [Prerequisites](../../docs/prerequisites.md).
 
 > All `make` commands below run from the cloud root: **`cd aws`** (or **`cd azure`**), where the `Makefile` and `envs/` live.
 
@@ -137,7 +138,7 @@ Blocks (non-zero exit) on any **classified-but-unprotected** column — a `gr_tr
 
 ```bash
 make validate-generated ENV=dev   # static validation incl. overlap guard (reject >1 mask/column)
-make apply ENV=dev                 # groups (consumed) → tag policies → gr_treatment assignments → masks → FGAC → Genie ACLs
+make apply ENV=dev                 # groups (consumed) → tag policies → gr_treatment assignments → masks → FGAC → Genie ACLs  # needs account-admin auth (see Prereqs 5); consume groups must be workspace-assigned first
 ```
 
 Then verify enforcement **by effect** — but note effective-access tests read the **promoted/split** config and require a released grant + a shared key column, so they run *after* `apply` (which promotes first):
