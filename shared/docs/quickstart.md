@@ -28,6 +28,14 @@ vi envs/dev/env.auto.tfvars
 # Optional: replace envs/account/auth.auto.tfvars or
 # envs/dev/data_access/auth.auto.tfvars if shared layers need different credentials.
 
+# In envs/dev/env.auto.tfvars, opt into native classification:
+#   enable_classification = true
+# The classification footprint is the union of top-level uc_tables and each
+# genie_spaces[*].uc_tables entry.
+make enable-classification ENV=dev
+# Poll system.information_schema.column_tags or system.data_classification.results
+# until class.* tags have landed for the configured footprint.
+
 make generate
 vi envs/dev/generated/abac.auto.tfvars
 # Review and iterate on the generated governance and Genie config:
@@ -50,9 +58,14 @@ make apply
 ## What happens end-to-end
 
 1. `make setup` creates `envs/account/`, `envs/dev/data_access/`, and `envs/dev/`
-2. `make generate` fetches DDLs from Unity Catalog, calls the LLM, and writes a draft into `envs/dev/generated/`
-3. You tune the generated governance and Genie config
-4. `make apply` splits the generated draft into layered configs and applies all three layers
+2. `make enable-classification` applies only the UC catalog classification configuration and auto-tag settings; it does not need generated ABAC or masking files
+3. You wait for the asynchronous Databricks scan to land `class.*` tags
+4. `make generate` fetches DDLs and native classification, then writes a draft into `envs/dev/generated/`
+5. You tune the generated governance and Genie config
+6. `make apply` splits the generated draft into layered configs and applies all three layers
+
+Generation remains fail-closed: after enabling classification, wait for native tags before
+running it. The explicit `--allow-llm-sensitivity` escape hatch is unchanged.
 
 Business exposure is fail-closed. With the default `business_access_enabled = false`,
 apply creates the enforcement scaffolding and may create/configure Genie Spaces, but

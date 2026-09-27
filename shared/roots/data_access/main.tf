@@ -35,9 +35,13 @@ provider "databricks" {
 
 locals {
   project_root = abspath("${path.root}/../..")
+  classification_uc_tables = distinct(concat(
+    var.uc_tables,
+    flatten([for space in var.genie_spaces : space.uc_tables]),
+  ))
   # 3-part entries (catalog.schema.table) are already fully qualified and passed through as-is.
   # 2-part entries (schema.table) are prefixed with uc_catalog (legacy schema-relative support).
-  full_uc_tables = [for t in var.uc_tables :
+  full_uc_tables = [for t in local.classification_uc_tables :
     length(split(".", t)) >= 3 ? t : (var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t)
   ]
 }
@@ -81,6 +85,17 @@ variable "uc_catalog" {
 variable "uc_tables" {
   type    = list(string)
   default = []
+}
+
+variable "genie_spaces" {
+  type = list(object({
+    name             = optional(string, "")
+    genie_space_id   = optional(string, "")
+    sql_warehouse_id = optional(string, "")
+    uc_tables        = optional(list(string), [])
+  }))
+  default     = []
+  description = "Workspace definitions whose UC tables also form the classification footprint."
 }
 
 variable "business_access_enabled" {
