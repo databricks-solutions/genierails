@@ -8,6 +8,7 @@ import json
 import os
 import random
 import sys
+import time
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -36,7 +37,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--catalog", default=os.getenv("CHAMPION_FLOW_CATALOG"), help="Existing UC catalog (required; env: CHAMPION_FLOW_CATALOG).")
     p.add_argument("--schema", default=os.getenv("CHAMPION_FLOW_SCHEMA", DEFAULT_SCHEMA), help=f"Sample schema (default: {DEFAULT_SCHEMA}; env: CHAMPION_FLOW_SCHEMA).")
     p.add_argument("--warehouse-id", default=os.getenv("DATABRICKS_WAREHOUSE_ID"), help="Existing SQL warehouse ID (required; env: DATABRICKS_WAREHOUSE_ID).")
-    p.add_argument("--rows", type=int, default=int(os.getenv("CHAMPION_FLOW_ROWS", DEFAULT_ROWS)), help=f"Rows per table (default: {DEFAULT_ROWS}; env: CHAMPION_FLOW_ROWS).")
+    p.add_argument("--rows", default=os.getenv("CHAMPION_FLOW_ROWS", str(DEFAULT_ROWS)), help=f"Rows per table (default: {DEFAULT_ROWS}; env: CHAMPION_FLOW_ROWS).")
     p.add_argument("--teardown", action="store_true", help="Remove only resources recorded as created by this script.")
     return p
 
@@ -76,10 +77,40 @@ def _run_sql(client: Any, warehouse_id: str, statement: str) -> None:
         response = client.statement_execution.execute_statement(warehouse_id=warehouse_id, statement=statement, wait_timeout="50s")
     except Exception as exc:
         raise RuntimeError(f"SQL execution failed: {exc}") from exc
-    status = getattr(response, "status", None)
-    state = str(getattr(status, "state", "")).upper()
-    if state and "SUCCEEDED" not in state:
-        raise RuntimeError(f"SQL statement ended in {state}: {getattr(status, 'error', None) or 'no detail'}")
+    statement_id = getattr(response, "statement_id", None)
+    deadline = time.monotonic() + 900
+    while True:
+        status = getattr(response, "status", None)
+        state = str(getattr(status, "state", "")).upper()
+        if "SUCCEEDED" in state:
+            return
+        if any(terminal in state for terminal in ("FAILED", "CANCELED", "CLOSED")):
+            raise RuntimeError(f"SQL statement ended in {state}: {getattr(status, 'error', None) or 'no detail'}")
+        if not statement_id:
+            raise RuntimeError(f"SQL statement returned {state or 'an unknown state'} without a statement ID")
+        if time.monotonic() >= deadline:
+            try:
+                client.statement_execution.cancel_execution(statement_id=statement_id)
+            except Exception as exc:
+                raise RuntimeError(f"SQL statement {statement_id} did not finish within 15 minutes and could not be canceled: {exc}") from exc
+            # Observe the terminal result: cancellation can race with successful
+            # completion, and a successful CREATE must reach the ownership write.
+            cancel_deadline = time.monotonic() + 60
+            while time.monotonic() < cancel_deadline:
+                time.sleep(2)
+                response = client.statement_execution.get_statement(statement_id=statement_id)
+                cancel_state = str(getattr(getattr(response, "status", None), "state", "")).upper()
+                if "SUCCEEDED" in cancel_state:
+                    return
+                if any(terminal in cancel_state for terminal in ("FAILED", "CANCELED", "CLOSED")):
+                    error = getattr(getattr(response, "status", None), "error", None)
+                    raise RuntimeError(f"SQL statement ended in {cancel_state}: {error or 'no detail'}")
+            raise RuntimeError(f"SQL statement {statement_id} did not report a terminal state after cancellation")
+        time.sleep(2)
+        try:
+            response = client.statement_execution.get_statement(statement_id=statement_id)
+        except Exception as exc:
+            raise RuntimeError(f"could not poll SQL statement {statement_id}: {exc}") from exc
 
 
 def _luhn_card(rng: random.Random) -> str:
@@ -151,7 +182,7 @@ def _space_exists(client: Any, space_id: str) -> bool:
 def _space_payload(warehouse_id: str, tables: list[str], title: str) -> dict[str, str]:
     return {"warehouse_id": warehouse_id, "title": title,
             "description": "Optional synthetic PII environment for the GenieRails champion flow.",
-            "serialized_space": json.dumps({"version": 2, "data_sources": {"tables": [{"identifier": table} for table in tables]}}, separators=(",", ":"))}
+            "serialized_space": json.dumps({"version": 2, "data_sources": {"tables": [{"identifier": table} for table in sorted(tables)]}}, separators=(",", ":"))}
 
 
 def _create_space(client: Any, warehouse_id: str, tables: list[str], title: str) -> str:
@@ -192,7 +223,15 @@ def setup(args: argparse.Namespace, client: Any) -> None:
         try:
             _run_sql(client, args.warehouse_id, f"CREATE SCHEMA {schema_sql}")
         except RuntimeError as exc:
-            raise RuntimeError(f"refusing existing/untracked schema {args.catalog}.{args.schema}; choose another --schema or restore the ownership state. Databricks said: {exc}") from exc
+            detail = str(exc)
+            if "ALREADY_EXISTS" in detail.upper() or "ALREADY EXISTS" in detail.upper():
+                raise RuntimeError(
+                    f"schema {args.catalog}.{args.schema} already exists but is not tracked as owned by this script; "
+                    f"choose another --schema or restore the ownership state. Databricks said: {detail}"
+                ) from exc
+            raise RuntimeError(
+                f"could not create schema {args.catalog}.{args.schema}. Databricks said: {detail}"
+            ) from exc
         state = {"catalog": args.catalog, "schema": args.schema, "schema_created": True, "space_id": "", "warehouse_id": args.warehouse_id}
         states[key] = state
         _save_states(states)
@@ -255,6 +294,12 @@ def teardown(args: argparse.Namespace, client: Any) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        try:
+            args.rows = int(args.rows)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"--rows/CHAMPION_FLOW_ROWS must be an integer, got {args.rows!r}"
+            ) from exc
         client = _client(args)
         teardown(args, client) if args.teardown else setup(args, client)
         return 0
