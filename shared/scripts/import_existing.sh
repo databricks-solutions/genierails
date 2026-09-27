@@ -90,8 +90,12 @@ run_import() {
 
   echo "  Importing: $address -> $id"
   local import_out
-  import_out=$("$TF_RUNNER" "$LAYER" "$ENV_NAME" import "$address" "$id" 2>&1)
-  local import_rc=$?
+  local import_rc
+  if import_out=$("$TF_RUNNER" "$LAYER" "$ENV_NAME" import "$address" "$id" 2>&1); then
+    import_rc=0
+  else
+    import_rc=$?
+  fi
   if [ "$import_rc" -eq 0 ]; then
     echo "  ✓ Imported $address"
   elif echo "$import_out" | grep -q "Resource already managed by Terraform"; then
