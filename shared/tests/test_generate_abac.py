@@ -1180,6 +1180,36 @@ def test_required_native_classification_fails_without_warehouse(monkeypatch):
     ) is None
 
 
+def test_required_native_classification_fails_for_unresolvable_footprint():
+    with pytest.raises(
+        generate_abac.NativeClassificationRequiredError,
+        match="footprint contains unresolvable table references",
+    ):
+        generate_abac._fetch_live_classification_source(
+            ["schema_table"], {}, require_native=True,
+        )
+
+
+def test_required_native_classification_qualifies_schema_table(monkeypatch):
+    import databricks.sdk
+
+    class FakeWarehouses:
+        @staticmethod
+        def list():
+            return []
+
+    class FakeClient:
+        warehouses = FakeWarehouses()
+
+    monkeypatch.setattr(generate_abac, "configure_databricks_env", lambda _: None)
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", lambda **_: FakeClient())
+
+    with pytest.raises(generate_abac.NativeClassificationRequiredError, match="No SQL warehouse"):
+        generate_abac._fetch_live_classification_source(
+            ["sch.table"], {"uc_catalog": "cat"}, require_native=True,
+        )
+
+
 def test_required_native_classification_fails_on_successful_empty_scan(monkeypatch):
     import databricks.sdk
     from databricks.sdk.service.sql import StatementState

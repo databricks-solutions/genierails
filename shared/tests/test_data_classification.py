@@ -23,3 +23,20 @@ def test_classification_is_scoped_to_governed_uc_schemas():
     assert 'parent   = "catalogs/${each.key}"' in source
     assert "names = each.value" in source
     assert "distinct(local._uc_catalogs)" in source
+
+
+def test_classification_plan_enables_auto_tagging_for_champion_types():
+    source = MODULE_MAIN.read_text()
+
+    expected = {
+        "class.card_security_code",
+        "class.credit_card",
+        "class.date_of_birth",
+        "class.email_address",
+        "class.name",
+        "class.phone_number",
+        "class.us_ssn",
+    }
+    assert all(f'"{tag}"' in source for tag in expected)
+    assert "auto_tag_configs = [" in source
+    assert 'auto_tagging_mode  = "AUTO_TAGGING_ENABLED"' in source

@@ -70,6 +70,18 @@ locals {
     ])
   }
 
+  # Native classifier types exercised by the champion footprint. Auto-tagging
+  # must be enabled per type; catalog classification alone does not land tags.
+  classification_auto_tags = toset([
+    "class.card_security_code",
+    "class.credit_card",
+    "class.date_of_birth",
+    "class.email_address",
+    "class.name",
+    "class.phone_number",
+    "class.us_ssn",
+  ])
+
   all_catalogs = distinct(concat(
     local._ta_catalogs,
     local._fgac_catalogs,
@@ -79,8 +91,8 @@ locals {
 
 # Data Classification is opt-in because deleting this resource disables scans
 # for the catalog. When enabled, scope scans to only the schemas represented by
-# the governed UC table footprint. Omitting auto_tag_configs mirrors the native
-# enablement flow, which enables the catalog's built-in classification tags.
+# the governed UC table footprint and enable auto-tagging for the champion
+# footprint's classifier types. Without auto_tag_configs, scans land no tags.
 resource "databricks_data_classification_catalog_config" "classification" {
   for_each = var.enable_classification ? local.classification_catalog_schemas : {}
 
@@ -90,6 +102,13 @@ resource "databricks_data_classification_catalog_config" "classification" {
   included_schemas = {
     names = each.value
   }
+
+  auto_tag_configs = [
+    for classification_tag in local.classification_auto_tags : {
+      classification_tag = classification_tag
+      auto_tagging_mode  = "AUTO_TAGGING_ENABLED"
+    }
+  ]
 }
 
 resource "databricks_entity_tag_assignment" "assignments" {

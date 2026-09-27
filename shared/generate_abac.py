@@ -1887,11 +1887,32 @@ def _fetch_live_classification_source(
     """
     # Concrete tables and schema-scoped ``catalog.schema.*`` footprints are both
     # readable; dropping wildcards here silently skipped native classification.
-    table_fqns = [
-        r for r in (table_refs or [])
-        if len(str(r).split(".")) == 3 and "*" not in str(r).split(".")[:2]
-    ]
+    catalog = str(auth_cfg.get("uc_catalog") or "").strip().strip("`\"")
+    table_fqns = []
+    unresolved = []
+    for ref in table_refs or []:
+        normalized = ".".join(
+            part.strip().strip("`\"") for part in str(ref).strip().split(".")
+        )
+        parts = normalized.split(".")
+        if len(parts) == 2 and catalog:
+            normalized = f"{catalog}.{normalized}"
+            parts = normalized.split(".")
+        if len(parts) == 3 and "*" not in parts[:2]:
+            table_fqns.append(normalized)
+        else:
+            unresolved.append(str(ref))
+    if unresolved and require_native:
+        raise NativeClassificationRequiredError(
+            "Required native classification footprint contains unresolvable "
+            f"table references: {', '.join(unresolved)}"
+        )
     if not table_fqns:
+        if require_native:
+            raise NativeClassificationRequiredError(
+                "No resolvable catalog.schema.table footprint is available for "
+                "required native classification"
+            )
         return None
     try:
         from databricks.sdk import WorkspaceClient
@@ -7279,7 +7300,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
 
         # Resolve the sensitivity source once. When classification is enabled,
         # native class.* is required unless the operator explicitly opts out.
-        native_expected = bool(auth_cfg.get("enable_classification")) and bool(table_refs)
+        native_expected = bool(auth_cfg.get("enable_classification"))
         try:
             classification_source = (
                 _fetch_live_classification_source(
