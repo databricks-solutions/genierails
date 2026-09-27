@@ -5,13 +5,13 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 > **No Genie agent yet?** The optional, self-contained
 > [`setup_sample_env.py`](setup_sample_env.py) creates the exact three-table
 > footprint, realistic synthetic PII, and a sample Genie Space. See
-> [Optional sample environment](#optional-sample-environment).
+> [Sample Environment Setup (Optional)](#sample-environment-setup-optional).
 
 > **New to GenieRails? Read this top-to-bottom once.** Every command runs from the cloud root (`cd aws` or `cd azure`).
 
 ---
 
-## Optional sample environment
+## Sample Environment Setup (Optional)
 
 This is demo tooling only; skip it when using your own tables and Genie Space.
 It uses no external data source and has one dependency:
