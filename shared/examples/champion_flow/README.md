@@ -41,15 +41,17 @@ Once those three values are in `env.auto.tfvars`, follow the rest of this guide 
 
 ## At a glance — the phase map
 
-| Phase | Env | Goal | Key commands | Done when | `business_access_enabled` |
+| Phase | Where | What you're doing | Commands you run | You're done when | Users can query it? |
 |---|---|---|---|---|---|
-| **0 Setup** | dev | creds + env dirs | `make setup`, `make init-env ENV=dev` | `envs/dev/auth.auto.tfvars` + `env.auto.tfvars` filled | `false` |
-| **1 Rehearse** | dev | validated rules + working agent | `enable-classification` → *(wait for scan)* → `generate` → `coverage-gate` → `validate-generated` → `apply` → `verify-access` | dev gate PASS + masks verified | `false` (flip `true` only to run `verify-access` after the gate is green) |
-| **2 Promote** | dev→prod | ship the RULES only | `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=...` | `envs/prod/env.auto.tfvars` written | — |
-| **3 Re-derive** | prod | prod's own facts | fill `envs/prod/auth.auto.tfvars` → `enable-classification` → *(wait for scan)* | prod `class.*` tags present | `false` |
-| **4 Gate** | prod | prove coverage | `generate` → `coverage-gate` → `apply-governance` → `audit-rulebook` → `verify-access` | prod gate PASS + masks verified | `false` |
-| **5 Expose** | prod | open the agent | set `business_access_enabled=true` → `make apply ENV=prod` → `make evidence` | Genie space live + `CAN_RUN`/`SELECT` released | `true` |
-| **6 Steady state** | prod | keep it covered | scheduled `audit-schema` / `audit-rulebook` / `generate-delta` | — | `true` |
+| **0 Setup** | dev | Add your credentials and create the per-environment config folders. | `make setup`, `make init-env ENV=dev` | `envs/dev/auth.auto.tfvars` and `env.auto.tfvars` are filled in | No |
+| **1 Build & test in dev** | dev | Databricks scans your data and labels the sensitive columns; GenieRails drafts the protection rules from those labels, checks that every sensitive column is covered, applies the protections, and you confirm the masking actually works — all in a safe dev copy first. | `enable-classification` → *(wait for the scan)* → `generate` → `coverage-gate` → `validate-generated` → `apply` → `verify-access` | The coverage check passes and you've seen sensitive values come back masked | No — turn it on only briefly to run the masking check, then off |
+| **2 Promote the rules** | dev→prod | Copy only the *rules* to production — never the dev data, and never dev's column labels. | `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=...` | `envs/prod/env.auto.tfvars` is written | — |
+| **3 Scan in prod** | prod | Let production scan its *own* real data and label its own sensitive columns. | fill `envs/prod/auth.auto.tfvars` → `enable-classification` → *(wait for the scan)* | Production's sensitive columns are labeled | No |
+| **4 Prove coverage** | prod | Re-check that every sensitive column production found is protected, apply the protections, and confirm the masking works. This is the check that blocks the release if anything is still uncovered. | `generate` → `coverage-gate` → `apply-governance` → `audit-rulebook` → `verify-access` | The coverage check passes and masking is confirmed | No |
+| **5 Open to users** | prod | Only now — with coverage proven — release access so business users can query the agent. | set `business_access_enabled=true` → `make apply ENV=prod` → `make evidence` | Business users can reach the agent (query + run access released) | Yes |
+| **6 Keep it covered** | prod | On a schedule, re-scan and re-check so sensitive data that arrives later stays protected. | scheduled `audit-schema` / `audit-rulebook` / `generate-delta` | — | Yes |
+
+> **New here?** Each command is walked through step-by-step in its phase below, and jargon like *coverage check* (`coverage-gate`), *masking*, and *rules vs. facts* is defined in the [Glossary](#glossary).
 
 ---
 
