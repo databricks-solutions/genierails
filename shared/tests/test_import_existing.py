@@ -40,16 +40,31 @@ def _response(state, value=None, statement_id="lookup"):
 
 
 @pytest.mark.parametrize(
-    ("initial", "polled", "expected_unsets"),
+    ("initial", "polled", "lookup_raises", "poll_raises", "expected_unsets"),
     [
-        (_response(_State.SUCCEEDED, "pii"), None, 0),
-        (_response(_State.SUCCEEDED, "wrong"), None, 1),
-        (_response(_State.FAILED), None, 1),
-        (_response(_State.PENDING), _response(_State.SUCCEEDED), 1),
+        (_response(_State.SUCCEEDED, "pii"), None, False, False, 0),
+        (_response(_State.SUCCEEDED, "wrong"), None, False, False, 1),
+        (_response(_State.FAILED), None, False, False, 1),
+        (_response(_State.PENDING), _response(_State.SUCCEEDED), False, False, 1),
+        (None, None, True, False, 1),
+        (_response(_State.PENDING), None, False, True, 1),
+        (_response(_State.PENDING), _response(_State.PENDING), False, False, 1),
+        (_response(_State.PENDING), _response(_State.SUCCEEDED, "pii"), False, False, 0),
     ],
-    ids=["success-match", "success-mismatch", "failed", "pending"],
+    ids=[
+        "success-match",
+        "success-mismatch",
+        "failed",
+        "pending-without-row",
+        "lookup-raises",
+        "poll-raises",
+        "poll-timeout",
+        "pending-to-success-match",
+    ],
 )
-def test_stale_tag_lookup_fails_closed(monkeypatch, tmp_path, initial, polled, expected_unsets):
+def test_stale_tag_lookup_fails_closed(
+    monkeypatch, tmp_path, initial, polled, lookup_raises, poll_raises, expected_unsets
+):
     (tmp_path / "abac.auto.tfvars").write_text(
         'tag_assignments = [{ entity_type = "tables", entity_name = "cat.sch.tbl", '
         'tag_key = "sensitivity", tag_value = "pii" }]\n'
@@ -62,10 +77,14 @@ def test_stale_tag_lookup_fails_closed(monkeypatch, tmp_path, initial, polled, e
         def execute_statement(self, *, statement, **_kwargs):
             calls.append(statement)
             if statement.startswith("SELECT"):
+                if lookup_raises:
+                    raise RuntimeError("lookup failed")
                 return initial
             return _response(_State.SUCCEEDED, statement_id="unset")
 
         def get_statement(self, _statement_id):
+            if poll_raises:
+                raise RuntimeError("poll failed")
             assert polled is not None
             return polled
 

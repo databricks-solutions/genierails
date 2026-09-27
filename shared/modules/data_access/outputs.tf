@@ -11,3 +11,13 @@ output "classification_catalog_schemas" {
   description = "Live remote scope unioned with this environment's classification footprint."
   value       = local.classification_catalog_schemas
 }
+
+output "schema_grant_resource_keys" {
+  description = "Instantiated schema grant resource keys."
+  value       = keys(databricks_grant.schema_access)
+}
+
+output "table_grant_resource_keys" {
+  description = "Instantiated table grant resource keys."
+  value       = keys(databricks_grant.table_access)
+}

@@ -409,6 +409,7 @@ for ta in tag_assignments:
     else:
         continue
 
+    lookup_matches_target = False
     try:
         from databricks.sdk.service.sql import StatementState as _SS
         lookup = w.statement_execution.execute_statement(
@@ -416,19 +417,33 @@ for ta in tag_assignments:
             warehouse_id=warehouse_id,
             wait_timeout='30s',
         )
-        while getattr(getattr(lookup, 'status', None), 'state', None) in (
-                _SS.PENDING, _SS.RUNNING):
+        for _poll_attempt in range(30):
+            if getattr(getattr(lookup, 'status', None), 'state', None) not in (
+                    _SS.PENDING, _SS.RUNNING):
+                break
             import time
             time.sleep(1)
             lookup = w.statement_execution.get_statement(lookup.statement_id)
+        else:
+            sys.stderr.write(
+                f'  WARNING: tag lookup timed out for {ename}/{tkey}; clearing tag\n'
+            )
         raw_lookup_state = getattr(getattr(lookup, 'status', None), 'state', None)
         lookup_state = (raw_lookup_state.value
                         if hasattr(raw_lookup_state, 'value')
                         else str(raw_lookup_state or ''))
         rows = getattr(getattr(lookup, 'result', None), 'data_array', None) or []
         current_value = rows[0][0] if rows and rows[0] else None
-        if 'SUCCEEDED' in lookup_state and current_value == tval:
-            continue
+        lookup_matches_target = 'SUCCEEDED' in lookup_state and current_value == tval
+    except Exception as e:
+        sys.stderr.write(
+            f'  WARNING: tag lookup failed for {ename}/{tkey}: {e}; clearing tag\n'
+        )
+
+    if lookup_matches_target:
+        continue
+
+    try:
         resp = w.statement_execution.execute_statement(
             statement=sql,
             warehouse_id=warehouse_id,
@@ -445,7 +460,7 @@ for ta in tag_assignments:
             if not ('not found' in err.lower() or 'does not exist' in err.lower() or 'unset' in err.lower()):
                 sys.stderr.write(f'  WARNING: could not clear {tkey} on {ename}: {err}\n')
     except Exception as e:
-        sys.stderr.write(f'  WARNING: SQL failed for {ename}/{tkey}: {e}\n')
+        sys.stderr.write(f'  WARNING: tag cleanup failed for {ename}/{tkey}: {e}\n')
 
 if cleaned:
     print(f'  Cleared {cleaned} stale tag assignment(s).')

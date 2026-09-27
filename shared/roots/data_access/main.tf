@@ -110,7 +110,7 @@ variable "business_access_enabled" {
 variable "enable_classification" {
   type        = bool
   default     = false
-  description = "Opt-in to enable UC Data Classification with auto-tagging, scoped to schemas in uc_tables."
+  description = "Opt-in to enable UC Data Classification with auto-tagging, scoped to schemas in the combined classification footprint."
 }
 
 variable "classification_existing_schemas" {
@@ -295,4 +295,12 @@ output "classification_uc_tables" {
 
 output "classification_catalog_schemas" {
   value = module.data_access.classification_catalog_schemas
+}
+
+output "schema_grant_resource_keys" {
+  value = module.data_access.schema_grant_resource_keys
+}
+
+output "table_grant_resource_keys" {
+  value = module.data_access.table_grant_resource_keys
 }

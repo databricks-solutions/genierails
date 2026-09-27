@@ -30,6 +30,20 @@ run "space_only_tables_are_classification_only" {
   }
 
   assert {
+    condition = toset(output.schema_grant_resource_keys) == toset([
+      "grants_catalog.business|analysts",
+    ])
+    error_message = "schema grant resources must be sourced only from uc_tables"
+  }
+
+  assert {
+    condition = toset(output.table_grant_resource_keys) == toset([
+      "grants_catalog.business.orders|analysts",
+    ])
+    error_message = "table grant resources must be sourced only from uc_tables"
+  }
+
+  assert {
     condition = toset(output.classification_uc_tables) == toset([
       "grants_catalog.business.orders",
       "classification_catalog.space_only.events",
