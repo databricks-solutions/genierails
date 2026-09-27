@@ -788,7 +788,7 @@ class EffectiveAccessVerifier:
                         value=[{"value": sp.id}],
                     )
                 ],
-                schemas=[iam.PatchSchema.URN_IETF_PARAMS_SCIM_API_MESSAGES2_0_PATCH_OP],
+                schemas=[iam.PatchSchema.URN_IETF_PARAMS_SCIM_API_MESSAGES_2_0_PATCH_OP],
             )
 
         return TestPrincipal(
