@@ -27,6 +27,49 @@ def test_coverage_gate_passes_fully_covered_classification_set():
     assert "fully protected" in result.info[0]
 
 
+def test_coverage_gate_warns_but_passes_on_untagged_sensitive_columns():
+    cfg = _covered_config()
+    result = ValidationResult()
+    ddl_columns = [
+        "cat.sch.people.email",          # tagged → not listed
+        "cat.sch.people.ssn",            # untagged, sensitive-looking
+        "cat.sch.people.full_name",      # untagged, sensitive-looking
+        "cat.sch.people.date_of_birth",  # untagged, sensitive-looking
+        "cat.sch.people.customer_id",    # generic → not listed
+    ]
+    validate_coverage_gate(cfg, {"mask_email"}, "", result, ddl_columns=ddl_columns)
+    assert result.passed  # non-blocking
+    assert "fully protected" in result.info[0]
+    assert len(result.warnings) == 1
+    warning = result.warnings[0]
+    assert "fail-open" in warning
+    for col in ("people.ssn", "people.full_name", "people.date_of_birth"):
+        assert col in warning
+    assert "people.email" not in warning
+    assert "customer_id" not in warning
+
+
+def test_coverage_gate_cli_warns_untagged_columns_from_fetched_ddl(tmp_path):
+    gen = tmp_path / "generated"
+    gen.mkdir()
+    (tmp_path / "ddl").mkdir()
+    (tmp_path / "ddl" / "_fetched.sql").write_text(
+        "CREATE TABLE cat.sch.people (\n  email string,\n  ssn string\n);\n"
+    )
+    tfvars = gen / "abac.auto.tfvars"
+    tfvars.write_text('tag_assignments = []\nfgac_policies = []\n')
+    sql = gen / "masking_functions.sql"
+    sql.write_text("CREATE FUNCTION cat.sch.mask_email(x STRING) RETURNS STRING RETURN x;\n")
+    script = Path(__file__).parents[1] / "validate_abac.py"
+    completed = subprocess.run(
+        [sys.executable, str(script), "--coverage-gate", str(tfvars), str(sql)],
+        text=True, capture_output=True,
+    )
+    assert "fail-open" in completed.stdout
+    assert "cat.sch.people.ssn" in completed.stdout
+    assert "COVERAGE GATE —" not in completed.stdout.replace("COVERAGE GATE (non-blocking)", "")
+
+
 def test_coverage_gate_groups_unmapped_native_classification():
     result = ValidationResult()
     validate_coverage_gate(

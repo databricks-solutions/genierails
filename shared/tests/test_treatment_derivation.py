@@ -125,3 +125,52 @@ def test_multi_catalog_masks_are_scoped_to_one_match_per_column():
     assert len(matches["cat.sch.people.ssn"]) == 1
     assert len(matches["other.sch.people.ssn"]) == 1
     assert matches["cat.sch.people.ssn"] != matches["other.sch.people.ssn"]
+
+
+def _single(entity, key, value):
+    return {
+        "tag_policies": [],
+        "tag_assignments": [{"entity_type": "columns", "entity_name": entity, "tag_key": key, "tag_value": value}],
+        "fgac_policies": [],
+    }
+
+
+def _treatment_of(cfg, entity):
+    derived, _ = derive_treatment_model(cfg, load_treatment_config())
+    return [
+        (a["tag_value"]) for a in derived["tag_assignments"]
+        if a["entity_name"] == entity and a["tag_key"] == "gr_treatment"
+    ]
+
+
+def test_free_text_column_with_single_class_is_fully_redacted():
+    # notes.free_text natively tagged only class.email_address must not get the
+    # email-shaped mask: mask_email leaks embedded phone numbers from the text.
+    col = "cat.sch.notes.free_text"
+    assert _treatment_of(_single(col, "pii_level", "masked_email"), col) == ["redact"]
+    derived, _ = derive_treatment_model(_single(col, "pii_level", "masked_email"), load_treatment_config())
+    masks = [p["function_name"] for p in derived["fgac_policies"]]
+    assert masks == ["mask_redact"]
+
+
+def test_generic_category_column_with_format_mask_is_redacted():
+    # No identifier semantics in the name (category == generic) → redact.
+    col = "cat.sch.tickets.details"
+    assert _treatment_of(_single(col, "pii_level", "masked_phone"), col) == ["redact"]
+
+
+def test_identifier_columns_keep_partial_treatment():
+    assert _treatment_of(_single("cat.sch.c.email", "pii_level", "masked_email"), "cat.sch.c.email") == ["email_partial"]
+    assert _treatment_of(_single("cat.sch.c.phone", "pii_level", "masked_phone"), "cat.sch.c.phone") == ["phone_partial"]
+    assert _treatment_of(
+        _single("cat.sch.p.credit_card_number", "pci_level", "masked_card_last4"),
+        "cat.sch.p.credit_card_number",
+    ) == ["card_last4"]
+
+
+def test_numeric_and_date_treatments_are_not_escalated():
+    # mask_redact is STRING-typed; escalating a DECIMAL/DATE column would break binding.
+    assert _treatment_of(
+        _single("cat.sch.p.notes_amount", "financial_sensitivity", "rounded_amounts"),
+        "cat.sch.p.notes_amount",
+    ) == ["round_amount"]

@@ -172,16 +172,32 @@ class TestClassificationSourceFromRunSql:
             ("pii_level", "masked_ssn", CLASSIFICATION)
         ]
 
-    def test_wildcard_refs_are_skipped(self):
+    def test_schema_wildcard_refs_query_schema_scope(self):
+        calls = []
+
+        def fake_run_sql(sql):
+            calls.append(sql)
+            if "column_tags" in sql:
+                return [("cat", "sch", "tbl", "phone", "class.phone_number", "")]
+            return []
+
+        src = ClassificationSource.from_run_sql(fake_run_sql, ["cat.sch.*"])
+        assert src.has_native_data() is True
+        assert "concat(catalog_name, '.', schema_name) IN ('cat.sch')" in calls[0]
+        assert [(f.tag_key, f.tag_value) for f in src.findings_for(["cat.sch.tbl.phone"])] == [
+            ("pii_level", "masked_phone")
+        ]
+
+    def test_unscoped_wildcard_refs_are_skipped(self):
         calls = []
 
         def fake_run_sql(sql):
             calls.append(sql)
             return []
 
-        src = ClassificationSource.from_run_sql(fake_run_sql, ["cat.sch.*"])
+        src = ClassificationSource.from_run_sql(fake_run_sql, ["cat.*.*", "cat.sch"])
         assert src.has_native_data() is False
-        assert calls == []  # nothing concrete to query
+        assert calls == []  # nothing safely scoped to query
 
 
 # ---------------------------------------------------------------------------

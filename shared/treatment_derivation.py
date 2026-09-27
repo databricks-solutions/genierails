@@ -44,6 +44,49 @@ def load_treatment_config(path: Path = CONFIG_PATH) -> TreatmentConfig:
     return TreatmentConfig(raw["tag_key"], raw["description"], treatments)
 
 
+# Treatments whose masking function operates on STRING values and is shaped for
+# one specific identifier format (email/phone/SSN/card/...).  Applied to a
+# free-text column these leak any *other* PII embedded in the text, so a
+# free-text column holding one of these is escalated to full redaction.
+# Numeric/date treatments (round_amount, date_year) are excluded: mask_redact is
+# STRING-typed and would not bind to DECIMAL/DATE columns.
+_FREE_TEXT_ESCALATION_EXCLUDED = frozenset({"redact", "round_amount", "date_year"})
+_FREE_TEXT_ESCALATION_TARGET = "redact"
+
+# Column-name tokens that mark a narrative / free-text column.
+FREE_TEXT_NAME_TOKENS = frozenset({
+    "note", "notes", "comment", "comments", "description", "desc", "remark",
+    "remarks", "message", "messages", "msg", "narrative", "memo", "text",
+    "freetext", "body", "summary", "feedback",
+})
+
+
+def is_free_text_column(entity_name: str, masking_function: str) -> bool:
+    """Whether a column must be treated as free text for masking purposes.
+
+    Heuristic (either signal is sufficient):
+      1. Name signal: an underscore-delimited token of the column name is in
+         ``FREE_TEXT_NAME_TOKENS`` (``free_text``, ``notes``, ``email_body``...).
+      2. Category signal: the validator's column-category inference
+         (``validate_abac._infer_column_categories``) yields only ``generic`` —
+         i.e. the name carries no identifier semantics — while the treatment's
+         masking function is format-specific and does not accept ``generic``
+         (``validate_abac.FUNCTION_EXPECTED_CATEGORIES``).  This is exactly the
+         condition the validator reports as a function/category mismatch.
+    """
+    column = entity_name.split(".")[-1].lower()
+    if set(column.split("_")) & FREE_TEXT_NAME_TOKENS:
+        return True
+    # Lazy import: validate_abac imports this module at load time.
+    from validate_abac import FUNCTION_EXPECTED_CATEGORIES, _infer_column_categories
+    expected = FUNCTION_EXPECTED_CATEGORIES.get(masking_function)
+    return (
+        expected is not None
+        and "generic" not in expected
+        and _infer_column_categories(entity_name) == {"generic"}
+    )
+
+
 def resolve_treatment(findings: list[tuple[str, str]], config: TreatmentConfig) -> Treatment | None:
     """Return the strictest matching treatment; config order is precedence."""
     observed = set(findings)
@@ -80,6 +123,16 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
         treatment = resolve_treatment(findings, config)
         if treatment is None:
             continue
+        if (
+            treatment.value not in _FREE_TEXT_ESCALATION_EXCLUDED
+            and is_free_text_column(column, treatment.masking_function)
+        ):
+            escalated = next(
+                (item for item in config.treatments if item.value == _FREE_TEXT_ESCALATION_TARGET),
+                None,
+            )
+            if escalated is not None:
+                treatment = escalated
         used[treatment.value] = treatment
         derived.append({
             "entity_type": "columns", "entity_name": column,

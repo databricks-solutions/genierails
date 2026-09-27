@@ -268,13 +268,79 @@ def _value_requires_coverage(tag_value: str) -> bool:
     return tag_value.strip().lower() not in {"public", "general", "exact"}
 
 
+_DDL_TABLE_RE = re.compile(
+    r"CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+([\w.`]+)\s*\((.*?)\)\s*(?:USING|;|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def parse_ddl_columns(ddl_text: str) -> list[str]:
+    """Return ``catalog.schema.table.column`` for every column in fetched DDL."""
+    columns: list[str] = []
+    for match in _DDL_TABLE_RE.finditer(ddl_text or ""):
+        table = match.group(1).replace("`", "")
+        for line in match.group(2).split("\n"):
+            parts = line.strip().rstrip(",").split()
+            if len(parts) < 2 or parts[0].startswith("--"):
+                continue
+            name = parts[0].strip("`\"")
+            if name.upper() in {"CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "CHECK"}:
+                continue
+            columns.append(f"{table}.{name}")
+    return columns
+
+
+def find_fetched_ddl(tfvars_path: Path) -> Path | None:
+    """Locate ``ddl/_fetched.sql`` next to or one level above the tfvars dir."""
+    for base in (tfvars_path.parent, tfvars_path.parent.parent):
+        candidate = base / "ddl" / "_fetched.sql"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _warn_unclassified_sensitive_columns(
+    ddl_columns: list[str] | None,
+    covered_columns: set[str],
+    result: ValidationResult,
+) -> None:
+    """Non-blocking: surface the fail-open gap for untagged sensitive-looking columns.
+
+    Masks bind only to columns that carry a sensitivity tag / ``gr_treatment``.
+    A column whose name looks sensitive (any non-``generic`` category from
+    ``_infer_column_categories``) but that has neither is unmasked; the gate
+    cannot prove it is sensitive, so it warns instead of blocking.
+    """
+    if not ddl_columns:
+        return
+    covered = {c.lower() for c in covered_columns}
+    gaps = []
+    for column in ddl_columns:
+        if column.lower() in covered:
+            continue
+        categories = _infer_column_categories(column) - {"generic"}
+        if categories:
+            gaps.append(f"{column} (looks like: {', '.join(sorted(categories))})")
+    if gaps:
+        result.warn(
+            "COVERAGE GATE (non-blocking) — sensitive-looking columns with NO "
+            "sensitivity/class.* tag and NO gr_treatment; these are NOT masked "
+            "(fail-open):\n    - " + "\n    - ".join(gaps)
+        )
+
+
 def validate_coverage_gate(
     cfg: dict,
     sql_functions: set[str] | None,
     raw_tfvars: str,
     result: ValidationResult,
+    ddl_columns: list[str] | None = None,
 ) -> None:
-    """Block every classification/treatment coverage gap in generated config."""
+    """Block every classification/treatment coverage gap in generated config.
+
+    When ``ddl_columns`` is supplied, additionally warn (never block) about
+    sensitive-looking columns that carry no sensitivity tag and no treatment.
+    """
     treatment_cfg = load_treatment_config()
     mapped_sources = {source for item in treatment_cfg.treatments for source in item.sources}
     treatment_functions = {item.value: item.masking_function for item in treatment_cfg.treatments}
@@ -339,6 +405,10 @@ def validate_coverage_gate(
         elif sql_functions is None or expected_fn not in sql_functions:
             missing_functions.add(f"{expected_fn} (treatment {treatment}; used by {column})")
             unprotected.append(f"{column} (treatment {treatment}; masking function {expected_fn} missing)")
+
+    _warn_unclassified_sensitive_columns(
+        ddl_columns, set(source_columns) | set(treatments), result,
+    )
 
     groups = [
         ("detected tags with no mapping/rule", [f"{c} ({d})" for c, d in unmapped]),
@@ -1050,6 +1120,12 @@ def main():
         help="Block if any classification-derived treatment lacks a mask policy/function",
     )
     parser.add_argument(
+        "--ddl",
+        metavar="PATH",
+        help="Fetched DDL used by --coverage-gate to warn about untagged "
+             "sensitive-looking columns (default: auto-detect ddl/_fetched.sql)",
+    )
+    parser.add_argument(
         "--country",
         metavar="CODE",
         help="Comma-separated region codes for country-specific column inference "
@@ -1143,7 +1219,16 @@ def main():
     if args.coverage_gate:
         if sql_path is None:
             result.error("COVERAGE GATE — masking_functions.sql is required")
-        validate_coverage_gate(merged_cfg, sql_functions, tfvars_path.read_text(), result)
+        ddl_path = Path(args.ddl).resolve() if args.ddl else find_fetched_ddl(tfvars_path)
+        ddl_columns = None
+        if ddl_path and ddl_path.exists():
+            ddl_columns = parse_ddl_columns(ddl_path.read_text())
+        elif args.ddl:
+            result.warn(f"COVERAGE GATE — DDL file {ddl_path} not found; untagged-column check skipped")
+        validate_coverage_gate(
+            merged_cfg, sql_functions, tfvars_path.read_text(), result,
+            ddl_columns=ddl_columns,
+        )
 
     result.print_report()
     sys.exit(0 if result.passed else 1)

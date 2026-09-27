@@ -1882,9 +1882,11 @@ def _fetch_live_classification_source(
     ``class.*`` tags are available, while keeping behaviour unchanged when they
     are not.
     """
+    # Concrete tables and schema-scoped ``catalog.schema.*`` footprints are both
+    # readable; dropping wildcards here silently skipped native classification.
     table_fqns = [
         r for r in (table_refs or [])
-        if len(str(r).split(".")) == 3 and "*" not in str(r)
+        if len(str(r).split(".")) == 3 and "*" not in str(r).split(".")[:2]
     ]
     if not table_fqns:
         return None
@@ -4980,6 +4982,11 @@ _PII_COLUMN_TAG_MAP: list[tuple[list[str], str, str]] = [
     (["address", "street_address", "residential_address"],   "pii_level", "redacted_address"),
     (["date_of_birth", "dob", "birth_date", "birthdate"],    "pii_level", "masked_dob"),
     (["ssn", "social_security"],                             "pii_level", "masked_ssn"),
+    # Person names (backstop only — realistic data is tagged natively as class.name).
+    # Bare "name" is matched exactly via _PII_EXACT_COLUMN_TAG_MAP, not as a
+    # substring, so username/table_name/file_name are not swept in.
+    (["full_name", "first_name", "last_name", "given_name", "surname",
+      "family_name", "middle_name"],                         "pii_level", "masked_name"),
     # ANZ
     (["tfn", "tax_file_number"],                             "pii_level", "masked_tfn"),
     (["medicare", "medicare_number"],                        "pii_level", "masked_medicare"),
@@ -4993,6 +5000,12 @@ _PII_COLUMN_TAG_MAP: list[tuple[list[str], str, str]] = [
     (["account_number", "bank_account"],                     "pii_level", "masked_account"),
     (["card_number", "credit_card", "pan"],                  "pci_level", "masked_card_last4"),
     (["cvv", "cvc", "card_verification"],                    "pci_level", "redacted_cvv"),
+]
+
+# Exact-column-name patterns (no substring matching) for hints too generic to
+# match as substrings.
+_PII_EXACT_COLUMN_TAG_MAP: list[tuple[list[str], str, str]] = [
+    (["name"],                                               "pii_level", "masked_name"),
 ]
 
 # Columns that look like amounts/balances → financial_sensitivity tag
@@ -5011,6 +5024,7 @@ _PII_TAG_REQUIRED_FUNCTIONS: dict[str, list[str]] = {
     "redacted_address": ["mask_redact", "mask_pii_partial"],
     "masked_dob":       ["mask_date_to_year"],
     "masked_ssn":       ["mask_ssn", "mask_redact", "mask_pii_partial"],
+    "masked_name":      ["mask_full_name", "mask_name", "mask_redact", "mask_pii_partial"],
     "masked_tfn":       ["mask_tfn", "mask_redact"],
     "masked_medicare":  ["mask_medicare", "mask_redact"],
     "masked_bsb":       ["mask_bsb", "mask_redact"],
@@ -5129,6 +5143,10 @@ def autofix_untagged_pii_columns(
     ]
     if "mask_amount_rounded" in available_fns:
         active_patterns.extend(_FINANCIAL_COLUMN_TAG_MAP)
+    active_exact_patterns = [
+        (hints, key, val) for hints, key, val in _PII_EXACT_COLUMN_TAG_MAP
+        if _any_covering_fn_available(val)
+    ]
 
     # Resolve each untagged column's sensitivity through the SensitivitySource
     # interface.  The deterministic DDL name-pattern matcher below is the LLM
@@ -5148,6 +5166,13 @@ def autofix_untagged_pii_columns(
         out: list[Finding] = []
         for full_name in cols:
             col_name = col_name_by_full.get(full_name, full_name.split(".")[-1].lower())
+            exact = next((p for p in active_exact_patterns if col_name in p[0]), None)
+            if exact is not None:
+                out.append(Finding(
+                    entity_name=full_name, tag_key=exact[1], tag_value=exact[2],
+                    source=_SRC_LLM, detail=col_name,
+                ))
+                continue
             for hints, tag_key, tag_value in active_patterns:
                 if col_name in hints or any(h in col_name for h in hints):
                     out.append(Finding(

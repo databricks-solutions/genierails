@@ -403,17 +403,42 @@ def _table_fqns_from_refs(table_refs: Sequence[str]) -> list[str]:
     return fqns
 
 
+def _schema_wildcards_from_refs(table_refs: Sequence[str]) -> list[str]:
+    """Return ``catalog.schema`` for each ``catalog.schema.*`` footprint ref."""
+    schemas: list[str] = []
+    for ref in table_refs or []:
+        parts = str(ref).split(".")
+        if len(parts) == 3 and parts[2] == "*" and "*" not in parts[:2]:
+            schemas.append(f"{parts[0]}.{parts[1]}")
+    return schemas
+
+
+def _table_scope_predicate(table_refs: Sequence[str]) -> str | None:
+    """SQL predicate matching concrete tables and ``catalog.schema.*`` scopes."""
+    clauses: list[str] = []
+    fqns = _table_fqns_from_refs(table_refs)
+    if fqns:
+        clauses.append(
+            f"concat(catalog_name, '.', schema_name, '.', table_name) IN ({_quote_list(fqns)})"
+        )
+    schemas = _schema_wildcards_from_refs(table_refs)
+    if schemas:
+        clauses.append(f"concat(catalog_name, '.', schema_name) IN ({_quote_list(schemas)})")
+    if not clauses:
+        return None
+    return "(" + " OR ".join(clauses) + ")"
+
+
 def _read_class_column_tags(run_sql: Callable[[str], list], table_refs: Sequence[str]) -> list[tuple]:
     """Read ``class.*`` column tags from system.information_schema.column_tags."""
-    fqns = _table_fqns_from_refs(table_refs)
-    if not fqns:
+    scope = _table_scope_predicate(table_refs)
+    if not scope:
         return []
-    table_list = _quote_list(fqns)
     sql = f"""\
 SELECT catalog_name, schema_name, table_name, column_name, tag_name, tag_value
 FROM system.information_schema.column_tags
 WHERE lower(tag_name) LIKE 'class.%'
-  AND concat(catalog_name, '.', schema_name, '.', table_name) IN ({table_list})
+  AND {scope}
 ORDER BY catalog_name, schema_name, table_name, column_name, tag_name"""
     return [tuple(row) for row in (run_sql(sql) or [])]
 
@@ -425,12 +450,11 @@ def _read_data_classification_results(run_sql: Callable[[str], list], table_refs
     or ``us_ssn``) — not ``class_name``.  Callers wrap this in try/except — a
     missing table is not fatal.
     """
-    fqns = _table_fqns_from_refs(table_refs)
-    if not fqns:
+    scope = _table_scope_predicate(table_refs)
+    if not scope:
         return []
-    table_list = _quote_list(fqns)
     sql = f"""\
 SELECT catalog_name, schema_name, table_name, column_name, class_tag
 FROM system.data_classification.results
-WHERE concat(catalog_name, '.', schema_name, '.', table_name) IN ({table_list})"""
+WHERE {scope}"""
     return [tuple(row) for row in (run_sql(sql) or [])]
