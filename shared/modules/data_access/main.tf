@@ -202,7 +202,7 @@ resource "null_resource" "deploy_masking_functions" {
     warehouse_id  = local.effective_warehouse_id
     host          = var.databricks_workspace_host
     client_id     = var.databricks_client_id
-    client_secret = nonsensitive(var.databricks_client_secret)
+    client_secret = var.databricks_client_secret
   }
 
   provisioner "local-exec" {

@@ -64,3 +64,10 @@ def test_builtin_policy_targets_are_included_in_access_principals():
         body = _resource_body(source, resource)
         assert "local.access_principals" in body
         assert "keys(var.groups)" not in body
+
+
+def test_masking_deployer_does_not_declassify_oauth_secret():
+    source = MAIN_TF.read_text()
+
+    assert "client_secret = var.databricks_client_secret" in source
+    assert "nonsensitive(var.databricks_client_secret)" not in source
