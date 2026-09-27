@@ -97,6 +97,7 @@ def main():
     # Load source config
     cfg = hcl2.load(open(os.path.join(source_env_dir, "env.auto.tfvars")))
     spaces = cfg.get("genie_spaces", [])
+    top_level_tables = cfg.get("uc_tables") or []
 
     # Load source auth for API queries
     auth_cfg = {}
@@ -139,6 +140,11 @@ def main():
             lines.append(f'      "{t}",')
         lines.append(f'    ]')
         lines.append("  },")
+    lines.append("]")
+    lines.append("")
+    lines.append("uc_tables = [")
+    for table in top_level_tables:
+        lines.append(f'  "{remap_table(table)}",')
     lines.append("]")
     lines.append("")
     lines.append('sql_warehouse_id = ""  # auto-create in dest workspace')
