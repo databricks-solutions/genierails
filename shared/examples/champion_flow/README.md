@@ -35,6 +35,8 @@ python teardown_sample_env.py --profile DEFAULT --catalog my_catalog
 Use `--help` to see the `--host`, `--schema`, `--rows`, and environment-variable
 alternatives.
 
+Once those three values are in `env.auto.tfvars`, follow the rest of this guide from **Phase 0** below unchanged — the sample footprint (`customers` / `payments` / `notes`, seeded with realistic synthetic PII) is exactly what every phase here assumes.
+
 ---
 
 ## At a glance — the phase map
