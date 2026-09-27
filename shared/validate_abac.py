@@ -383,7 +383,9 @@ def validate_coverage_gate(
                 f"catalog {catalog}: {len(names)} policies (limit 100): {', '.join(names)}"
             )
 
-    for column, sources in sorted(source_columns.items()):
+    protected_columns = set(source_columns) | set(treatments)
+    for column in sorted(protected_columns):
+        sources = source_columns.get(column, [])
         treatment = treatments.get(column)
         if not treatment:
             unprotected.append(f"{column} (detected: {', '.join(f'{k}={v}' for k, v in sources)}; no gr_treatment)")
@@ -402,6 +404,14 @@ def validate_coverage_gate(
         expected_fn = treatment_functions.get(treatment)
         if not expected_fn:
             missing_policies.add(f"{treatment} (no treatment mapping/rule)")
+            unprotected.append(f"{column} (unknown gr_treatment {treatment}; no treatment mapping/rule)")
+        elif not any(p.get("function_name") == expected_fn for p in matching):
+            missing_policies.add(
+                f"{treatment} (catalog {catalog}; expected masking function {expected_fn})"
+            )
+            unprotected.append(
+                f"{column} (treatment {treatment}; covering policy does not resolve to {expected_fn})"
+            )
         elif sql_functions is None or expected_fn not in sql_functions:
             missing_functions.add(f"{expected_fn} (treatment {treatment}; used by {column})")
             unprotected.append(f"{column} (treatment {treatment}; masking function {expected_fn} missing)")
@@ -421,7 +431,7 @@ def validate_coverage_gate(
         if items:
             result.error(f"COVERAGE GATE — {title}:\n    - " + "\n    - ".join(items))
     if not any(items for _, items in groups):
-        result.ok(f"Coverage gate: {len(source_columns)} classified column(s) fully protected")
+        result.ok(f"Coverage gate: {len(protected_columns)} classified/treatment column(s) fully protected")
 
 
 def _load_country_categories(
@@ -565,7 +575,7 @@ def validate_groups(cfg: dict, result: ValidationResult):
             for field in ("to_principals", "except_principals")
             for principal in (policy.get(field) or [])
         }
-        if referenced and referenced <= BUILTIN_PRINCIPALS:
+        if referenced and {principal.lower() for principal in referenced} <= BUILTIN_PRINCIPALS:
             result.ok("groups: built-in principals only (no managed group definitions required)")
             return set()
         result.error("'groups' is missing or empty — at least one group is required")

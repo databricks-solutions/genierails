@@ -6,7 +6,9 @@ relevant autofix function, and asserts the expected outcome.
 """
 import re
 import sys
+import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1090,3 +1092,82 @@ def test_strip_native_source_assignments_keeps_single_treatment(tmp_path):
         ("gr_treatment", "email_partial"),
         ("gr_row_scope", "region_code"),
     ]
+
+
+def test_initial_and_retry_paths_share_authoritative_pipeline_wiring():
+    source = inspect.getsource(generate_abac.main)
+    assert source.count("authoritative_classification=classification_source is not None") == 2
+    assert source.count("derive_and_finalize_treatments(") == 2
+
+
+def test_native_finalizer_is_idempotent_and_strips_source_families(tmp_path):
+    path = tmp_path / "abac.auto.tfvars"
+    path.write_text('''tag_policies = [
+  { key = "pii_level", values = ["masked_email"] },
+  { key = "gr_treatment", values = ["email_partial"] }
+]
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.tbl.email", tag_key = "pii_level", tag_value = "masked_email" }
+]
+fgac_policies = []
+''')
+    generate_abac.derive_and_finalize_treatments(path, native_authoritative=True)
+    first = path.read_text()
+    generate_abac.derive_and_finalize_treatments(path, native_authoritative=True)
+    second = path.read_text()
+    cfg = assert_valid_hcl(path)
+    assert second == first
+    assert [(a["tag_key"], a["tag_value"]) for a in cfg["tag_assignments"]] == [
+        ("gr_treatment", "email_partial")
+    ]
+    assert [p["key"] for p in cfg["tag_policies"]] == ["gr_treatment"]
+
+
+def test_required_native_classification_fails_without_warehouse(monkeypatch):
+    import databricks.sdk
+
+    class FakeWarehouses:
+        @staticmethod
+        def list():
+            return []
+
+    class FakeClient:
+        warehouses = FakeWarehouses()
+
+    monkeypatch.setattr(generate_abac, "configure_databricks_env", lambda _: None)
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", lambda **_: FakeClient())
+
+    with pytest.raises(generate_abac.NativeClassificationRequiredError, match="No SQL warehouse"):
+        generate_abac._fetch_live_classification_source(
+            ["cat.sch.*"], {}, require_native=True,
+        )
+    assert generate_abac._fetch_live_classification_source(
+        ["cat.sch.*"], {}, require_native=False,
+    ) is None
+
+
+def test_required_native_classification_fails_on_successful_empty_scan(monkeypatch):
+    import databricks.sdk
+    from databricks.sdk.service.sql import StatementState
+
+    class FakeStatements:
+        @staticmethod
+        def execute_statement(**_):
+            return SimpleNamespace(
+                status=SimpleNamespace(state=StatementState.SUCCEEDED),
+                result=SimpleNamespace(data_array=[]),
+            )
+
+    class FakeClient:
+        statement_execution = FakeStatements()
+
+    monkeypatch.setattr(generate_abac, "configure_databricks_env", lambda _: None)
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", lambda **_: FakeClient())
+
+    with pytest.raises(
+        generate_abac.NativeClassificationRequiredError,
+        match=r"returned 0 class\.\* findings",
+    ):
+        generate_abac._fetch_live_classification_source(
+            ["cat.sch.*"], {"sql_warehouse_id": "warehouse"}, require_native=True,
+        )

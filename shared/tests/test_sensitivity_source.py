@@ -305,6 +305,47 @@ def _paths(tmp_path):
 
 
 class TestAutofixIntegration:
+    def test_authoritative_branch_calls_findings_for_all_footprint_columns(self, tmp_path):
+        import generate_abac
+
+        class SpySource:
+            def __init__(self):
+                self.calls = []
+
+            def findings_for(self, columns):
+                self.calls.append(list(columns))
+                return [Finding(
+                    entity_name="cat.sch.tbl.email", tag_key="pii_level",
+                    tag_value="masked_email", source=CLASSIFICATION,
+                )]
+
+            def unmapped_columns(self, columns):
+                return []
+
+        tfvars = tmp_path / "abac.auto.tfvars"
+        tfvars.write_text('''tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.tbl.email", tag_key = "data_domain", tag_value = "contact" }
+]
+''')
+        ddl = tmp_path / "ddl" / "_fetched.sql"
+        ddl.parent.mkdir(parents=True)
+        ddl.write_text(_DDL)
+        source = SpySource()
+
+        generate_abac.autofix_untagged_pii_columns(
+            tfvars, ddl_path=ddl, classification_source=source,
+            authoritative_classification=True,
+        )
+
+        assert source.calls == [[
+            "cat.sch.tbl.id", "cat.sch.tbl.email", "cat.sch.tbl.contact",
+        ]]
+        cfg = assert_valid_hcl(tfvars)
+        assert any(
+            a["entity_name"] == "cat.sch.tbl.email" and a["tag_value"] == "masked_email"
+            for a in cfg["tag_assignments"]
+        )
+
     def test_authoritative_classification_removes_llm_guesses_for_footprint(self, tmp_path):
         import generate_abac
         tfvars = tmp_path / "abac.auto.tfvars"
@@ -332,6 +373,37 @@ class TestAutofixIntegration:
         assert [(a["entity_name"], a["tag_value"]) for a in assignments] == [
             ("cat.sch.tbl.email", "masked_email")
         ]
+
+    @pytest.mark.parametrize("existing", [
+        {"tag_key": "pii_level", "tag_value": "public"},
+        {"tag_key": "data_domain", "tag_value": "contact"},
+    ])
+    def test_authoritative_native_finding_cannot_be_blocked_by_existing_assignment(
+        self, tmp_path, existing,
+    ):
+        import generate_abac
+        tfvars = tmp_path / "abac.auto.tfvars"
+        tfvars.write_text(f'''tag_assignments = [
+  {{ entity_type = "columns", entity_name = "cat.sch.tbl.email", tag_key = "{existing['tag_key']}", tag_value = "{existing['tag_value']}" }}
+]
+''')
+        ddl = tmp_path / "ddl" / "_fetched.sql"
+        ddl.parent.mkdir(parents=True)
+        ddl.write_text(_DDL)
+        classification = ClassificationSource(
+            tag_rows=[("cat", "sch", "tbl", "email", "class.email_address", "")],
+        )
+
+        added = generate_abac.autofix_untagged_pii_columns(
+            tfvars, ddl_path=ddl, classification_source=classification,
+            authoritative_classification=True,
+        )
+
+        assert added == 1
+        cfg = assert_valid_hcl(tfvars)
+        email = [a for a in cfg["tag_assignments"] if a["entity_name"] == "cat.sch.tbl.email"]
+        assert any(a["tag_key"] == "pii_level" and a["tag_value"] == "masked_email" for a in email)
+        assert not any(a["tag_key"] == "pii_level" and a["tag_value"] == "public" for a in email)
 
     def test_default_none_is_unchanged_legacy_behaviour(self, _paths):
         import generate_abac

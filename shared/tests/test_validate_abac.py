@@ -80,6 +80,14 @@ class TestValidateGroups:
         assert r.passed
         assert names == set()
 
+    def test_builtin_principal_match_is_case_insensitive(self):
+        r = _result()
+        validate_groups({
+            "groups": {},
+            "fgac_policies": [{"to_principals": ["Account Users"]}],
+        }, r)
+        assert r.passed
+
     def test_multiple_groups_all_returned(self):
         r = _result()
         names = validate_groups(

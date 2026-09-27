@@ -174,3 +174,24 @@ def test_numeric_and_date_treatments_are_not_escalated():
         _single("cat.sch.p.notes_amount", "financial_sensitivity", "rounded_amounts"),
         "cat.sch.p.notes_amount",
     ) == ["round_amount"]
+
+
+def test_rederive_treatment_only_config_is_idempotent():
+    cfg = {
+        "tag_policies": [],
+        "tag_assignments": [{
+            "entity_type": "columns", "entity_name": "cat.sch.tbl.email",
+            "tag_key": "gr_treatment", "tag_value": "email_partial",
+        }],
+        "fgac_policies": [{
+            "name": "existing", "policy_type": "POLICY_TYPE_COLUMN_MASK",
+            "catalog": "cat", "to_principals": ["account users"],
+            "match_condition": "hasTagValue('gr_treatment', 'email_partial')",
+            "function_name": "mask_email", "function_schema": "security",
+        }],
+    }
+    first, _ = derive_treatment_model(cfg, load_treatment_config())
+    second, _ = derive_treatment_model(first, load_treatment_config())
+    assert second["tag_assignments"] == first["tag_assignments"]
+    assert second["fgac_policies"] == first["fgac_policies"]
+    assert second["tag_assignments"][0]["tag_value"] == "email_partial"

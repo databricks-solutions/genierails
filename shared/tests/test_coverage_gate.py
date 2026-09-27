@@ -27,6 +27,38 @@ def test_coverage_gate_passes_fully_covered_classification_set():
     assert "fully protected" in result.info[0]
 
 
+def test_coverage_gate_rejects_treatment_only_column_without_mask():
+    cfg = {
+        "tag_assignments": [{
+            "entity_type": "columns", "entity_name": "cat.sch.people.email",
+            "tag_key": "gr_treatment", "tag_value": "email_partial",
+        }],
+        "fgac_policies": [],
+    }
+    result = ValidationResult()
+    validate_coverage_gate(cfg, set(), "", result)
+    assert not result.passed
+    assert any("no covering column-mask policy" in error for error in result.errors)
+
+
+def test_coverage_gate_rejects_treatment_only_column_with_missing_function():
+    cfg = {
+        "tag_assignments": [{
+            "entity_type": "columns", "entity_name": "cat.sch.people.email",
+            "tag_key": "gr_treatment", "tag_value": "email_partial",
+        }],
+        "fgac_policies": [{
+            "name": "email", "policy_type": "POLICY_TYPE_COLUMN_MASK",
+            "catalog": "cat", "match_condition": "hasTagValue('gr_treatment', 'email_partial')",
+            "function_name": "mask_email",
+        }],
+    }
+    result = ValidationResult()
+    validate_coverage_gate(cfg, set(), "", result)
+    assert not result.passed
+    assert any("mask_email" in error for error in result.errors)
+
+
 def test_coverage_gate_warns_but_passes_on_untagged_sensitive_columns():
     cfg = _covered_config()
     result = ValidationResult()

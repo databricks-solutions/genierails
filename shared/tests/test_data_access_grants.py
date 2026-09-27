@@ -55,6 +55,12 @@ def test_business_select_is_fail_closed_while_structural_grants_remain():
 
 def test_builtin_policy_targets_are_included_in_access_principals():
     source = MAIN_TF.read_text()
-
-    assert "keys(var.groups)" in source
-    assert "flatten([for p in var.fgac_policies : p.to_principals])" in source
+    normalized = " ".join(source.split())
+    assert (
+        "access_principals = distinct(concat( keys(var.groups), "
+        "flatten([for p in var.fgac_policies : p.to_principals]), ))"
+    ) in normalized
+    for resource in ("catalog_access", "schema_access", "table_access"):
+        body = _resource_body(source, resource)
+        assert "local.access_principals" in body
+        assert "keys(var.groups)" not in body

@@ -103,11 +103,17 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
     assignments = [dict(item) for item in (cfg.get("tag_assignments") or [])]
     mapped_sources = {source for item in config.treatments for source in item.sources}
     by_column: dict[str, list[tuple[str, str]]] = {}
+    existing_treatments: dict[str, str] = {}
     retained: list[dict] = []
     for assignment in assignments:
         source = (assignment.get("tag_key", ""), assignment.get("tag_value", ""))
         if assignment.get("entity_type") == "columns" and source in mapped_sources:
             by_column.setdefault(assignment.get("entity_name", ""), []).append(source)
+        if (
+            assignment.get("entity_type") == "columns"
+            and assignment.get("tag_key") == config.tag_key
+        ):
+            existing_treatments[assignment.get("entity_name", "")] = assignment.get("tag_value", "")
         # Sensitivity tags are owned by their detection sources and must remain
         # in the emitted model. Only this transform's prior column assignment is
         # replaced, so repeated derivation cannot accumulate treatment values.
@@ -119,8 +125,12 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
 
     derived: list[dict] = []
     used: dict[str, Treatment] = {}
-    for column, findings in sorted(by_column.items()):
+    treatments_by_value = {item.value: item for item in config.treatments}
+    for column in sorted(set(by_column) | set(existing_treatments)):
+        findings = by_column.get(column, [])
         treatment = resolve_treatment(findings, config)
+        if treatment is None:
+            treatment = treatments_by_value.get(existing_treatments.get(column, ""))
         if treatment is None:
             continue
         if (

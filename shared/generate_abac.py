@@ -1864,9 +1864,15 @@ def _fetch_live_tag_policy_values() -> dict[str, set[str]]:
         return {}
 
 
+class NativeClassificationRequiredError(RuntimeError):
+    """Raised when native classification is required but cannot be read."""
+
+
 def _fetch_live_classification_source(
     table_refs: list[str] | None,
     auth_cfg: dict,
+    *,
+    require_native: bool = False,
 ) -> SensitivitySource | None:
     """Best-effort: build a ClassificationSource from native UC Data Classification.
 
@@ -1875,12 +1881,9 @@ def _fetch_live_classification_source(
     warehouse, using the same statement-execution pattern as
     scripts/audit_schema_drift.py.
 
-    Returns ``None`` on any failure or when no native classification exists (no
-    warehouse, no credentials, table absent, empty results) so generation
-    proceeds on the DDL-inference path exactly as before.  This is the hook that
-    makes ClassificationSource the default sensitivity input whenever native
-    ``class.*`` tags are available, while keeping behaviour unchanged when they
-    are not.
+    Returns ``None`` for unavailable/empty native data only when native mode is
+    not required.  With ``require_native=True`` every unreadable or empty scan
+    is a hard failure, preventing a silent downgrade to LLM inference.
     """
     # Concrete tables and schema-scoped ``catalog.schema.*`` footprints are both
     # readable; dropping wildcards here silently skipped native classification.
@@ -1904,7 +1907,10 @@ def _fetch_live_classification_source(
                     warehouse_id = wh.id
                     break
         if not warehouse_id:
-            print("  [SENSITIVITY] No SQL warehouse available; using DDL inference only")
+            message = "No SQL warehouse available for native classification read"
+            if require_native:
+                raise NativeClassificationRequiredError(message)
+            print(f"  [SENSITIVITY] {message}; using DDL inference only")
             return None
 
         def _run_sql(sql: str) -> list:
@@ -1924,6 +1930,13 @@ def _fetch_live_classification_source(
 
         source = ClassificationSource.from_run_sql(_run_sql, table_fqns)
         if not source.has_native_data():
+            message = (
+                "Native classification read succeeded but returned 0 class.* "
+                "findings for the declared footprint"
+            )
+            if require_native:
+                raise NativeClassificationRequiredError(message)
+            print(f"  [SENSITIVITY] {message}; using DDL inference only")
             return None
         print(
             "  [SENSITIVITY] Native UC Data Classification found for "
@@ -1932,6 +1945,12 @@ def _fetch_live_classification_source(
         )
         return source
     except Exception as exc:
+        if require_native:
+            if isinstance(exc, NativeClassificationRequiredError):
+                raise
+            raise NativeClassificationRequiredError(
+                f"Could not read required native classification: {exc}"
+            ) from exc
         print(f"  [SENSITIVITY] Could not read native classification ({exc}); using DDL inference only")
         return None
 
@@ -2718,6 +2737,7 @@ def strip_native_source_assignments(tfvars_path: Path) -> int:
         source for treatment in treatment_cfg.treatments for source in treatment.sources
     }
     assignments = cfg.get("tag_assignments", []) or []
+    sensitivity_keys = {key for key, _ in mapped_sources}
     retained = [
         assignment for assignment in assignments
         if not (
@@ -2727,12 +2747,35 @@ def strip_native_source_assignments(tfvars_path: Path) -> int:
     ]
     removed = len(assignments) - len(retained)
     if removed:
-        tfvars_path.write_text(_replace_bracket_section(
+        text = _replace_bracket_section(
             text,
             "tag_assignments",
             [_render_tag_assignment_block(item) for item in retained],
-        ))
+        )
+        # Native class.* is the source vocabulary; do not emit centrally owned
+        # sensitivity tag-policy definitions that this layer must not mutate.
+        policies = [
+            policy for policy in (cfg.get("tag_policies", []) or [])
+            if policy.get("key") not in sensitivity_keys
+        ]
+        text = _replace_bracket_section(
+            text,
+            "tag_policies",
+            [_render_tag_policy_block(item) for item in policies],
+        )
+        tfvars_path.write_text(text)
     return removed
+
+
+def derive_and_finalize_treatments(
+    tfvars_path: Path,
+    *,
+    native_authoritative: bool,
+) -> tuple[int, int]:
+    """Run the identical treatment finalization used by initial and retry paths."""
+    derived = derive_enforcement_treatments(tfvars_path)
+    stripped = strip_native_source_assignments(tfvars_path) if native_authoritative else 0
+    return derived, stripped
 
 
 def _parse_sql_function_names(sql_path: Path | None) -> set[str]:
@@ -5159,6 +5202,7 @@ def autofix_untagged_pii_columns(
         sensitivity_sources = {
             source for treatment in treatment_cfg.treatments for source in treatment.sources
         }
+        sensitivity_keys = {key for key, _ in sensitivity_sources}
         all_column_names = {full for full, _ in all_columns}
         assignments = cfg.get("tag_assignments", []) or []
         retained_assignments = [
@@ -5166,7 +5210,7 @@ def autofix_untagged_pii_columns(
             if not (
                 assignment.get("entity_type") == "columns"
                 and assignment.get("entity_name") in all_column_names
-                and (assignment.get("tag_key"), assignment.get("tag_value")) in sensitivity_sources
+                and assignment.get("tag_key") in sensitivity_keys
             )
         ]
         if len(retained_assignments) != len(assignments):
@@ -5219,7 +5263,10 @@ def autofix_untagged_pii_columns(
     # path's backstop, wrapped as an LLMSource; native classification (when
     # supplied) takes precedence per column via select_findings.
     col_name_by_full = dict(all_columns)
-    candidate_columns = [full for full, _ in all_columns if full not in existing_tags]
+    candidate_columns = [
+        full for full, _ in all_columns
+        if authoritative_classification or full not in existing_tags
+    ]
     if agent_footprint is not None:
         # The same canonical footprint that selected the classification tables
         # also supplies the coverage-gate denominator at column granularity.
@@ -6476,6 +6523,15 @@ def main():
     parser.add_argument("--promote", action="store_true",
         help="Auto-split validated output into account + env data_access + workspace configs")
     parser.add_argument("--dry-run", action="store_true", help="Build the prompt and print it without calling the LLM")
+    parser.add_argument(
+        "--allow-llm-sensitivity",
+        action="store_true",
+        help=(
+            "Explicitly allow LLM/DDL sensitivity inference when native "
+            "classification is enabled but unreadable or empty. Without this "
+            "opt-out, enabled native classification is fail-closed."
+        ),
+    )
     # --groups (consume) and --create-groups (invent) are mutually exclusive:
     # you either point GenieRails at existing IdP-synced groups OR opt into
     # minting new ones — never both (that would aim the create path at an
@@ -7172,13 +7228,22 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_overlay_fns:
             print(f"  Auto-fixed: injected {n_overlay_fns} overlay-provided masking function(s)")
 
-        # Resolve the sensitivity source once: native UC Data Classification
-        # (class.* tags) is authoritative when present, else DDL inference.
-        # Best-effort — None means "no native classification, behave as before".
-        classification_source = (
-            _fetch_live_classification_source(table_refs, auth_cfg)
-            if args.mode != "genie" else None
-        )
+        # Resolve the sensitivity source once. When classification is enabled,
+        # native class.* is required unless the operator explicitly opts out.
+        native_expected = bool(auth_cfg.get("enable_classification")) and bool(table_refs)
+        try:
+            classification_source = (
+                _fetch_live_classification_source(
+                    table_refs,
+                    auth_cfg,
+                    require_native=native_expected and not args.allow_llm_sensitivity,
+                )
+                if args.mode != "genie" else None
+            )
+        except NativeClassificationRequiredError as exc:
+            print(f"ERROR: {exc}")
+            print("  Re-run with --allow-llm-sensitivity only to explicitly accept LLM/DDL inference.")
+            sys.exit(1)
 
         # Skip PII autofix in genie mode — tag_assignments are managed by the governance team
         if args.mode != "genie":
@@ -7232,16 +7297,17 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 print(f"  Auto-fixed: populated acl_groups for {n_acl} genie space(s)")
 
         if args.mode != "genie":
-            n_treatments = derive_enforcement_treatments(tfvars_path)
+            n_treatments, n_native_sources = derive_and_finalize_treatments(
+                tfvars_path,
+                native_authoritative=classification_source is not None,
+            )
             if n_treatments:
                 print(f"  Derived GenieRails enforcement treatments ({n_treatments} change(s))")
-            if classification_source is not None:
-                n_native_sources = strip_native_source_assignments(tfvars_path)
-                if n_native_sources:
-                    print(
-                        "  Native classification authoritative: removed "
-                        f"{n_native_sources} redundant source-family assignment(s)"
-                    )
+            if n_native_sources:
+                print(
+                    "  Native classification authoritative: removed "
+                    f"{n_native_sources} redundant source-family assignment(s)"
+                )
 
         # Check the hard UC quota after Option-B has collapsed masks to one
         # policy per treatment/catalog. Never delete policies to fit the cap.
@@ -7458,6 +7524,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                             sql_path=sql_path if sql_block else None,
                             classification_source=classification_source,
                             agent_footprint=agent_footprint,
+                            authoritative_classification=classification_source is not None,
                         )
                         autofix_tag_policies(tfvars_path)  # register new PII tag values
                     autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
@@ -7470,7 +7537,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
                         env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
                         autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
                     if args.mode != "genie":
-                        derive_enforcement_treatments(tfvars_path)
+                        derive_and_finalize_treatments(
+                            tfvars_path,
+                            native_authoritative=classification_source is not None,
+                        )
                     autofix_fgac_policy_count(tfvars_path)
                     autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
                     autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
