@@ -57,6 +57,12 @@ variable "classification_existing_schemas" {
   description = "Existing schemas to preserve when a catalog classification config is shared across environments."
 }
 
+variable "classification_all_schemas" {
+  type        = set(string)
+  default     = []
+  description = "Catalogs whose classification config intentionally covers all schemas (unset included_schemas)."
+}
+
 variable "tag_assignments" {
   type = list(object({
     entity_type = string

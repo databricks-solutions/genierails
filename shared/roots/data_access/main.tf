@@ -119,6 +119,12 @@ variable "classification_existing_schemas" {
   description = "Existing catalog classification scope preserved when adopting a singleton catalog config."
 }
 
+variable "classification_all_schemas" {
+  type        = set(string)
+  default     = []
+  description = "Catalog classification configs whose remote included_schemas is unset (all schemas)."
+}
+
 variable "manage_groups" {
   type    = bool
   default = false
@@ -260,6 +266,7 @@ module "data_access" {
   business_access_enabled         = var.business_access_enabled
   enable_classification           = var.enable_classification
   classification_existing_schemas = var.classification_existing_schemas
+  classification_all_schemas      = var.classification_all_schemas
   tag_assignments                 = var.tag_assignments
   fgac_policies                   = var.fgac_policies
   sql_warehouse_id                = var.sql_warehouse_id
@@ -284,4 +291,8 @@ output "grant_uc_tables" {
 output "classification_uc_tables" {
   description = "Fully qualified table footprint used only for classification."
   value       = local.full_classification_uc_tables
+}
+
+output "classification_catalog_schemas" {
+  value = module.data_access.classification_catalog_schemas
 }

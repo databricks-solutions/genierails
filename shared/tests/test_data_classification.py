@@ -1,5 +1,7 @@
-from pathlib import Path
+import importlib.util
 import subprocess
+from pathlib import Path
+from types import SimpleNamespace
 
 
 SHARED = Path(__file__).parents[1]
@@ -29,6 +31,7 @@ def test_classification_is_scoped_to_governed_uc_schemas():
     assert "names = each.value" in source
     assert "distinct(local._classification_catalogs)" in source
     assert "classification_existing_schemas" in source
+    assert "prevent_destroy = true" in source
 
 
 def test_classification_plan_enables_auto_tagging_for_champion_types():
@@ -99,6 +102,78 @@ def test_full_apply_plan_keeps_space_only_tables_out_of_grants():
         capture_output=True,
     )
     assert plan_test.returncode == 0, plan_test.stdout + plan_test.stderr
+
+
+def test_classification_plan_unions_live_scope_and_second_env_cannot_shrink_it():
+    init = subprocess.run(
+        ["terraform", "init", "-backend=false", "-input=false"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert init.returncode == 0, init.stdout + init.stderr
+
+    plan_test = subprocess.run(
+        ["terraform", "test", "-filter=tests/classification_scope_union.tftest.hcl"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert plan_test.returncode == 0, plan_test.stdout + plan_test.stderr
+
+
+def test_prepare_resolves_two_part_tables_and_preserves_all_schema_scope(tmp_path, monkeypatch, capsys):
+    env_dir = tmp_path / "envs" / "dev"
+    (env_dir / "data_access").mkdir(parents=True)
+    (env_dir / "env.auto.tfvars").write_text(
+        'enable_classification = true\nuc_catalog = "real_catalog"\n'
+        'uc_tables = ["schema_a.table_a"]\n'
+    )
+    (env_dir / "auth.auto.tfvars").write_text(
+        'databricks_workspace_host = "https://example.invalid"\n'
+        'databricks_client_id = "client"\ndatabricks_client_secret = "secret"\n'
+    )
+
+    spec = importlib.util.spec_from_file_location(
+        "prepare_classification_config",
+        SHARED / "scripts/prepare_classification_config.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    requested = []
+
+    class FakeClassification:
+        def get_catalog_config(self, name):
+            requested.append(name)
+            return SimpleNamespace(included_schemas=None)
+
+    monkeypatch.setattr(
+        module,
+        "WorkspaceClient",
+        lambda **_: SimpleNamespace(data_classification=FakeClassification()),
+    )
+    monkeypatch.setattr(module.sys, "argv", ["prepare", str(env_dir)])
+
+    assert module.main() == 0
+    assert requested == ["catalogs/real_catalog/config"]
+    generated = (env_dir / "data_access/classification.auto.tfvars").read_text()
+    assert 'classification_all_schemas = ["real_catalog"]' in generated
+    assert "WARNING: real_catalog classification includes ALL schemas" in capsys.readouterr().err
+
+
+def test_data_access_plan_and_apply_refresh_classification_without_swallowing_errors():
+    source = MAKEFILE.read_text()
+    prepare = source[source.index("_prepare-classification:") : source.index("_plan-layer:")]
+    plan = source[source.index("_plan-layer:") : source.index("plan:", source.index("_plan-layer:"))]
+    apply = source[source.index("_apply-layer:") : source.index("apply:", source.index("_apply-layer:"))]
+
+    assert "prepare_classification_config.py" in prepare
+    assert '|| exit 1' in prepare
+    assert "@set -e" in plan
+    assert "_prepare-classification" in plan
+    assert "_prepare-classification" in apply
+    assert "classification.auto.tfvars" in apply
 
 
 def test_classification_validator_requires_opt_in_and_accepts_space_footprint(tmp_path):

@@ -109,7 +109,7 @@ resource "databricks_data_classification_catalog_config" "classification" {
   provider = databricks.workspace
   parent   = "catalogs/${each.key}"
 
-  included_schemas = {
+  included_schemas = contains(var.classification_all_schemas, each.key) ? null : {
     names = each.value
   }
 
@@ -124,7 +124,8 @@ resource "databricks_data_classification_catalog_config" "classification" {
   # configuration. Ignoring that import-only mismatch lets an existing
   # singleton catalog config be adopted and updated instead of deleted first.
   lifecycle {
-    ignore_changes = [parent]
+    ignore_changes  = [parent]
+    prevent_destroy = true
   }
 }
 

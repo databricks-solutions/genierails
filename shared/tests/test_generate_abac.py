@@ -1157,6 +1157,35 @@ CREATE FUNCTION mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2);
     assert "FUNCTION mask_amount_rounded" in sql_text
 
 
+def test_category_mismatch_autofix_preserves_canonical_treatment_function(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text('''tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.tbl.phone_number", tag_key = "gr_treatment", tag_value = "email_partial" }
+]
+fgac_policies = [
+  {
+    name = "mask_email"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "cat"
+    to_principals = ["users"]
+    function_schema = "sch"
+    match_condition = "hasTagValue('gr_treatment', 'email_partial')"
+    function_name = "mask_email"
+  }
+]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "CREATE FUNCTION mask_email(input STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_redact(input STRING) RETURNS STRING RETURN '***';\n"
+    )
+
+    before = tfvars.read_text()
+    assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == 0
+    assert tfvars.read_text() == before
+    assert assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"] == "mask_email"
+
+
 def test_required_native_classification_fails_without_warehouse(monkeypatch):
     import databricks.sdk
 

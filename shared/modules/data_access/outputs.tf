@@ -7,3 +7,7 @@ output "catalogs" {
   description = "Catalogs governed by this data_access layer."
   value       = local.all_catalogs
 }
+output "classification_catalog_schemas" {
+  description = "Live remote scope unioned with this environment's classification footprint."
+  value       = local.classification_catalog_schemas
+}
