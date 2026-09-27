@@ -32,6 +32,9 @@ Check the [Prerequisites](shared/docs/prerequisites.md) first (Python, Terraform
 https://github.com/user-attachments/assets/b58d83e7-d95c-416d-9df3-03292d9db617
 
 
+> **▶ Start here — the champion flow:** [Champion Flow — Native-Classification-Driven Governance, End-to-End](shared/examples/champion_flow/) — the canonical walkthrough. Unity Catalog decides what's sensitive, GenieRails derives one enforcement treatment per column, a coverage gate blocks promotion until every sensitive column is covered, and the agent is exposed only after the prod gate passes. Validated end-to-end on real dev + prod workspaces.
+> 
+> _Region/industry overlay demos (older LLM-overlay flow):_
 > - [Australian Bank Demo](shared/examples/aus_bank_demo/) — ANZ-specific masking (TFN, Medicare, BSB), PCI compliance, AML row filters
 > - [India Bank Demo](shared/examples/india_bank_demo/) — Aadhaar, PAN, GSTIN, UPI masking, DPDP Act 2023 compliance
 > - [ASEAN Bank Demo](shared/examples/asean_bank_demo/) — 6-country national IDs (NRIC, MyKad, Thai ID, NIK, PhilSys, CCCD), multi-currency, cross-border remittances
@@ -40,7 +43,8 @@ https://github.com/user-attachments/assets/b58d83e7-d95c-416d-9df3-03292d9db617
 
 | Your situation | Start here | Time |
 |---|---|---|
-| Want to see a demo first | [Australian Bank Demo](shared/examples/aus_bank_demo/), [India](shared/examples/india_bank_demo/), or [ASEAN](shared/examples/asean_bank_demo/) | ~20 min |
+| **Want the end-to-end champion flow** | [**Champion Flow** — native classification → coverage gate → safe dev→prod promotion](shared/examples/champion_flow/) | ~30 min |
+| Want a region/industry overlay demo | [Australian Bank](shared/examples/aus_bank_demo/), [India](shared/examples/india_bank_demo/), or [ASEAN](shared/examples/asean_bank_demo/) | ~20 min |
 | Have an existing Genie Space in the UI | [From UI to Production](shared/docs/from-ui-to-production.md) | ~45 min |
 | Starting from scratch (no Genie Space yet) | [Quickstart](shared/docs/quickstart.md) | ~30 min |
 | Need the full reference | [Playbook](shared/docs/playbook.md) | Reference |
