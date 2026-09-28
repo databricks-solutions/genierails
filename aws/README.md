@@ -49,7 +49,7 @@ databricks_workspace_host = "https://dbc-xxxxxxxx-xxxx.cloud.databricks.com"
 
 ### Want to see it in action first?
 
-The [Australian Bank Demo](../shared/examples/aus_bank_demo/) provisions a complete environment and walks through the full GenieRails flow in ~20 minutes — ANZ-specific masking, PCI compliance, AML row filters, and dev-to-prod promotion. Works on both AWS and Azure.
+The [Australian Bank Demo](../shared/examples/legacy/aus_bank_demo/) provisions a complete environment and walks through the full GenieRails flow in ~20 minutes — ANZ-specific masking, PCI compliance, AML row filters, and dev-to-prod promotion. Works on both AWS and Azure.
 
 ---
 
@@ -59,5 +59,5 @@ The [Australian Bank Demo](../shared/examples/aus_bank_demo/) provisions a compl
 - [Quickstart](../shared/docs/quickstart.md) — create a Genie Space from scratch
 - [Playbook](../shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios
 - [Architecture](../shared/docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
-- [Australian Bank Demo](../shared/examples/aus_bank_demo/) — end-to-end demo with ANZ banking data, governance, and promotion
+- [Australian Bank Demo](../shared/examples/legacy/aus_bank_demo/) — end-to-end demo with ANZ banking data, governance, and promotion
 - [All documentation](../shared/docs/) — full list

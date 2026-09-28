@@ -12,7 +12,7 @@ An end-to-end demo of GenieRails for a regional ASEAN bank headquartered in Sing
 
 **Time:** ~20 minutes (5 min setup, 15 min demo)
 
-**Prerequisites:** [Prerequisites](../../docs/prerequisites.md) — Python 3, Terraform, account admin credentials. Azure users: also see [Azure Prerequisites](../../../azure/docs/azure-prerequisites.md).
+**Prerequisites:** [Prerequisites](../../../docs/prerequisites.md) — Python 3, Terraform, account admin credentials. Azure users: also see [Azure Prerequisites](../../../../azure/docs/azure-prerequisites.md).
 
 ---
 
@@ -38,7 +38,7 @@ You need:
 - `DATABRICKS_AWS_REGION` — AWS region (default: `ap-southeast-1`)
 - AWS credentials (IAM keys, SSO profile, or instance role) — for S3 bucket + IAM role creation
 
-See [Prerequisites](../../docs/prerequisites.md) for detailed setup instructions.
+See [Prerequisites](../../../docs/prerequisites.md) for detailed setup instructions.
 
 #### Azure
 
@@ -59,14 +59,14 @@ You need:
 - `AZURE_TENANT_ID` — your Azure AD tenant ID
 - `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` — Azure AD App Registration credentials
 
-The Azure SP needs **Contributor** and **Storage Blob Data Contributor** RBAC roles on the resource group. See [Azure Prerequisites](../../../azure/docs/azure-prerequisites.md) for details.
+The Azure SP needs **Contributor** and **Storage Blob Data Contributor** RBAC roles on the resource group. See [Azure Prerequisites](../../../../azure/docs/azure-prerequisites.md) for details.
 
 ### 2. Provision the demo
 
 #### AWS
 
 ```bash
-python ../shared/examples/asean_bank_demo/setup_demo.py provision \
+python ../shared/examples/legacy/asean_bank_demo/setup_demo.py provision \
     --env-file ../shared/scripts/account-admin.aws.env
 ```
 
@@ -74,7 +74,7 @@ python ../shared/examples/asean_bank_demo/setup_demo.py provision \
 
 ```bash
 CLOUD_PROVIDER=azure CLOUD_ROOT=$(pwd) \
-python ../shared/examples/asean_bank_demo/setup_demo.py provision \
+python ../shared/examples/legacy/asean_bank_demo/setup_demo.py provision \
     --env-file ../shared/scripts/account-admin.azure.env
 ```
 
@@ -249,7 +249,7 @@ make destroy ENV=dev
 #### AWS
 
 ```bash
-python ../shared/examples/asean_bank_demo/setup_demo.py teardown \
+python ../shared/examples/legacy/asean_bank_demo/setup_demo.py teardown \
     --env-file ../shared/scripts/account-admin.aws.env
 ```
 
@@ -257,7 +257,7 @@ python ../shared/examples/asean_bank_demo/setup_demo.py teardown \
 
 ```bash
 CLOUD_PROVIDER=azure CLOUD_ROOT=$(pwd) \
-python ../shared/examples/asean_bank_demo/setup_demo.py teardown \
+python ../shared/examples/legacy/asean_bank_demo/setup_demo.py teardown \
     --env-file ../shared/scripts/account-admin.azure.env
 ```
 

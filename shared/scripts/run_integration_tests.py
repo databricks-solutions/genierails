@@ -157,18 +157,18 @@ DEV_BANK_CAT  = "dev_bank"
 PROD_BANK_CAT = "prod_bank"
 BANK_SCHEMA   = "retail"
 
-# India bank demo catalogs (mirrors shared/examples/india_bank_demo/setup_demo.py)
+# India bank demo catalogs (mirrors shared/examples/legacy/india_bank_demo/setup_demo.py)
 DEV_LAKSHMI_CAT  = "dev_lakshmi"
 PROD_LAKSHMI_CAT = "prod_lakshmi"
 LAKSHMI_SCHEMA   = "retail"
 
-# ASEAN bank demo catalogs (mirrors shared/examples/asean_bank_demo/setup_demo.py)
+# ASEAN bank demo catalogs (mirrors shared/examples/legacy/asean_bank_demo/setup_demo.py)
 DEV_ASEAN_CAT  = "dev_asean_bank"
 PROD_ASEAN_CAT = "prod_asean_bank"
 ASEAN_SCHEMA   = "retail"
 
 # ---------------------------------------------------------------------------
-# Australian banking table SQL (mirrors shared/examples/aus_bank_demo/setup_demo.py)
+# Australian banking table SQL (mirrors shared/examples/legacy/aus_bank_demo/setup_demo.py)
 # ---------------------------------------------------------------------------
 
 BANK_SETUP_SQL = f"""
@@ -271,7 +271,7 @@ CREATE OR REPLACE TABLE {PROD_BANK_CAT}.{BANK_SCHEMA}.credit_cards AS SELECT * F
 """
 
 # ---------------------------------------------------------------------------
-# India bank demo table SQL (mirrors shared/examples/india_bank_demo/setup_demo.py)
+# India bank demo table SQL (mirrors shared/examples/legacy/india_bank_demo/setup_demo.py)
 # ---------------------------------------------------------------------------
 
 INDIA_BANK_SETUP_SQL = f"""
@@ -376,7 +376,7 @@ CREATE OR REPLACE TABLE {PROD_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.credit_cards AS SELE
 """
 
 # ---------------------------------------------------------------------------
-# ASEAN bank demo table SQL (mirrors shared/examples/asean_bank_demo/setup_demo.py)
+# ASEAN bank demo table SQL (mirrors shared/examples/legacy/asean_bank_demo/setup_demo.py)
 # ---------------------------------------------------------------------------
 
 ASEAN_BANK_SETUP_SQL = f"""

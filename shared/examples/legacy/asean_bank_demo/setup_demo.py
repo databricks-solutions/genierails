@@ -13,14 +13,14 @@ After setup, follow the README.md to run the demo.
 Usage
 -----
   # Provision everything (from the cloud wrapper directory: aws/ or azure/)
-  python shared/examples/asean_bank_demo/setup_demo.py provision \
+  python shared/examples/legacy/asean_bank_demo/setup_demo.py provision \
       --env-file shared/scripts/account-admin.aws.env
 
   # Check status
-  python shared/examples/asean_bank_demo/setup_demo.py status
+  python shared/examples/legacy/asean_bank_demo/setup_demo.py status
 
   # Tear down everything
-  python shared/examples/asean_bank_demo/setup_demo.py teardown
+  python shared/examples/legacy/asean_bank_demo/setup_demo.py teardown
 
 Prerequisites
 -------------
@@ -429,7 +429,7 @@ uc_tables = [
     print()
     print("  Next steps:")
     print("    1. Run: make generate ENV=dev COUNTRY=SEA INDUSTRY=financial_services")
-    print("    2. Follow ../shared/examples/asean_bank_demo/README.md for the demo")
+    print("    2. Follow ../shared/examples/legacy/asean_bank_demo/README.md for the demo")
     print()
 
 
