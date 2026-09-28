@@ -108,15 +108,15 @@ cp ../shared/examples/champion_flow/env.auto.tfvars.example envs/dev/env.auto.tf
 ```bash
 cd ../shared/examples/champion_flow         # from the cloud root (aws/ or azure/); return with 'cd ../../../aws' afterward
 python -m pip install -r requirements.txt
-python setup_sample_env.py --profile DEFAULT --catalog dev_finance --warehouse-id abc123
+python setup_sample_env.py --catalog dev_finance --warehouse-id <your-warehouse-id>
 ```
 
-> `--profile DEFAULT` here is a **Databricks CLI profile** used *only by this standalone helper script* — it is separate from the deploying Service Principal that `make` uses (that lives in `auth.auto.tfvars`). Use any CLI profile that can reach your workspace.
+> **Auth for this helper is optional to specify.** It authenticates with a **Databricks CLI profile** — separate from the deploying Service Principal that `make` uses (that one lives in `auth.auto.tfvars`). With no flag it uses your **default** CLI profile (or `DATABRICKS_HOST`/`DATABRICKS_TOKEN` env vars); add `--profile <name>` only if you authenticate with a *named* profile.
 
 The script prints the exact `uc_tables`, `genie_spaces`, and `sql_warehouse_id` snippet — paste it into `envs/dev/env.auto.tfvars`. It does **not** create any access-tier groups, so in Phase 1 either pass `--groups` with existing group names or use `--create-groups`. Re-runs are safe. To remove everything it created (only that — it uses a local ownership record):
 
 ```bash
-python teardown_sample_env.py --profile DEFAULT --catalog dev_finance
+python teardown_sample_env.py --catalog dev_finance
 # Equivalent: add --teardown to the setup command.
 ```
 
