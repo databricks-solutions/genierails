@@ -42,7 +42,7 @@ from pathlib import Path
 # Paths
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
-SHARED_DIR = SCRIPT_DIR.parent.parent  # shared/
+SHARED_DIR = SCRIPT_DIR.parent.parent.parent  # shared/
 SCRIPTS_DIR = SHARED_DIR / "scripts"
 CLOUD_ROOT = Path(os.environ.get("CLOUD_ROOT", SHARED_DIR.parent / "aws"))
 
