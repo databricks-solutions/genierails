@@ -169,7 +169,12 @@ WHERE catalog_name = '<your-catalog>' AND schema_name = '<your-schema>'
 ```bash
 make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'
 ```
-`--groups` is a comma-separated list of your existing IdP groups (strictest tier first). Generation reads the authoritative `class.*` tags and is **fail-closed**: if classification is enabled but unreadable/empty it aborts (opt into inference only with `GENERATE_ARGS='--groups "..." --allow-llm-sensitivity'`).
+**About `--groups` — these are *your own* groups, not names GenieRails defines.** They are account groups synced from your identity provider (Entra ID / Okta) via **AIM or SCIM**. The `payments_ops,regional_analysts,viewers` shown above are just **example placeholders** — replace them with the real group names in your workspace (the ones you listed under [Fill these in before you start](#fill-these-in-before-you-start)). Key points:
+- **One group per access tier** (usually 2–5), listed in tier order — this is the group→tier mapping GenieRails applies (e.g. one tier sees full values, another sees masked, another sees the least).
+- The groups **must already exist**. GenieRails *consumes* them by exact name and never creates or renames them (`manage_groups = false`); if a name isn't found, generation stops with a clear preflight error.
+- **No tiered IdP groups to point at yet (e.g. just trying the demo)?** Use `--create-groups` *instead of* `--groups` — a demo/greenfield-only opt-in that lets the tool invent and create the tier groups for you (requires `manage_groups = true`). Production should always consume real IdP-synced groups via `--groups`.
+
+Generation then reads the authoritative `class.*` tags and is **fail-closed**: if classification is enabled but unreadable/empty it aborts (opt into LLM inference only with `GENERATE_ARGS='--groups "..." --allow-llm-sensitivity'`).
 
 **1d. Gate → validate → apply → verify (in order):**
 ```bash
