@@ -54,7 +54,7 @@ locals {
     acl_groups       = var.genie_acl_groups
   }
 
-  legacy_space_name = var.genie_space_title != "" ? var.genie_space_title : "Genie agent"
+  legacy_space_name = var.genie_space_title != "" ? var.genie_space_title : "Genie Space"
 
   # The legacy single-space path is only activated when genie_space_title is
   # explicitly set (non-empty).  Having uc_tables in env.auto.tfvars for ABAC
@@ -161,7 +161,7 @@ variable "genie_spaces" {
     uc_tables        = optional(list(string), [])
   }))
   default     = []
-  description = "List of Genie agent definitions. 'name' is the human-readable space title and the lookup key for genie_space_configs. An internal Terraform key is derived automatically by sanitizing the name."
+  description = "List of Genie agent definitions. 'name' is the human-readable agent title and the lookup key for genie_space_configs. An internal Terraform key is derived automatically by sanitizing the name."
 }
 
 variable "genie_space_configs" {

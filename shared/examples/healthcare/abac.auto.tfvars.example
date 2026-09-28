@@ -1,5 +1,5 @@
 # ============================================================================
-# Healthcare Example — Workspace Layer (Genie Space configuration)
+# Healthcare Example — Workspace Layer (Genie agent configuration)
 # ============================================================================
 # This file lives at envs/<env>/abac.auto.tfvars
 # ============================================================================

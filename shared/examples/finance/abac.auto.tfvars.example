@@ -1,8 +1,8 @@
 # ============================================================================
-# Finance Example — Workspace Layer (Genie Space configuration)
+# Finance Example — Workspace Layer (Genie agent configuration)
 # ============================================================================
 # This file lives at envs/<env>/abac.auto.tfvars
-# It defines Genie Space configs and group lookups for the workspace layer.
+# It defines Genie agent configs and group lookups for the workspace layer.
 # ============================================================================
 
 # Groups referenced here must exist in the account layer

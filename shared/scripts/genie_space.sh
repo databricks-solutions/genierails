@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Genie Space: create / update-config / set-acls / trash
+# Genie agent: create / update-config / set-acls / trash
 # =============================================================================
 # Commands:
-#   create        Create a minimal Genie Space (tables + warehouse + title).
+#   create        Create a minimal Genie agent (tables + warehouse + title).
 #                 Wildcards (catalog.schema.*) are expanded via UC Tables API.
-#   update-config Update a Genie Space's full configuration via PATCH API.
+#   update-config Update a Genie agent's full configuration via PATCH API.
 #                 Reads space_id from GENIE_ID_FILE.
-#   set-acls      Set CAN_RUN on a Genie Space for the configured groups.
+#   set-acls      Set CAN_RUN on a Genie agent for the configured groups.
 #                 Reads space_id from GENIE_SPACE_OBJECT_ID or GENIE_ID_FILE.
-#   trash         Move a Genie Space to trash. Reads space_id from GENIE_ID_FILE.
+#   trash         Move a Genie agent to trash. Reads space_id from GENIE_ID_FILE.
 #
 # Authentication (in order of precedence):
 #   1. DATABRICKS_TOKEN (PAT) - if set, used directly
@@ -23,8 +23,8 @@
 #                        are expanded via the UC Tables API.
 #   GENIE_WAREHOUSE_ID   Warehouse ID for create. Falls back to sql_warehouse_id
 #                        in env.auto.tfvars if not set.
-#   GENIE_TITLE          Optional. Title for the new Genie Space (default: "ABAC Genie Space").
-#   GENIE_DESCRIPTION    Optional. Description for the new Genie Space.
+#   GENIE_TITLE          Optional. Title for the new Genie agent (default: "ABAC Genie Space").
+#   GENIE_DESCRIPTION    Optional. Description for the new Genie agent.
 #   GENIE_SAMPLE_QUESTIONS  Optional. JSON array of sample question strings.
 #   GENIE_INSTRUCTIONS   Optional. Text instructions for the Genie LLM.
 #   GENIE_BENCHMARKS     Optional. JSON array of {question, sql} objects.
@@ -189,7 +189,7 @@ expand_tables() {
   echo "${expanded[*]}"
 }
 
-# ---------- Set ACLs on a Genie Space (CAN_RUN for configured groups) ----------
+# ---------- Set ACLs on a Genie agent (CAN_RUN for configured groups) ----------
 set_genie_acls() {
   local workspace_url="$1"
   local token="$2"
@@ -207,7 +207,7 @@ set_genie_acls() {
   local body="{\"access_control_list\": ${access_control}}"
   local path="/api/2.0/permissions/genie/${space_id}"
 
-  echo "Putting permissions on Genie Space ${space_id} for groups: ${GENIE_GROUPS[*]}"
+  echo "Putting permissions on Genie agent ${space_id} for groups: ${GENIE_GROUPS[*]}"
   local response
   response=$(curl -s -w "\n%{http_code}" -X PUT \
     -H "${UA_HEADER}" \
@@ -222,14 +222,14 @@ set_genie_acls() {
   response_body=$(echo "$response" | sed '$d')
 
   if [[ "$http_code" != "200" && "$http_code" != "201" ]]; then
-    echo "Request failed (HTTP ${http_code}). Check workspace URL, token, and Genie Space ID."
+    echo "Request failed (HTTP ${http_code}). Check workspace URL, token, and Genie agent ID."
     echo "API response: ${response_body}"
     exit 1
   fi
-  echo "Genie Space ACLs updated successfully."
+  echo "Genie agent ACLs updated successfully."
 }
 
-# ---------- Create Genie Space (minimal: tables + warehouse + title) ----------
+# ---------- Create Genie agent (minimal: tables + warehouse + title) ----------
 create_genie_space() {
   local workspace_url="$1"
   local token="$2"
@@ -277,7 +277,7 @@ PYEOF
 
   local tables_display
   tables_display=$(printf '%s\n' "${sorted_identifiers[@]}" | tr '\n' ' ')
-  echo "Creating Genie Space '${title}' with warehouse ${warehouse_id} and ${#sorted_identifiers[@]} tables: ${tables_display}"
+  echo "Creating Genie agent '${title}' with warehouse ${warehouse_id} and ${#sorted_identifiers[@]} tables: ${tables_display}"
 
   local tmpfile
   tmpfile=$(mktemp)
@@ -298,7 +298,7 @@ PYEOF
   response_body=$(echo "$response" | sed '$d')
 
   if [[ "$http_code" != "200" && "$http_code" != "201" ]]; then
-    echo "Create Genie Space failed (HTTP ${http_code})."
+    echo "Create Genie agent failed (HTTP ${http_code})."
     echo "API response: ${response_body}"
     exit 1
   fi
@@ -313,17 +313,17 @@ PYEOF
     exit 1
   fi
 
-  echo "Genie Space created: ${space_id}"
+  echo "Genie agent created: ${space_id}"
 
   if [[ -n "${GENIE_ID_FILE:-}" ]]; then
     echo "$space_id" > "$GENIE_ID_FILE"
     echo "Space ID saved to ${GENIE_ID_FILE}"
   fi
 
-  echo "Done. Genie Space ID: ${space_id}"
+  echo "Done. Genie agent ID: ${space_id}"
 }
 
-# ---------- Update Genie Space config via PATCH ----------
+# ---------- Update Genie agent config via PATCH ----------
 update_genie_config() {
   local workspace_url="${DATABRICKS_HOST}"
   workspace_url="${workspace_url%/}"
@@ -347,7 +347,7 @@ update_genie_config() {
   fi
 
   if [[ -z "$space_id" ]]; then
-    echo "ERROR: No Genie Space ID available for update-config." >&2
+    echo "ERROR: No Genie agent ID available for update-config." >&2
     echo "  Set GENIE_SPACE_OBJECT_ID (for existing spaces) or ensure GENIE_ID_FILE exists (for auto-created spaces)." >&2
     exit 1
   fi
@@ -496,7 +496,7 @@ PYEOF
   local patch_body
   patch_body=$(build_patch_body 0)
 
-  echo "Updating Genie Space ${space_id} config..."
+  echo "Updating Genie agent ${space_id} config..."
 
   local tmpfile
   tmpfile=$(mktemp)
@@ -529,7 +529,7 @@ PYEOF
       http_code=$(echo "$response" | tail -n1)
       response_body=$(echo "$response" | sed '$d')
       if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
-        echo "Genie Space ${space_id} config updated successfully without join_specs."
+        echo "Genie agent ${space_id} config updated successfully without join_specs."
         echo "WARNING: join_specs were skipped because the Genie API rejected them."
         rm -f "$tmpfile"
         return 0
@@ -555,7 +555,7 @@ PYEOF
       http_code=$(echo "$response" | tail -n1)
       response_body=$(echo "$response" | sed '$d')
       if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
-        echo "Genie Space ${space_id} config updated successfully (title was already set)."
+        echo "Genie agent ${space_id} config updated successfully (title was already set)."
         rm -f "$tmpfile"
         return 0
       fi
@@ -575,7 +575,7 @@ PYEOF
           http_code=$(echo "$response" | tail -n1)
           response_body=$(echo "$response" | sed '$d')
           if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
-            echo "Genie Space ${space_id} config updated successfully (title already set, join_specs skipped)."
+            echo "Genie agent ${space_id} config updated successfully (title already set, join_specs skipped)."
             echo "WARNING: join_specs were skipped because the Genie API rejected them."
             rm -f "$tmpfile"
             return 0
@@ -588,15 +588,15 @@ PYEOF
   rm -f "$tmpfile"
 
   if [[ "$http_code" == "200" || "$http_code" == "201" ]]; then
-    echo "Genie Space ${space_id} config updated successfully."
+    echo "Genie agent ${space_id} config updated successfully."
   else
-    echo "Failed to update Genie Space config (HTTP ${http_code})."
+    echo "Failed to update Genie agent config (HTTP ${http_code})."
     echo "API response: ${response_body}"
     exit 1
   fi
 }
 
-# ---------- Trash (delete) a Genie Space ----------
+# ---------- Trash (delete) a Genie agent ----------
 trash_genie_space() {
   local workspace_url="${DATABRICKS_HOST}"
   workspace_url="${workspace_url%/}"
@@ -617,11 +617,11 @@ trash_genie_space() {
   fi
 
   if [[ -z "$space_id" ]]; then
-    echo "No Genie Space ID file found at ${GENIE_ID_FILE:-<not set>}. Nothing to trash."
+    echo "No Genie agent ID file found at ${GENIE_ID_FILE:-<not set>}. Nothing to trash."
     exit 0
   fi
 
-  echo "Trashing Genie Space ${space_id}..."
+  echo "Trashing Genie agent ${space_id}..."
   local response
   response=$(curl -s -w "\n%{http_code}" -X DELETE \
     -H "${UA_HEADER}" \
@@ -634,13 +634,13 @@ trash_genie_space() {
   response_body=$(echo "$response" | sed '$d')
 
   if [[ "$http_code" == "200" || "$http_code" == "204" ]]; then
-    echo "Genie Space ${space_id} trashed successfully."
+    echo "Genie agent ${space_id} trashed successfully."
     rm -f "${GENIE_ID_FILE}"
   elif [[ "$http_code" == "404" ]]; then
-    echo "Genie Space ${space_id} not found (already deleted). Cleaning up ID file."
+    echo "Genie agent ${space_id} not found (already deleted). Cleaning up ID file."
     rm -f "${GENIE_ID_FILE}"
   else
-    echo "Failed to trash Genie Space (HTTP ${http_code})."
+    echo "Failed to trash Genie agent (HTTP ${http_code})."
     echo "API response: ${response_body}"
     exit 1
   fi
@@ -684,7 +684,7 @@ elif [[ "$COMMAND" == "set-acls" ]]; then
   # Try reading space ID from file if not provided directly
   if [[ -z "$SPACE_ID" && -n "${GENIE_ID_FILE:-}" ]]; then
     if [[ ! -f "${GENIE_ID_FILE}" ]]; then
-      echo "ERROR: Genie Space ID file not found at '${GENIE_ID_FILE}'." >&2
+      echo "ERROR: Genie agent ID file not found at '${GENIE_ID_FILE}'." >&2
       echo "  The space may have been deleted outside Terraform." >&2
       echo "  To recover: terraform taint 'null_resource.genie_space_create[0]'" >&2
       exit 1
@@ -700,7 +700,7 @@ elif [[ "$COMMAND" == "set-acls" ]]; then
   TOKEN=$(resolve_token "$WORKSPACE_URL" "$EXPLICIT_TOKEN") || exit 1
 
   if [[ -z "$SPACE_ID" ]]; then
-    echo "Genie Space ID required. Set GENIE_SPACE_OBJECT_ID, GENIE_ID_FILE, or pass as third argument."
+    echo "Genie agent ID required. Set GENIE_SPACE_OBJECT_ID, GENIE_ID_FILE, or pass as third argument."
     exit 1
   fi
 

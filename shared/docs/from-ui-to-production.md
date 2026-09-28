@@ -31,7 +31,7 @@ The ABAC governance (groups, tag policies, tag assignments, masking functions) i
 
 ## Step 1 — Point at your existing space
 
-Find the Genie agent ID in the URL when viewing the space in the Databricks UI (e.g. `...genie/rooms/01ef7b3c2a4d5e6f`).
+Find the Genie agent ID in the URL when viewing the agent in the Databricks UI (e.g. `...genie/rooms/01ef7b3c2a4d5e6f`).
 
 > **Prerequisite:** Complete Steps 1-2 in your cloud README ([AWS](../../aws/README.md) or [Azure](../../azure/README.md)) to set up credentials before continuing.
 
@@ -44,7 +44,7 @@ vi envs/dev/env.auto.tfvars
 genie_spaces = [
   {
     genie_space_id = "01ef7b3c2a4d5e6f"   # the only required field; find it in the Genie agent URL
-    # name omitted     → defaults to the space title returned by the API
+    # name omitted     → defaults to the agent title returned by the API
     # uc_tables omitted → discovered automatically from the Genie API
   },
 ]
@@ -190,7 +190,7 @@ Each space's config is fetched independently. All spaces get their governance ge
 
 ## What's next?
 
-- [Add another Genie agent](playbook.md#add-another-genie-space) — incremental generation without touching existing spaces
+- [Add another Genie agent](playbook.md#add-another-genie-agent) — incremental generation without touching existing agents
 - [Country & industry overlays](playbook.md#country-and-industry-overlays) — region-specific or industry-specific governance
 - [Schema drift detection](playbook.md#schema-drift-detection) — handle table changes after initial deployment
 - [Advanced scenarios](playbook.md#advanced-scenarios) — ABAC-only, self-service Genie, independent BU environments

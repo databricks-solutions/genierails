@@ -25,17 +25,17 @@ DEST_ENV ?=
 # All source catalogs referenced in genie_spaces[*].uc_tables must be covered.
 # Example: DEST_CATALOG_MAP="dev_catalog=prod_catalog,dev_hr=prod_hr"
 DEST_CATALOG_MAP ?=
-# Optional: name of a single Genie Space to (re)generate.
+# Optional: name of a single Genie agent to (re)generate.
 # When set, only that space's tables are fetched and only that space's config is
 # regenerated. Existing tuned config for other spaces is preserved.
 # Example: make generate SPACE="Finance Analytics"
 SPACE ?=
 # Optional: generation mode for self-service Genie deployments.
 # governance — generate ABAC only (groups, tags, policies, masking); no genie_space_configs
-# genie      — generate Genie space configs only (instructions, benchmarks, measures); no ABAC
+# genie      — generate Genie agent configs only (instructions, benchmarks, measures); no ABAC
 # (empty)    — full generation (default, current behavior)
 # Example: make generate MODE=governance   (central governance team)
-#          make generate MODE=genie        (BU team creating Genie spaces)
+#          make generate MODE=genie        (BU team creating Genie agents)
 MODE ?=
 # Optional: override the 'country' field in env.auto.tfvars for this invocation.
 # Comma-separated region codes. Normally set once in env.auto.tfvars.
@@ -440,7 +440,7 @@ apply: _bootstrap ## Apply the selected layer, or account -> data_access -> work
 		$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"; \
 	fi
 
-apply-governance: _bootstrap _guard-workspace-target ## [Governance team] Apply account + data_access layers only (no Genie spaces)
+apply-governance: _bootstrap _guard-workspace-target ## [Governance team] Apply account + data_access layers only (no Genie agents)
 	@set -e; \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
@@ -456,7 +456,7 @@ apply-governance: _bootstrap _guard-workspace-target ## [Governance team] Apply 
 	sleep 30; \
 	$(MAKE) --no-print-directory _apply-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"
 
-apply-genie: _bootstrap _guard-workspace-target ## [BU team] Apply workspace layer only — groups + Genie spaces (assumes governance already applied)
+apply-genie: _bootstrap _guard-workspace-target ## [BU team] Apply workspace layer only — groups + Genie agents (assumes governance already applied)
 	@set -e; \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
@@ -611,13 +611,13 @@ test-quickstart: _bootstrap _guard-workspace-target ## Scenario: single space, s
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-multi-catalog: _bootstrap _guard-workspace-target ## Scenario: one Genie Space spanning two catalogs
+test-multi-catalog: _bootstrap _guard-workspace-target ## Scenario: one Genie agent spanning two catalogs
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario multi-catalog \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-multi-space: _bootstrap _guard-workspace-target ## Scenario: two Genie Spaces with separate catalogs
+test-multi-space: _bootstrap _guard-workspace-target ## Scenario: two Genie agents with separate catalogs
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario multi-space \
 		--auth-file "$(_ITEST_AUTH)" \
@@ -647,19 +647,19 @@ test-attach-promote: _bootstrap _guard-workspace-target ## Scenario: attach to U
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-self-service-genie: _bootstrap _guard-workspace-target ## Scenario: central governance team applies ABAC, BU teams self-serve Genie spaces
+test-self-service-genie: _bootstrap _guard-workspace-target ## Scenario: central governance team applies ABAC, BU teams self-serve Genie agents
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario self-service-genie \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-abac-only: _bootstrap _guard-workspace-target ## Scenario: ABAC governance only (no Genie Space) + upgrade to add Genie Space later
+test-abac-only: _bootstrap _guard-workspace-target ## Scenario: ABAC governance only (no Genie agent) + upgrade to add Genie agent later
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario abac-only \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-multi-space-import: _bootstrap _guard-workspace-target ## Scenario: import two UI-configured Genie Spaces in one make generate call
+test-multi-space-import: _bootstrap _guard-workspace-target ## Scenario: import two UI-configured Genie agents in one make generate call
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario multi-space-import \
 test-schema-drift: _bootstrap _guard-workspace-target ## Scenario: column tag drift detection after ALTER TABLE ADD/DROP/RENAME COLUMN

@@ -62,7 +62,7 @@ make generate GENERATE_ARGS='--create-groups'
 
 ## ABAC-Only Mode (No Genie agent)
 
-See [playbook.md — ABAC governance only](playbook.md#abac-governance-only-no-genie-space) for the full step-by-step.
+See [playbook.md — ABAC governance only](playbook.md#abac-governance-only-no-genie-agent) for the full step-by-step.
 
 ## Existing Masking Functions
 

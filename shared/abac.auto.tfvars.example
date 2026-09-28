@@ -18,7 +18,7 @@
 #                                    Existing groups are auto-loaded from the account layer.
 #                                    Use with: make apply-genie ENV=<env>
 #
-# For the self-service Genie pattern (central ABAC team + BU teams self-serve Genie spaces)
+# For the self-service Genie pattern (central ABAC team + BU teams self-serve Genie agents)
 # see docs/self-service-genie.md.
 #
 # ============================================================================
@@ -97,8 +97,8 @@ fgac_policies = [
   # }
 ]
 
-# === Genie Space Configs (workspace-owned after promote) ===
-# One entry per Genie Space, keyed by the same `key` used in env.auto.tfvars genie_spaces.
+# === Genie agent Configs (workspace-owned after promote) ===
+# One entry per Genie agent, keyed by the same `key` used in env.auto.tfvars genie_spaces.
 # All table names in SQL must be fully qualified: catalog.schema.table.
 #
 # The key must exactly match the `name` field in env.auto.tfvars genie_spaces.
