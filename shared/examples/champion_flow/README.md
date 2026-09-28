@@ -190,6 +190,8 @@ make apply              ENV=dev                          # gate CLOSED: masks ap
 make apply              ENV=dev                          # releases SELECT (+ Genie CAN_RUN if a space is configured)
 make verify-access      ENV=dev VERIFY_KEY_COLUMN=customer_id   # query AS each tier: masked vs raw
 ```
+**What these four commands do:** `coverage-gate` is the safety check at the heart of the flow — it looks at every column the classifier tagged sensitive (`class.*`) and confirms each one has a protection (a derived `gr_treatment` + mask/policy) covering it. If even one sensitive column is unprotected it **fails (non-zero exit) and stops you here** — the "tool says NO" moment; it changes nothing, it only passes or fails. `validate-generated` runs static checks on the generated config (e.g. that no two masks collide on one column). `apply` deploys the masks/policies. `verify-access` then queries the tables **as each tier's principal** to prove a lower tier sees masked values while an authorized tier sees raw.
+
 > Do **not** flip `business_access_enabled = true` until the dev `coverage-gate` passes. Also confirm the agent still answers useful questions under masking.
 >
 > **Warehouse access:** if a tier group must run the Genie space's warehouse, grant it `CAN_USE` yourself — GenieRails does not manage warehouse permissions.
@@ -313,8 +315,10 @@ Key config & code: [`treatment_config.json`](../../treatment_config.json) (the `
 ## Glossary
 
 - **`gr_treatment`** — the one GenieRails-owned governed tag whose value picks a column's mask.
+- **masking** — a rule that transforms a sensitive value for unauthorized tiers (e.g. card → `****-****-****-4464`, email → `c***@…`) while authorized tiers see the raw value.
 - **facts vs rules** — *facts* = which columns got tagged (per workspace, from the scan); *rules* = the mapping + policies (portable, promoted).
 - **footprint** — the exact tables the agent can reach (your `uc_tables` / Genie space tables).
 - **fail-closed** — if native classification can't be read, `generate` aborts rather than guessing.
+- **coverage gate** — `make coverage-gate`; the blocking check that fails (non-zero exit) if any classifier-tagged sensitive column has no covering mask/policy. The "tool says NO" step — run it before every apply/promote.
 - **exposure gate** — `business_access_enabled`; releases `SELECT` + Genie `CAN_RUN` only when `true`.
 - **AIM / SCIM** — how your IdP syncs groups into Databricks; GenieRails consumes those groups.
