@@ -13,11 +13,12 @@ Use this split of responsibilities:
   - run `make validate-generated`
   - commit the reviewed config changes
 - CI workflow:
-  - validate committed config
-  - run `make plan` for the target environment
-  - run `make apply ENV=<env>` on approved branches
+  - validate committed config **and run `make coverage-gate`** (block the build if any classified sensitive column has no covering mask)
+  - for prod: enable/wait for native classification, then `make derive-assignments ENV=prod` (re-derive facts from prod's own tags — no LLM), then `make coverage-gate ENV=prod`
+  - run `make plan`, then `make apply` on approved branches with `business_access_enabled = false`
+  - release business access as a **separate, separately-approved** step (set `business_access_enabled = true`, re-apply)
 
-This keeps LLM-driven generation and human review out of the automated deployment path, while still letting CI own repeatable validation and rollout.
+This keeps LLM-driven generation and human review out of the automated deployment path, keeps the LLM out of prod entirely (prod re-derives deterministically), and makes coverage + exposure explicit gates rather than side effects of deploy.
 
 > **Prerequisite:** Your configs should be version-controlled before setting up CI/CD. See [Version Control & Standalone Terraform](version-control.md) for what to commit and how to set up git tracking.
 
@@ -66,9 +67,10 @@ make validate ENV=dev
 make validate ENV=prod
 ```
 
-If the change includes fresh generated drafts that have not yet been split, also run:
+If the change includes fresh generated drafts that have not yet been split, also run the blocking coverage gate and generated-config validation — the coverage gate fails the PR if any classified sensitive column has no covering mask:
 
 ```bash
+make coverage-gate ENV=dev
 make validate-generated ENV=dev
 ```
 
@@ -89,18 +91,25 @@ This shows the net change across the layered state model:
 
 ## 3. Apply on approved branches
 
-After approval, deploy with:
+After approval, deploy. **For prod, re-derive facts from prod's own classification first** — never re-run `generate` in prod (that re-invokes the LLM and could drift from the reviewed rules):
 
 ```bash
-make apply ENV=dev
-make apply ENV=prod
+# prod facts: enable/wait for native classification, then re-derive assignments (no LLM)
+make derive-assignments ENV=prod
+make coverage-gate ENV=prod
+# closed rollout: enforcement applied, business access withheld
+make apply ENV=prod          # business_access_enabled = false
 ```
 
-`make apply ENV=<workspace>` already handles the required ordering:
+`make apply ENV=<workspace>` handles the required layer ordering (account → data_access → workspace). It does **not** run the coverage gate itself — run `make coverage-gate` as an explicit prior stage — and it does **not** re-generate via the LLM.
 
-1. shared account layer
-2. env-scoped governance layer
-3. env-scoped workspace layer
+Release business access as a **separate, separately-approved** job, so exposure is a deliberate gate rather than a side effect of deploy:
+
+```bash
+# envs/prod/env.auto.tfvars -> business_access_enabled = true
+make apply ENV=prod          # releases business SELECT + Genie CAN_RUN
+make verify-access ENV=prod VERIFY_KEY_COLUMN=<key>   # prove masking by querying as each tier
+```
 
 ## Promotion in CI/CD
 
@@ -117,8 +126,8 @@ Recommended for most teams.
    ```
 
 2. The promoted config is reviewed and committed
-3. CI runs `make plan ENV=prod`
-4. CI runs `make apply ENV=prod` after approval
+3. CI enables/waits for prod native classification, runs `make derive-assignments ENV=prod`, then `make coverage-gate ENV=prod` and `make plan ENV=prod`
+4. CI runs `make apply ENV=prod` (gate closed) after approval, then releases business access (`business_access_enabled = true`, re-apply) as a separate approved step
 
 This is the best model when you want promotion to stay explicit and reviewable in Git.
 
@@ -176,13 +185,14 @@ make audit-schema ENV=prod
 
 This exits `1` if untagged sensitive columns are found (forward drift) or if existing tag assignments reference deleted columns (reverse drift). Use GitHub's built-in failed-run notifications to alert when drift is detected.
 
-When drift is found, a developer runs `make generate-delta ENV=prod` locally to classify new columns and remove stale assignments, then commits the result for CI to deploy.
+When drift is found, prefer letting native classification tag the new columns, then re-derive deterministically with `make derive-assignments ENV=prod` (reuses the promoted rules, no LLM). `make generate-delta` is an exceptional/legacy remediation that invokes the LLM — it is not the routine champion path.
 
 ---
 
 ## Notes and Gotchas
 
-- Avoid running `make generate` automatically in CI unless you intentionally want LLM output in the pipeline. Most teams should generate locally, review, then commit the result.
+- Avoid running `make generate` automatically in CI — and never in prod. Dev drafts locally with the LLM (reviewed, committed); prod re-derives facts with `make derive-assignments` (no LLM), so prod enforcement can't drift from the reviewed rules.
+- The coverage gate is a separate stage: `make apply` does not run it. Make `make coverage-gate` a required, build-blocking step before any apply.
 - `make apply ENV=<workspace>` also applies the shared account layer, so your CI user must be authorized for both account and workspace operations.
 - If you deploy multiple environments from the same repo, parameterize `ENV` and inject the matching workspace secrets per environment.
 - Destroy should usually be a separate manual workflow, for example `make destroy ENV=dev`, rather than part of the normal deployment pipeline.
