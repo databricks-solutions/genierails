@@ -4,18 +4,18 @@
 
 # GenieRails
 
-Put Genie onboarding on rails — with built-in guardrails. Point GenieRails at your tables, and it generates everything you need to run a governed Genie agent: groups, tag policies, column masks, row filters, ACLs, entitlements, and the agent itself. No Terraform to write.
+Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent from dev to production without exposing sensitive data: Unity Catalog's built-in classifier decides *what* is sensitive, GenieRails derives *how* it's protected and applies it as code — groups, column masks, row filters, ACLs, entitlements, and the agent itself — and a **coverage gate blocks the release** until every sensitive column the agent can reach is covered. No Terraform to write.
 
 ## What you get
 
-- **Role-based groups** — e.g. `Finance_Analyst`, `Compliance_Officer`, each with tailored data access
-- **Tag-based governance** — Unity Catalog tag policies that classify sensitive columns (PII, PCI, PHI)
-- **Column masking** — AI-generated SQL UDFs that mask sensitive data (SSN, credit cards, emails) per group
-- **Row-level security** — filter rows by region, department, compliance scope, or any business dimension
-- **Consumer entitlements** — workspace consume access granted to each group automatically
-- **Per-space Genie ACLs** — `CAN_RUN` permissions scoped per space, so each group only accesses the spaces it needs
-- **Genie agent as code** — instructions, benchmarks, SQL measures, all version-controlled
-- **Dev → prod promotion** — one command to replicate governance to production with catalog remapping
+- **Native classification as the source of truth** — Unity Catalog's Data Classification decides what's sensitive (`class.*` labels); GenieRails never guesses.
+- **One protection per column** — a single enforcement treatment (`gr_treatment`) is derived deterministically from each column's label, then applied as UC tag-condition column masks + row filters (SSN, credit cards, emails, region/department/compliance scope, …).
+- **A blocking coverage gate** — the release fails ("says NO") until every classified sensitive column is protected.
+- **Access tiers from your IdP** — mapped to your existing IdP-synced groups; GenieRails *consumes* them, it never invents them.
+- **Consumer entitlements** — workspace consume access granted to each group.
+- **Per-agent Genie ACLs** — `CAN_RUN` scoped per agent, released only when the coverage gate is green (exposed last).
+- **Genie agent as code** — instructions, benchmarks, SQL measures, all version-controlled.
+- **Safe dev → prod promotion** — promote the *rules*, re-derive the *facts* from prod's own classification (no LLM re-generation), with one-command catalog remapping.
 
 ## Getting Started
 
@@ -33,7 +33,7 @@ Check the [Prerequisites](shared/docs/prerequisites.md) first (Python, Terraform
 | Your situation | Start here | Time |
 |---|---|---|
 | **Want the end-to-end champion flow** | [**Champion Flow** — native classification → coverage gate → safe dev→prod promotion](shared/examples/champion_flow/) | ~30 min |
-| Have an existing Genie agent in the UI | [From UI to Production](shared/docs/from-ui-to-production.md) | ~45 min |
+| Have an existing Genie agent in the UI | [From UI to Production](shared/docs/from-ui-to-production.md) — import it, then govern it via the champion flow | ~30 min |
 | Starting from scratch (no Genie agent yet) | [Quickstart](shared/docs/quickstart.md) | ~30 min |
 | Need the full reference | [Playbook](shared/docs/playbook.md) | Reference |
 
@@ -47,9 +47,12 @@ policy, or a treatment's masking function is absent. Native classification is
 read live only during generation through the existing classification source.
 
 GenieRails never deletes sensitive tags or mask policies to make output deploy.
-The Unity Catalog 100-policy-per-catalog quota is a hard error listing the
-affected policies. Option-B treatment derivation substantially reduces pressure
-on this quota by emitting one policy per treatment and catalog.
+Two platform limits can surface as hard errors: the **100 FGAC/ABAC policies
+per catalog** limit (Option-B treatment derivation keeps you well under it by
+emitting one policy per treatment per catalog), and the separate
+**account-level governed-tag-policy cap** (each governed tag is an account tag
+policy, so large shared accounts can hit it). Both are reported clearly, never
+worked around by dropping protection.
 
 ## Repository Layout
 
@@ -66,9 +69,10 @@ genierails/
 
 **Getting Started:**
 - [Prerequisites](shared/docs/prerequisites.md) — OS, Python, Terraform, network, Databricks account, cloud credentials
-- [From UI to Production](shared/docs/from-ui-to-production.md) — import your existing Genie agent, add governance, promote to prod
+- [**Champion Flow**](shared/examples/champion_flow/) — the canonical end-to-end walkthrough: native classification → coverage gate → safe dev→prod promotion
+- [From UI to Production](shared/docs/from-ui-to-production.md) — import an existing UI-built agent, then govern it via the champion flow
 - [Quickstart](shared/docs/quickstart.md) — create a Genie agent from scratch
-- [Playbook](shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios
+- [Playbook](shared/docs/playbook.md) — after first deployment: add agents, promote, overlays, advanced scenarios
 
 **Reference:**
 - [Version Control & Standalone Terraform](shared/docs/version-control.md) — what to commit, version pinning, running Terraform directly
