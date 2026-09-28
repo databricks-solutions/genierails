@@ -177,6 +177,9 @@ make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,vi
 Generation then reads the authoritative `class.*` tags and is **fail-closed**: if classification is enabled but unreadable/empty it aborts (opt into LLM inference only with `GENERATE_ARGS='--groups "..." --allow-llm-sensitivity'`).
 
 **1d. Gate → validate → apply → verify (in order):**
+
+First, the one term you'll act on here: **`business_access_enabled`** is the **exposure gate** — a single `true`/`false` setting in `envs/<env>/env.auto.tfvars`. While it is `false` (the default), GenieRails applies every mask and policy but **withholds** the business-user `SELECT` grant and the Genie `CAN_RUN` permission, so no one can reach the agent yet. Setting it to `true` and re-running `make apply` is what **releases** that access. Keep it `false` while you build and test; turn it on only **after** `coverage-gate` passes — briefly here in dev to run the masking check, then for real in prod at Phase 5. **To change it:** open `envs/dev/env.auto.tfvars` in a text editor and set `business_access_enabled = true`.
+
 ```bash
 make coverage-gate      ENV=dev                          # expect: PASS — N columns fully protected
 make validate-generated ENV=dev                          # static checks incl. overlap guard
