@@ -44,6 +44,48 @@ def test_coverage_gate_passes_correctly_classified_card_and_amount_columns():
     assert result.passed, result.errors
 
 
+def test_coverage_gate_rejects_column_mask_policy_with_zero_protected_columns():
+    cfg = {
+        "tag_assignments": [],
+        "fgac_policies": [{
+            "name": "orphaned_email_mask",
+            "policy_type": "POLICY_TYPE_COLUMN_MASK",
+            "catalog": "cat",
+            "match_condition": "hasTagValue('gr_treatment', 'email_partial')",
+            "function_name": "mask_email",
+        }],
+    }
+    result = ValidationResult()
+    validate_coverage_gate(cfg, {"mask_email"}, "", result)
+    assert not result.passed
+    assert any("vacuous" in error for error in result.errors)
+
+
+def test_coverage_gate_passes_row_filter_only_config():
+    cfg = {
+        "tag_assignments": [{
+            "entity_type": "tables",
+            "entity_name": "cat.sch.regional_orders",
+            "tag_key": "row_scope",
+            "tag_value": "regional",
+        }],
+        "fgac_policies": [{
+            "name": "regional_orders_filter",
+            "policy_type": "POLICY_TYPE_ROW_FILTER",
+            "catalog": "cat",
+            "match_condition": "hasTagValue('row_scope', 'regional')",
+            "function_name": "filter_region",
+        }],
+    }
+    result = ValidationResult()
+    validate_coverage_gate(cfg, {"filter_region"}, "", result)
+    assert result.passed, result.errors
+    assert any(
+        "0 classified/treatment column(s) fully protected" in info
+        for info in result.info
+    )
+
+
 def test_coverage_gate_rejects_treatment_only_column_without_mask():
     cfg = {
         "tag_assignments": [{

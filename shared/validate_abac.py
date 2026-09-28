@@ -430,10 +430,14 @@ def validate_coverage_gate(
     for title, items in groups:
         if items:
             result.error(f"COVERAGE GATE — {title}:\n    - " + "\n    - ".join(items))
-    if policies and not protected_columns:
+    has_column_mask_policy = any(
+        policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
+        for policy in policies
+    )
+    if has_column_mask_policy and not protected_columns:
         result.error(
             "COVERAGE GATE — zero classified/treatment columns were supplied; "
-            "refusing a vacuous pass (run derive-assignments after native classification)"
+            "refusing a vacuous pass (populate assignments from classification before retrying)"
         )
     elif not any(items for _, items in groups):
         result.ok(f"Coverage gate: {len(protected_columns)} classified/treatment column(s) fully protected")
