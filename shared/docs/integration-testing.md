@@ -75,9 +75,7 @@ counter that always starts at zero.
 
 ### Unit Tests
 
-The `tests/` directory contains pytest-based unit tests for the core Python
-functions — all autofix functions in `generate_abac.py` and all validation
-functions in `validate_abac.py`.
+The `tests/` directory is the champion **regression suite** — ~500+ pytest cases across ~27 modules. Beyond the legacy `generate_abac.py`/`validate_abac.py` helpers, it locks in the champion invariants: native-authoritative classification, deterministic one-`gr_treatment` derivation, the blocking coverage gate, the no-LLM prod refresh, fail-closed exposure, and IdP consume-by-default.
 
 **Run:**
 
@@ -85,7 +83,7 @@ functions in `validate_abac.py`.
 # Install deps once (if not already installed)
 pip install pytest python-hcl2
 
-# Run all 60+ unit tests (~1 second, no Databricks connection needed)
+# Run the full suite (~500+ tests, no Databricks connection needed)
 make test-unit
 
 # Or invoke pytest directly for richer output
@@ -103,15 +101,16 @@ python3 -m pytest tests/ -k "TagPolicies" -v        # filter by name
 | `tests/test_validate_abac.py` | `validate_groups`, `validate_tag_policies`, `validate_tag_assignments`, `validate_fgac_policies`, `parse_sql_functions`, `parse_sql_function_arg_counts`, `_condition_matches_tags` |
 | `tests/test_schema_drift.py` | PII column pattern regex, env file parsing (both `uc_tables` and `genie_spaces` shapes), governed-key resolution (4-level fallback), delta merge/dedup, delta validation (reject unknown keys/values), stale assignment removal |
 
-Unit tests catch the most common failure categories without incurring the
-cost of a full LLM + Terraform run:
+Unit tests lock in the champion invariants (and the legacy autofix helpers) without a full LLM + Terraform run. Champion coverage includes:
 
-- LLM output contains missing commas between HCL objects → `fix_hcl_syntax`
-- LLM uses a tag value not in the allowed list → `autofix_tag_policies`
-- LLM generates an assignment with a typo'd value → `autofix_invalid_tag_values`
-- LLM references a tag key that was never defined → `autofix_undefined_tag_refs`
-- An uncovered sensitive column is left without an FGAC policy → `autofix_missing_fgac_policies`
-- Too many FGAC policies for one catalog → `autofix_fgac_policy_count`
+- Native classification is authoritative / fail-closed → `test_sensitivity_source.py`, `test_data_classification.py`
+- Exactly one `gr_treatment` derived per column (strictest-wins) → `test_treatment_derivation.py`
+- The coverage gate BLOCKS unmapped / uncovered classified columns → `test_coverage_gate.py`
+- Prod `derive-assignments` makes **no** model call and only rewrites assignments → `test_derive_assignments.py`
+- Exposure defaults false and gates `SELECT` + Genie `CAN_RUN` → `test_exposure_gating.py`, `test_data_access_grants.py`
+- Setup scaffolds `manage_groups=false`; groups consumed from IdP → `test_idp_consume_default.py`
+
+Legacy generation helpers (HCL repair, tag-value autofix, FGAC count) remain covered by `test_generate_abac.py` / `test_validate_abac.py`.
 
 ---
 
@@ -317,10 +316,7 @@ This deletes cloud-specific resources, the workspace, metastore (and all catalog
 
 ## Scenarios
 
-`scripts/run_integration_tests.py` runs each playbook.md scenario end-to-end with
-full data setup, LLM generation, Terraform apply, assertions, and teardown. Each
-scenario is isolated — state from a previous run is destroyed and cleaned before
-the next one starts.
+`scripts/run_integration_tests.py` runs 18 live scenarios end-to-end (data setup, generation/apply, assertions, teardown), each isolated. These exercise **topology, import, and promotion** mechanics; most predate the champion invariants and do not by themselves prove native-classification / coverage-gate / exposure-gate / derive-assignments — the champion **regression suite** above covers those deterministically. (In the champion flow, prod enforcement is `derive-assignments` with no LLM, not re-generation.)
 
 | Scenario | playbook.md section | What it validates |
 |---|---|---|
@@ -334,14 +330,14 @@ the next one starts.
 | **self-service-genie** | § 7 | Central governance team + two BU Genie teams self-serve; second BU isolation check; BU promote to prod via `apply-genie`; governance state verified unchanged throughout |
 | **abac-only** | § 2 | ABAC governance only (no Genie agent) + §2→§4 upgrade path: add Genie agent later without disturbing governance |
 | **multi-space-import** | § 3 (multi-space) | Import two UI-configured Genie agents in one `make generate`; assert both configs present, Terraform creates no new spaces |
-| **schema-drift** | — | Detects and classifies new columns after initial ABAC deployment; tests `make audit-schema` and `make generate-delta` across ADD/DROP/RENAME COLUMN scenarios |
+| **schema-drift** | — | Detects new/removed columns after deployment; tests `make audit-schema` / `make audit-rulebook` across ADD/DROP/RENAME. (In champion prod, new columns are re-derived via `make derive-assignments` after native classification; `make generate-delta` is the legacy LLM path.) |
 | **genie-only** | § 7 (genie\_only) | Minimal-privilege SP (workspace USER + SQL entitlement) creates Genie agent with `genie_only=true`; no account-level resources |
 | **genie-import-no-abac** | § 3 + § 7 | Import an existing Genie agent and deploy to prod **without any ABAC governance** — validates the genie-only import-to-prod workflow when a separate team manages ABAC centrally |
 | **country-overlay** | — | Country/region overlays (ANZ, IN, SEA) — full cycle per region + multi-region generation |
 | **industry-overlay** | — | Industry overlays (financial\_services, healthcare, retail) — full cycle per industry + multi-industry + country+industry composition (COUNTRY=ANZ INDUSTRY=healthcare) |
-| **aus-bank-demo** | — | Australian bank demo — champion flow (ANZ + financial\_services, import + promote with `dev_bank`→`prod_bank` catalog remap) |
-| **india-bank-demo** | — | India bank demo — champion flow (IN + financial\_services, Aadhaar/PAN/GSTIN/UPI masking, import + promote with `dev_lakshmi`→`prod_lakshmi`) |
-| **asean-bank-demo** | — | ASEAN bank demo — champion flow (SEA + financial\_services, 6 nullable national ID columns, multi-currency, import + promote with `dev_asean_bank`→`prod_asean_bank`) |
+| **aus-bank-demo** | — | Australian bank demo — **legacy** LLM-overlay demo (ANZ + financial\_services, import + promote with `dev_bank`→`prod_bank` catalog remap) |
+| **india-bank-demo** | — | India bank demo — **legacy** LLM-overlay demo (IN + financial\_services, Aadhaar/PAN/GSTIN/UPI masking, import + promote with `dev_lakshmi`→`prod_lakshmi`) |
+| **asean-bank-demo** | — | ASEAN bank demo — **legacy** LLM-overlay demo (SEA + financial\_services, 6 nullable national ID columns, multi-currency, import + promote with `dev_asean_bank`→`prod_asean_bank`) |
 
 ---
 
