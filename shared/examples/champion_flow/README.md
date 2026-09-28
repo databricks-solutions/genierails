@@ -234,6 +234,8 @@ make apply-governance ENV=prod                        # account + data_access ON
 make audit-rulebook ENV=prod                          # drift: prod tags with no covering policy/mask
 make verify-access  ENV=prod VERIFY_KEY_COLUMN=customer_id
 ```
+The `--groups` flag works exactly as in **step 1c** above — they are *your own* IdP group names, and `payments_ops,regional_analysts,viewers` are just placeholders. Use the **same** tier groups you used in dev (your IdP syncs the same groups into the prod workspace).
+
 > Use **`apply-governance`** here, not `make apply` — a full `apply` runs the workspace layer and would create the Genie space before the gate passes. If prod surfaces a type your mapping doesn't cover, update `treatment_config.json`, re-`generate`, re-gate.
 
 ---
