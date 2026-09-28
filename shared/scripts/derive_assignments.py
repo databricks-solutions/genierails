@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -25,9 +26,51 @@ from generate_abac import (  # noqa: E402
 )
 from treatment_derivation import (  # noqa: E402
     collapse_sensitivity_assignments,
-    derive_treatment_assignments,
+    derive_treatment_model,
     load_treatment_config,
 )
+
+
+def _retained_promoted_assignments(assignments: list[dict], config) -> list[dict]:
+    """Discard all stale column sensitivity facts while preserving other facts."""
+    sensitivity_keys = {
+        key for treatment in config.treatments for key, _value in treatment.sources
+    }
+    return [
+        dict(item) for item in assignments
+        if not (
+            item.get("entity_type") == "columns"
+            and item.get("tag_key") in sensitivity_keys | {config.tag_key}
+        )
+    ]
+
+
+def _assert_promoted_masks_cover(assignments: list[dict], promoted: dict, tag_key: str) -> None:
+    """Fail closed unless every derived treatment is covered by a reviewed mask."""
+    covered: set[tuple[str, str]] = set()
+    pattern = re.compile(
+        rf"hasTagValue\(\s*['\"]{re.escape(tag_key)}['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)"
+    )
+    for policy in promoted.get("fgac_policies") or []:
+        if policy.get("policy_type") != "POLICY_TYPE_COLUMN_MASK":
+            continue
+        catalog = policy.get("catalog", "")
+        for value in pattern.findall(policy.get("match_condition", "") or ""):
+            covered.add((catalog, value))
+
+    missing = []
+    for item in assignments:
+        if item.get("entity_type") != "columns" or item.get("tag_key") != tag_key:
+            continue
+        catalog = item.get("entity_name", "").split(".", 1)[0]
+        key = (catalog, item.get("tag_value", ""))
+        if key not in covered:
+            missing.append(f"{item.get('entity_name')} ({tag_key}={key[1]}, catalog={catalog})")
+    if missing:
+        raise RuntimeError(
+            "Promoted rules have no matching column-mask policy for derived treatment(s): "
+            + ", ".join(missing)
+        )
 
 
 def derive_assignments(config_path: Path, auth_path: Path, env_path: Path) -> int:
@@ -72,8 +115,16 @@ def derive_assignments(config_path: Path, auth_path: Path, env_path: Path) -> in
         for finding in native.findings_for(sorted(native.classified_columns()))
     ]
     native_assignments = collapse_sensitivity_assignments(native_assignments, config)
-    assignments = list(promoted.get("tag_assignments") or []) + native_assignments
-    refreshed = derive_treatment_assignments(assignments, config)
+    retained = _retained_promoted_assignments(
+        list(promoted.get("tag_assignments") or []), config
+    )
+    # Use the exact treatment transform used by generate. Only its assignments
+    # are consumed; its rebuilt policy model is intentionally discarded.
+    derived, _changes = derive_treatment_model(
+        {"tag_assignments": retained + native_assignments}, config
+    )
+    refreshed = derived["tag_assignments"]
+    _assert_promoted_masks_cover(refreshed, promoted, config.tag_key)
     updated = _replace_bracket_section(
         original,
         "tag_assignments",

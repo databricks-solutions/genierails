@@ -25,9 +25,15 @@ tag_policies = [{ key = "gr_treatment", description = "reviewed", values = ["red
 tag_assignments = [
   { entity_type = "tables", entity_name = "prod.sales.customers", tag_key = "row_scope", tag_value = "anz" },
   { entity_type = "columns", entity_name = "prod.sales.customers.old", tag_key = "gr_treatment", tag_value = "email_partial" },
+  { entity_type = "columns", entity_name = "prod.sales.customers.no_longer_sensitive", tag_key = "pii_level", tag_value = "masked_email" },
+  { entity_type = "columns", entity_name = "prod.sales.customers.no_longer_sensitive", tag_key = "gr_treatment", tag_value = "email_partial" },
+  { entity_type = "columns", entity_name = "prod.sales.customers.email", tag_key = "pii_level", tag_value = "masked_ssn" },
+  { entity_type = "columns", entity_name = "prod.sales.customers.email", tag_key = "gr_treatment", tag_value = "ssn_last4" },
 ]
 fgac_policies = [
   { name = "reviewed_mask", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "prod", to_principals = ["reviewed_group"], match_condition = "hasTagValue('gr_treatment', 'redact')", function_name = "mask_redact", function_schema = "security" },
+  { name = "reviewed_email", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "prod", to_principals = ["reviewed_group"], match_condition = "hasTagValue('gr_treatment', 'email_partial')", function_name = "mask_email", function_schema = "security" },
+  { name = "reviewed_ssn", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "prod", to_principals = ["reviewed_group"], match_condition = "hasTagValue('gr_treatment', 'ssn_last4')", function_name = "mask_ssn", function_schema = "security" },
   { name = "reviewed_row_filter", policy_type = "POLICY_TYPE_ROW_FILTER", catalog = "prod", to_principals = ["reviewed_group"], match_condition = "hasTagValue('row_scope', 'anz')", function_name = "filter_anz", function_schema = "security" },
 ]
 '''
@@ -59,11 +65,7 @@ def test_refresh_changes_only_assignments_and_derives_one_treatment_per_column(t
         ("prod", "sales", "customers", "free_text", "class.phone_number", ""),
     ])
     monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
-    monkeypatch.setattr(
-        generate_abac,
-        "call_with_retries",
-        lambda *_a, **_k: pytest.fail("assignment refresh must never call a model"),
-    )
+    _forbid_model_calls(monkeypatch)
     before = config.read_text()
 
     assert MODULE.derive_assignments(config, auth, env) == 3
@@ -74,10 +76,14 @@ def test_refresh_changes_only_assignments_and_derives_one_treatment_per_column(t
     assignments = parsed["tag_assignments"]
     assert {tuple(sorted(item.items())) for item in assignments} == {
         tuple(sorted({"entity_type": "tables", "entity_name": "prod.sales.customers", "tag_key": "row_scope", "tag_value": "anz"}.items())),
+        tuple(sorted({"entity_type": "columns", "entity_name": "prod.sales.customers.email", "tag_key": "pii_level", "tag_value": "masked_email"}.items())),
         tuple(sorted({"entity_type": "columns", "entity_name": "prod.sales.customers.email", "tag_key": "gr_treatment", "tag_value": "email_partial"}.items())),
+        tuple(sorted({"entity_type": "columns", "entity_name": "prod.sales.customers.ssn", "tag_key": "pii_level", "tag_value": "masked_ssn"}.items())),
         tuple(sorted({"entity_type": "columns", "entity_name": "prod.sales.customers.ssn", "tag_key": "gr_treatment", "tag_value": "ssn_last4"}.items())),
+        tuple(sorted({"entity_type": "columns", "entity_name": "prod.sales.customers.free_text", "tag_key": "pii_level", "tag_value": "redacted_mixed"}.items())),
         tuple(sorted({"entity_type": "columns", "entity_name": "prod.sales.customers.free_text", "tag_key": "gr_treatment", "tag_value": "redact"}.items())),
     }
+    assert not any("no_longer_sensitive" in item["entity_name"] for item in assignments)
     counts = {}
     for item in assignments:
         if item["tag_key"] == "gr_treatment":
@@ -104,6 +110,37 @@ def test_refresh_fails_closed_without_native_findings(tmp_path, monkeypatch, fai
     assert config.read_bytes() == before
 
 
+def test_refresh_fails_closed_on_unmapped_native_class(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    before = config.read_bytes()
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "secret", "class.future_secret", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    with pytest.raises(NativeClassificationRequiredError, match=r"unmapped class\.\* findings"):
+        MODULE.derive_assignments(config, auth, env)
+    assert config.read_bytes() == before
+
+
+def test_refresh_fails_closed_when_promoted_mask_does_not_cover_treatment(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    original = config.read_text()
+    config.write_text(original.replace(
+        "hasTagValue('gr_treatment', 'ssn_last4')",
+        "hasTagValue('gr_treatment', 'email_partial')",
+    ))
+    before = config.read_bytes()
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "ssn", "class.us_ssn", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    with pytest.raises(RuntimeError, match="no matching column-mask policy"):
+        MODULE.derive_assignments(config, auth, env)
+    assert config.read_bytes() == before
+
+
 def test_missing_promoted_config_says_run_promote_first(tmp_path):
     with pytest.raises(RuntimeError, match="Run `make promote` first"):
         MODULE.derive_assignments(
@@ -113,11 +150,24 @@ def test_missing_promoted_config_says_run_promote_first(tmp_path):
         )
 
 
+MODEL_SURFACES = (
+    "call_with_retries", "call_databricks", "call_openai", "call_anthropic",
+    "build_prompt", "serving_endpoints",
+)
+
+
+def _forbid_model_calls(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("assignment refresh must never call a model")
+
+    for namespace in (generate_abac, MODULE):
+        for name in MODEL_SURFACES:
+            monkeypatch.setattr(namespace, name, forbidden, raising=False)
+
+
 def test_command_has_no_model_call_surface():
     source = SCRIPT.read_text()
-    assert "call_model" not in source
-    assert "build_prompt" not in source
-    assert "provider" not in source
+    assert all(name not in source for name in MODEL_SURFACES)
 
 
 def test_make_target_exposes_assignment_only_command():
