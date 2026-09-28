@@ -1,8 +1,8 @@
 # GenieRails Champion Flow — take a Genie agent from dev to production, safely
 
-Take a curated Genie agent in **dev** and ship it to **production** without ever exposing sensitive data. Unity Catalog's built-in classifier decides *what* is sensitive; GenieRails derives *how* it's protected and applies it as code; and a **coverage check blocks the release** until every sensitive column the agent can reach is provably covered.
+Take a curated Genie agent in **dev** and ship it to **production** without ever exposing sensitive data. Unity Catalog's built-in classifier decides *what* is sensitive; GenieRails derives *how* it's protected and applies it as code; and a **coverage check blocks the release** until every *classified* sensitive column the agent can reach is provably covered.
 
-> **What you'll end up with:** a production Genie agent where an authorized tier sees real values and every other tier sees masked ones — plus a proof that every sensitive column is covered and an audit/evidence record. Nothing is reachable by users until that coverage is proven.
+> **What you'll end up with:** a production Genie agent where an authorized tier sees real values and every other tier sees masked ones — plus a proof that every *classified* sensitive column is covered and an audit/evidence record. Nothing is reachable by users until you open the exposure gate — which you do only after coverage passes.
 
 > **Just want to run it?** → **[Quick start — every command in order](#quick-start--every-command-in-order)**.
 > **No Genie agent or tables of your own yet?** → do **[Phase 0](#phase-0--set-up-dev)**, then the optional **[Sample Environment Setup](#sample-environment-setup-optional)**, then continue.
@@ -167,7 +167,7 @@ WHERE catalog_name = '<your-catalog>' AND schema_name = '<your-schema>'
   notes        free_text            class.email_address
   ```
 - ⏳ **Zero rows → wait and re-run.** It almost always just means the scan hasn't finished. *(On **Azure** the initial scan runs materially slower than on AWS — typically tens of minutes rather than a few — so give it more time before concluding it didn't run.)*
-- ⚠️ **Don't expect every column.** The scanner only tags values it can *format-match* — free-text or unusual formats may stay untagged, and that's expected; the `coverage-gate` (1d) is what enforces completeness. If it stays empty after a clear scan, your data isn't format-matchable: seed **realistic** PII (the scanner ignores fake `example.com` emails / `000-` SSNs).
+- ⚠️ **Don't expect every column.** The scanner only tags values it can *format-match* — free-text or unusual formats may stay untagged, and that's expected. The `coverage-gate` (1d) blocks on any *classified* column left unprotected, but it **cannot** gate a column the scanner never tagged (a documented fail-open) — which is why you keep the exposure gate closed and prefer a restrictive default for high-sensitivity data. If it stays empty after a clear scan, your data isn't format-matchable: seed **realistic** PII (the scanner ignores fake `example.com` emails / `000-` SSNs).
 
 **1c. Draft the protection rules.**
 ```bash
@@ -251,7 +251,7 @@ make audit-rulebook   ENV=prod   # flags any prod tag with no covering rule (dri
 
 ---
 
-## Phase 5 — Open to users (the gate releases access), then verify
+## Phase 5 — Open to users (you release access after the gate passes), then verify
 
 **What you're doing:** only now — with coverage proven — releasing access, creating the agent, and confirming masking live.
 
@@ -304,7 +304,7 @@ A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog gr
 
 ## What this does — and does NOT — do
 
-**It does:** discover the tables the agent can reach, read native classification, derive one protection per column, prove coverage with a blocking gate, verify masking by querying as real principals, and release the agent only when the gate is green.
+**It does:** discover the tables the agent can reach, read native classification, derive one protection per column, prove coverage with a blocking gate, verify masking by querying as real principals, and release the agent — a deliberate step you take only after the coverage gate passes.
 
 **It does not:** decide what's sensitive (Unity Catalog's classifier does); remove human review (the generated rules are a draft you review); manage warehouse `CAN_USE` (you grant it); make you legally compliant (it proves coverage, not sign-off); or replace Unity Catalog (it runs on top of it).
 

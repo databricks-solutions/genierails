@@ -6,7 +6,7 @@ This document explains the layered state model, config files, and resource owner
 
 Everything below rests on four invariants of the champion flow:
 
-1. **Unity Catalog is the sensitivity source of truth.** Native Data Classification writes `class.*` labels on sensitive columns; GenieRails never guesses. When `enable_classification=true`, generation is fail-closed — unreadable/empty native results abort rather than fall back to LLM inference (unless the operator explicitly passes `--allow-llm-sensitivity`).
+1. **Unity Catalog is the sensitivity source of truth.** Native Data Classification writes `class.*` labels on sensitive columns; GenieRails does not guess by default. When `enable_classification=true`, generation is fail-closed — unreadable/empty native results abort rather than fall back to LLM inference (unless the operator explicitly passes the `--allow-llm-sensitivity` escape hatch).
 2. **One `gr_treatment` per column.** GenieRails collapses a column's `class.*` findings deterministically to exactly one enforcement treatment (`gr_treatment`), so exactly one column mask ever resolves; masks are keyed to that treatment vocabulary.
 3. **A blocking coverage gate.** `make coverage-gate` fails the release if any classified sensitive column has no covering treatment/mask. It is a *separate* step — `make apply` does not run it — so run it as an explicit gate before applying.
 4. **The exposure gate controls release.** `business_access_enabled` withholds business `SELECT` and Genie `CAN_RUN` until set to `true`; enforcement resources can exist while access stays withheld. Prod re-derives its own facts (`derive-assignments`) before the gate opens.
@@ -110,7 +110,7 @@ genie_spaces = [
 
 sql_warehouse_id        = ""     # shared fallback; empty = auto-create serverless
 enable_classification   = true   # turn on UC native Data Classification for the footprint
-business_access_enabled = false  # exposure gate: withhold SELECT + Genie CAN_RUN until coverage is green
+business_access_enabled = false  # exposure gate: withholds SELECT + Genie CAN_RUN; open only after coverage-gate passes
 ```
 
 `manage_groups` defaults to `false` on every layer (account, `data_access`, workspace): groups are **consumed** — looked up by name from the IdP-synced account groups — not created. This is the normal path. Only for a demo/greenfield account with no IdP-synced groups should `envs/account/env.auto.tfvars` set `manage_groups = true` (opt-in group creation); workspace and `data_access` env files always stay on the lookup-only default. See [IdP-Synced Groups](advanced.md#idp-synced-groups-default).

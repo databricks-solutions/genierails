@@ -1,6 +1,6 @@
 # From UI to Production
 
-> **Already built your Genie agent in the Databricks UI?** This is the on-ramp: it imports your existing agent's configuration into code, then governs it with the **[champion flow](../examples/champion_flow/README.md)**. It is *not* a separate governance model — after the import step you follow the champion flow exactly (Unity Catalog decides what's sensitive, GenieRails derives one protection per column, and a coverage gate blocks the release until every sensitive column is covered).
+> **Already built your Genie agent in the Databricks UI?** This is the on-ramp: it imports your existing agent's configuration into code, then governs it with the **[champion flow](../examples/champion_flow/README.md)**. It is *not* a separate governance model — after the import step you follow the champion flow exactly (Unity Catalog decides what's sensitive, GenieRails derives one protection per column, and a coverage gate blocks the release until every *classified* sensitive column is covered).
 
 ## What this does
 

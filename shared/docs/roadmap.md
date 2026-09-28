@@ -10,7 +10,7 @@ The native-classification governance model has since shipped and is the current 
 - **Deterministic treatment derivation** — one `gr_treatment` per column, so exactly one mask resolves.
 - **Blocking coverage gate** — `make coverage-gate` fails the release until every classified column is protected.
 - **Safe dev→prod promotion** — `make derive-assignments` re-derives prod facts from prod's own classification (no LLM re-generation), reusing the promoted rules.
-- **Exposure gate** — `business_access_enabled` withholds business `SELECT` + Genie `CAN_RUN` until the coverage gate is green.
+- **Exposure gate** — `business_access_enabled` withholds business `SELECT` + Genie `CAN_RUN` until you open it (the workflow is to open it only after the coverage gate passes; it is not mechanically wired to the gate's result).
 - **Consume-IdP groups by default** — GenieRails consumes IdP-synced groups (`manage_groups=false`) rather than inventing them.
 - **Effective-access verification** — `make verify-access` proves masking/row filters by querying as per-tier principals (item 5 below).
 - **Scheduled steady-state governance** and a **compliance evidence report**.

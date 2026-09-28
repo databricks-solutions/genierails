@@ -4,16 +4,16 @@
 
 # GenieRails
 
-Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent from dev to production without exposing sensitive data: Unity Catalog's built-in classifier decides *what* is sensitive, GenieRails derives *how* it's protected and applies it as code — groups, column masks, row filters, ACLs, entitlements, and the agent itself — and a **coverage gate blocks the release** until every sensitive column the agent can reach is covered. No Terraform to write.
+Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent from dev to production without exposing sensitive data: Unity Catalog's built-in classifier decides *what* is sensitive, GenieRails derives *how* it's protected and applies it as code — groups, column masks, row filters, ACLs, entitlements, and the agent itself — and a **coverage gate blocks the release** until every *classified* sensitive column the agent can reach is covered. No Terraform to write.
 
 ## What you get
 
-- **Native classification as the source of truth** — Unity Catalog's Data Classification decides what's sensitive (`class.*` labels); GenieRails never guesses.
+- **Native classification as the source of truth** — Unity Catalog's Data Classification decides what's sensitive (`class.*` labels); GenieRails doesn't guess by default (an explicit `--allow-llm-sensitivity` escape hatch exists).
 - **One protection per column** — a single enforcement treatment (`gr_treatment`) is derived deterministically from each column's label, then applied as UC tag-condition column masks + row filters (SSN, credit cards, emails, region/department/compliance scope, …).
 - **A blocking coverage gate** — the release fails ("says NO") until every classified sensitive column is protected.
-- **Access tiers from your IdP** — mapped to your existing IdP-synced groups; GenieRails *consumes* them, it never invents them.
+- **Access tiers from your IdP** — mapped to your existing IdP-synced groups; GenieRails *consumes* them by default, it doesn't invent them (a demo/greenfield `--create-groups` path aside).
 - **Consumer entitlements** — workspace consume access granted to each group.
-- **Per-agent Genie ACLs** — `CAN_RUN` scoped per agent, released only when the coverage gate is green (exposed last).
+- **Per-agent Genie ACLs** — `CAN_RUN` scoped per agent, withheld by the `business_access_enabled` gate until you open it — the workflow is to open it only after coverage passes (exposed last).
 - **Genie agent as code** — instructions, benchmarks, SQL measures, all version-controlled.
 - **Safe dev → prod promotion** — promote the *rules*, re-derive the *facts* from prod's own classification (no LLM re-generation), with one-command catalog remapping.
 
@@ -26,7 +26,7 @@ Check the [Prerequisites](shared/docs/prerequisites.md) first (Python, Terraform
 | AWS   | [`aws/README.md`](aws/README.md) |
 | Azure | [`azure/README.md`](azure/README.md) |
 
-> **▶ Start here — the champion flow:** [Champion Flow — Native-Classification-Driven Governance, End-to-End](shared/examples/champion_flow/) — the canonical walkthrough. Unity Catalog decides what's sensitive, GenieRails derives one enforcement treatment per column, a coverage gate blocks promotion until every sensitive column is covered, and the agent is exposed only after the prod gate passes.
+> **▶ Start here — the champion flow:** [Champion Flow — Native-Classification-Driven Governance, End-to-End](shared/examples/champion_flow/) — the canonical walkthrough. Unity Catalog decides what's sensitive, GenieRails derives one enforcement treatment per column, a coverage gate blocks promotion until every classified sensitive column is covered, and you expose the agent only after the prod coverage gate passes.
 
 **Where to start:**
 
