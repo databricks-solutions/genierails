@@ -203,7 +203,9 @@ Dev's deliverable = **validated rules + a working agent** (not dev's tag assignm
 ```bash
 make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_finance=prod_finance"
 ```
-Promotes the mapping, masking functions, ABAC/row-filter policies, and group→tier mapping; **strips dev's tag assignments** (`databricks_entity_tag_assignment` also carries `ignore_changes = all`, so Terraform never fights the classifier's re-tagging).
+Promotes the **rules** — the mapping, masking functions, ABAC/row-filter policies, and group→tier mapping — and deliberately **leaves dev's tag assignments behind** (which specific columns got tagged is a *fact* about dev's data; prod re-derives its own from its own scan in Phase 3).
+
+*What is `ignore_changes = all`?* It is a standard Terraform **lifecycle** setting placed on the tag-assignment resource (`databricks_entity_tag_assignment`). It tells Terraform: **once these tags exist, do not try to change or delete them.** That is what lets the **classifier own the `class.*` tags** in prod — when the scan (re)writes a tag, Terraform leaves it alone instead of reverting it to its own copy. In short: the classifier owns the tags, GenieRails owns the rules, and the two never overwrite each other.
 
 > **`make promote` writes `envs/prod/env.auto.tfvars` for you** (with the discovered `genie_spaces` + catalog-remapped `uc_tables`, and `sql_warehouse_id = ""`). **Edit** that file — do not overwrite it:
 > - **Replace** the `sql_warehouse_id = ""` line with your prod warehouse id (or leave `""` to auto-create).
