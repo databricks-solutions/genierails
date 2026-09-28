@@ -152,7 +152,7 @@ WHERE catalog_name = '<your-catalog>' AND schema_name = '<your-schema>'
   payments     credit_card_number   class.credit_card
   notes        free_text            class.email_address
   ```
-- ⏳ **Zero rows → wait and re-run.** It almost always just means the scan hasn't finished.
+- ⏳ **Zero rows → wait and re-run.** It almost always just means the scan hasn't finished. *(On **Azure** the initial scan runs materially slower than on AWS — typically tens of minutes rather than a few — so give it more time before concluding it didn't run.)*
 - ⚠️ **Don't expect every column.** The scanner only tags values it can *format-match* — free-text or unusual formats may stay untagged, and that's expected; the `coverage-gate` (1d) is what enforces completeness. If it stays empty after a clear scan, your data isn't format-matchable: seed **realistic** PII (the scanner ignores fake `example.com` emails / `000-` SSNs).
 
 **1c. Draft the protection rules.**
@@ -332,7 +332,7 @@ Key config & code: [`treatment_config.json`](../../treatment_config.json) (the `
 
 ## Limits you might hit
 
-- **Scan latency** — the first scan is async (minutes to ~24h); no force-scan API. `generate` before tags land correctly fail-closes.
+- **Scan latency** — the first scan is async (minutes to ~24h); no force-scan API, and **Azure's initial scan is materially slower than AWS's** (tens of minutes vs. a few). `generate` before tags land correctly fail-closes.
 - **Governed tag-policy account cap** — each governed tag is an account tag policy; large accounts can hit the cap (`make apply` reports it as a hard error). Free unused policies or raise the quota.
 - **Fine-grained access-control limits** — per catalog/schema/table/metastore; see [Troubleshooting](../../docs/troubleshooting.md).
 - **Region-scoped classifiers** run in-region only — out-of-region PII physically present may go undetected (add a custom classifier or scan in-region).
