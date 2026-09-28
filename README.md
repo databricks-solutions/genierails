@@ -4,7 +4,7 @@
 
 # GenieRails
 
-Put Genie onboarding on rails — with built-in guardrails. Point GenieRails at your tables, and it generates everything you need to run a governed Genie Space: groups, tag policies, column masks, row filters, ACLs, entitlements, and the Space itself. No Terraform to write.
+Put Genie onboarding on rails — with built-in guardrails. Point GenieRails at your tables, and it generates everything you need to run a governed Genie agent: groups, tag policies, column masks, row filters, ACLs, entitlements, and the agent itself. No Terraform to write.
 
 ## What you get
 
@@ -14,7 +14,7 @@ Put Genie onboarding on rails — with built-in guardrails. Point GenieRails at 
 - **Row-level security** — filter rows by region, department, compliance scope, or any business dimension
 - **Consumer entitlements** — workspace consume access granted to each group automatically
 - **Per-space Genie ACLs** — `CAN_RUN` permissions scoped per space, so each group only accesses the spaces it needs
-- **Genie Space as code** — instructions, benchmarks, SQL measures, all version-controlled
+- **Genie agent as code** — instructions, benchmarks, SQL measures, all version-controlled
 - **Dev → prod promotion** — one command to replicate governance to production with catalog remapping
 
 ## Getting Started
@@ -33,8 +33,8 @@ Check the [Prerequisites](shared/docs/prerequisites.md) first (Python, Terraform
 | Your situation | Start here | Time |
 |---|---|---|
 | **Want the end-to-end champion flow** | [**Champion Flow** — native classification → coverage gate → safe dev→prod promotion](shared/examples/champion_flow/) | ~30 min |
-| Have an existing Genie Space in the UI | [From UI to Production](shared/docs/from-ui-to-production.md) | ~45 min |
-| Starting from scratch (no Genie Space yet) | [Quickstart](shared/docs/quickstart.md) | ~30 min |
+| Have an existing Genie agent in the UI | [From UI to Production](shared/docs/from-ui-to-production.md) | ~45 min |
+| Starting from scratch (no Genie agent yet) | [Quickstart](shared/docs/quickstart.md) | ~30 min |
 | Need the full reference | [Playbook](shared/docs/playbook.md) | Reference |
 
 ## Blocking sensitive-column coverage gate
@@ -66,16 +66,16 @@ genierails/
 
 **Getting Started:**
 - [Prerequisites](shared/docs/prerequisites.md) — OS, Python, Terraform, network, Databricks account, cloud credentials
-- [From UI to Production](shared/docs/from-ui-to-production.md) — import your existing Genie Space, add governance, promote to prod
-- [Quickstart](shared/docs/quickstart.md) — create a Genie Space from scratch
+- [From UI to Production](shared/docs/from-ui-to-production.md) — import your existing Genie agent, add governance, promote to prod
+- [Quickstart](shared/docs/quickstart.md) — create a Genie agent from scratch
 - [Playbook](shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios
 
 **Reference:**
 - [Version Control & Standalone Terraform](shared/docs/version-control.md) — what to commit, version pinning, running Terraform directly
-- [Architecture](shared/docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
+- [Architecture](shared/docs/architecture.md) — layers, artifact ownership, config files, Genie agent lifecycle
 - [Country & Region Overlays](shared/docs/country-overlays.md) — region-specific PII governance (ANZ, India, Southeast Asia)
 - [Industry Overlays](shared/docs/industry-overlays.md) — industry-specific masking and access patterns (Financial Services, Healthcare, Retail)
-- [Central Governance, Self-Service Genie](shared/docs/self-service-genie.md) — central ABAC team + BU teams self-serve Genie spaces
+- [Central Governance, Self-Service Genie](shared/docs/self-service-genie.md) — central ABAC team + BU teams self-serve Genie agents
 - [Advanced Usage](shared/docs/advanced.md) — IDP-synced groups, ABAC-only mode, masking UDF reuse, legacy migration
 - [CI/CD Integration](shared/docs/cicd.md) — validate and deploy from a pipeline
 - [Troubleshooting](shared/docs/troubleshooting.md) — imports, provider quirks, brownfield workflows
