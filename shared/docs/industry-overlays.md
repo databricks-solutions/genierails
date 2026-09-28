@@ -6,9 +6,9 @@
 
 ## Overview
 
-By default, the ABAC generator produces governance rules using generic PII patterns. The **industry overlay** system injects industry-specific identifier knowledge — column patterns, masking functions, group templates, access patterns, and regulatory context — into the LLM prompt so it produces governance appropriate for your industry's datasets.
+> **Overlays tune the *rules*, not the *sensitivity decision* or your *groups*.** In the champion flow, **Unity Catalog native Data Classification** (`class.*`) is the authoritative source of what's sensitive (one `gr_treatment`/column derived from it), and your **access-tier groups come from your IdP** (consumed via `--groups`, `manage_groups=false`). An industry overlay only adds **industry-specific masking functions, regulatory context, and prompt hints** to generation — it never decides sensitivity, never creates groups, and never proves coverage (that's `make coverage-gate`).
 
-Each overlay is a self-contained YAML file under `shared/industries/`.
+The **industry overlay** system injects industry-specific identifier knowledge — column patterns, masking functions, group templates, access patterns, and regulatory context — into the generation prompt so GenieRails drafts industry-appropriate rules. Each overlay is a self-contained YAML file under `shared/industries/`.
 
 ### Supported industries
 
@@ -22,7 +22,7 @@ Each overlay is a self-contained YAML file under `shared/industries/`.
 
 Industry overlays share the same core structure (identifiers, masking functions, prompt overlay) but add two additional sections:
 
-- **Group templates** — suggested ABAC group definitions with access levels (e.g. `fraud_team: full`, `analyst: masked`). These are injected into the LLM prompt as guidance, not enforced.
+- **Group templates** — suggested access-tier *shapes* (e.g. `fraud_team: full`, `analyst: masked`), injected into the prompt as guidance only. They are **not** created and **not** enforced: your real groups come from your IdP (`--groups`), and the overlay conveys the *idea* of tiers, not group identity.
 - **Access patterns** — named patterns like `break_glass` (healthcare) or `pci_isolation` (financial services) with implementation guidance.
 
 Industry and country overlays are independent dimensions that compose additively. Use both together when your dataset spans a specific region *and* industry.
@@ -43,9 +43,13 @@ industry = ""                        # No industry overlay (default)
 
 ### 2. Generate and apply
 
+Enable native classification first (sensitivity is native; the overlay only adds industry rule context), then prove coverage before applying:
+
 ```bash
-make generate ENV=dev
-make apply ENV=dev
+make enable-classification ENV=dev   # then wait for class.* tags
+make generate ENV=dev GENERATE_ARGS='--groups "<your-idp-groups>"'
+make coverage-gate ENV=dev           # blocks if any classified column is unprotected
+make apply ENV=dev                   # business_access_enabled stays false until you verify + open the gate
 ```
 
 Or override the industry via CLI without editing the file:
@@ -67,7 +71,7 @@ make generate ENV=dev COUNTRY=ANZ INDUSTRY=healthcare
 make generate ENV=dev COUNTRY=IN INDUSTRY=financial_services
 ```
 
-Both overlays are injected into the LLM prompt (countries first, then industries). The LLM sees both regulatory contexts and produces governance that satisfies both.
+Both overlays are injected into the generation prompt (countries first, then industries) so the LLM drafts rules informed by both regulatory contexts. Sensitivity still comes from native classification, and `make coverage-gate` still gates the result.
 
 ---
 
@@ -126,7 +130,7 @@ The YAML overlay plugs into the generate and validate stages — the apply stage
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Key insight:** The YAML file teaches the LLM about your industry's identifiers, group structures, and access patterns (generate) and extends the validation rules (validate). The apply stage deploys whatever the LLM produced — no industry-specific logic.
+**Key insight:** The YAML overlay adds industry-specific masking functions, group-tier *shapes*, and prompt context to *generation*, and extends *validation*. It does **not** decide sensitivity (native `class.*` does) or create groups (your IdP does), and `make coverage-gate` proves coverage separately. The apply stage deploys whatever was generated — no industry-specific logic.
 
 ---
 
@@ -302,8 +306,8 @@ See [Integration Testing](integration-testing.md) for full details.
 
 ## FAQ
 
-**What if the LLM ignores the industry overlay?**
-Make `column_hints` more specific, add stronger instructions in `prompt_overlay`, or increase the specificity of group template descriptions.
+**What if an industry identifier isn't getting masked?**
+First confirm native classification tagged the column (`class.*`) — that's what drives protection. The overlay only supplies masking functions and prompt context; if a type isn't recognized by UC classification, add a custom classifier. Strengthening `column_hints`/`prompt_overlay` only affects the LLM's rule drafting.
 
 **What if an identifier doesn't need masking?**
 Set `masking_function: null`. The identifier is still listed so the LLM knows not to mask it unnecessarily.
@@ -315,10 +319,10 @@ Yes: `make generate INDUSTRY=financial_services,retail`. All overlays are merged
 Yes: `make generate COUNTRY=ANZ INDUSTRY=healthcare`. Country overlays are injected first, then industry overlays. The LLM sees both contexts.
 
 **Do I need to update Terraform?**
-No. Industry overlays only affect generation and validation. Terraform deploys whatever the LLM produces.
+No Terraform *code* changes. The overlay's masking functions are written into the generated `masking_functions.sql` and deployed, but there's no industry-specific Terraform logic, and `make coverage-gate` still gates it.
 
 **How do group templates work?**
-They are suggestions injected into the LLM prompt. The LLM may use these exact names or adapt them based on your actual table structure. They are not enforced by the system.
+They are prompt suggestions for access-tier *shapes* only — GenieRails does **not** create groups. In the champion consume model your real groups come from your IdP (supplied via `--groups`, `manage_groups=false`); the templates just help the LLM reason about tiering. Map your actual IdP group names to tiers at generate time.
 
 **What about access patterns like break-glass?**
 Access patterns provide implementation guidance to the LLM. For break-glass, the LLM will typically create a dedicated group with `except_principals` to override masking. You should review the generated output to ensure the pattern is correctly implemented.

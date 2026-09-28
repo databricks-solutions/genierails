@@ -4,7 +4,13 @@ How to adopt GenieRails when you already have ABAC governance (groups, tag polic
 
 ## Overview
 
-A "brownfield" environment has existing governance resources that Terraform doesn't know about. Without importing them, `terraform apply` will fail with "already exists" errors. This guide walks through the adoption process.
+A "brownfield" environment has existing governance resources (groups, tag policies, masks, FGAC policies, grants) that Terraform doesn't know about. Without importing them, `terraform apply` fails with "already exists" errors. This guide adopts them into GenieRails **without exposing users or silently changing sensitivity decisions**.
+
+Two adoptions to keep straight:
+- **Brownfield adoption** (this guide) = pull existing *governance resources* + Terraform state under management.
+- **[From UI to Production](from-ui-to-production.md)** = import an existing Genie *agent's content*. They're complementary; neither replaces the other.
+
+Going forward, sensitivity comes from **native UC classification** (`class.*`), GenieRails derives one `gr_treatment` per column, and `make coverage-gate` must pass with `business_access_enabled = false` before you open access — adopting brownfield state does not bypass those gates.
 
 ## Before You Start
 
@@ -35,10 +41,13 @@ for p in w.fgac_policies.list():
 
 ## Generate-Then-Import (Recommended)
 
-### Step 1: Generate ABAC config
+### Step 1: Enable classification, then generate ABAC config
+
+Enable native classification and wait for `class.*` tags first (sensitivity is native, not LLM-guessed); overlays only add regional/industry rule context:
 
 ```bash
-make generate ENV=dev COUNTRY=ANZ INDUSTRY=financial_services
+make enable-classification ENV=dev   # then wait for class.* tags
+make generate ENV=dev GENERATE_ARGS='--groups "<your-idp-groups>"' COUNTRY=ANZ INDUSTRY=financial_services
 ```
 
 ### Step 2: Review and align with existing governance
@@ -88,10 +97,11 @@ If `make plan` shows unexpected changes:
 - **"will be created"** — a resource in your config doesn't exist yet. This is expected for new governance.
 - **"will be destroyed"** — a live resource isn't in your config. Import it or add it to config.
 
-### Step 6: Apply
+### Step 6: Prove coverage, then apply
 
 ```bash
-make apply ENV=dev
+make coverage-gate ENV=dev   # BLOCKS if any classified column is unprotected
+make apply ENV=dev           # business_access_enabled stays false until you verify + open the gate
 ```
 
 ## Import-Only (Exact Match)
@@ -130,17 +140,7 @@ make plan ENV=dev
 
 ## Handling Existing Masking Functions
 
-If you have existing masking functions in your catalog:
-
-1. **Don't regenerate them** — add them to `existing_masking_functions` in your env config:
-   ```hcl
-   existing_masking_functions = [
-     "my_catalog.my_schema.mask_ssn",
-     "my_catalog.my_schema.mask_email",
-   ]
-   ```
-
-2. **Or include them in the SQL file** — copy your existing function definitions into `envs/<env>/generated/masking_functions.sql` so Terraform manages them alongside new ones.
+If you have existing masking functions in your catalog, include them in the SQL file: copy your existing function definitions into `envs/<env>/generated/masking_functions.sql` so Terraform manages them alongside the generated ones, and point `function_name` / `function_catalog` / `function_schema` in `abac.auto.tfvars` at them. See [Custom Masking Functions](custom-masking-functions.md).
 
 ## Handling Conflicts
 
@@ -177,7 +177,7 @@ If the migration goes wrong:
 
 1. `make plan` shows what Terraform would change — review before applying
 2. `terraform state rm <resource>` removes a resource from Terraform management without deleting it
-3. `make destroy` only destroys Terraform-managed resources — manually-created resources are unaffected
+3. ⚠️ **Once you import a resource, it IS Terraform-managed** — `make destroy` will destroy it, including formerly-manual resources you adopted. To release a resource from management *without* deleting it, use `terraform state rm <resource>` (step 2), not `make destroy`.
 4. Keep a backup of your existing governance state before starting migration
 
 ## Incremental Migration
@@ -193,4 +193,4 @@ make import ENV=dev
 make apply ENV=dev
 ```
 
-Then add more spaces over time with `make generate-delta`.
+Then add more agents over time. For new columns, prefer letting native classification tag them and re-deriving with `make derive-assignments` (no LLM); `make generate-delta` is an exceptional/legacy LLM path.
