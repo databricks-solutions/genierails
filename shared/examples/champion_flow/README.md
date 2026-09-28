@@ -141,14 +141,29 @@ make enable-classification ENV=dev
 ```
 This applies only the UC Data Classification + auto-tagging config for your footprint. No masks/policies/grants yet.
 
-**1b. Wait for the scan, then check it landed.** The initial scan is asynchronous (minutes to ~24h; no force-scan API). Proceed only when your expected PII columns show `class.*` tags:
+**1b. Wait for the scan, then check it landed.** The initial scan is asynchronous — anywhere from a few minutes to ~24h, and there is no force-scan API. Re-run this query until your recognizable PII columns show up with `class.*` tags:
 ```sql
 SELECT table_name, column_name, tag_name
 FROM system.information_schema.column_tags
 WHERE catalog_name = '<your-catalog>' AND schema_name = '<your-schema>'
   AND tag_name LIKE 'class.%';
 ```
-> If dev data is sparse, seed **realistic** synthetic PII first — the scanner only tags format-matchable values (fake `example.com` emails / `000-` SSNs are ignored).
+
+**What the result means:**
+
+- ✅ **Landed — go to 1c.** The query returns one row per recognizable PII column, each carrying a `class.*` tag. For the sample footprint you would expect roughly:
+  ```
+  table_name   column_name          tag_name
+  customers    email                class.email_address
+  customers    phone                class.phone_number
+  customers    ssn                  class.us_ssn
+  payments     credit_card_number   class.credit_card
+  payments     cvv                  class.card_security_code
+  notes        free_text            class.email_address
+  ```
+  Once your obvious sensitive columns are tagged, the scan has run — proceed.
+- ⏳ **Not yet — wait and re-run.** **Zero rows** (or your obvious PII missing) almost always just means the async scan has not finished. Wait a few minutes and run it again (it can take up to ~24h).
+- ⚠️ **Do not expect every column.** The scanner only tags values it can *format-match*, so some columns (free-text, unusual formats, or a type the built-in classifier does not cover) may stay untagged — that is expected. The `coverage-gate` in step 1d is what enforces completeness and blocks the release if anything sensitive is still uncovered. If the query stays empty even though the data was clearly scanned, your values probably are not format-matchable: seed **realistic** synthetic PII (the scanner ignores fake `example.com` emails / `000-` SSNs) and it re-scans.
 
 **1c. Generate the rules from native classification:**
 ```bash
