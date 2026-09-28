@@ -34,6 +34,21 @@ ACCOUNT_MODULE = SHARED / "modules" / "account"
 ACCOUNT_ROOT = SHARED / "roots" / "account"
 
 
+class TestPrepareEnvConsumeByDefault:
+    def test_scaffolds_account_manage_groups_false(self):
+        makefile = (SHARED / "Makefile.shared").read_text()
+        prepare_env = makefile.split("_prepare-env:", 1)[1].split("\n_bootstrap:", 1)[0]
+        assert "manage_groups = false" in prepare_env
+        assert "manage_groups = true" not in prepare_env
+
+    def test_preserves_explicit_create_groups_opt_in(self):
+        makefile = (SHARED / "Makefile.shared").read_text()
+        prepare_env = makefile.split("_prepare-env:", 1)[1].split("\n_bootstrap:", 1)[0]
+        scaffold = prepare_env.split('if [ ! -e "$$env_dir/env.auto.tfvars" ]; then', 1)
+        assert len(scaffold) == 2
+        assert "manage_groups = false" in scaffold[1]
+
+
 # ---------------------------------------------------------------------------
 # generate_abac.py — group preflight
 # ---------------------------------------------------------------------------

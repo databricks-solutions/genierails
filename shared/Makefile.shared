@@ -123,7 +123,7 @@ _prepare-env:
 		if [ ! -e "$$env_dir/env.auto.tfvars" ]; then \
 			cp "$(SHARED_ROOT)/env.auto.tfvars.example" "$$env_dir/env.auto.tfvars"; \
 			if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
-				printf "\n# Account layer owns group creation.\nmanage_groups = true\n" >> "$$env_dir/env.auto.tfvars"; \
+				printf "\n# Consume IdP-synced groups by default; set true for demo/greenfield creation.\nmanage_groups = false\n" >> "$$env_dir/env.auto.tfvars"; \
 			fi; \
 		fi; \
 	done
