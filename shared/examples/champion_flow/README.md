@@ -37,7 +37,7 @@ The whole flow as a checklist. Each line is a command to run, a one-time file ed
 8. `make validate-generated ENV=dev` — static sanity checks on the generated config.
 9. *(Optional but recommended)* open `envs/dev/generated/` and review the drafted rules.
 10. `make apply ENV=dev` — deploy the masks/policies. Users still can't see data (access stays withheld).
-11. Edit `envs/dev/env.auto.tfvars`: `business_access_enabled = true` → `make apply ENV=dev` again → `make verify-access ENV=dev VERIFY_KEY_COLUMN=<key>` — prove masking works (unprivileged sees masked, authorized sees raw). Then set `business_access_enabled = false` and `make apply ENV=dev` again to re-close dev.
+11. Edit `envs/dev/env.auto.tfvars`: `business_access_enabled = true` → `make apply ENV=dev` again → grant your tier groups `CAN_USE` on the dev warehouse (so `verify-access` can query), then `make verify-access ENV=dev VERIFY_KEY_COLUMN=<key>` — prove masking works (unprivileged sees masked, authorized sees raw). Then set `business_access_enabled = false` and `make apply ENV=dev` again to re-close dev.
 
 **Promote & prove in prod**
 12. `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_finance=prod_finance"` — copy the *rules* to prod (not the data, not dev's labels). This **creates `envs/prod/` and writes `envs/prod/env.auto.tfvars`**.
@@ -54,7 +54,7 @@ The whole flow as a checklist. Each line is a command to run, a one-time file ed
 **Keep it covered**
 20. On a schedule: `make audit-schema ENV=prod`, `make audit-rulebook ENV=prod`, `make generate-delta ENV=prod` — catch sensitive data that arrives later.
 
-> **Two things to know before you start:** (a) `verify-access` only works with the gate **open** (`business_access_enabled=true`) — that's why it comes *after* you flip the gate, in dev step 11 and prod step 18. (b) `make generate ENV=prod` (step 16) re-runs generation against prod's own tags — see [Phase 4](#phase-4--prove-coverage-the-gate) for what that does and doesn't preserve.
+> **Two things to know before you start:** (a) `verify-access` only works with the gate **open** (`business_access_enabled=true`) — that's why it comes *after* you flip the gate, in dev step 11 and prod step 19. (b) `make generate ENV=prod` (step 16) re-runs generation against prod's own tags — see [Phase 4](#phase-4--prove-coverage-the-gate) for what that does and doesn't preserve.
 
 ---
 
