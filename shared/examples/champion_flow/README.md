@@ -95,7 +95,7 @@ It uses no external data source and has one dependency:
 ```bash
 cd shared/examples/champion_flow
 python -m pip install -r requirements.txt
-python setup_sample_env.py --profile DEFAULT --catalog my_catalog --warehouse-id abc123
+python setup_sample_env.py --profile DEFAULT --catalog dev_finance --warehouse-id abc123
 ```
 
 The script prints the exact `uc_tables`, `genie_spaces`, and
@@ -104,7 +104,7 @@ Teardown relies on a local ownership record and does not infer resources to
 delete:
 
 ```bash
-python teardown_sample_env.py --profile DEFAULT --catalog my_catalog
+python teardown_sample_env.py --profile DEFAULT --catalog dev_finance
 # Equivalent: add --teardown to the setup command.
 ```
 
