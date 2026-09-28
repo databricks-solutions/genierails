@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create optional sample data and a Genie Space for champion_flow."""
+"""Create optional sample data and a Genie agent for champion_flow."""
 
 from __future__ import annotations
 
@@ -246,7 +246,7 @@ def setup(args: argparse.Namespace, client: Any) -> None:
         for chunk in _chunks(generated[name]):
             values = ",\n".join("(" + ", ".join(_literal(v) for v in row) + ")" for row in chunk)
             _run_sql(client, args.warehouse_id, f"INSERT INTO {target} VALUES\n{values}")
-    print("[3/4] Creating or reusing the tracked Genie Space ...")
+    print("[3/4] Creating or reusing the tracked Genie agent ...")
     space_id = state.get("space_id", "")
     title = f"GenieRails Champion Flow ({args.catalog}.{args.schema})"
     if not space_id or not _space_exists(client, space_id):
@@ -258,10 +258,10 @@ def setup(args: argparse.Namespace, client: Any) -> None:
                              body=_space_payload(args.warehouse_id, tables, title))
         state["warehouse_id"] = args.warehouse_id
         _save_states(states)
-        print(f"      Genie Space {space_id} already exists; configuration refreshed.")
+        print(f"      Genie agent {space_id} already exists; configuration refreshed.")
     print("[4/4] Complete. Paste this exact snippet into env.auto.tfvars:\n")
     print(_tfvars(space_id, tables, args.warehouse_id))
-    print(f"\nGenie space ID: {space_id}\nOwnership state: {STATE_FILE}")
+    print(f"\nGenie agent ID: {space_id}\nOwnership state: {STATE_FILE}")
 
 
 def teardown(args: argparse.Namespace, client: Any) -> None:
@@ -274,12 +274,12 @@ def teardown(args: argparse.Namespace, client: Any) -> None:
         return
     space_id = state.get("space_id", "")
     if space_id:
-        print(f"Removing tracked Genie Space {space_id} ...")
+        print(f"Removing tracked Genie agent {space_id} ...")
         try:
             client.api_client.do("DELETE", f"/api/2.0/genie/spaces/{space_id}")
         except Exception as exc:
             if not _missing(exc):
-                raise RuntimeError(f"could not remove Genie Space {space_id}: {exc}") from exc
+                raise RuntimeError(f"could not remove Genie agent {space_id}: {exc}") from exc
     if state.get("schema_created"):
         warehouse_id = args.warehouse_id or state.get("warehouse_id", "")
         if not warehouse_id:

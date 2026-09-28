@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Remap a generated draft from one env's catalog namespace to another.
 
-Supports multiple catalog mappings for multi-catalog Genie Spaces.
+Supports multiple catalog mappings for multi-catalog Genie agents.
 Mappings are sorted by source name length (longest first) to prevent
 a shorter catalog name from being substituted inside a longer one.
 

@@ -162,7 +162,7 @@ def configured_tags(env_dir: Path) -> list[dict[str, str]]:
 
 
 def configured_tables(env_dir: Path) -> list[str]:
-    """Return the tables managed by configured Genie spaces."""
+    """Return the tables managed by configured Genie agents."""
     config = _load_hcl(env_dir / "env.auto.tfvars")
     tables = set(str(table) for table in config.get("uc_tables", []))
     for space in config.get("genie_spaces", []):

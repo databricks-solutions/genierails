@@ -90,7 +90,7 @@ The Foundation Model API sometimes returns truncated output, especially with com
 2. Reduce prompt complexity: use fewer tables (`SPACE="Single Space"`) or fewer overlays
 3. Try `make generate --dry-run` to inspect the prompt without calling the LLM
 4. If using country + industry overlays together, try generating with just one overlay first
-5. Keep each Genie Space to 4-8 tables for reliable generation
+5. Keep each Genie agent to 4-8 tables for reliable generation
 
 ### LLM generates wrong masking functions for columns
 
@@ -145,13 +145,13 @@ Permission errors when fetching table DDL or applying governance.
 3. Check `auth.auto.tfvars` credentials match the correct workspace
 4. Run `make setup ENV=<env>` to verify the SP can connect
 
-### Genie Space API errors (rate limiting, timeouts)
+### Genie agent API errors (rate limiting, timeouts)
 
-The Genie Space REST API may return 429 (rate limit) or timeout errors during import or config push.
+The Genie agent REST API may return 429 (rate limit) or timeout errors during import or config push.
 
 **Solutions:**
 1. Re-run `make generate` — transient API errors resolve on retry
-2. If consistent 403 errors: the SP may not have permission to manage Genie Spaces
+2. If consistent 403 errors: the SP may not have permission to manage Genie agents
 3. For large spaces with many tables: the API may timeout — reduce the number of tables per space
 4. Check workspace network connectivity if behind a firewall/VPN
 

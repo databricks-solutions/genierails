@@ -575,7 +575,7 @@ def scope_ddl_to_footprint(ddl_text: str, footprint: list[dict]) -> str:
 
 
 def parse_genie_config_from_serialized_space(serialized: str, description: str = "") -> dict:
-    """Parse a Genie Space's serialized_space JSON into a genie_space_configs dict.
+    """Parse a Genie agent's serialized_space JSON into a genie_space_configs dict.
 
     Returns a dict with keys: description, instructions, sample_questions,
     benchmarks, sql_filters, sql_expressions, sql_measures, join_specs.
@@ -841,7 +841,7 @@ def remove_hcl_top_level_list(text: str, key: str) -> str:
 
 
 def _fetch_via_patch_fallback(w, space_id: str) -> dict:
-    """Read a Genie Space via a no-op PATCH (workaround for Partner AI gate).
+    """Read a Genie agent via a no-op PATCH (workaround for Partner AI gate).
 
     On workspaces where Partner Powered AI hasn't propagated, GET
     /api/2.0/genie/spaces/{id} is blocked.  However, PATCH is not gated
@@ -876,7 +876,7 @@ def fetch_tables_from_genie_space(
     auth_cfg: dict,
     quick_check_only: bool = False,
 ) -> tuple[list[str], dict, str]:
-    """Fetch tables and config from an existing Genie Space via the REST API.
+    """Fetch tables and config from an existing Genie agent via the REST API.
 
     Returns (table_identifiers, genie_config_dict, space_title).
     Uses GET /api/2.0/genie/spaces/{space_id} and parses serialized_space.
@@ -896,7 +896,7 @@ def fetch_tables_from_genie_space(
     configure_databricks_env(auth_cfg)
     w = WorkspaceClient(product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
 
-    print(f"  Querying Genie Space {space_id}...")
+    print(f"  Querying Genie agent {space_id}...")
     _used_patch_fallback = False
     try:
         resp = w.api_client.do(
@@ -913,18 +913,18 @@ def fetch_tables_from_genie_space(
             resp = _fetch_via_patch_fallback(w, space_id)
             _used_patch_fallback = True
         else:
-            print(f"  WARNING: Could not reach Genie Space {space_id}: {e}")
+            print(f"  WARNING: Could not reach Genie agent {space_id}: {e}")
             return [], {}, ""
 
     if not isinstance(resp, dict):
-        print(f"  WARNING: Unexpected response type from Genie Space {space_id}.")
+        print(f"  WARNING: Unexpected response type from Genie agent {space_id}.")
         return [], {}, ""
 
     space_title = resp.get("title", "")
     description = resp.get("description", "")
     serialized = resp.get("serialized_space", "")
 
-    # Genie Spaces may take 1-3 minutes after creation before serialized_space
+    # Genie agents may take 1-3 minutes after creation before serialized_space
     # is populated by the Databricks backend (async processing).
     # Skip retries when uc_tables is already provided (quick_check_only=True) —
     # in that case we only need the space config, not table discovery, and
@@ -932,7 +932,7 @@ def fetch_tables_from_genie_space(
     if not serialized and not quick_check_only:
         retry_delays = [5, 10, 20, 30, 45, 60, 90]
         for attempt, delay in enumerate(retry_delays, start=1):
-            print(f"  Genie Space {space_id} has no serialized_space yet — "
+            print(f"  Genie agent {space_id} has no serialized_space yet — "
                   f"retrying in {delay}s (attempt {attempt}/{len(retry_delays)})...")
             _time.sleep(delay)
             try:
@@ -953,7 +953,7 @@ def fetch_tables_from_genie_space(
                 break
 
     if not serialized:
-        print(f"  WARNING: Genie Space {space_id} returned no serialized_space after retries.")
+        print(f"  WARNING: Genie agent {space_id} returned no serialized_space after retries.")
         return [], {}, space_title
 
     # --- Tables ---
@@ -961,13 +961,13 @@ def fetch_tables_from_genie_space(
         space_data = _json.loads(serialized)
         identifiers = footprint_table_refs(discover_agent_footprint(space_data))
     except Exception as e:
-        print(f"  WARNING: Could not parse table list from Genie Space {space_id}: {e}")
+        print(f"  WARNING: Could not parse table list from Genie agent {space_id}: {e}")
         identifiers = []
 
     if identifiers:
         print(f"    Discovered {len(identifiers)} table(s): {', '.join(identifiers)}")
     else:
-        print(f"  WARNING: Genie Space {space_id} has no tables configured yet.")
+        print(f"  WARNING: Genie agent {space_id} has no tables configured yet.")
 
     # --- Config ---
     genie_config = parse_genie_config_from_serialized_space(serialized, description=description)
@@ -1157,7 +1157,7 @@ def build_prompt(ddl_text: str,
     space_names_lines = ""
     if space_names:
         space_names_lines = (
-            "\n### REQUIRED GENIE SPACE NAMES\n\n"
+            "\n### REQUIRED GENIE AGENT NAMES\n\n"
             "Use EXACTLY these name(s) as the keys in `genie_space_configs`. "
             "Do NOT rename, merge, or invent alternative titles. "
             "Each name must appear verbatim as a map key.\n\n"
@@ -1170,7 +1170,7 @@ def build_prompt(ddl_text: str,
     if per_space_name:
         per_space_instruction = (
             "\n### PER-SPACE GENERATION MODE\n\n"
-            f"You are generating config for a SINGLE Genie Space named: \"{per_space_name}\"\n\n"
+            f"You are generating config for a SINGLE Genie agent named: \"{per_space_name}\"\n\n"
             "IMPORTANT CONSTRAINTS:\n"
             "- Generate ONLY: genie_space_configs (for this space), tag_assignments "
             "(for the tables listed below), fgac_policies, masking functions, and "
@@ -1188,20 +1188,20 @@ def build_prompt(ddl_text: str,
             "You are generating ABAC governance configuration for a central Data Governance team.\n\n"
             "IMPORTANT CONSTRAINTS:\n"
             "- Generate: groups, tag_policies, tag_assignments, fgac_policies, and masking functions.\n"
-            "- Do NOT generate 'genie_space_configs' — Genie space content is managed independently "
+            "- Do NOT generate 'genie_space_configs' — Genie agent content is managed independently "
             "by each BU team. Omit the genie_space_configs block entirely from your output.\n"
             "- Focus on data classification (tags), access policies (FGAC), and masking functions "
-            "that apply to the governed tables regardless of which Genie spaces query them.\n\n"
+            "that apply to the governed tables regardless of which Genie agents query them.\n\n"
         )
     elif mode == "genie":
         per_space_instruction = (
             "\n### GENIE-ONLY MODE\n\n"
-            "You are generating Genie Space configurations for a BU team. "
+            "You are generating Genie agent configurations for a BU team. "
             "The ABAC governance (groups, tag policies, tag assignments, FGAC policies, masking "
             "functions) is managed by a central Data Governance team — do NOT generate any of that.\n\n"
             "IMPORTANT CONSTRAINTS:\n"
             "- Generate ONLY: genie_space_configs (with instructions, sample_questions, benchmarks, "
-            "sql_measures, sql_filters, sql_expressions, and join_specs for each Genie Space).\n"
+            "sql_measures, sql_filters, sql_expressions, and join_specs for each Genie agent).\n"
             "- Do NOT generate 'groups' — use the group names listed under REQUIRED GROUP NAMES.\n"
             "- Do NOT generate 'tag_policies' — those are managed by the governance team.\n"
             "- Do NOT generate 'tag_assignments' — those are managed by the governance team.\n"
@@ -1407,7 +1407,7 @@ def sanitize_tfvars_hcl(hcl_block: str) -> str:
         "# ----------------------------------------------------------------------------\n"
         "# Keys are group names. Use these to represent business personas (e.g., Analyst,\n"
         "# Researcher, Compliance). These groups are used for workspace onboarding,\n"
-        "# Databricks One consumer access, data grants, and optional Genie Space ACLs.\n"
+        "# Databricks One consumer access, data grants, and optional Genie agent ACLs.\n"
         "#\n"
         + docs
     )
@@ -1496,12 +1496,12 @@ def sanitize_tfvars_hcl(hcl_block: str) -> str:
 
     genie_configs_block = (
         "# ----------------------------------------------------------------------------\n"
-        "# Genie Space configs (per-space semantic configuration + ACLs)\n"
+        "# Genie agent configs (per-space semantic configuration + ACLs)\n"
         "# ----------------------------------------------------------------------------\n"
         "# Each key is the human-readable space name matching genie_spaces[*].name in\n"
         "# env.auto.tfvars. Contains instructions, benchmarks, SQL measures, and ACLs.\n"
         "#\n"
-        "# acl_groups: controls which groups get CAN_RUN on this Genie Space.\n"
+        "# acl_groups: controls which groups get CAN_RUN on this Genie agent.\n"
         "#   - List the group names that should have access to this specific space\n"
         "#   - Groups NOT listed are excluded from the space\n"
         "#   - Empty list or omitted = all groups get access (backward compatible)\n"
@@ -3525,7 +3525,7 @@ def autofix_genie_config_fields(tfvars_path: Path) -> int:
 
     for section, required_fields in section_required.items():
         # Find ALL occurrences of this section in the file (there may be one
-        # per genie space in an assembled multi-space file).  Process in
+        # per Genie agent in an assembled multi-space file).  Process in
         # reverse order so that earlier offsets are not shifted by edits.
         all_ranges: list[tuple[int, int]] = []
         search_start = 0
@@ -3698,7 +3698,7 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
 
 
 def autofix_missing_genie_space_entries(tfvars_path: Path, auth_cfg: dict) -> int:
-    """Ensure each configured Genie space has a genie_space_configs entry."""
+    """Ensure each configured Genie agent has a genie_space_configs entry."""
     configured_spaces = auth_cfg.get("genie_spaces", []) or []
     if not configured_spaces or not tfvars_path.exists():
         return 0
@@ -6573,7 +6573,7 @@ def main():
     )
     parser.add_argument(
         "--footprint", nargs="+", metavar="CATALOG.SCHEMA.TABLE[.COLUMN]",
-        help="Declared reachable footprint for a not-yet-created Genie Space. "
+        help="Declared reachable footprint for a not-yet-created Genie agent. "
              "Accepts table or column FQNs and overrides declared_footprint/uc_tables.",
     )
     parser.add_argument("--catalog", help="Catalog for masking UDFs (auto-derived from first uc_tables entry if omitted)")
@@ -6638,7 +6638,7 @@ def main():
     parser.add_argument(
         "--space",
         metavar="SPACE_NAME",
-        help="Name of a single Genie Space to (re)generate. "
+        help="Name of a single Genie agent to (re)generate. "
              "Fetches only that space's tables, instructs the LLM to skip groups and "
              "tag_policies (shared state), and writes output to generated/spaces/<key>/. "
              "Existing groups are auto-loaded from envs/account/abac.auto.tfvars. "
@@ -6683,7 +6683,7 @@ def main():
             "governance — generate ABAC only (groups, tag policies, tag assignments, "
             "FGAC policies, masking functions); genie_space_configs is suppressed. "
             "Use this for the central Data Governance team. "
-            "genie — generate Genie space configs only (instructions, benchmarks, "
+            "genie — generate Genie agent configs only (instructions, benchmarks, "
             "SQL measures/filters/expressions, join specs); all ABAC output and SQL "
             "masking functions are suppressed. Existing groups are auto-loaded. "
             "Use this for BU teams that consume pre-existing governance. "
@@ -6759,7 +6759,7 @@ def main():
                 break
 
         if target_space_cfg is None:
-            print(f"ERROR: No Genie Space named '{args.space}' found in env.auto.tfvars.")
+            print(f"ERROR: No Genie agent named '{args.space}' found in env.auto.tfvars.")
             print("  Available spaces:")
             for sp in genie_spaces_cfg_all:
                 print(f"    - {sp.get('name') or sp.get('genie_space_id') or '(unnamed)'}")
@@ -6852,7 +6852,7 @@ def main():
 
     # ── Auto-discover the canonical reachable footprint ─────────────────────
     # For spaces where genie_space_id is set but uc_tables is empty, query the
-    # Genie Space API to learn what tables and config that space contains.
+    # Genie agent API to learn what tables and config that space contains.
     # The existing space's genie_space_configs is parsed verbatim from the API
     # (no LLM involvement) and injected into the generated abac.auto.tfvars
     # after the LLM runs, replacing whatever the LLM generated for that space.
@@ -6881,9 +6881,9 @@ def main():
                     # When uc_tables IS set, use quick_check_only to skip long
                     # retries — serialized_space is optional in that case.
                     if not space_tables:
-                        print(f"\n  Genie Space '{space_name}' has no uc_tables — querying API...")
+                        print(f"\n  Genie agent '{space_name}' has no uc_tables — querying API...")
                     else:
-                        print(f"\n  Querying existing Genie Space '{space_name}' for config...")
+                        print(f"\n  Querying existing Genie agent '{space_name}' for config...")
 
                     tables, genie_cfg, api_title = fetch_tables_from_genie_space(
                         space_id, auth_cfg, quick_check_only=bool(space_tables)
@@ -6912,7 +6912,7 @@ def main():
 
             if discovered_from_api:
                 print(
-                    "\n  Auto-discovered tables from existing Genie Space(s):\n"
+                    "\n  Auto-discovered tables from existing Genie agent(s):\n"
                     + "".join(f"    - {t}\n" for t in discovered_from_api)
                     + "\n  NOTE: Add these tables to data_access/env.auto.tfvars so that\n"
                     "  UC grants and masking functions are applied to them as well."
@@ -7055,7 +7055,7 @@ def main():
 
 This folder contains a **first draft** of:
 - `masking_functions.sql` — masking UDFs + row filter functions
-- `abac.auto.tfvars` — groups, tags, FGAC policies, and Genie Space config
+- `abac.auto.tfvars` — groups, tags, FGAC policies, and Genie agent config
 
 Before you apply, tune for your business roles, security requirements, and Genie accuracy:
 
@@ -7075,7 +7075,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
 - **Masking behavior**: Are you using the right approach (partial, redact, hash) per sensitivity and use case?
 - **Row filters and exceptions**: Are filters too broad/strict? Are exceptions minimal and intentional?
 
-## Checklist — Genie Space Metadata & ACLs
+## Checklist — Genie agent Metadata & ACLs
 
 - **Genie title & description**: Does the AI-generated title/description accurately represent the space?
 - **Genie sample questions**: Do the sample questions reflect what business users will ask?
@@ -7199,7 +7199,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
         # ── Strip legacy Genie keys when no genie_spaces are configured ───────
         # The LLM sometimes hallucinates legacy single-space keys (genie_space_title,
         # genie_space_description, etc.) even when env.auto.tfvars has no genie_spaces.
-        # Strip them to prevent Terraform from creating an unexpected Genie Space.
+        # Strip them to prevent Terraform from creating an unexpected Genie agent.
         _configured_spaces = auth_cfg.get("genie_spaces", [])
         if args.mode not in ("genie",) and not _configured_spaces and not args.space:
             _legacy_genie_block_keys = (
@@ -7240,12 +7240,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
         # ── Inject API-parsed genie_space_configs for existing spaces ─────────
         # The LLM generates genie_space_configs from DDL, but for spaces with a
         # genie_space_id the UI config is authoritative. Replace the LLM-generated
-        # block with the verbatim parse from the Genie Space API.
+        # block with the verbatim parse from the Genie agent API.
         # Skip in governance mode — genie_space_configs is managed by BU teams.
         if api_genie_configs and args.mode != "governance":
             hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_configs")
             injected_hcl = (
-                "\n# genie_space_configs parsed verbatim from the existing Genie Space(s).\n"
+                "\n# genie_space_configs parsed verbatim from the existing Genie agent(s).\n"
                 "# Edit here to manage space config as code; make apply pushes changes back.\n"
                 + format_genie_space_configs_hcl(api_genie_configs)
             )
@@ -7376,7 +7376,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
             env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
             n_acl = autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
             if n_acl:
-                print(f"  Auto-fixed: populated acl_groups for {n_acl} genie space(s)")
+                print(f"  Auto-fixed: populated acl_groups for {n_acl} Genie agent(s)")
 
         if args.mode != "genie":
             n_treatments, n_native_sources = derive_and_finalize_treatments(

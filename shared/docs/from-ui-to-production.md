@@ -1,12 +1,12 @@
 # From UI to Production
 
-> **This is the recommended starting point.** Most users already have a Genie Space configured in the Databricks UI and want to add governance and deploy it to production.
+> **This is the recommended starting point.** Most users already have a Genie agent configured in the Databricks UI and want to add governance and deploy it to production.
 >
 > **See it in action:** The [Australian Bank Demo](../examples/legacy/aus_bank_demo/) walks through this entire flow with a realistic banking scenario — ANZ-specific masking, PCI compliance, and dev-to-prod promotion. Also available: [India Bank Demo](../examples/legacy/india_bank_demo/) (Aadhaar, PAN, GSTIN, UPI) and [ASEAN Bank Demo](../examples/legacy/asean_bank_demo/) (6-country national IDs, multi-currency).
 
 ## What you'll achieve
 
-1. Import your existing Genie Space configuration into code (instructions, benchmarks, SQL measures — all captured verbatim)
+1. Import your existing Genie agent configuration into code (instructions, benchmarks, SQL measures — all captured verbatim)
 2. Generate ABAC governance: groups, tag policies, column masking, row filters, catalog grants
 3. Review and tune the generated governance
 4. Apply everything to your dev workspace
@@ -14,7 +14,7 @@
 
 ## What gets imported
 
-`make generate` queries the Genie Space API and captures the full space configuration verbatim — no LLM re-writing:
+`make generate` queries the Genie agent API and captures the full space configuration verbatim — no LLM re-writing:
 
 | Field | Captured from API |
 | ----- | ---------------- |
@@ -31,7 +31,7 @@ The ABAC governance (groups, tag policies, tag assignments, masking functions) i
 
 ## Step 1 — Point at your existing space
 
-Find the Genie Space ID in the URL when viewing the space in the Databricks UI (e.g. `...genie/rooms/01ef7b3c2a4d5e6f`).
+Find the Genie agent ID in the URL when viewing the space in the Databricks UI (e.g. `...genie/rooms/01ef7b3c2a4d5e6f`).
 
 > **Prerequisite:** Complete Steps 1-2 in your cloud README ([AWS](../../aws/README.md) or [Azure](../../azure/README.md)) to set up credentials before continuing.
 
@@ -43,7 +43,7 @@ vi envs/dev/env.auto.tfvars
 # envs/dev/env.auto.tfvars
 genie_spaces = [
   {
-    genie_space_id = "01ef7b3c2a4d5e6f"   # the only required field; find it in the Genie Space URL
+    genie_space_id = "01ef7b3c2a4d5e6f"   # the only required field; find it in the Genie agent URL
     # name omitted     → defaults to the space title returned by the API
     # uc_tables omitted → discovered automatically from the Genie API
   },
@@ -57,7 +57,7 @@ make generate
 ```
 
 This does in one step:
-1. Queries the Genie Space API — discovers tables and imports existing config verbatim
+1. Queries the Genie agent API — discovers tables and imports existing config verbatim
 2. Fetches DDLs from Unity Catalog for those tables
 3. LLM generates ABAC governance (groups, tag policies, tag assignments, masking functions)
 4. Writes everything to `envs/dev/generated/abac.auto.tfvars` — the imported Genie config replaces any LLM-generated Genie content
@@ -65,7 +65,7 @@ This does in one step:
 You will see output like:
 
 ```
-  Querying existing Genie Space 'Finance Analytics' for config...
+  Querying existing Genie agent 'Finance Analytics' for config...
     Discovered 3 table(s): dev_fin.finance.customers, dev_fin.finance.transactions, ...
   Injected genie_space_configs from Genie API for: Finance Analytics
 
@@ -92,7 +92,7 @@ You will see output like:
 vi envs/dev/generated/abac.auto.tfvars
 # - Review the imported genie_space_configs (instructions, benchmarks, etc.)
 # - Review and tune the generated groups, tag_assignments, fgac_policies
-# - Check acl_groups per space — controls which groups can run each Genie Space
+# - Check acl_groups per space — controls which groups can run each Genie agent
 #   (see "Per-space Genie ACLs" below)
 
 vi envs/dev/generated/masking_functions.sql
@@ -155,7 +155,7 @@ genie_spaces = [
 
 ```bash
 make apply ENV=prod
-# Creates the prod Genie Space with the full promoted config:
+# Creates the prod Genie agent with the full promoted config:
 # governance (groups, tags, masking) + Genie content (instructions, benchmarks, SQL)
 ```
 
@@ -190,7 +190,7 @@ Each space's config is fetched independently. All spaces get their governance ge
 
 ## What's next?
 
-- [Add another Genie Space](playbook.md#add-another-genie-space) — incremental generation without touching existing spaces
+- [Add another Genie agent](playbook.md#add-another-genie-space) — incremental generation without touching existing spaces
 - [Country & industry overlays](playbook.md#country-and-industry-overlays) — region-specific or industry-specific governance
 - [Schema drift detection](playbook.md#schema-drift-detection) — handle table changes after initial deployment
 - [Advanced scenarios](playbook.md#advanced-scenarios) — ABAC-only, self-service Genie, independent BU environments

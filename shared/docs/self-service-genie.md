@@ -1,6 +1,6 @@
 # Central Governance, Self-Service Genie
 
-This document covers the self-service Genie operating model, where a central **Data Governance team** owns ABAC policies and groups, while independent **BU teams** self-serve their own Genie spaces.
+This document covers the self-service Genie operating model, where a central **Data Governance team** owns ABAC policies and groups, while independent **BU teams** self-serve their own Genie agents.
 
 For the quick step-by-step, see [playbook.md — Central governance, self-service Genie](playbook.md#central-governance-self-service-genie). This document covers the reasoning, Git strategies, CI/CD integration, and FAQ.
 
@@ -10,16 +10,16 @@ For the quick step-by-step, see [playbook.md — Central governance, self-servic
 
 | Situation | Recommended mode |
 | --------- | ---------------- |
-| Single team controls data access and Genie spaces end-to-end | `make generate` + `make apply` (default, no change) |
-| Central governance team + BU teams creating Genie spaces | `MODE=governance` / `apply-governance` + `MODE=genie` / `apply-genie` |
+| Single team controls data access and Genie agents end-to-end | `make generate` + `make apply` (default, no change) |
+| Central governance team + BU teams creating Genie agents | `MODE=governance` / `apply-governance` + `MODE=genie` / `apply-genie` |
 | Two independent BU teams, each owning ABAC for their own catalogs | `make generate` per-BU + `abac_managed_catalogs` (see [advanced.md](advanced.md)) |
 
 Use the self-service Genie pattern when:
 
 - Your organization has a dedicated Data Governance or Data Platform team that standardizes access policies across the company.
-- Business units want self-service Genie space creation without needing governance expertise.
+- Business units want self-service Genie agent creation without needing governance expertise.
 - You want to prevent BU teams from accidentally modifying ABAC policies, tag assignments, or masking functions.
-- Different teams have different deployment cadences (governance policies change rarely; Genie spaces evolve quickly).
+- Different teams have different deployment cadences (governance policies change rarely; Genie agents evolve quickly).
 
 ---
 
@@ -36,14 +36,14 @@ Data Access layer  →  Tag Assignments + FGAC Policies + Masking Functions + Ca
                         owned by: Governance team
                         applied by: make apply-governance ENV=<env>
 
-Workspace layer    →  Workspace Assignment + Entitlements + Genie Spaces + ACLs
+Workspace layer    →  Workspace Assignment + Entitlements + Genie agents + ACLs
                         owned by: BU team
                         applied by: make apply-genie ENV=<bu-env>
 ```
 
 The workspace module (`modules/workspace/main.tf`) looks up groups by name — it never creates them. This means BU teams can reference the IdP-synced access-tier groups (provisioned via AIM, or SCIM where AIM isn't available) without any additional coordination. The IdP owns groups and membership; the governance team owns grants and ABAC, and consumes those groups by name.
 
-Catalog grants (`USE_CATALOG`, `USE_SCHEMA`, `SELECT`) are applied by the governance team's data_access layer. Once in place, BU teams' Genie spaces can query those catalogs immediately.
+Catalog grants (`USE_CATALOG`, `USE_SCHEMA`, `SELECT`) are applied by the governance team's data_access layer. Once in place, BU teams' Genie agents can query those catalogs immediately.
 
 ---
 
@@ -72,7 +72,7 @@ make destroy-governance ENV=<env>         # tears down data_access only
 
 Own and run their workspace env only:
 
-- `envs/<bu-env>/env.auto.tfvars` — Genie space definitions (tables, warehouse)
+- `envs/<bu-env>/env.auto.tfvars` — Genie agent definitions (tables, warehouse)
 - `envs/<bu-env>/abac.auto.tfvars` — genie_space_configs (instructions, benchmarks, etc.)
 
 What they commit to Git:
@@ -150,12 +150,12 @@ By default, the workspace layer looks up groups at the account level, which requ
 | Workspace group assignment | Yes (account API) | Skipped |
 | Group entitlements | Yes (workspace API) | Skipped |
 | SQL warehouse | Auto-create or BYO | BYO only (`sql_warehouse_id` required) |
-| Genie Space create/config | Yes | Yes |
-| Genie Space ACLs | Yes (per group) | Skipped (no groups) |
+| Genie agent create/config | Yes | Yes |
+| Genie agent ACLs | Yes (per group) | Skipped (no groups) |
 | UC table access | Implicit (SP is metastore admin) | Explicit grants required (step 3) |
 | SP role required | Account Admin + Workspace Admin + Metastore Admin | Workspace USER + SQL entitlement |
 
-The governance team manages workspace assignments, entitlements, warehouses, UC grants, and Genie Space ACLs via `make apply-governance` — attaching them to the IdP-synced groups it consumes by name (the IdP owns the groups and their membership; GenieRails does not mint them). The BU team only manages Genie Space creation and configuration.
+The governance team manages workspace assignments, entitlements, warehouses, UC grants, and Genie agent ACLs via `make apply-governance` — attaching them to the IdP-synced groups it consumes by name (the IdP owns the groups and their membership; GenieRails does not mint them). The BU team only manages Genie agent creation and configuration.
 
 > **Tested:** The `genie-only` integration test (`make test-genie-only`) creates a minimal-privilege SP with only workspace USER + SQL entitlement (no admin roles), grants it CAN USE on a warehouse and UC table access, and verifies the full `genie_only = true` flow end-to-end — including confirming that zero account-level resources appear in Terraform state.
 
@@ -201,7 +201,7 @@ Each pipeline only touches its own Terraform state files. The governance pipelin
 
 ## Promotion in self-service Genie mode
 
-BU teams can promote their Genie spaces from dev to prod using a modified flow:
+BU teams can promote their Genie agents from dev to prod using a modified flow:
 
 ```bash
 # Promote genie_space_configs from bu_finance_dev to bu_finance_prod:
@@ -214,9 +214,9 @@ make apply-genie ENV=bu_finance_prod
 
 Governance runs separately for the prod environment — the promotion only carries `genie_space_configs`, not ABAC.
 
-### Import an existing Genie Space to prod (no ABAC)
+### Import an existing Genie agent to prod (no ABAC)
 
-If a data team has already created a Genie Space in the UI and you want to bring it to prod without managing any ABAC governance (because a central team handles that separately), use the genie-only import workflow:
+If a data team has already created a Genie agent in the UI and you want to bring it to prod without managing any ABAC governance (because a central team handles that separately), use the genie-only import workflow:
 
 ```bash
 # 1. Set up a new env
@@ -265,7 +265,7 @@ make apply-genie ENV=bu_import_prod
 
 **What if a BU needs a new group?**
 
-New groups must be requested from the governance team. The governance team adds the group to `envs/account/abac.auto.tfvars`, runs `make apply-governance`, and the group becomes available for BU teams to reference in their Genie space ACLs. BU teams can then add the group name to their `env.auto.tfvars` (genie_spaces ACLs) and `make apply-genie`.
+New groups must be requested from the governance team. The governance team adds the group to `envs/account/abac.auto.tfvars`, runs `make apply-governance`, and the group becomes available for BU teams to reference in their Genie agent ACLs. BU teams can then add the group name to their `env.auto.tfvars` (genie_spaces ACLs) and `make apply-genie`.
 
 **Can a BU team see what groups are available?**
 
@@ -286,6 +286,6 @@ Yes — `make apply` applies all three layers. In self-service Genie mode this i
 
 `make apply-genie` will succeed (the workspace layer doesn't check catalog grants), but Genie queries against ungoverned tables will fail at query time due to missing `SELECT` grants. The governance team must add the tables to their governed set and re-run `make apply-governance`.
 
-**Can two BUs share the same Genie space?**
+**Can two BUs share the same Genie agent?**
 
-No — a Genie space is workspace-specific. If two BUs need the same data surface, each creates their own Genie space pointing at the same governed tables. The ABAC governance applies identically to both since it's catalog-level.
+No — a Genie agent is workspace-specific. If two BUs need the same data surface, each creates their own Genie agent pointing at the same governed tables. The ABAC governance applies identically to both since it's catalog-level.

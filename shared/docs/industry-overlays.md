@@ -122,7 +122,7 @@ The YAML overlay plugs into the generate and validate stages — the apply stage
 │                                                                 │
 │  Deploys to Databricks (no industry-specific logic here):       │
 │  • Creates masking UDFs, tag assignments, FGAC policies         │
-│  • Sets up Genie Spaces                                         │
+│  • Sets up Genie agents                                         │
 └─────────────────────────────────────────────────────────────────┘
 ```
 

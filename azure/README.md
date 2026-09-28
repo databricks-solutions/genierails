@@ -14,9 +14,9 @@
 | Mode | Role | Why it's needed |
 | ---- | ---- | --------------- |
 | Full (default) | **Account Admin** | Create groups, assign groups to workspaces, manage group membership |
-| Full (default) | **Workspace Admin** | Grant entitlements, create warehouses, manage Genie Spaces and permissions |
+| Full (default) | **Workspace Admin** | Grant entitlements, create warehouses, manage Genie agents and permissions |
 | Full (default) | **Metastore Admin** | Create tag policies, FGAC policies, grants, and masking functions |
-| Genie-only | **Workspace USER** + **Databricks SQL access** entitlement | Create Genie Spaces only — set `genie_only = true` and provide `sql_warehouse_id` in `env.auto.tfvars`. No admin roles needed. |
+| Genie-only | **Workspace USER** + **Databricks SQL access** entitlement | Create Genie agents only — set `genie_only = true` and provide `sql_warehouse_id` in `env.auto.tfvars`. No admin roles needed. |
 
 ## Step 1 — Set up your environment
 
@@ -48,8 +48,8 @@ databricks_workspace_host = "https://adb-1234567890.12.azuredatabricks.net"
 
 | Starting point | You have... | Guide |
 |---|---|---|
-| **I already have a Genie Space** | A space configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](../shared/docs/from-ui-to-production.md) |
-| **I'm starting from scratch** | Tables in Unity Catalog, no Genie Space yet | [Quickstart](../shared/docs/quickstart.md) |
+| **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](../shared/docs/from-ui-to-production.md) |
+| **I'm starting from scratch** | Tables in Unity Catalog, no Genie agent yet | [Quickstart](../shared/docs/quickstart.md) |
 
 ### Want to see it in action first?
 
@@ -60,9 +60,9 @@ The [Australian Bank Demo](../shared/examples/legacy/aus_bank_demo/) provisions 
 ## Documentation
 
 - [Azure Prerequisites](docs/azure-prerequisites.md) — Azure-specific resource setup, RBAC roles, storage accounts
-- [From UI to Production](../shared/docs/from-ui-to-production.md) — import your existing Genie Space, add governance, promote to prod
-- [Quickstart](../shared/docs/quickstart.md) — create a Genie Space from scratch
+- [From UI to Production](../shared/docs/from-ui-to-production.md) — import your existing Genie agent, add governance, promote to prod
+- [Quickstart](../shared/docs/quickstart.md) — create a Genie agent from scratch
 - [Playbook](../shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios
-- [Architecture](../shared/docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
+- [Architecture](../shared/docs/architecture.md) — layers, artifact ownership, config files, Genie agent lifecycle
 - [Australian Bank Demo](../shared/examples/legacy/aus_bank_demo/) — end-to-end demo with ANZ banking data, governance, and promotion
 - [All documentation](../shared/docs/) — full list

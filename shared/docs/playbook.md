@@ -1,19 +1,19 @@
 # Playbook
 
-GenieRails puts Genie onboarding on rails — import your existing Genie Space, generate ABAC governance, and promote to production.
+GenieRails puts Genie onboarding on rails — import your existing Genie agent, generate ABAC governance, and promote to production.
 
 ## Pick your starting point
 
 | Starting point | You have... | Guide |
 |---|---|---|
-| **I already have a Genie Space** | A space configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](from-ui-to-production.md) |
-| **I'm starting from scratch** | Tables in Unity Catalog, no Genie Space yet | [Quickstart](quickstart.md) |
+| **I already have a Genie agent** | A space configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](from-ui-to-production.md) |
+| **I'm starting from scratch** | Tables in Unity Catalog, no Genie agent yet | [Quickstart](quickstart.md) |
 
 ---
 
 ## After your first deployment
 
-### Add another Genie Space
+### Add another Genie agent
 
 Add a second space without re-generating existing ones:
 
@@ -136,9 +136,9 @@ cd envs/dev && python3 "$SHARED_ROOT/scripts/audit_schema_drift.py" --mode all
 
 These cover less common deployment patterns. Most users won't need them on day one.
 
-### ABAC governance only (no Genie Space)
+### ABAC governance only (no Genie agent)
 
-Set up groups, tag policies, column masking, row filters, and catalog grants — without creating any Genie Space. Add Genie later without changing the governance setup.
+Set up groups, tag policies, column masking, row filters, and catalog grants — without creating any Genie agent. Add Genie later without changing the governance setup.
 
 ```bash
 make setup
@@ -151,7 +151,7 @@ make apply
 
 ### Independent BU environment
 
-A second business unit needs its own groups, governance, and Genie spaces — not a promotion of `dev`.
+A second business unit needs its own groups, governance, and Genie agents — not a promotion of `dev`.
 
 ```bash
 make setup ENV=bu2
@@ -164,7 +164,7 @@ make apply ENV=bu2
 
 ### Central governance, self-service Genie
 
-A central Data Governance team owns ABAC policies, while BU teams self-serve their own Genie spaces. See [self-service-genie.md](self-service-genie.md) for the full guide.
+A central Data Governance team owns ABAC policies, while BU teams self-serve their own Genie agents. See [self-service-genie.md](self-service-genie.md) for the full guide.
 
 ```bash
 # Governance team
@@ -176,9 +176,9 @@ make generate ENV=bu1 MODE=genie
 make apply-genie ENV=bu1
 ```
 
-### Import Genie Space to prod without ABAC
+### Import Genie agent to prod without ABAC
 
-Import a UI-created Genie Space and deploy to production when ABAC is managed separately. See [self-service-genie.md](self-service-genie.md) for context.
+Import a UI-created Genie agent and deploy to production when ABAC is managed separately. See [self-service-genie.md](self-service-genie.md) for context.
 
 ```bash
 make generate ENV=bu_import MODE=genie   # genie_only=true in env.auto.tfvars
@@ -211,7 +211,7 @@ See [Architecture](architecture.md) for the full reference. Quick summary:
 
 1. `envs/account/` — shared account layer (groups, tag policies)
 2. `envs/<name>/data_access/` — env-scoped governance (tags, masking, grants)
-3. `envs/<name>/` — workspace layer (Genie Spaces, ACLs)
+3. `envs/<name>/` — workspace layer (Genie agents, ACLs)
 
 The core loop:
 

@@ -50,4 +50,4 @@ sql_warehouse_id = "<WAREHOUSE_ID>"
 ```
 
 - In `envs/<workspace>/data_access/env.auto.tfvars`, this reuses the warehouse for masking function deployment.
-- In `envs/<workspace>/env.auto.tfvars`, this reuses the warehouse for the workspace layer / Genie Space.
+- In `envs/<workspace>/env.auto.tfvars`, this reuses the warehouse for the workspace layer / Genie agent.

@@ -28,7 +28,7 @@ make generate GENERATE_ARGS='--groups "Finance_Analyst,Clinical_Staff"'
 **GenieRails consumes IdP-owned groups by default; it never mints them in the normal path.** Ownership is split cleanly:
 
 - **The IdP owns groups and membership.** Enable [AIM](#prerequisite-sync-your-idp-groups) (or SCIM where AIM isn't available) so your identity provider — Okta, Azure AD/Entra ID, etc. — syncs the access-tier groups into the Databricks account.
-- **GenieRails owns grants and ABAC.** It looks the synced groups up by name and attaches tags, FGAC policies, and Genie Space ACLs to them.
+- **GenieRails owns grants and ABAC.** It looks the synced groups up by name and attaches tags, FGAC policies, and Genie agent ACLs to them.
 
 ### Prerequisite: sync your IdP groups
 
@@ -45,7 +45,7 @@ Before running `make apply`, the access-tier groups must already exist as accoun
   make generate GENERATE_ARGS='--groups "acme-finance-readers,acme-clinical-staff,acme-compliance"'
   ```
 
-  The LLM uses these exact names in generated FGAC policies, tag assignments, and Genie Space ACLs — it does not invent new ones.
+  The LLM uses these exact names in generated FGAC policies, tag assignments, and Genie agent ACLs — it does not invent new ones.
 - `manage_groups` defaults to **`false`** everywhere (account, `data_access`, and workspace layers). All three layers look groups up by name via `data "databricks_group"`; none create them.
 - **Group-existence preflight:** `make generate` verifies every referenced group is synced into the account. If one is missing, generation **fails loudly and names the missing group**, telling you to enable AIM/SCIM (or fix the name) — rather than silently producing a grant that matches nobody. (The preflight is skipped only when account credentials aren't available; the account layer's `data "databricks_group"` lookup then fails at apply time instead.)
 - `group_members` stays empty in `envs/account/abac.auto.tfvars` — the IdP owns membership.
@@ -60,7 +60,7 @@ make generate GENERATE_ARGS='--create-groups'
 
 `--create-groups` lets the LLM invent access-tier names and skips the preflight. To have Terraform create them, also set `manage_groups = true` in `envs/account/env.auto.tfvars` (the only place that flag belongs). Keep workspace and `data_access` envs on the default `manage_groups = false` (lookup-only) regardless.
 
-## ABAC-Only Mode (No Genie Space)
+## ABAC-Only Mode (No Genie agent)
 
 See [playbook.md — ABAC governance only](playbook.md#abac-governance-only-no-genie-space) for the full step-by-step.
 

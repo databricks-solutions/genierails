@@ -10,7 +10,7 @@ The quickstart edits files in `envs/<env>/`, while Terraform itself runs from fi
 | ----- | ---- | ---- | ------------ |
 | Account | `envs/account/` | Account groups, optional group membership, tag policy definitions | Masking functions, FGAC policies, Genie resources |
 | Data access | `envs/<env>/data_access/` | Env-scoped tag assignments, masking functions, FGAC policies, catalog grants | Account tag policy definitions, workspace entitlements, Genie lifecycle |
-| Workspace | `envs/<env>/` | Workspace assignment, entitlements, optional warehouse, optional Genie Space and ACLs | Account groups, tag policies, FGAC policies |
+| Workspace | `envs/<env>/` | Workspace assignment, entitlements, optional warehouse, optional Genie agent and ACLs | Account groups, tag policies, FGAC policies |
 
 ### Self-service Genie operating mode
 
@@ -121,20 +121,20 @@ data-access module ignores classifier-driven assignment changes in Terraform sta
 
 Tune the generated draft before applying. See `generated/TUNING.md` for guidance.
 
-## Genie Space Behavior
+## Genie agent Behavior
 
 Each entry in `genie_spaces` behaves based on whether `genie_space_id` is set:
 
 | `genie_space_id` in entry | What happens on `make apply` |
 | ------------------------- | ---------------------------- |
-| Empty (default) | Creates a new Genie Space, configures it fully (title, instructions, benchmarks, ACLs), trashes it on `make destroy` |
+| Empty (default) | Creates a new Genie agent, configures it fully (title, instructions, benchmarks, ACLs), trashes it on `make destroy` |
 | Set | Attaches to the existing space — never creates or deletes it; applies ACLs and pushes config changes back to the API |
 
-When `make generate` creates the ABAC config, it also generates Genie Space config in `abac.auto.tfvars`:
+When `make generate` creates the ABAC config, it also generates Genie agent config in `abac.auto.tfvars`:
 
 | Variable | Purpose |
 | -------- | ------- |
-| `genie_space_title` | AI-generated title for the Genie Space |
+| `genie_space_title` | AI-generated title for the Genie agent |
 | `genie_space_description` | Short summary of the space's scope and audience |
 | `genie_sample_questions` | Conversation starters shown in the Genie UI |
 | `genie_instructions` | Domain-specific guidance and business defaults |
@@ -144,7 +144,7 @@ When `make generate` creates the ABAC config, it also generates Genie Space conf
 | `genie_sql_expressions` | Computed dimensions |
 | `genie_join_specs` | Table relationships and join conditions |
 
-All nine fields are included in the `serialized_space` when a new Genie Space is created. Review and tune them in `generated/abac.auto.tfvars` alongside the ABAC policies before applying.
+All nine fields are included in the `serialized_space` when a new Genie agent is created. Review and tune them in `generated/abac.auto.tfvars` alongside the ABAC policies before applying.
 
 ## Make Targets
 

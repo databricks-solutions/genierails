@@ -68,7 +68,7 @@ No VPN is required unless your Databricks workspace is on a private network.
 
 - **Unity Catalog** — must be enabled on the target workspace
 - **SQL Warehouse** — serverless (auto-created) or existing warehouse
-- **Genie Spaces** — for the Genie Space governance workflow
+- **Genie agents** — for the Genie agent governance workflow
 
 ### Identity Provider group sync (required)
 
@@ -91,7 +91,7 @@ Create a service principal (SP) in the Databricks Account Console with:
 | **Workspace Admin** | Target workspace | Deploying governance resources |
 | **Metastore Admin** | Unity Catalog metastore | Managing catalogs, grants, FGAC policies |
 
-> **Genie-only mode**: If you only need Genie Spaces without ABAC governance,
+> **Genie-only mode**: If you only need Genie agents without ABAC governance,
 > set `genie_only = true` in `env.auto.tfvars`. This requires only **Workspace Admin**
 > (no Account Admin or Metastore Admin needed).
 

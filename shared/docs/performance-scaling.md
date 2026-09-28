@@ -11,8 +11,8 @@ Guidelines for deploying GenieRails governance at scale.
 | Tag policy values | 1000 | Per tag policy key | e.g., `pii_level` can have up to 1000 distinct values |
 | Groups | 10,000 | Per account | Shared across all workspaces |
 | Tag assignments | Unlimited | Per catalog | One tag key per column per assignment |
-| Genie Spaces | No hard limit | Per workspace | Each space consumes warehouse resources at query time |
-| Tables per Genie Space | ~20 recommended | Per space | LLM context window limits generation quality beyond ~20 tables |
+| Genie agents | No hard limit | Per workspace | Each space consumes warehouse resources at query time |
+| Tables per Genie agent | ~20 recommended | Per space | LLM context window limits generation quality beyond ~20 tables |
 
 ## Generation Performance
 
@@ -26,7 +26,7 @@ Guidelines for deploying GenieRails governance at scale.
 | 16-20 | 150-200 | ~35K tokens | Poor (frequent retries) | 30-120s |
 | 20+ | 200+ | >40K tokens | Not recommended | Unreliable |
 
-**Recommendation:** Keep each Genie Space to 4-8 tables for reliable generation. Use `SPACE="Space Name"` for per-space generation to control prompt size.
+**Recommendation:** Keep each Genie agent to 4-8 tables for reliable generation. Use `SPACE="Space Name"` for per-space generation to control prompt size.
 
 ### Country + Industry Overlay Impact
 
@@ -99,16 +99,16 @@ Account Layer (shared)
 +-- Tag Policies: 3-5 (pii_level, pci_level, compliance_scope, etc.)
 |
 +-- BU 1: Finance
-|   +-- Genie Space: Finance Analytics (4 tables)
-|   +-- Genie Space: Risk Dashboard (3 tables)
+|   +-- Genie agent: Finance Analytics (4 tables)
+|   +-- Genie agent: Risk Dashboard (3 tables)
 |   +-- ABAC: 8 FGAC policies across 2 catalogs
 |
 +-- BU 2: Clinical
-|   +-- Genie Space: Clinical Analytics (5 tables)
+|   +-- Genie agent: Clinical Analytics (5 tables)
 |   +-- ABAC: 6 FGAC policies in 1 catalog
 |
 +-- BU 3: Marketing
-    +-- Genie Space: Campaign Analytics (3 tables)
+    +-- Genie agent: Campaign Analytics (3 tables)
     +-- ABAC: 4 FGAC policies in 1 catalog
 ```
 

@@ -110,7 +110,7 @@ variable "genie_spaces" {
     })
   }))
   default     = {}
-  description = "Map of Genie Space key to merged infra + semantic config. Produced by the workspace root."
+  description = "Map of Genie agent key to merged infra + semantic config. Produced by the workspace root."
 }
 
 variable "genie_only" {

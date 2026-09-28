@@ -1,6 +1,6 @@
 # Healthcare ABAC — Walkthrough
 
-A step-by-step example applying GenieRails to a healthcare scenario with four clinical tables. This shows the complete flow from table DDL to a governed Genie Space.
+A step-by-step example applying GenieRails to a healthcare scenario with four clinical tables. This shows the complete flow from table DDL to a governed Genie agent.
 
 For the general workflow, see [From UI to Production](../../docs/from-ui-to-production.md) or [Quickstart](../../docs/quickstart.md).
 
@@ -61,7 +61,7 @@ make generate ENV=dev
 ```
 
 This calls the Databricks Foundation Model to analyze your table schemas and generate:
-- `envs/dev/generated/abac.auto.tfvars` — groups, tag policies, tag assignments, FGAC policies, Genie Space config
+- `envs/dev/generated/abac.auto.tfvars` — groups, tag policies, tag assignments, FGAC policies, Genie agent config
 - `envs/dev/generated/masking_functions.sql` — SQL UDFs for column masking
 
 ## Step 4 — Review and tune
@@ -71,7 +71,7 @@ Open `envs/dev/generated/abac.auto.tfvars` and review:
 - **Groups** — are the access tiers right for your organization?
 - **Tag assignments** — did the AI correctly identify all sensitive columns?
 - **FGAC policies** — are the masking rules appropriate (e.g., Nurses see partial PII, Billing Clerks see no clinical notes)?
-- **Genie Space config** — are the instructions and sample questions useful?
+- **Genie agent config** — are the instructions and sample questions useful?
 
 See `envs/dev/generated/TUNING.md` for tuning guidance.
 
@@ -85,7 +85,7 @@ This promotes the config into three layers and applies them:
 
 1. **Account layer** (`envs/account/`) — creates groups and tag policies
 2. **Data access layer** (`envs/dev/data_access/`) — applies tag assignments, deploys masking functions, creates FGAC policies
-3. **Workspace layer** (`envs/dev/`) — creates the Genie Space with ACLs
+3. **Workspace layer** (`envs/dev/`) — creates the Genie agent with ACLs
 
 ## What each group sees after deployment
 
@@ -119,7 +119,7 @@ examples/healthcare/
 ├── account/abac.auto.tfvars.example       # Account layer config
 ├── data_access/abac.auto.tfvars.example   # Data access layer config
 ├── env.auto.tfvars.example                # Environment config
-└── abac.auto.tfvars.example               # Workspace layer (Genie Space) config
+└── abac.auto.tfvars.example               # Workspace layer (Genie agent) config
 ```
 
 Copy these into your `envs/` directory structure and run `make apply ENV=dev`.

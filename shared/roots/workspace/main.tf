@@ -54,11 +54,11 @@ locals {
     acl_groups       = var.genie_acl_groups
   }
 
-  legacy_space_name = var.genie_space_title != "" ? var.genie_space_title : "Genie Space"
+  legacy_space_name = var.genie_space_title != "" ? var.genie_space_title : "Genie agent"
 
   # The legacy single-space path is only activated when genie_space_title is
   # explicitly set (non-empty).  Having uc_tables in env.auto.tfvars for ABAC
-  # policy generation must NOT cause a Genie Space to be created.
+  # policy generation must NOT cause a Genie agent to be created.
   effective_spaces = length(var.genie_spaces) > 0 ? var.genie_spaces : (
     var.genie_space_title != "" || var.genie_space_id != "" ? [{
       name             = local.legacy_space_name
@@ -95,7 +95,7 @@ locals {
   # When name is omitted (empty string), genie_space_id is used as the key
   # directly — this is the common case when attaching to an existing space.
   #
-  # The name is also used as the default Genie Space title when genie_space_configs
+  # The name is also used as the default Genie agent title when genie_space_configs
   # does not set an explicit title.
   merged_spaces = {
     for s in local.effective_spaces :
@@ -161,7 +161,7 @@ variable "genie_spaces" {
     uc_tables        = optional(list(string), [])
   }))
   default     = []
-  description = "List of Genie Space definitions. 'name' is the human-readable space title and the lookup key for genie_space_configs. An internal Terraform key is derived automatically by sanitizing the name."
+  description = "List of Genie agent definitions. 'name' is the human-readable space title and the lookup key for genie_space_configs. An internal Terraform key is derived automatically by sanitizing the name."
 }
 
 variable "genie_space_configs" {
@@ -315,7 +315,7 @@ variable "genie_join_specs" {
 variable "genie_acl_groups" {
   type        = list(string)
   default     = []
-  description = "Groups that should have CAN_RUN access to this Genie Space. Empty = all groups."
+  description = "Groups that should have CAN_RUN access to this Genie agent. Empty = all groups."
 }
 
 # ── Group variables ───────────────────────────────────────────────────────────

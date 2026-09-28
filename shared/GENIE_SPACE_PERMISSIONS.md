@@ -1,12 +1,12 @@
-# Permissions Required for a Genie Space
+# Permissions Required for a Genie agent
 
-This document lists everything that must be in place for business users (the groups defined in `abac.auto.tfvars`) to use an AI/BI Genie Space.
+This document lists everything that must be in place for business users (the groups defined in `abac.auto.tfvars`) to use an AI/BI Genie agent.
 
 Business exposure is fail-closed. `business_access_enabled` defaults to `false`,
-which withholds table `SELECT` and Genie Space business-group ACLs while retaining
+which withholds table `SELECT` and Genie agent business-group ACLs while retaining
 the structural grants and resources needed to prepare the environment. Set it to
 `true` only after the coverage gate (`make validate-generated`) and schema drift
-check (`make audit-schema`) pass. Genie Space creation and configuration are not
+check (`make audit-schema`) pass. Genie agent creation and configuration are not
 gated, so administrators can inspect them before granting business access.
 
 ## 1. Identity
@@ -17,19 +17,19 @@ gated, so administrators can inspect them before granting business access.
 
 ## 2. Entitlements (Consumer = Databricks One UI only)
 
-- **Consumer access:** When `workspace_consume` is the **only** entitlement for a user/group, they get the **Databricks One UI** experience (dashboards, Genie spaces, apps) and do **not** get the full workspace UI (clusters, notebooks, etc.).
+- **Consumer access:** When `workspace_consume` is the **only** entitlement for a user/group, they get the **Databricks One UI** experience (dashboards, Genie agents, apps) and do **not** get the full workspace UI (clusters, notebooks, etc.).
 - **Terraform:** `module.workspace.databricks_entitlements` in `roots/workspace/main.tf` sets `workspace_consume = true` for each group. No other entitlements are set so that consumers see One UI only.
 
 ## 3. Compute
 
-- **SQL warehouse:** The shared `data_access` layer uses one warehouse for masking function deployment. The workspace layer uses a warehouse for Genie Space configuration. End users do **not** need explicit **CAN USE** on the warehouse.
+- **SQL warehouse:** The shared `data_access` layer uses one warehouse for masking function deployment. The workspace layer uses a warehouse for Genie agent configuration. End users do **not** need explicit **CAN USE** on the warehouse.
 - **Terraform:**
   - `module.data_access.databricks_sql_endpoint` in `roots/data_access/main.tf` handles governance execution warehouse resolution
   - `module.workspace.databricks_sql_endpoint` in `roots/workspace/main.tf` handles workspace / Genie warehouse resolution
 
 ## 4. Data access
 
-- **Unity Catalog:** At least **SELECT** (and **USE CATALOG** / **USE SCHEMA**) on all UC objects used by the Genie Space. Catalogs are auto-derived from fully-qualified table names in `tag_assignments` and `fgac_policies`. ABAC policies further restrict what each group sees at query time.
+- **Unity Catalog:** At least **SELECT** (and **USE CATALOG** / **USE SCHEMA**) on all UC objects used by the Genie agent. Catalogs are auto-derived from fully-qualified table names in `tag_assignments` and `fgac_policies`. ABAC policies further restrict what each group sees at query time.
 - **Terraform:** The shared `data_access` layer grants `USE_CATALOG`, `USE_SCHEMA`, and `SELECT` on all relevant catalogs to all configured groups, deploys masking functions, creates tag policies, assigns tags, and creates FGAC policies.
 
 `make generate` now builds one canonical agent footprint from the Space's
@@ -39,11 +39,11 @@ Space exists, set `declared_footprint` on its `genie_spaces` entry (or pass
 `--footprint`) so discovery, coverage, and least-privilege grants do not depend
 on a live Genie API response.
 
-## 5. Genie Space (create + ACLs)
+## 5. Genie agent (create + ACLs)
 
-- **Genie Space:** Create a Genie Space with the tables from `uc_tables` (in `env.auto.tfvars`) and grant at least **CAN VIEW** and **CAN RUN** to all groups.
-- **Automation:** Terraform manages Genie Space lifecycle via `module.workspace`:
-  - **`genie_space_id` empty** (greenfield): `terraform apply` auto-creates a Genie Space from `uc_tables`, sets ACLs, and trashes the space on `terraform destroy`.
+- **Genie agent:** Create a Genie agent with the tables from `uc_tables` (in `env.auto.tfvars`) and grant at least **CAN VIEW** and **CAN RUN** to all groups.
+- **Automation:** Terraform manages Genie agent lifecycle via `module.workspace`:
+  - **`genie_space_id` empty** (greenfield): `terraform apply` auto-creates a Genie agent from `uc_tables`, sets ACLs, and trashes the space on `terraform destroy`.
   - **`genie_space_id` set** (existing): `terraform apply` only applies CAN_RUN ACLs to the existing space.
 
 ### Auto-create mode
@@ -52,7 +52,7 @@ Set `genie_space_id = ""` in `env.auto.tfvars` and ensure `uc_tables` is non-emp
 
 ### Existing space mode
 
-Set `genie_space_id` to your Genie Space ID in `env.auto.tfvars`. Terraform runs `genie_space.sh set-acls` to grant CAN_RUN to all configured groups.
+Set `genie_space_id` to your Genie agent ID in `env.auto.tfvars`. Terraform runs `genie_space.sh set-acls` to grant CAN_RUN to all configured groups.
 
 ### Manual script usage
 
@@ -96,10 +96,10 @@ The governance team must also grant via workspace admin APIs:
 In this mode:
 - Identity (groups, workspace assignment) and entitlements are managed by the governance team via `make apply-governance`
 - Data access (UC grants, FGAC, masking) is managed by the governance team
-- The BU team only manages Genie Space creation and configuration via `make apply-genie`
-- Genie Space ACLs are skipped (groups are empty); the governance team sets ACLs when applying the full workspace layer
+- The BU team only manages Genie agent creation and configuration via `make apply-genie`
+- Genie agent ACLs are skipped (groups are empty); the governance team sets ACLs when applying the full workspace layer
 
-This mode is **integration tested** with a minimal-privilege SP (see `make test-genie-only`). The test creates a dedicated SP with only workspace USER + SQL entitlement (no admin roles), grants it CAN USE on a warehouse and UC table access, and verifies Genie Space creation succeeds with zero account-level resources in Terraform state.
+This mode is **integration tested** with a minimal-privilege SP (see `make test-genie-only`). The test creates a dedicated SP with only workspace USER + SQL entitlement (no admin roles), grants it CAN USE on a warehouse and UC table access, and verifies Genie agent creation succeeds with zero account-level resources in Terraform state.
 
 See [Central Governance, Self-Service Genie](docs/self-service-genie.md) for the full setup guide.
 
@@ -112,4 +112,4 @@ See [Central Governance, Self-Service Genie](docs/self-service-genie.md) for the
 | Consumer (One UI only) | Terraform: `roots/workspace/main.tf` -> `module.workspace`                      |
 | Warehouse              | Terraform: `roots/data_access/main.tf` and `roots/workspace/main.tf`            |
 | UC data (SELECT, etc.) | Terraform: `roots/data_access/main.tf` -> `module.data_access`                  |
-| Genie Space + ACLs     | Terraform: `roots/workspace/main.tf` -> `module.workspace`                      |
+| Genie agent + ACLs     | Terraform: `roots/workspace/main.tf` -> `module.workspace`                      |

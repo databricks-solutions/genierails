@@ -11,7 +11,7 @@ Scenarios
   quickstart       Single space, single catalog: Finance Analytics backed by dev_fin.
                    Tests the core quickstart flow from docs/playbook.md § 1.
 
-  multi-catalog    One Genie Space spanning two catalogs (dev_fin + dev_clinical).
+  multi-catalog    One Genie agent spanning two catalogs (dev_fin + dev_clinical).
                    Tests the "single space spanning multiple catalogs" pattern.
 
   multi-space      Two independent spaces: Finance Analytics (dev_fin) and
@@ -20,7 +20,7 @@ Scenarios
 
   per-space        Incremental per-space generation. Deploys Finance Analytics first,
                    then adds Clinical Analytics using SPACE= without touching Finance.
-                   Tests § 2 (Add a new Genie Space) isolation guarantee.
+                   Tests § 2 (Add a new Genie agent) isolation guarantee.
 
   promote          Full multi-space dev → prod promotion with catalog remapping.
                    Tests § 3a promote flow end-to-end.
@@ -29,34 +29,34 @@ Scenarios
                    dev=Finance Analytics, bu2=Clinical Analytics.
                    Tests § 3b (second independent environment / BU).
 
-  attach-promote   Attach to an existing Genie Space that was configured in the UI.
+  attach-promote   Attach to an existing Genie agent that was configured in the UI.
                    A Finance Analytics space is created via the Genie API (simulating
                    a data team that already set it up in the Databricks UI). The test
                    then runs `make generate` in genie_space_id-only mode (no uc_tables),
                    which discovers the space's tables from the API and generates full
                    ABAC governance. Finally promotes to prod. Tests playbook.md §3
-                   "Attaching to an existing Genie Space" + §3a promotion.
+                   "Attaching to an existing Genie agent" + §3a promotion.
 
   self-service-genie
-                   Central Data Governance team + BU teams self-serve Genie spaces.
+                   Central Data Governance team + BU teams self-serve Genie agents.
                    Phase 1: governance env applies ABAC (MODE=governance + apply-governance).
                    Phase 2: bu_fin env creates Finance Analytics (MODE=genie + apply-genie).
                    Phase 3: bu_clin (second BU) added; governance state verified unchanged.
                    Phase 4: bu_fin → bu_fin_prod promoted via make promote + make apply-genie.
                    Asserts cross-layer state isolation throughout. Tests playbook.md §7.
 
-  abac-only        ABAC governance only — no Genie Space (playbook.md §2).
+  abac-only        ABAC governance only — no Genie agent (playbook.md §2).
                    Phase 1: uc_tables only in env.auto.tfvars, plain make generate + make apply.
                    Phase 2: §2 → §4 upgrade: add genie_spaces, make generate SPACE=, make apply.
-                   Asserts governance preserved when Genie Space is added later.
+                   Asserts governance preserved when Genie agent is added later.
 
-  multi-space-import  Import two UI-configured Genie Spaces in one make generate call
+  multi-space-import  Import two UI-configured Genie agents in one make generate call
                    (playbook.md §3 multi-space import). Creates two spaces via API,
                    imports both via genie_space_id entries, asserts both genie_space_configs
                    present, no new spaces created by Terraform.
 
   genie-import-no-abac
-                   Import an existing Genie Space and deploy to prod without ABAC.
+                   Import an existing Genie agent and deploy to prod without ABAC.
                    Creates a space via API, imports it with genie_only=true, runs
                    MODE=genie generation, promotes to prod (graceful skip or remap),
                    applies workspace layer. Asserts no governance artifacts produced.
@@ -2056,7 +2056,7 @@ def _preamble_cleanup(*envs: str, fresh_env: bool = False) -> None:
     state files still exist*, then wipes all local artifacts.  This ensures each
     scenario starts clean even if a previous scenario failed before its own
     teardown block ran (which would have left Databricks groups, tag_policies,
-    and Genie Spaces behind without Terraform state to track them).
+    and Genie agents behind without Terraform state to track them).
 
     When fresh_env=True (provisioned via provision_test_env.py), the metastore
     counter always starts at 0 so the FGAC quota wait is skipped entirely.
@@ -2127,7 +2127,7 @@ def _preamble_cleanup(*envs: str, fresh_env: bool = False) -> None:
     # On a fresh provisioned environment the metastore starts clean, so there is
     # no stale FGAC quota to wait for.  However, if a PREVIOUS scenario in the
     # same test run applied Terraform resources and then failed before its own
-    # teardown block ran, those resources (groups, Genie Spaces, tag policies)
+    # teardown block ran, those resources (groups, Genie agents, tag policies)
     # persist and must be destroyed before the next scenario can recreate them.
     # We destroy using state files when they exist, then wipe all artifacts.
     if fresh_env:
@@ -2267,16 +2267,16 @@ def _assert_genie_space_id_file(env: str, space_name: str) -> None:
         # Also accept the legacy single-space file
         legacy = ENVS_DIR / env / ".genie_space_id"
         if legacy.exists():
-            print(f"  {_green('PASS')}  Genie Space ID file exists (legacy): .genie_space_id")
+            print(f"  {_green('PASS')}  Genie agent ID file exists (legacy): .genie_space_id")
             return
         raise AssertionError(
             f"No .genie_space_id_* file found for space '{space_name}' in envs/{env}/"
         )
-    print(f"  {_green('PASS')}  Genie Space ID file: {candidates[0].name}")
+    print(f"  {_green('PASS')}  Genie agent ID file: {candidates[0].name}")
 
 
 def _read_genie_space_id(env: str, space_name: str) -> str:
-    """Read the Genie Space object ID from the .genie_space_id_<key> file."""
+    """Read the Genie agent object ID from the .genie_space_id_<key> file."""
     key = re.sub(r"[^a-z0-9]+", "_", space_name.lower()).strip("_")
     candidates = list((ENVS_DIR / env).glob(f".genie_space_id_{key}*"))
     if not candidates:
@@ -2288,7 +2288,7 @@ def _read_genie_space_id(env: str, space_name: str) -> str:
 
 
 def _get_genie_space_acl_groups(auth_file: Path, space_id: str) -> set[str]:
-    """Query the Genie Space permissions API and return the set of group names with CAN_RUN."""
+    """Query the Genie agent permissions API and return the set of group names with CAN_RUN."""
     if not space_id:
         return set()
     try:
@@ -2325,12 +2325,12 @@ def _get_genie_space_acl_groups(auth_file: Path, space_id: str) -> set[str]:
                     groups.add(group)
         return groups
     except Exception as exc:
-        print(f"  {_yellow('WARN')} Could not query Genie Space ACLs for {space_id}: {exc}")
+        print(f"  {_yellow('WARN')} Could not query Genie agent ACLs for {space_id}: {exc}")
         return set()
 
 
 def _assert_acl_groups(auth_file: Path, env: str, space_name: str, expected_groups: set[str], label: str) -> None:
-    """Assert that a Genie Space's ACLs match the expected groups."""
+    """Assert that a Genie agent's ACLs match the expected groups."""
     space_id = _read_genie_space_id(env, space_name)
     if not space_id:
         print(f"  {_yellow('WARN')} Skipping ACL check for '{space_name}' — no space ID found")
@@ -2351,7 +2351,7 @@ def _assert_acl_groups(auth_file: Path, env: str, space_name: str, expected_grou
 
 
 def _assert_acl_excludes_groups(auth_file: Path, env: str, space_name: str, excluded_groups: set[str], label: str) -> None:
-    """Assert that specific groups do NOT have CAN_RUN on a Genie Space."""
+    """Assert that specific groups do NOT have CAN_RUN on a Genie agent."""
     space_id = _read_genie_space_id(env, space_name)
     if not space_id:
         print(f"  {_yellow('WARN')} Skipping ACL exclusion check for '{space_name}' — no space ID found")
@@ -2500,7 +2500,7 @@ def scenario_quickstart(
     _step("Applying all layers")
     _make(f"apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
-    _step("Asserting Genie Space deployed")
+    _step("Asserting Genie agent deployed")
     _assert_genie_space_id_file(env, "Finance Analytics")
 
     _step("Verifying data + ABAC governance")
@@ -2517,7 +2517,7 @@ def scenario_quickstart(
 
 
 # ---------------------------------------------------------------------------
-# Scenario: 2 — Multi-catalog in one Genie Space
+# Scenario: 2 — Multi-catalog in one Genie agent
 # ---------------------------------------------------------------------------
 
 def scenario_multi_catalog(
@@ -2562,7 +2562,7 @@ def scenario_multi_catalog(
     _step("Applying all layers")
     _make(f"apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
-    _step("Asserting single Genie Space deployed")
+    _step("Asserting single Genie agent deployed")
     _assert_genie_space_id_file(env, "Combined Analytics")
 
     _step("Verifying data + ABAC governance (both catalogs)")
@@ -2579,7 +2579,7 @@ def scenario_multi_catalog(
 
 
 # ---------------------------------------------------------------------------
-# Scenario: 3 — Multi Genie Spaces
+# Scenario: 3 — Multi Genie agents
 # ---------------------------------------------------------------------------
 
 def scenario_multi_space(
@@ -2627,7 +2627,7 @@ def scenario_multi_space(
     _step("Applying all layers")
     _make(f"apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
-    _step("Asserting both Genie Spaces deployed")
+    _step("Asserting both Genie agents deployed")
     _assert_genie_space_id_file(env, "Finance Analytics")
     _assert_genie_space_id_file(env, "Clinical Analytics")
 
@@ -3012,7 +3012,7 @@ def scenario_multi_env(
 
 
 # ---------------------------------------------------------------------------
-# Genie Space API helpers (for the attach-promote scenario)
+# Genie agent API helpers (for the attach-promote scenario)
 # ---------------------------------------------------------------------------
 
 def _ensure_packages() -> None:
@@ -3075,7 +3075,7 @@ def _create_genie_only_sp(
     """Create a minimal-privilege SP for genie_only mode (no admin roles at all).
 
     The SP is assigned to the workspace as a regular USER (not Admin) and is
-    granted only the permissions needed to create Genie Spaces:
+    granted only the permissions needed to create Genie agents:
       - Workspace membership (USER)
       - Databricks SQL access entitlement
       - CAN USE on the specified warehouse
@@ -3217,7 +3217,7 @@ def _create_genie_only_sp(
             else:
                 print(f"  {_green('OK')}  {sql}")
     else:
-        print(f"  {_yellow('WARN')} No warehouse found — skipping UC grants (Genie space creation may fail)")
+        print(f"  {_yellow('WARN')} No warehouse found — skipping UC grants (Genie agent creation may fail)")
 
     # 5. Wait for identity propagation
     print("  Waiting 20 s for workspace identity propagation...")
@@ -3253,7 +3253,7 @@ def _create_genie_space_via_api(
     tables: list[str],
     warehouse_id: str,
 ) -> str:
-    """Create a Genie Space directly via REST API, simulating the UI experience.
+    """Create a Genie agent directly via REST API, simulating the UI experience.
 
     Returns the new space_id.
     """
@@ -3275,33 +3275,33 @@ def _create_genie_space_via_api(
         }, separators=(",", ":")),
     }
 
-    print(f"  Creating Genie Space '{title}' via API with {len(tables)} table(s)...")
+    print(f"  Creating Genie agent '{title}' via API with {len(tables)} table(s)...")
     resp = w.api_client.do("POST", "/api/2.0/genie/spaces", body=body)
     space_id = resp.get("space_id", "")
     if not space_id:
         raise RuntimeError(f"Genie API did not return space_id. Response: {resp}")
-    print(f"  Created Genie Space: {space_id}")
+    print(f"  Created Genie agent: {space_id}")
     return space_id
 
 
 def _delete_genie_space_via_api(auth_file: Path, space_id: str) -> None:
-    """Permanently delete a Genie Space via REST API (teardown helper)."""
+    """Permanently delete a Genie agent via REST API (teardown helper)."""
     from databricks.sdk import WorkspaceClient
 
     cfg = _load_auth_cfg(auth_file)
     _configure_sdk_env(cfg)
     w = WorkspaceClient(product="genierails-test-runner", product_version="0.1.0")
 
-    print(f"  Deleting Genie Space {space_id} via API...")
+    print(f"  Deleting Genie agent {space_id} via API...")
     try:
         w.api_client.do("DELETE", f"/api/2.0/genie/spaces/{space_id}")
-        print(f"  Genie Space {space_id} deleted.")
+        print(f"  Genie agent {space_id} deleted.")
     except Exception as exc:
-        print(f"  {_yellow('WARN')} Could not delete Genie Space {space_id}: {exc}")
+        print(f"  {_yellow('WARN')} Could not delete Genie agent {space_id}: {exc}")
 
 
 # ---------------------------------------------------------------------------
-# Scenario: 7 — Attach to an existing Genie Space and promote to prod
+# Scenario: 7 — Attach to an existing Genie agent and promote to prod
 # ---------------------------------------------------------------------------
 
 def scenario_attach_and_promote(
@@ -3311,10 +3311,10 @@ def scenario_attach_and_promote(
     fresh_env: bool = False,
 ) -> None:
     """
-    Simulates the "Import an existing Genie Space" flow from docs/playbook.md §3:
+    Simulates the "Import an existing Genie agent" flow from docs/playbook.md §3:
 
     Phase 1 — Simulate "configured in the UI":
-      A Finance Analytics Genie Space is created directly via the Genie REST API
+      A Finance Analytics Genie agent is created directly via the Genie REST API
       (not Terraform), with dev_fin tables. This represents what a data team would
       have built in the Databricks UI before this tool was adopted.
 
@@ -3329,7 +3329,7 @@ def scenario_attach_and_promote(
 
     Phase 3 — Apply:
       `make apply` deploys ABAC governance (ACLs, column tags, masking functions,
-      FGAC policies) without creating or deleting the Genie Space.
+      FGAC policies) without creating or deleting the Genie agent.
       The space's title, description, benchmarks, and instructions are preserved
       exactly as configured in the API/UI.
 
@@ -3337,7 +3337,7 @@ def scenario_attach_and_promote(
       `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=dev_fin=prod_fin`
       followed by `make apply ENV=prod` applies the same governance to prod.
 
-    Tests: playbook.md §3 "Import an existing Genie Space" + §5 promotion.
+    Tests: playbook.md §3 "Import an existing Genie agent" + §5 promotion.
     """
     _banner("Scenario: attach-promote — Attach to UI-created space, promote to prod")
     env      = "dev"
@@ -3359,7 +3359,7 @@ def scenario_attach_and_promote(
         f"{DEV_FIN_CAT}.finance.credit_cards",
     ]
 
-    _step("Phase 1 — Creating Genie Space via API (simulating UI configuration)")
+    _step("Phase 1 — Creating Genie agent via API (simulating UI configuration)")
     space_id = _create_genie_space_via_api(
         auth_file,
         title="Finance Analytics",
@@ -3375,7 +3375,7 @@ def scenario_attach_and_promote(
     # inspecting the logged discovered tables, and pasting them into
     # env.auto.tfvars as instructed by the playbook.md manual step.
     # The key assertion tested here is that Terraform does NOT create/delete
-    # the existing Genie Space — it attaches to it as-is.
+    # the existing Genie agent — it attaches to it as-is.
     _step("Phase 2 — Configuring env with genie_space_id + uc_tables (attach mode)")
     _make(f"setup", f"ENV={env}")
     _make(f"setup", f"ENV={prod_env}")
@@ -3418,7 +3418,7 @@ genie_spaces = [
     legacy   = ENVS_DIR / env / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
-            "Terraform created a new Genie Space in attach mode — expected no .genie_space_id_* file. "
+            "Terraform created a new Genie agent in attach mode — expected no .genie_space_id_* file. "
             "The existing space should be used as-is."
         )
     print(f"  {_green('PASS')}  No .genie_space_id_* file: Terraform did not create a new space")
@@ -3473,7 +3473,7 @@ def scenario_self_service_genie(
     keep_data: bool = False,
     fresh_env: bool = False,
 ) -> None:
-    """Central governance, self-service Genie: central ABAC team + BU teams self-serve Genie spaces.
+    """Central governance, self-service Genie: central ABAC team + BU teams self-serve Genie agents.
 
     Phase 1 — Governance team:
       Creates a 'governance' env that governs both dev_fin + dev_clinical catalogs.
@@ -3486,7 +3486,7 @@ def scenario_self_service_genie(
       Creates a 'bu_fin' env pointing at dev_fin tables with a Finance Analytics space.
       Runs `make generate MODE=genie` — asserts genie_space_configs is present and
       ABAC sections (groups, tag_assignments, fgac_policies) are absent.
-      Runs `make apply-genie` — applies workspace only; Finance Analytics Genie Space
+      Runs `make apply-genie` — applies workspace only; Finance Analytics Genie agent
       IS created (.genie_space_id_finance_analytics must appear).
 
     Phase 3 — Adding a second BU (isolation check):
@@ -3559,7 +3559,7 @@ uc_tables = [
     _step("Phase 1 — Applying governance layers (account + data_access only)")
     _make("apply-governance", f"ENV={gov_env}", retries=3, retry_delay_seconds=120)
 
-    _step("Asserting governance env: data_access state exists, no Genie Space created")
+    _step("Asserting governance env: data_access state exists, no Genie agent created")
     da_state = gov_env_dir / "data_access" / "terraform.tfstate"
     if not da_state.exists():
         raise AssertionError(
@@ -3571,7 +3571,7 @@ uc_tables = [
     id_files_gov = list(gov_env_dir.glob(".genie_space_id_*"))
     if id_files_gov:
         raise AssertionError(
-            f"apply-governance created a Genie Space in '{gov_env}' env — expected none. "
+            f"apply-governance created a Genie agent in '{gov_env}' env — expected none. "
             f"Files found: {[str(f) for f in id_files_gov]}"
         )
     print(f"  {_green('PASS')}  No .genie_space_id_* file in '{gov_env}' env — workspace layer skipped")
@@ -3603,7 +3603,7 @@ uc_tables = [
         )
     print(f"  {_green('PASS')}  No masking_functions.sql in '{bu_env}' genie-mode output")
 
-    _step("Phase 2 — Applying BU workspace layer (Genie space only)")
+    _step("Phase 2 — Applying BU workspace layer (Genie agent only)")
     _make("apply-genie", f"ENV={bu_env}", retries=3, retry_delay_seconds=120)
 
     _step("Asserting BU env: .genie_space_id_* created, no data_access state")
@@ -3612,7 +3612,7 @@ uc_tables = [
     if not id_files_bu:
         raise AssertionError(
             f"apply-genie did not create a .genie_space_id_* file in '{bu_env}' env. "
-            "The Finance Analytics Genie Space should have been created."
+            "The Finance Analytics Genie agent should have been created."
         )
     print(f"  {_green('PASS')}  .genie_space_id_* file present in '{bu_env}' env: "
           + ", ".join(f.name for f in id_files_bu))
@@ -3654,7 +3654,7 @@ uc_tables = [
     if not id_files_clin:
         raise AssertionError(
             f"apply-genie did not create a .genie_space_id_* file in '{bu_clin_env}' env. "
-            "The Clinical Analytics Genie Space should have been created."
+            "The Clinical Analytics Genie agent should have been created."
         )
     print(f"  {_green('PASS')}  .genie_space_id_* file present in '{bu_clin_env}' env: "
           + ", ".join(f.name for f in id_files_clin))
@@ -3682,7 +3682,7 @@ uc_tables = [
     )
     # In genie mode, catalog refs may only appear in env.auto.tfvars (always
     # correctly remapped) and not in generated/abac.auto.tfvars (which may
-    # only contain Genie Space metadata without catalog-prefixed table refs).
+    # only contain Genie agent metadata without catalog-prefixed table refs).
     _bu_prod_gen = ENVS_DIR / bu_prod_env / "generated" / "abac.auto.tfvars"
     _bu_prod_env_tf = ENVS_DIR / bu_prod_env / "env.auto.tfvars"
     _found_prod_cat = (
@@ -3742,7 +3742,7 @@ uc_tables = [
 
 
 # ---------------------------------------------------------------------------
-# Scenario: abac-only — ABAC governance without Genie Space (+ upgrade path)
+# Scenario: abac-only — ABAC governance without Genie agent (+ upgrade path)
 # ---------------------------------------------------------------------------
 
 def scenario_abac_only(
@@ -3760,12 +3760,12 @@ def scenario_abac_only(
 
     Phase 2 — §2 → §4 upgrade path:
       Add Finance Analytics to genie_spaces and run `make generate MODE=genie`.
-      Then `make apply-genie`. Assert Genie Space created, existing governance preserved
+      Then `make apply-genie`. Assert Genie agent created, existing governance preserved
       (data_access/terraform.tfstate still exists, column tags and masks still applied).
 
     Tests: playbook.md §2 "ABAC governance only" and the §2 → §4 upgrade path.
     """
-    _banner("Scenario: abac-only — ABAC governance without Genie Space (+ upgrade to Genie)")
+    _banner("Scenario: abac-only — ABAC governance without Genie agent (+ upgrade to Genie)")
     env = "dev"
 
     _preamble_cleanup(env, fresh_env=fresh_env)
@@ -3794,15 +3794,15 @@ def scenario_abac_only(
     _step("Phase 1 — Applying (all three layers)")
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
-    _step("Asserting Phase 1: no Genie Space created, data_access state exists")
+    _step("Asserting Phase 1: no Genie agent created, data_access state exists")
     id_files = list(env_dir.glob(".genie_space_id_*"))
     legacy   = env_dir / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
-            "make apply created a Genie Space in ABAC-only mode — expected none. "
+            "make apply created a Genie agent in ABAC-only mode — expected none. "
             f"Files: {[f.name for f in id_files]}"
         )
-    print(f"  {_green('PASS')}  No .genie_space_id_* file — Genie Space correctly not created")
+    print(f"  {_green('PASS')}  No .genie_space_id_* file — Genie agent correctly not created")
 
     da_state = env_dir / "data_access" / "terraform.tfstate"
     da_backup = env_dir / "data_access" / "terraform.tfstate.backup"
@@ -3839,17 +3839,17 @@ def scenario_abac_only(
     _step("Phase 2 — Applying workspace layer only (Genie on top of existing governance)")
     _make("apply-genie", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
-    _step("Asserting Phase 2: Genie Space created, governance preserved")
+    _step("Asserting Phase 2: Genie agent created, governance preserved")
     _assert_genie_space_id_file(env, "Finance Analytics")
 
     if not da_state.exists():
         raise AssertionError(
-            "data_access/terraform.tfstate was removed during Genie Space upgrade — "
+            "data_access/terraform.tfstate was removed during Genie agent upgrade — "
             "existing governance should be preserved."
         )
     print(f"  {_green('PASS')}  data_access/terraform.tfstate still exists — governance preserved")
 
-    _step("Verifying ABAC governance still applied after Genie Space added")
+    _step("Verifying ABAC governance still applied after Genie agent added")
     _verify_data(auth_file, dev=True, warehouse_id=resolved_wh)
 
     # ── teardown ─────────────────────────────────────────────────────────────
@@ -3862,7 +3862,7 @@ def scenario_abac_only(
 
 
 # ---------------------------------------------------------------------------
-# Scenario: multi-space-import — Import two UI-created Genie Spaces at once
+# Scenario: multi-space-import — Import two UI-created Genie agents at once
 # ---------------------------------------------------------------------------
 
 def scenario_multi_space_import(
@@ -3872,7 +3872,7 @@ def scenario_multi_space_import(
     fresh_env: bool = False,
 ) -> None:
     """
-    Import two existing Genie Spaces in one make generate call (playbook.md §3 multi-space).
+    Import two existing Genie agents in one make generate call (playbook.md §3 multi-space).
 
     Creates two spaces via the Genie REST API (simulating UI-configured spaces),
     then configures genie_spaces with two genie_space_id entries. Asserts both
@@ -3881,7 +3881,7 @@ def scenario_multi_space_import(
 
     Tests: playbook.md §3 "Multi-space import" section.
     """
-    _banner("Scenario: multi-space-import — Import two UI-created Genie Spaces")
+    _banner("Scenario: multi-space-import — Import two UI-created Genie agents")
     env = "dev"
 
     _ensure_packages()
@@ -3902,12 +3902,12 @@ def scenario_multi_space_import(
         f"{DEV_CLIN_CAT}.clinical.encounters",
     ]
 
-    _step("Creating Finance Analytics Genie Space via API (simulating UI configuration)")
+    _step("Creating Finance Analytics Genie agent via API (simulating UI configuration)")
     fin_space_id = _create_genie_space_via_api(
         auth_file, title="Finance Analytics", tables=fin_tables, warehouse_id=resolved_wh,
     )
 
-    _step("Creating Clinical Analytics Genie Space via API (simulating UI configuration)")
+    _step("Creating Clinical Analytics Genie agent via API (simulating UI configuration)")
     clin_space_id = _create_genie_space_via_api(
         auth_file, title="Clinical Analytics", tables=clin_tables, warehouse_id=resolved_wh,
     )
@@ -3960,7 +3960,7 @@ genie_spaces = [
     legacy   = ENVS_DIR / env / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
-            "Terraform created new Genie Spaces in multi-space import mode — expected none. "
+            "Terraform created new Genie agents in multi-space import mode — expected none. "
             f"Files: {[f.name for f in id_files]}"
         )
     print(f"  {_green('PASS')}  No .genie_space_id_* files — both spaces correctly attached")
@@ -4284,7 +4284,7 @@ def scenario_genie_only(
       1. .genie_space_id_finance_analytics file exists (space created)
       2. No account-level resources in terraform.tfstate
       3. No data_access/terraform.tfstate (governance layer untouched)
-      4. Genie space accessible via API (read space by ID)
+      4. Genie agent accessible via API (read space by ID)
 
     Phase 5 — Teardown:
       destroy genie_only env, teardown data, destroy account layer.
@@ -4392,12 +4392,12 @@ genie_only = true
         )
     print(f"  {_green('PASS')}  No data_access/terraform.tfstate in '{env}' — workspace layer only")
 
-    # 4d. Genie space accessible via API (read space by ID using reduced SP)
+    # 4d. Genie agent accessible via API (read space by ID using reduced SP)
     id_files = list(env_dir.glob(".genie_space_id_*"))
     if id_files:
         space_id = id_files[0].read_text().strip()
         if space_id:
-            _step("Phase 4 — Verifying Genie Space exists via API (using minimal-privilege SP)")
+            _step("Phase 4 — Verifying Genie agent exists via API (using minimal-privilege SP)")
             from databricks.sdk import WorkspaceClient
             w = WorkspaceClient(
                 host=ws_host,
@@ -4409,7 +4409,7 @@ genie_only = true
             try:
                 resp = w.api_client.do("GET", f"/api/2.0/genie/spaces/{space_id}")
                 api_title = resp.get("title", "")
-                print(f"  {_green('PASS')}  Genie Space {space_id} accessible via API (title: {api_title!r})")
+                print(f"  {_green('PASS')}  Genie agent {space_id} accessible via API (title: {api_title!r})")
             except Exception as exc:
                 # GET may be blocked by Partner Powered AI on fresh AWS workspaces.
                 # Fall back to PATCH (not gated) to verify the space exists.
@@ -4418,14 +4418,14 @@ genie_only = true
                         resp = w.api_client.do("PATCH", f"/api/2.0/genie/spaces/{space_id}",
                                                body={"title": f"Space {space_id}"})
                         api_title = resp.get("title", "")
-                        print(f"  {_green('PASS')}  Genie Space {space_id} accessible via PATCH fallback (title: {api_title!r})")
+                        print(f"  {_green('PASS')}  Genie agent {space_id} accessible via PATCH fallback (title: {api_title!r})")
                     except Exception as exc2:
                         raise AssertionError(
-                            f"Genie Space {space_id} not accessible via API (GET blocked by Partner AI, PATCH also failed): {exc2}"
+                            f"Genie agent {space_id} not accessible via API (GET blocked by Partner AI, PATCH also failed): {exc2}"
                         )
                 else:
                     raise AssertionError(
-                        f"Genie Space {space_id} not accessible via API: {exc}"
+                        f"Genie agent {space_id} not accessible via API: {exc}"
                     )
 
     # ── Phase 5: Teardown ───────────────────────────────────────────────────
@@ -4446,7 +4446,7 @@ genie_only = true
 
 
 # ---------------------------------------------------------------------------
-# Scenario: genie-import-no-abac — Import Genie Space, deploy to prod, no ABAC
+# Scenario: genie-import-no-abac — Import Genie agent, deploy to prod, no ABAC
 # ---------------------------------------------------------------------------
 
 def scenario_genie_import_no_abac(
@@ -4456,14 +4456,14 @@ def scenario_genie_import_no_abac(
     fresh_env: bool = False,
 ) -> None:
     """
-    Import an existing Genie Space and deploy to prod without generating or
+    Import an existing Genie agent and deploy to prod without generating or
     managing any ABAC governance.  This validates the genie-only import-to-prod
     workflow when a separate governance team manages ABAC centrally.
 
     Phase 1 — Data setup:
       Create dev_fin + prod_fin test catalogs.
 
-    Phase 2 — Create initial Genie Space via API:
+    Phase 2 — Create initial Genie agent via API:
       Simulates a UI-configured space that a data team already set up.
 
     Phase 3 — Import into fresh env without ABAC:
@@ -4503,8 +4503,8 @@ def scenario_genie_import_no_abac(
 
     resolved_wh = _get_or_find_warehouse(auth_file, warehouse_id)
 
-    # ── Phase 2: Create a Genie Space via API (simulating UI-configured space) ──
-    _step("Phase 2 — Creating Genie Space via API (simulating existing UI-created space)")
+    # ── Phase 2: Create a Genie agent via API (simulating UI-configured space) ──
+    _step("Phase 2 — Creating Genie agent via API (simulating existing UI-created space)")
     fin_tables = [
         f"{DEV_FIN_CAT}.finance.customers",
         f"{DEV_FIN_CAT}.finance.transactions",
@@ -4569,13 +4569,13 @@ genie_spaces = [
     legacy = ENVS_DIR / env / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
-            f"Terraform created a new Genie Space in '{env}' — expected none. "
+            f"Terraform created a new Genie agent in '{env}' — expected none. "
             "The imported space (genie_space_id) should be attached, not created."
         )
     print(f"  {_green('PASS')}  No .genie_space_id_* file in '{env}' — space correctly attached, not created")
 
     # Verify the imported space is accessible via API
-    _step("Verifying imported Genie Space accessible via API")
+    _step("Verifying imported Genie agent accessible via API")
     from databricks.sdk import WorkspaceClient as _WC
     _cfg = _load_auth_cfg(auth_file)
     _configure_sdk_env(_cfg)
@@ -4583,18 +4583,18 @@ genie_spaces = [
     try:
         resp = _w.api_client.do("GET", f"/api/2.0/genie/spaces/{src_space_id}")
         api_title = resp.get("title", "")
-        print(f"  {_green('PASS')}  Genie Space {src_space_id} accessible via API (title: {api_title!r})")
+        print(f"  {_green('PASS')}  Genie agent {src_space_id} accessible via API (title: {api_title!r})")
     except Exception as exc:
         if "Partner Powered AI" in str(exc) or "cross-Geo" in str(exc):
             try:
                 resp = _w.api_client.do("PATCH", f"/api/2.0/genie/spaces/{src_space_id}",
                                         body={"title": f"Space {src_space_id}"})
                 api_title = resp.get("title", "")
-                print(f"  {_green('PASS')}  Genie Space {src_space_id} accessible via PATCH fallback (title: {api_title!r})")
+                print(f"  {_green('PASS')}  Genie agent {src_space_id} accessible via PATCH fallback (title: {api_title!r})")
             except Exception as exc2:
-                raise AssertionError(f"Imported Genie Space {src_space_id} not accessible (PATCH fallback failed): {exc2}")
+                raise AssertionError(f"Imported Genie agent {src_space_id} not accessible (PATCH fallback failed): {exc2}")
         else:
-            raise AssertionError(f"Imported Genie Space {src_space_id} not accessible via API: {exc}")
+            raise AssertionError(f"Imported Genie agent {src_space_id} not accessible via API: {exc}")
 
     # ── Phase 4: Promote to prod (the key test) ──────────────────────────────
     _step(f"Phase 4 — Promoting {env} → {prod_env} (no ABAC to remap)")
@@ -5327,7 +5327,7 @@ def _create_bank_genie_space_via_api(
     auth_file: Path,
     warehouse_id: str,
 ) -> str:
-    """Create a rich Genie Space for Kookaburra Bank Analytics via REST API.
+    """Create a rich Genie agent for Kookaburra Bank Analytics via REST API.
 
     Includes sample questions, benchmarks, instructions, SQL expressions,
     measures, and filters — simulating a space configured in the UI.
@@ -5441,7 +5441,7 @@ def _create_bank_genie_space_via_api(
         "serialized_space": _json_bank.dumps(serialized_space, separators=(",", ":")),
     }
 
-    print(f"  Creating Genie Space 'Kookaburra Bank Analytics' via API with {len(tables)} table(s)...")
+    print(f"  Creating Genie agent 'Kookaburra Bank Analytics' via API with {len(tables)} table(s)...")
     resp = w.api_client.do("POST", "/api/2.0/genie/spaces", body=body)
     space_id = resp.get("space_id", "")
     if not space_id:
@@ -5454,11 +5454,11 @@ def _create_bank_genie_space_via_api(
             f"/api/2.0/genie/spaces/{space_id}",
             body={"serialized_space": _json_bank.dumps(serialized_space, separators=(",", ":"))},
         )
-        print(f"  {_green('OK')}  Genie Space configured (tables, instructions, benchmarks, SQL config)")
+        print(f"  {_green('OK')}  Genie agent configured (tables, instructions, benchmarks, SQL config)")
     except Exception as exc:
         print(f"  {_yellow('WARN')} PATCH config: {exc}")
 
-    print(f"  Created Genie Space: {space_id}")
+    print(f"  Created Genie agent: {space_id}")
     return space_id
 
 
@@ -5472,16 +5472,16 @@ def scenario_aus_bank_demo(
 
     Phase 1 — Setup:
       Creates dev_bank and prod_bank catalogs with Australian banking tables.
-      Creates a rich Genie Space via API (simulating UI configuration).
+      Creates a rich Genie agent via API (simulating UI configuration).
 
     Phase 2 — Generate with ANZ + financial_services overlays:
       Configures env.auto.tfvars with genie_space_id + uc_tables (attach mode).
       Runs `make generate ENV=dev COUNTRY=ANZ INDUSTRY=financial_services`.
       Asserts ANZ-specific masking functions (mask_tfn, mask_medicare, mask_bsb).
-      Asserts Genie Space config was imported (Kookaburra Bank Analytics).
+      Asserts Genie agent config was imported (Kookaburra Bank Analytics).
 
     Phase 3 — Apply:
-      Applies governance. Verifies no new Genie Space created (attach mode).
+      Applies governance. Verifies no new Genie agent created (attach mode).
 
     Phase 4 — Promote to prod:
       Promotes dev -> prod with catalog remapping dev_bank=prod_bank.
@@ -5501,7 +5501,7 @@ def scenario_aus_bank_demo(
     _step("Phase 1 — Creating Australian banking tables")
     resolved_wh = _setup_bank_data(auth_file, warehouse_id)
 
-    _step("Phase 1 — Creating rich Genie Space via API")
+    _step("Phase 1 — Creating rich Genie agent via API")
     space_id = _create_bank_genie_space_via_api(auth_file, resolved_wh)
 
     # ── Phase 2: Generate with ANZ + financial_services ──────────────────────
@@ -5563,7 +5563,7 @@ genie_spaces = [
         )
     print(f"  {_green('PASS')}  ANZ-specific masking functions present: {anz_fns_found}")
 
-    # Genie Space config imported
+    # Genie agent config imported
     _assert_contains(gen_dir / "abac.auto.tfvars", "Kookaburra Bank Analytics",
                      "Kookaburra Bank Analytics genie_space_configs entry present")
 
@@ -5576,7 +5576,7 @@ genie_spaces = [
     legacy = ENVS_DIR / env / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
-            "Terraform created a new Genie Space in attach mode — expected no "
+            "Terraform created a new Genie agent in attach mode — expected no "
             ".genie_space_id_* file. The existing space should be used as-is."
         )
     print(f"  {_green('PASS')}  No .genie_space_id_* file: Terraform did not create a new space")
@@ -5752,7 +5752,7 @@ def _create_india_bank_genie_space_via_api(
     auth_file: Path,
     warehouse_id: str,
 ) -> str:
-    """Create a Genie Space for Lakshmi Bank Analytics via REST API."""
+    """Create a Genie agent for Lakshmi Bank Analytics via REST API."""
     india_tables = [
         f"{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.customers",
         f"{DEV_LAKSHMI_CAT}.{LAKSHMI_SCHEMA}.accounts",
@@ -5783,7 +5783,7 @@ def scenario_india_bank_demo(
     _step("Phase 1 — Creating Indian banking tables")
     resolved_wh = _setup_india_bank_data(auth_file, warehouse_id)
 
-    _step("Phase 1 — Creating rich Genie Space via API")
+    _step("Phase 1 — Creating rich Genie agent via API")
     space_id = _create_india_bank_genie_space_via_api(auth_file, resolved_wh)
 
     # ── Phase 2: Generate with IN + financial_services ──────────────────────
@@ -5865,7 +5865,7 @@ genie_spaces = [
     legacy = ENVS_DIR / env / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
-            "Terraform created a new Genie Space in attach mode — expected no "
+            "Terraform created a new Genie agent in attach mode — expected no "
             ".genie_space_id_* file. The existing space should be used as-is."
         )
     print(f"  {_green('PASS')}  No .genie_space_id_* file: Terraform did not create a new space")
@@ -6038,7 +6038,7 @@ def _create_asean_bank_genie_space_via_api(
     auth_file: Path,
     warehouse_id: str,
 ) -> str:
-    """Create a Genie Space for ASEAN Regional Banking Analytics via REST API."""
+    """Create a Genie agent for ASEAN Regional Banking Analytics via REST API."""
     asean_tables = [
         f"{DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.customers",
         f"{DEV_ASEAN_CAT}.{ASEAN_SCHEMA}.accounts",
@@ -6069,7 +6069,7 @@ def scenario_asean_bank_demo(
     _step("Phase 1 — Creating ASEAN banking tables")
     resolved_wh = _setup_asean_bank_data(auth_file, warehouse_id)
 
-    _step("Phase 1 — Creating rich Genie Space via API")
+    _step("Phase 1 — Creating rich Genie agent via API")
     space_id = _create_asean_bank_genie_space_via_api(auth_file, resolved_wh)
 
     # ── Phase 2: Generate with SEA + financial_services ─────────────────────
@@ -6141,7 +6141,7 @@ genie_spaces = [
     legacy = ENVS_DIR / env / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
-            "Terraform created a new Genie Space in attach mode — expected no "
+            "Terraform created a new Genie agent in attach mode — expected no "
             ".genie_space_id_* file. The existing space should be used as-is."
         )
     print(f"  {_green('PASS')}  No .genie_space_id_* file: Terraform did not create a new space")
@@ -6215,13 +6215,13 @@ SCENARIOS: dict[str, tuple[str, Callable]] = {
     "multi-env":            ("Two independent envs (dev Finance, bu2 Clinical)",                  scenario_multi_env),
     "attach-promote":       ("Attach to UI-created space (API discovery) + promote",              scenario_attach_and_promote),
     "self-service-genie":   ("Central governance + BU teams self-serve Genie (MODE=governance/genie)", scenario_self_service_genie),
-    "abac-only":            ("ABAC governance only (no Genie Space) + upgrade to Genie",         scenario_abac_only),
-    "multi-space-import":   ("Import two UI-created Genie Spaces in one make generate",          scenario_multi_space_import),
+    "abac-only":            ("ABAC governance only (no Genie agent) + upgrade to Genie",         scenario_abac_only),
+    "multi-space-import":   ("Import two UI-created Genie agents in one make generate",          scenario_multi_space_import),
     "schema-drift":    ("Column tag drift detection after ADD/DROP/RENAME COLUMN",           scenario_schema_drift),
     "genie-only":      ("Genie-only mode (genie_only=true, no account-level resources)",    scenario_genie_only),
     "country-overlay": ("Country/region overlays (ANZ, IN, SEA) — generation only",         scenario_country_overlay),
     "industry-overlay": ("Industry overlays (financial/healthcare/retail) + country+industry combo", scenario_industry_overlay),
-    "genie-import-no-abac": ("Import Genie Space, deploy to prod without ABAC",            scenario_genie_import_no_abac),
+    "genie-import-no-abac": ("Import Genie agent, deploy to prod without ABAC",            scenario_genie_import_no_abac),
     "aus-bank-demo": ("Australian bank demo — champion flow (ANZ + financial_services, import + promote)", scenario_aus_bank_demo),
     "india-bank-demo": ("India bank demo — champion flow (IN + financial_services, import + promote)", scenario_india_bank_demo),
     "asean-bank-demo": ("ASEAN bank demo — champion flow (SEA + financial_services, import + promote)", scenario_asean_bank_demo),

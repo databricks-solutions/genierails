@@ -27,7 +27,7 @@ Currently, validation only runs against the generated `.tfvars` files. If someon
 
 **Design:**
 - `make validate-live ENV=<env>` compares deployed Databricks state against config
-- Checks: tag assignments exist, FGAC policies match, masking functions exist, Genie Space ACLs match
+- Checks: tag assignments exist, FGAC policies match, masking functions exist, Genie agent ACLs match
 - Reports drift as a structured diff (added/removed/modified)
 
 **Implementation notes:**
@@ -44,7 +44,7 @@ GenieRails is designed for single workspace per `ENV`. Large organizations need 
 **Design:**
 - Account layer (groups, tag policies) is already shared across workspaces — no change needed
 - Data access layer (tag assignments, FGAC policies) is per-catalog, not per-workspace — no change needed
-- Workspace layer (Genie Spaces, ACLs) IS per-workspace — needs a "workspace mesh" mode
+- Workspace layer (Genie agents, ACLs) IS per-workspace — needs a "workspace mesh" mode
 
 **Proposed "workspace mesh" mode:**
 ```
@@ -52,11 +52,11 @@ envs/
   account/          # shared across all workspaces
   dev/
     data_access/    # shared governance for dev catalogs
-    workspace_a/    # Genie Spaces for workspace A
-    workspace_b/    # Genie Spaces for workspace B
+    workspace_a/    # Genie agents for workspace A
+    workspace_b/    # Genie agents for workspace B
   prod/
     data_access/    # shared governance for prod catalogs
-    workspace_c/    # Genie Spaces for workspace C
+    workspace_c/    # Genie agents for workspace C
 ```
 
 **Implementation notes:**

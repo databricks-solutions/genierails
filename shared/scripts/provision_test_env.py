@@ -1176,7 +1176,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     # On AWS (especially ap-southeast-2), the account-level "Enforce On"
     # setting does not propagate instantly to new workspaces.  We:
     #   1. Enable the workspace-level setting via PATCH.
-    #   2. Create a throwaway Genie Space and poll GET until the read-back
+    #   2. Create a throwaway Genie agent and poll GET until the read-back
     #      succeeds (confirming the Genie API is fully functional).
     #   3. Delete the throwaway space.
     #
@@ -1225,7 +1225,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
         _ok("Partner Powered AI enabled on workspace")
     except Exception as exc:
         _warn(f"Could not enable Partner Powered AI: {exc}")
-        _warn("Genie Space read-back may fail if it hasn't propagated from account settings.")
+        _warn("Genie agent read-back may fail if it hasn't propagated from account settings.")
 
     # Note: Genie API GET read-back may remain blocked by Partner Powered AI
     # on fresh AWS workspaces even after the workspace-level setting is enabled.

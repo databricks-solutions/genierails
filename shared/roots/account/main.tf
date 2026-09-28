@@ -129,7 +129,7 @@ variable "genie_space_id" {
 
 variable "genie_space_title" {
   type    = string
-  default = "Genie Space"
+  default = "Genie agent"
 }
 
 variable "genie_space_description" {
