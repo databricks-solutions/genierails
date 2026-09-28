@@ -238,6 +238,8 @@ make verify-access  ENV=prod VERIFY_KEY_COLUMN=customer_id
 ```
 The `--groups` flag works exactly as in **step 1c** above — they are *your own* IdP group names, and `payments_ops,regional_analysts,viewers` are just placeholders. Use the **same** tier groups you used in dev (your IdP syncs the same groups into the prod workspace).
 
+**What these commands do:** `apply-governance` deploys the **enforcement only** — the account layer (groups, tag policies) and the data_access layer (masking functions, ABAC/row-filter policies, grants) — but **not** the workspace layer, so the Genie space is *not* created yet (that happens in Phase 5, after the gate). `audit-rulebook` is a **drift check**: it reports any prod `class.*` / `gr_treatment` tag that has **no covering policy or mask** in the promoted rulebook (e.g. a rule dropped during promotion, or a prod-only type your mapping doesn't handle) — a clean run means every tag maps to a rule. `verify-access` runs the **effective-access test**: it queries the footprint tables **as each tier's principal** and confirms an unprivileged tier sees masked values while an authorized tier sees raw — proving the masking actually fires (tested by effect, not by inspection). `VERIFY_KEY_COLUMN=customer_id` is the shared key column it uses to line up the same rows across tiers for that comparison.
+
 > Use **`apply-governance`** here, not `make apply` — a full `apply` runs the workspace layer and would create the Genie space before the gate passes. If prod surfaces a type your mapping doesn't cover, update `treatment_config.json`, re-`generate`, re-gate.
 
 ---
