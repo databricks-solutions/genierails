@@ -11,65 +11,6 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 
 ---
 
-## Sample Environment Setup (Optional)
-
-This is demo tooling only; skip it when using your own tables and Genie Space.
-It uses no external data source and has one dependency:
-
-```bash
-cd shared/examples/champion_flow
-python -m pip install -r requirements.txt
-python setup_sample_env.py --profile DEFAULT --catalog my_catalog --warehouse-id abc123
-```
-
-The script prints the exact `uc_tables`, `genie_spaces`, and
-`sql_warehouse_id` snippet to paste into `env.auto.tfvars`. Re-runs are safe.
-Teardown relies on a local ownership record and does not infer resources to
-delete:
-
-```bash
-python teardown_sample_env.py --profile DEFAULT --catalog my_catalog
-# Equivalent: add --teardown to the setup command.
-```
-
-Use `--help` to see the `--host`, `--schema`, `--rows`, and environment-variable
-alternatives.
-
-Once those three values are in `env.auto.tfvars`, follow the rest of this guide from **Phase 0** below unchanged — the sample footprint (`customers` / `payments` / `notes`, seeded with realistic synthetic PII) is exactly what every phase here assumes.
-
----
-
-## At a glance — the phase map
-
-| Phase | Where | What you're doing | Commands you run | You're done when | Users can query it? |
-|---|---|---|---|---|---|
-| **0 Setup** | dev | Add your credentials and create the per-environment config folders. | `make setup`, `make init-env ENV=dev` | `envs/dev/auth.auto.tfvars` and `env.auto.tfvars` are filled in | No |
-| **1 Build & test in dev** | dev | Databricks scans your data and labels the sensitive columns; GenieRails drafts the protection rules from those labels, checks that every sensitive column is covered, applies the protections, and you confirm the masking actually works — all in a safe dev copy first. | `enable-classification` → *(wait for the scan)* → `generate` → `coverage-gate` → `validate-generated` → `apply` → `verify-access` | The coverage check passes and you've seen sensitive values come back masked | No — turn it on only briefly to run the masking check, then off |
-| **2 Promote the rules** | dev→prod | Copy only the *rules* to production — never the dev data, and never dev's column labels. | `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=...` | `envs/prod/env.auto.tfvars` is written | — |
-| **3 Scan in prod** | prod | Let production scan its *own* real data and label its own sensitive columns. | fill `envs/prod/auth.auto.tfvars` → `enable-classification` → *(wait for the scan)* | Production's sensitive columns are labeled | No |
-| **4 Prove coverage** | prod | Re-check that every sensitive column production found is protected, apply the protections, and confirm the masking works. This is the check that blocks the release if anything is still uncovered. | `generate` → `coverage-gate` → `apply-governance` → `audit-rulebook` → `verify-access` | The coverage check passes and masking is confirmed | No |
-| **5 Open to users** | prod | Only now — with coverage proven — release access so business users can query the agent. | set `business_access_enabled=true` → `make apply ENV=prod` → `make evidence` | Business users can reach the agent (query + run access released) | Yes |
-| **6 Keep it covered** | prod | On a schedule, re-scan and re-check so sensitive data that arrives later stays protected. | scheduled `audit-schema` / `audit-rulebook` / `generate-delta` | — | Yes |
-
-> **New here?** Each command is walked through step-by-step in its phase below, and jargon like *coverage check* (`coverage-gate`), *masking*, and *rules vs. facts* is defined in the [Glossary](#glossary).
-
----
-
-## Fill these in before you start
-
-Gather these once — every phase reuses them:
-
-| Value | Where it comes from |
-|---|---|
-| **Deploying Service Principal** `client_id` + `client_secret` | An SP with **Account Admin + Workspace Admin + Metastore Admin** on the *same* account (see Prerequisites). Goes in `envs/<env>/auth.auto.tfvars`. |
-| **Dev / prod catalog names** | Your UC catalogs (e.g. `dev_finance` / `prod_finance`). |
-| **SQL warehouse id** (per env) | An existing serverless warehouse id — **or leave blank** to auto-create a serverless PRO warehouse. |
-| **Curated Genie space** (needed for the agent) | From the Genie UI URL. **To deploy the Genie agent and get Layer-3 `CAN_RUN`, you MUST configure a `genie_spaces` entry** (an existing space id, or `genie_space_id=""` + `uc_tables` to create one). `genie_spaces = []` governs *data only* — no agent, no Layer 3. |
-| **IdP group names** (one per access tier, strictest first) | Your AIM/SCIM-synced groups, e.g. `payments_ops,regional_analysts,viewers`. GenieRails consumes them — it never creates them. |
-| **Shared key column** | One column present in **all** footprint tables (e.g. `customer_id`) — needed by `verify-access` to pair rows. |
-
----
-
 ## The mental model
 
 > **Prod decides what's sensitive and is the final gate. Dev is the rehearsal.** You promote the **rules**; you re-derive the **facts**. Expose the agent **last**, only after a passing prod coverage check. Fail closed, never fail open.
@@ -100,14 +41,19 @@ The single enforcement key is **`gr_treatment`** — GenieRails derives exactly 
 
 ---
 
-## Glossary
+## At a glance — the phase map
 
-- **`gr_treatment`** — the one GenieRails-owned governed tag whose value picks a column's mask.
-- **facts vs rules** — *facts* = which columns got tagged (per workspace, from the scan); *rules* = the mapping + policies (portable, promoted).
-- **footprint** — the exact tables the agent can reach (your `uc_tables` / Genie space tables).
-- **fail-closed** — if native classification can't be read, `generate` aborts rather than guessing.
-- **exposure gate** — `business_access_enabled`; releases `SELECT` + Genie `CAN_RUN` only when `true`.
-- **AIM / SCIM** — how your IdP syncs groups into Databricks; GenieRails consumes those groups.
+| Phase | Where | What you're doing | Commands you run | You're done when | Users can query it? |
+|---|---|---|---|---|---|
+| **0 Setup** | dev | Add your credentials and create the per-environment config folders. | `make setup`, `make init-env ENV=dev` | `envs/dev/auth.auto.tfvars` and `env.auto.tfvars` are filled in | No |
+| **1 Build & test in dev** | dev | Databricks scans your data and labels the sensitive columns; GenieRails drafts the protection rules from those labels, checks that every sensitive column is covered, applies the protections, and you confirm the masking actually works — all in a safe dev copy first. | `enable-classification` → *(wait for the scan)* → `generate` → `coverage-gate` → `validate-generated` → `apply` → `verify-access` | The coverage check passes and you've seen sensitive values come back masked | No — turn it on only briefly to run the masking check, then off |
+| **2 Promote the rules** | dev→prod | Copy only the *rules* to production — never the dev data, and never dev's column labels. | `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=...` | `envs/prod/env.auto.tfvars` is written | — |
+| **3 Scan in prod** | prod | Let production scan its *own* real data and label its own sensitive columns. | fill `envs/prod/auth.auto.tfvars` → `enable-classification` → *(wait for the scan)* | Production's sensitive columns are labeled | No |
+| **4 Prove coverage** | prod | Re-check that every sensitive column production found is protected, apply the protections, and confirm the masking works. This is the check that blocks the release if anything is still uncovered. | `generate` → `coverage-gate` → `apply-governance` → `audit-rulebook` → `verify-access` | The coverage check passes and masking is confirmed | No |
+| **5 Open to users** | prod | Only now — with coverage proven — release access so business users can query the agent. | set `business_access_enabled=true` → `make apply ENV=prod` → `make evidence` | Business users can reach the agent (query + run access released) | Yes |
+| **6 Keep it covered** | prod | On a schedule, re-scan and re-check so sensitive data that arrives later stays protected. | scheduled `audit-schema` / `audit-rulebook` / `generate-delta` | — | Yes |
+
+> **New here?** Each command is walked through step-by-step in its phase below, and jargon like *coverage check* (`coverage-gate`), *masking*, and *rules vs. facts* is defined in the [Glossary](#glossary).
 
 ---
 
@@ -123,6 +69,49 @@ The single enforcement key is **`gr_treatment`** — GenieRails derives exactly 
 5. For `verify-access`: a **shared key column** across the footprint tables. `verify-access` creates and then deletes temporary `genierails-verify-<tier>` test principals (needs account-admin; your IdP sync must tolerate a transient non-IdP group member).
 
 See [Prerequisites](../../docs/prerequisites.md) for SP setup details.
+
+---
+
+## Fill these in before you start
+
+Gather these once — every phase reuses them:
+
+| Value | Where it comes from |
+|---|---|
+| **Deploying Service Principal** `client_id` + `client_secret` | An SP with **Account Admin + Workspace Admin + Metastore Admin** on the *same* account (see Prerequisites). Goes in `envs/<env>/auth.auto.tfvars`. |
+| **Dev / prod catalog names** | Your UC catalogs (e.g. `dev_finance` / `prod_finance`). |
+| **SQL warehouse id** (per env) | An existing serverless warehouse id — **or leave blank** to auto-create a serverless PRO warehouse. |
+| **Curated Genie space** (needed for the agent) | From the Genie UI URL. **To deploy the Genie agent and get Layer-3 `CAN_RUN`, you MUST configure a `genie_spaces` entry** (an existing space id, or `genie_space_id=""` + `uc_tables` to create one). `genie_spaces = []` governs *data only* — no agent, no Layer 3. |
+| **IdP group names** (one per access tier, strictest first) | Your AIM/SCIM-synced groups, e.g. `payments_ops,regional_analysts,viewers`. GenieRails consumes them — it never creates them. |
+| **Shared key column** | One column present in **all** footprint tables (e.g. `customer_id`) — needed by `verify-access` to pair rows. |
+
+---
+
+## Sample Environment Setup (Optional)
+
+This is demo tooling only; skip it when using your own tables and Genie Space.
+It uses no external data source and has one dependency:
+
+```bash
+cd shared/examples/champion_flow
+python -m pip install -r requirements.txt
+python setup_sample_env.py --profile DEFAULT --catalog my_catalog --warehouse-id abc123
+```
+
+The script prints the exact `uc_tables`, `genie_spaces`, and
+`sql_warehouse_id` snippet to paste into `env.auto.tfvars`. Re-runs are safe.
+Teardown relies on a local ownership record and does not infer resources to
+delete:
+
+```bash
+python teardown_sample_env.py --profile DEFAULT --catalog my_catalog
+# Equivalent: add --teardown to the setup command.
+```
+
+Use `--help` to see the `--host`, `--schema`, `--rows`, and environment-variable
+alternatives.
+
+Once those three values are in `env.auto.tfvars`, follow the rest of this guide from **Phase 0** below unchanged — the sample footprint (`customers` / `payments` / `notes`, seeded with realistic synthetic PII) is exactly what every phase here assumes.
 
 ---
 
@@ -289,3 +278,14 @@ Key config & code: [`treatment_config.json`](../../treatment_config.json) (the `
 **It does:** discover the footprint, read native classification, derive one enforcement treatment per column, prove coverage with a blocking gate, verify masking by impersonation, and release Genie/data exposure only when the gate is green.
 
 **It does not:** decide what's sensitive (Unity Catalog's classifier does); remove human review (generated rules are a reviewable draft); manage warehouse `CAN_USE` (you grant it); make you legally compliant (it proves coverage, not sign-off); or replace Unity Catalog (it runs on top of it).
+
+---
+
+## Glossary
+
+- **`gr_treatment`** — the one GenieRails-owned governed tag whose value picks a column's mask.
+- **facts vs rules** — *facts* = which columns got tagged (per workspace, from the scan); *rules* = the mapping + policies (portable, promoted).
+- **footprint** — the exact tables the agent can reach (your `uc_tables` / Genie space tables).
+- **fail-closed** — if native classification can't be read, `generate` aborts rather than guessing.
+- **exposure gate** — `business_access_enabled`; releases `SELECT` + Genie `CAN_RUN` only when `true`.
+- **AIM / SCIM** — how your IdP syncs groups into Databricks; GenieRails consumes those groups.
