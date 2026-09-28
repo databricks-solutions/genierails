@@ -2,6 +2,15 @@
 
 This document explains the layered state model, config files, and resource ownership.
 
+## Governance model — four invariants
+
+Everything below rests on four invariants of the champion flow:
+
+1. **Unity Catalog is the sensitivity source of truth.** Native Data Classification writes `class.*` labels on sensitive columns; GenieRails never guesses. When `enable_classification=true`, generation is fail-closed — unreadable/empty native results abort rather than fall back to LLM inference (unless the operator explicitly passes `--allow-llm-sensitivity`).
+2. **One `gr_treatment` per column.** GenieRails collapses a column's `class.*` findings deterministically to exactly one enforcement treatment (`gr_treatment`), so exactly one column mask ever resolves; masks are keyed to that treatment vocabulary.
+3. **A blocking coverage gate.** `make coverage-gate` fails the release if any classified sensitive column has no covering treatment/mask. It is a *separate* step — `make apply` does not run it — so run it as an explicit gate before applying.
+4. **The exposure gate controls release.** `business_access_enabled` withholds business `SELECT` and Genie `CAN_RUN` until set to `true`; enforcement resources can exist while access stays withheld. Prod re-derives its own facts (`derive-assignments`) before the gate opens.
+
 ## Layer Model
 
 The quickstart edits files in `envs/<env>/`, while Terraform itself runs from fixed roots in `roots/account`, `roots/data_access`, and `roots/workspace`. Make passes the correct `-var-file` inputs for you and keeps the split config synchronized.
@@ -99,7 +108,9 @@ genie_spaces = [
   },
 ]
 
-sql_warehouse_id = ""   # shared fallback; empty = auto-create serverless
+sql_warehouse_id        = ""     # shared fallback; empty = auto-create serverless
+enable_classification   = true   # turn on UC native Data Classification for the footprint
+business_access_enabled = false  # exposure gate: withhold SELECT + Genie CAN_RUN until coverage is green
 ```
 
 `manage_groups` defaults to `false` on every layer (account, `data_access`, workspace): groups are **consumed** — looked up by name from the IdP-synced account groups — not created. This is the normal path. Only for a demo/greenfield account with no IdP-synced groups should `envs/account/env.auto.tfvars` set `manage_groups = true` (opt-in group creation); workspace and `data_access` env files always stay on the lookup-only default. See [IdP-Synced Groups](advanced.md#idp-synced-groups-default).
@@ -128,7 +139,9 @@ Each entry in `genie_spaces` behaves based on whether `genie_space_id` is set:
 | `genie_space_id` in entry | What happens on `make apply` |
 | ------------------------- | ---------------------------- |
 | Empty (default) | Creates a new Genie agent, configures it fully (title, instructions, benchmarks, ACLs), trashes it on `make destroy` |
-| Set | Attaches to the existing space — never creates or deletes it; applies ACLs and pushes config changes back to the API |
+| Set | Attaches to the existing agent — never creates or deletes it; applies ACLs and pushes config changes back to the API |
+
+> **Exposure gate:** an agent can be *created and configured* while `business_access_enabled=false`, but its `CAN_RUN` ACLs (and business-user table `SELECT`) are withheld until the gate is opened — so an agent is never reachable by users before coverage is proven.
 
 When `make generate` creates the ABAC config, it also generates Genie agent config in `abac.auto.tfvars`:
 
@@ -152,13 +165,20 @@ All nine fields are included in the `serialized_space` when a new Genie agent is
 | ------ | ----------- |
 | `make setup` | Prepare `envs/account`, `envs/<env>/data_access`, and the selected `envs/<env>` |
 | `make init-env` | Explicitly bootstrap env directories and default config files |
-| `make generate` | Run `generate_abac.py` in the selected workspace environment |
+| `make generate` | (dev) Run `generate_abac.py`: read native `class.*`, derive one `gr_treatment`/column, draft rules + Genie content (LLM drafts rules/content; sensitivity is native) |
+| `make enable-classification` | Turn on UC native Data Classification + auto-tagging for the footprint (no generated files needed) |
+| `make derive-assignments` | (prod) Re-derive **only** tag assignments from live `class.*`, reusing the promoted rules — no LLM |
+| `make coverage-gate` | **Block** the release if any classified sensitive column has no covering mask (separate step; not run by `apply`) |
+| `make verify-access` | Prove masking/row filters by querying as per-tier test principals |
 | `make validate-generated` | Validate `envs/<env>/generated/` files after tuning |
 | `make validate` | Validate the selected split config (`account`, `data_access`, or `workspace`) |
 | `make promote` | Split `generated/` into account + data_access + workspace configs (same-env) |
 | `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG=prod_catalog` | Cross-env promote: remap catalog references from dev to prod, then split |
 | `make plan` | Run `terraform plan` in the selected layer root |
-| `make apply` | For `ENV=<workspace>`: promote, then apply account -> data_access -> workspace |
+| `make apply` | For `ENV=<workspace>`: promote (same-env split), then apply account -> data_access -> workspace; releases gated access only when `business_access_enabled=true` |
+| `make apply-governance` | Apply account + data_access only (enforcement; no Genie agent) |
+| `make apply-genie` | Apply the workspace layer only (Genie agent + ACLs) |
+| `make audit-schema` / `make audit-rulebook` | Drift checks (untagged sensitive columns / applied tags with no covering rule) |
 | `make import` | Import resources into the selected layer state (`account`, `data_access`, or workspace) |
 | `make migrate-state` | Move legacy state into the new module/layer addresses |
 | `make destroy` | Destroy only the selected layer state |
