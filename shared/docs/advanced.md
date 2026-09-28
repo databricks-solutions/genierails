@@ -4,8 +4,10 @@ This document covers optional and advanced workflows that most first-time users 
 
 ## Generation Options
 
+Generation consumes your IdP-synced groups, so it needs a group→tier mapping (`--groups`) unless you explicitly opt into demo group creation (`--create-groups`). Sensitivity comes from native `class.*` classification, not from these flags.
+
 ```bash
-make generate GENERATE_ARGS='--tables a.b.* c.d.e'
+make generate GENERATE_ARGS='--tables a.b.* c.d.e --groups "Finance_Analyst,Clinical_Staff"'
 make generate GENERATE_ARGS='--dry-run'
 ```
 
@@ -13,7 +15,7 @@ If you want to run the script directly, do it from inside the env workspace and 
 
 ```bash
 cd envs/dev
-python ../../generate_abac.py --tables "a.b.*" "c.d.e"
+python ../../generate_abac.py --tables "a.b.*" "c.d.e" --groups "Finance_Analyst,Clinical_Staff"
 python ../../generate_abac.py --dry-run
 ```
 
@@ -45,7 +47,7 @@ Before running `make apply`, the access-tier groups must already exist as accoun
   make generate GENERATE_ARGS='--groups "acme-finance-readers,acme-clinical-staff,acme-compliance"'
   ```
 
-  The LLM uses these exact names in generated FGAC policies, tag assignments, and Genie agent ACLs — it does not invent new ones.
+  The LLM uses these exact names in generated FGAC policies and Genie agent ACLs — it does not invent new ones. (Column *sensitivity* comes from native `class.*` classification, not from groups.)
 - `manage_groups` defaults to **`false`** everywhere (account, `data_access`, and workspace layers). All three layers look groups up by name via `data "databricks_group"`; none create them.
 - **Group-existence preflight:** `make generate` verifies every referenced group is synced into the account. If one is missing, generation **fails loudly and names the missing group**, telling you to enable AIM/SCIM (or fix the name) — rather than silently producing a grant that matches nobody. (The preflight is skipped only when account credentials aren't available; the account layer's `data "databricks_group"` lookup then fails at apply time instead.)
 - `group_members` stays empty in `envs/account/abac.auto.tfvars` — the IdP owns membership.
@@ -71,7 +73,7 @@ If you have pre-existing masking SQL UDFs, the tool can incorporate them:
 1. Run `make generate` so the AI creates `masking_functions.sql` and `abac.auto.tfvars` in `envs/dev/generated/`
 2. Edit `envs/dev/generated/masking_functions.sql` and replace generated UDF definitions with your existing functions
 3. Update `function_name`, `function_catalog`, and `function_schema` in `envs/dev/generated/abac.auto.tfvars` to match your existing UDFs
-4. Run `make apply`
+4. Run `make coverage-gate` (confirm every classified column still has a covering mask), then `make apply`
 
 ## Multi-Environment File Layout
 
@@ -128,9 +130,8 @@ That moves root working files into `envs/dev/` and rewrites any legacy top-level
 
 ## Examples
 
-Pre-built examples with 3-layer configs (account, data access, workspace) are available in:
-- `examples/legacy/aus_bank_demo/` — **end-to-end champion flow** for an Australian bank with ANZ + financial services overlays, dev-to-prod promotion ([README](../examples/legacy/aus_bank_demo/README.md))
-- `examples/legacy/india_bank_demo/` — **India champion flow** for Lakshmi Bank with India + financial services overlays, Aadhaar/PAN/GSTIN/UPI masking ([README](../examples/legacy/india_bank_demo/README.md))
-- `examples/legacy/asean_bank_demo/` — **ASEAN champion flow** for a Singapore-HQ regional bank with SEA + financial services overlays, 6-country national IDs, multi-currency ([README](../examples/legacy/asean_bank_demo/README.md))
-- `examples/finance/` — 5-group finance demo with PII, PCI, and AML governance
-- `examples/healthcare/` — 6-group healthcare demo with HIPAA-compliant PHI, PII, and regional row filters ([walkthrough](../examples/healthcare/healthcare_walkthrough.md))
+Pre-built examples with 3-layer configs (account, data access, workspace):
+- `examples/champion_flow/` — **the canonical end-to-end walkthrough** (native classification → coverage gate → safe dev→prod promotion) ([README](../examples/champion_flow/README.md))
+- `examples/finance/` — finance validation fixture: PII, PCI, and AML governance
+- `examples/healthcare/` — healthcare fixture: PHI, PII, and regional row filters ([walkthrough](../examples/healthcare/healthcare_walkthrough.md))
+- `examples/legacy/{aus,india,asean}_bank_demo/` — **older LLM-overlay demos** (region-specific: ANZ/TFN, India/Aadhaar-PAN-GSTIN-UPI, ASEAN 6-country IDs). Superseded by the champion flow; kept for reference.

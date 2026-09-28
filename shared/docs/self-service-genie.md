@@ -43,7 +43,7 @@ Workspace layer    →  Workspace Assignment + Entitlements + Genie agents + ACL
 
 The workspace module (`modules/workspace/main.tf`) looks up groups by name — it never creates them. This means BU teams can reference the IdP-synced access-tier groups (provisioned via AIM, or SCIM where AIM isn't available) without any additional coordination. The IdP owns groups and membership; the governance team owns grants and ABAC, and consumes those groups by name.
 
-Catalog grants (`USE_CATALOG`, `USE_SCHEMA`, `SELECT`) are applied by the governance team's data_access layer. Once in place, BU teams' Genie agents can query those catalogs immediately.
+Catalog grants (`USE_CATALOG`, `USE_SCHEMA`, `SELECT`) are applied by the governance team's data_access layer. Note the **exposure gate**: business-user `SELECT` and Genie `CAN_RUN` are withheld until `business_access_enabled = true`, so an agent becomes reachable only after coverage is proven and the gate is opened — not the moment grants are declared.
 
 ---
 
@@ -63,8 +63,9 @@ What they commit to Git:
 
 Commands they run:
 ```bash
-make generate ENV=<env> MODE=governance   # LLM generates ABAC config only
-make apply-governance ENV=<env>           # applies account + data_access
+make generate ENV=<env> MODE=governance   # native class.* decides sensitivity; LLM drafts the rulebook (policies/masks)
+make coverage-gate ENV=<env>              # BLOCKS if any classified column is unprotected (run before applying)
+make apply-governance ENV=<env>           # applies account + data_access (enforcement; no Genie agent)
 make destroy-governance ENV=<env>         # tears down data_access only
 ```
 
@@ -155,7 +156,7 @@ By default, the workspace layer looks up groups at the account level, which requ
 | UC table access | Implicit (SP is metastore admin) | Explicit grants required (step 3) |
 | SP role required | Account Admin + Workspace Admin + Metastore Admin | Workspace USER + SQL entitlement |
 
-The governance team manages workspace assignments, entitlements, warehouses, UC grants, and Genie agent ACLs via `make apply-governance` — attaching them to the IdP-synced groups it consumes by name (the IdP owns the groups and their membership; GenieRails does not mint them). The BU team only manages Genie agent creation and configuration.
+`make apply-governance` applies the **account + data_access** layers only — groups (looked up from the IdP), tag policies, tag assignments, masking functions, FGAC policies, and UC catalog grants. Workspace assignments, entitlements, and Genie agent ACLs belong to the **workspace** layer (`make apply-genie` / full `make apply`), attached to the same IdP-synced groups (the IdP owns the groups and their membership; GenieRails consumes them by name). The BU team manages Genie agent creation and configuration.
 
 > **Tested:** The `genie-only` integration test (`make test-genie-only`) creates a minimal-privilege SP with only workspace USER + SQL entitlement (no admin roles), grants it CAN USE on a warehouse and UC table access, and verifies the full `genie_only = true` flow end-to-end — including confirming that zero account-level resources appear in Terraform state.
 
@@ -212,7 +213,7 @@ make promote SOURCE_ENV=bu_finance_dev DEST_ENV=bu_finance_prod \
 make apply-genie ENV=bu_finance_prod
 ```
 
-Governance runs separately for the prod environment — the promotion only carries `genie_space_configs`, not ABAC.
+Governance runs separately for the prod environment — the promotion only carries `genie_space_configs`, not ABAC. Prod governance re-derives its own facts (`make derive-assignments ENV=<prod>`, no LLM), and must pass `make coverage-gate` before the exposure gate is opened.
 
 ### Import an existing Genie agent to prod (no ABAC)
 
@@ -265,11 +266,11 @@ make apply-genie ENV=bu_import_prod
 
 **What if a BU needs a new group?**
 
-New groups must be requested from the governance team. The governance team adds the group to `envs/account/abac.auto.tfvars`, runs `make apply-governance`, and the group becomes available for BU teams to reference in their Genie agent ACLs. BU teams can then add the group name to their `env.auto.tfvars` (genie_spaces ACLs) and `make apply-genie`.
+New groups come from your IdP (AIM/SCIM), not from GenieRails. Request the new tier group be synced from the IdP; once it appears as an account group, the governance team references it by name in `envs/account/abac.auto.tfvars`, runs `make apply-governance`, and BU teams can reference it in their Genie agent ACLs. (Only in an opt-in demo/greenfield account with `manage_groups = true` does GenieRails create the group itself.) BU teams can then add the group name to their `env.auto.tfvars` (genie_spaces ACLs) and `make apply-genie`.
 
 **Can a BU team see what groups are available?**
 
-Yes — the group names are in `envs/account/abac.auto.tfvars`. In `genie` mode, `make generate` auto-loads those names and includes them in the prompt so the LLM suggests the right group references.
+Yes — the group names are in `envs/account/abac.auto.tfvars`. In `genie` mode, `make generate` auto-loads those names so generated ACLs reference your existing IdP groups by exact name — the LLM does not invent group names.
 
 **Can a BU team run `make apply` (full) instead of `make apply-genie`?**
 
