@@ -2,6 +2,19 @@
 
 Planned features and improvements identified during the comprehensive project review. Each item includes a design sketch and estimated effort.
 
+## Delivered since this roadmap was written
+
+The native-classification governance model has since shipped and is the current recommended flow — see the **[Champion Flow](../examples/champion_flow/README.md)**. The items below are *remaining* future work, distinct from what has already landed:
+
+- **Native classification as the sensitivity source** — Unity Catalog `class.*` tags decide what's sensitive (no LLM guessing); fail-closed if unreadable.
+- **Deterministic treatment derivation** — one `gr_treatment` per column, so exactly one mask resolves.
+- **Blocking coverage gate** — `make coverage-gate` fails the release until every classified column is protected.
+- **Safe dev→prod promotion** — `make derive-assignments` re-derives prod facts from prod's own classification (no LLM re-generation), reusing the promoted rules.
+- **Exposure gate** — `business_access_enabled` withholds business `SELECT` + Genie `CAN_RUN` until the coverage gate is green.
+- **Consume-IdP groups by default** — GenieRails consumes IdP-synced groups (`manage_groups=false`) rather than inventing them.
+- **Effective-access verification** — `make verify-access` proves masking/row filters by querying as per-tier principals (item 5 below).
+- **Scheduled steady-state governance** and a **compliance evidence report**.
+
 ## 1. Rollback Mechanism
 
 **Status:** Planned | **Effort:** Medium
@@ -21,9 +34,11 @@ Currently, there's no `make rollback` command. Users must manually manage Terraf
 
 ## 2. Live State Validation
 
-**Status:** Planned | **Effort:** Medium
+**Status:** Partially delivered | **Effort:** Medium
 
-Currently, validation only runs against the generated `.tfvars` files. If someone manually edits governance in the Databricks UI, Terraform will overwrite it on next `apply`.
+`make audit-rulebook` (flags tags with no covering rule) and `make audit-schema` (untagged sensitive columns) provide drift detection today; the full deployed-vs-config live diff described below is still planned.
+
+Currently, structured validation only runs against the generated `.tfvars` files. If someone manually edits governance in the Databricks UI, Terraform will overwrite it on next `apply`.
 
 **Design:**
 - `make validate-live ENV=<env>` compares deployed Databricks state against config
