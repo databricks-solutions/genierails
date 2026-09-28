@@ -123,7 +123,21 @@ def derive_assignments(config_path: Path, auth_path: Path, env_path: Path) -> in
     derived, _changes = derive_treatment_model(
         {"tag_assignments": retained + native_assignments}, config
     )
-    refreshed = derived["tag_assignments"]
+    sensitivity_keys = {
+        key for treatment in config.treatments for key, _value in treatment.sources
+    }
+    # Match generate's native-authoritative finalization: class.* findings are
+    # source facts, while only the single gr_treatment assignment is persisted
+    # for enforcement. Keeping intermediate pii_level/pci_level assignments
+    # makes the promoted rules invalid because those source-family tag policies
+    # are intentionally not promoted.
+    refreshed = [
+        item for item in derived["tag_assignments"]
+        if not (
+            item.get("entity_type") == "columns"
+            and item.get("tag_key") in sensitivity_keys
+        )
+    ]
     _assert_promoted_masks_cover(refreshed, promoted, config.tag_key)
     updated = _replace_bracket_section(
         original,

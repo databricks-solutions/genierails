@@ -76,11 +76,8 @@ def test_refresh_changes_only_assignments_and_derives_one_treatment_per_column(t
     assignments = parsed["tag_assignments"]
     assert {tuple(sorted(item.items())) for item in assignments} == {
         tuple(sorted({"entity_type": "tables", "entity_name": "prod.sales.customers", "tag_key": "row_scope", "tag_value": "anz"}.items())),
-        tuple(sorted({"entity_type": "columns", "entity_name": "prod.sales.customers.email", "tag_key": "pii_level", "tag_value": "masked_email"}.items())),
         tuple(sorted({"entity_type": "columns", "entity_name": "prod.sales.customers.email", "tag_key": "gr_treatment", "tag_value": "email_partial"}.items())),
-        tuple(sorted({"entity_type": "columns", "entity_name": "prod.sales.customers.ssn", "tag_key": "pii_level", "tag_value": "masked_ssn"}.items())),
         tuple(sorted({"entity_type": "columns", "entity_name": "prod.sales.customers.ssn", "tag_key": "gr_treatment", "tag_value": "ssn_last4"}.items())),
-        tuple(sorted({"entity_type": "columns", "entity_name": "prod.sales.customers.free_text", "tag_key": "pii_level", "tag_value": "redacted_mixed"}.items())),
         tuple(sorted({"entity_type": "columns", "entity_name": "prod.sales.customers.free_text", "tag_key": "gr_treatment", "tag_value": "redact"}.items())),
     }
     assert not any("no_longer_sensitive" in item["entity_name"] for item in assignments)
