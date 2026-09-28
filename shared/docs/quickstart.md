@@ -36,23 +36,26 @@ make enable-classification ENV=dev
 # Poll system.information_schema.column_tags or system.data_classification.results
 # until class.* tags have landed for the configured footprint.
 
-make generate
+# Generation consumes your existing IdP-synced groups (setup scaffolds
+# manage_groups = false); pass one group per access tier, strictest first.
+make generate GENERATE_ARGS='--groups "<idp-tier-1>,<idp-tier-2>,<idp-tier-3>"'
 vi envs/dev/generated/abac.auto.tfvars
 # Review and iterate on the generated governance and Genie config:
-#   - groups
-#   - tag policies and tag assignments
+#   - groups            (references to your IdP-synced groups — not created here)
+#   - tag assignments   (one gr_treatment derived per classified column)
 #   - FGAC policies
-#   - genie_space_configs (title, instructions, benchmarks, filters, measures per space)
-#   - acl_groups per space (which groups can run each Genie agent)
+#   - genie_space_configs (title, instructions, benchmarks, filters, measures per agent)
+#   - acl_groups per agent (which of your groups can run each Genie agent)
 
 vi envs/dev/generated/masking_functions.sql
 # Review and iterate on the generated masking and row-filter functions.
 
+make coverage-gate       # BLOCKS the release if any classified sensitive column has no protection ("says NO")
 make validate-generated
-# Confirm `make audit-schema` is clean, then release business access in
-# envs/dev/env.auto.tfvars:
-#   business_access_enabled = true
-make apply
+make apply               # business_access_enabled = false: enforcement is applied, but access stays withheld
+# Verify masking works, then release access: open the gate and re-apply.
+#   envs/dev/env.auto.tfvars -> business_access_enabled = true
+make apply               # releases business SELECT + Genie CAN_RUN
 ```
 
 ## What happens end-to-end
@@ -62,7 +65,8 @@ make apply
 3. You wait for the asynchronous Databricks scan to land `class.*` tags
 4. `make generate` fetches DDLs and native classification, then writes a draft into `envs/dev/generated/`
 5. You tune the generated governance and Genie config
-6. `make apply` splits the generated draft into layered configs and applies all three layers
+6. `make coverage-gate` blocks the release if any classified sensitive column has no protection
+7. `make apply` splits the generated draft into layered configs and applies all three layers (with `business_access_enabled = false`, enforcement is applied but business access is withheld until you open the gate and re-apply)
 
 Generation remains fail-closed: after enabling classification, wait for native tags before
 running it. The explicit `--allow-llm-sensitivity` escape hatch is unchanged.
@@ -70,8 +74,8 @@ running it. The explicit `--allow-llm-sensitivity` escape hatch is unchanged.
 Business exposure is fail-closed. With the default `business_access_enabled = false`,
 apply creates the enforcement scaffolding and may create/configure Genie agents, but
 it withholds business-group table `SELECT` and Genie `CAN_RUN` ACLs. Set the flag to
-`true` only after the coverage validation and schema drift check are green. Space
-creation remains ungated so administrators can finish and inspect its configuration
+`true` only after `make coverage-gate` passes and you've verified masking, then re-apply.
+Agent creation remains ungated so administrators can finish and inspect its configuration
 before releasing it to business users.
 
 ## Multiple Genie agents and multiple catalogs
