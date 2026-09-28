@@ -60,6 +60,9 @@ The whole flow as a checklist. Each line is a command to run, a one-time file ed
 
 ## Prerequisites & what to gather
 
+> **AWS or Azure?** This flow is cloud-neutral — run it from either `aws/` or `azure/`; all Terraform, scripts, and `make` targets are shared. **Azure users:** in each `envs/<env>/auth.auto.tfvars` you must set `databricks_account_host = "https://accounts.azuredatabricks.net"` and use your Azure-format workspace host (`https://adb-<id>.<n>.azuredatabricks.net`). The provider defaults to the **AWS** account host, so the account-layer steps (groups, tag policies) fail on Azure if you leave it unset. See [Azure prerequisites](../../azure/docs/azure-prerequisites.md). Everything else in this walkthrough is identical on both clouds.
+
+
 **Tools:** the Databricks Terraform provider `~> 1.111.0` (auto-selected), **GNU Make**, Python 3, and Terraform on your `PATH`. *(On macOS, Apple's `/usr/bin/make` and Homebrew may be blocked by an unaccepted Xcode license — install GNU Make another way, e.g. `conda install make`, and put it first on `PATH`.)*
 
 Gather these once — every phase reuses them:

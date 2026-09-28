@@ -32,7 +32,7 @@ Check the [Prerequisites](shared/docs/prerequisites.md) first (Python, Terraform
 https://github.com/user-attachments/assets/b58d83e7-d95c-416d-9df3-03292d9db617
 
 
-> **▶ Start here — the champion flow:** [Champion Flow — Native-Classification-Driven Governance, End-to-End](shared/examples/champion_flow/) — the canonical walkthrough. Unity Catalog decides what's sensitive, GenieRails derives one enforcement treatment per column, a coverage gate blocks promotion until every sensitive column is covered, and the agent is exposed only after the prod gate passes. Validated end-to-end on real dev + prod workspaces.
+> **▶ Start here — the champion flow:** [Champion Flow — Native-Classification-Driven Governance, End-to-End](shared/examples/champion_flow/) — the canonical walkthrough. Unity Catalog decides what's sensitive, GenieRails derives one enforcement treatment per column, a coverage gate blocks promotion until every sensitive column is covered, and the agent is exposed only after the prod gate passes.
 > 
 > _Region/industry overlay demos (older LLM-overlay flow):_
 > - [Australian Bank Demo](shared/examples/aus_bank_demo/) — ANZ-specific masking (TFN, Medicare, BSB), PCI compliance, AML row filters
