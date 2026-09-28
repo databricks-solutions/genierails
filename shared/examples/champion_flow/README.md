@@ -7,7 +7,7 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 > **Just want to run it?** → **[Quick start — every command in order](#quick-start--every-command-in-order)**.
 > **No Genie agent or tables of your own yet?** → do **[Phase 0](#phase-0--set-up-dev)**, then the optional **[Sample Environment Setup](#sample-environment-setup-optional)**, then continue.
 
-Terms in `code` (and words like *coverage check*, *masking*, *access tier*) are defined in the **[Glossary](#glossary)** at the bottom — skim it first if any term is unfamiliar.
+Terms in `code` (and words like *coverage check*, *masking*, *access tier*) are defined in the **[Glossary](REFERENCE.md#glossary)** on the companion reference page — skim it first if any term is unfamiliar.
 
 ---
 
@@ -69,6 +69,7 @@ Every command in order — each step is a command to run, a one-time file edit, 
 1. On a schedule: `make audit-schema ENV=prod`, `make audit-rulebook ENV=prod`, `make generate-delta ENV=prod` — catch sensitive data that arrives later.
 
 > **Two things to know before you start:** (a) `verify-access` only works with the gate **open** (`business_access_enabled=true`) — that's why it runs *after* you flip the gate on, in both dev (Phase 1) and prod (Phase 5). (b) prod does **not** re-run `generate` — Phase 4 uses `make derive-assignments`, which re-derives only the `tag_assignments` from prod's live tags and keeps the promoted rules byte-for-byte (no model call). See [Phase 4](#phase-4--prove-coverage-the-gate).
+
 ---
 
 ## Prerequisites & what to gather
@@ -292,57 +293,6 @@ A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog gr
 
 ---
 
-## How it works (under the hood)
-
-**The exposure gate is mechanical.** `business_access_enabled` holds back exactly the two things that let a user reach data through the agent; everything else applies regardless:
-
-| Control | When it applies |
-|---|---|
-| Table `SELECT` grant | **held until `business_access_enabled=true`** |
-| Genie run permission (`CAN_RUN`) | **held until `business_access_enabled=true`** |
-| Workspace assignment + consume entitlement | applied on **every** apply (harmless without `SELECT`/`CAN_RUN`) |
-| Warehouse `CAN_USE` | **not managed by GenieRails** — you grant it (Phase 5) |
-
-So "expose last" isn't a policy you hope holds — there is simply no `SELECT` and no `CAN_RUN` until the gate is opened.
-
-**Three layers of governance, and the Terraform layers that build them:**
-
-| Governance layer (what it controls) | Built by Terraform layer | Contains |
-|---|---|---|
-| **Who can reach a table** | `account` + `data_access` | groups + the `USE CATALOG → USE SCHEMA → SELECT` grant chain |
-| **What they see through it** | `account` + `data_access` | governed tag policies + column masks + row filters (attribute-based access control) |
-| **Whether they can open/run the agent** | `workspace` | the Genie agent, its run permissions, workspace assignment + entitlement |
-
-(So the `data_access` Terraform layer covers both *access* and *masking*; the `workspace` layer is the agent itself.)
-
-**One mask per column.** The single enforcement key is **`gr_treatment`** — GenieRails derives exactly **one** value per column from its `class.*` labels (strictest label wins; a free-text column with multiple labels escalates to full redaction), so Unity Catalog's "only one mask may apply per column" rule is never violated.
-
-**Why prod keeps the classifier's tags.** The Terraform resource that records tag assignments carries `ignore_changes = all` — a standard Terraform *lifecycle* setting meaning "once these exist, don't change or delete them." That lets the **classifier own the `class.*` tags** in prod: when a scan writes a tag, Terraform leaves it alone instead of reverting it. The classifier owns the tags; GenieRails owns the rules.
-
----
-
-## Command reference
-
-| Command | Phase | What it does |
-|---|---|---|
-| `make setup` / `make init-env ENV=<e>` | 0 | Create local env dirs + default config files (no Databricks calls) |
-| `make enable-classification ENV=<e>` | 1/3 | Turn on UC Data Classification + auto-tagging for your tables |
-| `make generate ENV=<e> GENERATE_ARGS='--groups "..."'` | 1 | (dev) Draft masks + access rules from the model and derive one `gr_treatment`/column from native `class.*` (fail-closed) |
-| `make derive-assignments ENV=<e>` | 4 | (prod) Re-derive **only** `tag_assignments` from live `class.*`, reusing the promoted rules unchanged — no model call (fail-closed; requires a prior `promote`) |
-| `make coverage-gate ENV=<e>` | 1/4 | **Block** if any labelled-sensitive column has no mask (the "says NO" check) |
-| `make validate-generated ENV=<e>` | 1/4 | Static validation incl. the one-mask-per-column guard |
-| `make apply ENV=<e>` | 1/5 | Full stack (account → data_access → workspace; auto-promotes same-env first); creates the Genie agent; releases gated access when `business_access_enabled=true` |
-| `make apply-governance ENV=<e>` | 4 | Enforcement only (account + data_access); no Genie agent |
-| `make promote SOURCE_ENV DEST_ENV DEST_CATALOG_MAP` | 2 | Promote **rules only** (leaves tag assignments behind); creates + writes prod `env.auto.tfvars` |
-| `make verify-access ENV=<e> VERIFY_KEY_COLUMN=<pk>` | 1/5 | Prove masking by querying as per-tier test principals (**needs the gate open**) |
-| `make audit-rulebook ENV=<e>` | 4/6 | Drift check — tags with no covering rule |
-| `make audit-schema ENV=<e>` / `make generate-delta ENV=<e>` | 6 | Untagged-column audit / incremental tag assignments after schema changes |
-| `make evidence ENV=<e>` | 5 | Compliance evidence record (`GENIERAILS_EVIDENCE_INTEGRATION=1` + `WAREHOUSE_ID`) |
-
-Key config & code: [`treatment_config.json`](../../treatment_config.json) (the `gr_treatment` precedence rules — shared across envs), [`sensitivity_source.py`](../../sensitivity_source.py) (native `class.*` source), [`treatment_derivation.py`](../../treatment_derivation.py) (one treatment/column), [`verify_effective_access.py`](../../verify_effective_access.py) (masked-vs-raw), [`scripts/audit_schema_drift.py`](../../scripts/audit_schema_drift.py) (drift).
-
----
-
 ## Limits you might hit
 
 - **Scan latency** — the first scan is async (minutes to ~24h); no force-scan API, and **Azure's initial scan is materially slower than AWS's** (tens of minutes vs. a few). `generate` before tags land correctly fail-closes.
@@ -360,26 +310,10 @@ Key config & code: [`treatment_config.json`](../../treatment_config.json) (the `
 
 ---
 
-## Glossary
+## Reference & glossary
 
-- **access tier** — a group of users who should see data at the same level (e.g. full / masked / least). You map one IdP group to each tier.
-- **ABAC (attribute-based access control)** — masks/filters that apply based on a column's *tag*, not its name — so a rule covers any column carrying that tag.
-- **`CAN_RUN` / `CAN_USE`** — Databricks permissions: `CAN_RUN` lets a group open and run a Genie agent (released by the exposure gate); `CAN_USE` lets a group run a SQL warehouse (you grant it yourself).
-- **`class.*` tag** — a label Unity Catalog's classifier writes on a column it finds sensitive (e.g. `class.email_address`).
-- **coverage gate** — `make coverage-gate`; the blocking check that fails if any labelled-sensitive column has no covering mask/policy. The "tool says NO" step.
-- **drift** — a gap between what's tagged and what's protected; `audit-rulebook` reports it.
-- **entitlement / workspace assignment** — what lets a group *into* a workspace at all (applied every apply; harmless without a data grant).
-- **evidence** — the compliance record `make evidence` produces (what was scanned, tagged, protected, and approved).
-- **exposure gate** — `business_access_enabled`; releases the `SELECT` grant + Genie run permission only when `true`.
-- **facts vs rules** — *facts* = which columns got tagged in *this* workspace (from the scan); *rules* = the mapping + policies (portable, promoted).
-- **fail-closed** — if native classification can't be read, `generate` aborts rather than guessing.
-- **FGAC (fine-grained access control)** — Unity Catalog column masks + row filters.
-- **footprint** — the exact tables the agent can reach (your `uc_tables` / Genie agent tables).
-- **Genie agent** — the Databricks Genie experience users query; "the agent." *(Formerly "Genie space"; the config key and API id are still `genie_spaces` / `genie_space_id`.)*
-- **`gr_treatment`** — the one GenieRails-owned tag whose value picks a column's mask.
-- **grant chain** — `USE CATALOG → USE SCHEMA → SELECT`, the layered grants needed to read a table.
-- **IdP (identity provider)** — Entra ID / Okta; **AIM / SCIM** are how it syncs groups into Databricks. GenieRails consumes those groups.
-- **masking** — transforming a sensitive value for unauthorized tiers (e.g. card → `****-****-****-4464`) while authorized tiers see the raw value.
-- **principal** — an identity a query runs as (a user, group, or service principal); `verify-access` uses temporary test principals per tier.
-- **rulebook / rules** — the mapping `class.* → gr_treatment → mask` plus the access/row-filter policies (the portable, promoted part).
-- **row filter** — a rule that limits *which rows* a tier can see (business logic; not every flow uses one).
+Kept out of this walkthrough so it stays scannable — all in **[REFERENCE.md](REFERENCE.md)**:
+
+- **[Command reference](REFERENCE.md#command-reference)** — every `make` target in one table.
+- **[How it works (under the hood)](REFERENCE.md#how-it-works-under-the-hood)** — the exposure gate, the three governance layers, and one-mask-per-column, explained.
+- **[Glossary](REFERENCE.md#glossary)** — every term used here (`gr_treatment`, `class.*`, coverage gate, ABAC, …).
