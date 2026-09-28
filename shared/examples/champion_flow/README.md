@@ -124,7 +124,7 @@ make init-env ENV=dev
 cp ../shared/examples/champion_flow/env.auto.tfvars.example envs/dev/env.auto.tfvars
 ```
 
-Then edit three files:
+Here `make setup` prepares the cloud root (pins the Terraform provider, etc.), and **`make init-env ENV=dev` creates the local `envs/dev/` config folder and fills it with default/template files** — this is purely local scaffolding on your machine and makes **no** calls to Databricks. The `cp` line seeds `env.auto.tfvars` from the champion-flow example. Those commands just give you empty config files to fill in — so next you edit three of them:
 - **`envs/dev/auth.auto.tfvars`** — the deploying SP `client_id` / `client_secret` + workspace host/id.
 - **`envs/dev/env.auto.tfvars`** — `uc_tables`, `sql_warehouse_id` (or blank), `enable_classification = true`, `business_access_enabled = false`.
 - **`envs/account/env.auto.tfvars`** — change the generated `manage_groups = true` to **`manage_groups = false`** (this flow consumes IdP groups; it does not mint them).
@@ -219,6 +219,8 @@ Promotes the **rules** — the mapping, masking functions, ABAC/row-filter polic
 make init-env ENV=prod          # then fill envs/prod/auth.auto.tfvars (prod SP + workspace host/id)
 make enable-classification ENV=prod
 ```
+`make init-env ENV=prod` does the same local scaffolding as Step 0, now for prod — it creates the `envs/prod/` folder with default config files (no Databricks calls); you then fill `envs/prod/auth.auto.tfvars` with the prod deploying SP (`client_id` / `client_secret`) and the prod workspace host + id. `make enable-classification ENV=prod` is the same action as step 1a, now pointed at prod.
+
 Wait for prod's scan and confirm `class.*` tags on the prod footprint (same SQL as 1b, prod catalog). Real customer PII only exists in prod — this is where the true facts land.
 
 ---
