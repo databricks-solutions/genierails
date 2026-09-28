@@ -97,6 +97,81 @@ def resolve_treatment(findings: list[tuple[str, str]], config: TreatmentConfig) 
     return next((item for item in config.treatments if item.sources & observed), None)
 
 
+def derive_treatment_assignments(
+    assignments: list[dict], config: TreatmentConfig
+) -> list[dict]:
+    """Replace sensitivity-derived column facts with one treatment per column.
+
+    This assignment-only variant deliberately does not rebuild tag policies or
+    FGAC masks.  It is used when reviewed rules are immutable and only live
+    native-classification facts may be refreshed.
+    """
+    mapped_sources = {source for item in config.treatments for source in item.sources}
+    sensitivity_keys = {key for key, _ in mapped_sources}
+    by_column: dict[str, list[tuple[str, str]]] = {}
+    retained: list[dict] = []
+    for raw in assignments:
+        assignment = dict(raw)
+        is_column = assignment.get("entity_type") == "columns"
+        source = (assignment.get("tag_key", ""), assignment.get("tag_value", ""))
+        if is_column and source in mapped_sources:
+            by_column.setdefault(assignment.get("entity_name", ""), []).append(source)
+        if is_column and (
+            assignment.get("tag_key") == config.tag_key
+            or assignment.get("tag_key") in sensitivity_keys
+        ):
+            continue
+        retained.append(assignment)
+
+    derived: list[dict] = []
+    for column in sorted(by_column):
+        treatment = resolve_treatment(by_column[column], config)
+        if treatment is None:
+            continue
+        if (
+            treatment.value not in _FREE_TEXT_ESCALATION_EXCLUDED
+            and is_free_text_column(column, treatment.masking_function)
+        ):
+            treatment = next(
+                (item for item in config.treatments if item.value == _FREE_TEXT_ESCALATION_TARGET),
+                treatment,
+            )
+        derived.append({
+            "entity_type": "columns", "entity_name": column,
+            "tag_key": config.tag_key, "tag_value": treatment.value,
+        })
+    return retained + derived
+
+
+def collapse_sensitivity_assignments(
+    assignments: list[dict], config: TreatmentConfig
+) -> list[dict]:
+    """Collapse same-key native findings with generation's configured precedence."""
+    rank = {
+        source: index
+        for index, treatment in enumerate(config.treatments)
+        for source in treatment.sources
+    }
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for assignment in assignments:
+        key = (assignment.get("entity_name", ""), assignment.get("tag_key", ""))
+        grouped.setdefault(key, []).append(dict(assignment))
+
+    collapsed: list[dict] = []
+    for (_entity, tag_key), candidates in grouped.items():
+        current = min(
+            candidates,
+            key=lambda item: rank.get(
+                (item.get("tag_key", ""), item.get("tag_value", "")), len(rank)
+            ),
+        )
+        if tag_key == "pii_level" and len({item.get("tag_value") for item in candidates}) > 1:
+            current = dict(current)
+            current["tag_value"] = "redacted_mixed"
+        collapsed.append(current)
+    return collapsed
+
+
 def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, int]:
     """Collapse mapped column findings and rebuild masks on ``gr_treatment``.
 
