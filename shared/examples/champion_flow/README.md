@@ -11,7 +11,7 @@ Terms in `code` (and words like *coverage check*, *masking*, *access tier*) are 
 
 ---
 
-## The idea in four sentences
+## The idea
 
 1. **Unity Catalog decides what's sensitive.** Its built-in *Data Classification* scanner reads your data and puts a `class.*` label on each sensitive column (e.g. `class.email_address`).
 2. **GenieRails decides how it's protected.** From those labels it derives one *masking* rule per column and the access rules, and applies them as Terraform.
