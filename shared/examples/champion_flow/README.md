@@ -44,7 +44,7 @@ The whole flow as a checklist. Each line is a command to run, a one-time file ed
 13. Edit the prod files: fill `envs/prod/auth.auto.tfvars` (prod SP + workspace host/id), and in `envs/prod/env.auto.tfvars` set your prod `sql_warehouse_id` (or leave `""` to auto-create), `enable_classification = true`, `business_access_enabled = false`.
 14. `make enable-classification ENV=prod` — scan prod's *own* real data.
 15. **Wait for prod's scan**, then confirm labels (same SQL, prod catalog) — another stop-and-resume point.
-16. `make generate ENV=prod GENERATE_ARGS='--groups "<same IdP groups>"'` → `make coverage-gate ENV=prod` → `make validate-generated ENV=prod` → `make apply-governance ENV=prod` → `make audit-rulebook ENV=prod` — re-derive from prod's tags, prove coverage (review `envs/prod/generated/`), deploy the enforcement (no agent yet), check for gaps.
+16. `make derive-assignments ENV=prod` → `make coverage-gate ENV=prod` → `make validate-generated ENV=prod` → `make apply-governance ENV=prod` → `make audit-rulebook ENV=prod` — re-derive prod's tag assignments from prod's live tags **while reusing the exact rules you promoted** (no model call — the masks/policies can't drift from dev), prove coverage, deploy the enforcement (no agent yet), check for gaps.
 
 **Open to users**
 17. Edit `envs/prod/env.auto.tfvars`: `business_access_enabled = true` → `make apply ENV=prod` — creates the Genie space and releases access (business `SELECT` + Genie run).
@@ -54,7 +54,7 @@ The whole flow as a checklist. Each line is a command to run, a one-time file ed
 **Keep it covered**
 20. On a schedule: `make audit-schema ENV=prod`, `make audit-rulebook ENV=prod`, `make generate-delta ENV=prod` — catch sensitive data that arrives later.
 
-> **Two things to know before you start:** (a) `verify-access` only works with the gate **open** (`business_access_enabled=true`) — that's why it comes *after* you flip the gate, in dev step 11 and prod step 19. (b) `make generate ENV=prod` (step 16) re-runs generation against prod's own tags — see [Phase 4](#phase-4--prove-coverage-the-gate) for what that does and doesn't preserve.
+> **Two things to know before you start:** (a) `verify-access` only works with the gate **open** (`business_access_enabled=true`) — that's why it comes *after* you flip the gate, in dev step 11 and prod step 19. (b) prod does **not** re-run `generate` — step 16 uses `make derive-assignments`, which re-derives only the `tag_assignments` from prod's live tags and keeps the promoted rules byte-for-byte (no model call). See [Phase 4](#phase-4--prove-coverage-the-gate).
 
 ---
 
@@ -217,18 +217,18 @@ make enable-classification ENV=prod   # same as step 1a, now on prod
 **What you're doing:** deriving prod's protections from prod's own labels, proving coverage, and deploying the enforcement — but **not** the agent yet.
 
 ```bash
-make generate         ENV=prod GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'   # reads prod's LIVE class.* tags
+make derive-assignments ENV=prod   # re-derive tag_assignments from prod's LIVE class.* tags; REUSES the promoted rules unchanged (no model call)
 make coverage-gate    ENV=prod   # blocks on any labelled-but-unprotected column
 make validate-generated ENV=prod # static checks on the prod-generated config
 make apply-governance ENV=prod   # deploy enforcement ONLY (account + data_access) — no Genie space yet
 make audit-rulebook   ENV=prod   # flags any prod tag with no covering rule (drift)
 ```
 
-`--groups` are the **same** IdP groups you used in dev (your IdP syncs them into the prod workspace too). **What each command does:** `apply-governance` deploys the enforcement — groups, tag policies, masking functions, access/row-filter policies, grants — but **not** the workspace layer, so the Genie space isn't created yet (that's Phase 5, after the gate). `audit-rulebook` is a **drift check**: it reports any prod `class.*`/`gr_treatment` tag with **no covering policy or mask** (e.g. a rule dropped in promotion, or a prod-only type your mapping doesn't handle) — a clean run means every tag maps to a rule.
+**What each command does:** `derive-assignments` reads prod's live `class.*` tags and re-derives exactly one `gr_treatment` per column, writing **only** the `tag_assignments` — it reuses the masks, policies, row filters, and group→tier mapping you promoted **unchanged** (no `--groups`, no model call). `apply-governance` deploys the enforcement — groups, tag policies, masking functions, access/row-filter policies, grants — but **not** the workspace layer, so the Genie space isn't created yet (that's Phase 5, after the gate). `audit-rulebook` is a **drift check**: it reports any prod `class.*`/`gr_treatment` tag with **no covering policy or mask** — a clean run means every tag maps to a rule.
 
 > **`verify-access` is not here** — it needs the exposure gate open, so it runs in Phase 5 after you release access. The masks are already applied by `apply-governance`, so opening the gate then verifying is safe.
 
-> ⚠️ **What `make generate` in prod does — and doesn't — preserve.** It re-derives *facts* from prod's authoritative `class.*` tags (sensitivity findings + tag assignments), but it is a **fresh generation run**, not a byte-for-byte replay of dev's rules: the broader governance draft still involves the model, so prod's generated policies/functions **can differ** from the ones you reviewed in dev. That's why you re-run `coverage-gate` + `validate-generated` + `audit-rulebook` here, and should **review `envs/prod/generated/`** before applying. If prod surfaces a type your mapping doesn't cover, update `treatment_config.json`, re-`generate`, and re-gate. **Use `apply-governance` here, not `make apply`** — a full `apply` runs the workspace layer and would create the Genie space before the gate passes.
+> **Prod enforces the exact rules you reviewed in dev.** `derive-assignments` reuses the promoted `generated/abac.auto.tfvars` verbatim and rewrites **only** the `tag_assignments` from prod's live `class.*` tags — no model call, so the masks/policies/row-filters/groups cannot drift from dev. It is **fail-closed**: it aborts if prod's native tags are unreadable or empty, if a finding is unmapped, or if a derived treatment has no covering mask in the promoted rules. If prod genuinely surfaces a *new* sensitive type your mapping doesn't cover, that's a **rule change** — update `treatment_config.json` and re-promote from dev; don't hand-edit prod. **Use `apply-governance` here, not `make apply`** — a full `apply` runs the workspace layer and would create the Genie space before the gate passes.
 
 **How you know it worked:** `coverage-gate` exits PASS, `audit-rulebook` reports no uncovered tags.
 
@@ -311,7 +311,8 @@ So "expose last" isn't a policy you hope holds — there is simply no `SELECT` a
 |---|---|---|
 | `make setup` / `make init-env ENV=<e>` | 0 | Create local env dirs + default config files (no Databricks calls) |
 | `make enable-classification ENV=<e>` | 1/3 | Turn on UC Data Classification + auto-tagging for your tables |
-| `make generate ENV=<e> GENERATE_ARGS='--groups "..."'` | 1/4 | Read native `class.*`, derive one `gr_treatment`/column, draft masks + access rules (fail-closed) |
+| `make generate ENV=<e> GENERATE_ARGS='--groups "..."'` | 1 | (dev) Draft masks + access rules from the model and derive one `gr_treatment`/column from native `class.*` (fail-closed) |
+| `make derive-assignments ENV=<e>` | 4 | (prod) Re-derive **only** `tag_assignments` from live `class.*`, reusing the promoted rules unchanged — no model call (fail-closed; requires a prior `promote`) |
 | `make coverage-gate ENV=<e>` | 1/4 | **Block** if any labelled-sensitive column has no mask (the "says NO" check) |
 | `make validate-generated ENV=<e>` | 1/4 | Static validation incl. the one-mask-per-column guard |
 | `make apply ENV=<e>` | 1/5 | Full stack (account → data_access → workspace; auto-promotes same-env first); creates the Genie space; releases gated access when `business_access_enabled=true` |
