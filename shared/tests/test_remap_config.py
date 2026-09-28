@@ -75,7 +75,7 @@ fgac_policies = [
 ]
 """
         result = remap_hcl(text, [("dev_fin", "prod_fin"), ("dev_hr", "prod_hr")])
-        assert "tag_assignments" not in result
+        assert "tag_assignments = []" in result
         assert "finance.accounts" not in result
         assert "people.employees" not in result
         assert 'catalog = "prod_fin"' in result
@@ -106,7 +106,7 @@ tag_assignments = [
 """
         result = remap_hcl(text, [("dev_fin", "prod_fin")])
         assert "analysts" in result  # Non-catalog content preserved
-        assert "tag_assignments" not in result
+        assert "tag_assignments = []" in result
         assert "finance.accounts" not in result
 
     def test_genie_space_configs_remapped(self):

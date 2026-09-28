@@ -430,7 +430,12 @@ def validate_coverage_gate(
     for title, items in groups:
         if items:
             result.error(f"COVERAGE GATE — {title}:\n    - " + "\n    - ".join(items))
-    if not any(items for _, items in groups):
+    if policies and not protected_columns:
+        result.error(
+            "COVERAGE GATE — zero classified/treatment columns were supplied; "
+            "refusing a vacuous pass (run derive-assignments after native classification)"
+        )
+    elif not any(items for _, items in groups):
         result.ok(f"Coverage gate: {len(protected_columns)} classified/treatment column(s) fully protected")
 
 

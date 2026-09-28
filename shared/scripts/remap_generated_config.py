@@ -25,7 +25,7 @@ from pathlib import Path
 
 
 def remove_tag_assignments(text: str) -> str:
-    """Remove the generated top-level tag_assignments list.
+    """Empty the generated top-level tag_assignments list.
 
     Assignments are environment-specific classification facts. Cross-environment
     promotion carries governance rules, while the destination classifier derives
@@ -62,7 +62,9 @@ def remove_tag_assignments(text: str) -> str:
                     end += 1
                 if end < len(text) and text[end] == "\n":
                     end += 1
-                return text[: match.start()] + text[end:]
+                # Keep an explicit empty section. The destination-side
+                # derive-assignments command atomically replaces this section.
+                return text[: match.start()] + "tag_assignments = []\n" + text[end:]
         index += 1
 
     raise ValueError("Unterminated top-level tag_assignments list")
