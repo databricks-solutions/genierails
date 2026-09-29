@@ -160,7 +160,7 @@ make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id   # one command: coverage-ga
 `make rehearse` runs those four steps in order and **stops at the first failure**. **`VERIFY_KEY_COLUMN` is optional but recommended** — omit it (`make rehearse ENV=dev`) and it still gates → validates → applies, then *skips* the live masking check with a reminder to pass a key column.
 
 <details>
-<summary><strong>Prefer to run the stages individually?</strong> (e.g. in CI, where <code>coverage-gate</code> must be its own blocking step)</summary>
+<summary><strong>Explicit stages + the <code>verify-access</code> warehouse prerequisite</strong> (run stages individually — e.g. for CI, where <code>coverage-gate</code> must be its own blocking step)</summary>
 
 ```bash
 make coverage-gate      ENV=dev                            # blocks unless every classified column has a mask ("says NO")
@@ -170,12 +170,8 @@ make verify-access      ENV=dev VERIFY_KEY_COLUMN=customer_id   # queries AS eac
 ```
 
 **What each command does:** `coverage-gate` is the safety check at the heart of the flow — it confirms every column the scanner labelled sensitive has a protection covering it, and **fails (non-zero exit) and stops you** if even one is uncovered ("the tool says NO"); it changes nothing. `validate-generated` runs static checks on the drafted config. `apply` deploys the masks/policies (and, with the gate set to `true`, opens access in the same step). `verify-access` proves it *by effect*: it queries as each tier's test principal and shows the unprivileged tier gets masked values while an authorized tier gets raw — this **needs the gate open**, so in dev you open the gate once and leave it — it's a rehearsal, and the masks protect the data regardless. (Prod is stricter: Phase 4 deploys governance with the gate **closed**, and Phase 5 opens it only after the gate passes — that's the real "expose last".)
-</details>
 
-<details>
-<summary><strong>Before <code>verify-access</code> (incl. via <code>rehearse</code>):</strong> grant warehouse <code>CAN_USE</code> first, or its queries fail</summary>
-
-`verify-access` queries the warehouse as test principals in your tier groups — grant those groups `CAN_USE` on the (dev) warehouse first, or the queries fail (GenieRails doesn't manage warehouse permissions). Also confirm the agent still answers useful questions under masking. Dev's deliverable = **validated rules + a working agent** (not dev's column labels — those stay in dev).
+**Warehouse prerequisite — applies to `rehearse` too.** `verify-access` queries the warehouse as test principals in your tier groups — grant those groups `CAN_USE` on the (dev) warehouse first, or the queries fail (GenieRails doesn't manage warehouse permissions). Also confirm the agent still answers useful questions under masking. Dev's deliverable = **validated rules + a working agent** (not dev's column labels — those stay in dev).
 </details>
 
 ---
