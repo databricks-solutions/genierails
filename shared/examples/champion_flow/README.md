@@ -24,7 +24,7 @@ Seven phases, dev → prod. This table is the **map**; each **Phase** below is t
 | Phase | What happens | Signature commands | Done when |
 |---|---|---|---|
 | **[0 · Set up (dev)](#phase-0--set-up-dev)** | create local config; fill in creds + settings (no Databricks calls) | `make setup` → `make init-env ENV=dev` → edit tfvars | `envs/dev/` config filled in |
-| **[1 · Dev — scan, draft, test](#phase-1--dev-scan-draft-the-rules-test-them)** | scan dev, review detections, draft the rules, prove masking works | `make enable-classification` → review → opt into tags → `make generate` → `make coverage-gate` → `make apply` → `make verify-access` | gate PASS + masking proven in dev |
+| **[1 · Dev — scan, draft, test](#phase-1--dev-scan-draft-the-rules-test-them)** | scan dev, review detections, draft the rules, prove masking works | `make enable-classification` → review → opt into tags → `make generate` → `make rehearse` | gate PASS + masking proven in dev |
 | **[2 · Promote to prod](#phase-2--promote-the-rules-to-prod)** | copy the *rules* to prod (not the data, not dev's labels) | `make promote …` | `envs/prod/` points at your prod catalog |
 | **[3 · Prod — scan real data](#phase-3--prod-scan-real-data)** | prod scans its *own* data → review detections, then opt into tags | `make enable-classification ENV=prod` → review → set `enable_auto_tagging=true` → re-apply | prod `class.*` tags land |
 | **[4 · Prove coverage (the gate)](#phase-4--prove-coverage-the-gate)** | re-derive prod facts, prove coverage, deploy enforcement (masks/policies) — the Genie agent isn't created until Phase 5 | `make derive-assignments` → `make coverage-gate` → `make apply-governance` → `make audit-rulebook` | gate PASS, no drift |
@@ -153,6 +153,13 @@ make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,vi
 ```bash
 # dev is a rehearsal: open the gate once, prove masking works, and leave it open — the masks protect the data either way
 # edit envs/dev/env.auto.tfvars:  business_access_enabled = true
+
+make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id   # one command: coverage-gate → validate-generated → apply → verify-access (stops at the first failure)
+```
+
+`make rehearse` runs those four steps in order and **stops at the first failure**. **`VERIFY_KEY_COLUMN` is optional but recommended** — omit it (`make rehearse ENV=dev`) and it still gates → validates → applies, then *skips* the live masking check with a reminder to pass a key column. Prefer the explicit stages — e.g. in CI, where `coverage-gate` must be its own blocking step — run them individually:
+
+```bash
 make coverage-gate      ENV=dev                            # blocks unless every classified column has a mask ("says NO")
 make validate-generated ENV=dev                            # static checks (e.g. no two masks collide on one column)
 make apply              ENV=dev                            # deploy masks/policies + open access
