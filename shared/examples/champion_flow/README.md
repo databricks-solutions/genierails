@@ -27,7 +27,7 @@ Seven phases, dev → prod. This table is the **map**; each **Phase** below is t
 | **[1 · Dev — scan, draft, test](#phase-1--dev-scan-draft-the-rules-test-them)** | scan dev, review detections, draft the rules, prove masking works | `make enable-classification` → review → opt into tags → `make generate` → `make rehearse` | gate PASS + masking proven in dev |
 | **[2 · Promote to prod](#phase-2--promote-the-rules-to-prod)** | copy the *rules* to prod (not the data, not dev's labels) | `make promote …` | `envs/prod/` points at your prod catalog |
 | **[3 · Prod — scan real data](#phase-3--prod-scan-real-data)** | prod scans its *own* data → review detections, then opt into tags | `make enable-classification ENV=prod` → review → set `enable_auto_tagging=true` → re-apply | prod `class.*` tags land |
-| **[4 · Prove coverage (the gate)](#phase-4--prove-coverage-the-gate)** | re-derive prod facts, prove coverage, deploy enforcement (masks/policies) — the Genie agent isn't created until Phase 5 | `make derive-assignments` → `make coverage-gate` → `make apply-governance` → `make audit-rulebook` | gate PASS, no drift |
+| **[4 · Prove coverage (the gate)](#phase-4--prove-coverage-the-gate)** | re-derive prod facts, prove coverage, deploy enforcement (masks/policies) — the Genie agent isn't created until Phase 5 | `make certify` | gate PASS, no drift |
 | **[5 · Open to users](#phase-5--open-to-users-you-release-access-after-the-gate-passes-then-verify)** | release access **last**, create the agent, verify live | edit tfvars (`business_access_enabled=true`) → `make apply` → `make verify-access` → `make evidence` | masked-vs-raw confirmed live |
 | **[6 · Keep it covered](#phase-6--keep-it-covered)** | catch sensitive data that arrives later | *(scheduled)* `make audit-schema` · `make audit-rulebook` · `make generate-delta` | runs on a schedule |
 
@@ -219,6 +219,15 @@ make enable-classification ENV=prod   # same as step 1a, now on prod
 **What you're doing:** deriving prod's protections from prod's own labels, proving coverage, and deploying the enforcement — but **not** the agent yet.
 
 ```bash
+make certify ENV=prod   # one command: derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook (stops at the first failure)
+```
+
+`make certify` re-derives prod's `tag_assignments` from its **live** `class.*` tags and **reuses the rules you reviewed in dev unchanged** — no model call, so the masks/policies/row-filters/groups can't drift — then proves coverage, deploys **enforcement only** (no Genie agent — that's Phase 5), and drift-checks. It is **fail-closed**: it aborts if prod's native tags are unreadable/empty, a finding is unmapped, or a derived treatment has no covering mask in the promoted rules. (If prod surfaces a *new* sensitive type your mapping doesn't cover, that's a rule change — see below.)
+
+<details>
+<summary><strong>Run the stages individually</strong> (e.g. for CI, where <code>coverage-gate</code> must be its own blocking step)</summary>
+
+```bash
 make derive-assignments ENV=prod   # re-derive tag_assignments from prod's LIVE class.* tags; REUSES the promoted rules unchanged (no model call)
 make coverage-gate    ENV=prod   # blocks on any labelled-but-unprotected column
 make validate-generated ENV=prod # static checks on the prod-generated config
@@ -228,9 +237,8 @@ make audit-rulebook   ENV=prod   # flags any prod tag with no covering rule (dri
 
 **What each command does:** `derive-assignments` reads prod's live `class.*` tags and re-derives exactly one `gr_treatment` per column, writing **only** the `tag_assignments` — it reuses the masks, policies, row filters, and group→tier mapping you promoted **unchanged** (no `--groups`, no model call). `apply-governance` deploys the enforcement — groups, tag policies, masking functions, access/row-filter policies, grants — but **not** the workspace layer, so the Genie agent isn't created yet (that's Phase 5, after the gate). `audit-rulebook` is a **drift check**: it reports any prod `class.*`/`gr_treatment` tag with **no covering policy or mask** — a clean run means every tag maps to a rule.
 
-> **`verify-access` is not here** — it needs the exposure gate open, so it runs in Phase 5 after you release access. The masks are already applied by `apply-governance`, so opening the gate then verifying is safe.
-
-> **Prod enforces the exact rules you reviewed in dev.** `derive-assignments` reuses the promoted `generated/abac.auto.tfvars` verbatim and rewrites **only** the `tag_assignments` from prod's live `class.*` tags — no model call, so the masks/policies/row-filters/groups cannot drift from dev. It is **fail-closed**: it aborts if prod's native tags are unreadable or empty, if a finding is unmapped, or if a derived treatment has no covering mask in the promoted rules. If prod genuinely surfaces a *new* sensitive type your mapping doesn't cover, that's a **rule change** — update `treatment_config.json` and re-promote from dev; don't hand-edit prod. **Use `apply-governance` here, not `make apply`** — a full `apply` runs the workspace layer and would create the Genie agent before the gate passes.
+**`verify-access` is not here** — it needs the exposure gate open, so it runs in Phase 5 after you release access (the masks are already applied, so opening the gate then verifying is safe). And **use `apply-governance`, not `make apply`** — a full `apply` runs the workspace layer and would create the Genie agent before the gate passes (`make certify` already uses `apply-governance`).
+</details>
 
 **How you know it worked:** `coverage-gate` exits PASS, `audit-rulebook` reports no uncovered tags.
 
@@ -239,7 +247,7 @@ make audit-rulebook   ENV=prod   # flags any prod tag with no covering rule (dri
 1. **In dev**, add the missing mapping to `treatment_config.json` (which `class.*` label → which `gr_treatment` + mask).
 2. **Re-validate in dev:** `make generate ENV=dev` → `make coverage-gate ENV=dev`.
 3. **Re-promote:** `make promote …` (carries the updated rules to prod — same command as [Phase 2](#phase-2--promote-the-rules-to-prod)).
-4. **Re-run this phase:** `make derive-assignments ENV=prod` → `make coverage-gate ENV=prod` → `make apply-governance ENV=prod` → `make audit-rulebook ENV=prod`.
+4. **Re-run this phase:** `make certify ENV=prod`.
 
 Repeat until the gate passes and drift is clean. The agent stays uncreated and closed to users throughout — that's the point of exposing last.
 
