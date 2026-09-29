@@ -13,7 +13,7 @@ Terms in `code` (and words like *coverage check*, *masking*, *access tier*) are 
 
 ## The idea
 
-1. **Unity Catalog decides what's sensitive.** Its built-in *Data Classification* scanner reads your data and puts a `class.*` label on each sensitive column (e.g. `class.email_address`).
+1. **Unity Catalog decides what's sensitive.** Its built-in [*Data Classification*](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) scanner reads your data and puts a `class.*` label on each sensitive column (e.g. `class.email_address`).
 2. **GenieRails decides how it's protected.** From those labels it derives one *masking* rule per column and the access rules, and applies them as Terraform.
 3. **The coverage check is the safety gate.** It fails ("says NO") if any labelled-sensitive column has no protection — blocking the release until you fix it.
 4. **Dev is the rehearsal; prod is the real thing.** You build and test in dev, promote the *rules* to prod, let prod scan its *own* data, prove coverage, and open the agent to users **last**.
@@ -55,7 +55,7 @@ Gather these once — every phase reuses them:
 | **Curated Genie agent** | The agent itself. To deploy it (and get *agent access*), you **must** set a `genie_spaces` entry — an existing space id, or `genie_space_id=""` + `uc_tables` to create one. `genie_spaces = []` governs *data only* — no agent. |
 | **IdP group names** (one per *access tier*) | Your existing groups, synced from your identity provider (Entra ID / Okta) via **AIM/SCIM**. GenieRails **consumes** them by name — it never creates them. e.g. `payments_ops,regional_analysts,viewers`. |
 | **Shared key column** | One column present in **all** your tables (e.g. `customer_id`) — `verify-access` uses it to line up the same rows across tiers. |
-| **UC Data Classification** | Available on the catalog; you turn it on per-env with `make enable-classification` (below). |
+| **UC Data Classification** | Available on the catalog; you turn it on per-env with `make enable-classification` (below). Learn more in the Databricks docs: [Data Classification (AWS)](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) / [(Azure)](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/data-classification). |
 
 > **`verify-access` side effects:** it creates and then deletes temporary `genierails-verify-<tier>` service principals, adds them to your tier groups for the duration of the test, and needs **account-admin**; your IdP sync must tolerate a transient non-IdP group member.
 
