@@ -1,4 +1,5 @@
 import importlib.util
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,8 +50,14 @@ def test_auto_tagging_false_emits_no_configs_while_classification_stays_enabled(
     source = MODULE_MAIN.read_text()
 
     assert "var.enable_classification ? local.classification_catalog_schemas : {}" in source
-    assert "auto_tag_configs = var.enable_auto_tagging ? [" in source
-    assert "] : []" in source
+    match = re.search(
+        r"(?ms)^  auto_tag_configs = (var\.enable_auto_tagging \? \[.*?^  \] : \[\])$",
+        source,
+    )
+    assert match, "auto_tag_configs must render an empty list when auto-tagging is false"
+    expression = match.group(1)
+    assert expression.endswith("] : []")
+    assert expression.count('auto_tagging_mode  = "AUTO_TAGGING_ENABLED"') == 1
 
 
 def test_auto_tagging_true_emits_configs_for_champion_types():
@@ -68,6 +75,26 @@ def test_auto_tagging_true_emits_configs_for_champion_types():
     assert all(f'"{tag}"' in source for tag in expected)
     assert "auto_tag_configs = var.enable_auto_tagging ? [" in source
     assert 'auto_tagging_mode  = "AUTO_TAGGING_ENABLED"' in source
+
+
+def test_auto_tagging_opt_in_plan_covers_default_off_and_enabled_configs():
+    init = subprocess.run(
+        ["terraform", "init", "-backend=false", "-input=false"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert init.returncode == 0, init.stdout + init.stderr
+
+    plan_test = subprocess.run(
+        ["terraform", "test", "-no-color", "-filter=tests/auto_tagging_opt_in.tftest.hcl"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert plan_test.returncode == 0, plan_test.stdout + plan_test.stderr
+    assert 'run "classification_scans_without_auto_tagging"... pass' in plan_test.stdout
+    assert 'run "auto_tagging_emits_all_champion_classifier_types"... pass' in plan_test.stdout
 
 
 def test_enable_classification_target_is_a_classification_only_apply():
