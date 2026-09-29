@@ -83,7 +83,7 @@ make init-env ENV=dev       # creates the local envs/dev/ folder + template conf
 cp ../shared/examples/champion_flow/env.auto.tfvars.example envs/dev/env.auto.tfvars
 ```
 
-`make init-env` is purely local scaffolding — it creates `envs/dev/` and drops in default/template files for you to fill in, and never calls Databricks. The `cp` seeds `env.auto.tfvars` from the champion-flow example. Now edit three files:
+Then edit three files:
 
 - **`envs/dev/auth.auto.tfvars`** — the deploying SP `client_id` / `client_secret` + workspace host & id.
 - **`envs/dev/env.auto.tfvars`** — `uc_tables`, `sql_warehouse_id` (or blank), `genie_spaces`, `enable_classification = true`, `enable_auto_tagging = false`, `business_access_enabled = false`.
@@ -130,7 +130,7 @@ Use `--help` for `--host`, `--schema`, `--rows`, and env-var alternatives. Then 
 ```bash
 make enable-classification ENV=dev
 ```
-This applies **only** the UC Data Classification config for your tables — no masks, policies, or grants yet. Auto-tagging follows `enable_auto_tagging` and defaults off.
+Turns on the scanner only — nothing is tagged or masked yet, and auto-tagging stays off until you opt in (1b).
 
 **1b. Review detections, opt into tags, then confirm they landed.** The first scan is asynchronous — minutes to ~24h, with no way to force it (a real *stop-and-resume-later* point). Two easy steps, mostly in the Databricks UI:
 
