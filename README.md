@@ -28,20 +28,7 @@ Check the [Prerequisites](shared/docs/prerequisites.md) first, then pick your cl
 
 ## Blocking sensitive-column coverage gate
 
-After generation, run `make coverage-gate ENV=<environment>` from `aws/` or
-`azure/`. The offline gate reads `generated/abac.auto.tfvars` and
-`generated/masking_functions.sql` and exits non-zero if a classification finding
-has no treatment mapping, a classified column has no covering column-mask
-policy, or a treatment's masking function is absent. Native classification is
-read live only during generation through the existing classification source.
-
-GenieRails never deletes sensitive tags or mask policies to make output deploy.
-Two platform limits can surface as hard errors: the **100 FGAC/ABAC policies
-per catalog** limit (Option-B treatment derivation keeps you well under it by
-emitting one policy per treatment per catalog), and the separate
-**account-level governed-tag-policy cap** (each governed tag is an account tag
-policy, so large shared accounts can hit it). Both are reported clearly, never
-worked around by dropping protection.
+After generation, `make coverage-gate` checks that every classified sensitive column has a covering mask and **exits non-zero if any is uncovered** — so an ungoverned agent can't ship. It never drops tags or policies to force a pass. (Mechanics and platform limits: [Troubleshooting](shared/docs/troubleshooting.md).)
 
 ## Documentation
 
