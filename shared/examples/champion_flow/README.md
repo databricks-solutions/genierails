@@ -114,23 +114,33 @@ make enable-classification ENV=dev
 ```
 This applies **only** the UC Data Classification config for your tables — no masks, policies, or grants yet. Auto-tagging follows `enable_auto_tagging` and defaults off.
 
-**1b. Review detections, then opt into tags.** The first scan is asynchronous — minutes to ~24h, with no way to force it (a real *stop-and-resume-later* point). Review the results in the Databricks UI ([Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections)) and exclude false positives. Auto-tagging defaults off: after review, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-run `make enable-classification ENV=dev`. The query below reads the resulting tags (`system.information_schema.column_tags`) that the coverage gate uses, so re-run it until recognizable PII columns show `class.*` tags:
+**1b. Review detections, opt into tags, then confirm they landed.** The first scan is asynchronous — minutes to ~24h, with no way to force it (a real *stop-and-resume-later* point). Two easy steps, mostly in the Databricks UI:
+
+- **Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) to see what the scanner found on your columns and **exclude any false positives**. Nothing is tagged yet — auto-tagging defaults off.
+- **Opt in.** After review, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-run `make enable-classification ENV=dev`. The `class.*` tags then land on the reviewed columns (again, minutes to ~24h — on **Azure** the initial scan runs materially slower than on AWS, tens of minutes rather than a few). You can see the applied tags on each column in **Catalog Explorer** — then go to **1c**.
+
+⚠️ **Don't expect every column.** The scanner only tags values it can *format-match* — free-text or unusual formats may stay untagged, and that's expected. The `coverage-gate` (1d) blocks on any *classified* column left unprotected, but it **cannot** gate a column the scanner never tagged (a documented fail-open) — which is why you keep the exposure gate closed and prefer a restrictive default for high-sensitivity data. If nothing gets tagged after a clear scan, your data isn't format-matchable: seed **realistic** PII (the scanner ignores fake `example.com` emails / `000-` SSNs).
+
+<details>
+<summary><strong>Prefer to verify with SQL?</strong> (reads the exact source the coverage gate uses)</summary>
+
+Re-run this until your recognizable PII columns show `class.*` tags. It reads `system.information_schema.column_tags` — the same source `make coverage-gate` reads — so rows here mean the gate will see them:
 ```sql
 SELECT table_name, column_name, tag_name
 FROM system.information_schema.column_tags
 WHERE catalog_name = '<your-catalog>' AND schema_name = '<your-schema>'
   AND tag_name LIKE 'class.%';
 ```
-- ✅ **Landed → go to 1c.** You get one row per recognizable PII column, each with a `class.*` tag, e.g.:
-  ```
-  table_name   column_name          tag_name
-  customers    email                class.email_address
-  customers    ssn                  class.us_ssn
-  payments     credit_card_number   class.credit_card
-  notes        free_text            class.email_address
-  ```
-- ⏳ **Zero rows → wait and re-run.** It almost always just means the scan hasn't finished. *(On **Azure** the initial scan runs materially slower than on AWS — typically tens of minutes rather than a few — so give it more time before concluding it didn't run.)*
-- ⚠️ **Don't expect every column.** The scanner only tags values it can *format-match* — free-text or unusual formats may stay untagged, and that's expected. The `coverage-gate` (1d) blocks on any *classified* column left unprotected, but it **cannot** gate a column the scanner never tagged (a documented fail-open) — which is why you keep the exposure gate closed and prefer a restrictive default for high-sensitivity data. If it stays empty after a clear scan, your data isn't format-matchable: seed **realistic** PII (the scanner ignores fake `example.com` emails / `000-` SSNs).
+One row per recognizable PII column, e.g.:
+```
+table_name   column_name          tag_name
+customers    email                class.email_address
+customers    ssn                  class.us_ssn
+payments     credit_card_number   class.credit_card
+notes        free_text            class.email_address
+```
+Zero rows usually just means the scan hasn't finished — wait and re-run.
+</details>
 
 **1c. Draft the protection rules.**
 ```bash
