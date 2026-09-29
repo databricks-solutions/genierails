@@ -8,6 +8,33 @@ ROOT = Path(__file__).parents[2]
 CLOUD_ROOT = ROOT / "aws"
 
 
+def test_rehearse_stops_after_first_failing_stage(tmp_path):
+    log = tmp_path / "recursive-make.log"
+    stub = tmp_path / "record-failing-make"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$1\" >> \"{log}\"\n"
+        "exit 1\n"
+    )
+    stub.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "make",
+            "rehearse",
+            "ENV=dev",
+            "VERIFY_KEY_COLUMN=customer_id",
+            f"MAKE={stub}",
+        ],
+        cwd=CLOUD_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert log.read_text().splitlines() == ["coverage-gate"]
+
+
 def test_rehearse_dry_run_is_ordered_and_does_not_toggle_exposure_gate():
     result = subprocess.run(
         [

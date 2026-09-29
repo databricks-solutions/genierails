@@ -250,7 +250,7 @@ rehearse: ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to
 	@$(MAKE) coverage-gate ENV="$(ENV)" && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
 		$(MAKE) apply ENV="$(ENV)" && \
-		$(if $(strip $(VERIFY_KEY_COLUMN)),$(MAKE) verify-access ENV="$(ENV)" VERIFY_KEY_COLUMN="$(VERIFY_KEY_COLUMN)",echo "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> to prove masking live (recommended)")
+		$(if $(strip $(VERIFY_KEY_COLUMN)),$(MAKE) verify-access ENV="$(ENV)" VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",echo "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> to prove masking live (recommended)")
 
 validate: _bootstrap ## Validate split config in the selected environment
 	@echo "=== Validate ($(ENV)) ==="
