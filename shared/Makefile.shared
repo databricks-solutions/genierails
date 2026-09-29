@@ -260,7 +260,11 @@ coverage-gate: _bootstrap _guard-workspace-target ## Block on any sensitive-colu
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" --coverage-gate generated/abac.auto.tfvars generated/masking_functions.sql
 
 rehearse: ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to prove masking live)
-	@$(_DRY_RUN_GUARD); $(MAKE) coverage-gate ENV="$(ENV)" && \
+	@if [ "$(ENV)" = "prod" ]; then \
+		echo "rehearse: ENV=prod is not allowed; use make certify, then deliberately commit business_access_enabled=true in Phase 5" >&2; \
+		exit 1; \
+	fi; \
+	$(_DRY_RUN_GUARD); $(MAKE) coverage-gate ENV="$(ENV)" && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
 		$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" && \
 		$(if $(strip $(VERIFY_KEY_COLUMN)),$(MAKE) verify-access ENV="$(ENV)" VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",echo "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> to prove masking live (recommended)")

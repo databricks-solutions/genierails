@@ -62,6 +62,25 @@ def test_rehearse_stops_after_first_failing_stage(tmp_path):
     assert log.read_text().splitlines() == ["coverage-gate"]
 
 
+def test_rehearse_rejects_prod_before_any_recursive_make_call(tmp_path):
+    stub, log = _recording_stub(tmp_path)
+    result = subprocess.run(
+        ["make", "rehearse", "ENV=prod", f"MAKE={stub}"],
+        cwd=CLOUD_ROOT,
+        text=True,
+        capture_output=True,
+        env=_clean_env(),
+    )
+
+    assert result.returncode != 0
+    assert not log.exists()
+    output = result.stdout + result.stderr
+    assert "rehearse: ENV=prod is not allowed" in output
+    assert "use make certify" in output
+    assert "business_access_enabled=true" in output
+    assert "Phase 5" in output
+
+
 def test_rehearse_with_key_opens_exposure_gate_for_its_apply_only(tmp_path):
     stub, log = _recording_stub(tmp_path)
     result = subprocess.run(
