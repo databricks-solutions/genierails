@@ -19,9 +19,4 @@ Do the [Prerequisites](shared/docs/prerequisites.md) first, and run everything f
 
 ## Documentation
 
-Full reference in [`shared/docs/`](shared/docs/):
-
-- **Guides** — [Dev-to-Prod Walkthrough](shared/examples/dev_to_prod/) · [From UI to Production](shared/docs/from-ui-to-production.md) · [Quickstart](shared/docs/quickstart.md) · [Playbook](shared/docs/playbook.md)
-- **Set up & operate** — [Prerequisites](shared/docs/prerequisites.md) · [Architecture](shared/docs/architecture.md) · [Version Control & Standalone Terraform](shared/docs/version-control.md) · [CI/CD](shared/docs/cicd.md)
-- **Customize** — [Country & Region Overlays](shared/docs/country-overlays.md) · [Industry Overlays](shared/docs/industry-overlays.md) · [Central Governance / Self-Service Genie](shared/docs/self-service-genie.md) · [Advanced Usage](shared/docs/advanced.md)
-- **Verify & troubleshoot** — [Effective-Access Verification](shared/docs/effective-access-verification.md) · [Integration Testing](shared/docs/integration-testing.md) · [Troubleshooting](shared/docs/troubleshooting.md)
+**[Browse all docs →](shared/docs/)** — the full index: walkthrough, quickstart, playbook, architecture, CI/CD, overlays, effective-access verification, and troubleshooting.
