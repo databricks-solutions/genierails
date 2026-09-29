@@ -1953,7 +1953,9 @@ def _fetch_live_classification_source(
         if not source.has_native_data():
             message = (
                 "Native classification read succeeded but returned 0 class.* "
-                "findings for the declared footprint"
+                "findings for the declared footprint — if you haven't enabled "
+                "auto-tagging yet, review detections, then set "
+                "enable_auto_tagging = true and re-apply enable-classification"
             )
             if require_native:
                 raise NativeClassificationRequiredError(message)

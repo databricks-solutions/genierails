@@ -15,6 +15,7 @@ run "second_environment_preserves_first_environment_scope" {
     databricks_workspace_host = "https://example.invalid"
     uc_tables                 = ["shared_catalog.env_b.orders"]
     enable_classification     = true
+    enable_auto_tagging       = true
     classification_existing_schemas = {
       shared_catalog = ["env_a"]
     }

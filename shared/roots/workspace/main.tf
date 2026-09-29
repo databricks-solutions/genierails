@@ -346,6 +346,14 @@ variable "enable_classification" {
   default = false
 }
 
+# Shared env.auto.tfvars is consumed by both workspace and data-access roots.
+# Auto-tagging is implemented only in data_access; declare it here to avoid an
+# undeclared-variable warning during a full apply.
+variable "enable_auto_tagging" {
+  type    = bool
+  default = false
+}
+
 variable "group_members" {
   type    = map(list(string))
   default = {}

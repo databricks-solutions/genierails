@@ -12,6 +12,14 @@ output "classification_catalog_schemas" {
   value       = local.classification_catalog_schemas
 }
 
+output "classification_auto_tag_configs" {
+  description = "Planned provider auto-tagging configs per classified catalog."
+  value = {
+    for catalog, config in databricks_data_classification_catalog_config.classification :
+    catalog => config.auto_tag_configs
+  }
+}
+
 output "schema_grant_resource_keys" {
   description = "Instantiated schema grant resource keys."
   value       = keys(databricks_grant.schema_access)

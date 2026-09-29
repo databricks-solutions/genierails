@@ -23,6 +23,17 @@ def test_classification_is_opt_in_and_forwarded_by_the_root():
     assert "= var.enable_classification" in ROOT_MAIN.read_text()
 
 
+def test_auto_tagging_is_default_off_and_forwarded_by_the_root():
+    variables = MODULE_VARIABLES.read_text()
+    start = variables.index('variable "enable_auto_tagging"')
+    body = variables[start : variables.index("}\n", start) + 2]
+
+    assert "default     = false" in body
+    root = ROOT_MAIN.read_text()
+    assert 'variable "enable_auto_tagging"' in root
+    assert "enable_auto_tagging             = var.enable_auto_tagging" in root
+
+
 def test_classification_is_scoped_to_governed_uc_schemas():
     source = MODULE_MAIN.read_text()
 
@@ -34,7 +45,15 @@ def test_classification_is_scoped_to_governed_uc_schemas():
     assert "prevent_destroy = true" in source
 
 
-def test_classification_plan_enables_auto_tagging_for_champion_types():
+def test_auto_tagging_false_emits_no_configs_while_classification_stays_enabled():
+    source = MODULE_MAIN.read_text()
+
+    assert "var.enable_classification ? local.classification_catalog_schemas : {}" in source
+    assert "auto_tag_configs = var.enable_auto_tagging ? [" in source
+    assert "] : []" in source
+
+
+def test_auto_tagging_true_emits_configs_for_champion_types():
     source = MODULE_MAIN.read_text()
 
     expected = {
@@ -47,7 +66,7 @@ def test_classification_plan_enables_auto_tagging_for_champion_types():
         "class.us_ssn",
     }
     assert all(f'"{tag}"' in source for tag in expected)
-    assert "auto_tag_configs = [" in source
+    assert "auto_tag_configs = var.enable_auto_tagging ? [" in source
     assert 'auto_tagging_mode  = "AUTO_TAGGING_ENABLED"' in source
 
 

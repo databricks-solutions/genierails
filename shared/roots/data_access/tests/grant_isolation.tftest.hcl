@@ -16,6 +16,7 @@ run "space_only_tables_are_classification_only" {
     groups                    = { analysts = {} }
     business_access_enabled   = true
     enable_classification     = true
+    enable_auto_tagging       = true
     sql_warehouse_id          = "warehouse"
   }
 

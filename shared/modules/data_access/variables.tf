@@ -48,7 +48,13 @@ variable "business_access_enabled" {
 variable "enable_classification" {
   type        = bool
   default     = false
-  description = "Opt-in to enable UC Data Classification with auto-tagging, scoped to schemas in classification_uc_tables."
+  description = "Opt-in to enable UC Data Classification scanning, scoped to schemas in classification_uc_tables."
+}
+
+variable "enable_auto_tagging" {
+  type        = bool
+  default     = false
+  description = "Opt-in to write class.* tags automatically after UC Data Classification detects sensitive data."
 }
 
 variable "classification_existing_schemas" {

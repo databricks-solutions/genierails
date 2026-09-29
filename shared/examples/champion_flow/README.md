@@ -24,9 +24,9 @@ Seven phases, dev → prod. This table is the **map**; each **Phase** below is t
 | Phase | What happens | Signature commands | Done when |
 |---|---|---|---|
 | **[0 · Set up (dev)](#phase-0--set-up-dev)** | create local config; fill in creds + settings (no Databricks calls) | `make setup` → `make init-env ENV=dev` → edit tfvars | `envs/dev/` config filled in |
-| **[1 · Dev — scan, draft, test](#phase-1--dev-scan-draft-the-rules-test-them)** | scan dev, draft the rules, prove masking works | `make enable-classification` → *(wait for scan)* → `make generate` → `make coverage-gate` → `make apply` → `make verify-access` | gate PASS + masking proven in dev |
+| **[1 · Dev — scan, draft, test](#phase-1--dev-scan-draft-the-rules-test-them)** | scan dev, review detections, draft the rules, prove masking works | `make enable-classification` → review → opt into tags → `make generate` → `make coverage-gate` → `make apply` → `make verify-access` | gate PASS + masking proven in dev |
 | **[2 · Promote to prod](#phase-2--promote-the-rules-to-prod)** | copy the *rules* to prod (not the data, not dev's labels) | `make promote …` | `envs/prod/` points at your prod catalog |
-| **[3 · Prod — scan real data](#phase-3--prod-scan-real-data)** | prod scans its *own* data → the real facts | `make enable-classification ENV=prod` → *(wait for scan)* | prod `class.*` tags land |
+| **[3 · Prod — scan real data](#phase-3--prod-scan-real-data)** | prod scans its *own* data → review detections, then opt into tags | `make enable-classification ENV=prod` → review → set `enable_auto_tagging=true` → re-apply | prod `class.*` tags land |
 | **[4 · Prove coverage (the gate)](#phase-4--prove-coverage-the-gate)** | re-derive prod facts, prove coverage, deploy enforcement (masks/policies) — the Genie agent isn't created until Phase 5 | `make derive-assignments` → `make coverage-gate` → `make apply-governance` → `make audit-rulebook` | gate PASS, no drift |
 | **[5 · Open to users](#phase-5--open-to-users-you-release-access-after-the-gate-passes-then-verify)** | release access **last**, create the agent, verify live | edit tfvars (`business_access_enabled=true`) → `make apply` → `make verify-access` → `make evidence` | masked-vs-raw confirmed live |
 | **[6 · Keep it covered](#phase-6--keep-it-covered)** | catch sensitive data that arrives later | *(scheduled)* `make audit-schema` · `make audit-rulebook` · `make generate-delta` | runs on a schedule |
@@ -74,7 +74,7 @@ cp ../shared/examples/champion_flow/env.auto.tfvars.example envs/dev/env.auto.tf
 `make init-env` is purely local scaffolding — it creates `envs/dev/` and drops in default/template files for you to fill in, and never calls Databricks. The `cp` seeds `env.auto.tfvars` from the champion-flow example. Now edit three files:
 
 - **`envs/dev/auth.auto.tfvars`** — the deploying SP `client_id` / `client_secret` + workspace host & id.
-- **`envs/dev/env.auto.tfvars`** — `uc_tables`, `sql_warehouse_id` (or blank), `genie_spaces`, `enable_classification = true`, `business_access_enabled = false`.
+- **`envs/dev/env.auto.tfvars`** — `uc_tables`, `sql_warehouse_id` (or blank), `genie_spaces`, `enable_classification = true`, `enable_auto_tagging = false`, `business_access_enabled = false`.
 - **`envs/account/env.auto.tfvars`** — set `manage_groups = false` (this flow *consumes* IdP groups; it doesn't create them). **There is one shared `envs/account/` config** used by both dev and prod — you edit it here, once.
 
 **How you know it worked:** `ls envs/dev` shows `auth.auto.tfvars` and `env.auto.tfvars`, both filled in.
@@ -112,9 +112,9 @@ Use `--help` for `--host`, `--schema`, `--rows`, and env-var alternatives. Then 
 ```bash
 make enable-classification ENV=dev
 ```
-This applies **only** the UC Data Classification + auto-tagging config for your tables — no masks, policies, or grants yet.
+This applies **only** the UC Data Classification config for your tables — no masks, policies, or grants yet. Auto-tagging follows `enable_auto_tagging` and defaults off.
 
-**1b. Wait for the scan, then check the labels landed.** The first scan is asynchronous — minutes to ~24h, with no way to force it (a real *stop-and-resume-later* point). Prefer clicking? Review the results in the Databricks UI ([Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections)). In the UI you'd normally **review detections** and then **enable automatic tagging** per class — but the champion flow already enabled auto-tagging in code (`make enable-classification` sets it up front), so matching `class.*` tags apply automatically once the scan runs; use Review detections to inspect findings or **exclude** false positives. The query below reads the *same* tags (`system.information_schema.column_tags`) that the coverage gate uses, so it's the scriptable check to re-run (in a SQL editor / notebook, on any warehouse) until your recognizable PII columns show `class.*` tags:
+**1b. Review detections, then opt into tags.** The first scan is asynchronous — minutes to ~24h, with no way to force it (a real *stop-and-resume-later* point). Review the results in the Databricks UI ([Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections)) and exclude false positives. Auto-tagging defaults off: after review, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-run `make enable-classification ENV=dev`. The query below reads the resulting tags (`system.information_schema.column_tags`) that the coverage gate uses, so re-run it until recognizable PII columns show `class.*` tags:
 ```sql
 SELECT table_name, column_name, tag_name
 FROM system.information_schema.column_tags
@@ -170,7 +170,7 @@ This **creates `envs/prod/` and writes `envs/prod/env.auto.tfvars`** (with the d
 
 **How you know it worked:** open `envs/prod/env.auto.tfvars` — `uc_tables` now points at your prod catalog (`prod_finance`).
 
-**Then edit `envs/prod/env.auto.tfvars`** (don't recreate it): replace `sql_warehouse_id = ""` with your prod warehouse id (or leave `""` to auto-create), and add `enable_classification = true` and `business_access_enabled = false`.
+**Then edit `envs/prod/env.auto.tfvars`** (don't recreate it): replace `sql_warehouse_id = ""` with your prod warehouse id (or leave `""` to auto-create), and add `enable_classification = true`, `enable_auto_tagging = false`, and `business_access_enabled = false`.
 
 > You do **not** touch the account config again — `envs/account/` is shared and you already set `manage_groups = false` in Phase 0.
 
@@ -187,7 +187,7 @@ Promotion (Phase 2) already created `envs/prod/` with a template `auth.auto.tfva
 make enable-classification ENV=prod   # same as step 1a, now on prod
 ```
 
-`make enable-classification ENV=prod` turns on prod's scanner. **Wait for prod's scan** and confirm `class.*` tags on the prod catalog (the same SQL as 1b, with your prod catalog/schema) — another stop-and-resume point. Zero rows = the scan hasn't finished; wait and re-check.
+`make enable-classification ENV=prod` turns on prod's scanner without writing tags. Review prod detections, then set `enable_auto_tagging = true` and re-run the command. **Wait for prod's tags** and confirm them on the prod catalog (the same SQL as 1b, with your prod catalog/schema) — another stop-and-resume point. Zero rows means tags have not landed; wait and re-check.
 
 ---
 

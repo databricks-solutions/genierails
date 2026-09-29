@@ -185,7 +185,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 init-env: _bootstrap ## Prepare env directories and default config files
 	@echo "Environment bootstrap ready for $(ENV)."
 
-enable-classification: _bootstrap _guard-workspace-target ## Enable UC Data Classification + auto-tagging for this environment before generate
+enable-classification: _bootstrap _guard-workspace-target ## Apply UC Data Classification scanning and the configured auto-tagging opt-in
 	@python3 "$(SHARED_ROOT)/scripts/validate_classification_config.py" "$(ENV_DIR)/env.auto.tfvars"
 	@existing_catalogs="$$(python3 "$(SHARED_ROOT)/scripts/prepare_classification_config.py" "$(ENV_DIR)")" || exit 1; \
 	for catalog in $$existing_catalogs; do \
@@ -198,8 +198,8 @@ enable-classification: _bootstrap _guard-workspace-target ## Enable UC Data Clas
 	@LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" "$(ROOT_RUNNER)" data_access "$(ENV)" apply \
 		-parallelism=1 -auto-approve \
 		-target=module.data_access.databricks_data_classification_catalog_config.classification
-	@echo "Classification is enabled. Wait for class.* tags to appear in system.information_schema.column_tags"
-	@echo "or system.data_classification.results before running 'make generate ENV=$(ENV)'."
+	@echo "Classification is enabled. Review system.data_classification.results / Review detections first."
+	@echo "To land class.* tags, set enable_auto_tagging=true, re-run this target, then wait before generate."
 
 generate: _bootstrap _guard-workspace-target ## Run generate_abac.py in the selected workspace environment (set SPACE="Name" to regenerate only one space; set MODE=governance|genie for self-service Genie deployments)
 	@echo "=== Generate ABAC Config ($(ENV)$(if $(SPACE), — space: $(SPACE),)$(if $(MODE), — mode: $(MODE),)) ==="
