@@ -95,7 +95,12 @@ cp ../shared/examples/champion_flow/env.auto.tfvars.example envs/dev/env.auto.tf
 
 ## Sample Environment Setup (Optional)
 
-**Do [Phase 0](#phase-0--set-up-dev) first, then this, then continue to [Phase 1](#phase-1--dev-scan-draft-the-rules-test-them).** This is demo tooling for when you *don't* have your own tables or a Genie agent — skip it entirely if you do. It creates a sample schema (three tables of realistic synthetic PII) and a sample Genie agent, and prints the exact values to paste into `envs/dev/env.auto.tfvars`.
+**No tables or Genie agent of your own?** Expand this to create a sample schema (three tables of realistic synthetic PII) + a sample agent and get the exact values to paste into `envs/dev/env.auto.tfvars`. **Skip it if you have your own.**
+
+<details>
+<summary><strong>Set up a sample environment</strong> (optional demo tooling — do Phase 0 first)</summary>
+
+Do [Phase 0](#phase-0--set-up-dev) first, then this, then continue to [Phase 1](#phase-1--dev-scan-draft-the-rules-test-them).
 
 ```bash
 cd ../shared/examples/champion_flow         # from the cloud root (aws/ or azure/); return with 'cd ../../../aws' afterward
@@ -103,16 +108,17 @@ python -m pip install -r requirements.txt
 python setup_sample_env.py --catalog dev_finance --warehouse-id <your-warehouse-id>
 ```
 
-> **Auth for this helper is optional to specify.** It authenticates with a **Databricks CLI profile** — separate from the deploying Service Principal that `make` uses (that one lives in `auth.auto.tfvars`). With no flag it uses your **default** CLI profile (or `DATABRICKS_HOST`/`DATABRICKS_TOKEN` env vars); add `--profile <name>` only if you authenticate with a *named* profile.
+**Auth is optional to specify.** It uses a **Databricks CLI profile** — separate from the deploying Service Principal `make` uses (that lives in `auth.auto.tfvars`). No flag → your **default** CLI profile (or `DATABRICKS_HOST`/`DATABRICKS_TOKEN`); add `--profile <name>` only for a *named* profile.
 
-The script prints the exact `uc_tables`, `genie_spaces`, and `sql_warehouse_id` snippet — paste it into `envs/dev/env.auto.tfvars`. It does **not** create any access-tier groups, so in Phase 1 either pass `--groups` with existing group names or use `--create-groups`. Re-runs are safe. To remove everything it created (only that — it uses a local ownership record):
+The script prints the `uc_tables`, `genie_spaces`, and `sql_warehouse_id` snippet — paste it into `envs/dev/env.auto.tfvars`. It does **not** create access-tier groups, so in Phase 1 pass `--groups` with existing names or use `--create-groups`. Re-runs are safe. To remove only what it created:
 
 ```bash
 python teardown_sample_env.py --catalog dev_finance
 # Equivalent: add --teardown to the setup command.
 ```
 
-Use `--help` for `--host`, `--schema`, `--rows`, and env-var alternatives. Then `cd ../../../aws` (or the equivalent azure path) and continue.
+Use `--help` for `--host`, `--schema`, `--rows`, and env-var alternatives. Then `cd ../../../aws` (or the azure path) and continue.
+</details>
 
 ---
 
@@ -323,10 +329,14 @@ A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog gr
 
 ## Limits you might hit
 
+<details>
+<summary><strong>Operational limits to know</strong> — scan latency, tag-policy cap, FGAC limits, region-scoped classifiers</summary>
+
 - **Scan latency** — the first scan is async (minutes to ~24h); no force-scan API, and **Azure's initial scan is materially slower than AWS's** (tens of minutes vs. a few). `generate` before tags land correctly fail-closes.
 - **Governed tag-policy account cap** — each governed tag is an account tag policy; large accounts can hit the cap (`make apply` reports it as a hard error). Free unused policies or raise the quota.
 - **Fine-grained access-control limits** — per catalog/schema/table/metastore; see [Troubleshooting](../../docs/troubleshooting.md).
 - **Region-scoped classifiers** run in-region only — out-of-region PII physically present may go undetected (add a custom classifier or scan in-region).
+</details>
 
 ---
 
@@ -340,8 +350,12 @@ A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog gr
 
 ## Reference & glossary
 
+<details>
+<summary><strong>Reference & glossary</strong> — commands, how-it-works, and term definitions (in <a href="REFERENCE.md">REFERENCE.md</a>)</summary>
+
 Kept out of this walkthrough so it stays scannable — all in **[REFERENCE.md](REFERENCE.md)**:
 
 - **[Command reference](REFERENCE.md#command-reference)** — every `make` target in one table.
 - **[How it works (under the hood)](REFERENCE.md#how-it-works-under-the-hood)** — the exposure gate, the three governance layers, and one-mask-per-column, explained.
 - **[Glossary](REFERENCE.md#glossary)** — every term used here (`gr_treatment`, `class.*`, coverage gate, ABAC, …).
+</details>
