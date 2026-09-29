@@ -17,7 +17,7 @@ export DATABRICKS_USER_AGENT_EXTRA := genierails/0.1.0
 
 # GNU Make executes an entire recipe line containing $(MAKE), even with -n.
 # Mixed recursive/shell recipes must exit before reaching real side effects.
-_MAKE_DRY_RUN := $(if $(filter --%,$(firstword $(MAKEFLAGS))),,$(findstring n,$(firstword $(MAKEFLAGS))))
+_MAKE_DRY_RUN := $(findstring n,$(firstword -$(MAKEFLAGS)))
 _DRY_RUN_GUARD = if [ -n "$(_MAKE_DRY_RUN)" ]; then exit 0; fi
 
 ACCOUNT_ENV := account
