@@ -16,6 +16,7 @@ class Treatment:
     sources: frozenset[tuple[str, str]]
     udf_signature: str = ""
     udf_body: str = ""
+    class_labels: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -38,13 +39,16 @@ def load_treatment_config(path: Path = CONFIG_PATH) -> TreatmentConfig:
             sources=frozenset(tuple(source) for source in item["sources"]),
             udf_signature=item.get("udf_signature", ""),
             udf_body=item.get("udf_body", ""),
+            class_labels=frozenset(item.get("class_labels", [])),
         )
         for item in raw["treatments"]
     )
     values = [item.value for item in treatments]
     sources = [source for item in treatments for source in item.sources]
-    if len(values) != len(set(values)) or len(sources) != len(set(sources)):
-        raise ValueError("Treatment values and source mappings must be unique")
+    class_labels = [label for item in treatments for label in item.class_labels]
+    if (len(values) != len(set(values)) or len(sources) != len(set(sources))
+            or len(class_labels) != len(set(class_labels))):
+        raise ValueError("Treatment values, source mappings, and class labels must be unique")
     return TreatmentConfig(raw["tag_key"], raw["description"], treatments)
 
 

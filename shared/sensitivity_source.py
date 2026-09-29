@@ -210,7 +210,19 @@ class ClassificationSource(SensitivitySource):
     ):
         self._tag_rows = [tuple(r) for r in (tag_rows or [])]
         self._classification_rows = [tuple(r) for r in (classification_rows or [])]
-        self._mapping = mapping if mapping is not None else _CLASS_TO_GOVERNED
+        if mapping is None:
+            mapping = dict(_CLASS_TO_GOVERNED)
+            # Auto-scaffolded class labels resolve straight to the owned
+            # treatment tag. Native class.* tags themselves remain read-only.
+            from treatment_derivation import load_treatment_config
+            for treatment in load_treatment_config().treatments:
+                for label in treatment.class_labels:
+                    semantic = _normalize_semantic(
+                        label[len(CLASS_NAMESPACE):]
+                        if label.lower().startswith(CLASS_NAMESPACE) else label
+                    )
+                    mapping[semantic] = ("gr_treatment", treatment.value)
+        self._mapping = mapping
 
     # -- construction helpers ------------------------------------------------
     @classmethod
