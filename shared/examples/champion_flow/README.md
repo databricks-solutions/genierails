@@ -206,13 +206,17 @@ make verify-access      ENV=dev VERIFY_KEY_COLUMN=customer_id   # queries AS eac
 make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_finance=prod_finance"
 ```
 
-This **creates `envs/prod/` and writes `envs/prod/env.auto.tfvars`** (with the discovered `genie_spaces` + catalog-remapped `uc_tables`, and `sql_warehouse_id = ""`). It carries the rules — the mapping, masking functions, access/row-filter policies, and group→tier mapping — and **leaves dev's tag assignments behind** (which columns got labelled is a *fact* about dev's data; prod re-derives its own in Phase 3).
+Copies the **rules** to prod and writes `envs/prod/env.auto.tfvars` (catalog-remapped `uc_tables` + discovered `genie_spaces`, `sql_warehouse_id = ""`) — not dev's data, and not which columns dev labelled.
 
 **How you know it worked:** open `envs/prod/env.auto.tfvars` — `uc_tables` now points at your prod catalog (`prod_finance`).
 
-**Then edit `envs/prod/env.auto.tfvars`** (don't recreate it): replace `sql_warehouse_id = ""` with your prod warehouse id (or leave `""` to auto-create), and add `enable_classification = true`, `enable_auto_tagging = false`, and `business_access_enabled = false`.
+**Then edit `envs/prod/env.auto.tfvars`** (don't recreate it): set `sql_warehouse_id` (or leave `""` to auto-create), and add `enable_classification = true`, `enable_auto_tagging = false`, `business_access_enabled = false`.
 
-> You do **not** touch the account config again — `envs/account/` is shared and you already set `manage_groups = false` in Phase 0.
+<details>
+<summary><strong>What promote carries vs. leaves behind</strong> (rules travel, facts don't)</summary>
+
+It carries the **rules** — the mapping, masking functions, access/row-filter policies, and group→tier mapping — and **leaves dev's tag assignments behind** (which columns got labelled is a *fact* about dev's data; prod re-derives its own in Phase 3). You do **not** touch the account config again — `envs/account/` is shared and you already set `manage_groups = false` in Phase 0.
+</details>
 
 ---
 
@@ -244,10 +248,10 @@ make enable-classification ENV=prod   # same as step 1a, now on prod
 make certify ENV=prod   # one command: derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook (stops at the first failure)
 ```
 
-`make certify` re-derives prod's `tag_assignments` from its **live** `class.*` tags and **reuses the rules you reviewed in dev unchanged** — no model call, so the masks/policies/row-filters/groups can't drift — then proves coverage, deploys **enforcement only** (no Genie agent — that's Phase 5), and drift-checks. It is **fail-closed**: it aborts if prod's native tags are unreadable/empty, a finding is unmapped, or a derived treatment has no covering mask in the promoted rules. (If prod surfaces a *new* sensitive type your mapping doesn't cover, that's a rule change — see below.)
+One command that **reuses the rules you reviewed in dev unchanged** (no model call → no drift), proves coverage, and deploys **enforcement only** — no Genie agent yet (Phase 5). It is **fail-closed**: it aborts if prod's live tags are unreadable/empty, a finding is unmapped, or a treatment has no covering mask.
 
 <details>
-<summary><strong>Run the stages individually</strong> (e.g. for CI, where <code>coverage-gate</code> must be its own blocking step)</summary>
+<summary><strong>What <code>certify</code> runs — and running the stages individually</strong> (e.g. for CI, where <code>coverage-gate</code> must be its own blocking step)</summary>
 
 ```bash
 make derive-assignments ENV=prod   # re-derive tag_assignments from prod's LIVE class.* tags; REUSES the promoted rules unchanged (no model call)
@@ -257,9 +261,9 @@ make apply-governance ENV=prod   # deploy enforcement ONLY (account + data_acces
 make audit-rulebook   ENV=prod   # flags any prod tag with no covering rule (drift)
 ```
 
-**What each command does:** `derive-assignments` reads prod's live `class.*` tags and re-derives exactly one `gr_treatment` per column, writing **only** the `tag_assignments` — it reuses the masks, policies, row filters, and group→tier mapping you promoted **unchanged** (no `--groups`, no model call). `apply-governance` deploys the enforcement — groups, tag policies, masking functions, access/row-filter policies, grants — but **not** the workspace layer, so the Genie agent isn't created yet (that's Phase 5, after the gate). `audit-rulebook` is a **drift check**: it reports any prod `class.*`/`gr_treatment` tag with **no covering policy or mask** — a clean run means every tag maps to a rule.
+`derive-assignments` reads prod's live `class.*` tags and re-derives exactly one `gr_treatment` per column, writing **only** the `tag_assignments` — reusing the masks, policies, row filters, and group→tier mapping you promoted **unchanged** (no `--groups`, no model call). `apply-governance` deploys the enforcement (groups, tag policies, masking functions, access/row-filter policies, grants) but **not** the workspace layer, so the Genie agent isn't created yet (Phase 5). `audit-rulebook` reports any prod `class.*`/`gr_treatment` tag with no covering policy/mask (drift).
 
-**`verify-access` is not here** — it needs the exposure gate open, so it runs in Phase 5 after you release access (the masks are already applied, so opening the gate then verifying is safe). And **use `apply-governance`, not `make apply`** — a full `apply` runs the workspace layer and would create the Genie agent before the gate passes (`make certify` already uses `apply-governance`).
+**`verify-access` is not here** — it needs the exposure gate open, so it runs in Phase 5. And **use `apply-governance`, not `make apply`** — a full `apply` would create the Genie agent before the gate passes (`make certify` already uses `apply-governance`).
 </details>
 
 **How you know it worked:** `coverage-gate` exits PASS, `audit-rulebook` reports no uncovered tags.
