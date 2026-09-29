@@ -29,12 +29,14 @@ vi envs/dev/env.auto.tfvars
 # envs/dev/data_access/auth.auto.tfvars if shared layers need different credentials.
 
 # In envs/dev/env.auto.tfvars, opt into native classification:
-#   enable_classification = true
+#   enable_classification = true      # turns on scanning
+#   enable_auto_tagging   = false     # default; flip to true after reviewing detections
 # The classification footprint is the union of top-level uc_tables and each
 # genie_spaces[*].uc_tables entry.
 make enable-classification ENV=dev
-# Poll system.information_schema.column_tags or system.data_classification.results
-# until class.* tags have landed for the configured footprint.
+# Scanning populates system.data_classification.results (review detections in the UI).
+# class.* column tags are written only once enable_auto_tagging = true and you re-apply;
+# then poll system.information_schema.column_tags until tags land for the footprint.
 
 # Generation consumes your existing IdP-synced groups (setup scaffolds
 # manage_groups = false); pass one group per access tier, strictest first.
@@ -61,8 +63,8 @@ make apply               # releases business SELECT + Genie CAN_RUN
 ## What happens end-to-end
 
 1. `make setup` creates `envs/account/`, `envs/dev/data_access/`, and `envs/dev/`
-2. `make enable-classification` applies only the UC catalog classification configuration and auto-tag settings; it does not need generated ABAC or masking files
-3. You wait for the asynchronous Databricks scan to land `class.*` tags
+2. `make enable-classification` applies only the UC catalog classification configuration (scanning); auto-tagging is opt-in via `enable_auto_tagging` (default off). It does not need generated ABAC or masking files
+3. You review detections, set `enable_auto_tagging = true`, re-apply, then wait for the scan to write `class.*` tags
 4. `make generate` fetches DDLs and native classification, then writes a draft into `envs/dev/generated/`
 5. You tune the generated governance and Genie config
 6. `make coverage-gate` blocks the release if any classified sensitive column has no protection

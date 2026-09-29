@@ -7,6 +7,7 @@ This document covers champion-flow issues, import flows, brownfield adoption, an
 ### `make generate` aborts: "could not read native classification" / empty results
 
 With `enable_classification=true`, generation is **fail-closed**: if native `class.*` results are unreadable or empty, it aborts rather than guessing. This is intentional.
+- **Have you enabled auto-tagging?** It's opt-in (`enable_auto_tagging = false` by default), so no `class.*` column tags are written until you set `enable_auto_tagging = true` and re-run `make enable-classification`. Review detections first ([Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections)), then opt in.
 - Confirm classification is enabled and the **scan has completed** (async, minutes to ~24h) — check `system.information_schema.column_tags` for `class.*` on your footprint.
 - If your data genuinely has no format-matchable PII yet, seed realistic values or wait for the scan.
 - Only to deliberately bypass (not recommended in prod): `GENERATE_ARGS='--allow-llm-sensitivity'`.
