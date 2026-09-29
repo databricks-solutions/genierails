@@ -42,7 +42,7 @@ def scaffold(
     sql_path: Path,
     config_path: Path,
     vocabulary_path: Path | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, object]]:
     if not tfvars_path.is_file():
         raise FileNotFoundError(f"Generated ABAC config not found: {tfvars_path}")
     if not sql_path.is_file():
@@ -57,8 +57,8 @@ def scaffold(
     vocabulary_path = vocabulary_path or config_path.with_name("tag_vocabulary_registry.json")
     raw = json.loads(config_path.read_text())
     vocabulary = json.loads(vocabulary_path.read_text())
-    configured_labels = {
-        label.lower()
+    configured_by_label = {
+        label.lower(): treatment
         for treatment in raw["treatments"]
         for label in treatment.get("class_labels", [])
     }
@@ -71,7 +71,7 @@ def scaffold(
 
     additions: list[dict[str, str]] = []
     for label in sorted({label for _, label, _ in markers}):
-        if label in configured_labels:
+        if label in configured_by_label:
             continue
         semantic = label.removeprefix("class.")
         slug = _slug(semantic)
@@ -87,11 +87,13 @@ def scaffold(
         existing_values.add(value)
         existing_functions.add(function)
 
-    if not additions:
-        return []
-
+    strict_insert_at = next(
+        (index + 1 for index, treatment in enumerate(raw["treatments"])
+         if treatment["value"] == "redact"),
+        0,
+    )
     for item in additions:
-        raw["treatments"].append({
+        treatment = {
             "value": item["value"],
             "masking_function": item["function"],
             "udf_signature": f'{item["function"]}(input STRING) RETURNS STRING',
@@ -102,7 +104,12 @@ def scaffold(
                 f'REVIEW: auto-scaffolded for {item["label"]}; defaults to full '
                 "redaction — implement type-appropriate masking or leave as-is"
             ),
-        })
+        }
+        # The config is strictest-first. These stubs have the same effective
+        # strength as full redaction, so keep them ahead of every partial mask.
+        raw["treatments"].insert(strict_insert_at, treatment)
+        strict_insert_at += 1
+        configured_by_label[item["label"]] = treatment
         family = vocabulary["families"]["gr_treatment"]
         if item["value"] not in family["canonical_values"]:
             family["canonical_values"].append(item["value"])
@@ -119,7 +126,9 @@ def scaffold(
     finally:
         staged_config.unlink(missing_ok=True)
 
-    value_by_label = {item["label"]: item["value"] for item in additions}
+    value_by_label = {
+        label: treatment["value"] for label, treatment in configured_by_label.items()
+    }
     cfg = hcl2.loads(tfvars_text)
     assignments = list(cfg.get("tag_assignments") or [])
     seen_assignments = {
@@ -132,6 +141,30 @@ def scaffold(
                                 "tag_key": config.tag_key, "tag_value": value})
     cfg["tag_assignments"] = assignments
     derived, _ = derive_treatment_model(cfg, config)
+
+    # A marker may be removed only when derivation actually left that column
+    # with the configured treatment or something stricter. Abort before any
+    # persistent write if this invariant cannot be proved, leaving the marker
+    # in place so coverage-gate continues to block.
+    treatment_rank = {
+        treatment.value: rank for rank, treatment in enumerate(config.treatments)
+    }
+    derived_by_entity = {
+        item.get("entity_name"): item.get("tag_value")
+        for item in derived.get("tag_assignments", [])
+        if item.get("tag_key") == config.tag_key
+    }
+    for entity, label, _ in markers:
+        expected = value_by_label[label]
+        actual = derived_by_entity.get(entity)
+        if (
+            actual not in treatment_rank
+            or treatment_rank[actual] > treatment_rank[expected]
+        ):
+            raise ValueError(
+                f"Refusing to remove marker for {entity}|{label}: derived "
+                f"treatment {actual!r} is missing or weaker than {expected!r}"
+            )
 
     updated_tfvars = MARKER_RE.sub(
         lambda match: match.group(0) if match.group(2).lower() not in value_by_label else "",
@@ -166,11 +199,23 @@ def scaffold(
             "END;"
         )
 
-    config_path.write_text(json.dumps(raw, indent=2) + "\n")
-    vocabulary_path.write_text(json.dumps(vocabulary, indent=2) + "\n")
-    sql_path.write_text(sql + "\n\n" + "\n\n".join(blocks) + "\n")
+    if additions:
+        config_path.write_text(json.dumps(raw, indent=2) + "\n")
+        vocabulary_path.write_text(json.dumps(vocabulary, indent=2) + "\n")
+        sql_path.write_text(sql + "\n\n" + "\n\n".join(blocks) + "\n")
     tfvars_path.write_text(updated_tfvars)
-    return additions
+    actions = []
+    added_labels = {item["label"] for item in additions}
+    for label in sorted({label for _, label, _ in markers}):
+        treatment = configured_by_label[label]
+        actions.append({
+            "label": label,
+            "semantic": label.removeprefix("class."),
+            "value": treatment["value"],
+            "function": treatment["masking_function"],
+            "added": label in added_labels,
+        })
+    return actions
 
 
 def main() -> int:
@@ -191,9 +236,11 @@ def main() -> int:
         print("No unmapped class.* labels found; nothing changed.")
         return 0
     for item in additions:
+        verb = "ADDED" if item["added"] else "APPLIED EXISTING"
+        suffix = " (full-redaction REVIEW stub)" if item["added"] else ""
         print(
-            f'ADDED {item["label"]} -> gr_treatment={item["value"]} '
-            f'-> {item["function"]} (full-redaction REVIEW stub)'
+            f'{verb} {item["label"]} -> gr_treatment={item["value"]} '
+            f'-> {item["function"]}{suffix}'
         )
     print("Review the stubs, then re-run `make certify` (or `make generate`+`make coverage-gate`).")
     return 0

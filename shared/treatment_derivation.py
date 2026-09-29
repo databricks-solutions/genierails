@@ -165,9 +165,21 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
     treatments_by_value = {item.value: item for item in config.treatments}
     for column in sorted(set(by_column) | set(existing_treatments)):
         findings = by_column.get(column, [])
-        treatment = resolve_treatment(findings, config)
-        if treatment is None:
-            treatment = treatments_by_value.get(existing_treatments.get(column, ""))
+        source_treatment = resolve_treatment(findings, config)
+        explicit_treatment = treatments_by_value.get(existing_treatments.get(column, ""))
+        # An explicit gr_treatment produced from a native class_label is a real
+        # finding, not a fallback. Compare it with source-derived findings using
+        # the same strictest-first config order so a scaffolded full-redaction
+        # treatment can never be silently replaced by a weaker partial mask.
+        candidates = {
+            item.value: item
+            for item in (source_treatment, explicit_treatment)
+            if item
+        }
+        treatment = next(
+            (item for item in config.treatments if item.value in candidates),
+            None,
+        )
         if treatment is None:
             continue
         if (
