@@ -205,7 +205,12 @@ Promotion (Phase 2) already created `envs/prod/` with a template `auth.auto.tfva
 make enable-classification ENV=prod   # same as step 1a, now on prod
 ```
 
-`make enable-classification ENV=prod` turns on prod's scanner without writing tags. Review prod detections, then set `enable_auto_tagging = true` and re-run the command. **Wait for prod's tags** and confirm them on the prod catalog (the same SQL as 1b, with your prod catalog/schema) — another stop-and-resume point. Zero rows means tags have not landed; wait and re-check.
+`make enable-classification ENV=prod` turns on prod's scanner **without writing tags** (auto-tagging defaults off — promotion doesn't carry it over, so prod gets its *own* review, just like dev). Then, exactly as in dev's **1b**:
+
+- **Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) on the prod catalog and **exclude any false positives** — prod's real data may surface sensitive types dev never saw.
+- **Opt in.** Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` (add the line if promote didn't write it) and re-run `make enable-classification ENV=prod`. The `class.*` tags then land.
+
+**Wait for prod's tags** and confirm them on the prod catalog (the same SQL as 1b, with your prod catalog/schema) — another stop-and-resume point. Zero rows means tags haven't landed; wait and re-check.
 
 ---
 
