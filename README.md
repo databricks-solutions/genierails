@@ -6,6 +6,15 @@
 
 Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent from dev to production without exposing sensitive data: Unity Catalog's built-in classifier decides *what* is sensitive, GenieRails derives *how* it's protected and applies it as code — groups, column masks, row filters, ACLs, entitlements, and the agent itself — and a **coverage gate blocks the release** until every *classified* sensitive column the agent can reach is covered. No Terraform to write.
 
+## How it works
+
+1. **Unity Catalog decides what's sensitive.** Its built-in [Data Classification](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) scanner reads your data and labels each sensitive column (`class.*`, e.g. `class.email_address`).
+2. **GenieRails decides how it's protected.** From those labels it derives one enforcement treatment per column — column masks, row filters, and access rules — and applies it as Terraform, so you don't write any.
+3. **A coverage gate is the safety net.** The release fails ("says NO") if any classified-sensitive column has no protection, so an ungoverned agent can't reach users.
+4. **Dev rehearses; prod is the real thing.** Build and test in dev, promote the *rules* to prod, let prod classify its *own* data, prove coverage, and open the agent to users **last**.
+
+→ Walk it end-to-end in the **[Champion Flow](shared/examples/champion_flow/)**.
+
 ## What you get
 
 - **Native classification as the source of truth** — Unity Catalog's Data Classification decides what's sensitive (`class.*` labels); GenieRails doesn't guess by default (an explicit `--allow-llm-sensitivity` escape hatch exists).

@@ -13,10 +13,7 @@ Terms in `code` (and words like *coverage check*, *masking*, *access tier*) are 
 
 ## The idea
 
-1. **Unity Catalog decides what's sensitive.** Its built-in [*Data Classification*](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) scanner reads your data and puts a `class.*` label on each sensitive column (e.g. `class.email_address`).
-2. **GenieRails decides how it's protected.** From those labels it derives one *masking* rule per column and the access rules, and applies them as Terraform.
-3. **The coverage check is the safety gate.** It fails ("says NO") if any labelled-sensitive column has no protection — blocking the release until you fix it.
-4. **Dev is the rehearsal; prod is the real thing.** You build and test in dev, promote the *rules* to prod, let prod scan its *own* data, prove coverage, and open the agent to users **last**.
+**The platform classifies → GenieRails enforces → a coverage gate blocks the release until every classified column is covered → dev rehearses, prod is the real thing.** For the full mental model, see [**How it works**](../../../README.md#how-it-works) on the landing page. The [phases below](#the-flow-at-a-glance) are the step-by-step.
 
 ---
 
