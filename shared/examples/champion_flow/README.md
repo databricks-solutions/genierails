@@ -212,8 +212,6 @@ make verify-access      ENV=dev VERIFY_KEY_COLUMN=customer_id   # queries AS eac
 make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_finance=prod_finance"
 ```
 
-Copies the **rules** to prod and writes `envs/prod/env.auto.tfvars` (catalog-remapped `uc_tables` + discovered `genie_spaces`, `sql_warehouse_id = ""`) — not dev's data, and not which columns dev labelled.
-
 **Done when —** `envs/prod/env.auto.tfvars`'s `uc_tables` now points at your prod catalog (`prod_finance`).
 
 **Then edit `envs/prod/env.auto.tfvars`** (don't recreate it): set `sql_warehouse_id` (or leave `""` to auto-create), and add `enable_classification = true`, `enable_auto_tagging = false`, `business_access_enabled = false`.
