@@ -17,19 +17,17 @@ Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent f
 
 ## Getting Started
 
-Check the [Prerequisites](shared/docs/prerequisites.md) first, then pick your cloud — [`aws/`](aws/README.md) or [`azure/`](azure/README.md), where you run all `make` commands (`shared/` is invoked automatically) — and follow the guide for your situation:
+Check the [Prerequisites](shared/docs/prerequisites.md) first, then pick your cloud — [`aws/`](aws/README.md) or [`azure/`](azure/README.md), where you run all `make` commands (`shared/` is invoked automatically).
 
-| Your situation | Start here | Time |
-|---|---|---|
-| **Want the end-to-end champion flow** (recommended) | [**Champion Flow** — native classification → coverage gate → safe dev→prod promotion](shared/examples/champion_flow/) | ~30 min |
-| Have an existing Genie agent in the UI | [From UI to Production](shared/docs/from-ui-to-production.md) — import it, then govern it via the champion flow | ~30 min |
-| Starting from scratch (no Genie agent yet) | [Quickstart](shared/docs/quickstart.md) | ~30 min |
-| Need the full reference | [Playbook](shared/docs/playbook.md) | Reference |
+**→ Follow the [Champion Flow](shared/examples/champion_flow/)** — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion), ~30 min. It ships an optional sample environment, so you can run the whole thing even without your own tables or agent.
+
+Already have a Genie agent built in the Databricks UI? [Import it first](shared/docs/from-ui-to-production.md), then follow the same flow.
 
 ## Documentation
 
-New here? Use the [Getting Started](#getting-started) routes above. Full reference in [`shared/docs/`](shared/docs/):
+Full reference in [`shared/docs/`](shared/docs/):
 
+- **Guides** — [Champion Flow](shared/examples/champion_flow/) · [From UI to Production](shared/docs/from-ui-to-production.md) · [Quickstart](shared/docs/quickstart.md) · [Playbook](shared/docs/playbook.md)
 - **Set up & operate** — [Prerequisites](shared/docs/prerequisites.md) · [Architecture](shared/docs/architecture.md) · [Version Control & Standalone Terraform](shared/docs/version-control.md) · [CI/CD](shared/docs/cicd.md)
 - **Customize** — [Country & Region Overlays](shared/docs/country-overlays.md) · [Industry Overlays](shared/docs/industry-overlays.md) · [Central Governance / Self-Service Genie](shared/docs/self-service-genie.md) · [Advanced Usage](shared/docs/advanced.md)
 - **Verify & troubleshoot** — [Effective-Access Verification](shared/docs/effective-access-verification.md) · [Integration Testing](shared/docs/integration-testing.md) · [Troubleshooting](shared/docs/troubleshooting.md)
