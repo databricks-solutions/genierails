@@ -6,7 +6,7 @@
 
 ## Overview
 
-> **Overlays tune the *rules*, not the *sensitivity decision* or your *groups*.** In the champion flow, **Unity Catalog native Data Classification** (`class.*`) is the authoritative source of what's sensitive (one `gr_treatment`/column derived from it), and your **access-tier groups come from your IdP** (consumed via `--groups`, `manage_groups=false`). An industry overlay only adds **industry-specific masking functions, regulatory context, and prompt hints** to generation — it never decides sensitivity, never creates groups, and never proves coverage (that's `make coverage-gate`).
+> **Overlays tune the *rules*, not the *sensitivity decision* or your *groups*.** In the dev-to-prod walkthrough, **Unity Catalog native Data Classification** (`class.*`) is the authoritative source of what's sensitive (one `gr_treatment`/column derived from it), and your **access-tier groups come from your IdP** (consumed via `--groups`, `manage_groups=false`). An industry overlay only adds **industry-specific masking functions, regulatory context, and prompt hints** to generation — it never decides sensitivity, never creates groups, and never proves coverage (that's `make coverage-gate`).
 
 The **industry overlay** system injects industry-specific identifier knowledge — column patterns, masking functions, group templates, access patterns, and regulatory context — into the generation prompt so GenieRails drafts industry-appropriate rules. Each overlay is a self-contained YAML file under `shared/industries/`.
 
@@ -322,7 +322,7 @@ Yes: `make generate COUNTRY=ANZ INDUSTRY=healthcare`. Country overlays are injec
 No Terraform *code* changes. The overlay's masking functions are written into the generated `masking_functions.sql` and deployed, but there's no industry-specific Terraform logic, and `make coverage-gate` still gates it.
 
 **How do group templates work?**
-They are prompt suggestions for access-tier *shapes* only — GenieRails does **not** create groups. In the champion consume model your real groups come from your IdP (supplied via `--groups`, `manage_groups=false`); the templates just help the LLM reason about tiering. Map your actual IdP group names to tiers at generate time.
+They are prompt suggestions for access-tier *shapes* only — GenieRails does **not** create groups. In the dev-to-prod consume model your real groups come from your IdP (supplied via `--groups`, `manage_groups=false`); the templates just help the LLM reason about tiering. Map your actual IdP group names to tiers at generate time.
 
 **What about access patterns like break-glass?**
 Access patterns provide implementation guidance to the LLM. For break-glass, the LLM will typically create a dedicated group with `except_principals` to override masking. You should review the generated output to ensure the pattern is correctly implemented.

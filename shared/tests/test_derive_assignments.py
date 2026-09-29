@@ -19,7 +19,7 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
 
 
-PROMOTED = '''# reviewed champion rules
+PROMOTED = '''# reviewed dev-to-prod rules
 groups = [{ display_name = "reviewed_group", roles = ["analyst"] }]
 tag_policies = [{ key = "gr_treatment", description = "reviewed", values = ["redact", "email_partial", "ssn_last4"] }]
 tag_assignments = [

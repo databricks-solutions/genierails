@@ -44,15 +44,15 @@ databricks_workspace_host = "https://adb-1234567890.12.azuredatabricks.net"
 > - `databricks_account_host` must be `accounts.azuredatabricks.net` (the Terraform provider default is the AWS URL)
 > - `databricks_workspace_host` uses the Azure format: `adb-<workspace-id>.<region-id>.azuredatabricks.net`
 
-## Step 3 — Follow the champion flow
+## Step 3 — Follow the dev-to-prod walkthrough
 
-The **[champion flow](../shared/examples/champion_flow/)** is the canonical end-to-end walkthrough: Unity Catalog classifies your data, GenieRails derives one protection per classified column, a coverage gate fails the build if any classified sensitive column is unprotected, and the agent is exposed to users only after the prod gate passes. No tables or agent of your own? It ships an optional sample-environment script that creates everything, so you can run the whole flow to see it in action.
+The **[dev-to-prod walkthrough](../shared/examples/dev_to_prod/)** is the canonical end-to-end walkthrough: Unity Catalog classifies your data, GenieRails derives one protection per classified column, a coverage gate fails the build if any classified sensitive column is unprotected, and the agent is exposed to users only after the prod gate passes. No tables or agent of your own? It ships an optional sample-environment script that creates everything, so you can run the whole flow to see it in action.
 
-Starting from a specific point? These entry guides feed into the champion flow:
+Starting from a specific point? These entry guides feed into the dev-to-prod walkthrough:
 
 | Starting point | You have... | Guide |
 |---|---|---|
-| **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](../shared/docs/from-ui-to-production.md) — imports your agent, then follow the champion flow |
+| **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](../shared/docs/from-ui-to-production.md) — imports your agent, then follow the dev-to-prod walkthrough |
 | **I'm starting from scratch** | Tables in Unity Catalog, no Genie agent yet | [Quickstart](../shared/docs/quickstart.md) |
 
 ---
@@ -60,8 +60,8 @@ Starting from a specific point? These entry guides feed into the champion flow:
 ## Documentation
 
 - [Azure Prerequisites](docs/azure-prerequisites.md) — Azure-specific resource setup, RBAC roles, storage accounts
-- [Champion flow](../shared/examples/champion_flow/) — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion)
-- [From UI to Production](../shared/docs/from-ui-to-production.md) — import your existing Genie agent, then follow the champion flow
+- [Dev-to-Prod walkthrough](../shared/examples/dev_to_prod/) — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion)
+- [From UI to Production](../shared/docs/from-ui-to-production.md) — import your existing Genie agent, then follow the dev-to-prod walkthrough
 - [Quickstart](../shared/docs/quickstart.md) — create a Genie agent from scratch
 - [Playbook](../shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios
 - [Architecture](../shared/docs/architecture.md) — layers, artifact ownership, config files, Genie agent lifecycle

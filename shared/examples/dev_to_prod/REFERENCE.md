@@ -1,6 +1,6 @@
-# GenieRails Champion Flow — reference
+# GenieRails Dev-to-Prod Walkthrough — reference
 
-Lookup companion to the **[champion flow walkthrough](README.md)**: the full command reference, how the enforcement works under the hood, and a glossary of every term. You don't need to read this top-to-bottom — jump in when the walkthrough links you here.
+Lookup companion to the **[Dev-to-Prod Walkthrough](README.md)**: the full command reference, how the enforcement works under the hood, and a glossary of every term. You don't need to read this top-to-bottom — jump in when the walkthrough links you here.
 
 ---
 

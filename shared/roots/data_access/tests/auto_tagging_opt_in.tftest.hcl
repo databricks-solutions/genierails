@@ -23,7 +23,7 @@ run "classification_scans_without_auto_tagging" {
   }
 }
 
-run "auto_tagging_emits_all_champion_classifier_types" {
+run "auto_tagging_emits_all_dev_to_prod_classifier_types" {
   command = plan
 
   variables {
@@ -40,7 +40,7 @@ run "auto_tagging_emits_all_champion_classifier_types" {
 
   assert {
     condition     = length(output.classification_auto_tag_configs["review_first"]) == 7
-    error_message = "auto-tagging opt-in must emit one config for every champion classifier type"
+    error_message = "auto-tagging opt-in must emit one config for every dev-to-prod classifier type"
   }
 
   assert {

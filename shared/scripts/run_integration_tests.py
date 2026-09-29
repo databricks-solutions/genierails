@@ -5210,7 +5210,7 @@ def scenario_industry_overlay(
 
 
 # ---------------------------------------------------------------------------
-# Scenario: aus-bank-demo — Australian bank champion flow
+# Scenario: aus-bank-demo — Australian bank dev-to-prod walkthrough
 # ---------------------------------------------------------------------------
 
 def _setup_bank_data(auth_file: Path, warehouse_id: str) -> str:
@@ -5468,7 +5468,7 @@ def scenario_aus_bank_demo(
     keep_data: bool = False,
     fresh_env: bool = False,
 ) -> None:
-    """Australian bank demo — champion flow (ANZ + financial_services, import + promote).
+    """Australian bank demo — dev-to-prod walkthrough (ANZ + financial_services, import + promote).
 
     Phase 1 — Setup:
       Creates dev_bank and prod_bank catalogs with Australian banking tables.
@@ -5489,7 +5489,7 @@ def scenario_aus_bank_demo(
 
     Tests: ANZ country overlay + financial_services industry overlay + import + promote.
     """
-    _banner("Scenario: aus-bank-demo — Australian bank champion flow (ANZ + financial_services)")
+    _banner("Scenario: aus-bank-demo — Australian bank dev-to-prod walkthrough (ANZ + financial_services)")
     env = "dev"
     prod_env = "prod"
 
@@ -5641,7 +5641,7 @@ genie_spaces = [
 
 
 # ---------------------------------------------------------------------------
-# Scenario: india-bank-demo — India bank champion flow
+# Scenario: india-bank-demo — India bank dev-to-prod walkthrough
 # ---------------------------------------------------------------------------
 
 def _setup_india_bank_data(auth_file: Path, warehouse_id: str) -> str:
@@ -5770,8 +5770,8 @@ def scenario_india_bank_demo(
     keep_data: bool = False,
     fresh_env: bool = False,
 ) -> None:
-    """India bank demo — champion flow (IN + financial_services, import + promote)."""
-    _banner("Scenario: india-bank-demo — India bank champion flow (IN + financial_services)")
+    """India bank demo — dev-to-prod walkthrough (IN + financial_services, import + promote)."""
+    _banner("Scenario: india-bank-demo — India bank dev-to-prod walkthrough (IN + financial_services)")
     env = "dev"
     prod_env = "prod"
 
@@ -5927,7 +5927,7 @@ genie_spaces = [
 
 
 # ---------------------------------------------------------------------------
-# Scenario: asean-bank-demo — ASEAN bank champion flow
+# Scenario: asean-bank-demo — ASEAN bank dev-to-prod walkthrough
 # ---------------------------------------------------------------------------
 
 def _setup_asean_bank_data(auth_file: Path, warehouse_id: str) -> str:
@@ -6056,8 +6056,8 @@ def scenario_asean_bank_demo(
     keep_data: bool = False,
     fresh_env: bool = False,
 ) -> None:
-    """ASEAN bank demo — champion flow (SEA + financial_services, import + promote)."""
-    _banner("Scenario: asean-bank-demo — ASEAN bank champion flow (SEA + financial_services)")
+    """ASEAN bank demo — dev-to-prod walkthrough (SEA + financial_services, import + promote)."""
+    _banner("Scenario: asean-bank-demo — ASEAN bank dev-to-prod walkthrough (SEA + financial_services)")
     env = "dev"
     prod_env = "prod"
 
@@ -6222,9 +6222,9 @@ SCENARIOS: dict[str, tuple[str, Callable]] = {
     "country-overlay": ("Country/region overlays (ANZ, IN, SEA) — generation only",         scenario_country_overlay),
     "industry-overlay": ("Industry overlays (financial/healthcare/retail) + country+industry combo", scenario_industry_overlay),
     "genie-import-no-abac": ("Import Genie agent, deploy to prod without ABAC",            scenario_genie_import_no_abac),
-    "aus-bank-demo": ("Australian bank demo — champion flow (ANZ + financial_services, import + promote)", scenario_aus_bank_demo),
-    "india-bank-demo": ("India bank demo — champion flow (IN + financial_services, import + promote)", scenario_india_bank_demo),
-    "asean-bank-demo": ("ASEAN bank demo — champion flow (SEA + financial_services, import + promote)", scenario_asean_bank_demo),
+    "aus-bank-demo": ("Australian bank demo — dev-to-prod walkthrough (ANZ + financial_services, import + promote)", scenario_aus_bank_demo),
+    "india-bank-demo": ("India bank demo — dev-to-prod walkthrough (IN + financial_services, import + promote)", scenario_india_bank_demo),
+    "asean-bank-demo": ("ASEAN bank demo — dev-to-prod walkthrough (SEA + financial_services, import + promote)", scenario_asean_bank_demo),
 }
 
 

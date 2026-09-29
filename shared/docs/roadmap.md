@@ -4,7 +4,7 @@ Planned features and improvements identified during the comprehensive project re
 
 ## Delivered since this roadmap was written
 
-The native-classification governance model has since shipped and is the current recommended flow — see the **[Champion Flow](../examples/champion_flow/README.md)**. The items below are *remaining* future work, distinct from what has already landed:
+The native-classification governance model has since shipped and is the current recommended flow — see the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)**. The items below are *remaining* future work, distinct from what has already landed:
 
 - **Native classification as the sensitivity source** — Unity Catalog `class.*` tags decide what's sensitive (no LLM guessing); fail-closed if unreadable.
 - **Deterministic treatment derivation** — one `gr_treatment` per column, so exactly one mask resolves.

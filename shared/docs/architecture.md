@@ -4,7 +4,7 @@ This document explains the layered state model, config files, and resource owner
 
 ## Governance model — four invariants
 
-Everything below rests on four invariants of the champion flow:
+Everything below rests on four invariants of the dev-to-prod walkthrough:
 
 1. **Unity Catalog is the sensitivity source of truth.** Native Data Classification writes `class.*` labels on sensitive columns; GenieRails does not guess by default. When `enable_classification=true`, generation is fail-closed — unreadable/empty native results abort rather than fall back to LLM inference (unless the operator explicitly passes the `--allow-llm-sensitivity` escape hatch).
 2. **One `gr_treatment` per column.** GenieRails collapses a column's `class.*` findings deterministically to exactly one enforcement treatment (`gr_treatment`), so exactly one column mask ever resolves; masks are keyed to that treatment vocabulary.

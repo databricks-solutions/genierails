@@ -5,7 +5,7 @@
 ### Added
 
 - **Australian Bank Demo**: End-to-end demo documentation now covers Azure
-  alongside AWS. Run the full champion flow (provision, generate, apply, promote,
+  alongside AWS. Run the full dev-to-prod walkthrough (provision, generate, apply, promote,
   teardown) from `cd azure/` with `account-admin.azure.env` credentials.
   See [`shared/examples/legacy/aus_bank_demo/`](../shared/examples/legacy/aus_bank_demo/).
 

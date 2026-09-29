@@ -13,13 +13,13 @@ Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent f
 3. **A coverage gate is the safety net.** The release fails ("says NO") if any classified-sensitive column has no protection, so an ungoverned agent can't reach users.
 4. **Dev rehearses; prod is the real thing.** Build and test in dev, promote the *rules* to prod, let prod classify its *own* data, prove coverage, and open the agent to users **last**.
 
-→ Walk it end-to-end in the **[Champion Flow](shared/examples/champion_flow/)**.
+→ Walk it end-to-end in the **[Dev-to-Prod Walkthrough](shared/examples/dev_to_prod/)**.
 
 ## Getting Started
 
 Check the [Prerequisites](shared/docs/prerequisites.md) first, then pick your cloud — [`aws/`](aws/README.md) or [`azure/`](azure/README.md), where you run all `make` commands (`shared/` is invoked automatically).
 
-**→ Follow the [Champion Flow](shared/examples/champion_flow/)** — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion), ~30 min. It ships an optional sample environment, so you can run the whole thing even without your own tables or agent.
+**→ Follow the [Dev-to-Prod Walkthrough](shared/examples/dev_to_prod/)** — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion), ~30 min. It ships an optional sample environment, so you can run the whole thing even without your own tables or agent.
 
 Already have a Genie agent built in the Databricks UI? [Import it first](shared/docs/from-ui-to-production.md), then follow the same flow.
 
@@ -27,7 +27,7 @@ Already have a Genie agent built in the Databricks UI? [Import it first](shared/
 
 Full reference in [`shared/docs/`](shared/docs/):
 
-- **Guides** — [Champion Flow](shared/examples/champion_flow/) · [From UI to Production](shared/docs/from-ui-to-production.md) · [Quickstart](shared/docs/quickstart.md) · [Playbook](shared/docs/playbook.md)
+- **Guides** — [Dev-to-Prod Walkthrough](shared/examples/dev_to_prod/) · [From UI to Production](shared/docs/from-ui-to-production.md) · [Quickstart](shared/docs/quickstart.md) · [Playbook](shared/docs/playbook.md)
 - **Set up & operate** — [Prerequisites](shared/docs/prerequisites.md) · [Architecture](shared/docs/architecture.md) · [Version Control & Standalone Terraform](shared/docs/version-control.md) · [CI/CD](shared/docs/cicd.md)
 - **Customize** — [Country & Region Overlays](shared/docs/country-overlays.md) · [Industry Overlays](shared/docs/industry-overlays.md) · [Central Governance / Self-Service Genie](shared/docs/self-service-genie.md) · [Advanced Usage](shared/docs/advanced.md)
 - **Verify & troubleshoot** — [Effective-Access Verification](shared/docs/effective-access-verification.md) · [Integration Testing](shared/docs/integration-testing.md) · [Troubleshooting](shared/docs/troubleshooting.md)

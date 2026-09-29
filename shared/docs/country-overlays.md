@@ -6,7 +6,7 @@
 
 ## Overview
 
-> **Overlays tune the *rules*, not the *sensitivity decision*.** In the champion flow, **Unity Catalog native Data Classification** (`class.*` tags) is the authoritative source of what's sensitive, and GenieRails derives one `gr_treatment` per column from it. A country overlay only adds **region-specific masking functions, regulatory context, and rule-generation hints** to the generation prompt — it never decides sensitivity and never proves coverage (that's `make coverage-gate`). Overlays are optional context layered *after* classification.
+> **Overlays tune the *rules*, not the *sensitivity decision*.** In the dev-to-prod walkthrough, **Unity Catalog native Data Classification** (`class.*` tags) is the authoritative source of what's sensitive, and GenieRails derives one `gr_treatment` per column from it. A country overlay only adds **region-specific masking functions, regulatory context, and rule-generation hints** to the generation prompt — it never decides sensitivity and never proves coverage (that's `make coverage-gate`). Overlays are optional context layered *after* classification.
 
 The **country overlay** system injects region-specific identifier knowledge — column patterns, masking functions, and regulatory context — into the generation prompt so GenieRails drafts region-appropriate masking functions and rules for non-US datasets. Each overlay is a self-contained YAML file under `shared/countries/`.
 

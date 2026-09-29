@@ -2,7 +2,7 @@
 """
 Australian Bank Demo — Setup and Teardown
 
-Provisions a complete demo environment for the GenieRails champion flow:
+Provisions a complete demo environment for the GenieRails dev-to-prod walkthrough:
   - Dev workspace + prod workspace (fresh, isolated)
   - Unity Catalog metastore with cloud storage
   - Sample Australian banking tables (customers, accounts, transactions, credit_cards)

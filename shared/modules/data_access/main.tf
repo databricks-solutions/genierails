@@ -80,7 +80,7 @@ locals {
     ], lookup(var.classification_existing_schemas, catalog, [])))
   }
 
-  # Native classifier types exercised by the champion footprint. Auto-tagging
+  # Native classifier types exercised by the dev-to-prod footprint. Auto-tagging
   # must be enabled per type; catalog classification alone does not land tags.
   classification_auto_tags = toset([
     "class.card_security_code",

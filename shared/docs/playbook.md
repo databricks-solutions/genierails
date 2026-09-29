@@ -1,6 +1,6 @@
 # Playbook
 
-GenieRails puts Genie onboarding on rails: Unity Catalog's classifier decides what's sensitive, GenieRails derives one protection per column and proves coverage with a blocking gate, then promotes the rules safely to production. This playbook covers common tasks after your first deployment; the end-to-end walkthrough is the **[champion flow](../examples/champion_flow/README.md)**.
+GenieRails puts Genie onboarding on rails: Unity Catalog's classifier decides what's sensitive, GenieRails derives one protection per column and proves coverage with a blocking gate, then promotes the rules safely to production. This playbook covers common tasks after your first deployment; the end-to-end walkthrough is the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)**.
 
 ## Pick your starting point
 
@@ -9,7 +9,7 @@ GenieRails puts Genie onboarding on rails: Unity Catalog's classifier decides wh
 | **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](from-ui-to-production.md) |
 | **I'm starting from scratch** | Tables in Unity Catalog, no Genie agent yet | [Quickstart](quickstart.md) |
 
-> Both routes converge on the **[champion flow](../examples/champion_flow/README.md)** — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion).
+> Both routes converge on the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)** — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion).
 
 ---
 
@@ -110,7 +110,7 @@ make audit-rulebook ENV=dev
 # Preferred: let native classification tag new columns, then re-derive deterministically (no LLM)
 make derive-assignments ENV=dev
 make apply ENV=dev
-# (make generate-delta is an exceptional/legacy LLM path — not the routine champion flow)
+# (make generate-delta is an exceptional/legacy LLM path — not the routine dev-to-prod walkthrough)
 ```
 
 `audit-schema` and `audit-rulebook` are two complementary directions of drift:
@@ -148,7 +148,7 @@ cd envs/dev && python3 "$SHARED_ROOT/scripts/audit_schema_drift.py" --mode all
 
 ## Advanced scenarios
 
-These cover less common deployment patterns. Most users won't need them on day one. **The commands below show the scenario-specific mechanics only** — each still runs through the champion gates: consume your IdP groups (`--groups`, `manage_groups=false`), run `make coverage-gate` before applying, keep `business_access_enabled=false` until coverage passes, and in prod use `derive-assignments` (not `generate`).
+These cover less common deployment patterns. Most users won't need them on day one. **The commands below show the scenario-specific mechanics only** — each still runs through the dev-to-prod gates: consume your IdP groups (`--groups`, `manage_groups=false`), run `make coverage-gate` before applying, keep `business_access_enabled=false` until coverage passes, and in prod use `derive-assignments` (not `generate`).
 
 ### ABAC governance only (no Genie agent)
 
@@ -227,7 +227,7 @@ See [Architecture](architecture.md) for the full reference. Quick summary:
 2. `envs/<name>/data_access/` — env-scoped governance (tags, masking, grants)
 3. `envs/<name>/` — workspace layer (Genie agents, ACLs)
 
-The core loop (champion flow):
+The core loop (dev-to-prod walkthrough):
 
 ```
 enable-classification → wait for class.* → make generate (--groups) → coverage-gate

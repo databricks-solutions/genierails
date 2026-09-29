@@ -185,7 +185,7 @@ make audit-schema ENV=prod
 
 This exits `1` if untagged sensitive columns are found (forward drift) or if existing tag assignments reference deleted columns (reverse drift). Use GitHub's built-in failed-run notifications to alert when drift is detected.
 
-When drift is found, prefer letting native classification tag the new columns, then re-derive deterministically with `make derive-assignments ENV=prod` (reuses the promoted rules, no LLM). `make generate-delta` is an exceptional/legacy remediation that invokes the LLM — it is not the routine champion path.
+When drift is found, prefer letting native classification tag the new columns, then re-derive deterministically with `make derive-assignments ENV=prod` (reuses the promoted rules, no LLM). `make generate-delta` is an exceptional/legacy remediation that invokes the LLM — it is not the routine dev-to-prod path.
 
 ---
 

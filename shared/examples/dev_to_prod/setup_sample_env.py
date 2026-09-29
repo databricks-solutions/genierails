@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create optional sample data and a Genie agent for champion_flow."""
+"""Create optional sample data and a Genie agent for dev_to_prod."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ try:
 except ImportError:  # Keep --help useful before dependencies are installed.
     WorkspaceClient = None  # type: ignore[assignment,misc]
 
-DEFAULT_SCHEMA, DEFAULT_ROWS = "champion_flow_demo", 200
-STATE_FILE = Path(__file__).with_name(".champion_flow_sample_env.json")
+DEFAULT_SCHEMA, DEFAULT_ROWS = "dev_to_prod_demo", 200
+STATE_FILE = Path(__file__).with_name(".dev_to_prod_sample_env.json")
 DOMAINS, REGIONS = ("gmail.com", "hotmail.com", "outlook.com", "yahoo.com"), ("APAC", "EMEA", "AMER")
 FIRST_NAMES = ("Olivia", "Liam", "Emma", "Noah", "Amelia", "Mateo", "Sophia", "Ethan", "Isabella", "Lucas", "Mia", "Benjamin", "Ava", "Daniel", "Harper", "James", "Camila", "Henry", "Layla", "Alexander")
 LAST_NAMES = ("Anderson", "Patel", "Nguyen", "Williams", "Garcia", "Johnson", "Martinez", "Brown", "Kim", "Wilson", "Taylor", "Thomas", "Lee", "Hernandez", "Clark", "Lewis", "Walker", "Hall", "Young", "King")
@@ -31,13 +31,13 @@ TABLES = {
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Optionally bootstrap or tear down the champion_flow sample environment.")
+    p = argparse.ArgumentParser(description="Optionally bootstrap or tear down the dev_to_prod sample environment.")
     p.add_argument("--profile", default=os.getenv("DATABRICKS_CONFIG_PROFILE"), help="Databricks CLI profile (env: DATABRICKS_CONFIG_PROFILE).")
     p.add_argument("--host", default=os.getenv("DATABRICKS_HOST"), help="Workspace URL (env: DATABRICKS_HOST).")
-    p.add_argument("--catalog", default=os.getenv("CHAMPION_FLOW_CATALOG"), help="Existing UC catalog (required; env: CHAMPION_FLOW_CATALOG).")
-    p.add_argument("--schema", default=os.getenv("CHAMPION_FLOW_SCHEMA", DEFAULT_SCHEMA), help=f"Sample schema (default: {DEFAULT_SCHEMA}; env: CHAMPION_FLOW_SCHEMA).")
+    p.add_argument("--catalog", default=os.getenv("DEV_TO_PROD_CATALOG"), help="Existing UC catalog (required; env: DEV_TO_PROD_CATALOG).")
+    p.add_argument("--schema", default=os.getenv("DEV_TO_PROD_SCHEMA", DEFAULT_SCHEMA), help=f"Sample schema (default: {DEFAULT_SCHEMA}; env: DEV_TO_PROD_SCHEMA).")
     p.add_argument("--warehouse-id", default=os.getenv("DATABRICKS_WAREHOUSE_ID"), help="Existing SQL warehouse ID (required; env: DATABRICKS_WAREHOUSE_ID).")
-    p.add_argument("--rows", default=os.getenv("CHAMPION_FLOW_ROWS", str(DEFAULT_ROWS)), help=f"Rows per table (default: {DEFAULT_ROWS}; env: CHAMPION_FLOW_ROWS).")
+    p.add_argument("--rows", default=os.getenv("DEV_TO_PROD_ROWS", str(DEFAULT_ROWS)), help=f"Rows per table (default: {DEFAULT_ROWS}; env: DEV_TO_PROD_ROWS).")
     p.add_argument("--teardown", action="store_true", help="Remove only resources recorded as created by this script.")
     return p
 
@@ -64,7 +64,7 @@ def _chunks(values: list[tuple[Any, ...]], size: int = 50) -> Iterable[list[tupl
 def _client(args: argparse.Namespace) -> Any:
     if WorkspaceClient is None:
         raise RuntimeError("databricks-sdk is not installed; run: pip install -r requirements.txt")
-    kwargs: dict[str, Any] = {"product": "genierails-champion-flow", "product_version": "1.0"}
+    kwargs: dict[str, Any] = {"product": "genierails-dev-to-prod", "product_version": "1.0"}
     if args.profile:
         kwargs["profile"] = args.profile
     if args.host:
@@ -181,7 +181,7 @@ def _space_exists(client: Any, space_id: str) -> bool:
 
 def _space_payload(warehouse_id: str, tables: list[str], title: str) -> dict[str, str]:
     return {"warehouse_id": warehouse_id, "title": title,
-            "description": "Optional synthetic PII environment for the GenieRails champion flow.",
+            "description": "Optional synthetic PII environment for the GenieRails dev-to-prod walkthrough.",
             "serialized_space": json.dumps({"version": 2, "data_sources": {"tables": [{"identifier": table} for table in sorted(tables)]}}, separators=(",", ":"))}
 
 
@@ -209,7 +209,7 @@ sql_warehouse_id = "{warehouse_id}"'''
 
 def setup(args: argparse.Namespace, client: Any) -> None:
     if not args.catalog:
-        raise RuntimeError("missing --catalog (or CHAMPION_FLOW_CATALOG); choose an existing UC catalog")
+        raise RuntimeError("missing --catalog (or DEV_TO_PROD_CATALOG); choose an existing UC catalog")
     if not args.warehouse_id:
         raise RuntimeError("missing --warehouse-id (or DATABRICKS_WAREHOUSE_ID); an existing SQL warehouse is required")
     if args.rows < 1:
@@ -248,7 +248,7 @@ def setup(args: argparse.Namespace, client: Any) -> None:
             _run_sql(client, args.warehouse_id, f"INSERT INTO {target} VALUES\n{values}")
     print("[3/4] Creating or reusing the tracked Genie agent ...")
     space_id = state.get("space_id", "")
-    title = f"GenieRails Champion Flow ({args.catalog}.{args.schema})"
+    title = f"GenieRails Dev-to-Prod Walkthrough ({args.catalog}.{args.schema})"
     if not space_id or not _space_exists(client, space_id):
         space_id = _create_space(client, args.warehouse_id, tables, title)
         state.update(space_id=space_id, warehouse_id=args.warehouse_id)
@@ -266,7 +266,7 @@ def setup(args: argparse.Namespace, client: Any) -> None:
 
 def teardown(args: argparse.Namespace, client: Any) -> None:
     if not args.catalog:
-        raise RuntimeError("teardown requires --catalog (or CHAMPION_FLOW_CATALOG)")
+        raise RuntimeError("teardown requires --catalog (or DEV_TO_PROD_CATALOG)")
     states, key = _load_states(), _state_key(client, args.catalog, args.schema)
     state = states.get(key)
     if not state:
@@ -298,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
             args.rows = int(args.rows)
         except (TypeError, ValueError) as exc:
             raise RuntimeError(
-                f"--rows/CHAMPION_FLOW_ROWS must be an integer, got {args.rows!r}"
+                f"--rows/DEV_TO_PROD_ROWS must be an integer, got {args.rows!r}"
             ) from exc
         client = _client(args)
         teardown(args, client) if args.teardown else setup(args, client)

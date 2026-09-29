@@ -1,13 +1,13 @@
 # From UI to Production
 
-> **Already built your Genie agent in the Databricks UI?** This is the on-ramp: it imports your existing agent's configuration into code, then governs it with the **[champion flow](../examples/champion_flow/README.md)**. It is *not* a separate governance model — after the import step you follow the champion flow exactly (Unity Catalog decides what's sensitive, GenieRails derives one protection per column, and a coverage gate blocks the release until every *classified* sensitive column is covered).
+> **Already built your Genie agent in the Databricks UI?** This is the on-ramp: it imports your existing agent's configuration into code, then governs it with the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)**. It is *not* a separate governance model — after the import step you follow the dev-to-prod walkthrough exactly (Unity Catalog decides what's sensitive, GenieRails derives one protection per column, and a coverage gate blocks the release until every *classified* sensitive column is covered).
 
 ## What this does
 
 1. **Imports** your existing Genie agent's configuration from the Genie API into code (a supported subset — see below) and **auto-discovers the tables** it uses.
-2. Hands off to the **champion flow** for governance: native classification → one `gr_treatment` per column → a blocking coverage gate → safe dev→prod promotion → expose last.
+2. Hands off to the **dev-to-prod walkthrough** for governance: native classification → one `gr_treatment` per column → a blocking coverage gate → safe dev→prod promotion → expose last.
 
-The only thing unique to this doc is the **import** in Step 1. Everything after it *is* the champion flow.
+The only thing unique to this doc is the **import** in Step 1. Everything after it *is* the dev-to-prod walkthrough.
 
 ## What gets imported (a supported subset — not verbatim)
 
@@ -25,7 +25,7 @@ When a `genie_spaces` entry has `genie_space_id` set, `make generate` queries th
 
 > **It's a projection, not a byte-for-byte copy.** Object IDs and some UI/API metadata are not preserved, and filter/measure *comments* aren't imported. If the agent was created moments ago, the API's `serialized_space` can take 1–3 minutes to populate (the tool retries for ~4 minutes).
 
-**Governance is NOT imported.** Groups, tag policies, masks, and row filters are *derived* — from native classification, not copied from the UI. Setting `genie_space_id` does **not** switch sensitivity back to LLM guessing; the imported tables flow into the same native-classification path as the champion flow.
+**Governance is NOT imported.** Groups, tag policies, masks, and row filters are *derived* — from native classification, not copied from the UI. Setting `genie_space_id` does **not** switch sensitivity back to LLM guessing; the imported tables flow into the same native-classification path as the dev-to-prod walkthrough.
 
 ## Prerequisites
 
@@ -59,9 +59,9 @@ uc_tables = [
 ]
 ```
 
-## Step 2 — Follow the champion flow
+## Step 2 — Follow the dev-to-prod walkthrough
 
-With the tables persisted, run the **[champion flow](../examples/champion_flow/README.md)** from **Phase 1** — it works identically for an imported agent:
+With the tables persisted, run the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)** from **Phase 1** — it works identically for an imported agent:
 
 ```bash
 make enable-classification ENV=dev        # turn on native classification; wait for class.* tags
@@ -76,7 +76,7 @@ Two import-specific notes as you review `generated/`:
 - **`acl_groups`** (which groups can run each agent) are **derived** — populated from your generated groups and the FGAC policies that cover each agent's tables. Review them; they reference your IdP groups, they aren't invented.
 - `make apply` **attaches** to the existing agent (applies governance + per-space ACLs and pushes any config changes back to the API); it does not create or delete it.
 
-Then continue the champion flow through promotion, prod re-derivation, and exposure:
+Then continue the dev-to-prod walkthrough through promotion, prod re-derivation, and exposure:
 
 ```bash
 make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_fin=prod_fin"
@@ -100,4 +100,4 @@ Import several agents in one `make generate` by listing them all with `genie_spa
 
 - **Destroy safety:** `make destroy` never deletes an *attached* agent (`genie_space_id` set) — only agents this tool created (empty `genie_space_id`).
 - **Config drift:** after the first import, the code is the source of truth. Changes made later in the UI don't sync back automatically — re-run `make generate` (with `genie_space_id`) to re-import.
-- **The full model, every command, and the glossary:** see the **[champion flow README](../examples/champion_flow/README.md)** and its **[REFERENCE](../examples/champion_flow/REFERENCE.md)**.
+- **The full model, every command, and the glossary:** see the **[dev-to-prod walkthrough README](../examples/dev_to_prod/README.md)** and its **[REFERENCE](../examples/dev_to_prod/REFERENCE.md)**.

@@ -718,19 +718,19 @@ test-genie-import-no-abac: _bootstrap _guard-workspace-target ## Scenario: impor
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-aus-bank-demo: _bootstrap _guard-workspace-target ## Scenario: Australian bank demo — champion flow (ANZ + financial_services)
+test-aus-bank-demo: _bootstrap _guard-workspace-target ## Scenario: Australian bank demo — dev-to-prod walkthrough (ANZ + financial_services)
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario aus-bank-demo \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-india-bank-demo: _bootstrap _guard-workspace-target ## Scenario: India bank demo — champion flow (IN + financial_services)
+test-india-bank-demo: _bootstrap _guard-workspace-target ## Scenario: India bank demo — dev-to-prod walkthrough (IN + financial_services)
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario india-bank-demo \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-asean-bank-demo: _bootstrap _guard-workspace-target ## Scenario: ASEAN bank demo — champion flow (SEA + financial_services)
+test-asean-bank-demo: _bootstrap _guard-workspace-target ## Scenario: ASEAN bank demo — dev-to-prod walkthrough (SEA + financial_services)
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario asean-bank-demo \
 		--auth-file "$(_ITEST_AUTH)" \

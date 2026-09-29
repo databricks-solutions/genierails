@@ -1,4 +1,4 @@
-# GenieRails Champion Flow — take a Genie agent from dev to production, safely
+# GenieRails Dev-to-Prod Walkthrough — take a Genie agent from dev to production, safely
 
 Take a curated Genie agent in **dev** and ship it to **production** without ever exposing sensitive data. Unity Catalog's built-in classifier decides *what* is sensitive; GenieRails derives *how* it's protected and applies it as code; and a **coverage check blocks the release** until every *classified* sensitive column the agent can reach is provably covered.
 
@@ -80,7 +80,7 @@ Gather these once — every phase reuses them:
 cd aws                      # or: cd azure
 make setup                  # prepares the cloud root (pins the Terraform provider, etc.)
 make init-env ENV=dev       # creates the local envs/dev/ folder + template config files (no Databricks calls)
-cp ../shared/examples/champion_flow/env.auto.tfvars.example envs/dev/env.auto.tfvars
+cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars
 ```
 
 Then edit three files:
@@ -103,7 +103,7 @@ Then edit three files:
 Do [Phase 0](#phase-0--set-up-dev) first, then this, then continue to [Phase 1](#phase-1--dev-scan-draft-the-rules-test-them).
 
 ```bash
-cd ../shared/examples/champion_flow         # from the cloud root (aws/ or azure/); return with 'cd ../../../aws' afterward
+cd ../shared/examples/dev_to_prod          # from the cloud root (aws/ or azure/); return with 'cd ../../../aws' afterward
 python -m pip install -r requirements.txt
 python setup_sample_env.py --catalog dev_finance --warehouse-id <your-warehouse-id>
 ```
@@ -173,7 +173,7 @@ make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,vi
 <details>
 <summary>No tiered groups yet, or want the fail-closed / LLM-fallback details?</summary>
 
-A missing group name stops generation with a clear error. **No tiered groups yet?** Use [`--create-groups`](../../docs/advanced.md#opt-in-group-creation-demo--greenfield-only) instead (demo/greenfield only — it creates the groups; needs `manage_groups = true`). Generation reads the authoritative `class.*` tags and is **fail-closed** — if classification is on but the results are unreadable or empty, it **aborts rather than silently guessing**. (You can opt into LLM inference with [`--allow-llm-sensitivity`](../../docs/troubleshooting.md#champion-flow-issues) — not recommended in prod.)
+A missing group name stops generation with a clear error. **No tiered groups yet?** Use [`--create-groups`](../../docs/advanced.md#opt-in-group-creation-demo--greenfield-only) instead (demo/greenfield only — it creates the groups; needs `manage_groups = true`). Generation reads the authoritative `class.*` tags and is **fail-closed** — if classification is on but the results are unreadable or empty, it **aborts rather than silently guessing**. (You can opt into LLM inference with [`--allow-llm-sensitivity`](../../docs/troubleshooting.md#dev-to-prod-walkthrough-issues) — not recommended in prod.)
 </details>
 
 **1d. Prove coverage, apply, and verify.** One knob: **`business_access_enabled`** in `envs/dev/env.auto.tfvars` is the *exposure gate* — `false` (default) deploys the masks but **withholds** user access; `true` **releases** it. **In dev you set it `true` once and leave it** — dev is a rehearsal (the masks protect the data either way), so there's no closing and no back-and-forth. (The gate earns its keep in prod's [Phase 5](#phase-5--open-to-users-you-release-access-after-the-gate-passes-then-verify): you open access *last*, only after coverage is proven on real data.)
