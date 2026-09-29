@@ -143,17 +143,16 @@ make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,vi
 ```bash
 make coverage-gate      ENV=dev   # PASS = every labelled-sensitive column has a mask; FAIL = it stops you here
 make validate-generated ENV=dev   # static checks (e.g. no two masks collide on one column)
-make apply              ENV=dev   # deploy masks/policies — access still withheld (gate closed)
 
-# --- prove masking works: open the gate, verify, then close it again ---
+# --- deploy, then prove masking works (dev is a rehearsal: open the gate briefly to verify, then re-close) ---
 # edit envs/dev/env.auto.tfvars:  business_access_enabled = true
-make apply         ENV=dev
+make apply         ENV=dev                                 # deploy masks/policies AND open access
 make verify-access ENV=dev VERIFY_KEY_COLUMN=customer_id   # queries AS each tier: unprivileged=masked, authorized=raw
 # edit envs/dev/env.auto.tfvars:  business_access_enabled = false
 make apply         ENV=dev                                 # re-close dev after the check
 ```
 
-**What each command does:** `coverage-gate` is the safety check at the heart of the flow — it confirms every column the scanner labelled sensitive has a protection covering it, and **fails (non-zero exit) and stops you** if even one is uncovered ("the tool says NO"); it changes nothing. `validate-generated` runs static checks on the drafted config. `apply` deploys the masks/policies. `verify-access` proves it *by effect*: it queries as each tier's test principal and shows the unprivileged tier gets masked values while an authorized tier gets raw — this **needs the gate open** (that's why you flip it to `true` first), so in dev you open it just for the check and close it again.
+**What each command does:** `coverage-gate` is the safety check at the heart of the flow — it confirms every column the scanner labelled sensitive has a protection covering it, and **fails (non-zero exit) and stops you** if even one is uncovered ("the tool says NO"); it changes nothing. `validate-generated` runs static checks on the drafted config. `apply` deploys the masks/policies (and, with the gate set to `true`, opens access in the same step). `verify-access` proves it *by effect*: it queries as each tier's test principal and shows the unprivileged tier gets masked values while an authorized tier gets raw — this **needs the gate open**, so in dev you deploy with it open just for the check, then re-close. (Prod is stricter: Phase 4 deploys governance with the gate **closed**, and Phase 5 opens it only after the gate passes — that's the real "expose last".)
 
 > `verify-access` queries the warehouse as test principals in your tier groups — grant those groups `CAN_USE` on the (dev) warehouse first, or the queries fail (GenieRails doesn't manage warehouse permissions). Also confirm the agent still answers useful questions under masking. Dev's deliverable = **validated rules + a working agent** (not dev's column labels — those stay in dev).
 
