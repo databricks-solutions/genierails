@@ -1,12 +1,21 @@
 """Regression tests for the Makefile rehearsal pipeline."""
 
-import subprocess
+import os
 import shlex
+import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).parents[2]
 CLOUD_ROOT = ROOT / "aws"
+
+
+def _clean_env():
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("VERIFY_KEY_COLUMN", "MAKEFLAGS", "MAKELEVEL")
+    }
 
 
 def _recording_stub(tmp_path):
@@ -46,6 +55,7 @@ def test_rehearse_stops_after_first_failing_stage(tmp_path):
         cwd=CLOUD_ROOT,
         text=True,
         capture_output=True,
+        env=_clean_env(),
     )
 
     assert result.returncode != 0
@@ -65,6 +75,7 @@ def test_rehearse_with_key_is_ordered_and_does_not_toggle_exposure_gate(tmp_path
         cwd=CLOUD_ROOT,
         text=True,
         capture_output=True,
+        env=_clean_env(),
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -90,6 +101,7 @@ def test_rehearse_without_key_runs_apply_then_recommends_live_verification(tmp_p
         cwd=CLOUD_ROOT,
         text=True,
         capture_output=True,
+        env=_clean_env(),
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
