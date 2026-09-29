@@ -48,7 +48,7 @@ Gather these once — every phase reuses them:
 |---|---|
 | **Deploying Service Principal** (`client_id` + `client_secret`) | The identity GenieRails runs as — **not** a CLI profile. Needs, on the **same account** as the workspace: **Account Admin** (groups, workspace assignment), **Workspace Admin** (Genie, warehouse), **Metastore Admin** (tags, fine-grained access control), **`EXECUTE` on `system.ai.databricks-claude-sonnet-4-6`** (generation calls a foundation model), and catalog **`APPLY TAG` + `ASSIGN`** (so the scanner can write `class.*` tags). Goes in `envs/<env>/auth.auto.tfvars`. See [Prerequisites](../../docs/prerequisites.md). |
 | **Dev / prod catalog names** | Your Unity Catalog catalogs, e.g. `dev_finance` / `prod_finance`. |
-| **SQL warehouse id** (per env) | An existing serverless warehouse id — **or leave blank** to auto-create one. |
+| **SQL warehouse id** (per env) | The serverless warehouse the **Genie agent runs its SQL on** (and that `verify-access` uses to test masking). Give an existing warehouse's id, **or leave blank** to auto-create one. |
 | **Curated Genie agent** | The agent itself. To deploy it (and get *agent access*), you **must** set a `genie_spaces` entry — an existing space id, or `genie_space_id=""` + `uc_tables` to create one. `genie_spaces = []` governs *data only* — no agent. |
 | **IdP group names** (one per *access tier*) | Your existing groups, synced from your identity provider (Entra ID / Okta) via **AIM/SCIM**. GenieRails **consumes** them by name — it never creates them. e.g. `payments_ops,regional_analysts,viewers`. |
 | **Shared key column** | One column present in **all** your tables (e.g. `customer_id`) — `verify-access` uses it to line up the same rows across tiers. |
