@@ -15,6 +15,8 @@ from treatment_derivation import derive_treatment_model, load_treatment_config
 
 SCRIPTS = Path(__file__).parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
+import scaffold_treatments as scaffold_module  # noqa: E402
+import derive_assignments as derive_module  # noqa: E402
 from scaffold_treatments import main, scaffold  # noqa: E402
 
 
@@ -120,6 +122,79 @@ def test_scaffold_is_idempotent(tmp_path):
     assert scaffold(tfvars, sql, config, vocabulary) == []
     assert (tfvars.read_text(), sql.read_text(), config.read_text(), vocabulary.read_text()) == snapshot
     assert sql.read_text().count("CREATE OR REPLACE FUNCTION mask_biometric_redact") == 1
+
+
+def test_prod_live_unmapped_fallback_scaffolds_shared_rulebook_and_becomes_mapped(
+    tmp_path, monkeypatch,
+):
+    tfvars, sql, config_path, vocabulary = _fixture(tmp_path)
+    # Promotion/remap erased both assignments and offline markers.
+    tfvars.write_text("tag_policies = []\ntag_assignments = []\nfgac_policies = []\n")
+    auth = tmp_path / "auth.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    auth.write_text('databricks_workspace_host = "https://unused.invalid"\n')
+    env.write_text('uc_catalog = "prod"\nuc_tables = ["sales.customers"]\n')
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "secret", "class.future_secret", ""),
+    ], mapping={})
+    monkeypatch.setattr(
+        scaffold_module, "_fetch_live_classification_source", lambda *a, **k: native,
+    )
+    monkeypatch.setattr(
+        derive_module, "_fetch_live_classification_source", lambda *a, **k: native,
+    )
+    monkeypatch.setattr(
+        derive_module, "load_treatment_config", lambda: load_treatment_config(config_path),
+    )
+    with pytest.raises(
+        derive_module.NativeClassificationRequiredError,
+        match=r"unmapped class\.\* findings",
+    ):
+        derive_module.derive_assignments(tfvars, auth, env)
+
+    actions = scaffold(
+        tfvars, sql, config_path, vocabulary, auth_path=auth, env_path=env,
+    )
+
+    assert actions[0]["label"] == "class.future_secret"
+    assert actions[0]["added"] is True
+    treatment = next(
+        item for item in json.loads(config_path.read_text())["treatments"]
+        if "class.future_secret" in item.get("class_labels", [])
+    )
+    assert treatment["value"] == "future_secret_redacted"
+    assert "REVIEW" in treatment["review"]
+    assert "ELSE '[REDACTED]'" in treatment["udf_body"]
+
+    # A fresh certify-time source loads the newly shared mapping, so the same
+    # prod-only class semantic is no longer reported as unmapped.
+    refreshed = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "secret", "class.future_secret", ""),
+    ], mapping={"future_secret": ("gr_treatment", treatment["value"])})
+    assert refreshed.unmapped_columns(sorted(refreshed.classified_columns())) == []
+    assert refreshed.findings_for(sorted(refreshed.classified_columns()))[0].as_assignment() == {
+        "entity_type": "columns",
+        "entity_name": "prod.sales.customers.secret",
+        "tag_key": "gr_treatment",
+        "tag_value": "future_secret_redacted",
+    }
+    monkeypatch.setattr(
+        derive_module, "_fetch_live_classification_source", lambda *a, **k: refreshed,
+    )
+    # Re-promotion replaces prod assignments; reviewed policies/functions remain.
+    tfvars.write_text(scaffold_module._replace_bracket_section(
+        tfvars.read_text(), "tag_assignments", [],
+    ))
+    assert derive_module.derive_assignments(tfvars, auth, env) == 1
+
+    snapshot = (tfvars.read_text(), sql.read_text(), config_path.read_text(), vocabulary.read_text())
+    monkeypatch.setattr(
+        scaffold_module, "_fetch_live_classification_source", lambda *a, **k: refreshed,
+    )
+    assert scaffold(
+        tfvars, sql, config_path, vocabulary, auth_path=auth, env_path=env,
+    ) == []
+    assert (tfvars.read_text(), sql.read_text(), config_path.read_text(), vocabulary.read_text()) == snapshot
 
 
 def test_scaffold_does_not_touch_already_mapped_label(tmp_path):

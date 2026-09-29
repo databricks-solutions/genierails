@@ -225,7 +225,9 @@ scaffold-treatments: _bootstrap _guard-workspace-target ## Add fail-safe treatme
 		--tfvars "$(ENV_DIR)/generated/abac.auto.tfvars" \
 		--sql "$(ENV_DIR)/generated/masking_functions.sql" \
 		--treatment-config "$(SHARED_ROOT)/treatment_config.json" \
-		--tag-vocabulary "$(SHARED_ROOT)/tag_vocabulary_registry.json"
+		--tag-vocabulary "$(SHARED_ROOT)/tag_vocabulary_registry.json" \
+		--auth-file "$(ENV_DIR)/auth.auto.tfvars" \
+		--env-file "$(ENV_DIR)/env.auto.tfvars"
 
 derive-assignments: _bootstrap _guard-workspace-target ## Re-derive only tag_assignments from live native class.* tags (requires prior promote; never calls an LLM)
 	@echo "=== Derive Assignments ($(ENV)) ==="

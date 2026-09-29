@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scaffold fail-safe treatments for offline class.* coverage markers."""
+"""Scaffold fail-safe treatments for offline or live unmapped class.* semantics."""
 
 from __future__ import annotations
 
@@ -15,10 +15,14 @@ SHARED_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SHARED_ROOT))
 
 from generate_abac import (  # noqa: E402
+    _fetch_live_classification_source,
     _render_fgac_policy_block,
     _render_tag_assignment_block,
     _render_tag_policy_block,
     _replace_bracket_section,
+    discover_agent_footprint,
+    footprint_table_refs,
+    load_auth_config,
 )
 from treatment_derivation import derive_treatment_model, load_treatment_config  # noqa: E402
 
@@ -37,11 +41,30 @@ def _slug(label: str) -> str:
     return value
 
 
+def _live_unmapped_markers(auth_path: Path, env_path: Path) -> list[tuple[str, str, str]]:
+    """Read unmapped class.* semantics from the certify-time native source."""
+    runtime = load_auth_config(auth_path, env_path)
+    declared = list(runtime.get("uc_tables") or [])
+    declared.extend(runtime.get("declared_footprint") or [])
+    for space in runtime.get("genie_spaces") or []:
+        declared.extend(space.get("declared_footprint") or space.get("uc_tables") or [])
+    table_refs = footprint_table_refs(discover_agent_footprint(declared_footprint=declared))
+    native = _fetch_live_classification_source(table_refs, runtime, require_native=True)
+    if native is None or not native.has_native_data():
+        return []
+    return [
+        (column, f"class.{semantic}", semantic)
+        for column, semantic in native.unmapped_columns(sorted(native.classified_columns()))
+    ]
+
+
 def scaffold(
     tfvars_path: Path,
     sql_path: Path,
     config_path: Path,
     vocabulary_path: Path | None = None,
+    auth_path: Path | None = None,
+    env_path: Path | None = None,
 ) -> list[dict[str, object]]:
     if not tfvars_path.is_file():
         raise FileNotFoundError(f"Generated ABAC config not found: {tfvars_path}")
@@ -51,6 +74,8 @@ def scaffold(
     tfvars_text = tfvars_path.read_text()
     markers = [(m.group(1).strip(), m.group(2).lower(), m.group(3).lower())
                for m in MARKER_RE.finditer(tfvars_text)]
+    if not markers and auth_path is not None and env_path is not None:
+        markers = _live_unmapped_markers(auth_path, env_path)
     if not markers:
         return []
 
@@ -224,12 +249,15 @@ def main() -> int:
     parser.add_argument("--sql", type=Path, required=True)
     parser.add_argument("--treatment-config", type=Path, required=True)
     parser.add_argument("--tag-vocabulary", type=Path)
+    parser.add_argument("--auth-file", type=Path)
+    parser.add_argument("--env-file", type=Path)
     args = parser.parse_args()
     try:
         additions = scaffold(
-            args.tfvars, args.sql, args.treatment_config, args.tag_vocabulary
+            args.tfvars, args.sql, args.treatment_config, args.tag_vocabulary,
+            args.auth_file, args.env_file,
         )
-    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+    except (RuntimeError, FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     if not additions:
