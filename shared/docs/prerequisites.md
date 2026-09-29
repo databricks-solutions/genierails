@@ -16,9 +16,12 @@ Everything you need before running GenieRails.
 
 | Tool | Version | Check | Install |
 |------|---------|-------|---------|
+| **GNU Make** | Any | `make --version` | Preinstalled on most Linux; on macOS see the note below |
 | **Python** | 3.9+ | `python3 --version` | [python.org](https://www.python.org/downloads/) |
 | **Terraform** | >= 1.0 | `terraform --version` | [terraform.io](https://developer.hashicorp.com/terraform/install) |
 | **Git** | Any | `git --version` | [git-scm.com](https://git-scm.com/) |
+
+> **macOS note:** Apple's `/usr/bin/make` (and Homebrew) can be blocked by an unaccepted Xcode license — `make` then errors with a license/agreement message. If you hit that, install GNU Make another way (e.g. `conda install make`) and put it first on your `PATH`.
 
 ### Python Packages (auto-installed)
 
