@@ -24,7 +24,10 @@ from sensitivity_source import (
     Finding,
     LLMSource,
     select_findings,
+    _CLASS_TO_GOVERNED,
 )
+import treatment_derivation
+from treatment_derivation import load_treatment_config
 from tests.conftest import assert_valid_hcl
 
 
@@ -32,6 +35,48 @@ from tests.conftest import assert_valid_hcl
 # ClassificationSource — native class.* column tags (mocked rows)
 # ---------------------------------------------------------------------------
 class TestClassificationSourceColumnTags:
+    def test_treatment_config_class_label_resolves_directly_to_treatment(
+        self, tmp_path, monkeypatch,
+    ):
+        config_path = tmp_path / "treatment_config.json"
+        config_path.write_text('''{
+          "tag_key": "gr_treatment",
+          "description": "test",
+          "treatments": [{
+            "value": "biometric_redacted",
+            "masking_function": "mask_biometric_redact",
+            "sources": [],
+            "class_labels": ["class.biometric"]
+          }]
+        }''')
+        config = load_treatment_config(config_path)
+        monkeypatch.setattr(treatment_derivation, "load_treatment_config", lambda: config)
+
+        source = ClassificationSource(tag_rows=[
+            ("cat", "sch", "people", "biometric_id", "class.biometric", ""),
+        ])
+        findings = source.findings_for(["cat.sch.people.biometric_id"])
+
+        assert [(item.tag_key, item.tag_value) for item in findings] == [
+            ("gr_treatment", "biometric_redacted"),
+        ]
+
+    def test_no_class_labels_preserves_builtin_mapping_exactly(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "treatment_config.json"
+        config_path.write_text('''{
+          "tag_key": "gr_treatment",
+          "description": "test",
+          "treatments": [{
+            "value": "redact",
+            "masking_function": "mask_redact",
+            "sources": [["pii_level", "redacted"]]
+          }]
+        }''')
+        config = load_treatment_config(config_path)
+        monkeypatch.setattr(treatment_derivation, "load_treatment_config", lambda: config)
+
+        assert ClassificationSource()._mapping == _CLASS_TO_GOVERNED
+
     def test_maps_class_suffix_tag_to_governed(self):
         rows = [
             ("cat", "sch", "tbl", "email", "class.email", ""),

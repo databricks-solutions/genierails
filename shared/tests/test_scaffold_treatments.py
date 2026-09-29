@@ -7,7 +7,9 @@ import hcl2
 import pytest
 
 import validate_abac
+import treatment_derivation
 from sensitivity_source import ClassificationSource
+from scripts.audit_schema_drift import build_rulebook, find_uncovered_tags
 from tag_vocabulary import TagVocabularyRegistry
 from treatment_derivation import derive_treatment_model, load_treatment_config
 
@@ -209,3 +211,21 @@ fgac_policies = []
         and item.get("tag_value") == "biometric_redacted"
         for item in parsed["tag_assignments"]
     )
+
+
+def test_scaffolded_native_label_is_covered_by_audit_rulebook(tmp_path, monkeypatch):
+    tfvars, sql, config_path, vocabulary = _fixture(tmp_path)
+    scaffold(tfvars, sql, config_path, vocabulary)
+    config = load_treatment_config(config_path)
+    monkeypatch.setattr(treatment_derivation, "load_treatment_config", lambda: config)
+    generated = hcl2.loads(tfvars.read_text())
+    rulebook = build_rulebook(
+        generated["tag_policies"], generated["fgac_policies"],
+    )
+    applied = [{
+        "catalog": "cat", "schema": "sch", "table": "people",
+        "column": "biometric", "tag_key": "class.biometric", "tag_value": "",
+    }]
+
+    assert rulebook["class_treatments"]["biometric"] == "biometric_redacted"
+    assert find_uncovered_tags(applied, rulebook) == []

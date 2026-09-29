@@ -358,7 +358,7 @@ def build_rulebook(tag_policies: list[dict], fgac_policies: list[dict]) -> dict:
     # Resolve each mapped class.* semantic through the same governed-source ->
     # gr_treatment derivation used by generation. The class fact is covered
     # when its derived treatment is present in the promoted rulebook.
-    from sensitivity_source import _CLASS_TO_GOVERNED
+    from sensitivity_source import CLASS_NAMESPACE, _CLASS_TO_GOVERNED, _normalize_semantic
     from treatment_derivation import load_treatment_config
 
     treatment_cfg = load_treatment_config()
@@ -372,6 +372,16 @@ def build_rulebook(tag_policies: list[dict], fgac_policies: list[dict]) -> dict:
         for semantic, source in _CLASS_TO_GOVERNED.items()
         if source in treatment_by_source
     }
+    # Match ClassificationSource's config-driven class-label extension. Native
+    # class.* tags remain read-only; this only resolves them to the promoted
+    # GenieRails-owned treatment for coverage auditing.
+    for treatment in treatment_cfg.treatments:
+        for label in treatment.class_labels:
+            semantic = _normalize_semantic(
+                label[len(CLASS_NAMESPACE):]
+                if label.lower().startswith(CLASS_NAMESPACE) else label
+            )
+            class_treatments[semantic] = treatment.value
 
     return {
         "policy_vocab": policy_vocab,

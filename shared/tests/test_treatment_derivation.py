@@ -1,7 +1,10 @@
 """Option-B single enforcement-tag derivation tests."""
 
+import json
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -68,6 +71,27 @@ def test_unknown_tag_resolves_to_no_treatment():
     assert resolve_treatment(
         [("pii_level", "future_unknown_value")], load_treatment_config()
     ) is None
+
+
+def test_duplicate_class_labels_across_treatments_are_rejected(tmp_path):
+    config_path = tmp_path / "treatment_config.json"
+    config_path.write_text(json.dumps({
+        "tag_key": "gr_treatment",
+        "description": "test",
+        "treatments": [
+            {
+                "value": "one", "masking_function": "mask_one",
+                "sources": [], "class_labels": ["class.biometric"],
+            },
+            {
+                "value": "two", "masking_function": "mask_two",
+                "sources": [], "class_labels": ["class.biometric"],
+            },
+        ],
+    }))
+
+    with pytest.raises(ValueError, match="class labels must be unique"):
+        load_treatment_config(config_path)
 
 
 def test_column_without_sensitivity_tag_gets_no_treatment():
