@@ -15,6 +15,11 @@ export CLOUD_ROOT
 SHELL := /bin/bash
 export DATABRICKS_USER_AGENT_EXTRA := genierails/0.1.0
 
+# GNU Make executes an entire recipe line containing $(MAKE), even with -n.
+# Mixed recursive/shell recipes must exit before reaching real side effects.
+_MAKE_DRY_RUN := $(if $(filter --%,$(firstword $(MAKEFLAGS))),,$(findstring n,$(firstword $(MAKEFLAGS))))
+_DRY_RUN_GUARD = if [ -n "$(_MAKE_DRY_RUN)" ]; then exit 0; fi
+
 ACCOUNT_ENV := account
 DATA_ACCESS_SUBDIR := data_access
 DEFAULT_ENV := dev
@@ -247,7 +252,7 @@ coverage-gate: _bootstrap _guard-workspace-target ## Block on any sensitive-colu
 
 rehearse: ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to prove masking live)
 	@echo "rehearse: requires business_access_enabled=true in envs/$(ENV)/env.auto.tfvars"
-	@$(MAKE) coverage-gate ENV="$(ENV)" && \
+	@$(_DRY_RUN_GUARD); $(MAKE) coverage-gate ENV="$(ENV)" && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
 		$(MAKE) apply ENV="$(ENV)" && \
 		$(if $(strip $(VERIFY_KEY_COLUMN)),$(MAKE) verify-access ENV="$(ENV)" VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",echo "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> to prove masking live (recommended)")
@@ -262,7 +267,7 @@ validate: _bootstrap ## Validate split config in the selected environment
 	fi
 
 promote: _bootstrap _guard-workspace-target ## Split generated/ into layers (same-env), or cross-env: make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_cat=prod_cat"
-	@if [ -n "$(DEST_ENV)" ]; then \
+	@$(_DRY_RUN_GUARD); if [ -n "$(DEST_ENV)" ]; then \
 		if [ "$(DEST_ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(DEST_ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
 			echo "ERROR: DEST_ENV cannot be '$(ACCOUNT_ENV)' or '$(DATA_ACCESS_SUBDIR)'."; exit 1; \
 		fi; \
@@ -346,13 +351,13 @@ _prepare-classification:
 	fi
 
 _plan-layer:
-	@set -e; layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
+	@set -e; $(_DRY_RUN_GUARD); layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	if [ "$$layer" = "data_access" ]; then $(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$(LAYER_ENV_DIR)")"; fi; \
 	echo "=== Terraform Plan ($$layer:$$target_env) ==="; \
 	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan
 
 plan: _bootstrap ## Run terraform plan for the selected layer or workspace env
-	@set -e; if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
+	@set -e; $(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		$(MAKE) --no-print-directory _guard-account-config; \
 		$(MAKE) --no-print-directory _plan-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV); \
 	else \
@@ -373,7 +378,7 @@ wait-tag-policies: _bootstrap ## Wait until account tag policies are visible to 
 	@cd "$(ACCOUNT_ENV_DIR)" && python3 -u "$(SHARED_ROOT)/scripts/wait_for_tag_policies.py" $(if $(REQUIRED_VALUES_TFVARS),--required-values-from "$(REQUIRED_VALUES_TFVARS)",)
 
 _apply-layer:
-	@set -e; layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
+	@set -e; $(_DRY_RUN_GUARD); layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	env_dir="$(LAYER_ENV_DIR)"; \
 	if [ "$$layer" = "data_access" ]; then $(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$$env_dir")" IMPORT_CLASSIFICATION=1; fi; \
 	if [ ! -f "$$env_dir/abac.auto.tfvars" ]; then \
@@ -424,7 +429,7 @@ _apply-layer:
 	printf "%s\n" "$$current_fingerprint" > "$$fingerprint_file"
 
 apply: _bootstrap ## Apply the selected layer, or account -> data_access -> workspace for ENV=<workspace>
-	@set -e; if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
+	@set -e; $(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		$(MAKE) --no-print-directory _guard-account-config; \
 		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 		$(MAKE) --no-print-directory wait-tag-policies; \
@@ -448,7 +453,7 @@ apply: _bootstrap ## Apply the selected layer, or account -> data_access -> work
 	fi
 
 apply-governance: _bootstrap _guard-workspace-target ## [Governance team] Apply account + data_access layers only (no Genie agents)
-	@set -e; \
+	@set -e; $(_DRY_RUN_GUARD); \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 		$(MAKE) --no-print-directory ENV="$(ENV)" promote; \
@@ -464,7 +469,7 @@ apply-governance: _bootstrap _guard-workspace-target ## [Governance team] Apply 
 	$(MAKE) --no-print-directory _apply-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"
 
 apply-genie: _bootstrap _guard-workspace-target ## [BU team] Apply workspace layer only — groups + Genie agents (assumes governance already applied)
-	@set -e; \
+	@set -e; $(_DRY_RUN_GUARD); \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 		echo "=== Extracting workspace config from genie draft ($(ENV)) ==="; \
@@ -495,7 +500,7 @@ import: _bootstrap ## Import existing resources into the selected layer state
 
 migrate-state: _bootstrap ## Migrate legacy state into account/data_access/workspace ownership
 	@echo "=== Migrate Terraform State ($(ENV)) ==="
-	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
+	@$(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		if [ ! -f "$(ACCOUNT_ENV_DIR)/terraform.tfstate" ]; then echo "No Terraform state found in $(ACCOUNT_ENV_DIR)."; exit 0; fi; \
 		"$(ROOT_RUNNER)" account $(ACCOUNT_ENV) state-list 2>/dev/null | python3 -c 'import re,sys; [print(line.strip()) for line in sys.stdin if re.match(r"^databricks_group\\.groups\\[", line.strip())]' | while read addr; do suffix="$${addr#databricks_group.groups}"; "$(ROOT_RUNNER)" account $(ACCOUNT_ENV) state-mv "$$addr" "module.account.databricks_group.groups$$suffix"; done; \
 		"$(ROOT_RUNNER)" account $(ACCOUNT_ENV) state-list 2>/dev/null | python3 -c 'import re,sys; [print(line.strip()) for line in sys.stdin if re.match(r"^databricks_group_member\\.members\\[", line.strip())]' | while read addr; do suffix="$${addr#databricks_group_member.members}"; "$(ROOT_RUNNER)" account $(ACCOUNT_ENV) state-mv "$$addr" "module.account.databricks_group_member.members$$suffix"; done; \
@@ -542,7 +547,7 @@ _destroy-layer:
 	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" destroy -auto-approve $(DESTROY_FLAGS)
 
 destroy: _bootstrap ## Destroy the selected layer or workspace environment
-	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
+	@$(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		$(MAKE) --no-print-directory _destroy-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 	else \
 		$(MAKE) --no-print-directory _destroy-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"; \
@@ -855,7 +860,7 @@ integration-test: ## Run the full end-to-end integration test (setup → generat
 	cd "$(CLOUD_ROOT)" && python3 $(SHARED_ROOT)/scripts/setup_test_data.py \
 		--auth-file "$(ITEST_AUTH)" $(ITEST_WH_FLAG) --verify-prod
 	@echo ""
-	@if [ -z "$(KEEP_DATA)" ]; then \
+	@$(_DRY_RUN_GUARD); if [ -z "$(KEEP_DATA)" ]; then \
 		echo "── Step 11: Teardown ────────────────────────────────────"; \
 		cd "$(CLOUD_ROOT)" && python3 $(SHARED_ROOT)/scripts/setup_test_data.py \
 			--auth-file "$(ITEST_AUTH)" $(ITEST_WH_FLAG) --teardown --teardown-prod; \
