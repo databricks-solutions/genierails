@@ -17,14 +17,12 @@ Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent f
 
 ## What you get
 
-- **Native classification as the source of truth** — Unity Catalog's Data Classification decides what's sensitive (`class.*` labels); GenieRails doesn't guess by default.
-- **One protection per column** — a single enforcement treatment (`gr_treatment`) is derived deterministically from each column's label, then applied as UC tag-condition column masks + row filters (SSN, credit cards, emails, region/department/compliance scope, …).
+- **Native classification as the source of truth** — Unity Catalog decides what's sensitive; GenieRails doesn't guess by default.
+- **One protection per column** — a single treatment derived from each column's label, applied as column masks + row filters.
 - **A blocking coverage gate** — the release fails ("says NO") until every classified sensitive column is protected.
-- **Access tiers from your IdP** — mapped to your existing IdP-synced groups; GenieRails *consumes* them by default, it doesn't invent them.
-- **Consumer entitlements** — workspace consume access granted to each group.
-- **Per-agent Genie ACLs** — `CAN_RUN` scoped per agent, withheld by the exposure gate until you open it — only after coverage passes (exposed last).
-- **Genie agent as code** — instructions, benchmarks, SQL measures, all version-controlled.
-- **Safe dev → prod promotion** — promote the *rules*, re-derive the *facts* from prod's own classification (no LLM re-generation), with one-command catalog remapping.
+- **Access tiers from your IdP** — GenieRails consumes your existing groups by default; it doesn't invent them.
+- **The agent and its access, as code** — per-agent Genie `CAN_RUN`, consumer entitlements, and the agent's config, all version-controlled and released only after the coverage gate passes.
+- **Safe dev → prod promotion** — promote the rules; re-derive the facts from prod's own classification.
 
 ## Getting Started
 
