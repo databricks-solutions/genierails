@@ -1,54 +1,16 @@
-# GenieRails Dev-to-Prod Walkthrough — take a Genie agent from dev to production, safely
+# GenieRails Dev-to-Prod Walkthrough — ship a Genie agent to production, safely
 
 Take a curated Genie agent in **dev** and ship it to **production** without ever exposing sensitive data. Unity Catalog's built-in classifier decides *what* is sensitive; GenieRails derives *how* it's protected and applies it as code; and a **coverage check blocks the release** until every *classified* sensitive column the agent can reach is provably covered.
-
-> **What you'll end up with:** a production Genie agent where users see only what their group is cleared to — the groups you authorize see real values, everyone else sees masked ones (e.g. your payments-ops group sees a full card number, while analysts see `****-****-****-1234`). These *access tiers* are simply your identity-provider groups mapped to access levels, which you set up in Phase 1. Plus a proof that every *classified* sensitive column is covered, and an audit/evidence record. Nothing is reachable by users until you open the exposure gate — which you do only after coverage passes.
-
-> **Want the whole flow at a glance?** → **[The flow at a glance](#the-flow-at-a-glance)**; then work through the **Phases** below — each is self-contained, with the exact commands.
-> **No Genie agent or tables of your own yet?** → do **[Phase 0](#phase-0--set-up-dev)**, then the optional **[Sample Environment Setup](#sample-environment-setup-optional)**, then continue.
-
-Terms in `code` (and words like *coverage check*, *masking*, *access tier*) are defined in the **[Glossary](REFERENCE.md#glossary)** on the companion reference page — skim it first if any term is unfamiliar.
 
 ---
 
 ## The idea
 
-**The platform classifies → GenieRails enforces → a coverage gate blocks the release until every classified column is covered → dev rehearses, prod is the real thing.** For the full mental model, see [**How it works**](../../../README.md#how-it-works) on the landing page. The [phases below](#the-flow-at-a-glance) are the step-by-step.
-
----
-
-## The flow at a glance
-
-The whole flow is a 7-phase map (each row links to its self-contained runbook below). Expand it for orientation, or just work through the **Phases**. Run everything from the cloud root (`cd aws` or `cd azure`).
-
-<details>
-<summary><strong>The 7-phase map</strong> — Phase · what happens · command · done-when</summary>
-
-| Phase | What happens | Signature commands | Done when |
-|---|---|---|---|
-| **[0 · Set up (dev)](#phase-0--set-up-dev)** | create local config; fill in creds + settings (no Databricks calls) | `make setup` → `make init-env ENV=dev` → edit tfvars | `envs/dev/` config filled in |
-| **[1 · Dev — scan, draft, test](#phase-1--dev-scan-draft-the-rules-test-them)** | scan dev, review detections, draft the rules, prove masking works | `make enable-classification` → review → opt into tags → `make generate` → `make rehearse` | gate PASS + masking proven in dev |
-| **[2 · Promote to prod](#phase-2--promote-the-rules-to-prod)** | copy the *rules* to prod (not the data, not dev's labels) | `make promote …` | `envs/prod/` points at your prod catalog |
-| **[3 · Prod — scan real data](#phase-3--prod-scan-real-data)** | prod scans its *own* data → review detections, then opt into tags | `make enable-classification ENV=prod` → review → set `enable_auto_tagging=true` → re-apply | prod `class.*` tags land |
-| **[4 · Prove coverage (the gate)](#phase-4--prove-coverage-the-gate)** | re-derive prod facts, prove coverage, deploy enforcement (masks/policies) — the Genie agent isn't created until Phase 5 | `make certify` | gate PASS, no drift |
-| **[5 · Open to users](#phase-5--open-to-users-you-release-access-after-the-gate-passes-then-verify)** | release access **last**, create the agent, verify live | edit tfvars (`business_access_enabled=true`) → `make apply` → `make verify-access` → `make evidence` | masked-vs-raw confirmed live |
-| **[6 · Keep it covered](#phase-6--keep-it-covered)** | catch sensitive data that arrives later | *(scheduled)* `make audit-schema` · `make audit-rulebook` · `make generate-delta` | runs on a schedule |
-</details>
-
-**Two things that trip people up:** (a) `make verify-access` only works with the exposure gate **open** (`business_access_enabled = true`) — so it runs *after* you flip the gate on (dev Phase 1, prod Phase 5). (b) Prod does **not** re-run `make generate` — Phase 4 uses `make derive-assignments`, which keeps your reviewed rules unchanged (no model call).
+Databricks scans your data and labels what's sensitive. GenieRails turns those labels into protections — column masks and access rules — as code, and a **coverage check refuses to release the agent** until every sensitive column is covered. You rehearse the whole thing safely in **dev**, then do it for real in **prod**. (Full mental model: [How it works](../../../README.md#how-it-works).)
 
 ---
 
 ## Prerequisites & what to gather
-
-<details>
-<summary><strong>AWS or Azure?</strong> Cloud-neutral — <strong>Azure needs one extra setting</strong> (the account host)</summary>
-
-Run from either `aws/` or `azure/`; all Terraform, scripts, and `make` targets are shared. **Azure users:** in each `envs/<env>/auth.auto.tfvars` set `databricks_account_host = "https://accounts.azuredatabricks.net"` and use your Azure-format workspace host (`https://adb-<id>.<n>.azuredatabricks.net`) — the provider defaults to the AWS account host, so account-layer steps (groups, tag policies) fail on Azure if you leave it unset. See [Azure prerequisites](../../../azure/docs/azure-prerequisites.md). Everything else is identical on both clouds.
-</details>
-
-
-**Tools:** GNU Make, Python 3, and Terraform on your `PATH` (`make setup` pins the Databricks provider for you). See [Prerequisites](../../docs/prerequisites.md) for versions and install help.
 
 Gather these once — every phase reuses them:
 
@@ -62,14 +24,6 @@ Gather these once — every phase reuses them:
 | **Row-pairing key** (`VERIFY_KEY_COLUMN`) | The column `verify-access` uses to line up the same rows across tiers for the **column-mask** checks — it must exist in the tables that *have* masks (e.g. `customer_id`), **not necessarily every table**. If your masked tables don't all share one column, `verify-access` reports the ones it couldn't pair as failures (the underlying script also accepts per-table keys via a `--spec` file). |
 | **UC Data Classification** | Available on the catalog; you turn it on per-env with `make enable-classification` (below). Learn more in the Databricks docs: [Data Classification (AWS)](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) / [(Azure)](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/data-classification). |
 | **Serverless budget policy** | On a newly provisioned serverless workspace, confirm an account budget policy is bound to the workspace before enabling classification. Without one, the classification API fails with `Usage policy ID must not be empty`. Creating or binding a policy requires the account-level `CreateBudgetPolicyPermission` / `UpdateBudgetPolicyPermission`, which can be separate from the Account Admin role. |
-
-<details>
-<summary><strong>More prerequisite notes</strong> — <code>verify-access</code> side effects & identity/groups</summary>
-
-**`verify-access` side effects:** it creates and then deletes temporary `genierails-verify-<tier>` service principals, adds them to your tier groups for the duration of the test, and needs **account-admin**; your IdP sync must tolerate a transient non-IdP group member.
-
-**Identity:** GenieRails does **not** create groups — it consumes the ones your IdP already syncs in (`manage_groups = false`). No tiered groups yet (e.g. just trying the demo)? Let it create demo groups with `--create-groups` instead of `--groups` (see [Phase 1](#phase-1--dev-scan-draft-the-rules-test-them)).
-</details>
 
 ---
 
@@ -140,44 +94,11 @@ Turns on the scanner only — nothing is tagged or masked yet, and auto-tagging 
 - **Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) to see what the scanner found on your columns and **exclude any false positives**. Nothing is tagged yet — auto-tagging defaults off.
 - **Opt in.** After review, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-run `make enable-classification ENV=dev`. The `class.*` tags then land on the reviewed columns (again, minutes to ~24h — on **Azure** the initial scan runs materially slower than on AWS, tens of minutes rather than a few). You can see the applied tags on each column in **Catalog Explorer** — then go to **1c**.
 
-<details>
-<summary>⚠️ <strong>Don't expect every column tagged</strong> — the scanner only matches recognizable formats, and the gate can't catch what was never tagged</summary>
-
-The scanner only tags values it can *format-match* — free-text or unusual formats may stay untagged, and that's expected. The `coverage-gate` (1d) blocks on any *classified* column left unprotected, but it **cannot** gate a column the scanner never tagged (a documented fail-open) — which is why you keep the exposure gate closed and prefer a restrictive default for high-sensitivity data. If nothing gets tagged after a clear scan, your data isn't format-matchable: seed **realistic** PII (the scanner ignores fake `example.com` emails / `000-` SSNs).
-</details>
-
-<details>
-<summary><strong>Prefer to verify with SQL?</strong> (reads the exact source the coverage gate uses)</summary>
-
-Re-run this until your recognizable PII columns show `class.*` tags. It reads `system.information_schema.column_tags` — the same source `make coverage-gate` reads — so rows here mean the gate will see them:
-```sql
-SELECT table_name, column_name, tag_name
-FROM system.information_schema.column_tags
-WHERE catalog_name = '<your-catalog>' AND schema_name = '<your-schema>'
-  AND tag_name LIKE 'class.%';
-```
-One row per recognizable PII column, e.g.:
-```
-table_name   column_name          tag_name
-customers    email                class.email_address
-customers    ssn                  class.us_ssn
-payments     credit_card_number   class.credit_card
-notes        free_text            class.email_address
-```
-Zero rows usually just means the scan hasn't finished — wait and re-run.
-</details>
-
 **1c. Draft the protection rules.**
 ```bash
 make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'
 ```
 `--groups` are **your own** IdP-synced groups, **one per access tier, most-privileged first** (`payments_ops`=full → `regional_analysts`=masked → `viewers`=least — placeholders; use your real names). GenieRails *consumes* them by exact name, never creates them.
-
-<details>
-<summary>No tiered groups yet, or want the fail-closed / LLM-fallback details?</summary>
-
-A missing group name stops generation with a clear error. **No tiered groups yet?** Use [`--create-groups`](../../docs/advanced.md#opt-in-group-creation-demo--greenfield-only) instead (demo/greenfield only — it creates the groups; needs `manage_groups = true`). Generation reads the authoritative `class.*` tags and is **fail-closed** — if classification is on but the results are unreadable or empty, it **aborts rather than silently guessing**. (You can opt into LLM inference with [`--allow-llm-sensitivity`](../../docs/troubleshooting.md#dev-to-prod-walkthrough-issues) — not recommended in prod.)
-</details>
 
 **1d. Prove coverage, apply, and verify.** One knob: **`business_access_enabled`** in `envs/dev/env.auto.tfvars` is the *exposure gate* — `false` (default) deploys the masks but **withholds** user access; `true` **releases** it. **In dev you set it `true` once and leave it** — dev is a rehearsal (the masks protect the data either way), so there's no closing and no back-and-forth. (The gate earns its keep in prod's [Phase 5](#phase-5--open-to-users-you-release-access-after-the-gate-passes-then-verify): you open access *last*, only after coverage is proven on real data.)
 
@@ -325,27 +246,6 @@ make audit-rulebook ENV=prod    # newly-detected tags with no covering rule → 
 make generate-delta ENV=prod    # incremental tag assignments after ALTER TABLE ADD/DROP/RENAME
 ```
 A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog granted nothing you didn't ask for) — add/derive the rule. For your most sensitive data, prefer "locked down until proven safe" over "open until tagged."
-
----
-
-## Limits you might hit
-
-<details>
-<summary><strong>Operational limits to know</strong> — scan latency, tag-policy cap, FGAC limits, region-scoped classifiers</summary>
-
-- **Scan latency** — the first scan is async (minutes to ~24h); no force-scan API, and **Azure's initial scan is materially slower than AWS's** (tens of minutes vs. a few). `generate` before tags land correctly fail-closes.
-- **Governed tag-policy account cap** — each governed tag is an account tag policy; large accounts can hit the cap (`make apply` reports it as a hard error). Free unused policies or raise the quota.
-- **Fine-grained access-control limits** — per catalog/schema/table/metastore; see [Troubleshooting](../../docs/troubleshooting.md).
-- **Region-scoped classifiers** run in-region only — out-of-region PII physically present may go undetected (add a custom classifier or scan in-region).
-</details>
-
----
-
-## What this does — and does NOT — do
-
-**It does:** discover the tables the agent can reach, read native classification, derive one protection per column, prove coverage with a blocking gate, verify masking by querying as real principals, and release the agent — a deliberate step you take only after the coverage gate passes.
-
-**It does not:** decide what's sensitive (Unity Catalog's classifier does); remove human review (the generated rules are a draft you review); manage warehouse `CAN_USE` (you grant it); make you legally compliant (it proves coverage, not sign-off); or replace Unity Catalog (it runs on top of it).
 
 ---
 
