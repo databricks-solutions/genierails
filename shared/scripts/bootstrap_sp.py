@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import os
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -22,6 +23,7 @@ class Config:
     dry_run: bool = False
     yes: bool = False
     rotate_secret: bool = False
+    model_endpoint: str = MODEL_ENDPOINT
 
 
 def _workspace_ids(value: str) -> tuple[int, ...]:
@@ -49,6 +51,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true", help="apply without an interactive confirmation")
     p.add_argument("--rotate-secret", action="store_true",
                    help="mint a new secret even when reusing an existing SP")
+    p.add_argument("--model-endpoint", default=os.environ.get("MODEL_ENDPOINT", MODEL_ENDPOINT),
+                   help="serving endpoint to grant CAN_QUERY (env: MODEL_ENDPOINT)")
     return p
 
 
@@ -56,15 +60,16 @@ def _plan(cfg: Config, emit: Callable[[str], None]) -> None:
     emit("GenieRails service-principal bootstrap plan")
     emit(f"  account: {cfg.account_id}")
     emit(f"  service principal: {cfg.sp_name!r} (create or reuse by exact display name)")
-    emit("  grant: Account Admin (account admins group membership)")
+    emit("  grant: Account Admin (account_admin role on the service principal)")
+    emit("  grant: account tag-policy creator and manager roles")
     for workspace_id in cfg.workspace_ids:
         emit(f"  workspace {workspace_id}: grant ADMIN")
-        emit(f"  workspace {workspace_id}: grant metastore ALL PRIVILEGES")
-        emit(f"  workspace {workspace_id}: grant CAN_QUERY on {MODEL_ENDPOINT}")
+        emit(f"  workspace {workspace_id}: grant CREATE_CATALOG on its metastore")
+        emit(f"  workspace {workspace_id}: grant CAN_QUERY on {cfg.model_endpoint}")
     if cfg.rotate_secret:
         emit("  secret: mint/rotate OAuth M2M secret")
     else:
-        emit("  secret: mint only when the SP is newly created")
+        emit("  secret: mint for a new SP or when the reused SP has no secret")
 
 
 def _clients(cfg: Config) -> tuple[Any, Callable[[str], Any]]:
@@ -76,6 +81,35 @@ def _clients(cfg: Config) -> tuple[Any, Callable[[str], Any]]:
 
 def _value(obj: Any, name: str) -> Any:
     return obj.get(name) if isinstance(obj, dict) else getattr(obj, name)
+
+
+def _role_values(sp: Any) -> set[str]:
+    roles = sp.get("roles", []) if isinstance(sp, dict) else getattr(sp, "roles", None) or []
+    return {str(_value(role, "value")) for role in roles}
+
+
+def _grant_tag_policy_roles(account: Any, cfg: Config, client_id: str) -> bool:
+    from databricks.sdk.service.iam import GrantRule, RuleSetUpdateRequest
+
+    name = f"accounts/{cfg.account_id}/ruleSets/default"
+    current = account.access_control.get_rule_set(name=name, etag="")
+    rules = list(current.grant_rules or [])
+    principal = f"servicePrincipals/{client_id}"
+    changed = False
+    for role in ("roles/tagPolicy.creator", "roles/tagPolicy.manager"):
+        rule = next((item for item in rules if item.role == role), None)
+        if rule is None:
+            rules.append(GrantRule(role=role, principals=[principal]))
+            changed = True
+        elif principal not in (rule.principals or []):
+            rule.principals = [*(rule.principals or []), principal]
+            changed = True
+    if changed:
+        account.access_control.update_rule_set(
+            name=name,
+            rule_set=RuleSetUpdateRequest(name=name, etag=current.etag, grant_rules=rules),
+        )
+    return changed
 
 
 def bootstrap(
@@ -105,20 +139,38 @@ def bootstrap(
     sp_id, client_id = str(_value(sp, "id")), str(_value(sp, "application_id"))
     emit(f"SP {'created' if created else 'reused'}: {cfg.sp_name} (client_id={client_id})")
 
-    # Account admins is the system group that carries the Account Admin role.
-    groups = list(account.groups.list(filter='displayName eq "account admins"'))
-    if len(groups) != 1:
-        raise RuntimeError("could not uniquely resolve the account admins system group")
-    group_id = str(_value(groups[0], "id"))
-    account.api_client.do(
-        "PATCH",
-        f"/api/2.0/accounts/{cfg.account_id}/scim/v2/Groups/{group_id}",
-        body={
-            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
-            "Operations": [{"op": "add", "path": "members", "value": [{"value": sp_id}]}],
-        },
+    # Mint before any grant: a failed grant must not strand a new SP without a usable secret.
+    existing_secrets = [] if created else list(
+        account.service_principal_secrets.list(service_principal_id=sp_id)
     )
-    emit("GRANTED Account Admin")
+    secret = None
+    if created or cfg.rotate_secret or not existing_secrets:
+        secret_response = account.service_principal_secrets.create(service_principal_id=int(sp_id))
+        secret = str(_value(secret_response, "secret"))
+        emit("WARNING: STORE THIS NOW. The OAuth client secret below is shown once and cannot be retrieved.")
+        emit(f"client_id = {client_id}")
+        emit(f"client_secret = {secret}")
+    else:
+        emit("OAuth secret unchanged (use --rotate-secret to mint a replacement).")
+
+    if "account_admin" not in _role_values(sp):
+        account.api_client.do(
+            "PATCH",
+            f"/api/2.0/accounts/{cfg.account_id}/scim/v2/ServicePrincipals/{sp_id}",
+            body={
+                "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+                "Operations": [{
+                    "op": "add", "path": "roles", "value": [{"value": "account_admin"}]
+                }],
+            },
+        )
+        emit("GRANTED Account Admin")
+    else:
+        emit("UNCHANGED Account Admin (already granted)")
+
+    changed = _grant_tag_policy_roles(account, cfg, client_id)
+    emit(("GRANTED" if changed else "UNCHANGED") +
+         " account tag-policy creator and manager roles")
 
     workspace_summaries: list[tuple[int, str]] = []
     for workspace_id in cfg.workspace_ids:
@@ -140,37 +192,26 @@ def bootstrap(
         w.grants.update(
             securable_type="metastore",
             full_name=metastore_id,
-            changes=[PermissionsChange(principal=client_id, add=[Privilege.ALL_PRIVILEGES])],
+            changes=[PermissionsChange(principal=client_id, add=[Privilege.CREATE_CATALOG])],
         )
-        emit(f"GRANTED workspace {workspace_id}: ALL PRIVILEGES on metastore {metastore_id}")
+        emit(f"GRANTED workspace {workspace_id}: CREATE_CATALOG on metastore {metastore_id}")
         w.api_client.do(
             "PATCH",
-            f"/api/2.0/permissions/serving-endpoints/{MODEL_ENDPOINT}",
+            f"/api/2.0/permissions/serving-endpoints/{cfg.model_endpoint}",
             body={"access_control_list": [{
                 "service_principal_name": client_id,
                 "permission_level": "CAN_QUERY",
             }]},
         )
-        emit(f"GRANTED workspace {workspace_id}: CAN_QUERY on {MODEL_ENDPOINT}")
+        emit(f"GRANTED workspace {workspace_id}: CAN_QUERY on {cfg.model_endpoint}")
         workspace_summaries.append((workspace_id, host))
 
-    secret = None
-    if created or cfg.rotate_secret:
-        secret_response = account.service_principal_secrets.create(service_principal_id=int(sp_id))
-        secret = str(_value(secret_response, "secret"))
-    else:
-        emit("OAuth secret unchanged (use --rotate-secret to mint a replacement).")
-
     emit("\nSummary: GenieRails deployer access is configured.")
-    if secret is not None:
-        emit("WARNING: STORE THIS NOW. The OAuth client secret below is shown once and cannot be retrieved.")
-    for index, (workspace_id, host) in enumerate(workspace_summaries):
+    for workspace_id, host in workspace_summaries:
         if secret is None:
             shown_secret = "<existing-secret-not-retrievable>"
-        elif index == 0:
-            shown_secret = secret
         else:
-            shown_secret = "<same newly-minted secret shown above>"
+            shown_secret = "<newly-minted secret shown above>"
         emit(f"\n# envs/<env>/auth.auto.tfvars — workspace {workspace_id}")
         emit(f'databricks_client_id     = "{client_id}"')
         emit(f'databricks_client_secret = "{shown_secret}"')
@@ -189,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         yes=args.yes,
         rotate_secret=args.rotate_secret,
+        model_endpoint=args.model_endpoint,
     )
     try:
         return bootstrap(cfg)

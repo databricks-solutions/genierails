@@ -95,9 +95,12 @@ OAuth secret and an `auth.auto.tfvars` snippet; it cannot elevate a non-admin ca
 
 | Role | Scope | Required for |
 |------|-------|-------------|
-| **Account Admin** | Account | Creating groups, tag policies |
+| **Account Admin** | Account | Creating groups and managing verification SPs |
+| **Tag Policy Creator + Manager** | Account | Creating and maintaining governed tag policies |
 | **Workspace Admin** | Target workspace | Deploying governance resources |
-| **Metastore Admin** | Unity Catalog metastore | Managing catalogs, grants, FGAC policies |
+| **CREATE CATALOG** | Workspace's Unity Catalog metastore | Creating owned catalogs; ownership then covers grants, masks, FGAC, and tag assignments |
+
+The bootstrap does **not** change metastore ownership or add the SP to a metastore-owner group.
 
 > **Genie-only mode**: If you only need Genie agents without ABAC governance,
 > set `genie_only = true` in `env.auto.tfvars`. This requires only **Workspace Admin**

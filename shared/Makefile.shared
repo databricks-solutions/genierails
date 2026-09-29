@@ -607,9 +607,10 @@ _CRED_EXAMPLE      := $(SHARED_ROOT)/scripts/account-admin.$(CLOUD).env.example
 _PROVISION       := python3 "$(SHARED_ROOT)/scripts/provision_test_env.py"
 
 # Bootstrap the privileged deployment SP using an already-authorized account-admin profile.
-# Required: ACCOUNT_ID, WORKSPACE_ID. Optional: ACCOUNT_PROFILE, SP_NAME, PLAN=1, YES=1, ROTATE_SECRET=1.
+# Required: ACCOUNT_ID, WORKSPACE_ID. Optional: ACCOUNT_PROFILE, SP_NAME, MODEL_ENDPOINT, PLAN=1, YES=1, ROTATE_SECRET=1.
 ACCOUNT_PROFILE ?= DEFAULT
 SP_NAME ?= genierails-deployer
+MODEL_ENDPOINT ?= databricks-claude-sonnet-4-6
 _BOOTSTRAP_SP_FLAGS = $(if $(filter 1,$(PLAN)),--dry-run,) $(if $(filter 1,$(YES)),--yes,) $(if $(filter 1,$(ROTATE_SECRET)),--rotate-secret,)
 
 bootstrap-sp: ## Create/reuse and authorize the GenieRails deployment service principal
@@ -617,7 +618,8 @@ bootstrap-sp: ## Create/reuse and authorize the GenieRails deployment service pr
 	@test -n "$(WORKSPACE_ID)" || { echo "ERROR: WORKSPACE_ID is required (comma-separated for multiple)"; exit 2; }
 	python3 "$(SHARED_ROOT)/scripts/bootstrap_sp.py" \
 		--profile "$(ACCOUNT_PROFILE)" --account-id "$(ACCOUNT_ID)" \
-		--workspace-id "$(WORKSPACE_ID)" --sp-name "$(SP_NAME)" $(_BOOTSTRAP_SP_FLAGS)
+		--workspace-id "$(WORKSPACE_ID)" --sp-name "$(SP_NAME)" \
+		--model-endpoint "$(MODEL_ENDPOINT)" $(_BOOTSTRAP_SP_FLAGS)
 
 test-unit: ## Run fast unit tests (no Databricks/LLM/Terraform required) — use before integration tests
 	cd "$(SHARED_ROOT)" && python3 -m pytest tests/ -v --tb=short
