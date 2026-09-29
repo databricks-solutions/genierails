@@ -40,24 +40,24 @@ databricks_workspace_host = "https://dbc-xxxxxxxx-xxxx.cloud.databricks.com"
 
 > **Note:** No `databricks_account_host` is needed for AWS — the Terraform provider defaults to `accounts.cloud.databricks.com`.
 
-## Step 3 — Follow the guide for your scenario
+## Step 3 — Follow the champion flow
+
+The **[champion flow](../shared/examples/champion_flow/)** is the canonical end-to-end walkthrough: Unity Catalog classifies your data, GenieRails derives one protection per classified column, a coverage gate fails the build if any classified sensitive column is unprotected, and the agent is exposed to users only after the prod gate passes. No tables or agent of your own? It ships an optional sample-environment script that creates everything, so you can run the whole flow to see it in action.
+
+Starting from a specific point? These entry guides feed into the champion flow:
 
 | Starting point | You have... | Guide |
 |---|---|---|
-| **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](../shared/docs/from-ui-to-production.md) |
+| **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](../shared/docs/from-ui-to-production.md) — imports your agent, then follow the champion flow |
 | **I'm starting from scratch** | Tables in Unity Catalog, no Genie agent yet | [Quickstart](../shared/docs/quickstart.md) |
-
-### Want to see it in action first?
-
-The [Australian Bank Demo](../shared/examples/legacy/aus_bank_demo/) provisions a complete environment and walks through the full GenieRails flow in ~20 minutes — ANZ-specific masking, PCI compliance, AML row filters, and dev-to-prod promotion. Works on both AWS and Azure.
 
 ---
 
 ## Documentation
 
-- [From UI to Production](../shared/docs/from-ui-to-production.md) — import your existing Genie agent, add governance, promote to prod
+- [Champion flow](../shared/examples/champion_flow/) — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion)
+- [From UI to Production](../shared/docs/from-ui-to-production.md) — import your existing Genie agent, then follow the champion flow
 - [Quickstart](../shared/docs/quickstart.md) — create a Genie agent from scratch
 - [Playbook](../shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios
 - [Architecture](../shared/docs/architecture.md) — layers, artifact ownership, config files, Genie agent lifecycle
-- [Australian Bank Demo](../shared/examples/legacy/aus_bank_demo/) — end-to-end demo with ANZ banking data, governance, and promotion
 - [All documentation](../shared/docs/) — full list
