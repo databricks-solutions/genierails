@@ -8,7 +8,7 @@ Everything below rests on four invariants of the champion flow:
 
 1. **Unity Catalog is the sensitivity source of truth.** Native Data Classification writes `class.*` labels on sensitive columns; GenieRails does not guess by default. When `enable_classification=true`, generation is fail-closed — unreadable/empty native results abort rather than fall back to LLM inference (unless the operator explicitly passes the `--allow-llm-sensitivity` escape hatch).
 2. **One `gr_treatment` per column.** GenieRails collapses a column's `class.*` findings deterministically to exactly one enforcement treatment (`gr_treatment`), so exactly one column mask ever resolves; masks are keyed to that treatment vocabulary.
-3. **A blocking coverage gate.** `make coverage-gate` fails the release if any classified sensitive column has no covering treatment/mask. It is a *separate* step — `make apply` does not run it — so run it as an explicit gate before applying.
+3. **A blocking coverage gate.** `make coverage-gate` is an offline check that reads the generated `abac.auto.tfvars` + `masking_functions.sql` and **exits non-zero** if a classification finding has no treatment mapping, a classified column has no covering column-mask policy, or a treatment's masking function is missing — and it never drops tags or policies to force a pass. It is a *separate* step (`make apply` does not run it), so run it as an explicit gate before applying.
 4. **The exposure gate controls release.** `business_access_enabled` withholds business `SELECT` and Genie `CAN_RUN` until set to `true`; enforcement resources can exist while access stays withheld. Prod re-derives its own facts (`derive-assignments`) before the gate opens.
 
 ## Layer Model

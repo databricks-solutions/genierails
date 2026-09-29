@@ -26,10 +26,6 @@ Check the [Prerequisites](shared/docs/prerequisites.md) first, then pick your cl
 | Starting from scratch (no Genie agent yet) | [Quickstart](shared/docs/quickstart.md) | ~30 min |
 | Need the full reference | [Playbook](shared/docs/playbook.md) | Reference |
 
-## Blocking sensitive-column coverage gate
-
-After generation, `make coverage-gate` checks that every classified sensitive column has a covering mask and **exits non-zero if any is uncovered** — so an ungoverned agent can't ship. It never drops tags or policies to force a pass. (Mechanics and platform limits: [Troubleshooting](shared/docs/troubleshooting.md).)
-
 ## Documentation
 
 New here? Use the [Getting Started](#getting-started) routes above. Full reference in [`shared/docs/`](shared/docs/):
