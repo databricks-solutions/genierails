@@ -100,7 +100,7 @@ OAuth secret and an `auth.auto.tfvars` snippet; it cannot elevate a non-admin ca
 | **Workspace Admin** | Target workspace | Deploying governance resources |
 | **CREATE CATALOG** | Workspace's Unity Catalog metastore | Creating owned catalogs; ownership then covers grants, masks, FGAC, and tag assignments |
 
-The bootstrap does **not** change metastore ownership or add the SP to a metastore-owner group.
+The bootstrap does **not** change metastore ownership or add the SP to a metastore-owner group. (To govern catalogs the SP does **not** own, that catalog's owner must grant it `MANAGE`.)
 
 > **Genie-only mode**: If you only need Genie agents without ABAC governance,
 > set `genie_only = true` in `env.auto.tfvars`. This requires only **Workspace Admin**
