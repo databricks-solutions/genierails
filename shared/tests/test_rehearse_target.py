@@ -1,11 +1,28 @@
 """Regression tests for the Makefile rehearsal pipeline."""
 
 import subprocess
+import shlex
 from pathlib import Path
 
 
 ROOT = Path(__file__).parents[2]
 CLOUD_ROOT = ROOT / "aws"
+
+
+def _recording_stub(tmp_path):
+    log = tmp_path / "recursive-make.log"
+    stub = tmp_path / "record-successful-make"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> \"{log}\"\n"
+        "exit 0\n"
+    )
+    stub.chmod(0o755)
+    return stub, log
+
+
+def _recorded_calls(log):
+    return [shlex.split(line) for line in log.read_text().splitlines()]
 
 
 def test_rehearse_stops_after_first_failing_stage(tmp_path):
@@ -35,14 +52,15 @@ def test_rehearse_stops_after_first_failing_stage(tmp_path):
     assert log.read_text().splitlines() == ["coverage-gate"]
 
 
-def test_rehearse_dry_run_is_ordered_and_does_not_toggle_exposure_gate():
+def test_rehearse_with_key_is_ordered_and_does_not_toggle_exposure_gate(tmp_path):
+    stub, log = _recording_stub(tmp_path)
     result = subprocess.run(
         [
             "make",
-            "-n",
             "rehearse",
             "ENV=dev",
-            "VERIFY_KEY_COLUMN=customer_id",
+            "VERIFY_KEY_COLUMN=  customer_id  ",
+            f"MAKE={stub}",
         ],
         cwd=CLOUD_ROOT,
         text=True,
@@ -51,15 +69,12 @@ def test_rehearse_dry_run_is_ordered_and_does_not_toggle_exposure_gate():
 
     assert result.returncode == 0, result.stdout + result.stderr
     output = result.stdout + result.stderr
-    invocations = [
-        'make coverage-gate ENV="dev"',
-        'make validate-generated ENV="dev"',
-        'make apply ENV="dev"',
-        'make verify-access ENV="dev" VERIFY_KEY_COLUMN="customer_id"',
+    assert _recorded_calls(log) == [
+        ["coverage-gate", "ENV=dev"],
+        ["validate-generated", "ENV=dev"],
+        ["apply", "ENV=dev"],
+        ["verify-access", "ENV=dev", "VERIFY_KEY_COLUMN=customer_id"],
     ]
-    positions = [output.index(invocation) for invocation in invocations]
-
-    assert positions == sorted(positions)
     assert output.count("business_access_enabled") == 1
     assert "requires business_access_enabled=true" in output
     assert not any(
@@ -68,9 +83,10 @@ def test_rehearse_dry_run_is_ordered_and_does_not_toggle_exposure_gate():
     )
 
 
-def test_rehearse_without_key_runs_apply_then_recommends_live_verification():
+def test_rehearse_without_key_runs_apply_then_recommends_live_verification(tmp_path):
+    stub, log = _recording_stub(tmp_path)
     result = subprocess.run(
-        ["make", "-n", "rehearse", "ENV=dev"],
+        ["make", "rehearse", "ENV=dev", f"MAKE={stub}"],
         cwd=CLOUD_ROOT,
         text=True,
         capture_output=True,
@@ -78,15 +94,11 @@ def test_rehearse_without_key_runs_apply_then_recommends_live_verification():
 
     assert result.returncode == 0, result.stdout + result.stderr
     output = result.stdout + result.stderr
-    invocations = [
-        'make coverage-gate ENV="dev"',
-        'make validate-generated ENV="dev"',
-        'make apply ENV="dev"',
+    assert _recorded_calls(log) == [
+        ["coverage-gate", "ENV=dev"],
+        ["validate-generated", "ENV=dev"],
+        ["apply", "ENV=dev"],
     ]
-    positions = [output.index(invocation) for invocation in invocations]
-
-    assert positions == sorted(positions)
-    assert 'make verify-access ENV="dev"' not in output
     assert (
         "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> "
         "to prove masking live (recommended)"
