@@ -23,15 +23,15 @@ Seven phases, dev → prod. This table is the **map**; each **Phase** below is t
 
 | Phase | What happens | Signature commands | Done when |
 |---|---|---|---|
-| **[0 · Set up (dev)](#phase-0--set-up-dev)** | create local config; fill in creds + settings (no Databricks calls) | `make setup` → `init-env ENV=dev` → edit tfvars | `envs/dev/` config filled in |
-| **[1 · Dev — scan, draft, test](#phase-1--dev-scan-draft-the-rules-test-them)** | scan dev, draft the rules, prove masking works | `enable-classification` → *(wait for scan)* → `generate` → `coverage-gate` → `apply` → `verify-access` | gate PASS + masking proven in dev |
+| **[0 · Set up (dev)](#phase-0--set-up-dev)** | create local config; fill in creds + settings (no Databricks calls) | `make setup` → `make init-env ENV=dev` → edit tfvars | `envs/dev/` config filled in |
+| **[1 · Dev — scan, draft, test](#phase-1--dev-scan-draft-the-rules-test-them)** | scan dev, draft the rules, prove masking works | `make enable-classification` → *(wait for scan)* → `make generate` → `make coverage-gate` → `make apply` → `make verify-access` | gate PASS + masking proven in dev |
 | **[2 · Promote to prod](#phase-2--promote-the-rules-to-prod)** | copy the *rules* to prod (not the data, not dev's labels) | `make promote …` | `envs/prod/` points at your prod catalog |
-| **[3 · Prod — scan real data](#phase-3--prod-scan-real-data)** | prod scans its *own* data → the real facts | `enable-classification ENV=prod` → *(wait for scan)* | prod `class.*` tags land |
-| **[4 · Prove coverage (the gate)](#phase-4--prove-coverage-the-gate)** | re-derive prod facts, prove coverage, deploy enforcement (no agent yet) | `derive-assignments` → `coverage-gate` → `apply-governance` → `audit-rulebook` | gate PASS, no drift |
-| **[5 · Open to users](#phase-5--open-to-users-you-release-access-after-the-gate-passes-then-verify)** | release access **last**, create the agent, verify live | set `business_access_enabled=true` → `make apply` → `verify-access` → `evidence` | masked-vs-raw confirmed live |
-| **[6 · Keep it covered](#phase-6--keep-it-covered)** | catch sensitive data that arrives later | *(scheduled)* `audit-schema` · `audit-rulebook` · `generate-delta` | runs on a schedule |
+| **[3 · Prod — scan real data](#phase-3--prod-scan-real-data)** | prod scans its *own* data → the real facts | `make enable-classification ENV=prod` → *(wait for scan)* | prod `class.*` tags land |
+| **[4 · Prove coverage (the gate)](#phase-4--prove-coverage-the-gate)** | re-derive prod facts, prove coverage, deploy enforcement (no agent yet) | `make derive-assignments` → `make coverage-gate` → `make apply-governance` → `make audit-rulebook` | gate PASS, no drift |
+| **[5 · Open to users](#phase-5--open-to-users-you-release-access-after-the-gate-passes-then-verify)** | release access **last**, create the agent, verify live | set `business_access_enabled=true` → `make apply` → `make verify-access` → `make evidence` | masked-vs-raw confirmed live |
+| **[6 · Keep it covered](#phase-6--keep-it-covered)** | catch sensitive data that arrives later | *(scheduled)* `make audit-schema` · `make audit-rulebook` · `make generate-delta` | runs on a schedule |
 
-**Two things that trip people up:** (a) `verify-access` only works with the exposure gate **open** (`business_access_enabled = true`) — so it runs *after* you flip the gate on (dev Phase 1, prod Phase 5). (b) Prod does **not** re-run `generate` — Phase 4 uses `derive-assignments`, which re-derives only the `tag_assignments` from prod's live tags and keeps the promoted rules byte-for-byte (no model call).
+**Two things that trip people up:** (a) `make verify-access` only works with the exposure gate **open** (`business_access_enabled = true`) — so it runs *after* you flip the gate on (dev Phase 1, prod Phase 5). (b) Prod does **not** re-run `make generate` — Phase 4 uses `make derive-assignments`, which re-derives only the `tag_assignments` from prod's live tags and keeps the promoted rules byte-for-byte (no model call).
 
 ---
 
