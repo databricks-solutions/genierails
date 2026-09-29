@@ -19,7 +19,10 @@ Terms in `code` (and words like *coverage check*, *masking*, *access tier*) are 
 
 ## The flow at a glance
 
-Seven phases, dev → prod. This table is the **map**; each **Phase** below is the **runbook** — self-contained, with the exact commands, what they do, and how you know they worked. Run everything from the cloud root (`cd aws` or `cd azure`).
+The whole flow is a 7-phase map (each row links to its self-contained runbook below). Expand it for orientation, or just work through the **Phases**. Run everything from the cloud root (`cd aws` or `cd azure`).
+
+<details>
+<summary><strong>The 7-phase map</strong> — Phase · what happens · command · done-when</summary>
 
 | Phase | What happens | Signature commands | Done when |
 |---|---|---|---|
@@ -30,6 +33,7 @@ Seven phases, dev → prod. This table is the **map**; each **Phase** below is t
 | **[4 · Prove coverage (the gate)](#phase-4--prove-coverage-the-gate)** | re-derive prod facts, prove coverage, deploy enforcement (masks/policies) — the Genie agent isn't created until Phase 5 | `make certify` | gate PASS, no drift |
 | **[5 · Open to users](#phase-5--open-to-users-you-release-access-after-the-gate-passes-then-verify)** | release access **last**, create the agent, verify live | edit tfvars (`business_access_enabled=true`) → `make apply` → `make verify-access` → `make evidence` | masked-vs-raw confirmed live |
 | **[6 · Keep it covered](#phase-6--keep-it-covered)** | catch sensitive data that arrives later | *(scheduled)* `make audit-schema` · `make audit-rulebook` · `make generate-delta` | runs on a schedule |
+</details>
 
 **Two things that trip people up:** (a) `make verify-access` only works with the exposure gate **open** (`business_access_enabled = true`) — so it runs *after* you flip the gate on (dev Phase 1, prod Phase 5). (b) Prod does **not** re-run `make generate` — Phase 4 uses `make derive-assignments`, which re-derives only the `tag_assignments` from prod's live tags and keeps the promoted rules byte-for-byte (no model call).
 
