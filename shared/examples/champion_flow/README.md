@@ -244,7 +244,7 @@ make audit-rulebook   ENV=prod   # flags any prod tag with no covering rule (dri
 
 **If the gate fails or `audit-rulebook` reports drift** — prod surfaced a sensitive tag your promoted rules don't cover (a type the classifier found only in prod, or a rule dropped in promotion). This is a **rule change — made in dev, never hand-edited in prod**. Loop back:
 
-1. **In dev**, add the missing mapping to `treatment_config.json` (which `class.*` label → which `gr_treatment` + mask).
+1. **Scaffold the missing mappings** (instead of hand-editing JSON): `make scaffold-treatments ENV=prod` reads the labels prod surfaced and adds, for each, a **fail-safe full-redaction** `gr_treatment` + mask **stub** to the shared `treatment_config.json`, every entry marked `REVIEW`. Then **review each stub** — keep the redaction, or implement a type-appropriate mask. (You can still edit `treatment_config.json` by hand.) This changes the shared *rulebook*, not prod's live state — you still validate it in dev and re-promote below.
 2. **Re-validate in dev:** `make generate ENV=dev` → `make coverage-gate ENV=dev`.
 3. **Re-promote:** `make promote …` (carries the updated rules to prod — same command as [Phase 2](#phase-2--promote-the-rules-to-prod)).
 4. **Re-run this phase:** `make certify ENV=prod`.
