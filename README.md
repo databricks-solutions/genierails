@@ -9,20 +9,11 @@ Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent f
 ## How it works
 
 1. **Unity Catalog decides what's sensitive.** Its built-in [Data Classification](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) scanner reads your data and labels each sensitive column (`class.*`, e.g. `class.email_address`).
-2. **GenieRails decides how it's protected.** From those labels it derives one enforcement treatment per column — column masks, row filters, and access rules — and applies it as Terraform, so you don't write any.
+2. **GenieRails decides how it's protected.** From those labels it derives one treatment per column — column masks and row filters — plus access rules mapped to your existing IdP groups (it *consumes* your groups, never invents them), and applies it all as Terraform, so you don't write any.
 3. **A coverage gate is the safety net.** The release fails ("says NO") if any classified-sensitive column has no protection, so an ungoverned agent can't reach users.
 4. **Dev rehearses; prod is the real thing.** Build and test in dev, promote the *rules* to prod, let prod classify its *own* data, prove coverage, and open the agent to users **last**.
 
 → Walk it end-to-end in the **[Champion Flow](shared/examples/champion_flow/)**.
-
-## What you get
-
-- **Native classification as the source of truth** — Unity Catalog decides what's sensitive; GenieRails doesn't guess by default.
-- **One protection per column** — a single treatment derived from each column's label, applied as column masks + row filters.
-- **A blocking coverage gate** — the release fails ("says NO") until every classified sensitive column is protected.
-- **Access tiers from your IdP** — GenieRails consumes your existing groups by default; it doesn't invent them.
-- **The agent and its access, as code** — per-agent Genie `CAN_RUN`, consumer entitlements, and the agent's config, all version-controlled and released only after the coverage gate passes.
-- **Safe dev → prod promotion** — promote the rules; re-derive the facts from prod's own classification.
 
 ## Getting Started
 
