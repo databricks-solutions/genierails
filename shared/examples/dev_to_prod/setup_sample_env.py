@@ -194,6 +194,23 @@ def _create_space(client: Any, warehouse_id: str, tables: list[str], title: str)
     return space_id
 
 
+def _reconcile_existing_space(state: dict[str, Any], warehouse_id: str) -> None:
+    """Validate an owned space on rerun without PATCHing its node graph.
+
+    The Genie PATCH endpoint re-imports the space graph even for metadata-only
+    bodies and rejects the already-present root ``.geniespace.json`` node.
+    A same-config rerun therefore reuses the tracked space unchanged. Changing
+    warehouses requires an explicit teardown/recreate rather than a partial,
+    misleading reconciliation.
+    """
+    tracked_warehouse = str(state.get("warehouse_id", ""))
+    if tracked_warehouse and tracked_warehouse != warehouse_id:
+        raise RuntimeError(
+            f"tracked Genie agent uses warehouse {tracked_warehouse}, not {warehouse_id}; "
+            "run with --teardown before changing the sample warehouse"
+        )
+
+
 def _tfvars(space_id: str, tables: list[str], warehouse_id: str) -> str:
     lines = "\n".join(f'  "{table}",' for table in tables)
     return f'''uc_tables = [
@@ -254,11 +271,10 @@ def setup(args: argparse.Namespace, client: Any) -> None:
         state.update(space_id=space_id, warehouse_id=args.warehouse_id)
         _save_states(states)
     else:
-        client.api_client.do("PATCH", f"/api/2.0/genie/spaces/{space_id}",
-                             body=_space_payload(args.warehouse_id, tables, title))
+        _reconcile_existing_space(state, args.warehouse_id)
+        print(f"      Reusing tracked Genie agent {space_id} without re-importing its node graph.")
         state["warehouse_id"] = args.warehouse_id
         _save_states(states)
-        print(f"      Genie agent {space_id} already exists; configuration refreshed.")
     print("[4/4] Complete. Paste this exact snippet into env.auto.tfvars:\n")
     print(_tfvars(space_id, tables, args.warehouse_id))
     print(f"\nGenie agent ID: {space_id}\nOwnership state: {STATE_FILE}")
