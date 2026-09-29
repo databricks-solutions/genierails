@@ -88,6 +88,11 @@ Ownership is split: the **IdP owns groups and membership**; **GenieRails owns gr
 
 Create a service principal (SP) in the Databricks Account Console with:
 
+Alternatively, an already-authorized account admin can create and grant the deployment SP with
+`make bootstrap-sp ACCOUNT_PROFILE=<profile> ACCOUNT_ID=<id> WORKSPACE_ID=<id> SP_NAME=<name> PLAN=1`.
+Review the dry-run, then replace `PLAN=1` with `YES=1` to apply. The command prints the one-time
+OAuth secret and an `auth.auto.tfvars` snippet; it cannot elevate a non-admin caller.
+
 | Role | Scope | Required for |
 |------|-------|-------------|
 | **Account Admin** | Account | Creating groups, tag policies |

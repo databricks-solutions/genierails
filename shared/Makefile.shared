@@ -1,4 +1,4 @@
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env enable-classification generate scaffold-treatments derive-assignments generate-delta audit-schema validate validate-generated coverage-gate promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _prepare-classification _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
+.PHONY: help bootstrap-sp _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env enable-classification generate scaffold-treatments derive-assignments generate-delta audit-schema validate validate-generated coverage-gate promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _prepare-classification _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema evidence validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema audit-rulebook validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec
@@ -599,6 +599,19 @@ _ITEST_FF_FLAG  := $(if $(filter 0,$(FAIL_FAST)),,--fail-fast)
 ACCOUNT_ADMIN_ENV  ?= $(SHARED_ROOT)/scripts/account-admin.$(CLOUD).env
 _CRED_EXAMPLE      := $(SHARED_ROOT)/scripts/account-admin.$(CLOUD).env.example
 _PROVISION       := python3 "$(SHARED_ROOT)/scripts/provision_test_env.py"
+
+# Bootstrap the privileged deployment SP using an already-authorized account-admin profile.
+# Required: ACCOUNT_ID, WORKSPACE_ID. Optional: ACCOUNT_PROFILE, SP_NAME, PLAN=1, YES=1, ROTATE_SECRET=1.
+ACCOUNT_PROFILE ?= DEFAULT
+SP_NAME ?= genierails-deployer
+_BOOTSTRAP_SP_FLAGS = $(if $(filter 1,$(PLAN)),--dry-run,) $(if $(filter 1,$(YES)),--yes,) $(if $(filter 1,$(ROTATE_SECRET)),--rotate-secret,)
+
+bootstrap-sp: ## Create/reuse and authorize the GenieRails deployment service principal
+	@test -n "$(ACCOUNT_ID)" || { echo "ERROR: ACCOUNT_ID is required"; exit 2; }
+	@test -n "$(WORKSPACE_ID)" || { echo "ERROR: WORKSPACE_ID is required (comma-separated for multiple)"; exit 2; }
+	python3 "$(SHARED_ROOT)/scripts/bootstrap_sp.py" \
+		--profile "$(ACCOUNT_PROFILE)" --account-id "$(ACCOUNT_ID)" \
+		--workspace-id "$(WORKSPACE_ID)" --sp-name "$(SP_NAME)" $(_BOOTSTRAP_SP_FLAGS)
 
 test-unit: ## Run fast unit tests (no Databricks/LLM/Terraform required) — use before integration tests
 	cd "$(SHARED_ROOT)" && python3 -m pytest tests/ -v --tb=short
