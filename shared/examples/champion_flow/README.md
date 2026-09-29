@@ -2,7 +2,7 @@
 
 Take a curated Genie agent in **dev** and ship it to **production** without ever exposing sensitive data. Unity Catalog's built-in classifier decides *what* is sensitive; GenieRails derives *how* it's protected and applies it as code; and a **coverage check blocks the release** until every *classified* sensitive column the agent can reach is provably covered.
 
-> **What you'll end up with:** a production Genie agent where an authorized tier sees real values and every other tier sees masked ones — plus a proof that every *classified* sensitive column is covered and an audit/evidence record. Nothing is reachable by users until you open the exposure gate — which you do only after coverage passes.
+> **What you'll end up with:** a production Genie agent where users see only what their group is cleared to — the groups you authorize see real values, everyone else sees masked ones (e.g. your payments-ops group sees a full card number, while analysts see `****-****-****-1234`). These *access tiers* are simply your identity-provider groups mapped to access levels, which you set up in Phase 1. Plus a proof that every *classified* sensitive column is covered, and an audit/evidence record. Nothing is reachable by users until you open the exposure gate — which you do only after coverage passes.
 
 > **Want the whole flow at a glance?** → **[The flow at a glance](#the-flow-at-a-glance)**; then work through the **Phases** below — each is self-contained, with the exact commands.
 > **No Genie agent or tables of your own yet?** → do **[Phase 0](#phase-0--set-up-dev)**, then the optional **[Sample Environment Setup](#sample-environment-setup-optional)**, then continue.
