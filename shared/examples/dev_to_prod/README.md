@@ -16,13 +16,13 @@ Gather these once — every phase reuses them:
 
 | Value | What it is / where it comes from |
 |---|---|
-| **Deploying Service Principal** (`client_id` + `client_secret`) | The identity GenieRails runs as — **not** a CLI profile. Needs, on the **same account** as the workspace: **Account Admin** (groups, workspace assignment), **Workspace Admin** (Genie, warehouse), **Metastore Admin** (tags, fine-grained access control), **`EXECUTE` on `system.ai.databricks-claude-sonnet-4-6`** (generation calls a foundation model), and catalog **`APPLY TAG` + `ASSIGN`** (so the scanner can write `class.*` tags). Goes in `envs/<env>/auth.auto.tfvars`. See [Prerequisites](../../docs/prerequisites.md). |
+| **Deploying Service Principal** (`client_id` + `client_secret`) | The identity GenieRails runs as (not a CLI profile), on the **same account** as the workspace. Broad roles that cover everything it does: **Account Admin**, **Workspace Admin**, **Metastore Admin**, plus permission to **query the `databricks-claude-sonnet-4-6` serving endpoint** (generation calls a foundation model — an Anthropic/OpenAI provider works too). A tighter least-privilege set is possible but not enumerated here. [How to create it → Prerequisites](../../docs/prerequisites.md); goes in `envs/<env>/auth.auto.tfvars`. |
 | **Dev / prod catalog names** | Your Unity Catalog catalogs, e.g. `dev_finance` / `prod_finance`. |
-| **SQL warehouse id** (per env) | The serverless warehouse the **Genie agent runs its SQL on** (and that `verify-access` uses to test masking). Give an existing warehouse's id, **or leave blank** to auto-create one. |
+| **SQL warehouse id** (per env) | The serverless warehouse the **Genie agent runs its SQL on**. Give an existing warehouse's id, **or leave blank** to auto-create one. |
 | **Curated Genie agent** | The agent itself. To deploy it (and get *agent access*), you **must** set a `genie_spaces` entry — an existing space id, or `genie_space_id=""` + `uc_tables` to create one. `genie_spaces = []` governs *data only* — no agent. |
 | **IdP group names** (one per *access tier*) | Your existing groups, synced from your identity provider (Entra ID / Okta) via **AIM/SCIM**. GenieRails **consumes** them by name — it never creates them. e.g. `payments_ops,regional_analysts,viewers`. |
-| **Row-pairing key** (`VERIFY_KEY_COLUMN`) | The column `verify-access` uses to line up the same rows across tiers for the **column-mask** checks — it must exist in the tables that *have* masks (e.g. `customer_id`), **not necessarily every table**. If your masked tables don't all share one column, `verify-access` reports the ones it couldn't pair as failures (the underlying script also accepts per-table keys via a `--spec` file). |
-| **UC Data Classification** | Available on the catalog; you turn it on per-env with `make enable-classification` (below). Learn more in the Databricks docs: [Data Classification (AWS)](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) / [(Azure)](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/data-classification). |
+| **Row-pairing key** (`VERIFY_KEY_COLUMN`) | One column `verify-access` uses to pair the same rows across tiers for the mask checks (e.g. `customer_id`); it just needs to exist on the masked tables. Tables that don't share one column → use a per-table `VERIFY_SPEC` JSON instead ([details](../../docs/effective-access-verification.md)). |
+| **UC Data Classification** | Turn it on per-env — in the **Databricks UI** (Catalog Explorer → your catalog → enable classification) or reproducibly with `make enable-classification` (Phase 1). Docs: [AWS](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/data-classification). |
 | **Serverless budget policy** | On a newly provisioned serverless workspace, confirm an account budget policy is bound to the workspace before enabling classification. Without one, the classification API fails with `Usage policy ID must not be empty`. Creating or binding a policy requires the account-level `CreateBudgetPolicyPermission` / `UpdateBudgetPolicyPermission`, which can be separate from the Account Admin role. |
 
 ---
@@ -44,38 +44,15 @@ Then edit three files:
 - **`envs/dev/env.auto.tfvars`** — `uc_tables`, `sql_warehouse_id` (or blank), `genie_spaces`, `enable_classification = true`, `enable_auto_tagging = false`, `business_access_enabled = false`.
 - **`envs/account/env.auto.tfvars`** — set `manage_groups = false` (this flow *consumes* IdP groups; it doesn't create them). **There is one shared `envs/account/` config** used by both dev and prod — you edit it here, once.
 
-> **Where do `genie_spaces` / `uc_tables` come from?** Already built the agent in the Databricks UI → import it into code first: [From UI to Production](../../docs/from-ui-to-production.md) captures the agent *and* its tables. No agent or tables of your own yet → use the optional [Sample Environment Setup](#sample-environment-setup-optional) below. Either path hands you the exact values to paste above.
+> **Where do `genie_spaces` / `uc_tables` come from?** Already built the agent in the Databricks UI → import it into code first: [From UI to Production](../../docs/from-ui-to-production.md) captures the agent *and* its tables. No agent or tables of your own yet → use the optional [Sample Environment Setup](SAMPLE_ENV.md) below. Either path hands you the exact values to paste above.
 
 **Done when —** `ls envs/dev` shows `auth.auto.tfvars` and `env.auto.tfvars`, both filled in.
 
 ---
 
-## Sample Environment Setup (Optional)
+## Sample environment (optional)
 
-**No tables or Genie agent of your own?** Expand this to create a sample schema (three tables of realistic synthetic PII) + a sample agent and get the exact values to paste into `envs/dev/env.auto.tfvars`. **Skip it if you have your own.**
-
-<details>
-<summary><strong>Set up a sample environment</strong> (optional demo tooling — do Phase 0 first)</summary>
-
-Do [Phase 0](#phase-0--set-up-dev) first, then this, then continue to [Phase 1](#phase-1--dev-scan-draft-the-rules-test-them).
-
-```bash
-cd ../shared/examples/dev_to_prod          # from the cloud root (aws/ or azure/); return with 'cd ../../../aws' afterward
-python -m pip install -r requirements.txt
-python setup_sample_env.py --catalog dev_finance --warehouse-id <your-warehouse-id>
-```
-
-**Auth is optional to specify.** It uses a **Databricks CLI profile** — separate from the deploying Service Principal `make` uses (that lives in `auth.auto.tfvars`). No flag → your **default** CLI profile (or `DATABRICKS_HOST`/`DATABRICKS_TOKEN`); add `--profile <name>` only for a *named* profile.
-
-The script prints the `uc_tables`, `genie_spaces`, and `sql_warehouse_id` snippet — paste it into `envs/dev/env.auto.tfvars`. It does **not** create access-tier groups, so in Phase 1 pass `--groups` with existing names or use `--create-groups`. Re-runs are safe. To remove only what it created:
-
-```bash
-python teardown_sample_env.py --catalog dev_finance
-# Equivalent: add --teardown to the setup command.
-```
-
-Use `--help` for `--host`, `--schema`, `--rows`, and env-var alternatives. Then `cd ../../../aws` (or the azure path) and continue.
-</details>
+No tables or Genie agent of your own? A one-command script creates a sample schema (realistic synthetic PII) + a sample agent and prints the exact `uc_tables` / `genie_spaces` / `sql_warehouse_id` to paste into `envs/dev/env.auto.tfvars`. **[→ Sample Environment Setup](SAMPLE_ENV.md)** — skip it if you have your own.
 
 ---
 
@@ -83,16 +60,16 @@ Use `--help` for `--host`, `--schema`, `--rows`, and env-var alternatives. Then 
 
 **Goal —** *rehearse* safely on dev: prove the masks fire, confirm the agent still answers, and produce a reviewable draft — off live PII. (Prod discovers what's actually sensitive later.)
 
-**1a. Turn on the scanner.**
+**1a. Turn on the scanner.** Enable UC Data Classification on your catalog — easiest in the **Databricks UI** (Catalog Explorer → your catalog → *Enable* classification), or reproducibly as code:
 ```bash
-make enable-classification ENV=dev
+make enable-classification ENV=dev   # scans only — nothing is tagged until you opt in (1b)
 ```
-Turns on the scanner only — nothing is tagged or masked yet, and auto-tagging stays off until you opt in (1b).
+Either way, keep `enable_classification = true` in your tfvars — it's the *fail-closed signal* that makes the next step abort rather than guess if classification results aren't readable.
 
-**1b. Review detections, opt into tags, then confirm they landed.** The first scan is asynchronous — minutes to ~24h, with no way to force it (a real *stop-and-resume-later* point). Two easy steps, mostly in the Databricks UI:
+**1b. Review detections, opt into tags, then confirm they landed.** The first scan is asynchronous (minutes to ~24h) — kick it off, grab a coffee ☕, and come back. Two easy steps, mostly in the Databricks UI:
 
 - **Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) to see what the scanner found on your columns and **exclude any false positives**. Nothing is tagged yet — auto-tagging defaults off.
-- **Opt in.** After review, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-run `make enable-classification ENV=dev`. The `class.*` tags then land on the reviewed columns (again, minutes to ~24h — on **Azure** the initial scan runs materially slower than on AWS, tens of minutes rather than a few). You can see the applied tags on each column in **Catalog Explorer** — then go to **1c**.
+- **Opt in.** After review, enable automatic tagging — in the UI, or set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-run `make enable-classification ENV=dev`. The `class.*` tags then land on the reviewed columns (visible in **Catalog Explorer**). Then continue to **1c**.
 
 **1c. Draft the protection rules.**
 ```bash
@@ -130,20 +107,22 @@ make verify-access      ENV=dev VERIFY_KEY_COLUMN=customer_id   # queries AS eac
 
 ## Phase 2 — Promote the rules to prod
 
-**Goal —** copy the *rules* to production — never the dev data, and never which columns dev labelled.
+**Goal —** copy the *rules* (masks, access policies, mappings) to production.
 
 ```bash
 make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_finance=prod_finance"
 ```
 
-**Done when —** `envs/prod/env.auto.tfvars`'s `uc_tables` now points at your prod catalog (`prod_finance`).
+`DEST_CATALOG_MAP` renames each dev catalog to its prod name (`dev_finance=prod_finance`; comma-separate multiple).
+
+**Done when —** `envs/prod/` now exists, pointing at your prod catalog.
 
 **Then edit `envs/prod/env.auto.tfvars`** (don't recreate it): set `sql_warehouse_id` (or leave `""` to auto-create), and add `enable_classification = true`, `enable_auto_tagging = false`, `business_access_enabled = false`.
 
 <details>
 <summary><strong>What promote carries vs. leaves behind</strong> (rules travel, facts don't)</summary>
 
-It carries the **rules** — the mapping, masking functions, access/row-filter policies, and group→tier mapping — and **leaves dev's tag assignments behind** (which columns got labelled is a *fact* about dev's data; prod re-derives its own in Phase 3). You do **not** touch the account config again — `envs/account/` is shared and you already set `manage_groups = false` in Phase 0.
+It carries the **rules** — the mapping, masking functions, access/row-filter policies, and group→tier mapping — and **leaves dev's tag assignments behind** (which columns got labelled is a *fact* about dev's data; prod re-derives its own in Phase 3).
 </details>
 
 ---
@@ -152,7 +131,7 @@ It carries the **rules** — the mapping, masking functions, access/row-filter p
 
 **Goal —** let production scan its *own* real data and label its sensitive columns — the true facts land here (real customer PII only exists in prod).
 
-Promotion (Phase 2) already created `envs/prod/` with a template `auth.auto.tfvars` — just fill it in (prod SP `client_id`/`client_secret` + prod workspace host/id), then turn on prod's scanner:
+Promotion (Phase 2) already created `envs/prod/` with a template `auth.auto.tfvars` — just fill it in (prod SP `client_id`/`client_secret` + prod workspace host/id), then turn on prod's scanner — in the **Databricks UI** on the prod catalog, or as code:
 
 ```bash
 # fill envs/prod/auth.auto.tfvars first (prod SP + workspace host/id), then:
@@ -164,35 +143,19 @@ make enable-classification ENV=prod   # same as step 1a, now on prod
 - **Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) on the prod catalog and **exclude any false positives** — prod's real data may surface sensitive types dev never saw.
 - **Opt in.** Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` (add the line if promote didn't write it) and re-run `make enable-classification ENV=prod`. The `class.*` tags then land.
 
-**Done when —** prod's `class.*` tags appear on the prod catalog (same SQL as 1b). The scan is async (another stop-and-resume point) — zero rows just means it hasn't finished; wait and re-check.
+**Done when —** prod's `class.*` tags appear on the prod catalog (check in Catalog Explorer / Review detections). The scan is async — grab a coffee ☕ and re-check; nothing yet just means it hasn't finished.
 
 ---
 
 ## Phase 4 — Prove coverage (the gate)
 
-**Goal —** derive prod's protections from its own labels, prove coverage, and deploy the enforcement — but **not** the agent yet.
+**Goal —** derive prod's protections from its own `class.*` tags, prove coverage, and deploy the enforcement (masks + access policies). The Genie agent itself isn't created yet — that's Phase 5.
 
 ```bash
 make certify ENV=prod   # one command: derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook (stops at the first failure)
 ```
 
-One command that **reuses the rules you reviewed in dev unchanged** (no model call → no drift), proves coverage, and deploys **enforcement only** — no Genie agent yet (Phase 5). It is **fail-closed**: it aborts if prod's live tags are unreadable/empty, a finding is unmapped, or a treatment has no covering mask.
-
-<details>
-<summary><strong>What <code>certify</code> runs — and running the stages individually</strong> (e.g. for CI, where <code>coverage-gate</code> must be its own blocking step)</summary>
-
-```bash
-make derive-assignments ENV=prod   # re-derive tag_assignments from prod's LIVE class.* tags; REUSES the promoted rules unchanged (no model call)
-make coverage-gate    ENV=prod   # blocks on any labelled-but-unprotected column
-make validate-generated ENV=prod # static checks on the prod-generated config
-make apply-governance ENV=prod   # deploy enforcement ONLY (account + data_access) — no Genie agent yet
-make audit-rulebook   ENV=prod   # flags any prod tag with no covering rule (drift)
-```
-
-`derive-assignments` reads prod's live `class.*` tags and re-derives exactly one `gr_treatment` per column, writing **only** the `tag_assignments` — reusing the masks, policies, row filters, and group→tier mapping you promoted **unchanged** (no `--groups`, no model call). `apply-governance` deploys the enforcement (groups, tag policies, masking functions, access/row-filter policies, grants) but **not** the workspace layer, so the Genie agent isn't created yet (Phase 5). `audit-rulebook` reports any prod `class.*`/`gr_treatment` tag with no covering policy/mask (drift).
-
-**`verify-access` is not here** — it needs the exposure gate open, so it runs in Phase 5. And **use `apply-governance`, not `make apply`** — a full `apply` would create the Genie agent before the gate passes (`make certify` already uses `apply-governance`).
-</details>
+`certify` reuses the exact rules you reviewed in dev — it re-derives *which prod columns* get which protection from prod's own tags, but never regenerates the rules (no model call, so nothing drifts from what you reviewed). It proves coverage and deploys the masks + access policies, but **not** the agent. It's **fail-closed**: it stops if prod's tags can't be read, or a detected type has no rule covering it.
 
 **Done when —** `coverage-gate` exits PASS and `audit-rulebook` reports no uncovered tags.
 
