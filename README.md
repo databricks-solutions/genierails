@@ -8,7 +8,7 @@ Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent f
 
 **▶ Start here — the [Dev-to-Prod Walkthrough](shared/examples/dev_to_prod/):** the canonical end-to-end guide (native classification → coverage gate → safe dev→prod promotion, ~30 min). It ships an optional sample environment, so you can run the whole thing even without your own tables or agent.
 
-Do the [Prerequisites](shared/docs/prerequisites.md) first, and run everything from [`aws/`](aws/README.md) or [`azure/`](azure/README.md) (they invoke `shared/` automatically). Already have a Genie agent built in the Databricks UI? [Import it first](shared/docs/from-ui-to-production.md), then follow the same walkthrough.
+Do the [Prerequisites](shared/docs/prerequisites.md) first. Already have a Genie agent built in the Databricks UI? [Import it first](shared/docs/from-ui-to-production.md), then follow the same walkthrough.
 
 ## How it works
 
