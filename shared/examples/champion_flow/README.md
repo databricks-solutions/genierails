@@ -212,6 +212,15 @@ make audit-rulebook   ENV=prod   # flags any prod tag with no covering rule (dri
 
 **How you know it worked:** `coverage-gate` exits PASS, `audit-rulebook` reports no uncovered tags.
 
+**If the gate fails or `audit-rulebook` reports drift** — prod surfaced a sensitive tag your promoted rules don't cover (a type the classifier found only in prod, or a rule dropped in promotion). This is a **rule change — made in dev, never hand-edited in prod**. Loop back:
+
+1. **In dev**, add the missing mapping to `treatment_config.json` (which `class.*` label → which `gr_treatment` + mask).
+2. **Re-validate in dev:** `make generate ENV=dev` → `make coverage-gate ENV=dev`.
+3. **Re-promote:** `make promote …` (carries the updated rules to prod — same command as [Phase 2](#phase-2--promote-the-rules-to-prod)).
+4. **Re-run this phase:** `make derive-assignments ENV=prod` → `make coverage-gate ENV=prod` → `make apply-governance ENV=prod` → `make audit-rulebook ENV=prod`.
+
+Repeat until the gate passes and drift is clean. The agent stays uncreated and closed to users throughout — that's the point of exposing last.
+
 ---
 
 ## Phase 5 — Open to users (you release access after the gate passes), then verify
