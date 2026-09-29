@@ -114,7 +114,7 @@ make enable-classification ENV=dev
 ```
 This applies **only** the UC Data Classification + auto-tagging config for your tables — no masks, policies, or grants yet.
 
-**1b. Wait for the scan, then check the labels landed.** The first scan is asynchronous — minutes to ~24h, with no way to force it (a real *stop-and-resume-later* point). Re-run this query (in a SQL editor / notebook, on any warehouse) until your recognizable PII columns show `class.*` tags:
+**1b. Wait for the scan, then check the labels landed.** The first scan is asynchronous — minutes to ~24h, with no way to force it (a real *stop-and-resume-later* point). Prefer clicking? You can also eyeball the results in the Databricks UI ([Data Classification](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification)) — note there's **nothing to approve**: with automatic tagging the `class.*` tags apply themselves once the scan runs. The query below reads the *same* tags (`system.information_schema.column_tags`) that the coverage gate uses, so it's the scriptable check to re-run (in a SQL editor / notebook, on any warehouse) until your recognizable PII columns show `class.*` tags:
 ```sql
 SELECT table_name, column_name, tag_name
 FROM system.information_schema.column_tags
