@@ -17,7 +17,7 @@ Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent f
 
 ## Getting Started
 
-Check the [Prerequisites](shared/docs/prerequisites.md) first, then pick your cloud — [`aws/README.md`](aws/README.md) or [`azure/README.md`](azure/README.md) — and follow the guide for your situation:
+Check the [Prerequisites](shared/docs/prerequisites.md) first, then pick your cloud — [`aws/`](aws/README.md) or [`azure/`](azure/README.md), where you run all `make` commands (`shared/` is invoked automatically) — and follow the guide for your situation:
 
 | Your situation | Start here | Time |
 |---|---|---|
@@ -42,17 +42,6 @@ emitting one policy per treatment per catalog), and the separate
 **account-level governed-tag-policy cap** (each governed tag is an account tag
 policy, so large shared accounts can hit it). Both are reported clearly, never
 worked around by dropping protection.
-
-## Repository Layout
-
-```
-genierails/
-├── aws/            Cloud wrapper for AWS deployments
-├── azure/          Cloud wrapper for Azure deployments
-└── shared/         All shared code (Terraform modules, scripts, tests, docs)
-```
-
-`aws/` and `azure/` are the entry points — always run `make` commands from one of these directories. `shared/` holds all Terraform modules, Python scripts, and docs, and is invoked automatically through the cloud wrapper.
 
 ## Documentation
 
