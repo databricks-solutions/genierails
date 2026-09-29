@@ -37,7 +37,11 @@ Seven phases, dev → prod. This table is the **map**; each **Phase** below is t
 
 ## Prerequisites & what to gather
 
-> **AWS or Azure?** This flow is cloud-neutral — run it from either `aws/` or `azure/`; all Terraform, scripts, and `make` targets are shared. **Azure users:** in each `envs/<env>/auth.auto.tfvars` you must set `databricks_account_host = "https://accounts.azuredatabricks.net"` and use your Azure-format workspace host (`https://adb-<id>.<n>.azuredatabricks.net`). The provider defaults to the **AWS** account host, so the account-layer steps (groups, tag policies) fail on Azure if you leave it unset. See [Azure prerequisites](../../azure/docs/azure-prerequisites.md). Everything else in this walkthrough is identical on both clouds.
+<details>
+<summary><strong>AWS or Azure?</strong> Cloud-neutral — <strong>Azure needs one extra setting</strong> (the account host)</summary>
+
+Run from either `aws/` or `azure/`; all Terraform, scripts, and `make` targets are shared. **Azure users:** in each `envs/<env>/auth.auto.tfvars` set `databricks_account_host = "https://accounts.azuredatabricks.net"` and use your Azure-format workspace host (`https://adb-<id>.<n>.azuredatabricks.net`) — the provider defaults to the AWS account host, so account-layer steps (groups, tag policies) fail on Azure if you leave it unset. See [Azure prerequisites](../../azure/docs/azure-prerequisites.md). Everything else is identical on both clouds.
+</details>
 
 
 **Tools:** GNU Make, Python 3, and Terraform on your `PATH` (`make setup` pins the Databricks provider for you). See [Prerequisites](../../docs/prerequisites.md) for versions and install help.
@@ -54,9 +58,13 @@ Gather these once — every phase reuses them:
 | **Row-pairing key** (`VERIFY_KEY_COLUMN`) | The column `verify-access` uses to line up the same rows across tiers for the **column-mask** checks — it must exist in the tables that *have* masks (e.g. `customer_id`), **not necessarily every table**. If your masked tables don't all share one column, `verify-access` reports the ones it couldn't pair as failures (the underlying script also accepts per-table keys via a `--spec` file). |
 | **UC Data Classification** | Available on the catalog; you turn it on per-env with `make enable-classification` (below). Learn more in the Databricks docs: [Data Classification (AWS)](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) / [(Azure)](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/data-classification). |
 
-> **`verify-access` side effects:** it creates and then deletes temporary `genierails-verify-<tier>` service principals, adds them to your tier groups for the duration of the test, and needs **account-admin**; your IdP sync must tolerate a transient non-IdP group member.
+<details>
+<summary><strong>More prerequisite notes</strong> — <code>verify-access</code> side effects & identity/groups</summary>
 
-> **Identity note:** GenieRails does **not** create groups — it consumes the ones your IdP already syncs in (`manage_groups = false`). If you have no tiered groups yet (e.g. just trying the demo), you can let it create demo groups with `--create-groups` instead of `--groups` (see [Phase 1](#phase-1--dev-scan-draft-the-rules-test-them)).
+**`verify-access` side effects:** it creates and then deletes temporary `genierails-verify-<tier>` service principals, adds them to your tier groups for the duration of the test, and needs **account-admin**; your IdP sync must tolerate a transient non-IdP group member.
+
+**Identity:** GenieRails does **not** create groups — it consumes the ones your IdP already syncs in (`manage_groups = false`). No tiered groups yet (e.g. just trying the demo)? Let it create demo groups with `--create-groups` instead of `--groups` (see [Phase 1](#phase-1--dev-scan-draft-the-rules-test-them)).
+</details>
 
 ---
 
@@ -119,7 +127,11 @@ This applies **only** the UC Data Classification config for your tables — no m
 - **Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) to see what the scanner found on your columns and **exclude any false positives**. Nothing is tagged yet — auto-tagging defaults off.
 - **Opt in.** After review, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-run `make enable-classification ENV=dev`. The `class.*` tags then land on the reviewed columns (again, minutes to ~24h — on **Azure** the initial scan runs materially slower than on AWS, tens of minutes rather than a few). You can see the applied tags on each column in **Catalog Explorer** — then go to **1c**.
 
-⚠️ **Don't expect every column.** The scanner only tags values it can *format-match* — free-text or unusual formats may stay untagged, and that's expected. The `coverage-gate` (1d) blocks on any *classified* column left unprotected, but it **cannot** gate a column the scanner never tagged (a documented fail-open) — which is why you keep the exposure gate closed and prefer a restrictive default for high-sensitivity data. If nothing gets tagged after a clear scan, your data isn't format-matchable: seed **realistic** PII (the scanner ignores fake `example.com` emails / `000-` SSNs).
+<details>
+<summary>⚠️ <strong>Don't expect every column tagged</strong> — the scanner only matches recognizable formats, and the gate can't catch what was never tagged</summary>
+
+The scanner only tags values it can *format-match* — free-text or unusual formats may stay untagged, and that's expected. The `coverage-gate` (1d) blocks on any *classified* column left unprotected, but it **cannot** gate a column the scanner never tagged (a documented fail-open) — which is why you keep the exposure gate closed and prefer a restrictive default for high-sensitivity data. If nothing gets tagged after a clear scan, your data isn't format-matchable: seed **realistic** PII (the scanner ignores fake `example.com` emails / `000-` SSNs).
+</details>
 
 <details>
 <summary><strong>Prefer to verify with SQL?</strong> (reads the exact source the coverage gate uses)</summary>
@@ -146,7 +158,13 @@ Zero rows usually just means the scan hasn't finished — wait and re-run.
 ```bash
 make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'
 ```
-`--groups` are **your own** IdP-synced groups (Entra ID / Okta), **one per access tier**, most-privileged first (the example runs `payments_ops` = full → `regional_analysts` = masked → `viewers` = least) — `payments_ops,regional_analysts,viewers` are just placeholders; use your real group names. GenieRails *consumes* them by exact name (never creates them); a missing name stops generation with a clear error. **No tiered groups yet?** Use [`--create-groups`](../../docs/advanced.md#opt-in-group-creation-demo--greenfield-only) instead (demo/greenfield only — it creates the groups; needs `manage_groups = true`). Generation reads the authoritative `class.*` tags and is **fail-closed** — if classification is on but the results are unreadable or empty, it **aborts rather than silently guessing**. (You can opt into LLM inference with [`--allow-llm-sensitivity`](../../docs/troubleshooting.md#champion-flow-issues) — not recommended in prod.)
+`--groups` are **your own** IdP-synced groups, **one per access tier, most-privileged first** (`payments_ops`=full → `regional_analysts`=masked → `viewers`=least — placeholders; use your real names). GenieRails *consumes* them by exact name, never creates them.
+
+<details>
+<summary>No tiered groups yet, or want the fail-closed / LLM-fallback details?</summary>
+
+A missing group name stops generation with a clear error. **No tiered groups yet?** Use [`--create-groups`](../../docs/advanced.md#opt-in-group-creation-demo--greenfield-only) instead (demo/greenfield only — it creates the groups; needs `manage_groups = true`). Generation reads the authoritative `class.*` tags and is **fail-closed** — if classification is on but the results are unreadable or empty, it **aborts rather than silently guessing**. (You can opt into LLM inference with [`--allow-llm-sensitivity`](../../docs/troubleshooting.md#champion-flow-issues) — not recommended in prod.)
+</details>
 
 **1d. Prove coverage, apply, and verify.** First, the one knob you'll flip: **`business_access_enabled`** is the *exposure gate* — a `true`/`false` in `envs/<env>/env.auto.tfvars`. While `false` (default), GenieRails applies every mask/policy but **withholds** the business `SELECT` grant and the Genie run permission, so no one can reach the agent. Setting it `true` and re-applying **releases** that access.
 
