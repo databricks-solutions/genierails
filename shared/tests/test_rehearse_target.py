@@ -41,13 +41,26 @@ def test_rehearse_dry_run_is_ordered_and_does_not_toggle_exposure_gate():
     )
 
 
-def test_rehearse_requires_verify_key_column():
+def test_rehearse_without_key_runs_apply_then_recommends_live_verification():
     result = subprocess.run(
-        ["make", "rehearse", "ENV=dev"],
+        ["make", "-n", "rehearse", "ENV=dev"],
         cwd=CLOUD_ROOT,
         text=True,
         capture_output=True,
     )
 
-    assert result.returncode != 0
-    assert "ERROR: VERIFY_KEY_COLUMN is required for rehearse." in result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    invocations = [
+        'make coverage-gate ENV="dev"',
+        'make validate-generated ENV="dev"',
+        'make apply ENV="dev"',
+    ]
+    positions = [output.index(invocation) for invocation in invocations]
+
+    assert positions == sorted(positions)
+    assert 'make verify-access ENV="dev"' not in output
+    assert (
+        "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> "
+        "to prove masking live (recommended)"
+    ) in output

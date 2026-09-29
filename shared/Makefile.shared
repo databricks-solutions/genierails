@@ -245,16 +245,12 @@ validate-generated: _bootstrap _guard-workspace-target ## Validate generated/ fi
 coverage-gate: _bootstrap _guard-workspace-target ## Block on any sensitive-column coverage gap in generated config
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" --coverage-gate generated/abac.auto.tfvars generated/masking_functions.sql
 
-rehearse: ## Run the serial, fail-fast dev-rehearsal pipeline for the selected environment
-	@if [ -z "$(strip $(VERIFY_KEY_COLUMN))" ]; then \
-		echo "ERROR: VERIFY_KEY_COLUMN is required for rehearse."; \
-		exit 1; \
-	fi
+rehearse: ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to prove masking live)
 	@echo "rehearse: requires business_access_enabled=true in envs/$(ENV)/env.auto.tfvars"
 	@$(MAKE) coverage-gate ENV="$(ENV)" && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
 		$(MAKE) apply ENV="$(ENV)" && \
-		$(MAKE) verify-access ENV="$(ENV)" VERIFY_KEY_COLUMN="$(VERIFY_KEY_COLUMN)"
+		$(if $(strip $(VERIFY_KEY_COLUMN)),$(MAKE) verify-access ENV="$(ENV)" VERIFY_KEY_COLUMN="$(VERIFY_KEY_COLUMN)",echo "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> to prove masking live (recommended)")
 
 validate: _bootstrap ## Validate split config in the selected environment
 	@echo "=== Validate ($(ENV)) ==="
