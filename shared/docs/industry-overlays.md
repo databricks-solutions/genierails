@@ -322,7 +322,7 @@ Yes: `make generate COUNTRY=ANZ INDUSTRY=healthcare`. Country overlays are injec
 No Terraform *code* changes. The overlay's masking functions are written into the generated `masking_functions.sql` and deployed, but there's no industry-specific Terraform logic, and `make coverage-gate` still gates it.
 
 **How do group templates work?**
-They are prompt suggestions for access-tier *shapes* only — GenieRails does **not** create groups. In the dev-to-prod consume model your real groups come from your IdP (supplied via `--groups`, `manage_groups=false`); the templates just help the LLM reason about tiering. Map your actual IdP group names to tiers at generate time.
+They are prompt suggestions for access-tier *shapes* only — GenieRails does **not** create groups. In the consume-IdP-groups model your real groups come from your IdP (supplied via `--groups`, `manage_groups=false`); the templates just help the LLM reason about tiering. Map your actual IdP group names to tiers at generate time.
 
 **What about access patterns like break-glass?**
 Access patterns provide implementation guidance to the LLM. For break-glass, the LLM will typically create a dedicated group with `except_principals` to override masking. You should review the generated output to ensure the pattern is correctly implemented.

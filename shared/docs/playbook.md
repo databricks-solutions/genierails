@@ -1,6 +1,6 @@
 # Playbook
 
-GenieRails puts Genie onboarding on rails: Unity Catalog's classifier decides what's sensitive, GenieRails derives one protection per column and proves coverage with a blocking gate, then promotes the rules safely to production. This playbook covers common tasks after your first deployment; the end-to-end walkthrough is the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)**.
+GenieRails puts Genie onboarding on rails: Unity Catalog's classifier decides what's sensitive, GenieRails derives one protection per column and proves coverage with a blocking gate, then promotes the rules safely to production. This playbook covers common tasks after your first deployment; for the full end-to-end flow, see the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)**.
 
 ## Pick your starting point
 

@@ -55,7 +55,7 @@ Starting from a specific point? These entry guides feed into the dev-to-prod wal
 
 ## Documentation
 
-- [Dev-to-Prod walkthrough](../shared/examples/dev_to_prod/) — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion)
+- [Dev-to-Prod Walkthrough](../shared/examples/dev_to_prod/) — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion)
 - [From UI to Production](../shared/docs/from-ui-to-production.md) — import your existing Genie agent, then follow the dev-to-prod walkthrough
 - [Quickstart](../shared/docs/quickstart.md) — create a Genie agent from scratch
 - [Playbook](../shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios

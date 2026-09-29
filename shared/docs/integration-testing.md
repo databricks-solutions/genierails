@@ -101,7 +101,7 @@ python3 -m pytest tests/ -k "TagPolicies" -v        # filter by name
 | `tests/test_validate_abac.py` | `validate_groups`, `validate_tag_policies`, `validate_tag_assignments`, `validate_fgac_policies`, `parse_sql_functions`, `parse_sql_function_arg_counts`, `_condition_matches_tags` |
 | `tests/test_schema_drift.py` | PII column pattern regex, env file parsing (both `uc_tables` and `genie_spaces` shapes), governed-key resolution (4-level fallback), delta merge/dedup, delta validation (reject unknown keys/values), stale assignment removal |
 
-Unit tests lock in the dev-to-prod invariants (and the legacy autofix helpers) without a full LLM + Terraform run. Dev-to-Prod coverage includes:
+Unit tests lock in the walkthrough's invariants (and the legacy autofix helpers) without a full LLM + Terraform run. Coverage includes:
 
 - Native classification is authoritative / fail-closed → `test_sensitivity_source.py`, `test_data_classification.py`
 - Exactly one `gr_treatment` derived per column (strictest-wins) → `test_treatment_derivation.py`
@@ -330,7 +330,7 @@ This deletes cloud-specific resources, the workspace, metastore (and all catalog
 | **self-service-genie** | § 7 | Central governance team + two BU Genie teams self-serve; second BU isolation check; BU promote to prod via `apply-genie`; governance state verified unchanged throughout |
 | **abac-only** | § 2 | ABAC governance only (no Genie agent) + §2→§4 upgrade path: add Genie agent later without disturbing governance |
 | **multi-space-import** | § 3 (multi-space) | Import two UI-configured Genie agents in one `make generate`; assert both configs present, Terraform creates no new spaces |
-| **schema-drift** | — | Detects new/removed columns after deployment; tests `make audit-schema` / `make audit-rulebook` across ADD/DROP/RENAME. (In dev-to-prod prod, new columns are re-derived via `make derive-assignments` after native classification; `make generate-delta` is the legacy LLM path.) |
+| **schema-drift** | — | Detects new/removed columns after deployment; tests `make audit-schema` / `make audit-rulebook` across ADD/DROP/RENAME. (In prod, new columns are re-derived via `make derive-assignments` after native classification; `make generate-delta` is the legacy LLM path.) |
 | **genie-only** | § 7 (genie\_only) | Minimal-privilege SP (workspace USER + SQL entitlement) creates Genie agent with `genie_only=true`; no account-level resources |
 | **genie-import-no-abac** | § 3 + § 7 | Import an existing Genie agent and deploy to prod **without any ABAC governance** — validates the genie-only import-to-prod workflow when a separate team manages ABAC centrally |
 | **country-overlay** | — | Country/region overlays (ANZ, IN, SEA) — full cycle per region + multi-region generation |

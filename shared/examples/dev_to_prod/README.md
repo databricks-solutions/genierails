@@ -44,7 +44,7 @@ The whole flow is a 7-phase map (each row links to its self-contained runbook be
 <details>
 <summary><strong>AWS or Azure?</strong> Cloud-neutral — <strong>Azure needs one extra setting</strong> (the account host)</summary>
 
-Run from either `aws/` or `azure/`; all Terraform, scripts, and `make` targets are shared. **Azure users:** in each `envs/<env>/auth.auto.tfvars` set `databricks_account_host = "https://accounts.azuredatabricks.net"` and use your Azure-format workspace host (`https://adb-<id>.<n>.azuredatabricks.net`) — the provider defaults to the AWS account host, so account-layer steps (groups, tag policies) fail on Azure if you leave it unset. See [Azure prerequisites](../../azure/docs/azure-prerequisites.md). Everything else is identical on both clouds.
+Run from either `aws/` or `azure/`; all Terraform, scripts, and `make` targets are shared. **Azure users:** in each `envs/<env>/auth.auto.tfvars` set `databricks_account_host = "https://accounts.azuredatabricks.net"` and use your Azure-format workspace host (`https://adb-<id>.<n>.azuredatabricks.net`) — the provider defaults to the AWS account host, so account-layer steps (groups, tag policies) fail on Azure if you leave it unset. See [Azure prerequisites](../../../azure/docs/azure-prerequisites.md). Everything else is identical on both clouds.
 </details>
 
 

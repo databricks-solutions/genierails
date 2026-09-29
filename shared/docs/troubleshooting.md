@@ -101,7 +101,7 @@ If you are still recovering an older partial state:
 
 ### Generation fails with "groups is missing or empty"
 
-In the dev-to-prod consume model, GenieRails does **not** invent groups — you supply your IdP group→tier mapping. This error almost always means the mapping is missing or a named group isn't synced, **not** LLM truncation. Retrying won't help; fix the input.
+In the consume-IdP-groups model, GenieRails does **not** invent groups — you supply your IdP group→tier mapping. This error almost always means the mapping is missing or a named group isn't synced, **not** LLM truncation. Retrying won't help; fix the input.
 
 **Solutions:**
 1. Pass the mapping: `make generate GENERATE_ARGS='--groups "<idp-tier-1>,<idp-tier-2>"'`. Generation refuses to proceed without it rather than inventing names.
