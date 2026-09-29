@@ -56,6 +56,7 @@ def test_certify_is_ordered_and_enforcement_only(tmp_path):
     assert not any(
         call[0] in ("apply", "apply-genie", "verify-access") for call in calls
     )
+    assert not any("business_access_enabled" in arg for call in calls for arg in call)
 
 
 def test_certify_stops_after_first_failing_stage(tmp_path):

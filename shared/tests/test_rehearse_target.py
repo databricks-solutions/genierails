@@ -62,7 +62,7 @@ def test_rehearse_stops_after_first_failing_stage(tmp_path):
     assert log.read_text().splitlines() == ["coverage-gate"]
 
 
-def test_rehearse_with_key_is_ordered_and_does_not_toggle_exposure_gate(tmp_path):
+def test_rehearse_with_key_opens_exposure_gate_for_its_apply_only(tmp_path):
     stub, log = _recording_stub(tmp_path)
     result = subprocess.run(
         [
@@ -83,11 +83,13 @@ def test_rehearse_with_key_is_ordered_and_does_not_toggle_exposure_gate(tmp_path
     assert _recorded_calls(log) == [
         ["coverage-gate", "ENV=dev"],
         ["validate-generated", "ENV=dev"],
-        ["apply", "ENV=dev"],
+        [
+            "apply",
+            "ENV=dev",
+            "APPLY_FLAGS=-var=business_access_enabled=true",
+        ],
         ["verify-access", "ENV=dev", "VERIFY_KEY_COLUMN=customer_id"],
     ]
-    assert output.count("business_access_enabled") == 1
-    assert "requires business_access_enabled=true" in output
     assert not any(
         mutation in output
         for mutation in ("sed ", "perl ", "env.auto.tfvars >>", "env.auto.tfvars >")
@@ -109,7 +111,11 @@ def test_rehearse_without_key_runs_apply_then_recommends_live_verification(tmp_p
     assert _recorded_calls(log) == [
         ["coverage-gate", "ENV=dev"],
         ["validate-generated", "ENV=dev"],
-        ["apply", "ENV=dev"],
+        [
+            "apply",
+            "ENV=dev",
+            "APPLY_FLAGS=-var=business_access_enabled=true",
+        ],
     ]
     assert (
         "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> "

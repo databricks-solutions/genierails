@@ -258,10 +258,9 @@ coverage-gate: _bootstrap _guard-workspace-target ## Block on any sensitive-colu
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" --coverage-gate generated/abac.auto.tfvars generated/masking_functions.sql
 
 rehearse: ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to prove masking live)
-	@echo "rehearse: requires business_access_enabled=true in envs/$(ENV)/env.auto.tfvars"
 	@$(_DRY_RUN_GUARD); $(MAKE) coverage-gate ENV="$(ENV)" && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
-		$(MAKE) apply ENV="$(ENV)" && \
+		$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" && \
 		$(if $(strip $(VERIFY_KEY_COLUMN)),$(MAKE) verify-access ENV="$(ENV)" VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",echo "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> to prove masking live (recommended)")
 
 certify: ## Certify coverage and deploy enforcement only (agent comes in Phase 5)
@@ -394,6 +393,7 @@ wait-tag-policies: _bootstrap ## Wait until account tag policies are visible to 
 _apply-layer:
 	@set -e; $(_DRY_RUN_GUARD); layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	env_dir="$(LAYER_ENV_DIR)"; \
+	apply_flags="$(if $(filter data_access workspace,$(LAYER)),$(APPLY_FLAGS),)"; \
 	if [ "$$layer" = "data_access" ]; then $(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$$env_dir")" IMPORT_CLASSIFICATION=1; fi; \
 	if [ ! -f "$$env_dir/abac.auto.tfvars" ]; then \
 		echo "=== Skipping terraform apply ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
@@ -405,7 +405,7 @@ _apply-layer:
 	files="$$env_dir/auth.auto.tfvars $$env_dir/env.auto.tfvars $$env_dir/abac.auto.tfvars $$env_dir/classification.auto.tfvars"; \
 	if [ -f "$$env_dir/masking_functions.sql" ]; then files="$$files $$env_dir/masking_functions.sql"; fi; \
 	fingerprint_file="$$env_dir/.$$layer.apply.sha"; \
-	current_fingerprint="$$(for file in $$files; do [ -f "$$file" ] && shasum "$$file"; done | shasum | awk '{print $$1}')"; \
+	current_fingerprint="$$( { for file in $$files; do [ -f "$$file" ] && shasum "$$file"; done; [ -z "$$apply_flags" ] || printf '%s\n' "$$apply_flags"; } | shasum | awk '{print $$1}')"; \
 	if [ -f "$$fingerprint_file" ] && [ "$$(cat "$$fingerprint_file")" = "$$current_fingerprint" ]; then \
 		echo "=== Skipping terraform apply ($$layer:$$target_env): inputs unchanged ==="; \
 		exit 0; \
@@ -423,7 +423,7 @@ _apply-layer:
 		echo "=== Auto-importing existing workspace resources (idempotent apply) ==="; \
 		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(SHARED_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
 		for _retry in 1 2 3; do \
-			if LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; then \
+			if LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve $$apply_flags; then \
 				break; \
 			else \
 				if [ "$$_retry" -lt 3 ]; then \
@@ -435,7 +435,7 @@ _apply-layer:
 			fi; \
 		done; \
 	else \
-		LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve; \
+		LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve $$apply_flags; \
 	fi; \
 	if [ "$$layer" = "account" ]; then \
 		$(MAKE) --no-print-directory sync-tags; \
