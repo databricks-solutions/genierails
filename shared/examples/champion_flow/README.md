@@ -35,7 +35,7 @@ The whole flow is a 7-phase map (each row links to its self-contained runbook be
 | **[6 · Keep it covered](#phase-6--keep-it-covered)** | catch sensitive data that arrives later | *(scheduled)* `make audit-schema` · `make audit-rulebook` · `make generate-delta` | runs on a schedule |
 </details>
 
-**Two things that trip people up:** (a) `make verify-access` only works with the exposure gate **open** (`business_access_enabled = true`) — so it runs *after* you flip the gate on (dev Phase 1, prod Phase 5). (b) Prod does **not** re-run `make generate` — Phase 4 uses `make derive-assignments`, which re-derives only the `tag_assignments` from prod's live tags and keeps the promoted rules byte-for-byte (no model call).
+**Two things that trip people up:** (a) `make verify-access` only works with the exposure gate **open** (`business_access_enabled = true`) — so it runs *after* you flip the gate on (dev Phase 1, prod Phase 5). (b) Prod does **not** re-run `make generate` — Phase 4 uses `make derive-assignments`, which keeps your reviewed rules unchanged (no model call).
 
 ---
 
@@ -235,7 +235,7 @@ Promotion (Phase 2) already created `envs/prod/` with a template `auth.auto.tfva
 make enable-classification ENV=prod   # same as step 1a, now on prod
 ```
 
-`make enable-classification ENV=prod` turns on prod's scanner **without writing tags** (auto-tagging defaults off — promotion doesn't carry it over, so prod gets its *own* review, just like dev). Then, exactly as in dev's **1b**:
+`make enable-classification ENV=prod` turns on prod's scanner **without writing tags** (auto-tagging defaults off, so prod gets its *own* review, just like dev). Then, exactly as in dev's **1b**:
 
 - **Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) on the prod catalog and **exclude any false positives** — prod's real data may surface sensitive types dev never saw.
 - **Opt in.** Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` (add the line if promote didn't write it) and re-run `make enable-classification ENV=prod`. The `class.*` tags then land.
