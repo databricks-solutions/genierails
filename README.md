@@ -11,7 +11,7 @@ Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent f
 ## How it works
 
 1. **Unity Catalog decides what's sensitive.** Its built-in [Data Classification](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) scanner reads your data and tags each sensitive column.
-2. **GenieRails decides how it's protected.** From those tags it derives one treatment per column — column masks and row filters — plus access rules mapped to your existing IdP groups (it *consumes* your groups, never invents them), and applies it all as Terraform, so you don't write any.
+2. **GenieRails decides how it's protected.** From those tags it derives one treatment per column — column masks and row filters — plus access rules mapped to your existing IdP groups, and applies it all as Terraform, so you don't write any.
 3. **A coverage gate is the safety net.** The release fails ("says NO") if any classified-sensitive column has no protection, so an ungoverned agent can't reach users.
 4. **Dev rehearses; prod is the real thing.** Build and test in dev, promote the *rules* to prod, let prod classify its *own* data, prove coverage, and open the agent to users **last**.
 
