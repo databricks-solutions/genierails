@@ -111,3 +111,18 @@ def test_azure_teardown_does_not_touch_serverless_budget_policies():
     )
 
     assert api.calls == []
+
+
+def test_policy_tfvar_is_written_only_for_aws_test_environments():
+    assert provision_test_env._serverless_usage_policy_tfvar(
+        {
+            "cloud_provider": "aws",
+            "serverless_budget_policy_id": "policy-123",
+        }
+    ) == 'serverless_usage_policy_id = "policy-123"\n'
+    assert provision_test_env._serverless_usage_policy_tfvar(
+        {
+            "cloud_provider": "azure",
+            "serverless_budget_policy_id": "policy-123",
+        }
+    ) == ""

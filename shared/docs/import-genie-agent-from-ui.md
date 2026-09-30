@@ -35,11 +35,16 @@ genie_spaces = [
 <details>
 <summary><strong>Step 2 — Import configuration and discover tables</strong></summary>
 
-Run generation once to import the supported agent configuration and discover its tables:
+Run Genie-only generation once to import the supported agent configuration and discover its tables. Supply your existing access-tier groups, most-privileged first:
 
 ```bash
-make generate ENV=dev
+make generate ENV=dev MODE=genie \
+  GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'
 ```
+
+`MODE=genie` deliberately skips governance generation at this stage, so native
+classification does not need to have finished yet. Phase 1 later runs normal
+generation after reviewed `class.*` tags are available.
 
 Generation writes the aggregate table list to the tool-owned
 `envs/dev/data_access/discovered_uc_tables.auto.tfvars`. Terraform automatically

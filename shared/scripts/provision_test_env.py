@@ -920,6 +920,14 @@ def _teardown_aws_serverless_budget_policy(account_client, state: dict) -> None:
             headers={"X-Databricks-Org-Id": str(workspace_id)},
         )
 
+
+def _serverless_usage_policy_tfvar(state: dict) -> str:
+    """Render the AWS-only policy handoff consumed by classification bootstrap."""
+    policy_id = state.get("serverless_budget_policy_id")
+    if state.get("cloud_provider") != "aws" or not policy_id:
+        return ""
+    return f'serverless_usage_policy_id = "{policy_id}"\n'
+
 # ---------------------------------------------------------------------------
 # Provision
 # ---------------------------------------------------------------------------
@@ -1371,6 +1379,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     # ------------------------------------------------------------------
     _step(f"Writing auth.auto.tfvars into {_display_path(TEST_ENVS_DIR)}/")
     written_envs = []
+    usage_policy_line = _serverless_usage_policy_tfvar(state)
     for env in ["dev", "bu2", "prod"]:
         env_dir = TEST_ENVS_DIR / env
         env_dir.mkdir(parents=True, exist_ok=True)
@@ -1384,6 +1393,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
             f'databricks_client_secret  = "{client_secret}"\n'
             f'databricks_workspace_id   = "{ws_id}"\n'
             f'databricks_workspace_host = "{ws_host}"\n'
+            f'{usage_policy_line}'
             f'# Base storage URL for catalog managed storage (External Location).\n'
             f'# Each catalog gets its own subfolder: {{catalog_storage_base}}/{{catalog_name}}/\n'
             f'catalog_storage_base      = "{ext_loc_url}"\n'
@@ -1403,6 +1413,7 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
         f'databricks_client_secret = "{client_secret}"\n'
         f'databricks_workspace_id  = "{ws_id}"\n'
         f'databricks_workspace_host = "{ws_host}"\n'
+        f'{usage_policy_line}'
     )
     _ok(f"Wrote {(acct_dir / 'auth.auto.tfvars').relative_to(CLOUD_ROOT)}")
 

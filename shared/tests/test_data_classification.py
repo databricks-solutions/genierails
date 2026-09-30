@@ -210,6 +210,115 @@ def test_prepare_resolves_two_part_tables_and_preserves_all_schema_scope(tmp_pat
     assert "WARNING: real_catalog classification includes ALL schemas" in capsys.readouterr().err
 
 
+def test_prepare_includes_imported_genie_discovery_in_classification_scope(
+    tmp_path, monkeypatch
+):
+    env_dir = tmp_path / "envs" / "dev"
+    (env_dir / "data_access").mkdir(parents=True)
+    (env_dir / "env.auto.tfvars").write_text(
+        'enable_classification = true\nuc_tables = []\n'
+        'genie_spaces = [{ genie_space_id = "space-123" }]\n'
+    )
+    (env_dir / "data_access/discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = ["imported_catalog.agent.orders"]\n'
+    )
+    (env_dir / "auth.auto.tfvars").write_text(
+        'databricks_workspace_host = "https://example.invalid"\n'
+        'databricks_client_id = "client"\ndatabricks_client_secret = "secret"\n'
+    )
+
+    spec = importlib.util.spec_from_file_location(
+        "prepare_classification_config_discovered",
+        SHARED / "scripts/prepare_classification_config.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    requested = []
+
+    class FakeClassification:
+        def get_catalog_config(self, name):
+            requested.append(name)
+            raise module.NotFound("missing")
+
+    monkeypatch.setattr(
+        module,
+        "WorkspaceClient",
+        lambda **_: SimpleNamespace(data_classification=FakeClassification()),
+    )
+    monkeypatch.setattr(module.sys, "argv", ["prepare", str(env_dir)])
+
+    assert module.main() == 0
+    assert requested == ["catalogs/imported_catalog/config"]
+
+
+def test_prepare_seeds_aws_classification_with_serverless_usage_policy(
+    tmp_path, monkeypatch
+):
+    env_dir = tmp_path / "envs" / "dev"
+    (env_dir / "data_access").mkdir(parents=True)
+    (env_dir / "env.auto.tfvars").write_text(
+        'enable_classification = true\n'
+        'uc_tables = ["imported_catalog.agent.orders"]\n'
+    )
+    (env_dir / "auth.auto.tfvars").write_text(
+        'databricks_workspace_host = "https://example.invalid"\n'
+        'databricks_workspace_id = "12345"\n'
+        'databricks_client_id = "client"\n'
+        'databricks_client_secret = "secret"\n'
+        'serverless_usage_policy_id = "policy-123"\n'
+    )
+
+    spec = importlib.util.spec_from_file_location(
+        "prepare_classification_config_aws_policy",
+        SHARED / "scripts/prepare_classification_config.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class FakeClassification:
+        def get_catalog_config(self, _name):
+            raise module.NotFound("missing")
+
+    api_calls = []
+
+    class FakeAPI:
+        def do(self, method, path, **kwargs):
+            api_calls.append((method, path, kwargs))
+            return {}
+
+    monkeypatch.setattr(
+        module,
+        "WorkspaceClient",
+        lambda **_: SimpleNamespace(
+            data_classification=FakeClassification(), api_client=FakeAPI()
+        ),
+    )
+    monkeypatch.setattr(module.sys, "argv", ["prepare", str(env_dir)])
+
+    assert module.main() == 0
+    assert api_calls == [
+        (
+            "POST",
+            "/api/data-classification/v1/catalogs/imported_catalog/config",
+            {
+                "body": {
+                    "included_schemas": {"names": ["agent"]},
+                    "auto_tag_configs": [],
+                    "usage_policy_id": "policy-123",
+                },
+                "headers": {"X-Databricks-Workspace-Id": "12345"},
+            },
+        )
+    ]
+    assert (env_dir / "data_access/classification.auto.tfvars").read_text() == (
+        'classification_existing_schemas = {\n'
+        '  "imported_catalog" = ["agent"]\n'
+        '}\nclassification_all_schemas = []\n'
+    )
+
+
 def test_data_access_plan_and_apply_refresh_classification_without_swallowing_errors():
     source = MAKEFILE.read_text()
     prepare = source[source.index("_prepare-classification:") : source.index("_plan-layer:")]
@@ -240,3 +349,24 @@ def test_classification_validator_requires_opt_in_and_accepts_space_footprint(tm
     )
     enabled = subprocess.run([sys.executable, VALIDATOR, config], capture_output=True, text=True)
     assert enabled.returncode == 0
+
+
+def test_classification_validator_accepts_imported_genie_discovery(tmp_path):
+    import subprocess
+    import sys
+
+    config = tmp_path / "env.auto.tfvars"
+    config.write_text(
+        'enable_classification = true\nuc_tables = []\n'
+        'genie_spaces = [{ genie_space_id = "space-123" }]\n'
+    )
+    data_access = tmp_path / "data_access"
+    data_access.mkdir()
+    (data_access / "discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = ["imported_catalog.agent.orders"]\n'
+    )
+
+    enabled = subprocess.run(
+        [sys.executable, VALIDATOR, config], capture_output=True, text=True
+    )
+    assert enabled.returncode == 0, enabled.stderr

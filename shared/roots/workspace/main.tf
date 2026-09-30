@@ -166,6 +166,11 @@ variable "databricks_workspace_id" {
   type = string
 }
 
+variable "serverless_usage_policy_id" {
+  type    = string
+  default = ""
+}
+
 variable "databricks_workspace_host" {
   type = string
 }

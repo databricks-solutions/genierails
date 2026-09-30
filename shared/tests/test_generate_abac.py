@@ -32,8 +32,29 @@ from generate_abac import (
     bootstrap_per_space_dirs,
     extract_code_blocks,
     persist_discovered_uc_tables,
+    strip_abac_for_genie_mode,
 )
 from tests.conftest import assert_valid_hcl
+
+
+def test_genie_mode_strips_all_abac_sections_including_tag_policy_list():
+    source = '''
+groups = { "analysts" = { description = "tier" } }
+group_members = { "analysts" = ["user@example.com"] }
+tag_policies = [{ key = "pii", values = ["masked"] }]
+tag_assignments = [{ entity_type = "columns", entity_name = "c.s.t.email", tag_key = "pii", tag_value = "masked" }]
+fgac_policies = [{ name = "mask", policy_type = "POLICY_TYPE_COLUMN_MASK" }]
+genie_space_configs = { "sales" = { title = "Sales" } }
+'''
+
+    stripped = strip_abac_for_genie_mode(source)
+
+    assert "groups =" not in stripped
+    assert "group_members =" not in stripped
+    assert "tag_policies =" not in stripped
+    assert "tag_assignments =" not in stripped
+    assert "fgac_policies =" not in stripped
+    assert 'genie_space_configs = { "sales" = { title = "Sales" } }' in stripped
 
 
 def test_discovered_table_writeback_aggregates_and_is_idempotent(tmp_path, capsys):
@@ -1337,7 +1358,8 @@ def test_derived_treatments_restore_configured_functions_before_ref_repair(tmp_p
     tfvars.write_text('''tag_policies = []
 tag_assignments = [
   { entity_type = "columns", entity_name = "cat.sch.payments.credit_card_number", tag_key = "pci_level", tag_value = "masked_card_last4" },
-  { entity_type = "columns", entity_name = "cat.sch.payments.amount", tag_key = "financial_sensitivity", tag_value = "rounded_amounts" }
+  { entity_type = "columns", entity_name = "cat.sch.payments.amount", tag_key = "financial_sensitivity", tag_value = "rounded_amounts" },
+  { entity_type = "columns", entity_name = "cat.sch.customers.date_of_birth", tag_key = "pii_level", tag_value = "masked_dob" }
 ]
 fgac_policies = [
   { name = "template", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "cat", to_principals = ["users"], function_schema = "sch", match_condition = "hasTagValue('pii_level', 'masked')", function_name = "mask_redact" }
@@ -1352,7 +1374,7 @@ CREATE FUNCTION mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2);
 
     generate_abac.autofix_remove_bodyless_functions(sql)
     generate_abac.derive_and_finalize_treatments(tfvars, native_authoritative=True)
-    assert generate_abac.ensure_derived_treatment_functions(tfvars, sql) == 2
+    assert generate_abac.ensure_derived_treatment_functions(tfvars, sql) == 3
     generate_abac.autofix_invalid_function_refs(tfvars, sql)
 
     cfg = assert_valid_hcl(tfvars)
@@ -1361,9 +1383,11 @@ CREATE FUNCTION mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2);
     }
     assert functions["hasTagValue('gr_treatment', 'card_last4')"] == "mask_credit_card_last4"
     assert functions["hasTagValue('gr_treatment', 'round_amount')"] == "mask_amount_rounded"
+    assert functions["hasTagValue('gr_treatment', 'date_year')"] == "mask_date_to_year"
     sql_text = sql.read_text()
     assert "FUNCTION mask_credit_card_last4" in sql_text
     assert "FUNCTION mask_amount_rounded" in sql_text
+    assert "FUNCTION mask_date_to_year" in sql_text
 
 
 def test_category_mismatch_autofix_preserves_canonical_treatment_function(tmp_path):

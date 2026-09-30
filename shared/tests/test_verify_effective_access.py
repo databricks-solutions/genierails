@@ -642,6 +642,46 @@ class TestTemporaryWarehouseAccess:
         assert access.service_principal_name == "app-123"
         assert access.permission_level.value == "CAN_USE"
 
+    def test_provision_assigns_temporary_principal_to_workspace_before_return(
+        self, monkeypatch,
+    ):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        verifier = EffectiveAccessVerifier({
+            "host": "h", "client_id": "c", "client_secret": "s",
+            "account_host": "a", "account_id": "1", "workspace_id": "123",
+        })
+        sp = SimpleNamespace(id="456", application_id="app-123")
+        group = SimpleNamespace(id="789", members=[])
+        account = SimpleNamespace(
+            service_principals=SimpleNamespace(
+                list=lambda **_: [], create=lambda **_: sp,
+            ),
+            service_principal_secrets=SimpleNamespace(
+                create=lambda **_: SimpleNamespace(secret="secret"),
+            ),
+            groups=SimpleNamespace(
+                list=lambda **_: [group], patch=Mock(),
+            ),
+            workspace_assignment=SimpleNamespace(update=Mock()),
+        )
+        workspace = SimpleNamespace(
+            service_principals=SimpleNamespace(list=lambda **_: [sp]),
+        )
+        verifier._account = account
+        verifier._admin_ws = workspace
+
+        principal = verifier.provision_principal("viewers")
+
+        account.workspace_assignment.update.assert_called_once()
+        call = account.workspace_assignment.update.call_args.kwargs
+        assert call["workspace_id"] == 123
+        assert call["principal_id"] == 456
+        assert call["permissions"][0].value == "USER"
+        assert principal.application_id == "app-123"
+
     def test_warehouse_grant_failure_aborts_verification_setup(self, monkeypatch):
         class FailingPermissions:
             def update(self, *args, **kwargs):

@@ -672,6 +672,7 @@ def load_auth(auth_file: Path) -> dict[str, str]:
         or "https://accounts.cloud.databricks.com",
         "account_id": _as_str(auth.get("databricks_account_id"))
         or os.environ.get("DATABRICKS_ACCOUNT_ID", ""),
+        "workspace_id": _as_str(auth.get("databricks_workspace_id")),
     }
 
 
@@ -790,6 +791,39 @@ class EffectiveAccessVerifier:
                 ],
                 schemas=[iam.PatchSchema.URN_IETF_PARAMS_SCIM_API_MESSAGES_2_0_PATCH_OP],
             )
+
+        workspace_id = self.auth.get("workspace_id", "")
+        if not workspace_id:
+            raise RuntimeError(
+                "databricks_workspace_id is required to assign verification "
+                "principals to the workspace"
+            )
+        a.workspace_assignment.update(
+            workspace_id=int(workspace_id),
+            principal_id=int(sp.id),
+            permissions=[iam.WorkspacePermission.USER],
+        )
+        deadline = time.time() + int(
+            os.environ.get("GENIERAILS_VERIFY_WORKSPACE_SYNC_TIMEOUT", "90")
+        )
+        while True:
+            visible = next(
+                (
+                    item
+                    for item in self.admin_ws.service_principals.list(
+                        filter=f'applicationId eq "{sp.application_id}"'
+                    )
+                ),
+                None,
+            )
+            if visible is not None:
+                break
+            if time.time() >= deadline:
+                raise TimeoutError(
+                    f"Verification principal {sp.application_id} was assigned to "
+                    "the workspace but did not become visible before timeout"
+                )
+            time.sleep(2)
 
         return TestPrincipal(
             tier=tier,

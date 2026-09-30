@@ -19,9 +19,15 @@ def main() -> int:
     tables = list(config.get("uc_tables") or [])
     for space in config.get("genie_spaces") or []:
         tables.extend(space.get("uc_tables") or [])
+    discovered_path = path.parent / "data_access" / "discovered_uc_tables.auto.tfvars"
+    if discovered_path.exists():
+        with discovered_path.open() as handle:
+            discovered = hcl2.load(handle)
+        tables.extend(discovered.get("discovered_uc_tables") or [])
     if not tables:
         print(
-            f"ERROR: define uc_tables (top-level or in genie_spaces) in {path}",
+            "ERROR: define uc_tables (top-level or in genie_spaces), or import "
+            f"a Genie agent to populate discovered_uc_tables in {path.parent}",
             file=sys.stderr,
         )
         return 1

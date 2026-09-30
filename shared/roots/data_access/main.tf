@@ -77,6 +77,12 @@ variable "databricks_workspace_id" {
   default = ""
 }
 
+variable "serverless_usage_policy_id" {
+  type        = string
+  default     = ""
+  description = "AWS test automation workaround for provider issue #5985; empty for normal and Azure environments."
+}
+
 variable "databricks_workspace_host" {
   type = string
 }

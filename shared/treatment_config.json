@@ -13,7 +13,7 @@
     {"value": "email_partial", "masking_function": "mask_email", "sources": [["pii_level", "masked_email"]]},
     {"value": "phone_partial", "masking_function": "mask_phone", "sources": [["pii_level", "masked_phone"]]},
     {"value": "name_partial", "masking_function": "mask_full_name", "sources": [["pii_level", "masked_name"]]},
-    {"value": "date_year", "masking_function": "mask_date_to_year", "sources": [["pii_level", "masked_dob"]]},
+    {"value": "date_year", "masking_function": "mask_date_to_year", "udf_signature": "mask_date_to_year(value DATE) RETURNS DATE", "udf_body": "CASE WHEN value IS NULL THEN NULL ELSE make_date(year(value), 1, 1) END", "sources": [["pii_level", "masked_dob"]]},
     {"value": "tfn_partial", "masking_function": "mask_tfn", "sources": [["pii_level", "masked_tfn"]]},
     {"value": "medicare_partial", "masking_function": "mask_medicare", "sources": [["pii_level", "masked_medicare"]]},
     {"value": "bsb_partial", "masking_function": "mask_bsb", "sources": [["pii_level", "masked_bsb"]]},

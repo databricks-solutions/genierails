@@ -908,6 +908,15 @@ def remove_hcl_top_level_list(text: str, key: str) -> str:
     return text[:start] + text[block_end:]
 
 
+def strip_abac_for_genie_mode(text: str) -> str:
+    """Keep only workspace/Genie configuration in self-service Genie mode."""
+    for key in ("groups", "group_members"):
+        text = remove_hcl_top_level_block(text, key)
+    for key in ("tag_policies", "tag_assignments", "fgac_policies"):
+        text = remove_hcl_top_level_list(text, key)
+    return text
+
+
 def _fetch_via_patch_fallback(w, space_id: str) -> dict:
     """Read a Genie agent via a no-op PATCH (workaround for Partner AI gate).
 
@@ -7315,10 +7324,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
             print("  [governance mode] Stripped genie_space_configs from output")
         elif args.mode == "genie":
             # Strip all ABAC sections — governance team manages them centrally.
-            for key in ("groups", "tag_policies", "group_members"):
-                hcl_block = remove_hcl_top_level_block(hcl_block, key)
-            for key in ("tag_assignments", "fgac_policies"):
-                hcl_block = remove_hcl_top_level_list(hcl_block, key)
+            hcl_block = strip_abac_for_genie_mode(hcl_block)
             # Remove any LLM-generated comment placeholders for the omitted sections
             # (e.g. "# tag_assignments = [] — managed centrally").  The LLM sometimes
             # acknowledges suppressed sections via commented-out examples despite the
