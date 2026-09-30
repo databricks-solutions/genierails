@@ -8,16 +8,23 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 
 Gather these once — every phase reuses them:
 
-| Value | What it is / where it comes from |
+| Value | What it is / where to find it |
 |---|---|
-| **Deploying Service Principal** (`client_id` + `client_secret`) | The identity GenieRails runs as (not a CLI profile), on the **same account** as the workspace: **Account Admin**, **Workspace Admin**, and **authority over your existing catalog** (own it, or `MANAGE` + `APPLY TAG`), plus permission to **query the `databricks-claude-sonnet-4-6` serving endpoint** (generation calls a foundation model — an Anthropic/OpenAI provider works too). **Create it manually, or point `make bootstrap-sp` at your catalog** (`TARGET_CATALOG=<catalog>`) — see [Prerequisites](../../docs/prerequisites.md) for exact roles. |
+| **Deploying Service Principal** (`client_id` + `client_secret`) | The identity GenieRails runs as (not a CLI profile). See [Prerequisites → Service Principal](../../docs/prerequisites.md#service-principal) to create it and grant its roles. |
 | **Dev / prod catalog names** | Your Unity Catalog catalogs, e.g. `dev_finance` / `prod_finance`. |
-| **SQL warehouse id** (per env) | The serverless warehouse the **Genie agent runs its SQL on**. Give an existing warehouse's id, **or leave blank** to auto-create one. |
-| **Curated Genie agent** | The Genie agent you’re shipping — set a `genie_spaces` entry with its existing space id (from the Genie UI URL). |
-| **IdP group names** (one per *access tier*) | Your existing groups, synced from your identity provider (Entra ID / Okta) via **AIM/SCIM**. GenieRails **consumes** them by name — it never creates them. e.g. `payments_ops,regional_analysts,viewers`. |
-| **Row-pairing key** (`VERIFY_KEY_COLUMN`) | `verify-access` proves masking works by reading the *same table twice* — once **as a privileged tier**, once **as an unprivileged tier** — and comparing what each sees for the **same row**. It uses this column to line those two reads up (e.g. `customer_id` → “row 1001: privileged sees the real SSN, unprivileged sees `***`”). It is **not a join** — just a per-row identifier, and there's no table-to-table join anywhere — so pick a stable, **non-sensitive** id that exists on your masked tables (a primary key is ideal). If your masked tables don't all share one such column, give a per-table mapping via `VERIFY_SPEC` JSON instead ([details](../../docs/effective-access-verification.md)). |
-| **UC Data Classification** | Turn it on per-env — **in the Databricks UI** (Catalog Explorer → your catalog → enable classification) is the recommended path; or as code with `make enable-classification` (Phase 1). Docs: [AWS](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/data-classification). |
-| **Serverless usage policy** (only if enabling classification *as code*) | A Terraform-provider issue: `make enable-classification` applies `databricks_data_classification_catalog_config`, which can fail with `Usage policy ID must not be empty` on a workspace that has no serverless usage (budget) policy ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)). **Enabling classification in the Databricks UI (the recommended path in Phase 1/3) avoids this provider error.** If you do enable it as code, first create/attach a serverless usage policy — per Databricks docs, **creating one requires Workspace Admin** (non-admins: *Serverless usage policy: Manager*). Docs: [AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies). |
+| **SQL warehouse id** (per env) | The serverless warehouse the Genie agent runs its SQL on — an existing warehouse's id, **or leave blank** to auto-create one. |
+| **Curated Genie agent** | The agent you're shipping — its Genie space id, from the Genie UI URL (goes in `genie_spaces`). |
+| **IdP group names** (one per *access tier*) | Your existing IdP-synced groups (Entra ID / Okta via AIM/SCIM), e.g. `payments_ops,regional_analysts,viewers`. See [Prerequisites → group sync](../../docs/prerequisites.md#identity-provider-group-sync-required). |
+| **Row-pairing key** (`VERIFY_KEY_COLUMN`) | A stable, **non-sensitive** id column present on your masked tables (e.g. `customer_id`) — `verify-access` uses it to line up rows. [Details](../../docs/effective-access-verification.md). |
+| **UC Data Classification** | Enable it per env — in the **Databricks UI** (recommended) or as code (Phase 1). Docs: [AWS](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/data-classification). |
+
+> **Enabling classification in the UI (recommended) needs nothing extra.** Only the as-code path may first need a serverless usage policy.
+
+<details><summary>Serverless usage policy — only if you enable classification <em>as code</em></summary>
+
+`make enable-classification` applies `databricks_data_classification_catalog_config`, which can fail with `Usage policy ID must not be empty` on a workspace that has no serverless usage (budget) policy ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)). The **Databricks UI path avoids this**. If you do enable it as code, first create/attach a serverless usage policy — per Databricks docs, **creating one requires Workspace Admin** (non-admins: *Serverless usage policy: Manager*). Docs: [AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies).
+
+</details>
 
 ---
 
