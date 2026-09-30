@@ -4,7 +4,8 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 
 ---
 
-## Prerequisites & what to gather
+<details>
+<summary><strong id="prerequisites--what-to-gather">Prerequisites &amp; what to gather</strong></summary>
 
 Gather these once — every phase reuses them:
 
@@ -23,6 +24,8 @@ Gather these once — every phase reuses them:
 <details><summary>Serverless usage policy — only if you enable classification <em>as code</em></summary>
 
 `make enable-classification` applies `databricks_data_classification_catalog_config`, which can fail with `Usage policy ID must not be empty` on a workspace that has no serverless usage (budget) policy ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)). The **Databricks UI path avoids this**. If you do enable it as code, first create/attach a serverless usage policy — per Databricks docs, **creating one requires Workspace Admin** (non-admins: *Serverless usage policy: Manager*). Docs: [AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies).
+
+</details>
 
 </details>
 
@@ -214,10 +217,8 @@ A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog gr
 
 ---
 
-## Reference & glossary
-
 <details>
-<summary><strong>Reference & glossary</strong> — commands, how-it-works, and term definitions (in <a href="REFERENCE.md">REFERENCE.md</a>)</summary>
+<summary><strong id="reference--glossary">Reference &amp; glossary</strong> — commands, how-it-works, and term definitions (in <a href="REFERENCE.md">REFERENCE.md</a>)</summary>
 
 Kept out of this walkthrough so it stays scannable — all in **[REFERENCE.md](REFERENCE.md)**:
 
