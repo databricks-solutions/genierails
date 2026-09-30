@@ -146,9 +146,19 @@ The SP needs:
 | **Authority over the target catalog** | The catalog you govern | **Own it, or** be granted `MANAGE` + `APPLY TAG` (plus `ASSIGN` on the governed tags GenieRails applies). This lets it deploy tag assignments, masking functions, FGAC policies, and grants — and self-grant its own `USE CATALOG` / `USE SCHEMA` / `EXECUTE` / `CREATE FUNCTION`. |
 | **Query the model serving endpoint** | Workspace | `CAN QUERY` on `databricks-claude-sonnet-4-6` — generation calls a foundation model (an external Anthropic/OpenAI provider works too). |
 
-**What are the per-tier test SPs?** Databricks cannot impersonate a user for a query, so live `verify-access` creates one dedicated service principal for each access tier, adds it to that tier's group, and runs the same SQL using each principal's own OAuth credentials. This proves that authorized tiers see raw values while restricted tiers see masked values and filtered rows. The test SPs are deleted automatically when verification finishes unless `KEEP_PRINCIPALS=1` is set for debugging. They are separate from the GenieRails deployment SP.
+<details>
+<summary><strong>Details — Per-tier test service principals</strong></summary>
 
-> The SP governs an **existing** catalog — `make apply` never creates one — so it needs authority *on that catalog*, **not** metastore `CREATE CATALOG`. (Metastore `CREATE CATALOG` matters only for greenfield/demo, where GenieRails creates a fresh catalog it then owns.)
+Databricks cannot impersonate a user for a query, so live `verify-access` creates one dedicated service principal for each access tier, adds it to that tier's group, and runs the same SQL using each principal's own OAuth credentials. This proves that authorized tiers see raw values while restricted tiers see masked values and filtered rows. The test SPs are deleted automatically when verification finishes unless `KEEP_PRINCIPALS=1` is set for debugging. They are separate from the GenieRails deployment SP.
+
+</details>
+
+<details>
+<summary><strong>Details — Existing catalog authority</strong></summary>
+
+The SP governs an **existing** catalog — `make apply` never creates one — so it needs authority *on that catalog*, **not** metastore `CREATE CATALOG`. Metastore `CREATE CATALOG` matters only for greenfield/demo, where GenieRails creates a fresh catalog it then owns.
+
+</details>
 
 **Provision the SP — choose one method:**
 
