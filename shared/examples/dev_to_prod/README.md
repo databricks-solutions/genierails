@@ -28,7 +28,7 @@ Gather these once — every phase reuses them:
 
 ---
 
-## Phase 0 — Set up (dev)
+## Phase 0 — Dev: Set up
 
 **Goal —** create the local config folders and fill in your creds + settings. Nothing here touches Databricks yet.
 
@@ -51,7 +51,7 @@ Then edit three files:
 
 ---
 
-## Phase 1 — Dev: scan, draft the rules, test them
+## Phase 1 — Dev: Scan, draft, and test rules
 
 **Goal —** *rehearse* safely on dev: prove the masks fire, confirm the agent still answers, and produce a reviewable draft — off live PII. (Prod discovers what's actually sensitive later.)
 
@@ -88,7 +88,7 @@ make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id
 
 ---
 
-## Phase 2 — Promote the rules to prod
+## Phase 2 — Dev-to-prod: Promote rules
 
 **Goal —** copy the *rules* (masks, access policies, mappings) to production.
 
@@ -110,7 +110,7 @@ It carries the **rules** — the mapping, masking functions, access/row-filter p
 
 ---
 
-## Phase 3 — Prod: scan real data
+## Phase 3 — Prod: Scan real data
 
 **Goal —** let production scan its *own* real data and tag its sensitive columns — the true facts land here (real customer PII only exists in prod).
 
@@ -132,7 +132,7 @@ make enable-classification ENV=prod   # same as step 1a, now on prod
 
 ---
 
-## Phase 4 — Prove coverage (the gate)
+## Phase 4 — Prod: Prove coverage
 
 **Goal —** derive prod's protections from its own `class.*` tags, prove coverage, and deploy the enforcement (masks + access policies). The Genie agent itself isn't created yet — that's Phase 5.
 
@@ -148,14 +148,14 @@ make certify ENV=prod   # one command: derive-assignments → coverage-gate → 
 
 1. **Scaffold the missing mappings** — `make scaffold-treatments ENV=prod` adds a **safe default** (full redaction, marked `REVIEW`) for each tag prod surfaced, so you don't hand-edit anything. Then **review each** — keep the redaction, or set a type-appropriate mask. This changes the shared *rulebook* (not prod's live state), so you validate it in dev and re-promote below.
 2. **Re-validate in dev:** `make generate ENV=dev` → `make coverage-gate ENV=dev`.
-3. **Re-promote:** `make promote …` (carries the updated rules to prod — same command as [Phase 2](#phase-2--promote-the-rules-to-prod)).
+3. **Re-promote:** `make promote …` (carries the updated rules to prod — same command as [Phase 2](#phase-2--dev-to-prod-promote-rules)).
 4. **Re-run this phase:** `make certify ENV=prod`.
 
 Repeat until the gate passes and drift is clean. The agent stays uncreated and closed to users throughout — that's the point of exposing last.
 
 ---
 
-## Phase 5 — Open to users (you release access after the gate passes), then verify
+## Phase 5 — Prod: Release access and verify
 
 **Goal —** with coverage proven, release access, create the agent, and confirm masking live.
 
@@ -181,7 +181,7 @@ make evidence      ENV=prod                                 # writes a complianc
 
 ---
 
-## Phase 6 — Keep it covered
+## Phase 6 — Prod: Maintain coverage
 
 **Goal —** catch sensitive data that arrives after go-live. Run these on a schedule (the repo ships a scheduled governance job):
 
