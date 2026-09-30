@@ -807,6 +807,23 @@ class EffectiveAccessVerifier:
         except Exception as exc:  # best-effort cleanup
             print(f"  WARN: could not delete {principal.display_name}: {exc}")
 
+    def grant_warehouse_use(self, principal: TestPrincipal) -> None:
+        """Grant a temporary test principal CAN_USE on the query warehouse."""
+        self._guard()
+        from databricks.sdk.service import iam
+
+        warehouse_id = self.resolve_warehouse()
+        self.admin_ws.permissions.update(
+            request_object_type="warehouses",
+            request_object_id=warehouse_id,
+            access_control_list=[
+                iam.AccessControlRequest(
+                    service_principal_name=principal.application_id,
+                    permission_level=iam.PermissionLevel.CAN_USE,
+                )
+            ],
+        )
+
     def _ws_for(self, principal: TestPrincipal):
         self._guard()
         from databricks.sdk import WorkspaceClient
@@ -896,7 +913,10 @@ def verify_effective_access_live(
     try:
         for tier in sorted(spec.principals):
             print(f"  Provisioning test principal for tier: {tier}")
-            principals[tier] = verifier.provision_principal(tier)
+            principal = verifier.provision_principal(tier)
+            principals[tier] = principal
+            print(f"  Granting warehouse CAN_USE to test principal: {tier}")
+            verifier.grant_warehouse_use(principal)
 
         # Newly-added group membership can take a short while to propagate.
         time.sleep(int(os.environ.get("GENIERAILS_VERIFY_PROPAGATION_SLEEP", "10")))

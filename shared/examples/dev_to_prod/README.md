@@ -95,9 +95,7 @@ make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,vi
 ```bash
 make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id
 ```
-`make rehearse` runs **coverage-gate → validate-generated → apply → verify-access** in order, stopping at the first failure. The last step, `verify-access`, proves masking *by effect*: it queries the data **as each access tier** and confirms the unprivileged tier sees masked values while an authorized tier sees raw. In dev you **don't touch the exposure gate** — rehearse opens it just for this check (the masks protect the data either way; prod opens it deliberately in Phase 5). `VERIFY_KEY_COLUMN` is the single column used to pair rows across tiers — optional (omit it and the masking check is skipped) but recommended; for tables that don't share one key, pass a [`VERIFY_SPEC` JSON](../../docs/effective-access-verification.md) instead.
-
-> **One prerequisite:** grant your tier groups `CAN_USE` on the dev SQL warehouse first — `verify-access` runs its queries *as* those groups' principals, so without it they can't execute (GenieRails doesn't manage warehouse permissions).
+`make rehearse` runs **coverage-gate → validate-generated → apply → verify-access** in order, stopping at the first failure. The last step, `verify-access`, proves masking *by effect*: it creates a test SP for each access tier, grants each test SP temporary `CAN_USE` on the selected warehouse, and confirms the unprivileged tier sees masked values while an authorized tier sees raw. No separate warehouse-permission command is required. In dev you **don't touch the exposure gate** — rehearse opens it just for this check (the masks protect the data either way; prod opens it deliberately in Phase 5). `VERIFY_KEY_COLUMN` is the single column used to pair rows across tiers — optional (omit it and the masking check is skipped) but recommended; for tables that don't share one key, pass a [`VERIFY_SPEC` JSON](../../docs/effective-access-verification.md) instead.
 
 </details>
 
@@ -206,7 +204,7 @@ business_access_enabled = true
 make apply ENV=prod    # creates the Genie agent + RELEASES the withheld business SELECT and Genie run access
 ```
 
-Grant your tier groups **`CAN_USE`** on the prod SQL warehouse (Databricks UI/API — GenieRails doesn't manage warehouse permissions), so `verify-access` can query *as* them. Then confirm masking live and capture the evidence report:
+Confirm masking live and capture the evidence report. `verify-access` automatically grants its temporary per-tier test SPs `CAN_USE` on the selected warehouse; it does not change the tier groups' permanent warehouse ACLs.
 
 ```bash
 make verify-access ENV=prod VERIFY_KEY_COLUMN=customer_id   # unprivileged = masked, authorized = raw (the gate is open now)

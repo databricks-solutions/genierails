@@ -3,8 +3,8 @@
 These exercise the *pure* comparison and spec-derivation logic with mocked
 query results — no Databricks connection, no warehouse, no service principals.
 The live workspace path (EffectiveAccessVerifier / verify_effective_access_live)
-is guarded behind GENIERAILS_LIVE_VERIFY and is not exercised here; only its
-guard is asserted.
+is guarded behind GENIERAILS_LIVE_VERIFY. Network-free tests below assert the
+guard and exercise provisioning behavior with mocked SDK clients.
 
 Guiding principle under test: a verification check only PASSES when it
 conclusively proves the policy took effect. Anything it could not verify
@@ -29,6 +29,7 @@ from verify_effective_access import (  # noqa: E402
     CheckResult,
     EffectiveAccessReport,
     EffectiveAccessVerifier,
+    TestPrincipal as VerificationPrincipal,
     parse_tag_conditions,
     resolve_columns_for_condition,
     derive_spec_from_config,
@@ -604,3 +605,83 @@ class TestLiveGuard:
             verifier.provision_principal("Junior_Analyst")
         with pytest.raises(RuntimeError, match="Live verification is disabled"):
             verifier.resolve_warehouse()
+
+
+class TestTemporaryWarehouseAccess:
+    @staticmethod
+    def _verifier(monkeypatch, permissions):
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        verifier = EffectiveAccessVerifier(
+            {"host": "h", "client_id": "c", "client_secret": "s",
+             "account_host": "a", "account_id": "1"},
+            warehouse_id="warehouse-123",
+        )
+        verifier._admin_ws = type("AdminWorkspace", (), {"permissions": permissions})()
+        return verifier
+
+    def test_grants_can_use_to_temporary_principal(self, monkeypatch):
+        calls = []
+
+        class FakePermissions:
+            def update(self, request_object_type, request_object_id, **kwargs):
+                calls.append((request_object_type, request_object_id, kwargs))
+
+        verifier = self._verifier(monkeypatch, FakePermissions())
+        verifier.grant_warehouse_use(VerificationPrincipal(
+            tier="viewers",
+            display_name="genierails-verify-viewers",
+            application_id="app-123",
+            client_secret="secret",
+            sp_id="456",
+        ))
+
+        object_type, object_id, kwargs = calls[0]
+        access = kwargs["access_control_list"][0]
+        assert object_type == "warehouses"
+        assert object_id == "warehouse-123"
+        assert access.service_principal_name == "app-123"
+        assert access.permission_level.value == "CAN_USE"
+
+    def test_warehouse_grant_failure_aborts_verification_setup(self, monkeypatch):
+        class FailingPermissions:
+            def update(self, *args, **kwargs):
+                raise RuntimeError("warehouse permission denied")
+
+        verifier = self._verifier(monkeypatch, FailingPermissions())
+        principal = VerificationPrincipal("viewers", "test", "app-123", "secret", "456")
+
+        with pytest.raises(RuntimeError, match="warehouse permission denied"):
+            verifier.grant_warehouse_use(principal)
+
+    def test_orchestrator_cleans_up_when_warehouse_grant_fails(self, monkeypatch, tmp_path):
+        deleted = []
+
+        class FakeVerifier:
+            def __init__(self, auth, warehouse_id=""):
+                pass
+
+            def resolve_warehouse(self):
+                return "warehouse-123"
+
+            def provision_principal(self, tier):
+                return VerificationPrincipal(tier, f"test-{tier}", "app-123", "secret", "456")
+
+            def grant_warehouse_use(self, principal):
+                raise RuntimeError("warehouse permission denied")
+
+            def deprovision_principal(self, principal):
+                deleted.append(principal.sp_id)
+
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        monkeypatch.setattr("verify_effective_access.load_auth", lambda path: {
+            "host": "h", "client_id": "c", "client_secret": "s",
+        })
+        monkeypatch.setattr("verify_effective_access.EffectiveAccessVerifier", FakeVerifier)
+
+        with pytest.raises(RuntimeError, match="warehouse permission denied"):
+            verify_effective_access_live(
+                VerificationSpec(column_masks=[_mask_check(masked=("viewers",), unmasked=())]),
+                tmp_path / "auth.auto.tfvars",
+            )
+
+        assert deleted == ["456"]
