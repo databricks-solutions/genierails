@@ -131,10 +131,10 @@ Ownership is split: the **IdP owns groups and membership**; **GenieRails owns gr
 
 **Requirements:**
 
-GenieRails runs **as a service principal (SP)**. There are two phases with different permission needs:
+GenieRails runs **as a service principal (SP)**. Confirm both identities involved:
 
-- **One-time setup** — an **Account Admin** creates the SP and grants it the roles below (creating an account SP, granting account-level roles, and creating governed tag policies all require Account Admin). Catalog authority is granted by the catalog's owner, who may be a different person. Do this manually or with `make bootstrap-sp`.
-- **Running it** (`generate` / `apply` / `certify` / `verify-access`) — you authenticate *as* the SP (its OAuth credentials in `auth.auto.tfvars`), so **the person running GenieRails afterward needs no Databricks roles of their own** — only access to the SP's OAuth secret (see [Credentials](#credentials)) and network access.
+- **Setup actors** — an Account Admin creates the SP and assigns its account/workspace roles; the target catalog's owner grants catalog authority. One person can perform both parts when they hold both authorities; otherwise the two owners coordinate. The automated method requires a caller with both.
+- **Runtime identity** — `generate`, `apply`, `certify`, and `verify-access` authenticate as the SP using `auth.auto.tfvars`. The person invoking those commands needs the SP's OAuth secret (see [Credentials](#credentials)) and network access, but no additional personal Databricks roles.
 
 The SP needs:
 
@@ -150,16 +150,21 @@ The SP needs:
 
 > The SP governs an **existing** catalog — `make apply` never creates one — so it needs authority *on that catalog*, **not** metastore `CREATE CATALOG`. (Metastore `CREATE CATALOG` matters only for greenfield/demo, where GenieRails creates a fresh catalog it then owns.)
 
-**Create and grant the SP — two ways:**
+**Provision the SP — choose one method:**
 
-1. **Manually** (as an **Account Admin**) — create the SP in the Account Console and grant it the account/workspace roles above; the target catalog's owner grants it `MANAGE` + `APPLY TAG`.
-2. **`make bootstrap-sp`** (run by an already-authorized **Account Admin** — it can't elevate a non-admin caller). Point it at your **existing catalog** with `TARGET_CATALOG`:
+1. **Manually** — the Account Admin creates the SP in the Account Console and assigns the account and workspace roles in the table above. The target catalog's owner grants it `MANAGE` + `APPLY TAG`.
+2. **With `make bootstrap-sp`** — an already-authorized Account Admin runs the command below. It cannot elevate a non-admin caller.
 
    ```
    make bootstrap-sp ACCOUNT_PROFILE=<profile> ACCOUNT_ID=<id> WORKSPACE_ID=<id> SP_NAME=<name> TARGET_CATALOG=<catalog> PLAN=1
    ```
 
-   Review the dry-run, then swap `PLAN=1` for `YES=1` to apply; it prints an `auth.auto.tfvars` snippet and the one-time OAuth secret when it mints one (reusing an existing SP without `ROTATE_SECRET=1` reports the secret as unchanged). `TARGET_CATALOG` grants the SP `USE CATALOG`, `USE SCHEMA`, `MANAGE`, and `APPLY TAG` on that existing catalog. A pre-flight first checks the catalog exists and that *you* can grant on it (you own the catalog/metastore, or hold effective `MANAGE`); if not, it stops **before** creating the SP or minting a secret and asks you to have the catalog owner run it. One `TARGET_CATALOG` applies to every workspace in `WORKSPACE_ID` — run it separately per catalog. `make destroy` later revokes these Terraform-managed catalog grants, so the SP loses `MANAGE`/`APPLY TAG` until you re-run `bootstrap-sp` or the owner re-grants them.
+   - `PLAN=1` previews the changes; replace it with `YES=1` to apply.
+   - `TARGET_CATALOG` must name the existing catalog GenieRails will govern.
+   - A preflight confirms the catalog exists and the caller owns it or holds effective `MANAGE`. On failure, it stops before creating the SP or minting a secret and asks the catalog owner to run it.
+   - On success, it grants `USE CATALOG`, `USE SCHEMA`, `MANAGE`, and `APPLY TAG`, then prints an `auth.auto.tfvars` snippet and any newly minted one-time OAuth secret. Reusing an SP without `ROTATE_SECRET=1` leaves its secret unchanged.
+   - One `TARGET_CATALOG` applies to every workspace in `WORKSPACE_ID`; run the command separately for each catalog.
+   - `make destroy` revokes these Terraform-managed catalog grants. Re-run `bootstrap-sp`, or have the owner re-grant them, before using the SP again.
 
    <details>
    <summary><strong>Alternative — Greenfield catalog creation</strong></summary>
