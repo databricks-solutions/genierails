@@ -86,7 +86,12 @@ Ownership is split: the **IdP owns groups and membership**; **GenieRails owns gr
 
 ### Service Principal
 
-GenieRails runs **as a service principal (SP)** — you put its OAuth credentials in `auth.auto.tfvars`, and Databricks sees that SP for every operation (`generate` / `apply` / `certify` / `verify-access`). **The person running GenieRails needs no Databricks roles of their own** — only access to the SP's OAuth secret (see [Credentials](#credentials)) and network access to the account and workspace. The SP itself needs:
+GenieRails runs **as a service principal (SP)**. There are two phases with different permission needs:
+
+- **One-time setup** — an **Account Admin** creates the SP and grants it the roles below (creating an account SP, granting account-level roles, and creating governed tag policies all require Account Admin). Catalog authority is granted by the catalog's owner, who may be a different person. Do this manually or with `make bootstrap-sp`.
+- **Running it** (`generate` / `apply` / `certify` / `verify-access`) — you authenticate *as* the SP (its OAuth credentials in `auth.auto.tfvars`), so **the person running GenieRails afterward needs no Databricks roles of their own** — only access to the SP's OAuth secret (see [Credentials](#credentials)) and network access.
+
+The SP needs:
 
 | Role / authority | Scope | Why |
 |---|---|---|
@@ -99,7 +104,7 @@ GenieRails runs **as a service principal (SP)** — you put its OAuth credential
 
 **Create and grant the SP — two ways:**
 
-1. **Manually** — create the SP in the Account Console, grant it the account/workspace roles above, and have the target catalog's owner grant it `MANAGE` + `APPLY TAG`.
+1. **Manually** (as an **Account Admin**) — create the SP in the Account Console and grant it the account/workspace roles above; the target catalog's owner grants it `MANAGE` + `APPLY TAG`.
 2. **`make bootstrap-sp`** (run by an already-authorized account admin — it can't elevate a non-admin caller):
 
    ```
