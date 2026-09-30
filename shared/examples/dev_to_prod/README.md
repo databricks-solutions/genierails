@@ -28,7 +28,8 @@ Gather these once — every phase reuses them:
 
 ---
 
-## Phase 0 — Dev: Set up
+<details>
+<summary><strong id="phase-0--dev-set-up">Phase 0 — Dev: Set up</strong></summary>
 
 **Goal —** create the local config folders and fill in your creds + settings. Nothing here touches Databricks yet.
 
@@ -49,9 +50,12 @@ Then edit three files:
 
 **Done when —** `ls envs/dev` shows `auth.auto.tfvars` and `env.auto.tfvars`, both filled in.
 
+</details>
+
 ---
 
-## Phase 1 — Dev: Scan, draft, and test rules
+<details>
+<summary><strong id="phase-1--dev-scan-draft-and-test-rules">Phase 1 — Dev: Scan, draft, and test rules</strong></summary>
 
 **Goal —** *rehearse* safely on dev: prove the masks fire, confirm the agent still answers, and produce a reviewable draft — off live PII. (Prod discovers what's actually sensitive later.)
 
@@ -86,9 +90,12 @@ make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id
 
 > **One prerequisite:** grant your tier groups `CAN_USE` on the dev SQL warehouse first — `verify-access` runs its queries *as* those groups' principals, so without it they can't execute (GenieRails doesn't manage warehouse permissions).
 
+</details>
+
 ---
 
-## Phase 2 — Dev-to-prod: Promote rules
+<details>
+<summary><strong id="phase-2--dev-to-prod-promote-rules">Phase 2 — Dev-to-prod: Promote rules</strong></summary>
 
 **Goal —** copy the *rules* (masks, access policies, mappings) to production.
 
@@ -108,9 +115,12 @@ make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_finance=prod_fin
 It carries the **rules** — the mapping, masking functions, access/row-filter policies, and group→tier mapping — and **leaves dev's tag assignments behind** (which columns got tagged is a *fact* about dev's data; prod re-derives its own in Phase 3).
 </details>
 
+</details>
+
 ---
 
-## Phase 3 — Prod: Scan real data
+<details>
+<summary><strong id="phase-3--prod-scan-real-data">Phase 3 — Prod: Scan real data</strong></summary>
 
 **Goal —** let production scan its *own* real data and tag its sensitive columns — the true facts land here (real customer PII only exists in prod).
 
@@ -130,9 +140,12 @@ make enable-classification ENV=prod   # same as step 1a, now on prod
 
 **Done when —** prod's `class.*` tags appear on the prod catalog (check in Catalog Explorer / Review detections). The scan is async — grab a coffee ☕ and re-check; nothing yet just means it hasn't finished.
 
+</details>
+
 ---
 
-## Phase 4 — Prod: Prove coverage
+<details>
+<summary><strong id="phase-4--prod-prove-coverage">Phase 4 — Prod: Prove coverage</strong></summary>
 
 **Goal —** derive prod's protections from its own `class.*` tags, prove coverage, and deploy the enforcement (masks + access policies). The Genie agent itself isn't created yet — that's Phase 5.
 
@@ -153,9 +166,12 @@ make certify ENV=prod   # one command: derive-assignments → coverage-gate → 
 
 Repeat until the gate passes and drift is clean. The agent stays uncreated and closed to users throughout — that's the point of exposing last.
 
+</details>
+
 ---
 
-## Phase 5 — Prod: Release access and verify
+<details>
+<summary><strong id="phase-5--prod-release-access-and-verify">Phase 5 — Prod: Release access and verify</strong></summary>
 
 **Goal —** with coverage proven, release access, create the agent, and confirm masking live.
 
@@ -179,9 +195,12 @@ make evidence      ENV=prod                                 # writes a complianc
 
 **Done when —** `verify-access` shows masked values for the unprivileged tier and raw for the authorized tier; business users can open the Genie agent and get useful, masked answers.
 
+</details>
+
 ---
 
-## Phase 6 — Prod: Maintain coverage
+<details>
+<summary><strong id="phase-6--prod-maintain-coverage">Phase 6 — Prod: Maintain coverage</strong></summary>
 
 **Goal —** catch sensitive data that arrives after go-live. Run these on a schedule (the repo ships a scheduled governance job):
 
@@ -190,6 +209,8 @@ make evidence      ENV=prod                                 # writes a complianc
 - **`make generate-delta ENV=prod`** — *mutating*: removes stale assignments and assigns newly-detected sensitive columns, **constrained to your existing governed tags** (it can't invent a new type). Review the merged assignments, then `make apply`.
 
 A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog granted nothing you didn't ask for). For your most sensitive data, prefer "locked down until proven safe" over "open until tagged."
+
+</details>
 
 ---
 
