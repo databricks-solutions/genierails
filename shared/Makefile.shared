@@ -220,7 +220,7 @@ generate: _bootstrap _guard-workspace-target ## Run generate_abac.py in the sele
 		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
 
-scaffold-treatments: _bootstrap _guard-workspace-target ## Add fail-safe treatment stubs for unmapped native class.* labels
+scaffold-treatments: _bootstrap _guard-workspace-target ## Add fail-safe treatment stubs for unmapped native class.* tags
 	@python3 "$(SHARED_ROOT)/scripts/scaffold_treatments.py" \
 		--tfvars "$(ENV_DIR)/generated/abac.auto.tfvars" \
 		--sql "$(ENV_DIR)/generated/masking_functions.sql" \

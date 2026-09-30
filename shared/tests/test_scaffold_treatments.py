@@ -276,7 +276,7 @@ fgac_policies = []
     assert main() == 0
     output = capsys.readouterr().out
     assert "APPLIED EXISTING class.biometric" in output
-    assert "No unmapped class.* labels found" not in output
+    assert "No unmapped class.* tags found" not in output
     rendered = tfvars.read_text()
     assert "classification_unmapped" not in rendered
     parsed = hcl2.loads(rendered)

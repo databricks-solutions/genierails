@@ -261,7 +261,7 @@ def main() -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     if not additions:
-        print("No unmapped class.* labels found; nothing changed.")
+        print("No unmapped class.* tags found; nothing changed.")
         return 0
     for item in additions:
         verb = "ADDED" if item["added"] else "APPLIED EXISTING"
