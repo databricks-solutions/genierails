@@ -2,13 +2,21 @@
 
 Import an existing Databricks Genie agent into code, then govern and promote it with the [dev-to-prod walkthrough](../examples/dev_to_prod/README.md).
 
-## Before you begin
+<a id="before-you-start"></a>
+<details>
+<summary><strong>Before you start — Complete prerequisites and get the Agent ID</strong></summary>
 
-- Complete the [prerequisites](prerequisites.md), including cloud setup and Unity Catalog Data Classification.
-- Sync the access groups GenieRails will use from your identity provider.
+- Complete the shared [prerequisites checklist](prerequisites.md).
+- Complete [Phase 0 — Dev: Set up](../examples/dev_to_prod/README.md#phase-0--dev-set-up) so `envs/dev/` exists.
 - Find the agent ID in the Genie UI: open the agent, click **Configure**, and copy the **Agent ID** from the **About this agent** panel. (It's also in the agent's URL: `.../genie/rooms/01ef7b3c2a4d5e6f`.)
 
-## 1. Configure the agent
+</details>
+
+---
+
+<a id="step-1--add-the-agent-id-to-dev-configuration"></a>
+<details>
+<summary><strong>Step 1 — Add the Agent ID to dev configuration</strong></summary>
 
 Add the agent ID to the development environment:
 
@@ -19,7 +27,13 @@ genie_spaces = [
 ]
 ```
 
-## 2. Import the agent
+</details>
+
+---
+
+<a id="step-2--import-configuration-and-discover-tables"></a>
+<details>
+<summary><strong>Step 2 — Import configuration and discover tables</strong></summary>
 
 Run generation once to import the supported agent configuration and discover its tables:
 
@@ -38,9 +52,15 @@ merge-only so it cannot erase tables previously discovered for other agents.
 If an API fetch fails, the run also preserves the previous aggregate rather than
 treating a failed lookup as a legitimate removal.
 
-## 3. Continue to production
+</details>
 
-Continue at [Phase 1 of the dev-to-prod walkthrough](../examples/dev_to_prod/README.md#phase-1--dev-scan-draft-the-rules-test-them). The remaining workflow is unchanged: classify, generate, validate coverage, promote, re-derive in production, and expose last.
+---
+
+<a id="step-3--continue-through-dev-to-prod"></a>
+<details>
+<summary><strong>Step 3 — Continue through dev-to-prod</strong></summary>
+
+Continue at [Phase 1 of the dev-to-prod walkthrough](../examples/dev_to_prod/README.md#phase-1--dev-scan-draft-and-test-rules). The remaining workflow is unchanged: classify, generate, validate coverage, promote, re-derive in production, and expose last.
 
 For an imported agent:
 
@@ -48,7 +68,13 @@ For an imported agent:
 - `make apply` updates the attached agent's configuration and ACLs without creating or deleting it.
 - In production, leave `genie_space_id` empty to create a new agent, or set an existing production agent ID to attach to it.
 
-## Importing multiple agents
+</details>
+
+---
+
+<a id="importing-multiple-agents"></a>
+<details>
+<summary><strong>Optional — Import multiple agents</strong></summary>
 
 Add each agent to `genie_spaces`, then run generation once. GenieRails combines their tables into one governance footprint while keeping separate configuration and `CAN_RUN` ACLs for each agent.
 
@@ -61,7 +87,7 @@ Before continuing:
    production file is populated by `make generate ENV=prod`.
 
 <details>
-<summary>What is imported?</summary>
+<summary><strong>Details — Imported content</strong></summary>
 
 GenieRails imports the agent's title, description, tables, instructions, sample questions, benchmarks, SQL filters, measures, expressions, and join specifications where supported.
 
@@ -69,10 +95,20 @@ This is a supported projection, not a byte-for-byte copy. API metadata, object I
 </details>
 
 <details>
-<summary>Agent lifecycle and drift</summary>
+<summary><strong>Details — Agent lifecycle and drift</strong></summary>
 
 - `make destroy` does not delete an attached agent; it deletes only agents created by GenieRails.
 - After import, code is the source of truth. Re-run generation to import later UI changes.
 </details>
 
-For detailed commands and concepts, see the walkthrough's [reference](../examples/dev_to_prod/REFERENCE.md).
+</details>
+
+---
+
+<a id="reference"></a>
+<details>
+<summary><strong>Reference — Review detailed commands and concepts</strong></summary>
+
+See the dev-to-prod walkthrough's [command reference and glossary](../examples/dev_to_prod/REFERENCE.md).
+
+</details>
