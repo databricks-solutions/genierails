@@ -46,7 +46,7 @@ for p in w.fgac_policies.list():
 Enable native classification and wait for `class.*` tags first (sensitivity is native, not LLM-guessed); overlays only add regional/industry rule context:
 
 ```bash
-make enable-classification ENV=dev   # then wait for class.* tags
+make enable-classification ENV=dev   # or the Databricks UI (recommended); then wait for class.* tags
 make generate ENV=dev GENERATE_ARGS='--groups "<your-idp-groups>"' COUNTRY=ANZ INDUSTRY=financial_services
 ```
 

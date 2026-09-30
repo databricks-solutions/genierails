@@ -38,7 +38,7 @@ So "expose last" isn't a policy you hope holds — there is simply no `SELECT` a
 | Command | Phase | What it does |
 |---|---|---|
 | `make setup` / `make init-env ENV=<e>` | 0 | Create local env dirs + default config files (no Databricks calls) |
-| `make enable-classification ENV=<e>` | 1/3 | Turn on UC Data Classification + auto-tagging for your tables |
+| `make enable-classification ENV=<e>` | 1/3 | Turn on UC Data Classification (scanning) — as-code alternative to the Databricks UI (recommended); auto-tagging is opt-in |
 | `make generate ENV=<e> GENERATE_ARGS='--groups "..."'` | 1 | (dev) Draft masks + access rules from the model and derive one `gr_treatment`/column from native `class.*` (fail-closed) |
 | `make derive-assignments ENV=<e>` | 4 | (prod) Re-derive **only** `tag_assignments` from live `class.*`, reusing the promoted rules unchanged — no model call (fail-closed; requires a prior `promote`) |
 | `make coverage-gate ENV=<e>` | 1/4 | **Block** if any tagged-sensitive column has no mask (the "says NO" check) |

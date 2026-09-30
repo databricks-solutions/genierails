@@ -37,7 +37,7 @@ country = ""               # US/global defaults (no overlay)
 Enable native classification first (sensitivity is native; the overlay only adds regional rule context), then prove coverage before applying:
 
 ```bash
-make enable-classification ENV=dev   # then wait for class.* tags
+make enable-classification ENV=dev   # or the Databricks UI (recommended); then wait for class.* tags
 make generate ENV=dev GENERATE_ARGS='--groups "<your-idp-groups>"'
 make coverage-gate ENV=dev           # blocks if any classified column is unprotected
 make apply ENV=dev                   # business_access_enabled stays false until you verify + open the gate

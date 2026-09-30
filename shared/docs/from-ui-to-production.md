@@ -64,7 +64,7 @@ uc_tables = [
 With the tables persisted, run the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)** from **Phase 1** — it works identically for an imported agent:
 
 ```bash
-make enable-classification ENV=dev        # turn on native classification; wait for class.* tags
+make enable-classification ENV=dev        # or the Databricks UI (recommended); then wait for class.* tags
 make generate ENV=dev GENERATE_ARGS='--groups "<your IdP group names>"'
 make coverage-gate ENV=dev                # blocks if any classified column is unprotected
 make validate-generated ENV=dev

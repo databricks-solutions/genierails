@@ -50,7 +50,7 @@ make promote SOURCE_ENV=dev DEST_ENV=prod \
 vi envs/prod/auth.auto.tfvars             # enter prod workspace credentials
 
 # prod re-derives its OWN facts — never re-run generate in prod
-make enable-classification ENV=prod       # then wait for prod class.* tags
+make enable-classification ENV=prod       # or the Databricks UI (recommended); then wait for prod class.* tags
 make derive-assignments ENV=prod          # reuses the promoted rules, no LLM
 make coverage-gate ENV=prod               # blocks until every classified prod column is covered
 make apply-governance ENV=prod            # enforcement only; exposure gate still closed

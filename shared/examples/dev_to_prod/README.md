@@ -22,7 +22,7 @@ Gather these once — every phase reuses them:
 | **Curated Genie agent** | The Genie agent you’re shipping — set a `genie_spaces` entry with its existing space id (from the Genie UI URL). |
 | **IdP group names** (one per *access tier*) | Your existing groups, synced from your identity provider (Entra ID / Okta) via **AIM/SCIM**. GenieRails **consumes** them by name — it never creates them. e.g. `payments_ops,regional_analysts,viewers`. |
 | **Row-pairing key** (`VERIFY_KEY_COLUMN`) | One column `verify-access` uses to pair the same rows across tiers for the mask checks (e.g. `customer_id`); it just needs to exist on the masked tables. Tables that don't share one column → use a per-table `VERIFY_SPEC` JSON instead ([details](../../docs/effective-access-verification.md)). |
-| **UC Data Classification** | Turn it on per-env — in the **Databricks UI** (Catalog Explorer → your catalog → enable classification) or reproducibly with `make enable-classification` (Phase 1). Docs: [AWS](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/data-classification). |
+| **UC Data Classification** | Turn it on per-env — **in the Databricks UI** (Catalog Explorer → your catalog → enable classification) is the recommended path; or as code with `make enable-classification` (Phase 1). Docs: [AWS](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/data-classification). |
 | **Serverless usage policy** (only if enabling classification *as code*) | A Terraform-provider issue: `make enable-classification` applies `databricks_data_classification_catalog_config`, which can fail with `Usage policy ID must not be empty` on a workspace that has no serverless usage (budget) policy ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)). **Enabling classification in the Databricks UI (the recommended path in Phase 1/3) avoids this provider error.** If you do enable it as code, first create/attach a serverless usage policy — per Databricks docs, **creating one requires Workspace Admin** (non-admins: *Serverless usage policy: Manager*). Docs: [AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies). |
 
 ---
@@ -60,16 +60,22 @@ No tables or Genie agent of your own? A one-command script creates a sample sche
 
 **Goal —** *rehearse* safely on dev: prove the masks fire, confirm the agent still answers, and produce a reviewable draft — off live PII. (Prod discovers what's actually sensitive later.)
 
-**1a. Turn on the scanner.** Enable UC Data Classification on your catalog — easiest in the **Databricks UI** (Catalog Explorer → your catalog → *Enable* classification), or reproducibly as code:
+**1a. Turn on the scanner.** Enable UC Data Classification on your catalog in the **Databricks UI** — Catalog Explorer → your catalog → *Enable* classification. The scan just runs; nothing is tagged until you opt in (1b). Keep `enable_classification = true` in your `env.auto.tfvars` — the *fail-closed signal* that makes generation (1c) abort rather than guess if classification results aren't readable.
+
+<details>
+<summary>Prefer to enable it as code (reproducible / CI)?</summary>
+
 ```bash
 make enable-classification ENV=dev   # scans only — nothing is tagged until you opt in (1b)
 ```
-Either way, keep `enable_classification = true` in your tfvars — it's the *fail-closed signal* that makes the next step abort rather than guess if classification results aren't readable.
+
+The as-code path applies the `databricks_data_classification_catalog_config` resource, which on a brand-new serverless workspace can hit the usage-policy provider issue noted in [Prerequisites](../../docs/prerequisites.md#service-principal); the UI path above avoids it.
+</details>
 
 **1b. Review detections, opt into tags, then confirm they landed.** The first scan is asynchronous (minutes to ~24h) — kick it off, grab a coffee ☕, and come back. Two easy steps, mostly in the Databricks UI:
 
 - **Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) to see what the scanner found on your columns and **exclude any false positives**. Nothing is tagged yet — auto-tagging defaults off.
-- **Opt in.** After review, enable automatic tagging — in the UI, or set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-run `make enable-classification ENV=dev`. The `class.*` tags then land on the reviewed columns (visible in **Catalog Explorer**). Then continue to **1c**.
+- **Opt in.** After review, **enable automatic tagging in the UI** (per class). The `class.*` tags then land on the reviewed columns (visible in **Catalog Explorer**). Then continue to **1c**. *(As code: set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-run `make enable-classification ENV=dev`.)*
 
 **1c. Draft the protection rules.**
 ```bash
@@ -113,17 +119,19 @@ It carries the **rules** — the mapping, masking functions, access/row-filter p
 
 **Goal —** let production scan its *own* real data and tag its sensitive columns — the true facts land here (real customer PII only exists in prod).
 
-Promotion (Phase 2) already created `envs/prod/` with a template `auth.auto.tfvars` — just fill it in (prod SP `client_id`/`client_secret` + prod workspace host/id), then turn on prod's scanner — in the **Databricks UI** on the prod catalog, or as code:
+Promotion (Phase 2) already created `envs/prod/` with a template `auth.auto.tfvars` — fill it in (prod SP `client_id`/`client_secret` + prod workspace host/id), then **turn on prod's scanner in the Databricks UI** on the prod catalog (same as step 1a). It scans **without writing tags** (auto-tagging defaults off, so prod gets its *own* review, just like dev). Then, exactly as in dev's **1b**:
+
+<details>
+<summary>Prefer to enable it as code?</summary>
 
 ```bash
 # fill envs/prod/auth.auto.tfvars first (prod SP + workspace host/id), then:
 make enable-classification ENV=prod   # same as step 1a, now on prod
 ```
-
-`make enable-classification ENV=prod` turns on prod's scanner **without writing tags** (auto-tagging defaults off, so prod gets its *own* review, just like dev). Then, exactly as in dev's **1b**:
+</details>
 
 - **Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) on the prod catalog and **exclude any false positives** — prod's real data may surface sensitive types dev never saw.
-- **Opt in.** Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` (add the line if promote didn't write it) and re-run `make enable-classification ENV=prod`. The `class.*` tags then land.
+- **Opt in.** **Enable automatic tagging in the UI** (per class); the `class.*` tags then land. *(As code: set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` — add the line if promote didn't write it — and re-run `make enable-classification ENV=prod`.)*
 
 **Done when —** prod's `class.*` tags appear on the prod catalog (check in Catalog Explorer / Review detections). The scan is async — grab a coffee ☕ and re-check; nothing yet just means it hasn't finished.
 
