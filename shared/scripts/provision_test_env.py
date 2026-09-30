@@ -875,26 +875,35 @@ def _provision_aws_serverless_budget_policy(account_client, state: dict) -> None
     if state.get("cloud_provider") != "aws":
         return
 
-    from databricks.sdk.service.billing import BudgetPolicy
-    from databricks.sdk.service.compute import CustomPolicyTag
-
     workspace_id = int(state["workspace_id"])
     run_id = str(state["run_id"])
     policy_name = f"genierails-ci-{run_id}"
-    created = account_client.budget_policy.create(
-        policy=BudgetPolicy(
-            policy_name=policy_name,
-            binding_workspace_ids=[workspace_id],
-            custom_tags=[CustomPolicyTag(key="genierails_ci", value=run_id)],
-        ),
-        request_id=f"genierails-ci-{run_id}",
+    account_id = account_client.config.account_id
+    response = account_client.api_client.do(
+        "POST",
+        f"/api/2.1/accounts/{account_id}/budget-policies",
+        body={
+            "policy": {
+                "policy_name": policy_name,
+                "binding_workspace_ids": [workspace_id],
+                "custom_tags": [{"key": "genierails_ci", "value": run_id}],
+            },
+            "request_id": f"genierails-ci-{run_id}",
+        },
+        # Budget policies are account resources, but creation by a Workspace
+        # Admin requires the workspace context used by the UI. The generated
+        # SDK omits this header and otherwise returns
+        # `missing CreateBudgetPolicyPermission` even for an assigned admin.
+        headers={"X-Databricks-Org-Id": str(workspace_id)},
     )
-    if not created.policy_id:
+    created = response.get("policy", response)
+    policy_id = created.get("policy_id")
+    if not policy_id:
         raise RuntimeError(
             "Databricks created no serverless usage policy ID for the AWS test workspace"
         )
-    state["serverless_budget_policy_id"] = created.policy_id
-    state["serverless_budget_policy_name"] = created.policy_name or policy_name
+    state["serverless_budget_policy_id"] = policy_id
+    state["serverless_budget_policy_name"] = created.get("policy_name") or policy_name
 
 
 def _teardown_aws_serverless_budget_policy(account_client, state: dict) -> None:
@@ -903,7 +912,13 @@ def _teardown_aws_serverless_budget_policy(account_client, state: dict) -> None:
         return
     policy_id = state.get("serverless_budget_policy_id")
     if policy_id:
-        account_client.budget_policy.delete(policy_id=policy_id)
+        workspace_id = int(state["workspace_id"])
+        account_id = account_client.config.account_id
+        account_client.api_client.do(
+            "DELETE",
+            f"/api/2.1/accounts/{account_id}/budget-policies/{policy_id}",
+            headers={"X-Databricks-Org-Id": str(workspace_id)},
+        )
 
 # ---------------------------------------------------------------------------
 # Provision
