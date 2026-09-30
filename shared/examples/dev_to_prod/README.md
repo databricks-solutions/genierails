@@ -1,12 +1,6 @@
 # GenieRails Dev-to-Prod Walkthrough — ship a Genie agent to production, safely
 
-Take a curated Genie agent in **dev** and ship it to **production** without ever exposing sensitive data. Unity Catalog's built-in classifier decides *what* is sensitive; GenieRails derives *how* it's protected and applies it as code; and a **coverage check blocks the release** until every *classified* sensitive column the agent can reach is provably covered.
-
----
-
-## The idea
-
-Databricks' built-in classifier samples your column values *inside your own workspace* and tags which columns hold sensitive types (emails, SSNs, card numbers). GenieRails turns those tags into protections — column masks and access rules — as code, and a **coverage check refuses to release the agent** until every sensitive column is covered. You rehearse the whole thing safely in **dev**, then do it for real in **prod**.
+Take a curated Genie agent in **dev** and ship it to **production** without ever exposing sensitive data. Databricks' built-in classifier — running inside your own workspace — decides *what* is sensitive by sampling your column values (emails, SSNs, card numbers); GenieRails derives *how* it's protected (column masks and access rules) and applies it all as code; and a **coverage check blocks the release** until every classified sensitive column the agent can reach is provably covered. You rehearse the whole thing safely in **dev**, then do it for real in **prod**.
 
 ---
 
