@@ -138,39 +138,39 @@ You'll need these values for `auth.auto.tfvars`:
 
 ## Cloud-Specific Requirements
 
-### AWS
+These apply **only to the integration-test provisioning harness (`make test-ci`)** — the normal flow (`make generate` / `apply` / `certify`) needs none of it, just the Databricks service principal. Expand your cloud only if you run that harness:
+
+<details>
+<summary><strong>AWS</strong> — test-ci provisioning only</summary>
 
 **Credentials** (one of):
 - `AWS_PROFILE` environment variable pointing to a named profile in `~/.aws/credentials`
 - `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ optional `AWS_SESSION_TOKEN`)
 - Default boto3 credential chain (instance profile, SSO, etc.)
 
-**IAM Permissions** (for `make test-ci` provisioning only):
+**IAM permissions:**
 - `iam:CreateRole`, `iam:DeleteRole`, `iam:PutRolePolicy`, `iam:DeleteRolePolicy`
 - `s3:CreateBucket`, `s3:DeleteBucket`, `s3:PutPublicAccessBlock`
 - `sts:GetCallerIdentity`
+</details>
 
-> Standard `make generate` + `make apply` usage does NOT require AWS IAM permissions —
-> only a Databricks service principal.
-
-### Azure
+<details>
+<summary><strong>Azure</strong> — test-ci provisioning only</summary>
 
 **Credentials** (one of):
 - Service principal: `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET` + `AZURE_TENANT_ID`
 - `DefaultAzureCredential` (Azure CLI login, managed identity, etc.)
 
-**Additional config** (for `make test-ci` provisioning only):
+**Additional config:**
 - `AZURE_SUBSCRIPTION_ID`
 - `AZURE_RESOURCE_GROUP`
 - `AZURE_REGION` (e.g., `australiaeast`)
 
-**Azure RBAC Roles** (for provisioning only):
+**Azure RBAC roles:**
 - `Contributor` on resource group
 - `Storage Blob Data Contributor`
 - `User Access Administrator`
-
-> Standard `make generate` + `make apply` usage does NOT require Azure RBAC roles —
-> only a Databricks service principal.
+</details>
 
 ## Quick Verification
 
