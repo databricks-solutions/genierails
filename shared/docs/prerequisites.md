@@ -1,8 +1,11 @@
 # Prerequisites
 
-Everything you need before running GenieRails.
+Everything you need before running GenieRails. Work through these checks in order; each section is collapsed by default so you can see the full checklist at a glance.
 
-## Operating System
+<details>
+<summary><strong id="operating-system">Check 1 — Operating system is supported</strong></summary>
+
+**Requirements:**
 
 | OS | Supported | Notes |
 |----|-----------|-------|
@@ -10,9 +13,14 @@ Everything you need before running GenieRails.
 | **macOS** | Yes | Intel or Apple Silicon |
 | **Windows** | Via WSL only | Requires Windows Subsystem for Linux (bash, sed, grep needed) |
 
-## Software
+</details>
 
-### Required
+---
+
+<details>
+<summary><strong id="software">Check 2 — Required local software is installed</strong></summary>
+
+**Requirements:**
 
 | Tool | Version | Check | Install |
 |------|---------|-------|---------|
@@ -23,12 +31,12 @@ Everything you need before running GenieRails.
 
 > **macOS note:** Apple's `/usr/bin/make` (and Homebrew) can be blocked by an unaccepted Xcode license — `make` then errors with a license/agreement message. If you hit that, install GNU Make another way (e.g. `conda install make`) and put it first on your `PATH`.
 
-### Dependencies (auto-installed)
+**Auto-installed dependencies:**
 
 GenieRails auto-installs its Python packages (first `make generate` / `make apply`) and auto-downloads its Terraform providers (first `terraform init`) — nothing to install by hand for the core flow. (`make test-ci` additionally needs `pytest`; see the note below.)
 
 <details>
-<summary>Expand to review the auto-installed dependencies</summary>
+<summary><strong>Details — Auto-installed dependencies</strong></summary>
 
 **Python packages** — on first `make generate` or `make apply`:
 
@@ -59,7 +67,14 @@ For integration testing (`make test-ci`), cloud-specific packages are also auto-
 | `hashicorp/time` | ~> 0.12 | registry.terraform.io |
 </details>
 
-## Network Access
+</details>
+
+---
+
+<details>
+<summary><strong id="network-access">Check 3 — Required network endpoints are reachable</strong></summary>
+
+**Requirements:**
 
 GenieRails requires outbound HTTPS (port 443) to:
 
@@ -74,15 +89,27 @@ GenieRails requires outbound HTTPS (port 443) to:
 
 No VPN is required unless your Databricks workspace is on a private network. (`make test-ci` also reaches your cloud's management endpoints, e.g. `management.azure.com`.)
 
-## Databricks Account
+</details>
 
-### Required Features
+---
+
+<details>
+<summary><strong id="required-features">Check 4 — Required Databricks features are enabled</strong></summary>
+
+**Requirements:**
 
 - **Unity Catalog** — must be enabled on the target workspace
 - **SQL Warehouse** — serverless (auto-created) or existing warehouse
 - **Genie agents** — for the Genie agent governance workflow
 
-### Identity Provider group sync (required)
+</details>
+
+---
+
+<details>
+<summary><strong id="identity-provider-group-sync-required">Check 5 — Identity provider groups are synced</strong></summary>
+
+**Requirements:**
 
 GenieRails **consumes** the access-tier groups your identity provider owns; it does not create them in the normal path. Before running `make generate` / `make apply`, make sure your IdP groups are synced into the Databricks account:
 
@@ -92,12 +119,19 @@ GenieRails **consumes** the access-tier groups your identity provider owns; it d
 Ownership is split: the **IdP owns groups and membership**; **GenieRails owns grants and ABAC** (tags, FGAC policies, Genie ACLs). `make generate` preflights the referenced group→tier mapping and fails loudly if a group isn't synced. See [IdP-Synced Groups](advanced.md#idp-synced-groups-default).
 
 <details>
-<summary>No IdP syncing groups yet? (demo / greenfield fallback)</summary>
+<summary><strong>Alternative — Demo/greenfield group creation</strong></summary>
 
 `make generate GENERATE_ARGS='--create-groups'` plus `manage_groups = true` in `envs/account/env.auto.tfvars` lets GenieRails mint the groups itself (opt-in, off by default). Use this only for a demo/greenfield account — prefer AIM/SCIM sync (above) for anything real.
 </details>
 
-### Service Principal
+</details>
+
+---
+
+<details>
+<summary><strong id="service-principal">Check 6 — Service principal has the required authority</strong></summary>
+
+**Requirements:**
 
 GenieRails runs **as a service principal (SP)**. There are two phases with different permission needs:
 
@@ -128,12 +162,19 @@ The SP needs:
    Review the dry-run, then swap `PLAN=1` for `YES=1` to apply; it prints an `auth.auto.tfvars` snippet and the one-time OAuth secret when it mints one (reusing an existing SP without `ROTATE_SECRET=1` reports the secret as unchanged). `TARGET_CATALOG` grants the SP `USE CATALOG`, `USE SCHEMA`, `MANAGE`, and `APPLY TAG` on that existing catalog. A pre-flight first checks the catalog exists and that *you* can grant on it (you own the catalog/metastore, or hold effective `MANAGE`); if not, it stops **before** creating the SP or minting a secret and asks you to have the catalog owner run it. One `TARGET_CATALOG` applies to every workspace in `WORKSPACE_ID` — run it separately per catalog. `make destroy` later revokes these Terraform-managed catalog grants, so the SP loses `MANAGE`/`APPLY TAG` until you re-run `bootstrap-sp` or the owner re-grants them.
 
    <details>
-   <summary><strong>Greenfield</strong> (GenieRails creates its own catalog) — rarely needed</summary>
+   <summary><strong>Alternative — Greenfield catalog creation</strong></summary>
 
    Omit `TARGET_CATALOG`, and bootstrap grants the SP metastore `CREATE CATALOG` instead, so it can create and own a fresh catalog. Use this only for demo/test setups where you don't already have a catalog to govern.
    </details>
 
-### Credentials
+</details>
+
+---
+
+<details>
+<summary><strong id="credentials">Check 7 — Databricks credentials and workspace values are ready</strong></summary>
+
+**Requirements:**
 
 You'll need these values for `auth.auto.tfvars`:
 
@@ -146,12 +187,22 @@ You'll need these values for `auth.auto.tfvars`:
 | `databricks_workspace_id` | Account Console → Workspaces, or `?o=` parameter in workspace URL |
 | `databricks_workspace_host` | Your workspace URL (e.g., `https://dbc-xxx.cloud.databricks.com`) |
 
-## Cloud-Specific Requirements
+</details>
+
+---
+
+<details>
+<summary><strong id="cloud-specific-requirements">Check 8 — test-ci cloud provisioning access is ready</strong></summary>
 
 These apply **only to the integration-test provisioning harness (`make test-ci`)** — the normal flow (`make generate` / `apply` / `certify`) needs none of it, just the Databricks service principal. Expand your cloud only if you run that harness:
 
+**Requirements (only when running `make test-ci`):**
+
+- Choose the cloud where the test harness will provision resources.
+- Provide that cloud's credentials, configuration values, and resource-management permissions listed below.
+
 <details>
-<summary><strong>AWS</strong> — test-ci provisioning only</summary>
+<summary><strong>AWS — Required test-ci credentials and permissions</strong></summary>
 
 **Credentials** (one of):
 - `AWS_PROFILE` environment variable pointing to a named profile in `~/.aws/credentials`
@@ -162,7 +213,7 @@ These apply **only to the integration-test provisioning harness (`make test-ci`)
 </details>
 
 <details>
-<summary><strong>Azure</strong> — test-ci provisioning only</summary>
+<summary><strong>Azure — Required test-ci credentials and permissions</strong></summary>
 
 **Credentials** (one of):
 - Service principal: `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET` + `AZURE_TENANT_ID`
@@ -179,7 +230,14 @@ These apply **only to the integration-test provisioning harness (`make test-ci`)
 - `User Access Administrator` — optional (only if the SP itself assigns roles; otherwise it falls back to your Azure CLI login)
 </details>
 
-## Quick check
+</details>
+
+---
+
+<details>
+<summary><strong id="quick-check">Check 9 — Local setup completes successfully</strong></summary>
+
+**Requirements:**
 
 Confirm the required tools are present:
 
@@ -198,3 +256,5 @@ make setup ENV=dev         # creates envs/dev/ config templates (local only — 
 `make setup` writes the `envs/dev/auth.auto.tfvars` and `env.auto.tfvars` templates — fill in your SP credentials (see [Credentials](#credentials)) and your tables / warehouse / Genie space.
 
 **Next: follow the [Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)** — the end-to-end champion flow. Its Phase 1 runs `make generate` → `make validate-generated` → `make coverage-gate`, where the `[PASS]` checks appear against your generated config. Already have a Genie agent built in the Databricks UI? [Import it into code first](from-ui-to-production.md), then follow the same walkthrough.
+
+</details>
