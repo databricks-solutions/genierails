@@ -159,7 +159,7 @@ resource "databricks_grant" "terraform_sp_manage_catalog" {
   provider   = databricks.workspace
   catalog    = each.value
   principal  = var.databricks_client_id
-  privileges = ["USE_CATALOG", "USE_SCHEMA", "EXECUTE", "MANAGE", "CREATE_FUNCTION"]
+  privileges = ["USE_CATALOG", "USE_SCHEMA", "EXECUTE", "MANAGE", "CREATE_FUNCTION", "APPLY_TAG"]
 }
 
 resource "databricks_grant" "catalog_access" {

@@ -121,6 +121,41 @@ def test_apply_grants_exact_account_tag_policy_roles():
     ]
 
 
+def test_target_catalog_grants_brownfield_privileges():
+    _account, workspace, _workspace_factory, factory = _fake()
+    output = []
+
+    assert bootstrap(
+        _cfg(target_catalog="existing_catalog"),
+        client_factory=factory,
+        emit=output.append,
+    ) == 0
+
+    workspace.metastores.current.assert_not_called()
+    workspace.grants.update.assert_called_once()
+    catalog_call = workspace.grants.update.call_args.kwargs
+    assert catalog_call["securable_type"] == "catalog"
+    assert catalog_call["full_name"] == "existing_catalog"
+    assert len(catalog_call["changes"]) == 1
+    assert catalog_call["changes"][0].principal == "client-123"
+    assert catalog_call["changes"][0].add == [Privilege.MANAGE, Privilege.APPLY_TAG]
+    assert any("MANAGE + APPLY_TAG on catalog existing_catalog" in line for line in output)
+
+
+def test_target_catalog_grant_fails_loudly_when_caller_lacks_authority():
+    _account, workspace, _workspace_factory, factory = _fake()
+    workspace.grants.update.side_effect = PermissionError("denied")
+
+    with pytest.raises(RuntimeError, match="catalog owner.*MANAGE and APPLY TAG"):
+        bootstrap(
+            _cfg(target_catalog="existing_catalog"),
+            client_factory=factory,
+            emit=MagicMock(),
+        )
+
+    workspace.api_client.do.assert_not_called()
+
+
 def test_existing_sp_and_grants_are_not_duplicated():
     account, _workspace, _workspace_factory, factory = _fake(
         existing=True, roles=("account_admin",)

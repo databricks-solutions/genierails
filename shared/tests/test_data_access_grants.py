@@ -45,6 +45,14 @@ def test_select_is_not_granted_at_namespace_level():
     assert '"USE_SCHEMA"' not in _resource_body(source, "table_access")
 
 
+def test_deployment_sp_self_grant_includes_apply_tag():
+    source = MAIN_TF.read_text()
+    deployer = _resource_body(source, "terraform_sp_manage_catalog")
+
+    assert '"MANAGE"' in deployer
+    assert '"APPLY_TAG"' in deployer
+
+
 def test_business_select_is_fail_closed_while_structural_grants_remain():
     source = MAIN_TF.read_text()
 

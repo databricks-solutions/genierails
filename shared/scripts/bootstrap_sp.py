@@ -24,6 +24,7 @@ class Config:
     yes: bool = False
     rotate_secret: bool = False
     model_endpoint: str = MODEL_ENDPOINT
+    target_catalog: str | None = None
 
 
 def _workspace_ids(value: str) -> tuple[int, ...]:
@@ -53,6 +54,7 @@ def parser() -> argparse.ArgumentParser:
                    help="mint a new secret even when reusing an existing SP")
     p.add_argument("--model-endpoint", default=os.environ.get("MODEL_ENDPOINT", MODEL_ENDPOINT),
                    help="serving endpoint to grant CAN_QUERY (env: MODEL_ENDPOINT)")
+    p.add_argument("--target-catalog", help="existing catalog to grant MANAGE and APPLY_TAG")
     return p
 
 
@@ -64,7 +66,10 @@ def _plan(cfg: Config, emit: Callable[[str], None]) -> None:
     emit("  grant: account tag-policy creator and manager roles")
     for workspace_id in cfg.workspace_ids:
         emit(f"  workspace {workspace_id}: grant ADMIN")
-        emit(f"  workspace {workspace_id}: grant CREATE_CATALOG on its metastore")
+        if cfg.target_catalog:
+            emit(f"  workspace {workspace_id}: grant MANAGE + APPLY_TAG on catalog {cfg.target_catalog}")
+        else:
+            emit(f"  workspace {workspace_id}: grant CREATE_CATALOG on its metastore")
         emit(f"  workspace {workspace_id}: grant CAN_QUERY on {cfg.model_endpoint}")
     if cfg.rotate_secret:
         emit("  secret: mint/rotate OAuth M2M secret")
@@ -188,13 +193,40 @@ def bootstrap(
         if not host.startswith("http"):
             host = "https://" + host
         w = workspace_client(host)
-        metastore_id = str(_value(w.metastores.current(), "metastore_id"))
-        w.grants.update(
-            securable_type="metastore",
-            full_name=metastore_id,
-            changes=[PermissionsChange(principal=client_id, add=[Privilege.CREATE_CATALOG])],
-        )
-        emit(f"GRANTED workspace {workspace_id}: CREATE_CATALOG on metastore {metastore_id}")
+        if cfg.target_catalog:
+            try:
+                w.grants.update(
+                    securable_type="catalog",
+                    full_name=cfg.target_catalog,
+                    changes=[PermissionsChange(
+                        principal=client_id,
+                        add=[Privilege.MANAGE, Privilege.APPLY_TAG],
+                    )],
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"could not grant MANAGE + APPLY_TAG on catalog {cfg.target_catalog!r} "
+                    f"in workspace {workspace_id}. The bootstrap caller lacks authority or "
+                    "the catalog is unavailable; have the catalog owner grant the deployment "
+                    f"service principal {client_id!r} MANAGE and APPLY TAG."
+                ) from exc
+            emit(
+                f"GRANTED workspace {workspace_id}: MANAGE + APPLY_TAG on catalog "
+                f"{cfg.target_catalog}"
+            )
+        else:
+            metastore_id = str(_value(w.metastores.current(), "metastore_id"))
+            w.grants.update(
+                securable_type="metastore",
+                full_name=metastore_id,
+                changes=[PermissionsChange(
+                    principal=client_id, add=[Privilege.CREATE_CATALOG]
+                )],
+            )
+            emit(
+                f"GRANTED workspace {workspace_id}: CREATE_CATALOG on metastore "
+                f"{metastore_id}"
+            )
         w.api_client.do(
             "PATCH",
             f"/api/2.0/permissions/serving-endpoints/{cfg.model_endpoint}",
@@ -231,6 +263,7 @@ def main(argv: list[str] | None = None) -> int:
         yes=args.yes,
         rotate_secret=args.rotate_secret,
         model_endpoint=args.model_endpoint,
+        target_catalog=args.target_catalog,
     )
     try:
         return bootstrap(cfg)
