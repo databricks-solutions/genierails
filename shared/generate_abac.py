@@ -910,7 +910,14 @@ def fetch_tables_from_genie_space(
             # GET is gated behind Partner Powered AI on new workspaces.
             # PATCH is not gated and returns serialized_space in its response.
             print(f"  GET blocked by Partner Powered AI — falling back to PATCH...")
-            resp = _fetch_via_patch_fallback(w, space_id)
+            try:
+                resp = _fetch_via_patch_fallback(w, space_id)
+            except Exception as patch_error:
+                print(
+                    f"  WARNING: Could not reach Genie agent {space_id} via "
+                    f"PATCH fallback: {patch_error}"
+                )
+                return [], {}, ""
             _used_patch_fallback = True
         else:
             print(f"  WARNING: Could not reach Genie agent {space_id}: {e}")

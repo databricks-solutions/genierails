@@ -7,6 +7,7 @@ relevant autofix function, and asserts the expected outcome.
 import re
 import sys
 import inspect
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -545,6 +546,49 @@ genie_space_configs = {
 
         assert (out_dir / "spaces" / "finance_analytics" / "abac.auto.tfvars").exists()
         assert (out_dir / "spaces" / "clinical_analytics" / "abac.auto.tfvars").exists()
+
+
+class TestGenieFetchFailureIsolation:
+
+    def test_patch_fallback_failure_does_not_block_later_spaces(self, monkeypatch, capsys):
+        """One broken fallback is warning-only and the next agent is still fetched."""
+        calls = []
+
+        class FakeApiClient:
+            def do(self, method, path, **kwargs):
+                space_id = path.rsplit("/", 1)[-1]
+                calls.append((method, space_id))
+                if space_id == "broken":
+                    if method == "GET":
+                        raise RuntimeError("Partner Powered AI is unavailable")
+                    raise RuntimeError("PATCH endpoint failed")
+                return {
+                    "title": "Healthy agent",
+                    "serialized_space": json.dumps({}),
+                }
+
+        class FakeWorkspaceClient:
+            def __init__(self, **kwargs):
+                self.api_client = FakeApiClient()
+
+        monkeypatch.setattr(generate_abac, "configure_databricks_env", lambda _: None)
+        monkeypatch.setattr(
+            sys.modules["databricks.sdk"], "WorkspaceClient", FakeWorkspaceClient
+        )
+
+        spaces = ["broken", "healthy"]
+        governed = []
+        for space_id in spaces:
+            tables, config, title = generate_abac.fetch_tables_from_genie_space(
+                space_id, {}, quick_check_only=True
+            )
+            if title:
+                governed.append(space_id)
+
+        assert governed == ["healthy"]
+        assert ("PATCH", "broken") in calls
+        assert ("GET", "healthy") in calls
+        assert "WARNING: Could not reach Genie agent broken via PATCH fallback" in capsys.readouterr().out
 
 
 class TestExtractCodeBlocks:

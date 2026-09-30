@@ -94,14 +94,33 @@ locals {
   #
   # When name is omitted (empty string), genie_space_id is used as the key
   # directly — this is the common case when attaching to an existing space.
+  # Preserve that legacy key for the first occurrence.  If another space has
+  # the same sanitized key, disambiguate it with its stable existing-space ID,
+  # or with its list index when it has not been created yet.  The "--" separator
+  # cannot occur in a sanitized name.  Thus ordinary deployments keep their
+  # current resource addresses while collisions cannot overwrite an entry in
+  # this map.
   #
   # The name is also used as the default Genie agent title when genie_space_configs
   # does not set an explicit title.
   merged_spaces = {
-    for s in local.effective_spaces :
-    (s.name != ""
-      ? trim(replace(lower(s.name), "/[^a-z0-9]+/", "_"), "_")
-      : s.genie_space_id
+    for idx, s in local.effective_spaces :
+    (length([
+      for prior_idx, prior in local.effective_spaces : prior
+      if prior_idx < idx && (
+        prior.name != ""
+        ? trim(replace(lower(prior.name), "/[^a-z0-9]+/", "_"), "_")
+        : prior.genie_space_id
+        ) == (
+        s.name != ""
+        ? trim(replace(lower(s.name), "/[^a-z0-9]+/", "_"), "_")
+        : s.genie_space_id
+      )
+      ]) == 0
+      ? (s.name != ""
+        ? trim(replace(lower(s.name), "/[^a-z0-9]+/", "_"), "_")
+      : s.genie_space_id)
+      : "${s.name != "" ? trim(replace(lower(s.name), "/[^a-z0-9]+/", "_"), "_") : s.genie_space_id}--${s.genie_space_id != "" ? s.genie_space_id : idx}"
       ) => {
       name             = s.name != "" ? s.name : s.genie_space_id
       genie_space_id   = s.genie_space_id
