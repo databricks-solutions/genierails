@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timezone
 
-from evidence_report import assemble_report, configured_tables, main, render_markdown, write_report
+from evidence_report import assemble_report, collect_live_state, configured_tables, main, render_markdown, write_report
 
 
 COL = {"catalog": "main", "schema": "sales", "table": "customers", "column": "email"}
@@ -83,3 +83,95 @@ tag_assignments = [{ entity_type = "columns", entity_name = "main.hr.people.ssn"
     assert configured_tables(tmp_path) == [
         "main.hr.people", "main.sales.orders", "main.support.tickets"
     ]
+
+
+def test_live_collector_uses_information_schema_mask_and_filter_columns(monkeypatch):
+    statements = []
+
+    class Response:
+        statement_id = "statement-1"
+        status = type("Status", (), {"state": "SUCCEEDED"})()
+
+        def __init__(self, rows):
+            self.result = type("Result", (), {"data_array": rows})()
+
+    class Execution:
+        def execute_statement(self, *, statement, warehouse_id, wait_timeout):
+            statements.append(statement)
+            rows = [["main", "sales", "customers", "email"]] if "information_schema.columns WHERE" in statement else []
+            return Response(rows)
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.statement_execution = Execution()
+
+    monkeypatch.setattr("databricks.sdk.WorkspaceClient", Client)
+    collect_live_state([COL], ["main.sales.customers"], "warehouse-1")
+
+    mask_sql = next(sql for sql in statements if "information_schema.column_masks" in sql)
+    filter_sql = next(sql for sql in statements if "information_schema.row_filters" in sql)
+    assert "table_catalog" in mask_sql and "mask_name" in mask_sql
+    assert "catalog_name" not in mask_sql and "mask_catalog" not in mask_sql
+    assert "table_catalog" in filter_sql and "filter_name" in filter_sql
+    assert "catalog_name" not in filter_sql and "filter_catalog" not in filter_sql
+
+
+def test_live_collector_uses_catalog_scoped_column_privileges(monkeypatch):
+    statements = []
+
+    class Response:
+        statement_id = "statement-1"
+        status = type("Status", (), {"state": "SUCCEEDED"})()
+
+        def __init__(self, rows):
+            self.result = type("Result", (), {"data_array": rows})()
+
+    class Execution:
+        def execute_statement(self, *, statement, warehouse_id, wait_timeout):
+            statements.append(statement)
+            if "information_schema.columns WHERE" in statement:
+                rows = [["odd`catalog", "sales", "customers", "email"]]
+            elif statement.startswith("SHOW TABLES"):
+                rows = [["information_schema", "column_privileges", "false"]]
+            else:
+                rows = []
+            return Response(rows)
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.statement_execution = Execution()
+
+    monkeypatch.setattr("databricks.sdk.WorkspaceClient", Client)
+    collect_live_state([COL], ["odd`catalog.sales.customers"], "warehouse-1")
+
+    privilege_sql = next(sql for sql in statements if "information_schema.column_privileges" in sql)
+    assert "FROM `odd``catalog`.information_schema.column_privileges" in privilege_sql
+    assert "system.information_schema.column_privileges" not in privilege_sql
+
+
+def test_live_collector_tolerates_missing_column_privileges(monkeypatch):
+    statements = []
+
+    class Response:
+        statement_id = "statement-1"
+        status = type("Status", (), {"state": "SUCCEEDED"})()
+
+        def __init__(self, rows):
+            self.result = type("Result", (), {"data_array": rows})()
+
+    class Execution:
+        def execute_statement(self, *, statement, warehouse_id, wait_timeout):
+            statements.append(statement)
+            rows = [["main", "sales", "customers", "email"]] if "information_schema.columns WHERE" in statement else []
+            return Response(rows)
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.statement_execution = Execution()
+
+    monkeypatch.setattr("databricks.sdk.WorkspaceClient", Client)
+    state = collect_live_state([COL], ["main.sales.customers"], "warehouse-1")
+
+    assert state["grants"] == []
+    assert any(sql == "SHOW TABLES IN `main`.information_schema" for sql in statements)
+    assert not any(".column_privileges WHERE" in sql for sql in statements)

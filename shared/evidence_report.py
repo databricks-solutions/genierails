@@ -176,6 +176,10 @@ def _sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _sql_identifier(value: str) -> str:
+    return "`" + value.replace("`", "``") + "`"
+
+
 def collect_live_state(columns: list[dict[str, str]], tables: list[str], warehouse_id: str) -> dict[str, list[dict[str, Any]]]:
     """Read live state through the SDK; called only in explicitly enabled integration mode."""
     if not tables:
@@ -205,14 +209,22 @@ def collect_live_state(columns: list[dict[str, str]], tables: list[str], warehou
         return {name: [] for name in ("columns", "classifications", "tags", "masks", "policies", "grants")}
     predicate = "concat(table_catalog, '.', table_schema, '.', table_name, '.', column_name) IN (" + keys + ")"
     tag_rows = query("SELECT catalog_name, schema_name, table_name, column_name, tag_name, tag_value FROM system.information_schema.column_tags WHERE concat(catalog_name, '.', schema_name, '.', table_name, '.', column_name) IN (" + keys + ")")
-    mask_rows = query("SELECT catalog_name, schema_name, table_name, column_name, concat(mask_catalog, '.', mask_schema, '.', mask_name) FROM system.information_schema.column_masks WHERE concat(catalog_name, '.', schema_name, '.', table_name, '.', column_name) IN (" + keys + ")")
-    grant_rows = query("SELECT table_catalog, table_schema, table_name, column_name, grantee, privilege_type FROM system.information_schema.column_privileges WHERE " + predicate)
+    mask_rows = query("SELECT table_catalog, table_schema, table_name, column_name, mask_name FROM system.information_schema.column_masks WHERE concat(table_catalog, '.', table_schema, '.', table_name, '.', column_name) IN (" + keys + ")")
+    # COLUMN_PRIVILEGES is optional in Databricks information_schema. Discover it
+    # per catalog rather than assuming the system-wide relation exists (Azure
+    # workspaces commonly expose no column-level privilege relation at all).
+    grant_rows = []
+    for catalog in sorted({key.split(".")[0] for key in tables}):
+        information_schema = _sql_identifier(catalog) + ".information_schema"
+        relations = query("SHOW TABLES IN " + information_schema)
+        if any(len(row) > 1 and str(row[1]).lower() == "column_privileges" for row in relations):
+            grant_rows.extend(query("SELECT table_catalog, table_schema, table_name, column_name, grantee, privilege_type FROM " + information_schema + ".column_privileges WHERE " + predicate))
     table_grant_rows = query("SELECT table_catalog, table_schema, table_name, grantee, privilege_type FROM system.information_schema.table_privileges WHERE concat(table_catalog, '.', table_schema, '.', table_name) IN (" + table_key_sql + ")")
     schema_keys = sorted({".".join(key.split(".")[:2]) for key in tables})
     catalog_keys = sorted({key.split(".")[0] for key in tables})
     schema_grant_rows = query("SELECT catalog_name, schema_name, grantee, privilege_type FROM system.information_schema.schema_privileges WHERE concat(catalog_name, '.', schema_name) IN (" + ", ".join(_sql_literal(key) for key in schema_keys) + ")")
     catalog_grant_rows = query("SELECT catalog_name, grantee, privilege_type FROM system.information_schema.catalog_privileges WHERE catalog_name IN (" + ", ".join(_sql_literal(key) for key in catalog_keys) + ")")
-    policy_rows = query("SELECT catalog_name, schema_name, table_name, concat(filter_catalog, '.', filter_schema, '.', filter_name) FROM system.information_schema.row_filters WHERE concat(catalog_name, '.', schema_name, '.', table_name) IN (" + table_key_sql + ")")
+    policy_rows = query("SELECT table_catalog, table_schema, table_name, filter_name FROM system.information_schema.row_filters WHERE concat(table_catalog, '.', table_schema, '.', table_name) IN (" + table_key_sql + ")")
 
     base = lambda row: dict(zip(("catalog", "schema", "table", "column"), row[:4]))
     result: dict[str, list[dict[str, Any]]] = {
