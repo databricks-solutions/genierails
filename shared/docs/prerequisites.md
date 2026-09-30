@@ -86,7 +86,7 @@ Ownership is split: the **IdP owns groups and membership**; **GenieRails owns gr
 
 ### Service Principal
 
-GenieRails runs as a **service principal (SP)**. It needs:
+GenieRails runs **as a service principal (SP)** — you put its OAuth credentials in `auth.auto.tfvars`, and Databricks sees that SP for every operation (`generate` / `apply` / `certify` / `verify-access`). **The person running GenieRails needs no Databricks roles of their own** — only access to the SP's OAuth secret (see [Credentials](#credentials)) and network access to the account and workspace. The SP itself needs:
 
 | Role / authority | Scope | Why |
 |---|---|---|
@@ -111,7 +111,7 @@ GenieRails runs as a **service principal (SP)**. It needs:
    - **Greenfield** (no `TARGET_CATALOG`) — it grants metastore `CREATE CATALOG` instead, so the SP can create and own its own catalog.
    - `make destroy` revokes the Terraform-managed catalog grants, so the SP loses `MANAGE`/`APPLY TAG` until you re-run `bootstrap-sp` or the owner re-grants them.
 
-> **Genie-only mode:** if you only need Genie agents without ABAC governance, set `genie_only = true` in `env.auto.tfvars` — this needs only **Workspace Admin** (no Account Admin or Metastore Admin).
+> **Genie-only mode:** if you only need Genie agents without ABAC governance, set `genie_only = true` in `env.auto.tfvars`. **Workspace Admin** is sufficient (no Account Admin or Metastore Admin); for least privilege the SP can instead have workspace **USER** + a Databricks SQL entitlement, **CAN USE** on a bring-your-own warehouse, and read access to the target tables.
 
 ### Credentials
 
