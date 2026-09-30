@@ -71,7 +71,13 @@ Just three things are import-specific as you go:
 
 ## Multi-agent import
 
-Import several agents in one `make generate` by listing them all with `genie_space_id`; each is fetched independently, and all are governed and promotable together.
+List several agents in one `make generate`, each with its own `genie_space_id` — each is fetched independently, and all are governed and promotable together: their tables merge into one classification + coverage footprint, and each agent keeps its own per-space `CAN_RUN` ACLs.
+
+A few multi-agent specifics:
+
+- **Verify they all imported.** A failed or slow fetch for one agent is warning-only — generation continues with the rest — so confirm every agent's tables appear before you proceed.
+- **Persist the union of tables.** As in Step 1, copy the discovered `uc_tables` into config for *all* agents — grants and masks deploy from config, not from the in-memory discovery.
+- **Promotion resets per-agent warehouses.** `make promote` creates fresh prod agents and clears each space's `sql_warehouse_id` (and its dev `genie_space_id`); set prod warehouse ids as needed.
 
 ## Good to know
 
