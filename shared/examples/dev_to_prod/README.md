@@ -6,7 +6,7 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 
 ## The idea
 
-Databricks' built-in classifier samples your column values *inside your own workspace* and labels which columns hold sensitive types (emails, SSNs, card numbers) — it records only the labels, never the values. GenieRails turns those labels into protections — column masks and access rules — as code, and a **coverage check refuses to release the agent** until every sensitive column is covered. You rehearse the whole thing safely in **dev**, then do it for real in **prod**. (Full mental model: [How it works](../../../README.md#how-it-works).)
+Databricks' built-in classifier samples your column values *inside your own workspace* and tags which columns hold sensitive types (emails, SSNs, card numbers) — it records only the tags, never the values. GenieRails turns those tags into protections — column masks and access rules — as code, and a **coverage check refuses to release the agent** until every sensitive column is covered. You rehearse the whole thing safely in **dev**, then do it for real in **prod**. (Full mental model: [How it works](../../../README.md#how-it-works).)
 
 ---
 
@@ -104,14 +104,14 @@ make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_finance=prod_fin
 <details>
 <summary><strong>What promote carries vs. leaves behind</strong> (rules travel, facts don't)</summary>
 
-It carries the **rules** — the mapping, masking functions, access/row-filter policies, and group→tier mapping — and **leaves dev's tag assignments behind** (which columns got labelled is a *fact* about dev's data; prod re-derives its own in Phase 3).
+It carries the **rules** — the mapping, masking functions, access/row-filter policies, and group→tier mapping — and **leaves dev's tag assignments behind** (which columns got tagged is a *fact* about dev's data; prod re-derives its own in Phase 3).
 </details>
 
 ---
 
 ## Phase 3 — Prod: scan real data
 
-**Goal —** let production scan its *own* real data and label its sensitive columns — the true facts land here (real customer PII only exists in prod).
+**Goal —** let production scan its *own* real data and tag its sensitive columns — the true facts land here (real customer PII only exists in prod).
 
 Promotion (Phase 2) already created `envs/prod/` with a template `auth.auto.tfvars` — just fill it in (prod SP `client_id`/`client_secret` + prod workspace host/id), then turn on prod's scanner — in the **Databricks UI** on the prod catalog, or as code:
 
@@ -143,7 +143,7 @@ make certify ENV=prod   # one command: derive-assignments → coverage-gate → 
 
 **If the gate fails or `audit-rulebook` reports drift** — prod surfaced a sensitive tag your promoted rules don't cover (a type the classifier found only in prod, or a rule dropped in promotion). This is a **rule change — made in dev, never hand-edited in prod**. Loop back:
 
-1. **Scaffold the missing mappings** — `make scaffold-treatments ENV=prod` adds a **safe default** (full redaction, marked `REVIEW`) for each label prod surfaced, so you don't hand-edit anything. Then **review each** — keep the redaction, or set a type-appropriate mask. This changes the shared *rulebook* (not prod's live state), so you validate it in dev and re-promote below.
+1. **Scaffold the missing mappings** — `make scaffold-treatments ENV=prod` adds a **safe default** (full redaction, marked `REVIEW`) for each tag prod surfaced, so you don't hand-edit anything. Then **review each** — keep the redaction, or set a type-appropriate mask. This changes the shared *rulebook* (not prod's live state), so you validate it in dev and re-promote below.
 2. **Re-validate in dev:** `make generate ENV=dev` → `make coverage-gate ENV=dev`.
 3. **Re-promote:** `make promote …` (carries the updated rules to prod — same command as [Phase 2](#phase-2--promote-the-rules-to-prod)).
 4. **Re-run this phase:** `make certify ENV=prod`.

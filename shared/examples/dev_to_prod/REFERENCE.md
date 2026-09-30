@@ -27,7 +27,7 @@ So "expose last" isn't a policy you hope holds — there is simply no `SELECT` a
 
 (So the `data_access` Terraform layer covers both *access* and *masking*; the `workspace` layer is the agent itself.)
 
-**One mask per column.** The single enforcement key is **`gr_treatment`** — GenieRails derives exactly **one** value per column from its `class.*` labels (strictest label wins; a free-text column with multiple labels escalates to full redaction), so Unity Catalog's "only one mask may apply per column" rule is never violated.
+**One mask per column.** The single enforcement key is **`gr_treatment`** — GenieRails derives exactly **one** value per column from its `class.*` tags (strictest tag wins; a free-text column with multiple tags escalates to full redaction), so Unity Catalog's "only one mask may apply per column" rule is never violated.
 
 **Why prod keeps the classifier's tags.** The Terraform resource that records tag assignments carries `ignore_changes = all` — a standard Terraform *lifecycle* setting meaning "once these exist, don't change or delete them." That lets the **classifier own the `class.*` tags** in prod: when a scan writes a tag, Terraform leaves it alone instead of reverting it. The classifier owns the tags; GenieRails owns the rules.
 
@@ -41,7 +41,7 @@ So "expose last" isn't a policy you hope holds — there is simply no `SELECT` a
 | `make enable-classification ENV=<e>` | 1/3 | Turn on UC Data Classification + auto-tagging for your tables |
 | `make generate ENV=<e> GENERATE_ARGS='--groups "..."'` | 1 | (dev) Draft masks + access rules from the model and derive one `gr_treatment`/column from native `class.*` (fail-closed) |
 | `make derive-assignments ENV=<e>` | 4 | (prod) Re-derive **only** `tag_assignments` from live `class.*`, reusing the promoted rules unchanged — no model call (fail-closed; requires a prior `promote`) |
-| `make coverage-gate ENV=<e>` | 1/4 | **Block** if any labelled-sensitive column has no mask (the "says NO" check) |
+| `make coverage-gate ENV=<e>` | 1/4 | **Block** if any tagged-sensitive column has no mask (the "says NO" check) |
 | `make validate-generated ENV=<e>` | 1/4 | Static validation incl. the one-mask-per-column guard |
 | `make apply ENV=<e>` | 1/5 | Full stack (account → data_access → workspace; auto-promotes same-env first); creates the Genie agent; releases gated access when `business_access_enabled=true` |
 | `make apply-governance ENV=<e>` | 4 | Enforcement only (account + data_access); no Genie agent |
@@ -60,8 +60,8 @@ Key config & code: [`treatment_config.json`](../../treatment_config.json) (the `
 - **access tier** — a group of users who should see data at the same level (e.g. full / masked / least). You map one IdP group to each tier.
 - **ABAC (attribute-based access control)** — masks/filters that apply based on a column's *tag*, not its name — so a rule covers any column carrying that tag.
 - **`CAN_RUN` / `CAN_USE`** — Databricks permissions: `CAN_RUN` lets a group open and run a Genie agent (released by the exposure gate); `CAN_USE` lets a group run a SQL warehouse (you grant it yourself).
-- **`class.*` tag** — a label Unity Catalog's classifier writes on a column it finds sensitive (e.g. `class.email_address`).
-- **coverage gate** — `make coverage-gate`; the blocking check that fails if any labelled-sensitive column has no covering mask/policy. The "tool says NO" step.
+- **`class.*` tag** — a tag Unity Catalog's classifier writes on a column it finds sensitive (e.g. `class.email_address`).
+- **coverage gate** — `make coverage-gate`; the blocking check that fails if any tagged-sensitive column has no covering mask/policy. The "tool says NO" step.
 - **drift** — a gap between what's tagged and what's protected; `audit-rulebook` reports it.
 - **entitlement / workspace assignment** — what lets a group *into* a workspace at all (applied every apply; harmless without a data grant).
 - **evidence** — the compliance record `make evidence` produces (what was scanned, tagged, protected, and approved).
