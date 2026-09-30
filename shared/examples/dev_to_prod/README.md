@@ -45,7 +45,7 @@ Then edit three files:
 
 **Choose one source for `genie_spaces` and `uc_tables`:**
 
-- **Existing Genie agent** — follow [From UI to Production](../../docs/from-ui-to-production.md) to import the agent and discover its tables.
+- **Existing Genie agent** — follow [Import a Genie Agent from UI into Code](../../docs/import-genie-agent-from-ui.md) to import the agent and discover its tables.
 - **No agent or tables yet** — use the optional [Sample Environment Setup](SAMPLE_ENV.md) to create them.
 
 Either path provides the values to add to `envs/dev/env.auto.tfvars`.

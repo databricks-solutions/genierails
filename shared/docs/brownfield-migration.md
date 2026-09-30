@@ -8,7 +8,7 @@ A "brownfield" environment has existing governance resources (groups, tag polici
 
 Two adoptions to keep straight:
 - **Brownfield adoption** (this guide) = pull existing *governance resources* + Terraform state under management.
-- **[From UI to Production](from-ui-to-production.md)** = import an existing Genie *agent's content*. They're complementary; neither replaces the other.
+- **[Import a Genie Agent from UI into Code](import-genie-agent-from-ui.md)** = import an existing Genie *agent's content*. They're complementary; neither replaces the other.
 
 Going forward, sensitivity comes from **native UC classification** (`class.*`), GenieRails derives one `gr_treatment` per column, and `make coverage-gate` must pass with `business_access_enabled = false` before you open access — adopting brownfield state does not bypass those gates.
 

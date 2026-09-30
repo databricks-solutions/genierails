@@ -52,7 +52,7 @@ Starting from a specific point? These entry guides feed into the dev-to-prod wal
 
 | Starting point | You have... | Guide |
 |---|---|---|
-| **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](../shared/docs/from-ui-to-production.md) — imports your agent, then follow the dev-to-prod walkthrough |
+| **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [Import a Genie Agent from UI into Code](../shared/docs/import-genie-agent-from-ui.md), then follow the dev-to-prod walkthrough |
 | **I'm starting from scratch** | Tables in Unity Catalog, no Genie agent yet | [Quickstart](../shared/docs/quickstart.md) |
 
 ---
@@ -61,7 +61,7 @@ Starting from a specific point? These entry guides feed into the dev-to-prod wal
 
 - [Azure Prerequisites](docs/azure-prerequisites.md) — Azure-specific resource setup, RBAC roles, storage accounts
 - [Dev-to-Prod Walkthrough](../shared/examples/dev_to_prod/) — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion)
-- [From UI to Production](../shared/docs/from-ui-to-production.md) — import your existing Genie agent, then follow the dev-to-prod walkthrough
+- [Import a Genie Agent from UI into Code](../shared/docs/import-genie-agent-from-ui.md) — import your existing agent, then follow the dev-to-prod walkthrough
 - [Quickstart](../shared/docs/quickstart.md) — create a Genie agent from scratch
 - [Playbook](../shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios
 - [Architecture](../shared/docs/architecture.md) — layers, artifact ownership, config files, Genie agent lifecycle

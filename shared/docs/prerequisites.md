@@ -241,7 +241,7 @@ Confirm the required tools are present:
 make --version && python3 --version && terraform --version && git --version
 ```
 
-**Done when —** all four commands exit successfully. Then follow the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)** to clone the repository and create your first environment. Already have a Genie agent built in the Databricks UI? [Import it into code first](from-ui-to-production.md), then follow the same walkthrough.
+**Done when —** all four commands exit successfully. Then follow the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)** to clone the repository and create your first environment. Already have a Genie agent built in the Databricks UI? [Import it into code first](import-genie-agent-from-ui.md), then follow the same walkthrough.
 
 </details>
 

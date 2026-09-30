@@ -6,7 +6,7 @@ GenieRails puts Genie onboarding on rails: Unity Catalog's classifier decides wh
 
 | Starting point | You have... | Guide |
 |---|---|---|
-| **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](from-ui-to-production.md) |
+| **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [Import a Genie Agent from UI into Code](import-genie-agent-from-ui.md) |
 | **I'm starting from scratch** | Tables in Unity Catalog, no Genie agent yet | [Quickstart](quickstart.md) |
 
 > Both routes converge on the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)** — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion).
@@ -75,7 +75,7 @@ make promote SOURCE_ENV=dev DEST_ENV=prod \
 - The promote command auto-detects all source catalog names from `genie_spaces[*].uc_tables`
 - Every detected catalog must have a mapping — the command fails clearly if any are missing
 
-> If you followed [From UI to Production](from-ui-to-production.md), promotion was already covered in Step 4.
+> If you imported an existing agent with [Import a Genie Agent from UI into Code](import-genie-agent-from-ui.md), continue with the same promotion steps below.
 
 ### Country and industry overlays
 

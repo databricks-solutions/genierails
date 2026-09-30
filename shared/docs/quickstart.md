@@ -1,6 +1,6 @@
 # Quickstart: Create a Genie agent from Scratch
 
-> **Already have a Genie agent?** Most users do — see [From UI to Production](from-ui-to-production.md) instead.
+> **Already have a Genie agent?** Most users do — [import it from the UI into code](import-genie-agent-from-ui.md) first.
 
 > **Using country or industry overlays?** Add `COUNTRY=ANZ` and/or `INDUSTRY=financial_services` to your `make generate` command for region-specific masking. See [Country Overlays](country-overlays.md) and [Industry Overlays](industry-overlays.md).
 
@@ -123,7 +123,7 @@ Each entry in `genie_spaces` operates in one of two modes based on whether `geni
 | `genie_space_id` | What the tool does |
 | --- | --- |
 | **empty** (default) | Creates and fully manages the space: title, benchmarks, instructions, group ACLs, full lifecycle. Requires `uc_tables`. |
-| **set** | Attaches to the existing space. Never creates or deletes it. See [From UI to Production](from-ui-to-production.md). |
+| **set** | Attaches to the existing space. Never creates or deletes it. See [Import a Genie Agent from UI into Code](import-genie-agent-from-ui.md). |
 
 ---
 
