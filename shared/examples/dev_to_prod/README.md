@@ -6,27 +6,19 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 
 <a id="prerequisites--gather-required-values"></a>
 <details>
-<summary><strong>Prerequisites — Gather required values</strong></summary>
+<summary><strong>Before you start — Complete checks and gather inputs</strong></summary>
 
-Gather these once — every phase reuses them:
+First complete the shared **[Prerequisites checklist](../../docs/prerequisites.md)**. It is the single source of truth for required software, network access, Databricks features, IdP group sync, Service Principal authority, credentials, and local tool checks.
+
+Then gather the inputs specific to this walkthrough:
 
 | Value | What it is / where to find it |
 |---|---|
-| **Deploying Service Principal** (`client_id` + `client_secret`) | The identity GenieRails runs as. See [Prerequisites → Service Principal](../../docs/prerequisites.md#service-principal) to create it and grant its roles. |
 | **Dev / prod catalog names** | Your Unity Catalog catalogs, e.g. `dev_finance` / `prod_finance`. |
 | **SQL warehouse id** (per Genie agent) | The serverless warehouse the Genie agent runs its SQL on — an existing warehouse's id, **or leave blank** to auto-create one. Set it on the agent's `genie_spaces` entry; agents can also share the environment-level warehouse as a fallback. |
 | **Curated Genie agent** | The agent you're shipping. In the Genie UI, open the agent, click **Configure**, and copy the **Agent ID** from **About this agent**. It is also in the URL (`.../genie/rooms/01ef7b3c2a4d5e6f`) and goes in `genie_spaces`. |
-| **IdP group names** (one per *access tier*) | Your existing IdP-synced groups (Entra ID / Okta via AIM/SCIM), ordered most- to least-privileged. For example: `payments_ops` = full/raw access; `regional_analysts` = only their region, with sensitive columns masked; `viewers` = least-privileged access, with every sensitive column masked and any applicable row restrictions. These are illustrative names—the generated policies define the actual access. See [Prerequisites → group sync](../../docs/prerequisites.md#identity-provider-group-sync-required). |
+| **Access-tier group names** | Choose the IdP-synced groups from the shared prerequisite check, ordered most- to least-privileged. Example: `payments_ops` = full/raw; `regional_analysts` = region-scoped + masked; `viewers` = least-privileged + all sensitive columns masked. The generated policies define the actual access. |
 | **Row-pairing key** (`VERIFY_KEY_COLUMN`) | A stable, **non-sensitive** id column present on your masked tables (e.g. `customer_id`) — `verify-access` uses it to line up rows. [Details](../../docs/effective-access-verification.md). |
-| **UC Data Classification** | Enable it per env — in the **Databricks UI** (recommended) or as code (Phase 1). Docs: [AWS](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/data-classification). |
-
-> **Enabling classification in the UI (recommended) needs nothing extra.** Only the as-code path may first need a serverless usage policy.
-
-<details><summary>Serverless usage policy — only if you enable classification <em>as code</em></summary>
-
-`make enable-classification` applies `databricks_data_classification_catalog_config`, which can fail with `Usage policy ID must not be empty` on a workspace that has no serverless usage (budget) policy ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)). The **Databricks UI path avoids this**. If you do enable it as code, first create/attach a serverless usage policy — per Databricks docs, **creating one requires Workspace Admin** (non-admins: *Serverless usage policy: Manager*). Docs: [AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies).
-
-</details>
 
 </details>
 
@@ -39,9 +31,9 @@ Gather these once — every phase reuses them:
 **Goal —** create the local config folders and fill in your creds + settings. Nothing here touches Databricks yet.
 
 ```bash
-cd aws                      # or: cd azure
-make setup                  # prepares the cloud root (pins the Terraform provider, etc.)
-make init-env ENV=dev       # creates the local envs/dev/ folder + template config files (no Databricks calls)
+git clone https://github.com/databricks-solutions/genierails.git
+cd genierails/aws           # or: cd genierails/azure
+make setup ENV=dev          # creates envs/dev/ config templates (local only — no Databricks calls)
 cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars
 ```
 
@@ -68,13 +60,13 @@ Then edit three files:
 **1a. Turn on the scanner.** Enable UC Data Classification on your catalog in the **Databricks UI** — Catalog Explorer → your catalog → *Enable* classification. The scan just runs; nothing is tagged until you opt in (1b). Keep `enable_classification = true` in your `env.auto.tfvars` — the *fail-closed signal* that makes generation (1c) abort rather than guess if classification results aren't readable.
 
 <details>
-<summary>Prefer to enable it as code (reproducible / CI)?</summary>
+<summary><strong>Alternative — Enable classification as code</strong></summary>
 
 ```bash
 make enable-classification ENV=dev   # scans only — nothing is tagged until you opt in (1b)
 ```
 
-The as-code path applies the `databricks_data_classification_catalog_config` resource, which on a brand-new serverless workspace can hit the usage-policy provider issue noted in [Prerequisites](../../docs/prerequisites.md#service-principal); the UI path above avoids it.
+The as-code path applies the `databricks_data_classification_catalog_config` resource. On a workspace without a serverless usage policy it can fail with `Usage policy ID must not be empty` ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)); the UI path above avoids this issue. If needed, create or attach a serverless usage policy first. Creating one requires Workspace Admin (non-admins need *Serverless usage policy: Manager*). Docs: [AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies).
 </details>
 
 **1b. Review detections, opt into tags, then confirm they landed.** The first scan is asynchronous (minutes to ~24h) — kick it off, grab a coffee ☕, and come back. Two easy steps, mostly in the Databricks UI:

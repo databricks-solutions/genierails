@@ -231,7 +231,7 @@ You'll need these values for `auth.auto.tfvars`:
 
 <a id="quick-check"></a>
 <details>
-<summary><strong>Check 8 — Local setup completes successfully</strong></summary>
+<summary><strong>Check 8 — Required local tools respond successfully</strong></summary>
 
 **Requirements:**
 
@@ -241,17 +241,7 @@ Confirm the required tools are present:
 make --version && python3 --version && terraform --version && git --version
 ```
 
-Then clone the repo and scaffold your first environment:
-
-```bash
-git clone https://github.com/databricks-solutions/genierails.git
-cd genierails/aws          # or: cd genierails/azure
-make setup ENV=dev         # creates envs/dev/ config templates (local only — no Databricks calls)
-```
-
-`make setup` writes the `envs/dev/auth.auto.tfvars` and `env.auto.tfvars` templates — fill in your SP credentials (see [Credentials](#credentials)) and your tables / warehouse / Genie space.
-
-**Next: follow the [Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)** — the end-to-end champion flow. Its Phase 1 runs `make generate` → `make validate-generated` → `make coverage-gate`, where the `[PASS]` checks appear against your generated config. Already have a Genie agent built in the Databricks UI? [Import it into code first](from-ui-to-production.md), then follow the same walkthrough.
+**Done when —** all four commands exit successfully. Then follow the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)** to clone the repository and create your first environment. Already have a Genie agent built in the Databricks UI? [Import it into code first](from-ui-to-production.md), then follow the same walkthrough.
 
 </details>
 
