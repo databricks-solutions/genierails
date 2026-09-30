@@ -86,6 +86,11 @@ Before continuing:
    environment fact: development's discovered file is not promoted, and the
    production file is populated by `make generate ENV=prod`.
 
+</details>
+
+---
+
+<a id="details--imported-content"></a>
 <details>
 <summary><strong>Details — Imported content</strong></summary>
 
@@ -94,13 +99,14 @@ GenieRails imports the agent's title, description, tables, instructions, sample 
 This is a supported projection, not a byte-for-byte copy. API metadata, object IDs, and some comments are not preserved. Governance is not imported: groups, tag policies, masks, and row filters are derived from native classification.
 </details>
 
+---
+
+<a id="details--agent-lifecycle-and-drift"></a>
 <details>
 <summary><strong>Details — Agent lifecycle and drift</strong></summary>
 
 - `make destroy` does not delete an attached agent; it deletes only agents created by GenieRails.
 - After import, code is the source of truth. Re-run generation to import later UI changes.
-</details>
-
 </details>
 
 ---
