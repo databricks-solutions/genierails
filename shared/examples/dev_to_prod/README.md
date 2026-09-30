@@ -4,8 +4,9 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 
 ---
 
+<a id="prerequisites--gather-required-values"></a>
 <details>
-<summary><strong id="prerequisites--gather-required-values">Prerequisites — Gather required values</strong></summary>
+<summary><strong>Prerequisites — Gather required values</strong></summary>
 
 Gather these once — every phase reuses them:
 
@@ -31,8 +32,9 @@ Gather these once — every phase reuses them:
 
 ---
 
+<a id="phase-0--dev-set-up"></a>
 <details>
-<summary><strong id="phase-0--dev-set-up">Phase 0 — Dev: Set up</strong></summary>
+<summary><strong>Phase 0 — Dev: Set up</strong></summary>
 
 **Goal —** create the local config folders and fill in your creds + settings. Nothing here touches Databricks yet.
 
@@ -57,8 +59,9 @@ Then edit three files:
 
 ---
 
+<a id="phase-1--dev-scan-draft-and-test-rules"></a>
 <details>
-<summary><strong id="phase-1--dev-scan-draft-and-test-rules">Phase 1 — Dev: Scan, draft, and test rules</strong></summary>
+<summary><strong>Phase 1 — Dev: Scan, draft, and test rules</strong></summary>
 
 **Goal —** *rehearse* safely on dev: prove the masks fire, confirm the agent still answers, and produce a reviewable draft — off live PII. (Prod discovers what's actually sensitive later.)
 
@@ -97,8 +100,9 @@ make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id
 
 ---
 
+<a id="phase-2--prod-set-up-and-promote-rules"></a>
 <details>
-<summary><strong id="phase-2--prod-set-up-and-promote-rules">Phase 2 — Prod: Set up and promote rules</strong></summary>
+<summary><strong>Phase 2 — Prod: Set up and promote rules</strong></summary>
 
 **Goal —** create the production configuration, add its credentials and settings, and copy the reviewed rules (masks, access policies, mappings) from dev.
 
@@ -125,8 +129,9 @@ It carries the **rules** — the mapping, masking functions, access/row-filter p
 
 ---
 
+<a id="phase-3--prod-scan-real-data"></a>
 <details>
-<summary><strong id="phase-3--prod-scan-real-data">Phase 3 — Prod: Scan real data</strong></summary>
+<summary><strong>Phase 3 — Prod: Scan real data</strong></summary>
 
 **Goal —** let production scan its *own* real data and tag its sensitive columns — the true facts land here (real customer PII only exists in prod).
 
@@ -149,8 +154,9 @@ make enable-classification ENV=prod   # same as step 1a, now on prod
 
 ---
 
+<a id="phase-4--prod-prove-coverage"></a>
 <details>
-<summary><strong id="phase-4--prod-prove-coverage">Phase 4 — Prod: Prove coverage</strong></summary>
+<summary><strong>Phase 4 — Prod: Prove coverage</strong></summary>
 
 **Goal —** derive prod's protections from its own `class.*` tags, prove coverage, and deploy the enforcement (masks + access policies). The Genie agent itself isn't created yet — that's Phase 5.
 
@@ -175,8 +181,9 @@ Repeat until the gate passes and drift is clean. The agent stays uncreated and c
 
 ---
 
+<a id="phase-5--prod-release-access-and-verify"></a>
 <details>
-<summary><strong id="phase-5--prod-release-access-and-verify">Phase 5 — Prod: Release access and verify</strong></summary>
+<summary><strong>Phase 5 — Prod: Release access and verify</strong></summary>
 
 **Goal —** with coverage proven, release access, create the agent, and confirm masking live.
 
@@ -204,8 +211,9 @@ make evidence      ENV=prod                                 # writes a complianc
 
 ---
 
+<a id="phase-6--prod-maintain-coverage"></a>
 <details>
-<summary><strong id="phase-6--prod-maintain-coverage">Phase 6 — Prod: Maintain coverage</strong></summary>
+<summary><strong>Phase 6 — Prod: Maintain coverage</strong></summary>
 
 **Goal —** catch sensitive data that arrives after go-live. Run these on a schedule (the repo ships a scheduled governance job):
 
@@ -219,8 +227,9 @@ A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog gr
 
 ---
 
+<a id="reference--commands-concepts-and-glossary"></a>
 <details>
-<summary><strong id="reference--commands-concepts-and-glossary">Reference — Commands, concepts, and glossary</strong></summary>
+<summary><strong>Reference — Commands, concepts, and glossary</strong></summary>
 
 Kept out of this walkthrough so it stays scannable — all in **[REFERENCE.md](REFERENCE.md)**:
 

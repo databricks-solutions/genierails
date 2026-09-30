@@ -2,8 +2,9 @@
 
 Everything you need before running GenieRails. Work through these checks in order; each section is collapsed by default so you can see the full checklist at a glance.
 
+<a id="operating-system"></a>
 <details>
-<summary><strong id="operating-system">Check 1 — Operating system is supported</strong></summary>
+<summary><strong>Check 1 — Operating system is supported</strong></summary>
 
 **Requirements:**
 
@@ -17,8 +18,9 @@ Everything you need before running GenieRails. Work through these checks in orde
 
 ---
 
+<a id="software"></a>
 <details>
-<summary><strong id="software">Check 2 — Required local software is installed</strong></summary>
+<summary><strong>Check 2 — Required local software is installed</strong></summary>
 
 **Requirements:**
 
@@ -69,8 +71,9 @@ For integration testing (`make test-ci`), cloud-specific packages are also auto-
 
 ---
 
+<a id="network-access"></a>
 <details>
-<summary><strong id="network-access">Check 3 — Required network endpoints are reachable</strong></summary>
+<summary><strong>Check 3 — Required network endpoints are reachable</strong></summary>
 
 **Requirements:**
 
@@ -91,8 +94,9 @@ No VPN is required unless your Databricks workspace is on a private network. (`m
 
 ---
 
+<a id="required-features"></a>
 <details>
-<summary><strong id="required-features">Check 4 — Required Databricks features are enabled</strong></summary>
+<summary><strong>Check 4 — Required Databricks features are enabled</strong></summary>
 
 **Requirements:**
 
@@ -104,8 +108,9 @@ No VPN is required unless your Databricks workspace is on a private network. (`m
 
 ---
 
+<a id="identity-provider-group-sync-required"></a>
 <details>
-<summary><strong id="identity-provider-group-sync-required">Check 5 — Identity provider groups are synced</strong></summary>
+<summary><strong>Check 5 — Identity provider groups are synced</strong></summary>
 
 **Requirements:**
 
@@ -126,8 +131,9 @@ Ownership is split: the **IdP owns groups and membership**; **GenieRails owns gr
 
 ---
 
+<a id="service-principal"></a>
 <details>
-<summary><strong id="service-principal">Check 6 — Service principal has the required authority</strong></summary>
+<summary><strong>Check 6 — Service principal has the required authority</strong></summary>
 
 **Requirements:**
 
@@ -183,8 +189,9 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
 
 ---
 
+<a id="credentials"></a>
 <details>
-<summary><strong id="credentials">Check 7 — Databricks credentials and workspace values are ready</strong></summary>
+<summary><strong>Check 7 — Databricks credentials and workspace values are ready</strong></summary>
 
 **Requirements:**
 
@@ -203,8 +210,9 @@ You'll need these values for `auth.auto.tfvars`:
 
 ---
 
+<a id="cloud-specific-requirements"></a>
 <details>
-<summary><strong id="cloud-specific-requirements">Check 8 — test-ci cloud provisioning access is ready</strong></summary>
+<summary><strong>Check 8 — test-ci cloud provisioning access is ready</strong></summary>
 
 These apply **only to the integration-test provisioning harness (`make test-ci`)** — the normal flow (`make generate` / `apply` / `certify`) needs none of it, just the Databricks service principal. Expand your cloud only if you run that harness:
 
@@ -246,8 +254,9 @@ These apply **only to the integration-test provisioning harness (`make test-ci`)
 
 ---
 
+<a id="quick-check"></a>
 <details>
-<summary><strong id="quick-check">Check 9 — Local setup completes successfully</strong></summary>
+<summary><strong>Check 9 — Local setup completes successfully</strong></summary>
 
 **Requirements:**
 
