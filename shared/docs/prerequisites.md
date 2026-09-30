@@ -31,12 +31,10 @@ Everything you need before running GenieRails. Work through these checks in orde
 
 > **macOS note:** Apple's `/usr/bin/make` (and Homebrew) can be blocked by an unaccepted Xcode license — `make` then errors with a license/agreement message. If you hit that, install GNU Make another way (e.g. `conda install make`) and put it first on your `PATH`.
 
-**Auto-installed dependencies:**
-
-GenieRails auto-installs its Python packages (first `make generate` / `make apply`) and auto-downloads its Terraform providers (first `terraform init`) — nothing to install by hand for the core flow. (`make test-ci` additionally needs `pytest`; see the note below.)
-
 <details>
 <summary><strong>Details — Auto-installed dependencies</strong></summary>
+
+GenieRails auto-installs its Python packages (first `make generate` / `make apply`) and auto-downloads its Terraform providers (first `terraform init`) — nothing to install by hand for the core flow. (`make test-ci` additionally needs `pytest`; see the note below.)
 
 **Python packages** — on first `make generate` or `make apply`:
 
