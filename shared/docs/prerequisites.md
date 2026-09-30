@@ -93,6 +93,10 @@ Alternatively, an already-authorized account admin can create and grant the depl
 Review the dry-run, then replace `PLAN=1` with `YES=1` to apply. The command prints the one-time
 OAuth secret and an `auth.auto.tfvars` snippet; it cannot elevate a non-admin caller.
 
+For a **brownfield** catalog (one you already have), add `TARGET_CATALOG=<catalog>`: the SP is then granted `USE CATALOG`, `USE SCHEMA`, `MANAGE`, and `APPLY TAG` on *that catalog* (instead of metastore `CREATE CATALOG`, which it uses only for greenfield). `bootstrap-sp` runs a pre-flight first — it verifies the catalog exists and that *you* (the caller) can grant on it (you must own the catalog or metastore, or hold effective `MANAGE`); if not, it stops **before** creating the SP or minting a secret and tells you to have the catalog owner run it. One `TARGET_CATALOG` is applied to every workspace in `WORKSPACE_ID`; run `bootstrap-sp` separately for different catalogs.
+
+> Because the deploy manages these catalog grants as Terraform, `make destroy` (or removing the deployment) revokes the SP's catalog grant set — it loses `MANAGE`/`APPLY TAG` on that catalog until you re-run `bootstrap-sp` or the owner re-grants it.
+
 | Role | Scope | Required for |
 |------|-------|-------------|
 | **Account Admin** | Account | Creating groups and managing verification SPs |
