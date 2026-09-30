@@ -43,7 +43,12 @@ Then edit three files:
 - **`envs/dev/env.auto.tfvars`** — `uc_tables`, `sql_warehouse_id` (or blank), `genie_spaces`, `enable_classification = true`, `enable_auto_tagging = false`, `business_access_enabled = false`.
 - **`envs/account/env.auto.tfvars`** — set `manage_groups = false` (this flow *consumes* IdP groups; it doesn't create them). **There is one shared `envs/account/` config** used by both dev and prod — you edit it here, once.
 
-> **Where do `genie_spaces` / `uc_tables` come from?** Already built the agent in the Databricks UI → import it into code first: [From UI to Production](../../docs/from-ui-to-production.md) captures the agent *and* its tables. No agent or tables of your own yet → use the optional [Sample Environment Setup](SAMPLE_ENV.md). Either path hands you the exact values to paste above.
+**Choose one source for `genie_spaces` and `uc_tables`:**
+
+- **Existing Genie agent** — follow [From UI to Production](../../docs/from-ui-to-production.md) to import the agent and discover its tables.
+- **No agent or tables yet** — use the optional [Sample Environment Setup](SAMPLE_ENV.md) to create them.
+
+Either path provides the values to add to `envs/dev/env.auto.tfvars`.
 
 **Done when —** `ls envs/dev` shows `auth.auto.tfvars` and `env.auto.tfvars`, both filled in.
 
