@@ -86,29 +86,32 @@ Ownership is split: the **IdP owns groups and membership**; **GenieRails owns gr
 
 ### Service Principal
 
-Create a service principal (SP) in the Databricks Account Console with:
+GenieRails runs as a **service principal (SP)**. It needs:
 
-Alternatively, an already-authorized account admin can create and grant the deployment SP with
-`make bootstrap-sp ACCOUNT_PROFILE=<profile> ACCOUNT_ID=<id> WORKSPACE_ID=<id> SP_NAME=<name> PLAN=1`.
-Review the dry-run, then replace `PLAN=1` with `YES=1` to apply. The command prints the one-time
-OAuth secret and an `auth.auto.tfvars` snippet; it cannot elevate a non-admin caller.
+| Role / authority | Scope | Why |
+|---|---|---|
+| **Account Admin** | Account | Create groups; manage the temporary verification SPs |
+| **Tag Policy Creator + Manager** | Account | Create and maintain governed tag policies |
+| **Workspace Admin** | Target workspace | Deploy governance resources |
+| **Authority over the target catalog** | The catalog you govern | **Own it, or** be granted `MANAGE` + `APPLY TAG` (plus `ASSIGN` on the governed tags GenieRails applies). This lets it deploy tag assignments, masking functions, FGAC policies, and grants — and self-grant its own `USE CATALOG` / `USE SCHEMA` / `EXECUTE` / `CREATE FUNCTION`. |
 
-For a **brownfield** catalog (one you already have), add `TARGET_CATALOG=<catalog>`: the SP is then granted `USE CATALOG`, `USE SCHEMA`, `MANAGE`, and `APPLY TAG` on *that catalog* (instead of metastore `CREATE CATALOG`, which it uses only for greenfield). `bootstrap-sp` runs a pre-flight first — it verifies the catalog exists and that *you* (the caller) can grant on it (you must own the catalog or metastore, or hold effective `MANAGE`); if not, it stops **before** creating the SP or minting a secret and tells you to have the catalog owner run it. One `TARGET_CATALOG` is applied to every workspace in `WORKSPACE_ID`; run `bootstrap-sp` separately for different catalogs.
+> The SP governs an **existing** catalog — `make apply` never creates one — so it needs authority *on that catalog*, **not** metastore `CREATE CATALOG`. (Metastore `CREATE CATALOG` matters only for greenfield/demo, where GenieRails creates a fresh catalog it then owns.)
 
-> Because the deploy manages these catalog grants as Terraform, `make destroy` (or removing the deployment) revokes the SP's catalog grant set — it loses `MANAGE`/`APPLY TAG` on that catalog until you re-run `bootstrap-sp` or the owner re-grants it.
+**Create and grant the SP — two ways:**
 
-| Role | Scope | Required for |
-|------|-------|-------------|
-| **Account Admin** | Account | Creating groups and managing verification SPs |
-| **Tag Policy Creator + Manager** | Account | Creating and maintaining governed tag policies |
-| **Workspace Admin** | Target workspace | Deploying governance resources |
-| **Authority over the target catalog** | The catalog you govern | Own it, **or** have its owner grant `MANAGE` + `APPLY TAG` (plus `ASSIGN` on the governed tags GenieRails applies). This is what lets GenieRails deploy tag assignments, masking functions, FGAC policies, and grants — and self-grant its own `USE CATALOG` / `USE SCHEMA` / `EXECUTE` / `CREATE FUNCTION`. |
+1. **Manually** — create the SP in the Account Console, grant it the account/workspace roles above, and have the target catalog's owner grant it `MANAGE` + `APPLY TAG`.
+2. **`make bootstrap-sp`** (run by an already-authorized account admin — it can't elevate a non-admin caller):
 
-GenieRails governs your **existing** catalog — `make apply` never creates one — so the SP does **not** need metastore `CREATE CATALOG`. It needs authority *on that catalog* (above); since it doesn't own a catalog it didn't create, the catalog's current owner must grant it `MANAGE` (+ `APPLY TAG`/`ASSIGN`). Metastore `CREATE CATALOG` is needed **only for greenfield/demo/test** setups where GenieRails creates a fresh catalog it then owns. `make bootstrap-sp` includes `CREATE CATALOG` for that greenfield case but does **not** grant catalog `MANAGE`/`APPLY TAG`, and it never changes metastore ownership — so for a brownfield catalog you must still have its owner grant those.
+   ```
+   make bootstrap-sp ACCOUNT_PROFILE=<profile> ACCOUNT_ID=<id> WORKSPACE_ID=<id> SP_NAME=<name> PLAN=1
+   ```
 
-> **Genie-only mode**: If you only need Genie agents without ABAC governance,
-> set `genie_only = true` in `env.auto.tfvars`. This requires only **Workspace Admin**
-> (no Account Admin or Metastore Admin needed).
+   Review the dry-run, then swap `PLAN=1` for `YES=1` to apply; it prints the one-time OAuth secret and an `auth.auto.tfvars` snippet.
+   - **Brownfield** (existing catalog) — add `TARGET_CATALOG=<catalog>`: it grants the SP `USE CATALOG`, `USE SCHEMA`, `MANAGE`, and `APPLY TAG` on that catalog. A pre-flight first checks the catalog exists and that *you* can grant on it (you own the catalog/metastore, or hold effective `MANAGE`); if not, it stops **before** creating the SP or minting a secret and asks you to have the catalog owner run it. One `TARGET_CATALOG` applies to every workspace in `WORKSPACE_ID` — run it separately per catalog.
+   - **Greenfield** (no `TARGET_CATALOG`) — it grants metastore `CREATE CATALOG` instead, so the SP can create and own its own catalog.
+   - `make destroy` revokes the Terraform-managed catalog grants, so the SP loses `MANAGE`/`APPLY TAG` until you re-run `bootstrap-sp` or the owner re-grants them.
+
+> **Genie-only mode:** if you only need Genie agents without ABAC governance, set `genie_only = true` in `env.auto.tfvars` — this needs only **Workspace Admin** (no Account Admin or Metastore Admin).
 
 ### Credentials
 
