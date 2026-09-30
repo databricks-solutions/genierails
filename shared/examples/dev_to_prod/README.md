@@ -10,11 +10,11 @@ Gather these once — every phase reuses them:
 
 | Value | What it is / where to find it |
 |---|---|
-| **Deploying Service Principal** (`client_id` + `client_secret`) | The identity GenieRails runs as (not a CLI profile). See [Prerequisites → Service Principal](../../docs/prerequisites.md#service-principal) to create it and grant its roles. |
+| **Deploying Service Principal** (`client_id` + `client_secret`) | The identity GenieRails runs as. See [Prerequisites → Service Principal](../../docs/prerequisites.md#service-principal) to create it and grant its roles. |
 | **Dev / prod catalog names** | Your Unity Catalog catalogs, e.g. `dev_finance` / `prod_finance`. |
-| **SQL warehouse id** (per env) | The serverless warehouse the Genie agent runs its SQL on — an existing warehouse's id, **or leave blank** to auto-create one. |
-| **Curated Genie agent** | The agent you're shipping — its Genie space id, from the Genie UI URL (goes in `genie_spaces`). |
-| **IdP group names** (one per *access tier*) | Your existing IdP-synced groups (Entra ID / Okta via AIM/SCIM), e.g. `payments_ops,regional_analysts,viewers`. See [Prerequisites → group sync](../../docs/prerequisites.md#identity-provider-group-sync-required). |
+| **SQL warehouse id** (per Genie agent) | The serverless warehouse the Genie agent runs its SQL on — an existing warehouse's id, **or leave blank** to auto-create one. Set it on the agent's `genie_spaces` entry; agents can also share the environment-level warehouse as a fallback. |
+| **Curated Genie agent** | The agent you're shipping. In the Genie UI, open the agent, click **Configure**, and copy the **Agent ID** from **About this agent**. It is also in the URL (`.../genie/rooms/01ef7b3c2a4d5e6f`) and goes in `genie_spaces`. |
+| **IdP group names** (one per *access tier*) | Your existing IdP-synced groups (Entra ID / Okta via AIM/SCIM), ordered most- to least-privileged. For example: `payments_ops` = full/raw access; `regional_analysts` = only their region, with sensitive columns masked; `viewers` = least-privileged access, with every sensitive column masked and any applicable row restrictions. These are illustrative names—the generated policies define the actual access. See [Prerequisites → group sync](../../docs/prerequisites.md#identity-provider-group-sync-required). |
 | **Row-pairing key** (`VERIFY_KEY_COLUMN`) | A stable, **non-sensitive** id column present on your masked tables (e.g. `customer_id`) — `verify-access` uses it to line up rows. [Details](../../docs/effective-access-verification.md). |
 | **UC Data Classification** | Enable it per env — in the **Databricks UI** (recommended) or as code (Phase 1). Docs: [AWS](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/data-governance/unity-catalog/data-classification). |
 
@@ -76,7 +76,7 @@ The as-code path applies the `databricks_data_classification_catalog_config` res
 ```bash
 make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'
 ```
-`--groups` are **your own** IdP-synced groups, **one per access tier, most-privileged first** (`payments_ops`=full → `regional_analysts`=masked → `viewers`=least — placeholders; use your real names). GenieRails *consumes* them by exact name, never creates them.
+`--groups` are **your own** IdP-synced groups, **one per access tier, most-privileged first** (`payments_ops`=full/raw → `regional_analysts`=region-scoped + masked → `viewers`=least-privileged, with all sensitive columns masked — placeholders; use your real names). GenieRails *consumes* them by exact name, never creates them; the generated policies define each tier's actual access.
 
 **1d. Prove coverage, apply, and verify — one command.**
 ```bash
