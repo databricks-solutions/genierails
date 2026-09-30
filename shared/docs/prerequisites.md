@@ -229,53 +229,9 @@ You'll need these values for `auth.auto.tfvars`:
 
 ---
 
-<a id="cloud-specific-requirements"></a>
-<details>
-<summary><strong>Check 8 — test-ci cloud provisioning access is ready</strong></summary>
-
-These apply **only to the integration-test provisioning harness (`make test-ci`)** — the normal flow (`make generate` / `apply` / `certify`) needs none of it, just the Databricks service principal. Expand your cloud only if you run that harness:
-
-**Requirements (only when running `make test-ci`):**
-
-- Choose the cloud where the test harness will provision resources.
-- Provide that cloud's credentials, configuration values, and resource-management permissions listed below.
-
-<details>
-<summary><strong>AWS — Required test-ci credentials and permissions</strong></summary>
-
-**Credentials** (one of):
-- `AWS_PROFILE` environment variable pointing to a named profile in `~/.aws/credentials`
-- `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ optional `AWS_SESSION_TOKEN`)
-- Default boto3 credential chain (instance profile, SSO, etc.)
-
-**IAM / S3 permissions** — to create, reuse-check, and tear down the test IAM roles and S3 buckets: create/update/list/delete on IAM roles and role policies, and on S3 buckets and objects, plus `sts:GetCallerIdentity`. (The exact call list isn't exhaustive; simplest is an admin policy on a throwaway test account.)
-</details>
-
-<details>
-<summary><strong>Azure — Required test-ci credentials and permissions</strong></summary>
-
-**Credentials** (one of):
-- Service principal: `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET` + `AZURE_TENANT_ID`
-- `DefaultAzureCredential` (Azure CLI login, managed identity, etc.)
-
-**Additional config:**
-- `AZURE_SUBSCRIPTION_ID`
-- `AZURE_RESOURCE_GROUP`
-- `AZURE_REGION` (e.g., `australiaeast`)
-
-**Azure RBAC roles:**
-- `Contributor` on the resource group
-- `Storage Blob Data Contributor`
-- `User Access Administrator` — optional (only if the SP itself assigns roles; otherwise it falls back to your Azure CLI login)
-</details>
-
-</details>
-
----
-
 <a id="quick-check"></a>
 <details>
-<summary><strong>Check 9 — Local setup completes successfully</strong></summary>
+<summary><strong>Check 8 — Local setup completes successfully</strong></summary>
 
 **Requirements:**
 
@@ -296,5 +252,44 @@ make setup ENV=dev         # creates envs/dev/ config templates (local only — 
 `make setup` writes the `envs/dev/auth.auto.tfvars` and `env.auto.tfvars` templates — fill in your SP credentials (see [Credentials](#credentials)) and your tables / warehouse / Genie space.
 
 **Next: follow the [Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)** — the end-to-end champion flow. Its Phase 1 runs `make generate` → `make validate-generated` → `make coverage-gate`, where the `[PASS]` checks appear against your generated config. Already have a Genie agent built in the Databricks UI? [Import it into code first](from-ui-to-production.md), then follow the same walkthrough.
+
+</details>
+
+---
+
+<a id="cloud-specific-requirements"></a>
+<details>
+<summary><strong>Contributor only — test-ci cloud provisioning access</strong></summary>
+
+This section is **not required to use GenieRails**. It applies only to contributors and maintainers who run the integration-test provisioning harness (`make test-ci`), which creates and removes cloud test resources.
+
+<details>
+<summary><strong>AWS — Required test-ci credentials and permissions</strong></summary>
+
+**Credentials** (one of):
+- `AWS_PROFILE` environment variable pointing to a named profile in `~/.aws/credentials`
+- `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ optional `AWS_SESSION_TOKEN`)
+- Default boto3 credential chain (instance profile, SSO, etc.)
+
+**IAM / S3 permissions** — create/update/list/delete on the test IAM roles, role policies, S3 buckets, and objects, plus `sts:GetCallerIdentity`.
+</details>
+
+<details>
+<summary><strong>Azure — Required test-ci credentials and permissions</strong></summary>
+
+**Credentials** (one of):
+- Service principal: `AZURE_CLIENT_ID` + `AZURE_CLIENT_SECRET` + `AZURE_TENANT_ID`
+- `DefaultAzureCredential` (Azure CLI login, managed identity, etc.)
+
+**Additional config:**
+- `AZURE_SUBSCRIPTION_ID`
+- `AZURE_RESOURCE_GROUP`
+- `AZURE_REGION` (e.g., `australiaeast`)
+
+**Azure RBAC roles:**
+- `Contributor` on the resource group
+- `Storage Blob Data Contributor`
+- `User Access Administrator` — optional (only if the SP itself assigns roles; otherwise it falls back to your Azure CLI login)
+</details>
 
 </details>
