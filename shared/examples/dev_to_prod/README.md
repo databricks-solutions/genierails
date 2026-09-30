@@ -5,7 +5,7 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 ---
 
 <details>
-<summary><strong id="prerequisites--what-to-gather">Prerequisites &amp; what to gather</strong></summary>
+<summary><strong id="prerequisites--gather-required-values">Prerequisites — Gather required values</strong></summary>
 
 Gather these once — every phase reuses them:
 
@@ -220,7 +220,7 @@ A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog gr
 ---
 
 <details>
-<summary><strong id="reference--glossary">Reference &amp; glossary</strong> — commands, how-it-works, and term definitions (in <a href="REFERENCE.md">REFERENCE.md</a>)</summary>
+<summary><strong id="reference--commands-concepts-and-glossary">Reference — Commands, concepts, and glossary</strong></summary>
 
 Kept out of this walkthrough so it stays scannable — all in **[REFERENCE.md](REFERENCE.md)**:
 
