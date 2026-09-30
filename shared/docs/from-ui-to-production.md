@@ -6,7 +6,7 @@ Import an existing Databricks Genie agent into code, then govern and promote it 
 
 - Complete the [prerequisites](prerequisites.md), including cloud setup and Unity Catalog Data Classification.
 - Sync the access groups GenieRails will use from your identity provider.
-- Find the agent ID in its Databricks URL, for example `.../genie/rooms/01ef7b3c2a4d5e6f`.
+- Find the agent ID in the Genie UI: open the agent, click **Configure**, and copy the **Agent ID** from the **About this agent** panel. (It's also in the agent's URL: `.../genie/rooms/01ef7b3c2a4d5e6f`.)
 
 ## 1. Configure the agent
 
