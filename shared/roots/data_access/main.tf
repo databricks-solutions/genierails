@@ -304,7 +304,7 @@ output "grant_uc_tables" {
 }
 
 output "classification_uc_tables" {
-  description = "Fully qualified table footprint used only for classification."
+  description = "Fully qualified table footprint used for classification and grant coverage."
   value       = local.full_effective_uc_tables
 }
 

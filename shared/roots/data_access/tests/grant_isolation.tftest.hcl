@@ -40,7 +40,7 @@ run "effective_tables_reach_classification_and_grants" {
       "classification_catalog.space_only|analysts",
       "discovered_catalog.agent|analysts",
     ])
-    error_message = "schema grant resources must be sourced only from uc_tables"
+    error_message = "schema grant resources must be sourced from the effective governed table footprint"
   }
 
   assert {
@@ -49,7 +49,7 @@ run "effective_tables_reach_classification_and_grants" {
       "classification_catalog.space_only.events|analysts",
       "discovered_catalog.agent.facts|analysts",
     ])
-    error_message = "table grant resources must be sourced only from uc_tables"
+    error_message = "table grant resources must be sourced from the effective governed table footprint"
   }
 
   assert {

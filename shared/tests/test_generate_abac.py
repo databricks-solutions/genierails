@@ -83,6 +83,48 @@ def test_full_discovery_reflects_current_state_and_reports_disappeared(tmp_path,
     assert disappeared == ["main.old.table"]
     assert "disappeared: main.old.table" in capsys.readouterr().out
 
+
+def test_persist_parse_failure_aborts_without_overwriting_with_empty(tmp_path):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    corrupt = 'discovered_uc_tables = ["main.kept.table"\n'
+    path.write_text(corrupt)
+
+    with pytest.raises(ValueError, match="Failed to parse previously discovered"):
+        persist_discovered_uc_tables(path, [])
+
+    assert path.read_text() == corrupt
+
+
+def test_strict_environment_parse_failure_aborts(tmp_path):
+    auth = tmp_path / "auth.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    auth.write_text("")
+    env.write_text('genie_spaces = [\n')
+
+    with pytest.raises(ValueError, match="Failed to parse environment"):
+        generate_abac.load_auth_config(auth, env, strict_env=True)
+
+
+def test_incomplete_discovery_folds_persisted_tables_into_masking_footprint(tmp_path):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    persist_discovered_uc_tables(path, ["main.persisted.customers"])
+    effective_tables = ["main.live.orders"]
+    footprint = ["main.live.orders"]
+
+    preserved = generate_abac.preserve_discovered_tables_for_incomplete_run(
+        path, effective_tables, footprint
+    )
+
+    assert preserved == ["main.persisted.customers"]
+    assert effective_tables == ["main.live.orders", "main.persisted.customers"]
+    assert footprint == ["main.live.orders", "main.persisted.customers"]
+
+
+def test_discovered_file_is_world_readable(tmp_path):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    persist_discovered_uc_tables(path, ["main.sales.orders"])
+    assert path.stat().st_mode & 0o777 == 0o644
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -628,16 +670,38 @@ class TestGenieFetchFailureIsolation:
         spaces = ["broken", "healthy"]
         governed = []
         for space_id in spaces:
-            tables, config, title = generate_abac.fetch_tables_from_genie_space(
+            tables, config, title, complete = generate_abac.fetch_tables_from_genie_space(
                 space_id, {}, quick_check_only=True
             )
-            if title:
+            if complete and title:
                 governed.append(space_id)
 
         assert governed == ["healthy"]
         assert ("PATCH", "broken") in calls
         assert ("GET", "healthy") in calls
         assert "WARNING: Could not reach Genie agent broken via PATCH fallback" in capsys.readouterr().out
+
+    def test_title_without_serialized_space_is_incomplete(self, monkeypatch):
+        class FakeApiClient:
+            def do(self, method, path, **kwargs):
+                return {"title": "Still provisioning", "serialized_space": ""}
+
+        class FakeWorkspaceClient:
+            def __init__(self, **kwargs):
+                self.api_client = FakeApiClient()
+
+        monkeypatch.setattr(generate_abac, "configure_databricks_env", lambda _: None)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+        monkeypatch.setattr(
+            sys.modules["databricks.sdk"], "WorkspaceClient", FakeWorkspaceClient
+        )
+
+        tables, config, title, complete = generate_abac.fetch_tables_from_genie_space(
+            "provisioning", {}
+        )
+
+        assert (tables, config, title) == ([], {}, "Still provisioning")
+        assert complete is False
 
 
 class TestExtractCodeBlocks:

@@ -291,7 +291,7 @@ def build_industry_detection_guidance(ddl_text: str, industry_codes: list[str]) 
     return prompt, comments
 
 
-def _load_tfvars(path: Path, label: str) -> dict:
+def _load_tfvars(path: Path, label: str, *, strict: bool = False) -> dict:
     """Load a single .tfvars file. Returns empty dict if not found."""
     if not path.exists():
         return {}
@@ -304,11 +304,16 @@ def _load_tfvars(path: Path, label: str) -> dict:
             print(f"  Loaded {label} from: {path}")
         return cfg
     except Exception as e:
-        print(f"  WARNING: Failed to parse {path}: {e}")
+        message = f"Failed to parse {label} file {path}: {e}"
+        if strict:
+            raise ValueError(message) from e
+        print(f"  WARNING: {message}")
         return {}
 
 
-def load_auth_config(auth_file: Path, env_file: Path | None = None) -> dict:
+def load_auth_config(
+    auth_file: Path, env_file: Path | None = None, *, strict_env: bool = False
+) -> dict:
     """Load config from auth + env tfvars files. Merges both; env overrides auth.
 
     Supports the new split format (uc_catalog + schema-relative uc_tables) as well as
@@ -319,7 +324,7 @@ def load_auth_config(auth_file: Path, env_file: Path | None = None) -> dict:
     cfg = _load_tfvars(auth_file, "credentials")
     if env_file is None:
         env_file = auth_file.parent / "env.auto.tfvars"
-    env_cfg = _load_tfvars(env_file, "environment")
+    env_cfg = _load_tfvars(env_file, "environment", strict=strict_env)
     cfg.update(env_cfg)
 
     # Combine uc_catalog + relative uc_tables into full 3-part refs when the new
@@ -339,7 +344,9 @@ def persist_discovered_uc_tables(
     path: Path, tables: list[str], *, merge_existing: bool = False
 ) -> tuple[list[str], list[str], list[str]]:
     """Atomically persist the tool-owned Genie table footprint."""
-    existing_cfg = _load_tfvars(path, "previously discovered UC tables")
+    existing_cfg = _load_tfvars(
+        path, "previously discovered UC tables", strict=True
+    )
     existing = list(dict.fromkeys(existing_cfg.get("discovered_uc_tables", []) or []))
     current = list(dict.fromkeys(str(table) for table in tables if table))
     desired = list(dict.fromkeys(existing + current)) if merge_existing else current
@@ -363,6 +370,7 @@ def persist_discovered_uc_tables(
     rendered += "".join(f"  {json.dumps(table)},\n" for table in desired)
     rendered += "]\n"
     if path.exists() and path.read_text() == rendered:
+        path.chmod(0o644)
         print(f"    unchanged: {path}")
         return added, already_present, disappeared
 
@@ -376,8 +384,22 @@ def persist_discovered_uc_tables(
         os.fsync(tmp.fileno())
         tmp_path = Path(tmp.name)
     os.replace(tmp_path, path)
+    path.chmod(0o644)
     print(f"    wrote: {path}")
     return added, already_present, disappeared
+
+
+def preserve_discovered_tables_for_incomplete_run(
+    path: Path, tables: list[str], footprint_entries: list
+) -> list[str]:
+    """Keep persisted tables governed and put them back in the masking footprint."""
+    cfg = _load_tfvars(path, "previously discovered UC tables", strict=True)
+    preserved = list(dict.fromkeys(cfg.get("discovered_uc_tables", []) or []))
+    tables[:] = list(dict.fromkeys(tables + preserved))
+    footprint_entries.extend(
+        table for table in preserved if table not in footprint_entries
+    )
+    return preserved
 
 
 def configure_databricks_env(auth_cfg: dict):
@@ -921,10 +943,10 @@ def fetch_tables_from_genie_space(
     space_id: str,
     auth_cfg: dict,
     quick_check_only: bool = False,
-) -> tuple[list[str], dict, str]:
+) -> tuple[list[str], dict, str, bool]:
     """Fetch tables and config from an existing Genie agent via the REST API.
 
-    Returns (table_identifiers, genie_config_dict, space_title).
+    Returns (table_identifiers, genie_config_dict, space_title, complete).
     Uses GET /api/2.0/genie/spaces/{space_id} and parses serialized_space.
 
     Falls back to PATCH when GET is blocked by Partner Powered AI / cross-geo
@@ -963,15 +985,15 @@ def fetch_tables_from_genie_space(
                     f"  WARNING: Could not reach Genie agent {space_id} via "
                     f"PATCH fallback: {patch_error}"
                 )
-                return [], {}, ""
+                return [], {}, "", False
             _used_patch_fallback = True
         else:
             print(f"  WARNING: Could not reach Genie agent {space_id}: {e}")
-            return [], {}, ""
+            return [], {}, "", False
 
     if not isinstance(resp, dict):
         print(f"  WARNING: Unexpected response type from Genie agent {space_id}.")
-        return [], {}, ""
+        return [], {}, "", False
 
     space_title = resp.get("title", "")
     description = resp.get("description", "")
@@ -981,7 +1003,7 @@ def fetch_tables_from_genie_space(
     # is populated by the Databricks backend (async processing).
     # Skip retries when uc_tables is already provided (quick_check_only=True) —
     # in that case we only need the space config, not table discovery, and
-    # a missing serialized_space is acceptable (config will just be omitted).
+    # it still reports incomplete so persisted governance is preserved.
     if not serialized and not quick_check_only:
         retry_delays = [5, 10, 20, 30, 45, 60, 90]
         for attempt, delay in enumerate(retry_delays, start=1):
@@ -1007,7 +1029,7 @@ def fetch_tables_from_genie_space(
 
     if not serialized:
         print(f"  WARNING: Genie agent {space_id} returned no serialized_space after retries.")
-        return [], {}, space_title
+        return [], {}, space_title, False
 
     # --- Tables ---
     try:
@@ -1015,7 +1037,7 @@ def fetch_tables_from_genie_space(
         identifiers = footprint_table_refs(discover_agent_footprint(space_data))
     except Exception as e:
         print(f"  WARNING: Could not parse table list from Genie agent {space_id}: {e}")
-        identifiers = []
+        return [], {}, space_title, False
 
     if identifiers:
         print(f"    Discovered {len(identifiers)} table(s): {', '.join(identifiers)}")
@@ -1023,7 +1045,13 @@ def fetch_tables_from_genie_space(
         print(f"  WARNING: Genie agent {space_id} has no tables configured yet.")
 
     # --- Config ---
-    genie_config = parse_genie_config_from_serialized_space(serialized, description=description)
+    try:
+        genie_config = parse_genie_config_from_serialized_space(
+            serialized, description=description
+        )
+    except Exception as e:
+        print(f"  WARNING: Could not parse config from Genie agent {space_id}: {e}")
+        return [], {}, space_title, False
     n_benchmarks = len(genie_config.get("benchmarks", []))
     n_filters = len(genie_config.get("sql_filters", []))
     n_measures = len(genie_config.get("sql_measures", []))
@@ -1032,7 +1060,7 @@ def fetch_tables_from_genie_space(
         f"{n_filters} filter(s), {n_measures} measure(s)"
     )
 
-    return identifiers, genie_config, space_title
+    return identifiers, genie_config, space_title, True
 
 
 def fetch_tables_from_databricks(
@@ -6771,7 +6799,13 @@ def main():
         print(f"  Mode: {mode_labels.get(args.mode, args.mode)}")
     print("=" * 60)
 
-    auth_cfg = load_auth_config(auth_file)
+    try:
+        auth_cfg = load_auth_config(
+            auth_file, strict_env=not args.tables and not args.dry_run
+        )
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
     # ── Country/region overlay: resolve from CLI --country or env config ─────
     # Priority: CLI --country > env.auto.tfvars country field > empty (global)
@@ -6941,10 +6975,10 @@ def main():
                     else:
                         print(f"\n  Querying existing Genie agent '{space_name}' for config...")
 
-                    tables, genie_cfg, api_title = fetch_tables_from_genie_space(
+                    tables, genie_cfg, api_title, discovery_ok = fetch_tables_from_genie_space(
                         space_id, auth_cfg, quick_check_only=bool(space_tables)
                     )
-                    if not space_tables and not tables and not genie_cfg and not api_title:
+                    if not discovery_ok:
                         discovery_incomplete = True
 
                     # Use the API title as the canonical name if no name was given
@@ -6962,6 +6996,22 @@ def main():
                 else:
                     all_space_tables.extend(space_tables)
 
+            if discovery_incomplete:
+                try:
+                    preserved = preserve_discovered_tables_for_incomplete_run(
+                        auth_file.parent / "data_access" / "discovered_uc_tables.auto.tfvars",
+                        all_space_tables,
+                        footprint_entries,
+                    )
+                except ValueError as e:
+                    print(f"ERROR: {e}")
+                    sys.exit(1)
+                if preserved:
+                    print(
+                        "\n  Discovery incomplete; preserving and regenerating governance "
+                        f"for {len(preserved)} persisted table(s)."
+                    )
+
             # Merge space tables with any top-level uc_tables (dedup, space tables first)
             existing_top = auth_cfg.get("uc_tables") or []
             merged = list(dict.fromkeys(all_space_tables + existing_top))
@@ -6975,11 +7025,16 @@ def main():
                     + "\n  Persisted for automatic UC grants, classification, and masking scope."
                 )
 
-        persist_discovered_uc_tables(
-            auth_file.parent / "data_access" / "discovered_uc_tables.auto.tfvars",
-            all_space_tables,
-            merge_existing=target_space_cfg is not None or discovery_incomplete,
-        )
+        if not args.dry_run:
+            try:
+                persist_discovered_uc_tables(
+                    auth_file.parent / "data_access" / "discovered_uc_tables.auto.tfvars",
+                    all_space_tables,
+                    merge_existing=target_space_cfg is not None or discovery_incomplete,
+                )
+            except ValueError as e:
+                print(f"ERROR: {e}")
+                sys.exit(1)
 
     # This canonical object is the single source for DDL/classification scan
     # scope and, consequently, the classified-column coverage denominator.
