@@ -119,8 +119,6 @@ The SP needs:
    Omit `TARGET_CATALOG`, and bootstrap grants the SP metastore `CREATE CATALOG` instead, so it can create and own a fresh catalog. Use this only for demo/test setups where you don't already have a catalog to govern.
    </details>
 
-> **Genie-only mode:** if you only need Genie agents without ABAC governance, set `genie_only = true` in `env.auto.tfvars`. **Workspace Admin** is sufficient (no Account Admin or Metastore Admin); for least privilege the SP can instead have workspace **USER** + a Databricks SQL entitlement, **CAN USE** on a bring-your-own warehouse, and read access to the target tables.
-
 ### Credentials
 
 You'll need these values for `auth.auto.tfvars`:
