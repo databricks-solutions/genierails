@@ -193,5 +193,5 @@ make setup ENV=dev
 make validate ENV=dev
 ```
 
-If `make validate` shows all `[PASS]` checks, you're ready to go.
-See [From UI to Production](from-ui-to-production.md) or [Quickstart](quickstart.md) for next steps.
+If `make validate` shows all `[PASS]` checks, you're ready.
+**Next: follow the [Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)** — the end-to-end champion flow. (Already have a Genie agent built in the Databricks UI? [Import it into code first](from-ui-to-production.md), then follow the same walkthrough.)
