@@ -105,16 +105,19 @@ The SP needs:
 **Create and grant the SP — two ways:**
 
 1. **Manually** (as an **Account Admin**) — create the SP in the Account Console and grant it the account/workspace roles above; the target catalog's owner grants it `MANAGE` + `APPLY TAG`.
-2. **`make bootstrap-sp`** (run by an already-authorized account admin — it can't elevate a non-admin caller):
+2. **`make bootstrap-sp`** (run by an already-authorized account admin — it can't elevate a non-admin caller). Point it at your **existing catalog** with `TARGET_CATALOG`:
 
    ```
-   make bootstrap-sp ACCOUNT_PROFILE=<profile> ACCOUNT_ID=<id> WORKSPACE_ID=<id> SP_NAME=<name> PLAN=1
+   make bootstrap-sp ACCOUNT_PROFILE=<profile> ACCOUNT_ID=<id> WORKSPACE_ID=<id> SP_NAME=<name> TARGET_CATALOG=<catalog> PLAN=1
    ```
 
-   Review the dry-run, then swap `PLAN=1` for `YES=1` to apply; it prints the one-time OAuth secret and an `auth.auto.tfvars` snippet.
-   - **Brownfield** (existing catalog) — add `TARGET_CATALOG=<catalog>`: it grants the SP `USE CATALOG`, `USE SCHEMA`, `MANAGE`, and `APPLY TAG` on that catalog. A pre-flight first checks the catalog exists and that *you* can grant on it (you own the catalog/metastore, or hold effective `MANAGE`); if not, it stops **before** creating the SP or minting a secret and asks you to have the catalog owner run it. One `TARGET_CATALOG` applies to every workspace in `WORKSPACE_ID` — run it separately per catalog.
-   - **Greenfield** (no `TARGET_CATALOG`) — it grants metastore `CREATE CATALOG` instead, so the SP can create and own its own catalog.
-   - `make destroy` revokes the Terraform-managed catalog grants, so the SP loses `MANAGE`/`APPLY TAG` until you re-run `bootstrap-sp` or the owner re-grants them.
+   Review the dry-run, then swap `PLAN=1` for `YES=1` to apply; it prints the one-time OAuth secret and an `auth.auto.tfvars` snippet. `TARGET_CATALOG` grants the SP `USE CATALOG`, `USE SCHEMA`, `MANAGE`, and `APPLY TAG` on that existing catalog. A pre-flight first checks the catalog exists and that *you* can grant on it (you own the catalog/metastore, or hold effective `MANAGE`); if not, it stops **before** creating the SP or minting a secret and asks you to have the catalog owner run it. One `TARGET_CATALOG` applies to every workspace in `WORKSPACE_ID` — run it separately per catalog. `make destroy` later revokes these Terraform-managed catalog grants, so the SP loses `MANAGE`/`APPLY TAG` until you re-run `bootstrap-sp` or the owner re-grants them.
+
+   <details>
+   <summary><strong>Greenfield</strong> (GenieRails creates its own catalog) — rarely needed</summary>
+
+   Omit `TARGET_CATALOG`, and bootstrap grants the SP metastore `CREATE CATALOG` instead, so it can create and own a fresh catalog. Use this only for demo/test setups where you don't already have a catalog to govern.
+   </details>
 
 > **Genie-only mode:** if you only need Genie agents without ABAC governance, set `genie_only = true` in `env.auto.tfvars`. **Workspace Admin** is sufficient (no Account Admin or Metastore Admin); for least privilege the SP can instead have workspace **USER** + a Databricks SQL entitlement, **CAN USE** on a bring-your-own warehouse, and read access to the target tables.
 
