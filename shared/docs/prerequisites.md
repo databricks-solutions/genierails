@@ -23,9 +23,14 @@ Everything you need before running GenieRails.
 
 > **macOS note:** Apple's `/usr/bin/make` (and Homebrew) can be blocked by an unaccepted Xcode license — `make` then errors with a license/agreement message. If you hit that, install GNU Make another way (e.g. `conda install make`) and put it first on your `PATH`.
 
-### Python Packages (auto-installed)
+### Dependencies (auto-installed)
 
-These are installed automatically when you first run `make generate` or `make apply`:
+GenieRails auto-installs its Python packages (first `make generate` / `make apply`) and auto-downloads its Terraform providers (first `terraform init`) — nothing to install by hand.
+
+<details>
+<summary>Expand to review the auto-installed dependencies</summary>
+
+**Python packages** — on first `make generate` or `make apply`:
 
 | Package | Purpose |
 |---------|---------|
@@ -42,15 +47,14 @@ For integration testing (`make test-ci`), cloud-specific packages are also auto-
 | `azure-mgmt-authorization` | Azure | RBAC role assignments |
 | `azure-mgmt-databricks` | Azure | Workspace management |
 
-### Terraform Providers (auto-downloaded)
-
-Downloaded automatically on first `terraform init`:
+**Terraform providers** — on first `terraform init`:
 
 | Provider | Version | Source |
 |----------|---------|--------|
-| `databricks/databricks` | ~> 1.91.0 | registry.terraform.io |
+| `databricks/databricks` | ~> 1.111.0 | registry.terraform.io |
 | `hashicorp/null` | ~> 3.2 | registry.terraform.io |
 | `hashicorp/time` | ~> 0.12 | registry.terraform.io |
+</details>
 
 ## Network Access
 
