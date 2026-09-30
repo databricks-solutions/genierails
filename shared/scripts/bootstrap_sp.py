@@ -115,6 +115,12 @@ def _preflight_target_catalog(
     if not cfg.target_catalog:
         return
     for workspace_id in cfg.workspace_ids:
+        error_message = (
+            f"preflight failed for catalog {cfg.target_catalog!r} in workspace "
+            f"{workspace_id}: the catalog is unavailable or the bootstrap caller lacks "
+            "grant authority. Have the catalog owner run bootstrap or grant the deployment "
+            "service principal USE CATALOG, USE SCHEMA, MANAGE, and APPLY TAG."
+        )
         try:
             workspace, _host = _workspace_client(account, workspace_client, workspace_id)
             catalog = workspace.catalogs.get(cfg.target_catalog)
@@ -128,30 +134,35 @@ def _preflight_target_catalog(
                         _value(group, "value"),
                     ) if value
                 )
+            caller_principals = {principal.casefold() for principal in caller_principals}
             metastore = workspace.metastores.current()
             owns_scope = (
-                str(_value(catalog, "owner")) in caller_principals
-                or str(_value(metastore, "owner")) in caller_principals
+                str(_value(catalog, "owner")).casefold() in caller_principals
+                or str(_value(metastore, "owner")).casefold() in caller_principals
             )
+        except Exception as exc:
+            raise RuntimeError(error_message) from exc
+
+        if owns_scope:
+            continue
+
+        try:
             effective = workspace.grants.get_effective(
                 securable_type="catalog",
                 full_name=cfg.target_catalog,
                 principal=caller_name,
             )
             can_manage = any(
-                str(_value(privilege, "privilege").value) == "MANAGE"
+                str(getattr(_value(privilege, "privilege"), "value",
+                            _value(privilege, "privilege"))) == "MANAGE"
                 for assignment in effective.privilege_assignments or []
                 for privilege in assignment.privileges or []
             )
-            if not owns_scope and not can_manage:
-                raise PermissionError("caller is not an owner and lacks effective MANAGE")
-        except Exception as exc:
-            raise RuntimeError(
-                f"preflight failed for catalog {cfg.target_catalog!r} in workspace "
-                f"{workspace_id}: the catalog is unavailable or the bootstrap caller lacks "
-                "grant authority. Have the catalog owner run bootstrap or grant the deployment "
-                "service principal USE CATALOG, USE SCHEMA, MANAGE, and APPLY TAG."
-            ) from exc
+        except Exception:
+            can_manage = False
+
+        if not can_manage:
+            raise RuntimeError(error_message)
 
 
 def _grant_tag_policy_roles(account: Any, cfg: Config, client_id: str) -> bool:

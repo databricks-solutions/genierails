@@ -5,7 +5,14 @@ import pytest
 from databricks.sdk.service.catalog import Privilege
 from databricks.sdk.service.iam import WorkspacePermission
 
-from scripts.bootstrap_sp import Config, _config_from_args, _plan, bootstrap, parser
+from scripts.bootstrap_sp import (
+    Config,
+    _config_from_args,
+    _plan,
+    _preflight_target_catalog,
+    bootstrap,
+    parser,
+)
 
 
 def _fake(*, existing=False, existing_secrets=True, roles=()):
@@ -49,6 +56,79 @@ def _cfg(**overrides):
     )
     values.update(overrides)
     return Config(**values)
+
+
+def _preflight(workspace):
+    account = MagicMock()
+    account.workspaces.get.return_value = SimpleNamespace(workspace_url="dbc.example.com")
+    workspace_factory = MagicMock(return_value=workspace)
+    _preflight_target_catalog(
+        _cfg(target_catalog="existing_catalog"), account, workspace_factory
+    )
+
+
+def test_preflight_catalog_owner_passes_without_effective_grant_lookup():
+    _account, workspace, _workspace_factory, _factory = _fake()
+
+    _preflight(workspace)
+
+    workspace.grants.get_effective.assert_not_called()
+
+
+def test_preflight_metastore_owner_passes():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    workspace.metastores.current.return_value = SimpleNamespace(
+        metastore_id="meta-1", owner="caller@example.com"
+    )
+
+    _preflight(workspace)
+
+    workspace.grants.get_effective.assert_not_called()
+
+
+def test_preflight_non_owner_with_effective_manage_passes():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    workspace.grants.get_effective.return_value = SimpleNamespace(
+        privilege_assignments=[SimpleNamespace(
+            privileges=[SimpleNamespace(privilege="MANAGE")]
+        )]
+    )
+
+    _preflight(workspace)
+
+    workspace.grants.get_effective.assert_called_once_with(
+        securable_type="catalog",
+        full_name="existing_catalog",
+        principal="caller@example.com",
+    )
+
+
+def test_preflight_non_owner_without_manage_fails():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+
+    with pytest.raises(RuntimeError, match="preflight failed.*catalog owner"):
+        _preflight(workspace)
+
+
+def test_preflight_owner_ignores_effective_grant_lookup_failure():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.grants.get_effective.side_effect = RuntimeError("unavailable")
+
+    _preflight(workspace)
+
+    workspace.grants.get_effective.assert_not_called()
+
+
+def test_preflight_owner_match_is_case_insensitive():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = SimpleNamespace(owner="CALLER@EXAMPLE.COM")
+
+    _preflight(workspace)
+
+    workspace.grants.get_effective.assert_not_called()
 
 
 def test_dry_run_makes_no_client_calls():
