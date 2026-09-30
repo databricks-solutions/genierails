@@ -25,7 +25,7 @@ Everything you need before running GenieRails.
 
 ### Dependencies (auto-installed)
 
-GenieRails auto-installs its Python packages (first `make generate` / `make apply`) and auto-downloads its Terraform providers (first `terraform init`) — nothing to install by hand.
+GenieRails auto-installs its Python packages (first `make generate` / `make apply`) and auto-downloads its Terraform providers (first `terraform init`) — nothing to install by hand for the core flow. (`make test-ci` additionally needs `pytest`; see the note below.)
 
 <details>
 <summary>Expand to review the auto-installed dependencies</summary>
@@ -36,6 +36,7 @@ GenieRails auto-installs its Python packages (first `make generate` / `make appl
 |---------|---------|
 | `python-hcl2` | Parse Terraform HCL configurations |
 | `databricks-sdk` | Databricks Python SDK |
+| `pyyaml` | Parse YAML overlay / config files |
 
 For integration testing (`make test-ci`), cloud-specific packages are also auto-installed:
 
@@ -46,6 +47,8 @@ For integration testing (`make test-ci`), cloud-specific packages are also auto-
 | `azure-mgmt-storage` | Azure | Storage account management |
 | `azure-mgmt-authorization` | Azure | RBAC role assignments |
 | `azure-mgmt-databricks` | Azure | Workspace management |
+
+> **`make test-ci`** also needs **`pytest`** (and `python-hcl2`) present — these are *not* auto-installed. Run `pip install pytest python-hcl2` first.
 
 **Terraform providers** — on first `terraform init`:
 
@@ -62,12 +65,14 @@ GenieRails requires outbound HTTPS (port 443) to:
 
 | Endpoint | Purpose |
 |----------|---------|
+| `github.com` | Clone the repository |
+| `pypi.org` (or your Python package index) | Auto-install Python packages (first run) |
 | `registry.terraform.io` | Download Terraform providers (first run only) |
 | Your Databricks workspace URL | All API calls (generate, apply, verify) |
 | `accounts.cloud.databricks.com` | AWS account API (group/tag policy management) |
 | `accounts.azuredatabricks.net` | Azure account API (group/tag policy management) |
 
-No VPN is required unless your Databricks workspace is on a private network.
+No VPN is required unless your Databricks workspace is on a private network. (`make test-ci` also reaches your cloud's management endpoints, e.g. `management.azure.com`.)
 
 ## Databricks Account
 
@@ -102,24 +107,25 @@ GenieRails runs **as a service principal (SP)**. There are two phases with diffe
 The SP needs:
 
 | Role / authority | Scope | Why |
-|---|---|---|
+|------------------|-------|-----|
 | **Account Admin** | Account | Create groups; manage the temporary verification SPs |
 | **Tag Policy Creator + Manager** | Account | Create and maintain governed tag policies |
 | **Workspace Admin** | Target workspace | Deploy governance resources |
 | **Authority over the target catalog** | The catalog you govern | **Own it, or** be granted `MANAGE` + `APPLY TAG` (plus `ASSIGN` on the governed tags GenieRails applies). This lets it deploy tag assignments, masking functions, FGAC policies, and grants — and self-grant its own `USE CATALOG` / `USE SCHEMA` / `EXECUTE` / `CREATE FUNCTION`. |
+| **Query the model serving endpoint** | Workspace | `CAN QUERY` on `databricks-claude-sonnet-4-6` — generation calls a foundation model (an external Anthropic/OpenAI provider works too). |
 
 > The SP governs an **existing** catalog — `make apply` never creates one — so it needs authority *on that catalog*, **not** metastore `CREATE CATALOG`. (Metastore `CREATE CATALOG` matters only for greenfield/demo, where GenieRails creates a fresh catalog it then owns.)
 
 **Create and grant the SP — two ways:**
 
 1. **Manually** (as an **Account Admin**) — create the SP in the Account Console and grant it the account/workspace roles above; the target catalog's owner grants it `MANAGE` + `APPLY TAG`.
-2. **`make bootstrap-sp`** (run by an already-authorized account admin — it can't elevate a non-admin caller). Point it at your **existing catalog** with `TARGET_CATALOG`:
+2. **`make bootstrap-sp`** (run by an already-authorized **Account Admin** — it can't elevate a non-admin caller). Point it at your **existing catalog** with `TARGET_CATALOG`:
 
    ```
    make bootstrap-sp ACCOUNT_PROFILE=<profile> ACCOUNT_ID=<id> WORKSPACE_ID=<id> SP_NAME=<name> TARGET_CATALOG=<catalog> PLAN=1
    ```
 
-   Review the dry-run, then swap `PLAN=1` for `YES=1` to apply; it prints the one-time OAuth secret and an `auth.auto.tfvars` snippet. `TARGET_CATALOG` grants the SP `USE CATALOG`, `USE SCHEMA`, `MANAGE`, and `APPLY TAG` on that existing catalog. A pre-flight first checks the catalog exists and that *you* can grant on it (you own the catalog/metastore, or hold effective `MANAGE`); if not, it stops **before** creating the SP or minting a secret and asks you to have the catalog owner run it. One `TARGET_CATALOG` applies to every workspace in `WORKSPACE_ID` — run it separately per catalog. `make destroy` later revokes these Terraform-managed catalog grants, so the SP loses `MANAGE`/`APPLY TAG` until you re-run `bootstrap-sp` or the owner re-grants them.
+   Review the dry-run, then swap `PLAN=1` for `YES=1` to apply; it prints an `auth.auto.tfvars` snippet and the one-time OAuth secret when it mints one (reusing an existing SP without `ROTATE_SECRET=1` reports the secret as unchanged). `TARGET_CATALOG` grants the SP `USE CATALOG`, `USE SCHEMA`, `MANAGE`, and `APPLY TAG` on that existing catalog. A pre-flight first checks the catalog exists and that *you* can grant on it (you own the catalog/metastore, or hold effective `MANAGE`); if not, it stops **before** creating the SP or minting a secret and asks you to have the catalog owner run it. One `TARGET_CATALOG` applies to every workspace in `WORKSPACE_ID` — run it separately per catalog. `make destroy` later revokes these Terraform-managed catalog grants, so the SP loses `MANAGE`/`APPLY TAG` until you re-run `bootstrap-sp` or the owner re-grants them.
 
    <details>
    <summary><strong>Greenfield</strong> (GenieRails creates its own catalog) — rarely needed</summary>
@@ -152,10 +158,7 @@ These apply **only to the integration-test provisioning harness (`make test-ci`)
 - `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ optional `AWS_SESSION_TOKEN`)
 - Default boto3 credential chain (instance profile, SSO, etc.)
 
-**IAM permissions:**
-- `iam:CreateRole`, `iam:DeleteRole`, `iam:PutRolePolicy`, `iam:DeleteRolePolicy`
-- `s3:CreateBucket`, `s3:DeleteBucket`, `s3:PutPublicAccessBlock`
-- `sts:GetCallerIdentity`
+**IAM / S3 permissions** — to create, reuse-check, and tear down the test IAM roles and S3 buckets: create/update/list/delete on IAM roles and role policies, and on S3 buckets and objects, plus `sts:GetCallerIdentity`. (The exact call list isn't exhaustive; simplest is an admin policy on a throwaway test account.)
 </details>
 
 <details>
@@ -171,31 +174,27 @@ These apply **only to the integration-test provisioning harness (`make test-ci`)
 - `AZURE_REGION` (e.g., `australiaeast`)
 
 **Azure RBAC roles:**
-- `Contributor` on resource group
+- `Contributor` on the resource group
 - `Storage Blob Data Contributor`
-- `User Access Administrator`
+- `User Access Administrator` — optional (only if the SP itself assigns roles; otherwise it falls back to your Azure CLI login)
 </details>
 
-## Quick Verification
+## Quick check
 
-After installing Python and Terraform, verify your setup:
+Confirm the required tools are present:
 
 ```bash
-# Clone the repo
-git clone https://github.com/databricks-solutions/genierails.git
-cd genierails
-
-# Pick your cloud
-cd aws   # or: cd azure
-
-# Copy and fill in credentials
-cp shared/auth.auto.tfvars.example envs/dev/auth.auto.tfvars
-# Edit envs/dev/auth.auto.tfvars with your credentials
-
-# Verify connectivity
-make setup ENV=dev
-make validate ENV=dev
+make --version && python3 --version && terraform --version && git --version
 ```
 
-If `make validate` shows all `[PASS]` checks, you're ready.
-**Next: follow the [Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)** — the end-to-end champion flow. (Already have a Genie agent built in the Databricks UI? [Import it into code first](from-ui-to-production.md), then follow the same walkthrough.)
+Then clone the repo and scaffold your first environment:
+
+```bash
+git clone https://github.com/databricks-solutions/genierails.git
+cd genierails/aws          # or: cd genierails/azure
+make setup ENV=dev         # creates envs/dev/ config templates (local only — no Databricks calls)
+```
+
+`make setup` writes the `envs/dev/auth.auto.tfvars` and `env.auto.tfvars` templates — fill in your SP credentials (see [Credentials](#credentials)) and your tables / warehouse / Genie space.
+
+**Next: follow the [Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)** — the end-to-end champion flow. Its Phase 1 runs `make generate` → `make validate-generated` → `make coverage-gate`, where the `[PASS]` checks appear against your generated config. Already have a Genie agent built in the Databricks UI? [Import it into code first](from-ui-to-production.md), then follow the same walkthrough.
