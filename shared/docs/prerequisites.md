@@ -171,11 +171,30 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
 1. **Manually** — the Account Admin creates the SP in the Account Console and assigns the account and workspace roles in the table above. The target catalog's owner grants it `MANAGE` + `APPLY TAG`.
 2. **With `make bootstrap-sp`** — an already-authorized Account Admin runs the command below. It cannot elevate a non-admin caller.
 
-   ```
-   make bootstrap-sp ACCOUNT_PROFILE=<profile> ACCOUNT_ID=<id> WORKSPACE_ID=<id> SP_NAME=<name> TARGET_CATALOG=<catalog> PLAN=1
+   `ACCOUNT_PROFILE` is the name of a Databricks CLI profile for the **bootstrap caller**, not the deployment SP. [Install the Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) if needed, then create the profile below (on Azure, use `https://accounts.azuredatabricks.net` as the host):
+
+   ```bash
+   databricks auth login \
+     --host https://accounts.cloud.databricks.com \
+     --account-id <account-id> \
+     --skip-workspace \
+     --profile genierails-bootstrap
    ```
 
-   - Run with `PLAN=1` first; after review, replace it with `YES=1` to apply.
+   ```bash
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<id> SP_NAME=<name> TARGET_CATALOG=<catalog> PLAN=1
+   ```
+
+   | Parameter | Required | Value / where to find it |
+   |-----------|----------|--------------------------|
+   | `ACCOUNT_PROFILE` | No | Profile name in `~/.databrickscfg`; defaults to `DEFAULT`. Use the Account Admin profile created above. |
+   | `ACCOUNT_ID` | Yes | Databricks Account Console → top-right profile menu. |
+   | `WORKSPACE_ID` | Yes | Numeric ID in Account Console → **Workspaces**, or the workspace URL's `?o=` value. Use commas for multiple workspaces. |
+   | `SP_NAME` | No | Display name for the deployment SP; defaults to `genierails-deployer`. |
+   | `TARGET_CATALOG` | Recommended | Exact name of the existing Unity Catalog catalog GenieRails will govern, from Catalog Explorer. Omit only for the greenfield alternative below. |
+   | `MODEL_ENDPOINT` | No | Model serving endpoint to grant `CAN QUERY`; defaults to `databricks-claude-sonnet-4-6`. |
+   | `PLAN=1` / `YES=1` | No | Use `PLAN=1` to preview, then rerun with `YES=1` to apply without an interactive confirmation. |
+
    - A preflight confirms the catalog exists and the caller can grant access. It stops before making changes if either check fails.
    - On success, it grants the required catalog permissions and prints the `auth.auto.tfvars` values, including a new OAuth secret when one is created.
 
