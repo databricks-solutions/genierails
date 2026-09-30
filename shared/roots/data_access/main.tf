@@ -35,18 +35,19 @@ provider "databricks" {
 
 locals {
   project_root = abspath("${path.root}/../..")
-  classification_uc_tables = distinct(concat(
+  configured_uc_tables = distinct(concat(
     var.uc_tables,
     flatten([for space in var.genie_spaces : space.uc_tables]),
   ))
   # 3-part entries (catalog.schema.table) are already fully qualified and passed through as-is.
   # 2-part entries (schema.table) are prefixed with uc_catalog (legacy schema-relative support).
-  full_uc_tables = [for t in var.uc_tables :
+  full_uc_tables = [for t in local.configured_uc_tables :
     length(split(".", t)) >= 3 ? t : (var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t)
   ]
-  full_classification_uc_tables = [for t in local.classification_uc_tables :
+  full_discovered_uc_tables = [for t in var.discovered_uc_tables :
     length(split(".", t)) >= 3 ? t : (var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t)
   ]
+  full_effective_uc_tables = distinct(concat(local.full_uc_tables, local.full_discovered_uc_tables))
 }
 
 variable "env_dir" {
@@ -88,6 +89,12 @@ variable "uc_catalog" {
 variable "uc_tables" {
   type    = list(string)
   default = []
+}
+
+variable "discovered_uc_tables" {
+  type        = list(string)
+  default     = []
+  description = "Tool-owned per-environment table facts discovered from Genie agents."
 }
 
 variable "genie_spaces" {
@@ -268,7 +275,8 @@ module "data_access" {
   databricks_workspace_host       = var.databricks_workspace_host
   groups                          = var.groups
   uc_tables                       = local.full_uc_tables
-  classification_uc_tables        = local.full_classification_uc_tables
+  discovered_uc_tables            = local.full_discovered_uc_tables
+  classification_uc_tables        = local.full_effective_uc_tables
   business_access_enabled         = var.business_access_enabled
   enable_classification           = var.enable_classification
   enable_auto_tagging             = var.enable_auto_tagging
@@ -292,12 +300,12 @@ output "catalogs" {
 
 output "grant_uc_tables" {
   description = "Fully qualified table footprint used for grants."
-  value       = local.full_uc_tables
+  value       = local.full_effective_uc_tables
 }
 
 output "classification_uc_tables" {
   description = "Fully qualified table footprint used only for classification."
-  value       = local.full_classification_uc_tables
+  value       = local.full_effective_uc_tables
 }
 
 output "classification_catalog_schemas" {

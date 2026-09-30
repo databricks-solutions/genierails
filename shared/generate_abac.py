@@ -40,6 +40,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -332,6 +333,51 @@ def load_auth_config(auth_file: Path, env_file: Path | None = None) -> dict:
     if "uc_tables" in cfg and cfg["uc_tables"]:
         print(f"    uc_tables: {', '.join(cfg['uc_tables'])}")
     return cfg
+
+
+def persist_discovered_uc_tables(
+    path: Path, tables: list[str], *, merge_existing: bool = False
+) -> tuple[list[str], list[str], list[str]]:
+    """Atomically persist the tool-owned Genie table footprint."""
+    existing_cfg = _load_tfvars(path, "previously discovered UC tables")
+    existing = list(dict.fromkeys(existing_cfg.get("discovered_uc_tables", []) or []))
+    current = list(dict.fromkeys(str(table) for table in tables if table))
+    desired = list(dict.fromkeys(existing + current)) if merge_existing else current
+
+    existing_set = set(existing)
+    desired_set = set(desired)
+    added = [table for table in desired if table not in existing_set]
+    already_present = [table for table in desired if table in existing_set]
+    disappeared = [table for table in existing if table not in desired_set]
+
+    print("\n  Discovered UC table persistence:")
+    for label, values in (
+        ("added", added),
+        ("already present", already_present),
+        ("disappeared", disappeared),
+    ):
+        print(f"    {label}: {', '.join(values) if values else '(none)'}")
+
+    rendered = "# Tool-owned: refreshed by make generate; do not edit manually.\n"
+    rendered += "discovered_uc_tables = [\n"
+    rendered += "".join(f"  {json.dumps(table)},\n" for table in desired)
+    rendered += "]\n"
+    if path.exists() and path.read_text() == rendered:
+        print(f"    unchanged: {path}")
+        return added, already_present, disappeared
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    import tempfile
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as tmp:
+        tmp.write(rendered)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = Path(tmp.name)
+    os.replace(tmp_path, path)
+    print(f"    wrote: {path}")
+    return added, already_present, disappeared
 
 
 def configure_databricks_env(auth_cfg: dict):
@@ -6870,11 +6916,12 @@ def main():
 
     if not args.tables:
         genie_spaces_cfg = auth_cfg.get("genie_spaces", [])
+        all_space_tables: list[str] = []
+        discovery_incomplete = False
         # In per-space mode, restrict scanning to only the target space
         if target_space_cfg is not None:
             genie_spaces_cfg = [target_space_cfg]
         if genie_spaces_cfg:
-            all_space_tables: list[str] = []
             discovered_from_api: list[str] = []
 
             for space in genie_spaces_cfg:
@@ -6897,6 +6944,8 @@ def main():
                     tables, genie_cfg, api_title = fetch_tables_from_genie_space(
                         space_id, auth_cfg, quick_check_only=bool(space_tables)
                     )
+                    if not space_tables and not tables and not genie_cfg and not api_title:
+                        discovery_incomplete = True
 
                     # Use the API title as the canonical name if no name was given
                     effective_name = space_name if space_name != space_id else (api_title or space_id)
@@ -6923,9 +6972,14 @@ def main():
                 print(
                     "\n  Auto-discovered tables from existing Genie agent(s):\n"
                     + "".join(f"    - {t}\n" for t in discovered_from_api)
-                    + "\n  NOTE: Add these tables to data_access/env.auto.tfvars so that\n"
-                    "  UC grants and masking functions are applied to them as well."
+                    + "\n  Persisted for automatic UC grants, classification, and masking scope."
                 )
+
+        persist_discovered_uc_tables(
+            auth_file.parent / "data_access" / "discovered_uc_tables.auto.tfvars",
+            all_space_tables,
+            merge_existing=target_space_cfg is not None or discovery_incomplete,
+        )
 
     # This canonical object is the single source for DDL/classification scan
     # scope and, consequently, the classified-column coverage denominator.

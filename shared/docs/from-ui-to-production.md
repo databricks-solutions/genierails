@@ -27,15 +27,16 @@ Run generation once to import the supported agent configuration and discover its
 make generate ENV=dev
 ```
 
-Copy the printed table list into the data-access configuration. This is required because later classification, grants, and masking steps read tables from code rather than rediscovering them from the agent.
+Generation writes the aggregate table list to the tool-owned
+`envs/dev/data_access/discovered_uc_tables.auto.tfvars`. Terraform automatically
+unions it with user-authored `uc_tables` for classification, grants, and masking;
+`env.auto.tfvars` is never rewritten.
 
-```hcl
-# envs/dev/data_access/env.auto.tfvars
-uc_tables = [
-  "dev_fin.finance.customers",
-  "dev_fin.finance.transactions",
-]
-```
+A full generation reflects the current aggregate discovery exactly and reports
+added, already-present, and disappeared tables. A per-agent `SPACE=...` run is
+merge-only so it cannot erase tables previously discovered for other agents.
+If an API fetch fails, the run also preserves the previous aggregate rather than
+treating a failed lookup as a legitimate removal.
 
 ## 3. Continue to production
 
@@ -54,8 +55,10 @@ Add each agent to `genie_spaces`, then run generation once. GenieRails combines 
 Before continuing:
 
 1. Confirm that every agent imported. A failed fetch is warning-only and does not stop the remaining agents.
-2. Persist the complete table list in `uc_tables`.
-3. After promotion, set any required production warehouse IDs. The promoted configuration omits development agent and warehouse IDs.
+2. Review the persisted aggregate and the added/disappeared summary.
+3. After promotion, set any required production warehouse IDs. Discovery is an
+   environment fact: development's discovered file is not promoted, and the
+   production file is populated by `make generate ENV=prod`.
 
 <details>
 <summary>What is imported?</summary>

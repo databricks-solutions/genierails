@@ -110,14 +110,16 @@ def test_enable_classification_target_is_a_classification_only_apply():
     assert "_apply-layer" not in body
 
 
-def test_data_access_root_includes_space_tables_in_classification_footprint():
+def test_data_access_root_unions_all_effective_tables_for_grants_and_classification():
     source = ROOT_MAIN.read_text()
 
     assert 'variable "genie_spaces"' in source
     assert "flatten([for space in var.genie_spaces : space.uc_tables])" in source
-    assert "full_uc_tables = [for t in var.uc_tables" in source
-    assert "full_classification_uc_tables = [for t in local.classification_uc_tables" in source
-    assert "classification_uc_tables        = local.full_classification_uc_tables" in source
+    assert "var.discovered_uc_tables" in source
+    assert "full_uc_tables = [for t in local.configured_uc_tables" in source
+    assert "full_discovered_uc_tables = [for t in var.discovered_uc_tables" in source
+    assert "full_effective_uc_tables = distinct(concat" in source
+    assert "classification_uc_tables        = local.full_effective_uc_tables" in source
 
 
 def test_classification_and_grant_footprints_are_independent():
@@ -126,13 +128,13 @@ def test_classification_and_grant_footprints_are_independent():
     assert "for t in var.classification_uc_tables" in source
     assert "for catalog in distinct(local._classification_catalogs)" in source
     assert "for schema in local.classification_uc_schemas" in source
-    assert "for t in var.uc_tables" in source
+    assert "for t in local.effective_uc_tables" in source
 
     grant_section = source[source.index('resource "databricks_grant"') :]
     assert "classification_uc_tables" not in grant_section
 
 
-def test_full_apply_plan_keeps_space_only_tables_out_of_grants():
+def test_full_apply_plan_unions_space_and_discovered_tables_into_grants():
     init = subprocess.run(
         ["terraform", "init", "-backend=false", "-input=false"],
         cwd=ROOT,

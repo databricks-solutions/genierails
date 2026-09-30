@@ -31,8 +31,57 @@ from generate_abac import (
     autofix_remove_bodyless_functions,
     bootstrap_per_space_dirs,
     extract_code_blocks,
+    persist_discovered_uc_tables,
 )
 from tests.conftest import assert_valid_hcl
+
+
+def test_discovered_table_writeback_aggregates_and_is_idempotent(tmp_path, capsys):
+    path = tmp_path / "data_access" / "discovered_uc_tables.auto.tfvars"
+    tables = ["main.sales.orders", "main.hr.people", "main.sales.orders"]
+
+    added, present, disappeared = persist_discovered_uc_tables(path, tables)
+    first = path.read_bytes()
+    first_mtime = path.stat().st_mtime_ns
+    assert added == ["main.sales.orders", "main.hr.people"]
+    assert present == []
+    assert disappeared == []
+    assert assert_valid_hcl(path)["discovered_uc_tables"] == [
+        "main.sales.orders", "main.hr.people"
+    ]
+
+    added, present, disappeared = persist_discovered_uc_tables(path, tables)
+    assert path.read_bytes() == first
+    assert path.stat().st_mtime_ns == first_mtime
+    assert added == []
+    assert present == ["main.sales.orders", "main.hr.people"]
+    assert disappeared == []
+    assert "unchanged:" in capsys.readouterr().out
+
+
+def test_per_space_discovery_merges_without_wiping_other_agents(tmp_path):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    persist_discovered_uc_tables(path, ["main.finance.transactions"])
+
+    persist_discovered_uc_tables(
+        path, ["main.support.tickets"], merge_existing=True
+    )
+
+    assert assert_valid_hcl(path)["discovered_uc_tables"] == [
+        "main.finance.transactions", "main.support.tickets"
+    ]
+
+
+def test_full_discovery_reflects_current_state_and_reports_disappeared(tmp_path, capsys):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    persist_discovered_uc_tables(path, ["main.old.table", "main.kept.table"])
+    capsys.readouterr()
+
+    _, present, disappeared = persist_discovered_uc_tables(path, ["main.kept.table"])
+
+    assert present == ["main.kept.table"]
+    assert disappeared == ["main.old.table"]
+    assert "disappeared: main.old.table" in capsys.readouterr().out
 
 # ---------------------------------------------------------------------------
 # Helpers

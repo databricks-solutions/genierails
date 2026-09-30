@@ -17,6 +17,7 @@ terraform {
 }
 
 locals {
+  effective_uc_tables = distinct(concat(var.uc_tables, var.discovered_uc_tables))
   effective_warehouse_id = (
     var.sql_warehouse_id != ""
     ? var.sql_warehouse_id
@@ -54,7 +55,7 @@ locals {
   ]
 
   _uc_catalogs = [
-    for t in var.uc_tables :
+    for t in local.effective_uc_tables :
     split(".", t)[0]
   ]
 
@@ -64,7 +65,7 @@ locals {
   ]
 
   uc_schemas = distinct([
-    for t in var.uc_tables :
+    for t in local.effective_uc_tables :
     join(".", slice(split(".", t), 0, 2))
   ])
 
@@ -190,7 +191,7 @@ resource "databricks_grant" "schema_access" {
 
 resource "databricks_grant" "table_access" {
   for_each = var.business_access_enabled ? {
-    for pair in setproduct(var.uc_tables, local.access_principals) :
+    for pair in setproduct(local.effective_uc_tables, local.access_principals) :
     "${pair[0]}|${pair[1]}" => { table = pair[0], group = pair[1] }
   } : {}
 

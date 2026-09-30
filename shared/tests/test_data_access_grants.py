@@ -32,7 +32,7 @@ def test_group_grants_follow_catalog_schema_table_chain():
     assert "schema     = each.value.schema" in schema
     assert 'privileges = ["USE_SCHEMA"]' in schema
 
-    assert "setproduct(var.uc_tables, local.access_principals)" in table
+    assert "setproduct(local.effective_uc_tables, local.access_principals)" in table
     assert "table      = each.value.table" in table
     assert 'privileges = ["SELECT"]' in table
 

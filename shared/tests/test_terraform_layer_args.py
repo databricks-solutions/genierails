@@ -48,3 +48,29 @@ def test_caller_var_override_follows_repo_tfvars(tmp_path):
     assert apply_args.index(f"-var-file={tfvars}") < apply_args.index(
         "-var=business_access_enabled=true"
     )
+
+
+def test_data_access_runner_loads_discovered_table_facts(tmp_path):
+    env_dir = tmp_path / "data_access"
+    env_dir.mkdir()
+    discovered = env_dir / "discovered_uc_tables.auto.tfvars"
+    discovered.write_text('discovered_uc_tables = ["main.agent.orders"]\n')
+
+    log = tmp_path / "terraform.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    terraform = bin_dir / "terraform"
+    terraform.write_text("#!/bin/sh\n" f"printf '%s\\n' \"$*\" >> \"{log}\"\n")
+    terraform.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["LAYER_ENV_DIR"] = str(env_dir)
+    result = subprocess.run(
+        [RUNNER, "data_access", "dev", "plan"],
+        text=True, capture_output=True, env=env,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    plan_args = shlex.split(log.read_text().splitlines()[1])
+    assert f"-var-file={discovered}" in plan_args

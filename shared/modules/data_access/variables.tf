@@ -33,6 +33,12 @@ variable "uc_tables" {
   description = "Optional UC table list used to derive catalogs for grants."
 }
 
+variable "discovered_uc_tables" {
+  type        = list(string)
+  default     = []
+  description = "Tool-owned per-environment table facts discovered from Genie agents."
+}
+
 variable "classification_uc_tables" {
   type        = list(string)
   default     = []
