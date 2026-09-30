@@ -25,9 +25,10 @@ Then gather the inputs specific to this walkthrough:
 ---
 
 <a id="phase-0--dev-set-up"></a>
-## Phase 0 — Dev: Set up
+<details>
+<summary><strong>Phase 0 — Dev: Set up</strong></summary>
 
-**Run:**
+**Goal —** create the local config folders and fill in your creds + settings. Nothing here touches Databricks yet.
 
 ```bash
 git clone https://github.com/databricks-solutions/genierails.git
@@ -36,12 +37,7 @@ make setup ENV=dev          # creates envs/dev/ config templates (local only —
 cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars
 ```
 
-**Then edit:** `envs/dev/auth.auto.tfvars`, `envs/dev/env.auto.tfvars`, and `envs/account/env.auto.tfvars`.
-
-<details>
-<summary><strong>Goal, file contents, and agent source</strong></summary>
-
-Create the local config folders and fill in your credentials and settings. Nothing here touches Databricks yet.
+Then edit three files:
 
 - **`envs/dev/auth.auto.tfvars`** — the deploying SP `client_id` / `client_secret` + workspace host & id.
 - **`envs/dev/env.auto.tfvars`** — `uc_tables`, `sql_warehouse_id` (or blank), and `genie_spaces`. Keep the template's safety defaults unchanged.
@@ -61,30 +57,12 @@ Either path provides the values to add to `envs/dev/env.auto.tfvars`.
 ---
 
 <a id="phase-1--dev-scan-draft-and-test-rules"></a>
-## Phase 1 — Dev: Scan, draft, and test rules
-
-**Run in order:**
-
-1. **UI:** Catalog Explorer → dev catalog → **Enable classification**.
-2. **UI:** When the scan finishes, open **Review detections** and exclude false positives; then enable automatic tagging for each reviewed class.
-3. **CLI:** Draft the protection rules:
-
-   ```bash
-   make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'
-   ```
-
-4. **CLI:** Prove coverage, apply, and verify:
-
-   ```bash
-   make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id
-   ```
-
 <details>
-<summary><strong>Goal, UI guidance, command details, and as-code alternatives</strong></summary>
+<summary><strong>Phase 1 — Dev: Scan, draft, and test rules</strong></summary>
 
-Rehearse safely on dev: prove the masks fire, confirm the agent still answers, and produce a reviewable draft without live PII. Prod discovers what is actually sensitive later.
+**Goal —** *rehearse* safely on dev: prove the masks fire, confirm the agent still answers, and produce a reviewable draft — off live PII. (Prod discovers what's actually sensitive later.)
 
-The first scan is asynchronous (minutes to ~24h). [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections), exclude any false positives, then enable automatic tagging per class. The `class.*` tags appear on the reviewed columns in Catalog Explorer.
+**1a. Turn on the scanner.** Enable UC Data Classification on your catalog in the **Databricks UI** — Catalog Explorer → your catalog → *Enable* classification. The scan just runs; nothing is tagged until you opt in (1b).
 
 <details>
 <summary><strong>Alternative — Enable classification as code</strong></summary>
@@ -98,6 +76,13 @@ This alternative uses the template's `enable_classification = true` safety setti
 The as-code path applies the `databricks_data_classification_catalog_config` resource. On a workspace without a serverless usage policy it can fail with `Usage policy ID must not be empty` ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)); the UI path above avoids this issue. If needed, create or attach a serverless usage policy first. Creating one requires Workspace Admin (non-admins need *Serverless usage policy: Manager*). Docs: [AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies).
 </details>
 
+**1b. Review detections.** The first scan is asynchronous (minutes to ~24h) — kick it off, grab a coffee ☕, and come back. Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) to see what the scanner found on your columns and **exclude any false positives**. Nothing is tagged yet — auto-tagging defaults off.
+
+<details>
+<summary><strong>Next — Enable automatic tagging after review</strong></summary>
+
+After review, **enable automatic tagging in the UI** (per class). The `class.*` tags then land on the reviewed columns and appear in **Catalog Explorer**. Then continue to **1c**.
+
 <details>
 <summary><strong>Alternative — Enable automatic tagging as code</strong></summary>
 
@@ -105,8 +90,18 @@ As code, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-r
 
 </details>
 
+</details>
+
+**1c. Draft the protection rules.**
+```bash
+make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'
+```
 `--groups` are **your own** IdP-synced groups, **one per access tier, most-privileged first** (`payments_ops`=full/raw → `regional_analysts`=region-scoped + masked → `viewers`=least-privileged, with all sensitive columns masked — placeholders; use your real names). GenieRails *consumes* them by exact name, never creates them; the generated policies define each tier's actual access.
 
+**1d. Prove coverage, apply, and verify — one command.**
+```bash
+make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id
+```
 `make rehearse` runs **coverage-gate → validate-generated → apply → verify-access** in order, stopping at the first failure. The last step, `verify-access`, proves masking *by effect*: it creates a test SP for each access tier, grants each test SP temporary `CAN_USE` on the selected warehouse, and confirms the unprivileged tier sees masked values while an authorized tier sees raw. No separate warehouse-permission command is required. In dev you **don't touch the exposure gate** — rehearse opens it just for this check (the masks protect the data either way; prod opens it deliberately in Phase 5). `VERIFY_KEY_COLUMN` is the single column used to pair rows across tiers — optional (omit it and the masking check is skipped) but recommended; for tables that don't share one key, pass a [`VERIFY_SPEC` JSON](../../docs/effective-access-verification.md) instead.
 
 </details>
@@ -114,20 +109,14 @@ As code, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-r
 ---
 
 <a id="phase-2--prod-set-up-and-promote-rules"></a>
-## Phase 2 — Prod: Set up and promote rules
+<details>
+<summary><strong>Phase 2 — Prod: Set up and promote rules</strong></summary>
 
-**Run:**
+**Goal —** create the production configuration, add its credentials and settings, and copy the reviewed rules (masks, access policies, mappings) from dev.
 
 ```bash
 make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_finance=prod_finance"
 ```
-
-**Then edit:** `envs/prod/auth.auto.tfvars` and `envs/prod/env.auto.tfvars`.
-
-<details>
-<summary><strong>Goal, production settings, and promotion behavior</strong></summary>
-
-Create the production configuration, add its credentials and settings, and copy the reviewed rules (masks, access policies, mappings) from dev.
 
 `DEST_CATALOG_MAP` renames each dev catalog to its prod name (`dev_finance=prod_finance`; comma-separate multiple).
 
@@ -138,24 +127,23 @@ Promotion creates `envs/prod/` with configuration templates. Fill in both files:
 
 **Done when —** `envs/prod/` points at the prod catalog and both production configuration files are filled in.
 
+<details>
+<summary><strong>Details — What promotion carries and leaves behind</strong></summary>
+
 It carries the **rules** — the mapping, masking functions, access/row-filter policies, and group→tier mapping — and **leaves dev's tag assignments behind** (which columns got tagged is a *fact* about dev's data; prod re-derives its own in Phase 3).
+</details>
 
 </details>
 
 ---
 
 <a id="phase-3--prod-scan-real-data"></a>
-## Phase 3 — Prod: Scan real data
-
-**Complete in order:**
-
-1. **UI:** Catalog Explorer → prod catalog → **Enable classification**.
-2. **UI:** When the scan finishes, open **Review detections** and exclude false positives; then enable automatic tagging for each reviewed class.
-
 <details>
-<summary><strong>Goal, UI guidance, completion check, and as-code alternatives</strong></summary>
+<summary><strong>Phase 3 — Prod: Scan real data</strong></summary>
 
-Let production scan its own real data and tag its sensitive columns. Real customer PII may surface types that dev data did not contain. The initial scan does not write tags until you enable automatic tagging after review.
+**Goal —** let production scan its *own* real data and tag its sensitive columns — the true facts land here (real customer PII only exists in prod).
+
+With the production configuration from Phase 2 in place, **turn on prod's scanner in the Databricks UI** on the prod catalog (same as step 1a). It scans **without writing tags** (auto-tagging defaults off, so prod gets its *own* review, just like dev). Then, exactly as in dev's **1b**:
 
 <details>
 <summary><strong>Alternative — Enable classification as code</strong></summary>
@@ -167,12 +155,19 @@ make enable-classification ENV=prod   # same as step 1a, now on prod
 This alternative uses the promoted file's `enable_classification = true` safety setting.
 </details>
 
-Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) on the prod catalog and exclude any false positives.
+**Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) on the prod catalog and **exclude any false positives** — prod's real data may surface sensitive types dev never saw.
+
+<details>
+<summary><strong>Next — Enable automatic tagging after review</strong></summary>
+
+**Enable automatic tagging in the UI** (per class); the `class.*` tags then land.
 
 <details>
 <summary><strong>Alternative — Enable automatic tagging as code</strong></summary>
 
 Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` and re-run `make enable-classification ENV=prod`.
+
+</details>
 
 </details>
 
@@ -183,18 +178,14 @@ Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` and re-run `make
 ---
 
 <a id="phase-4--prod-prove-coverage"></a>
-## Phase 4 — Prod: Prove coverage
+<details>
+<summary><strong>Phase 4 — Prod: Prove coverage</strong></summary>
 
-**Run:**
+**Goal —** derive prod's protections from its own `class.*` tags, prove coverage, and deploy the enforcement (masks + access policies). The Genie agent itself isn't created yet — that's Phase 5.
 
 ```bash
 make certify ENV=prod   # one command: derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook (stops at the first failure)
 ```
-
-<details>
-<summary><strong>Goal, certification behavior, and failure recovery</strong></summary>
-
-Derive prod's protections from its own `class.*` tags, prove coverage, and deploy the enforcement (masks + access policies). The Genie agent itself is not created yet; that happens in Phase 5.
 
 `certify` reuses the exact rules you reviewed in dev — it re-derives *which prod columns* get which protection from prod's own tags, but never regenerates the rules (no model call, so nothing drifts from what you reviewed). It verifies coverage and deploys only the governance protections: masks and access policies. It does not deploy or update the Genie agent. If prod's tags cannot be read, or a detected data type has no protection rule, the command stops instead of applying incomplete protection.
 
@@ -214,26 +205,24 @@ Repeat until the gate passes and drift is clean. The agent stays uncreated and c
 ---
 
 <a id="phase-5--prod-release-access-and-verify"></a>
-## Phase 5 — Prod: Release access and verify
+<details>
+<summary><strong>Phase 5 — Prod: Release access and verify</strong></summary>
 
-**Set:**
+**Goal —** with coverage proven, release access, create the agent, and confirm masking live.
 
 ```hcl
 # envs/prod/env.auto.tfvars
 business_access_enabled = true
 ```
-
-**Then run in order:**
-
 ```bash
 make apply ENV=prod    # creates the Genie agent + RELEASES the withheld business SELECT and Genie run access
-make verify-access ENV=prod VERIFY_KEY_COLUMN=customer_id   # unprivileged = masked, authorized = raw
 ```
 
-<details>
-<summary><strong>Goal, live verification, completion check, and optional evidence</strong></summary>
+Confirm masking live. `verify-access` automatically grants its temporary per-tier test SPs `CAN_USE` on the selected warehouse; it does not change the tier groups' permanent warehouse ACLs.
 
-With coverage proven, release access, create the agent, and confirm masking live. `verify-access` automatically grants its temporary per-tier test SPs `CAN_USE` on the selected warehouse; it does not change the tier groups' permanent warehouse ACLs.
+```bash
+make verify-access ENV=prod VERIFY_KEY_COLUMN=customer_id   # unprivileged = masked, authorized = raw (the gate is open now)
+```
 
 <details>
 <summary><strong>Optional — Capture compliance evidence</strong></summary>
@@ -263,27 +252,10 @@ ENVS_DIR="$PWD/envs" ../shared/scripts/terraform_layer.sh workspace prod output 
 ---
 
 <a id="phase-6--prod-maintain-coverage"></a>
-## Phase 6 — Prod: Maintain coverage
-
-**Run on a schedule:**
-
-```bash
-make audit-schema ENV=prod
-make audit-rulebook ENV=prod
-```
-
-**Only after reviewing a finding that needs new assignments:**
-
-```bash
-make generate-delta ENV=prod
-# review the generated changes
-make apply ENV=prod
-```
-
 <details>
-<summary><strong>Goal, command behavior, and handling findings</strong></summary>
+<summary><strong>Phase 6 — Prod: Maintain coverage</strong></summary>
 
-Catch sensitive data that arrives after go-live. The repository includes a scheduled governance job.
+**Goal —** catch sensitive data that arrives after go-live. Run these on a schedule (the repo ships a scheduled governance job):
 
 - **`make audit-schema ENV=prod`** — flags untagged sensitive-looking columns and stale assignments. A clean run prints `No drift detected.`; a finding lists the columns → classify them (usually via `generate-delta`) and re-apply.
 - **`make audit-rulebook ENV=prod`** — flags any prod tag with no covering policy/mask (a rule dropped in promotion, or a brand-new type). A finding means: add the rule in dev, re-generate/validate, re-promote, and re-certify.
