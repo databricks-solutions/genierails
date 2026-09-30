@@ -39,7 +39,7 @@ uc_tables = [
 
 ## 3. Continue to production
 
-Continue at Phase 1 of the [dev-to-prod walkthrough](../examples/dev_to_prod/README.md). The remaining workflow is unchanged: classify, generate, validate coverage, promote, re-derive in production, and expose last.
+Continue at [Phase 1 of the dev-to-prod walkthrough](../examples/dev_to_prod/README.md#phase-1--dev-scan-draft-the-rules-test-them). The remaining workflow is unchanged: classify, generate, validate coverage, promote, re-derive in production, and expose last.
 
 For an imported agent:
 
