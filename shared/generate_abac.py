@@ -1714,16 +1714,33 @@ def call_databricks(prompt: str, model: str) -> str:
     w = WorkspaceClient(config=cfg)
     print(f"  Calling Databricks FMAPI ({model})...")
 
-    response = w.serving_endpoints.query(
+    query_args = dict(
         name=model,
         messages=[
             ChatMessage(role=ChatMessageRole.SYSTEM, content="You are a Databricks Unity Catalog ABAC expert."),
             ChatMessage(role=ChatMessageRole.USER, content=prompt),
         ],
         max_tokens=32768,
-        temperature=0,
     )
-    return response.choices[0].message.content
+    # Claude 5+ endpoints reject the temperature parameter. Keep deterministic
+    # temperature=0 behavior for older/current models that support it.
+    if not re.match(r"^databricks-claude-(?:sonnet|opus)-(?:[5-9]|\d{2})", model):
+        query_args["temperature"] = 0
+
+    response = w.serving_endpoints.query(**query_args)
+    content = response.choices[0].message.content
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_blocks = []
+        for block in content:
+            block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", "")
+            block_text = block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
+            if block_type == "text" and block_text:
+                text_blocks.append(block_text)
+        if text_blocks:
+            return "\n".join(text_blocks)
+    raise ValueError(f"Databricks FMAPI model {model} returned no text content")
 
 
 PROVIDERS = {

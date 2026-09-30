@@ -704,6 +704,58 @@ class TestGenieFetchFailureIsolation:
         assert complete is False
 
 
+class TestDatabricksModelCompatibility:
+
+    @staticmethod
+    def _install_fake_client(monkeypatch, content):
+        calls = []
+
+        class FakeServingEndpoints:
+            def query(self, **kwargs):
+                calls.append(kwargs)
+                message = SimpleNamespace(content=content)
+                return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+        class FakeWorkspaceClient:
+            def __init__(self, **kwargs):
+                self.serving_endpoints = FakeServingEndpoints()
+
+        monkeypatch.setattr("databricks.sdk.WorkspaceClient", FakeWorkspaceClient)
+        monkeypatch.setattr("databricks.sdk.config.Config", lambda **kwargs: object())
+        return calls
+
+    def test_claude_5_omits_temperature_and_normalizes_content_blocks(self, monkeypatch):
+        calls = self._install_fake_client(
+            monkeypatch,
+            [
+                {"type": "reasoning", "summary": []},
+                {"type": "text", "text": "```sql\nSELECT 1;\n```"},
+                SimpleNamespace(type="text", text="```hcl\ngroups = {}\n```"),
+            ],
+        )
+
+        result = generate_abac.call_databricks("prompt", "databricks-claude-sonnet-5-5")
+
+        assert "temperature" not in calls[0]
+        assert result == "```sql\nSELECT 1;\n```\n```hcl\ngroups = {}\n```"
+
+    def test_claude_4_keeps_deterministic_temperature_and_string_content(self, monkeypatch):
+        calls = self._install_fake_client(monkeypatch, "plain response")
+
+        result = generate_abac.call_databricks("prompt", "databricks-claude-sonnet-4-6")
+
+        assert calls[0]["temperature"] == 0
+        assert result == "plain response"
+
+    def test_structured_response_without_text_fails_clearly(self, monkeypatch):
+        self._install_fake_client(
+            monkeypatch, [{"type": "reasoning", "summary": []}]
+        )
+
+        with pytest.raises(ValueError, match="returned no text content"):
+            generate_abac.call_databricks("prompt", "databricks-claude-sonnet-5")
+
+
 class TestExtractCodeBlocks:
 
     def test_extracts_hcl_from_nonstandard_label(self):
