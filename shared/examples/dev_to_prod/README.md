@@ -6,7 +6,7 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 
 ## The idea
 
-Databricks' built-in classifier samples your column values *inside your own workspace* and tags which columns hold sensitive types (emails, SSNs, card numbers). GenieRails turns those tags into protections — column masks and access rules — as code, and a **coverage check refuses to release the agent** until every sensitive column is covered. You rehearse the whole thing safely in **dev**, then do it for real in **prod**. (Full mental model: [How it works](../../../README.md#how-it-works).)
+Databricks' built-in classifier samples your column values *inside your own workspace* and tags which columns hold sensitive types (emails, SSNs, card numbers). GenieRails turns those tags into protections — column masks and access rules — as code, and a **coverage check refuses to release the agent** until every sensitive column is covered. You rehearse the whole thing safely in **dev**, then do it for real in **prod**.
 
 ---
 
