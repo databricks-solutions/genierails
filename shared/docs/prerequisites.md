@@ -262,6 +262,8 @@ This section is **not required to use GenieRails**. It applies only to contribut
 - Default boto3 credential chain (instance profile, SSO, etc.)
 
 **IAM / S3 permissions** — create/update/list/delete on the test IAM roles, role policies, S3 buckets, and objects, plus `sts:GetCallerIdentity`.
+
+The Databricks Account Admin SP is automatically assigned as an admin of the new test workspace. The harness then creates a temporary serverless usage policy bound only to that workspace so Data Classification can run without manual UI setup, and deletes the policy during teardown.
 </details>
 
 <details>

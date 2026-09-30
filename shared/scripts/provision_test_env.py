@@ -53,6 +53,9 @@ Storage setup (fully automated)
   3. External Location  — path-scoped S3 prefix for this run registered in the
                           new workspace, so catalogs can be created without a
                           metastore-level storage root.
+  4. AWS only: serverless usage policy — bound only to the test workspace so
+                          Data Classification can be enabled automatically;
+                          deleted on teardown. Azure skips this step.
 
   The IAM role and S3 test prefix are both deleted automatically by `teardown`.
   The bucket itself is deleted only if this script created it.
@@ -859,6 +862,49 @@ databricks_workspace_host = "{workspace_host}"
     auth_file.write_text(content)
     return auth_file
 
+
+def _provision_aws_serverless_budget_policy(account_client, state: dict) -> None:
+    """Create the AWS CI workspace's serverless usage policy.
+
+    Data Classification's Terraform resource currently fails on a fresh AWS
+    workspace when no serverless usage policy exists (provider issue #5985).
+    The account-admin test identity is also made a workspace admin and creates
+    this policy, so it can use the policy without a separate permission grant.
+    Azure is intentionally unaffected.
+    """
+    if state.get("cloud_provider") != "aws":
+        return
+
+    from databricks.sdk.service.billing import BudgetPolicy
+    from databricks.sdk.service.compute import CustomPolicyTag
+
+    workspace_id = int(state["workspace_id"])
+    run_id = str(state["run_id"])
+    policy_name = f"genierails-ci-{run_id}"
+    created = account_client.budget_policy.create(
+        policy=BudgetPolicy(
+            policy_name=policy_name,
+            binding_workspace_ids=[workspace_id],
+            custom_tags=[CustomPolicyTag(key="genierails_ci", value=run_id)],
+        ),
+        request_id=f"genierails-ci-{run_id}",
+    )
+    if not created.policy_id:
+        raise RuntimeError(
+            "Databricks created no serverless usage policy ID for the AWS test workspace"
+        )
+    state["serverless_budget_policy_id"] = created.policy_id
+    state["serverless_budget_policy_name"] = created.policy_name or policy_name
+
+
+def _teardown_aws_serverless_budget_policy(account_client, state: dict) -> None:
+    """Delete only the AWS serverless usage policy created by this CI run."""
+    if state.get("cloud_provider") != "aws":
+        return
+    policy_id = state.get("serverless_budget_policy_id")
+    if policy_id:
+        account_client.budget_policy.delete(policy_id=policy_id)
+
 # ---------------------------------------------------------------------------
 # Provision
 # ---------------------------------------------------------------------------
@@ -1150,6 +1196,29 @@ def cmd_provision(cfg: dict[str, str], dry_run: bool = False, force: bool = Fals
     _warn("Waiting 20 s for workspace identity propagation…")
     time.sleep(20)
 
+    # ------------------------------------------------------------------
+    # Step 5a-1: AWS Data Classification needs a serverless usage policy.
+    # Creating one here keeps test-ci fully automated and avoids provider
+    # issue #5985 on a brand-new workspace. Azure has not exhibited this
+    # problem and deliberately skips this AWS-only setup.
+    # ------------------------------------------------------------------
+    if state.get("cloud_provider") == "aws":
+        _step("Creating serverless usage policy for AWS Data Classification")
+        try:
+            _provision_aws_serverless_budget_policy(a, state)
+            _save_state(state)
+            _ok(
+                "Serverless usage policy created: "
+                f"{state['serverless_budget_policy_name']} "
+                f"({state['serverless_budget_policy_id']})"
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not create the AWS serverless usage policy required by "
+                "Data Classification. The test-ci identity must be a Workspace "
+                "Admin and be allowed to create serverless usage policies."
+            ) from exc
+
     # Step 5a-2: Explicitly grant metastore admin to the SP via workspace API.
     # On Azure, implicit metastore admin from being the creator is not always
     # recognized when accessing through the workspace API. Explicit grant ensures
@@ -1408,7 +1477,23 @@ def cmd_teardown(dry_run: bool = False, env_file: Path | None = None) -> None:
     )
 
     # ------------------------------------------------------------------
-    # Step 0: Delete cloud storage resources (IAM role + S3 for AWS,
+    # Step 0: Delete the AWS-only CI serverless usage policy while its bound
+    # workspace still exists. Azure never creates this resource.
+    # ------------------------------------------------------------------
+    policy_id = state.get("serverless_budget_policy_id")
+    if policy_id:
+        _step(
+            "Deleting serverless usage policy: "
+            f"{state.get('serverless_budget_policy_name', policy_id)}"
+        )
+        try:
+            _teardown_aws_serverless_budget_policy(a, state)
+            _ok("Serverless usage policy deleted")
+        except Exception as exc:
+            _warn(f"Could not delete serverless usage policy {policy_id}: {exc}")
+
+    # ------------------------------------------------------------------
+    # Step 1: Delete cloud storage resources (IAM role + S3 for AWS,
     # Access Connector + Storage Account for Azure, etc.)
     # ------------------------------------------------------------------
     provider.teardown_storage(env_cfg, state)
