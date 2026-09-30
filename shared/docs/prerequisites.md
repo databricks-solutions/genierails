@@ -98,9 +98,9 @@ OAuth secret and an `auth.auto.tfvars` snippet; it cannot elevate a non-admin ca
 | **Account Admin** | Account | Creating groups and managing verification SPs |
 | **Tag Policy Creator + Manager** | Account | Creating and maintaining governed tag policies |
 | **Workspace Admin** | Target workspace | Deploying governance resources |
-| **CREATE CATALOG** | Workspace's Unity Catalog metastore | Creating owned catalogs; ownership then covers grants, masks, FGAC, and tag assignments |
+| **Authority over the target catalog** | The catalog you govern | Own it, **or** have its owner grant `MANAGE` + `APPLY TAG` (plus `ASSIGN` on the governed tags GenieRails applies). This is what lets GenieRails deploy tag assignments, masking functions, FGAC policies, and grants — and self-grant its own `USE CATALOG` / `USE SCHEMA` / `EXECUTE` / `CREATE FUNCTION`. |
 
-The bootstrap does **not** change metastore ownership or add the SP to a metastore-owner group. (To govern catalogs the SP does **not** own, that catalog's owner must grant it `MANAGE`.)
+GenieRails governs your **existing** catalog — `make apply` never creates one — so the SP does **not** need metastore `CREATE CATALOG`. It needs authority *on that catalog* (above); since it doesn't own a catalog it didn't create, the catalog's current owner must grant it `MANAGE` (+ `APPLY TAG`/`ASSIGN`). Metastore `CREATE CATALOG` is needed **only for greenfield/demo/test** setups where GenieRails creates a fresh catalog it then owns. `make bootstrap-sp` includes `CREATE CATALOG` for that greenfield case but does **not** grant catalog `MANAGE`/`APPLY TAG`, and it never changes metastore ownership — so for a brownfield catalog you must still have its owner grant those.
 
 > **Genie-only mode**: If you only need Genie agents without ABAC governance,
 > set `genie_only = true` in `env.auto.tfvars`. This requires only **Workspace Admin**
