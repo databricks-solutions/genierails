@@ -142,11 +142,12 @@ def test_live_collector_uses_catalog_scoped_column_privileges(monkeypatch):
             self.statement_execution = Execution()
 
     monkeypatch.setattr("databricks.sdk.WorkspaceClient", Client)
-    collect_live_state([COL], ["odd`catalog.sales.customers"], "warehouse-1")
+    state = collect_live_state([COL], ["odd`catalog.sales.customers"], "warehouse-1")
 
     privilege_sql = next(sql for sql in statements if "information_schema.column_privileges" in sql)
     assert "FROM `odd``catalog`.information_schema.column_privileges" in privilege_sql
     assert "system.information_schema.column_privileges" not in privilege_sql
+    assert state["column_privileges_availability"] == {"odd`catalog": "available"}
 
 
 def test_live_collector_tolerates_missing_column_privileges(monkeypatch):
@@ -173,5 +174,6 @@ def test_live_collector_tolerates_missing_column_privileges(monkeypatch):
     state = collect_live_state([COL], ["main.sales.customers"], "warehouse-1")
 
     assert state["grants"] == []
+    assert state["column_privileges_availability"] == {"main": "not_available"}
     assert any(sql == "SHOW TABLES IN `main`.information_schema" for sql in statements)
     assert not any(".column_privileges WHERE" in sql for sql in statements)

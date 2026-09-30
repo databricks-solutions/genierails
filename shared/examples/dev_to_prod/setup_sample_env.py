@@ -194,7 +194,9 @@ def _create_space(client: Any, warehouse_id: str, tables: list[str], title: str)
     return space_id
 
 
-def _reconcile_existing_space(state: dict[str, Any], warehouse_id: str) -> None:
+def _reconcile_existing_space(
+    state: dict[str, Any], warehouse_id: str, tables: list[str], title: str
+) -> None:
     """Validate an owned space on rerun without PATCHing its node graph.
 
     The Genie PATCH endpoint re-imports the space graph even for metadata-only
@@ -208,6 +210,17 @@ def _reconcile_existing_space(state: dict[str, Any], warehouse_id: str) -> None:
         raise RuntimeError(
             f"tracked Genie agent uses warehouse {tracked_warehouse}, not {warehouse_id}; "
             "run with --teardown before changing the sample warehouse"
+        )
+    drift = []
+    if sorted(state.get("tables", [])) != sorted(tables):
+        drift.append("tables")
+    if state.get("title") != title:
+        drift.append("title")
+    if drift:
+        print(
+            "      WARNING: tracked Genie agent " + " and ".join(drift)
+            + " differ from the requested configuration. Configuration is NOT re-applied; "
+            "run with --teardown, then recreate the sample environment to change it."
         )
 
 
@@ -268,10 +281,13 @@ def setup(args: argparse.Namespace, client: Any) -> None:
     title = f"GenieRails Dev-to-Prod Walkthrough ({args.catalog}.{args.schema})"
     if not space_id or not _space_exists(client, space_id):
         space_id = _create_space(client, args.warehouse_id, tables, title)
-        state.update(space_id=space_id, warehouse_id=args.warehouse_id)
+        state.update(
+            space_id=space_id, warehouse_id=args.warehouse_id,
+            tables=tables, title=title,
+        )
         _save_states(states)
     else:
-        _reconcile_existing_space(state, args.warehouse_id)
+        _reconcile_existing_space(state, args.warehouse_id, tables, title)
         print(f"      Reusing tracked Genie agent {space_id} without re-importing its node graph.")
         state["warehouse_id"] = args.warehouse_id
         _save_states(states)

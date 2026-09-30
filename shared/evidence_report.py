@@ -105,10 +105,15 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Source: `{header['source']}`",
         f"- Approved by: `{header['approved_by']}`",
         f"- Approved at: `{header['approved_at'] or 'pending'}`",
-        "",
-        "| Table | Column | Scan status | Scanned at | Tags | Applied mask / policies | Grants |",
-        "|---|---|---|---|---|---|---|",
     ]
+    if "column_privileges_availability" in report:
+        availability = report["column_privileges_availability"]
+        detail = ", ".join(f"{catalog}={status}" for catalog, status in sorted(availability.items())) or "not queried"
+        lines.append(f"- Column privileges: `{detail}`")
+    lines.extend([
+        "", "| Table | Column | Scan status | Scanned at | Tags | Applied mask / policies | Grants |",
+        "|---|---|---|---|---|---|---|",
+    ])
     for item in report["evidence"]:
         table = ".".join((item["catalog"], item["schema"], item["table"]))
         tags = ", ".join(f"{tag['name']}={tag['value']}" for tag in item["detected_tags"]) or "—"
@@ -180,7 +185,7 @@ def _sql_identifier(value: str) -> str:
     return "`" + value.replace("`", "``") + "`"
 
 
-def collect_live_state(columns: list[dict[str, str]], tables: list[str], warehouse_id: str) -> dict[str, list[dict[str, Any]]]:
+def collect_live_state(columns: list[dict[str, str]], tables: list[str], warehouse_id: str) -> dict[str, Any]:
     """Read live state through the SDK; called only in explicitly enabled integration mode."""
     if not tables:
         return {name: [] for name in ("columns", "classifications", "tags", "masks", "policies", "grants")}
@@ -209,28 +214,35 @@ def collect_live_state(columns: list[dict[str, str]], tables: list[str], warehou
         return {name: [] for name in ("columns", "classifications", "tags", "masks", "policies", "grants")}
     predicate = "concat(table_catalog, '.', table_schema, '.', table_name, '.', column_name) IN (" + keys + ")"
     tag_rows = query("SELECT catalog_name, schema_name, table_name, column_name, tag_name, tag_value FROM system.information_schema.column_tags WHERE concat(catalog_name, '.', schema_name, '.', table_name, '.', column_name) IN (" + keys + ")")
+    # Azure's live view has no mask catalog/schema columns, so mask_name must
+    # remain bare; table_catalog/table_schema identify the protected table.
     mask_rows = query("SELECT table_catalog, table_schema, table_name, column_name, mask_name FROM system.information_schema.column_masks WHERE concat(table_catalog, '.', table_schema, '.', table_name, '.', column_name) IN (" + keys + ")")
     # COLUMN_PRIVILEGES is optional in Databricks information_schema. Discover it
     # per catalog rather than assuming the system-wide relation exists (Azure
     # workspaces commonly expose no column-level privilege relation at all).
     grant_rows = []
+    column_privileges_availability = {}
     for catalog in sorted({key.split(".")[0] for key in tables}):
         information_schema = _sql_identifier(catalog) + ".information_schema"
         relations = query("SHOW TABLES IN " + information_schema)
-        if any(len(row) > 1 and str(row[1]).lower() == "column_privileges" for row in relations):
+        available = any(len(row) > 1 and str(row[1]).lower() == "column_privileges" for row in relations)
+        column_privileges_availability[catalog] = "available" if available else "not_available"
+        if available:
             grant_rows.extend(query("SELECT table_catalog, table_schema, table_name, column_name, grantee, privilege_type FROM " + information_schema + ".column_privileges WHERE " + predicate))
     table_grant_rows = query("SELECT table_catalog, table_schema, table_name, grantee, privilege_type FROM system.information_schema.table_privileges WHERE concat(table_catalog, '.', table_schema, '.', table_name) IN (" + table_key_sql + ")")
     schema_keys = sorted({".".join(key.split(".")[:2]) for key in tables})
     catalog_keys = sorted({key.split(".")[0] for key in tables})
     schema_grant_rows = query("SELECT catalog_name, schema_name, grantee, privilege_type FROM system.information_schema.schema_privileges WHERE concat(catalog_name, '.', schema_name) IN (" + ", ".join(_sql_literal(key) for key in schema_keys) + ")")
     catalog_grant_rows = query("SELECT catalog_name, grantee, privilege_type FROM system.information_schema.catalog_privileges WHERE catalog_name IN (" + ", ".join(_sql_literal(key) for key in catalog_keys) + ")")
+    # Azure's live view likewise has no filter catalog/schema columns.
     policy_rows = query("SELECT table_catalog, table_schema, table_name, filter_name FROM system.information_schema.row_filters WHERE concat(table_catalog, '.', table_schema, '.', table_name) IN (" + table_key_sql + ")")
 
     base = lambda row: dict(zip(("catalog", "schema", "table", "column"), row[:4]))
-    result: dict[str, list[dict[str, Any]]] = {
+    result: dict[str, Any] = {
         "columns": live_column_dicts, "classifications": [],
         "tags": [], "masks": [], "policies": [], "grants": [],
     }
+    result["column_privileges_availability"] = column_privileges_availability
     for row in tag_rows:
         result["tags"].append({**base(row), "name": row[4], "value": row[5]})
     for row in mask_rows:
@@ -286,7 +298,7 @@ def write_report(report: dict[str, Any], output_dir: Path) -> tuple[Path, Path]:
     return json_path, md_path
 
 
-def main(argv: list[str] | None = None, *, collector: Callable[..., dict[str, list[dict[str, Any]]]] = collect_live_state) -> int:
+def main(argv: list[str] | None = None, *, collector: Callable[..., dict[str, Any]] = collect_live_state) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-dir", type=Path, default=Path.cwd())
     parser.add_argument("--output-dir", type=Path)
@@ -302,6 +314,7 @@ def main(argv: list[str] | None = None, *, collector: Callable[..., dict[str, li
             parser.error(f"--warehouse-id or DATABRICKS_WAREHOUSE_ID is required when {INTEGRATION_ENV}=1")
         state = collector(columns, tables, args.warehouse_id)
         report = assemble_report(state["columns"], classifications=state["classifications"], tags=state["tags"], masks=state["masks"], policies=state["policies"], grants=state["grants"], approved_by=args.approved_by, approved_at=args.approved_at, source="databricks-live")
+        report["column_privileges_availability"] = state.get("column_privileges_availability", {})
     else:
         report = assemble_report(columns, tags=tags, approved_by=args.approved_by, approved_at=args.approved_at)
     paths = write_report(report, args.output_dir or args.env_dir / "generated" / "evidence")
