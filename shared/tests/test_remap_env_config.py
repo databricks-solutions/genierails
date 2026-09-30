@@ -26,6 +26,9 @@ def test_table_only_promotion_preserves_and_remaps_top_level_uc_tables(tmp_path,
         config = hcl2.load(handle)
     assert config["genie_spaces"] == []
     assert config["uc_tables"] == ["prod_catalog.genierails_e2e.customers"]
+    assert config["enable_classification"] is True
+    assert config["enable_auto_tagging"] is False
+    assert config["business_access_enabled"] is False
 
 
 def test_promotion_does_not_copy_or_overwrite_environment_discovery(tmp_path, monkeypatch):

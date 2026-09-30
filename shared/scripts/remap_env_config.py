@@ -148,6 +148,11 @@ def main():
     lines.append("]")
     lines.append("")
     lines.append('sql_warehouse_id = ""  # auto-create in dest workspace')
+    lines.append("")
+    lines.append("# Safe production defaults; use the UI workflow before opening access.")
+    lines.append("enable_classification = true")
+    lines.append("enable_auto_tagging = false")
+    lines.append("business_access_enabled = false")
 
     # Write
     os.makedirs(dest_env_dir, exist_ok=True)

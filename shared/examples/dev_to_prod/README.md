@@ -40,7 +40,7 @@ cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfva
 Then edit three files:
 
 - **`envs/dev/auth.auto.tfvars`** — the deploying SP `client_id` / `client_secret` + workspace host & id.
-- **`envs/dev/env.auto.tfvars`** — `uc_tables`, `sql_warehouse_id` (or blank), `genie_spaces`, `enable_classification = true`, `enable_auto_tagging = false`, `business_access_enabled = false`.
+- **`envs/dev/env.auto.tfvars`** — `uc_tables`, `sql_warehouse_id` (or blank), and `genie_spaces`. Keep the template's safety defaults unchanged.
 - **`envs/account/env.auto.tfvars`** — set `manage_groups = false` (this flow *consumes* IdP groups; it doesn't create them). **There is one shared `envs/account/` config** used by both dev and prod — you edit it here, once.
 
 **Choose one source for `genie_spaces` and `uc_tables`:**
@@ -62,7 +62,7 @@ Either path provides the values to add to `envs/dev/env.auto.tfvars`.
 
 **Goal —** *rehearse* safely on dev: prove the masks fire, confirm the agent still answers, and produce a reviewable draft — off live PII. (Prod discovers what's actually sensitive later.)
 
-**1a. Turn on the scanner.** Enable UC Data Classification on your catalog in the **Databricks UI** — Catalog Explorer → your catalog → *Enable* classification. The scan just runs; nothing is tagged until you opt in (1b). Keep `enable_classification = true` in your `env.auto.tfvars` — the *fail-closed signal* that makes generation (1c) abort rather than guess if classification results aren't readable.
+**1a. Turn on the scanner.** Enable UC Data Classification on your catalog in the **Databricks UI** — Catalog Explorer → your catalog → *Enable* classification. The scan just runs; nothing is tagged until you opt in (1b).
 
 <details>
 <summary><strong>Alternative — Enable classification as code</strong></summary>
@@ -70,6 +70,8 @@ Either path provides the values to add to `envs/dev/env.auto.tfvars`.
 ```bash
 make enable-classification ENV=dev   # scans only — nothing is tagged until you opt in (1b)
 ```
+
+This alternative uses the template's `enable_classification = true` safety setting, which also makes generation fail closed if classification results cannot be read.
 
 The as-code path applies the `databricks_data_classification_catalog_config` resource. On a workspace without a serverless usage policy it can fail with `Usage policy ID must not be empty` ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)); the UI path above avoids this issue. If needed, create or attach a serverless usage policy first. Creating one requires Workspace Admin (non-admins need *Serverless usage policy: Manager*). Docs: [AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies).
 </details>
@@ -81,7 +83,12 @@ The as-code path applies the `databricks_data_classification_catalog_config` res
 
 After review, **enable automatic tagging in the UI** (per class). The `class.*` tags then land on the reviewed columns and appear in **Catalog Explorer**. Then continue to **1c**.
 
+<details>
+<summary><strong>Alternative — Enable automatic tagging as code</strong></summary>
+
 As code, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-run `make enable-classification ENV=dev`.
+
+</details>
 
 </details>
 
@@ -116,7 +123,7 @@ make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_finance=prod_fin
 Promotion creates `envs/prod/` with configuration templates. Fill in both files:
 
 - **`envs/prod/auth.auto.tfvars`** — the deployment SP `client_id` / `client_secret` + prod workspace host & id. You may reuse the dev SP when both workspaces are in the same Databricks account and it is authorized in prod; use a separate prod SP when your security policy requires environment isolation. Separate Databricks accounts require separate SPs.
-- **`envs/prod/env.auto.tfvars`** — don't recreate it; set `sql_warehouse_id` (or leave `""` to auto-create), and add `enable_classification = true`, `enable_auto_tagging = false`, `business_access_enabled = false`.
+- **`envs/prod/env.auto.tfvars`** — don't recreate it; set `sql_warehouse_id` (or leave `""` to auto-create). Promotion has already written the safe classification and access defaults.
 
 **Done when —** `envs/prod/` points at the prod catalog and both production configuration files are filled in.
 
@@ -144,6 +151,8 @@ With the production configuration from Phase 2 in place, **turn on prod's scanne
 ```bash
 make enable-classification ENV=prod   # same as step 1a, now on prod
 ```
+
+This alternative uses the promoted file's `enable_classification = true` safety setting.
 </details>
 
 **Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) on the prod catalog and **exclude any false positives** — prod's real data may surface sensitive types dev never saw.
@@ -153,7 +162,12 @@ make enable-classification ENV=prod   # same as step 1a, now on prod
 
 **Enable automatic tagging in the UI** (per class); the `class.*` tags then land.
 
-As code, set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` (add the line if promote didn't write it) and re-run `make enable-classification ENV=prod`.
+<details>
+<summary><strong>Alternative — Enable automatic tagging as code</strong></summary>
+
+Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` and re-run `make enable-classification ENV=prod`.
+
+</details>
 
 </details>
 
