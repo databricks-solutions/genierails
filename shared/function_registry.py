@@ -86,15 +86,20 @@ class FunctionRegistry:
 
         Returns (normalized_hcl, count_of_renames).
         """
+        import re
+
         count = 0
         for alias, canonical in self._alias_map.items():
             if alias == canonical:
                 continue
-            old = f'"{alias}"'
-            new = f'"{canonical}"'
-            if old in hcl_text:
-                hcl_text = hcl_text.replace(old, new)
-                count += 1
+            # Function aliases can also be legitimate tag values (for example
+            # gr_treatment="redact").  Restrict normalization to the
+            # function_name attribute instead of replacing every quoted value.
+            pattern = re.compile(
+                r'(\bfunction_name\s*=\s*")' + re.escape(alias) + r'(")'
+            )
+            hcl_text, n = pattern.subn(rf'\g<1>{canonical}\2', hcl_text)
+            count += n
         return hcl_text, count
 
     @classmethod

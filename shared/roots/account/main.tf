@@ -2,7 +2,7 @@ terraform {
   required_providers {
     databricks = {
       source  = "databricks/databricks"
-      version = "~> 1.91.0"
+      version = "~> 1.111.0"
     }
   }
   required_version = ">= 1.0"
@@ -65,7 +65,7 @@ variable "uc_tables" {
 
 variable "manage_groups" {
   type    = bool
-  default = true
+  default = false
 }
 variable "groups" {
   type = map(object({
@@ -199,8 +199,8 @@ module "account" {
   source = "../../modules/account"
 
   providers = {
-    databricks.account    = databricks.account
-    databricks.workspace  = databricks.workspace
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
   }
 
   manage_groups = var.manage_groups

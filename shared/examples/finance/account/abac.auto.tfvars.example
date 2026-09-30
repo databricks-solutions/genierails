@@ -2,7 +2,17 @@
 # Finance Example — Account Layer (shared across all environments)
 # ============================================================================
 # This file lives at envs/account/abac.auto.tfvars
-# It defines groups and tag policies that are shared across dev, prod, etc.
+# It maps access tiers to groups and defines tag policies shared across
+# dev, prod, etc.
+#
+# CONSUME-BY-DEFAULT: manage_groups defaults to false, so these group names are
+# LOOKED UP by display name from the groups your IdP syncs into the account
+# (via AIM, or SCIM where AIM isn't available) — GenieRails does NOT create them
+# and does not manage membership. The IdP owns groups + membership; GenieRails
+# owns grants + ABAC. Make sure each name below already exists as an account
+# group before `make apply`. (Demo/greenfield with no IdP: set
+# manage_groups = true in envs/account/env.auto.tfvars to have Terraform mint
+# them, and add group_members here.)
 # ============================================================================
 
 groups = {

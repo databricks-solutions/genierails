@@ -14,6 +14,7 @@ from validate_abac import (  # noqa: E402
     validate_tag_policies,
     validate_tag_assignments,
     validate_fgac_policies,
+    validate_policy_overlaps,
     validate_acl_groups,
     parse_sql_functions,
     parse_sql_function_arg_counts,
@@ -69,6 +70,23 @@ class TestValidateGroups:
         r = _result()
         validate_groups({"groups": {}}, r)
         assert not r.passed
+
+    def test_empty_groups_passes_when_only_builtin_principal_is_referenced(self):
+        r = _result()
+        names = validate_groups({
+            "groups": {},
+            "fgac_policies": [{"to_principals": ["account users"]}],
+        }, r)
+        assert r.passed
+        assert names == set()
+
+    def test_builtin_principal_match_is_case_insensitive(self):
+        r = _result()
+        validate_groups({
+            "groups": {},
+            "fgac_policies": [{"to_principals": ["Account Users"]}],
+        }, r)
+        assert r.passed
 
     def test_multiple_groups_all_returned(self):
         r = _result()
@@ -448,6 +466,145 @@ class TestConditionMatchesTags:
             "hasTagValue('pii_level', 'Full_PII') OR hasTagValue('pii_level', 'Limited_PII')",
             tags,
         )
+
+
+# ===========================================================================
+#  validate_policy_overlaps
+# ===========================================================================
+
+class TestValidatePolicyOverlaps:
+
+    @staticmethod
+    def _policy(name: str, policy_type: str, condition: str) -> dict:
+        policy = {"name": name, "policy_type": policy_type, "catalog": "main"}
+        condition_key = (
+            "match_condition"
+            if policy_type == "POLICY_TYPE_COLUMN_MASK"
+            else "when_condition"
+        )
+        policy[condition_key] = condition
+        return policy
+
+    def test_clean_config_passes(self):
+        cfg = {
+            "tag_assignments": [
+                {
+                    "entity_type": "columns",
+                    "entity_name": "main.hr.employees.ssn",
+                    "tag_key": "pii_level",
+                    "tag_value": "Full_PII",
+                }
+            ],
+            "fgac_policies": [
+                self._policy(
+                    "mask_full_pii",
+                    "POLICY_TYPE_COLUMN_MASK",
+                    "hasTagValue('pii_level', 'Full_PII')",
+                ),
+                self._policy(
+                    "mask_limited_pii",
+                    "POLICY_TYPE_COLUMN_MASK",
+                    "hasTagValue('pii_level', 'Limited_PII')",
+                ),
+            ],
+        }
+        r = _result()
+        validate_policy_overlaps(cfg, r)
+        assert r.passed
+
+    def test_two_masks_on_one_column_fails_with_actionable_message(self):
+        cfg = {
+            "tag_assignments": [
+                {
+                    "entity_type": "columns",
+                    "entity_name": "main.hr.employees.ssn",
+                    "tag_key": "pii_level",
+                    "tag_value": "Full_PII",
+                }
+            ],
+            "fgac_policies": [
+                self._policy(
+                    "mask_all_pii",
+                    "POLICY_TYPE_COLUMN_MASK",
+                    "hasTag('pii_level')",
+                ),
+                self._policy(
+                    "mask_full_pii",
+                    "POLICY_TYPE_COLUMN_MASK",
+                    "hasTagValue('pii_level', 'Full_PII')",
+                ),
+            ],
+        }
+        r = _result()
+        validate_policy_overlaps(cfg, r)
+        assert not r.passed
+        message = " ".join(r.errors)
+        assert "main.hr.employees.ssn" in message
+        assert "mask_all_pii" in message
+        assert "mask_full_pii" in message
+        assert "only one mask" in message
+        assert "MULTIPLE_MASKS" in message
+
+    def test_two_row_filters_on_one_table_fail(self):
+        cfg = {
+            "tag_assignments": [
+                {
+                    "entity_type": "tables",
+                    "entity_name": "main.sales.orders",
+                    "tag_key": "region_scope",
+                    "tag_value": "global",
+                }
+            ],
+            "fgac_policies": [
+                self._policy(
+                    "filter_tagged_tables",
+                    "POLICY_TYPE_ROW_FILTER",
+                    "hasTag('region_scope')",
+                ),
+                self._policy(
+                    "filter_global_tables",
+                    "POLICY_TYPE_ROW_FILTER",
+                    "hasTagValue('region_scope', 'global')",
+                ),
+            ],
+        }
+        r = _result()
+        validate_policy_overlaps(cfg, r)
+        assert not r.passed
+        message = " ".join(r.errors)
+        assert "main.sales.orders" in message
+        assert "filter_tagged_tables" in message
+        assert "filter_global_tables" in message
+        assert "only one row filter" in message
+
+    def test_column_aware_row_filter_accepts_one_argument(self, tmp_path):
+        from validate_abac import validate_fgac_policies
+
+        cfg = {
+            "groups": {"analysts": {}},
+            "tag_policies": [{"key": "region_scope", "values": ["region_code"]}],
+            "fgac_policies": [{
+                "name": "filter_region",
+                "policy_type": "POLICY_TYPE_ROW_FILTER",
+                "catalog": "main",
+                "to_principals": ["analysts"],
+                "match_condition": "hasTagValue('region_scope', 'region_code')",
+                "match_alias": "region_code",
+                "function_name": "filter_allowed_region",
+                "function_catalog": "main",
+                "function_schema": "security",
+            }],
+        }
+        r = _result()
+        validate_fgac_policies(
+            cfg,
+            {"analysts"},
+            {"region_scope": {"region_code"}},
+            {"filter_allowed_region"},
+            r,
+            {"filter_allowed_region": 1},
+        )
+        assert not any("binds" in warning for warning in r.warnings)
 
 
 # ===========================================================================

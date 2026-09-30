@@ -30,7 +30,7 @@ def _str(v) -> str:
 
 
 def _discover_from_genie_api(space_id: str, auth_cfg: dict) -> tuple[str, list[str]]:
-    """Query Genie Space API to get name and tables.
+    """Query Genie agent API to get name and tables.
 
     Returns (space_title, table_identifiers).
     """
@@ -53,7 +53,7 @@ def _discover_from_genie_api(space_id: str, auth_cfg: dict) -> tuple[str, list[s
             query={"include_serialized_space": "true"},
         )
     except Exception as e:
-        print(f"  WARNING: Could not query Genie Space {space_id}: {e}")
+        print(f"  WARNING: Could not query Genie agent {space_id}: {e}")
         return "", []
 
     title = resp.get("title", "")
@@ -97,6 +97,7 @@ def main():
     # Load source config
     cfg = hcl2.load(open(os.path.join(source_env_dir, "env.auto.tfvars")))
     spaces = cfg.get("genie_spaces", [])
+    top_level_tables = cfg.get("uc_tables") or []
 
     # Load source auth for API queries
     auth_cfg = {}
@@ -115,7 +116,7 @@ def main():
         uc_tables = space.get("uc_tables") or []
 
         if space_id and (not name or not uc_tables):
-            print(f"  Querying Genie Space {space_id} for name/tables...")
+            print(f"  Querying Genie agent {space_id} for name/tables...")
             api_title, api_tables = _discover_from_genie_api(space_id, auth_cfg)
             if not name and api_title:
                 space["name"] = api_title
@@ -139,6 +140,11 @@ def main():
             lines.append(f'      "{t}",')
         lines.append(f'    ]')
         lines.append("  },")
+    lines.append("]")
+    lines.append("")
+    lines.append("uc_tables = [")
+    for table in top_level_tables:
+        lines.append(f'  "{remap_table(table)}",')
     lines.append("]")
     lines.append("")
     lines.append('sql_warehouse_id = ""  # auto-create in dest workspace')

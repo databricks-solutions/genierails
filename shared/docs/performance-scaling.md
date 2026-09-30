@@ -6,17 +6,24 @@ Guidelines for deploying GenieRails governance at scale.
 
 | Resource | Limit | Scope | Notes |
 |----------|-------|-------|-------|
-| FGAC policies | 10 | Per catalog | Includes both column masks and row filters |
+| FGAC policies | 100 | Per catalog | Column masks + row filters. Option-B treatment derivation keeps you well under it (one policy per treatment per catalog). |
 | Tag policies | Unlimited | Per metastore | Each policy has a value limit |
 | Tag policy values | 1000 | Per tag policy key | e.g., `pii_level` can have up to 1000 distinct values |
 | Groups | 10,000 | Per account | Shared across all workspaces |
 | Tag assignments | Unlimited | Per catalog | One tag key per column per assignment |
-| Genie Spaces | No hard limit | Per workspace | Each space consumes warehouse resources at query time |
-| Tables per Genie Space | ~20 recommended | Per space | LLM context window limits generation quality beyond ~20 tables |
+| Genie agents | No hard limit | Per workspace | Each space consumes warehouse resources at query time |
+| Tables per Genie agent | ~20 recommended | Per space | LLM context window limits generation quality beyond ~20 tables |
 
-## Generation Performance
+## Generation & Governance Performance
 
-### LLM Prompt Size vs. Quality
+> **What actually scales.** In the dev-to-prod walkthrough, *sensitivity* comes from native classification and *enforcement* is derived deterministically — neither depends on LLM prompt size. The LLM only drafts the **rulebook and Genie content** in dev `generate`. Two cost models:
+>
+> - **Governance scaling (the important one):** classification **scan latency** (async, eventual-consistency before `derive-assignments`); deterministic **derivation** (scales with classified columns × catalog/treatment combinations, not tokens); **coverage-gate** cost (classified columns × relevant mask policies/functions); and **exposure rollout** (opening `business_access_enabled` releases `SELECT` + Genie `CAN_RUN`, so stage it per env/BU). Prod uses `derive-assignments` — **no LLM**.
+> - **Generation scaling (dev only):** the LLM prompt-size table below governs *dev rule/Genie-content drafting quality*, not production enforcement.
+>
+> No defensible numeric benchmarks exist for scan latency or derive/gate throughput — measure in your own environment rather than assuming fixed timings.
+
+### LLM Prompt Size vs. Quality (dev generation only)
 
 | Tables | Columns | Approx. Prompt Size | Generation Quality | Time |
 |--------|---------|--------------------|--------------------|------|
@@ -26,7 +33,7 @@ Guidelines for deploying GenieRails governance at scale.
 | 16-20 | 150-200 | ~35K tokens | Poor (frequent retries) | 30-120s |
 | 20+ | 200+ | >40K tokens | Not recommended | Unreliable |
 
-**Recommendation:** Keep each Genie Space to 4-8 tables for reliable generation. Use `SPACE="Space Name"` for per-space generation to control prompt size.
+**Recommendation:** Keep each Genie agent to 4-8 tables for reliable generation. Use `SPACE="Space Name"` for per-space generation to control prompt size.
 
 ### Country + Industry Overlay Impact
 
@@ -99,16 +106,16 @@ Account Layer (shared)
 +-- Tag Policies: 3-5 (pii_level, pci_level, compliance_scope, etc.)
 |
 +-- BU 1: Finance
-|   +-- Genie Space: Finance Analytics (4 tables)
-|   +-- Genie Space: Risk Dashboard (3 tables)
+|   +-- Genie agent: Finance Analytics (4 tables)
+|   +-- Genie agent: Risk Dashboard (3 tables)
 |   +-- ABAC: 8 FGAC policies across 2 catalogs
 |
 +-- BU 2: Clinical
-|   +-- Genie Space: Clinical Analytics (5 tables)
+|   +-- Genie agent: Clinical Analytics (5 tables)
 |   +-- ABAC: 6 FGAC policies in 1 catalog
 |
 +-- BU 3: Marketing
-    +-- Genie Space: Campaign Analytics (3 tables)
+    +-- Genie agent: Campaign Analytics (3 tables)
     +-- ABAC: 4 FGAC policies in 1 catalog
 ```
 
@@ -123,9 +130,11 @@ Use `MODE=governance` for the central team and `MODE=genie` for BU teams. See [S
 | Scenario | AWS | Azure | Notes |
 |---|---|---|---|
 | Unit tests | ~10s | ~10s | No infrastructure required |
-| Single demo (e.g., aus-bank-demo) | ~15 min | ~20 min | 1 workspace + generate + apply + promote |
-| Full parallel CI (18 scenarios) | ~4 hours | ~5 hours | All scenarios concurrently |
+| Single legacy demo (e.g., aus-bank-demo) | ~15 min | ~20 min | 1 workspace + generate + apply + promote (legacy bank demo) |
+| Full parallel CI (18 scenarios) | ~4 hours | ~5 hours | All scenarios concurrently; includes the legacy bank/overlay demos |
 | Country overlay (6 phases) | ~3 hours | ~3-4 hours | Longest single scenario |
+
+> A live **dev-to-prod** run has phases these older scenarios don't isolate — chiefly the **async classification scan wait** (minutes to ~24h; not compressible) before `derive-assignments`, plus the coverage-gate and staged exposure. Budget the scan wait as wall-clock, separate from generate/apply time.
 
 ### Optimizing CI Time
 

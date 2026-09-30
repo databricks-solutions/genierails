@@ -2,7 +2,7 @@ terraform {
   required_providers {
     databricks = {
       source                = "databricks/databricks"
-      version               = "~> 1.91.0"
+      version               = "~> 1.111.0"
       configuration_aliases = [databricks.account, databricks.workspace]
     }
     null = {
@@ -35,8 +35,8 @@ locals {
   genie_space_groups = length(var.groups) > 0 ? {
     for key, space in var.genie_spaces : key => (
       length(try(space.config.acl_groups, [])) > 0
-        ? join(",", space.config.acl_groups)
-        : join(",", keys(var.groups))
+      ? join(",", space.config.acl_groups)
+      : join(",", keys(var.groups))
     )
   } : {}
 
@@ -46,7 +46,7 @@ locals {
   # Existing spaces that have non-trivial config — also run update-config.
   existing_spaces_with_config = {
     for k, v in local.existing_spaces : k => v
-    if (
+    if(
       length(v.config.benchmarks) > 0 ||
       v.config.instructions != "" ||
       v.config.description != "" ||
@@ -100,7 +100,7 @@ resource "databricks_sql_endpoint" "warehouse" {
 resource "null_resource" "genie_space_acls" {
   for_each = {
     for k, v in local.existing_spaces : k => v
-    if lookup(local.genie_space_groups, k, "") != ""
+    if var.business_access_enabled && lookup(local.genie_space_groups, k, "") != ""
   }
 
   triggers = {
@@ -245,15 +245,15 @@ resource "null_resource" "genie_space_config" {
         ? each.value.sql_warehouse_id
         : local.shared_warehouse_id
       )
-      GENIE_TITLE              = each.value.config.title != "" ? each.value.config.title : each.value.name
-      GENIE_DESCRIPTION        = each.value.config.description
-      GENIE_SAMPLE_QUESTIONS   = jsonencode(each.value.config.sample_questions)
-      GENIE_INSTRUCTIONS       = each.value.config.instructions
-      GENIE_BENCHMARKS         = jsonencode(each.value.config.benchmarks)
-      GENIE_SQL_FILTERS        = jsonencode(each.value.config.sql_filters)
-      GENIE_SQL_EXPRESSIONS    = jsonencode(each.value.config.sql_expressions)
-      GENIE_SQL_MEASURES       = jsonencode(each.value.config.sql_measures)
-      GENIE_JOIN_SPECS         = jsonencode(each.value.config.join_specs)
+      GENIE_TITLE            = each.value.config.title != "" ? each.value.config.title : each.value.name
+      GENIE_DESCRIPTION      = each.value.config.description
+      GENIE_SAMPLE_QUESTIONS = jsonencode(each.value.config.sample_questions)
+      GENIE_INSTRUCTIONS     = each.value.config.instructions
+      GENIE_BENCHMARKS       = jsonencode(each.value.config.benchmarks)
+      GENIE_SQL_FILTERS      = jsonencode(each.value.config.sql_filters)
+      GENIE_SQL_EXPRESSIONS  = jsonencode(each.value.config.sql_expressions)
+      GENIE_SQL_MEASURES     = jsonencode(each.value.config.sql_measures)
+      GENIE_JOIN_SPECS       = jsonencode(each.value.config.join_specs)
     }
   }
 
@@ -267,7 +267,7 @@ resource "null_resource" "genie_space_acls_created" {
   # where groups are managed by the governance team in a separate environment).
   for_each = {
     for k, v in local.new_spaces : k => v
-    if lookup(local.genie_space_groups, k, "") != ""
+    if var.business_access_enabled && lookup(local.genie_space_groups, k, "") != ""
   }
 
   triggers = {

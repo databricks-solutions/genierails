@@ -1,19 +1,21 @@
 # Playbook
 
-GenieRails puts Genie onboarding on rails — import your existing Genie Space, generate ABAC governance, and promote to production.
+GenieRails puts Genie onboarding on rails: Unity Catalog's classifier decides what's sensitive, GenieRails derives one protection per column and proves coverage with a blocking gate, then promotes the rules safely to production. This playbook covers common tasks after your first deployment; for the full end-to-end flow, see the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)**.
 
 ## Pick your starting point
 
 | Starting point | You have... | Guide |
 |---|---|---|
-| **I already have a Genie Space** | A space configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](from-ui-to-production.md) |
-| **I'm starting from scratch** | Tables in Unity Catalog, no Genie Space yet | [Quickstart](quickstart.md) |
+| **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](from-ui-to-production.md) |
+| **I'm starting from scratch** | Tables in Unity Catalog, no Genie agent yet | [Quickstart](quickstart.md) |
+
+> Both routes converge on the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)** — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion).
 
 ---
 
 ## After your first deployment
 
-### Add another Genie Space
+### Add another Genie agent
 
 Add a second space without re-generating existing ones:
 
@@ -24,10 +26,11 @@ vi envs/dev/env.auto.tfvars
 # 2. Generate ONLY Space B's config — existing spaces are preserved
 make generate SPACE="Clinical Analytics"
 
-# 3. Review and apply
-vi envs/dev/generated/abac.auto.tfvars   # verify existing spaces are unchanged
+# 3. Review, prove coverage, and apply
+vi envs/dev/generated/abac.auto.tfvars   # verify existing agents are unchanged
+make coverage-gate ENV=dev               # blocks if any classified column is unprotected
 make validate-generated
-make apply
+make apply ENV=dev                       # business_access_enabled stays false until you verify + open the gate
 ```
 
 | Situation | Command |
@@ -36,7 +39,7 @@ make apply
 | Re-tuning a single space from scratch | `make generate SPACE="Finance Analytics"` |
 | Adding new groups or changing shared tag policies | `make generate` (full — reviews all spaces) |
 
-> Per-space generation does **not** modify groups or tag_policies. If you genuinely need new groups, run full `make generate` (no `SPACE=`).
+> Per-agent generation does **not** modify groups or tag_policies. Groups are your IdP-synced groups (consumed, not created); a full `make generate` re-selects them across all agents.
 
 ### Promote dev → prod
 
@@ -44,10 +47,20 @@ make apply
 make promote SOURCE_ENV=dev DEST_ENV=prod \
   DEST_CATALOG_MAP="dev_catalog=prod_catalog"
 
-vi envs/prod/auth.auto.tfvars   # enter prod workspace credentials
+vi envs/prod/auth.auto.tfvars             # enter prod workspace credentials
 
-make apply ENV=prod
+# prod re-derives its OWN facts — never re-run generate in prod
+make enable-classification ENV=prod       # or the Databricks UI (recommended); then wait for prod class.* tags
+make derive-assignments ENV=prod          # reuses the promoted rules, no LLM
+make coverage-gate ENV=prod               # blocks until every classified prod column is covered
+make apply-governance ENV=prod            # enforcement only; exposure gate still closed
+# open exposure only after the gate is green:
+#   envs/prod/env.auto.tfvars -> business_access_enabled = true
+make apply ENV=prod                       # releases business SELECT + Genie CAN_RUN
+make verify-access ENV=prod VERIFY_KEY_COLUMN=<key>
 ```
+
+Promotion carries the reviewed **rules** (mapping, masks, policies, Genie config) — *not* dev's tag assignments. Prod establishes its own facts from its own classification scan, so dev data never decides what's protected in prod.
 
 For multiple catalogs:
 
@@ -81,19 +94,47 @@ make generate INDUSTRY=financial_services,retail
 make generate COUNTRY=ANZ INDUSTRY=healthcare
 ```
 
-These work with any scenario — just add the flag. See [Country Overlays](country-overlays.md) and [Industry Overlays](industry-overlays.md) for details.
+Overlays **tune the rules** (region/industry-specific masking context and functions) applied *after* classification — they do **not** decide what's sensitive. Unity Catalog's native `class.*` classification remains the authoritative sensitivity source. These work with any scenario — just add the flag. See [Country Overlays](country-overlays.md) and [Industry Overlays](industry-overlays.md) for details.
 
 ### Schema drift detection
 
-After ABAC governance is deployed, table schemas may evolve. Two commands handle drift without a full `make generate` re-run:
+After ABAC governance is deployed, table schemas may evolve. These commands handle drift without a full `make generate` re-run:
 
 ```bash
 # Detect untagged columns and stale assignments
 make audit-schema ENV=dev
 
-# Auto-classify new columns and remove stale ones
-make generate-delta ENV=dev
+# Detect prod-applied tags that no policy or mask covers ("new prod tag, no rule")
+make audit-rulebook ENV=dev
+
+# Preferred: let native classification tag new columns, then re-derive deterministically (no LLM)
+make derive-assignments ENV=dev
 make apply ENV=dev
+# (make generate-delta is an exceptional/legacy LLM path — not the routine dev-to-prod walkthrough)
+```
+
+`audit-schema` and `audit-rulebook` are two complementary directions of drift:
+
+| Command | Direction | Detects |
+| --- | --- | --- |
+| `audit-schema` (forward) | column → rule | sensitive columns with no governed tag |
+| `audit-schema` (reverse) | rule → column | tag assignments whose column no longer exists |
+| `audit-rulebook` | applied tag → rule | tags actually applied in the workspace (`class.*` classification + governed keys) that no `tag_policy` declares and no `fgac_policy` mask/row-filter references |
+
+`make audit-rulebook` reads `system.information_schema.column_tags` for the managed
+tables and compares each applied tag key/value against the RULEBOOK (`tag_policies` +
+column-mask `fgac_policies` in the config). It catches the case where an automatic
+classification or an out-of-band `SET TAGS` lands a tag in production that the
+governance config never anticipated — so no mask will act on it. Coverage is matched
+per catalog (a mask in one catalog does not cover a tag in another) and only column
+masks count; a row filter's `when_condition` targets table tags, not column tags.
+
+The `make` targets each run a fixed mode (`audit-schema` → forward + reverse,
+`audit-rulebook` → rulebook). To run all three checks in one pass, invoke the script
+directly from the env directory:
+
+```bash
+cd envs/dev && python3 "$SHARED_ROOT/scripts/audit_schema_drift.py" --mode all
 ```
 
 | Schema change | What happens |
@@ -101,16 +142,17 @@ make apply ENV=dev
 | `ALTER TABLE ADD COLUMN patient_ssn STRING` | `generate-delta` classifies and tags it |
 | `ALTER TABLE DROP COLUMN old_ssn` | `generate-delta` removes the stale assignment |
 | `ALTER TABLE RENAME COLUMN ssn TO tax_id` | Old assignment removed, new column classified |
+| Auto-classifier sets `class.pii` on a new column | `audit-rulebook` flags it — no covering policy or mask |
 
 ---
 
 ## Advanced scenarios
 
-These cover less common deployment patterns. Most users won't need them on day one.
+These cover less common deployment patterns. Most users won't need them on day one. **The commands below show the scenario-specific mechanics only** — each still runs through the dev-to-prod gates: consume your IdP groups (`--groups`, `manage_groups=false`), run `make coverage-gate` before applying, keep `business_access_enabled=false` until coverage passes, and in prod use `derive-assignments` (not `generate`).
 
-### ABAC governance only (no Genie Space)
+### ABAC governance only (no Genie agent)
 
-Set up groups, tag policies, column masking, row filters, and catalog grants — without creating any Genie Space. Add Genie later without changing the governance setup.
+Set up groups, tag policies, column masking, row filters, and catalog grants — without creating any Genie agent. Add Genie later without changing the governance setup.
 
 ```bash
 make setup
@@ -123,7 +165,7 @@ make apply
 
 ### Independent BU environment
 
-A second business unit needs its own groups, governance, and Genie spaces — not a promotion of `dev`.
+A second business unit needs its own groups, governance, and Genie agents — not a promotion of `dev`.
 
 ```bash
 make setup ENV=bu2
@@ -136,7 +178,7 @@ make apply ENV=bu2
 
 ### Central governance, self-service Genie
 
-A central Data Governance team owns ABAC policies, while BU teams self-serve their own Genie spaces. See [self-service-genie.md](self-service-genie.md) for the full guide.
+A central Data Governance team owns ABAC policies, while BU teams self-serve their own Genie agents. See [self-service-genie.md](self-service-genie.md) for the full guide.
 
 ```bash
 # Governance team
@@ -148,9 +190,9 @@ make generate ENV=bu1 MODE=genie
 make apply-genie ENV=bu1
 ```
 
-### Import Genie Space to prod without ABAC
+### Import Genie agent to prod without ABAC
 
-Import a UI-created Genie Space and deploy to production when ABAC is managed separately. See [self-service-genie.md](self-service-genie.md) for context.
+Import a UI-created Genie agent and deploy to production when ABAC is managed separately. See [self-service-genie.md](self-service-genie.md) for context.
 
 ```bash
 make generate ENV=bu_import MODE=genie   # genie_only=true in env.auto.tfvars
@@ -183,13 +225,15 @@ See [Architecture](architecture.md) for the full reference. Quick summary:
 
 1. `envs/account/` — shared account layer (groups, tag policies)
 2. `envs/<name>/data_access/` — env-scoped governance (tags, masking, grants)
-3. `envs/<name>/` — workspace layer (Genie Spaces, ACLs)
+3. `envs/<name>/` — workspace layer (Genie agents, ACLs)
 
-The core loop:
+The core loop (dev-to-prod walkthrough):
 
 ```
-inputs → make generate → review generated/ → make validate-generated → make apply
+enable-classification → wait for class.* → make generate (--groups) → coverage-gate
+  → review generated/ → validate-generated → apply (gate closed) → verify → open gate → apply
 ```
+Prod swaps `generate` for `derive-assignments` (re-derive facts from prod's own tags, no LLM).
 
 | File | What it contains |
 | ---- | ---------------- |

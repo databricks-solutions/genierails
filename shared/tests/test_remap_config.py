@@ -63,18 +63,23 @@ class TestRemapHcl:
         result = remap_hcl(text, [("dev_fin", "prod_fin")])
         assert '"prod_fin"' in result
 
-    def test_multiple_catalogs(self):
+    def test_tag_assignments_are_not_promoted(self):
         text = """
 tag_assignments = [
   { entity_name = "dev_fin.finance.accounts", tag_key = "pii" },
   { entity_name = "dev_hr.people.employees", tag_key = "pii" },
 ]
+
+fgac_policies = [
+  { name = "mask_pii", catalog = "dev_fin", function_catalog = "dev_fin" },
+]
 """
         result = remap_hcl(text, [("dev_fin", "prod_fin"), ("dev_hr", "prod_hr")])
-        assert "prod_fin.finance.accounts" in result
-        assert "prod_hr.people.employees" in result
-        assert "dev_fin" not in result
-        assert "dev_hr" not in result
+        assert "tag_assignments = []" in result
+        assert "finance.accounts" not in result
+        assert "people.employees" not in result
+        assert 'catalog = "prod_fin"' in result
+        assert 'function_catalog = "prod_fin"' in result
 
     def test_overlapping_catalog_names_longest_first(self):
         """Ensure 'dev_fin_v2' is remapped before 'dev_fin'."""
@@ -101,7 +106,8 @@ tag_assignments = [
 """
         result = remap_hcl(text, [("dev_fin", "prod_fin")])
         assert "analysts" in result  # Non-catalog content preserved
-        assert "prod_fin.finance.accounts" in result
+        assert "tag_assignments = []" in result
+        assert "finance.accounts" not in result
 
     def test_genie_space_configs_remapped(self):
         text = """

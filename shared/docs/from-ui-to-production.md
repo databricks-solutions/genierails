@@ -1,197 +1,103 @@
 # From UI to Production
 
-> **This is the recommended starting point.** Most users already have a Genie Space configured in the Databricks UI and want to add governance and deploy it to production.
->
-> **See it in action:** The [Australian Bank Demo](../examples/aus_bank_demo/) walks through this entire flow with a realistic banking scenario — ANZ-specific masking, PCI compliance, and dev-to-prod promotion. Also available: [India Bank Demo](../examples/india_bank_demo/) (Aadhaar, PAN, GSTIN, UPI) and [ASEAN Bank Demo](../examples/asean_bank_demo/) (6-country national IDs, multi-currency).
+> **Already built your Genie agent in the Databricks UI?** This is the on-ramp: it imports your existing agent's configuration into code, then governs it with the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)**. It is *not* a separate governance model — after the import step you follow the dev-to-prod walkthrough exactly (Unity Catalog decides what's sensitive, GenieRails derives one protection per column, and a coverage gate blocks the release until every *classified* sensitive column is covered).
 
-## What you'll achieve
+## What this does
 
-1. Import your existing Genie Space configuration into code (instructions, benchmarks, SQL measures — all captured verbatim)
-2. Generate ABAC governance: groups, tag policies, column masking, row filters, catalog grants
-3. Review and tune the generated governance
-4. Apply everything to your dev workspace
-5. Promote the whole setup — governance and Genie config — to production
+1. **Imports** your existing Genie agent's configuration from the Genie API into code (a supported subset — see below) and **auto-discovers the tables** it uses.
+2. Hands off to the **dev-to-prod walkthrough** for governance: native classification → one `gr_treatment` per column → a blocking coverage gate → safe dev→prod promotion → expose last.
 
-## What gets imported
+The only thing unique to this doc is the **import** in Step 1. Everything after it *is* the dev-to-prod walkthrough.
 
-`make generate` queries the Genie Space API and captures the full space configuration verbatim — no LLM re-writing:
+## What gets imported (a supported subset — not verbatim)
 
-| Field | Captured from API |
-| ----- | ---------------- |
-| Instructions (text) | ✓ |
+When a `genie_spaces` entry has `genie_space_id` set, `make generate` queries the Genie API and imports a **supported subset** of the agent's serialized configuration:
+
+| Field | Imported |
+| ----- | -------- |
+| Instructions (the first text instruction) | ✓ |
 | Sample questions | ✓ |
-| Benchmarks (question + SQL) | ✓ |
+| Benchmarks (question + first SQL answer) | ✓ |
 | SQL filters, measures, expressions | ✓ |
 | Join specs | ✓ |
-| Table list | ✓ — auto-discovered from the space |
-| Space title and description | ✓ |
-| SQL warehouse | — kept as-is in the existing space |
+| Table list | ✓ — auto-discovered from the agent |
+| Title / description | ✓ |
 
-The ABAC governance (groups, tag policies, tag assignments, masking functions) is generated fresh by the LLM from the discovered table DDLs.
+> **It's a projection, not a byte-for-byte copy.** Object IDs and some UI/API metadata are not preserved, and filter/measure *comments* aren't imported. If the agent was created moments ago, the API's `serialized_space` can take 1–3 minutes to populate (the tool retries for ~4 minutes).
 
-## Step 1 — Point at your existing space
+**Governance is NOT imported.** Groups, tag policies, masks, and row filters are *derived* — from native classification, not copied from the UI. Setting `genie_space_id` does **not** switch sensitivity back to LLM guessing; the imported tables flow into the same native-classification path as the dev-to-prod walkthrough.
 
-Find the Genie Space ID in the URL when viewing the space in the Databricks UI (e.g. `...genie/rooms/01ef7b3c2a4d5e6f`).
+## Prerequisites
 
-> **Prerequisite:** Complete Steps 1-2 in your cloud README ([AWS](../../aws/README.md) or [Azure](../../azure/README.md)) to set up credentials before continuing.
+- **Cloud setup done** — complete Steps 1–2 in your cloud README ([AWS](../../aws/README.md) or [Azure](../../azure/README.md)) so credentials are configured.
+- **Groups synced from your IdP** (AIM/SCIM). `make setup` scaffolds `manage_groups = false` — GenieRails *consumes* your IdP groups; it never invents them. You supply the group names at generate time.
+- **UC Data Classification** available in the workspace.
 
-```bash
-vi envs/dev/env.auto.tfvars
-```
+## Step 1 — Point at your agent and persist its tables
+
+Find the agent ID in the Databricks UI URL (e.g. `.../genie/rooms/01ef7b3c2a4d5e6f`):
 
 ```hcl
 # envs/dev/env.auto.tfvars
 genie_spaces = [
-  {
-    genie_space_id = "01ef7b3c2a4d5e6f"   # the only required field; find it in the Genie Space URL
-    # name omitted     → defaults to the space title returned by the API
-    # uc_tables omitted → discovered automatically from the Genie API
-  },
+  { genie_space_id = "01ef7b3c2a4d5e6f" },   # the only required field
 ]
 ```
 
-## Step 2 — Import config and generate governance
+**Important — discover and persist the tables first.** An ID-only import can't jump straight to `enable-classification`: that command reads `uc_tables` from your config and does **not** call the Genie API. And table discovery only populates the tables *in memory* during a generate run — it doesn't write them back. So run generate once to discover them, then copy them in:
 
 ```bash
-make generate
+make generate ENV=dev        # discovers + prints the agent's tables (and imports its config)
 ```
-
-This does in one step:
-1. Queries the Genie Space API — discovers tables and imports existing config verbatim
-2. Fetches DDLs from Unity Catalog for those tables
-3. LLM generates ABAC governance (groups, tag policies, tag assignments, masking functions)
-4. Writes everything to `envs/dev/generated/abac.auto.tfvars` — the imported Genie config replaces any LLM-generated Genie content
-
-You will see output like:
-
-```
-  Querying existing Genie Space 'Finance Analytics' for config...
-    Discovered 3 table(s): dev_fin.finance.customers, dev_fin.finance.transactions, ...
-  Injected genie_space_configs from Genie API for: Finance Analytics
-
-  Next steps:
-    1. Review generated/TUNING.md
-    2. Review and tune generated/abac.auto.tfvars
-    3. make apply
-```
-
-> **Required manual step:** Copy the discovered tables into `envs/dev/data_access/env.auto.tfvars` so that UC grants and masking functions are applied to them:
->
-> ```hcl
-> # envs/dev/data_access/env.auto.tfvars
-> uc_tables = [
->   "dev_fin.finance.customers",
->   "dev_fin.finance.transactions",
->   # ... (as printed by make generate)
-> ]
-> ```
-
-## Step 3 — Review, tune, and apply
-
-```bash
-vi envs/dev/generated/abac.auto.tfvars
-# - Review the imported genie_space_configs (instructions, benchmarks, etc.)
-# - Review and tune the generated groups, tag_assignments, fgac_policies
-# - Check acl_groups per space — controls which groups can run each Genie Space
-#   (see "Per-space Genie ACLs" below)
-
-vi envs/dev/generated/masking_functions.sql
-# Review and iterate on generated masking and row-filter functions.
-
-make validate-generated
-make apply
-```
-
-> `make apply` attaches to the existing space (does not create or delete it), applies ABAC governance, per-space ACLs, and pushes any changes to the space config (instructions, benchmarks, etc.) back to the API.
-
-### Per-space Genie ACLs
-
-Each space in `genie_space_configs` has an `acl_groups` field that controls which groups get `CAN_RUN` access. The LLM assigns groups based on which FGAC policies reference each space's tables:
 
 ```hcl
-genie_space_configs = {
-  "Finance Analytics" = {
-    acl_groups = ["Finance_Analyst", "Manager"]   # only these groups can run this space
-    # ... instructions, benchmarks, etc.
-  }
-  "Clinical Analytics" = {
-    acl_groups = ["Clinical_Staff", "Manager"]    # different groups for this space
-    # ...
-  }
-}
-```
-
-**Review checklist:**
-- Verify each space's `acl_groups` includes all groups that need access
-- Groups not listed are excluded from that space (they cannot run queries)
-- If `acl_groups` is empty or omitted, all groups get access (backward compatible)
-- `acl_groups` entries must match group names defined in the `groups` block
-
-## Step 4 — Promote to prod
-
-```bash
-make promote SOURCE_ENV=dev DEST_ENV=prod \
-  DEST_CATALOG_MAP="dev_fin=prod_fin"
-
-vi envs/prod/auth.auto.tfvars   # prod workspace credentials
-vi envs/prod/env.auto.tfvars
-```
-
-For prod, leave `genie_space_id` empty to create a brand-new prod space from the promoted config, or set it to an existing prod space ID to attach:
-
-```hcl
-# envs/prod/env.auto.tfvars  (written by make promote, edit as needed)
-genie_spaces = [
-  {
-    name           = "Finance Analytics"
-    genie_space_id = ""            # empty → tool creates new prod space with the promoted config
-    uc_tables = [
-      "prod_fin.finance.customers",
-      "prod_fin.finance.transactions",
-    ]
-  },
+# envs/dev/data_access/env.auto.tfvars
+uc_tables = [
+  "dev_fin.finance.customers",
+  "dev_fin.finance.transactions",
+  # ... (exactly as make generate printed)
 ]
 ```
 
+## Step 2 — Follow the dev-to-prod walkthrough
+
+With the tables persisted, run the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)** from **Phase 1** — it works identically for an imported agent:
+
 ```bash
-make apply ENV=prod
-# Creates the prod Genie Space with the full promoted config:
-# governance (groups, tags, masking) + Genie content (instructions, benchmarks, SQL)
+make enable-classification ENV=dev        # or the Databricks UI (recommended); then wait for class.* tags
+make generate ENV=dev GENERATE_ARGS='--groups "<your IdP group names>"'
+make coverage-gate ENV=dev                # blocks if any classified column is unprotected
+make validate-generated ENV=dev
+make apply ENV=dev                         # business_access_enabled=false; attaches to your existing agent (never recreates it)
 ```
 
----
+Two import-specific notes as you review `generated/`:
 
-## Multi-space import
+- **`acl_groups`** (which groups can run each agent) are **derived** — populated from your generated groups and the FGAC policies that cover each agent's tables. Review them; they reference your IdP groups, they aren't invented.
+- `make apply` **attaches** to the existing agent (applies governance + per-space ACLs and pushes any config changes back to the API); it does not create or delete it.
 
-Import multiple spaces in a single `make generate` by listing them all with `genie_space_id`:
+Then continue the dev-to-prod walkthrough through promotion, prod re-derivation, and exposure:
 
-```hcl
-genie_spaces = [
-  {
-    genie_space_id = "01ef7b3c2a4d5e6f"   # Finance Analytics
-  },
-  {
-    genie_space_id = "02ab9c1d3e4f5a6b"   # Executive Dashboard
-  },
-]
+```bash
+make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_fin=prod_fin"
+# prod: fill envs/prod/auth.auto.tfvars, run make enable-classification ENV=prod, wait for prod class.* tags, then:
+make derive-assignments ENV=prod   # re-derives tag assignments from prod's live tags; reuses the promoted rules, no LLM
+make coverage-gate ENV=prod
+make apply-governance ENV=prod     # enforcement only; exposure gate still closed
+# open exposure only after the gate is green:
+#   envs/prod/env.auto.tfvars -> business_access_enabled = true
+make apply ENV=prod                # releases business SELECT + Genie CAN_RUN
+make verify-access ENV=prod VERIFY_KEY_COLUMN=<key>
 ```
 
-Each space's config is fetched independently. All spaces get their governance generated in the same LLM call, and all are promotable together.
+For prod, leave `genie_space_id` empty to create a fresh prod agent from the promoted config, or set it to an existing prod agent ID to attach. (Warehouse `CAN_USE` is not managed by GenieRails — grant it yourself.)
 
----
+## Multi-agent import
+
+Import several agents in one `make generate` by listing them all with `genie_space_id`; each is fetched independently, and all are governed and promotable together.
 
 ## Good to know
 
-- **API async delay**: The Genie API's `serialized_space` field may take 1–3 minutes to populate for newly created spaces. The tool retries automatically for up to ~4 minutes. If the space was just created moments ago, wait a minute before running `make generate`.
-- **Destroy safety**: `make destroy` never deletes an attached space (`genie_space_id` set). Only spaces created by this tool (empty `genie_space_id`) are destroyed.
-- **Config drift**: After the first import, `abac.auto.tfvars` is the source of truth. Changes made in the UI will not automatically sync back — re-run `make generate` (with `genie_space_id`) to re-import if needed.
-
----
-
-## What's next?
-
-- [Add another Genie Space](playbook.md#add-another-genie-space) — incremental generation without touching existing spaces
-- [Country & industry overlays](playbook.md#country-and-industry-overlays) — region-specific or industry-specific governance
-- [Schema drift detection](playbook.md#schema-drift-detection) — handle table changes after initial deployment
-- [Advanced scenarios](playbook.md#advanced-scenarios) — ABAC-only, self-service Genie, independent BU environments
-- [Version control your configs](version-control.md) — what to commit, version pinning, running Terraform directly
+- **Destroy safety:** `make destroy` never deletes an *attached* agent (`genie_space_id` set) — only agents this tool created (empty `genie_space_id`).
+- **Config drift:** after the first import, the code is the source of truth. Changes made later in the UI don't sync back automatically — re-run `make generate` (with `genie_space_id`) to re-import.
+- **The full model, every command, and the glossary:** see the **[dev-to-prod walkthrough README](../examples/dev_to_prod/README.md)** and its **[REFERENCE](../examples/dev_to_prod/REFERENCE.md)**.

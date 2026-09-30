@@ -75,9 +75,7 @@ counter that always starts at zero.
 
 ### Unit Tests
 
-The `tests/` directory contains pytest-based unit tests for the core Python
-functions — all autofix functions in `generate_abac.py` and all validation
-functions in `validate_abac.py`.
+The `tests/` directory is the dev-to-prod **regression suite** — ~500+ pytest cases across ~27 modules. Beyond the legacy `generate_abac.py`/`validate_abac.py` helpers, it locks in the dev-to-prod invariants: native-authoritative classification, deterministic one-`gr_treatment` derivation, the blocking coverage gate, the no-LLM prod refresh, fail-closed exposure, and IdP consume-by-default.
 
 **Run:**
 
@@ -85,7 +83,7 @@ functions in `validate_abac.py`.
 # Install deps once (if not already installed)
 pip install pytest python-hcl2
 
-# Run all 60+ unit tests (~1 second, no Databricks connection needed)
+# Run the full suite (~500+ tests, no Databricks connection needed)
 make test-unit
 
 # Or invoke pytest directly for richer output
@@ -103,15 +101,16 @@ python3 -m pytest tests/ -k "TagPolicies" -v        # filter by name
 | `tests/test_validate_abac.py` | `validate_groups`, `validate_tag_policies`, `validate_tag_assignments`, `validate_fgac_policies`, `parse_sql_functions`, `parse_sql_function_arg_counts`, `_condition_matches_tags` |
 | `tests/test_schema_drift.py` | PII column pattern regex, env file parsing (both `uc_tables` and `genie_spaces` shapes), governed-key resolution (4-level fallback), delta merge/dedup, delta validation (reject unknown keys/values), stale assignment removal |
 
-Unit tests catch the most common failure categories without incurring the
-cost of a full LLM + Terraform run:
+Unit tests lock in the walkthrough's invariants (and the legacy autofix helpers) without a full LLM + Terraform run. Coverage includes:
 
-- LLM output contains missing commas between HCL objects → `fix_hcl_syntax`
-- LLM uses a tag value not in the allowed list → `autofix_tag_policies`
-- LLM generates an assignment with a typo'd value → `autofix_invalid_tag_values`
-- LLM references a tag key that was never defined → `autofix_undefined_tag_refs`
-- An uncovered sensitive column is left without an FGAC policy → `autofix_missing_fgac_policies`
-- Too many FGAC policies for one catalog → `autofix_fgac_policy_count`
+- Native classification is authoritative / fail-closed → `test_sensitivity_source.py`, `test_data_classification.py`
+- Exactly one `gr_treatment` derived per column (strictest-wins) → `test_treatment_derivation.py`
+- The coverage gate BLOCKS unmapped / uncovered classified columns → `test_coverage_gate.py`
+- Prod `derive-assignments` makes **no** model call and only rewrites assignments → `test_derive_assignments.py`
+- Exposure defaults false and gates `SELECT` + Genie `CAN_RUN` → `test_exposure_gating.py`, `test_data_access_grants.py`
+- Setup scaffolds `manage_groups=false`; groups consumed from IdP → `test_idp_consume_default.py`
+
+Legacy generation helpers (HCL repair, tag-value autofix, FGAC count) remain covered by `test_generate_abac.py` / `test_validate_abac.py`.
 
 ---
 
@@ -317,31 +316,28 @@ This deletes cloud-specific resources, the workspace, metastore (and all catalog
 
 ## Scenarios
 
-`scripts/run_integration_tests.py` runs each playbook.md scenario end-to-end with
-full data setup, LLM generation, Terraform apply, assertions, and teardown. Each
-scenario is isolated — state from a previous run is destroyed and cleaned before
-the next one starts.
+`scripts/run_integration_tests.py` runs 18 live scenarios end-to-end (data setup, generation/apply, assertions, teardown), each isolated. These exercise **topology, import, and promotion** mechanics; most predate the dev-to-prod invariants and do not by themselves prove native-classification / coverage-gate / exposure-gate / derive-assignments — the dev-to-prod **regression suite** above covers those deterministically. (In the dev-to-prod walkthrough, prod enforcement is `derive-assignments` with no LLM, not re-generation.)
 
 | Scenario | playbook.md section | What it validates |
 |---|---|---|
-| **quickstart** | § 1 | Single Genie Space backed by a single UC catalog (`dev_fin`) |
-| **multi-catalog** | § 1 (multi-catalog) | One Genie Space drawing tables from two catalogs (`dev_fin` + `dev_clinical`) |
-| **multi-space** | § 1 (multi-space) | Two Genie Spaces with separate catalogs — Finance Analytics + Clinical Analytics |
+| **quickstart** | § 1 | Single Genie agent backed by a single UC catalog (`dev_fin`) |
+| **multi-catalog** | § 1 (multi-catalog) | One Genie agent drawing tables from two catalogs (`dev_fin` + `dev_clinical`) |
+| **multi-space** | § 1 (multi-space) | Two Genie agents with separate catalogs — Finance Analytics + Clinical Analytics |
 | **per-space** | § 4 | Add Clinical Analytics incrementally without touching Finance Analytics (isolation guarantee) |
 | **promote** | § 5 | Full dev → prod promotion with catalog remapping across both spaces |
 | **multi-env** | § 6 | Two independent envs on the same account: `dev` (Finance), `bu2` (Clinical) |
-| **attach-promote** | § 3 | Import a Genie Space already configured in the UI — govern it, then promote to prod |
+| **attach-promote** | § 3 | Import a Genie agent already configured in the UI — govern it, then promote to prod |
 | **self-service-genie** | § 7 | Central governance team + two BU Genie teams self-serve; second BU isolation check; BU promote to prod via `apply-genie`; governance state verified unchanged throughout |
-| **abac-only** | § 2 | ABAC governance only (no Genie Space) + §2→§4 upgrade path: add Genie Space later without disturbing governance |
-| **multi-space-import** | § 3 (multi-space) | Import two UI-configured Genie Spaces in one `make generate`; assert both configs present, Terraform creates no new spaces |
-| **schema-drift** | — | Detects and classifies new columns after initial ABAC deployment; tests `make audit-schema` and `make generate-delta` across ADD/DROP/RENAME COLUMN scenarios |
-| **genie-only** | § 7 (genie\_only) | Minimal-privilege SP (workspace USER + SQL entitlement) creates Genie Space with `genie_only=true`; no account-level resources |
-| **genie-import-no-abac** | § 3 + § 7 | Import an existing Genie Space and deploy to prod **without any ABAC governance** — validates the genie-only import-to-prod workflow when a separate team manages ABAC centrally |
+| **abac-only** | § 2 | ABAC governance only (no Genie agent) + §2→§4 upgrade path: add Genie agent later without disturbing governance |
+| **multi-space-import** | § 3 (multi-space) | Import two UI-configured Genie agents in one `make generate`; assert both configs present, Terraform creates no new spaces |
+| **schema-drift** | — | Detects new/removed columns after deployment; tests `make audit-schema` / `make audit-rulebook` across ADD/DROP/RENAME. (In prod, new columns are re-derived via `make derive-assignments` after native classification; `make generate-delta` is the legacy LLM path.) |
+| **genie-only** | § 7 (genie\_only) | Minimal-privilege SP (workspace USER + SQL entitlement) creates Genie agent with `genie_only=true`; no account-level resources |
+| **genie-import-no-abac** | § 3 + § 7 | Import an existing Genie agent and deploy to prod **without any ABAC governance** — validates the genie-only import-to-prod workflow when a separate team manages ABAC centrally |
 | **country-overlay** | — | Country/region overlays (ANZ, IN, SEA) — full cycle per region + multi-region generation |
 | **industry-overlay** | — | Industry overlays (financial\_services, healthcare, retail) — full cycle per industry + multi-industry + country+industry composition (COUNTRY=ANZ INDUSTRY=healthcare) |
-| **aus-bank-demo** | — | Australian bank demo — champion flow (ANZ + financial\_services, import + promote with `dev_bank`→`prod_bank` catalog remap) |
-| **india-bank-demo** | — | India bank demo — champion flow (IN + financial\_services, Aadhaar/PAN/GSTIN/UPI masking, import + promote with `dev_lakshmi`→`prod_lakshmi`) |
-| **asean-bank-demo** | — | ASEAN bank demo — champion flow (SEA + financial\_services, 6 nullable national ID columns, multi-currency, import + promote with `dev_asean_bank`→`prod_asean_bank`) |
+| **aus-bank-demo** | — | Australian bank demo — **legacy** LLM-overlay demo (ANZ + financial\_services, import + promote with `dev_bank`→`prod_bank` catalog remap) |
+| **india-bank-demo** | — | India bank demo — **legacy** LLM-overlay demo (IN + financial\_services, Aadhaar/PAN/GSTIN/UPI masking, import + promote with `dev_lakshmi`→`prod_lakshmi`) |
+| **asean-bank-demo** | — | ASEAN bank demo — **legacy** LLM-overlay demo (SEA + financial\_services, 6 nullable national ID columns, multi-currency, import + promote with `dev_asean_bank`→`prod_asean_bank`) |
 
 ---
 
@@ -475,7 +471,7 @@ One space ("Combined Analytics") draws tables from both `dev_fin` and `dev_clini
 
 **Key assertions:**
 - `generated/abac.auto.tfvars` contains `Combined Analytics` and references both `dev_fin` and `dev_clinical`
-- Only one Genie Space deployed
+- Only one Genie agent deployed
 - Column tags applied across both catalogs
 
 ---
@@ -509,7 +505,7 @@ without triggering a full LLM re-run over Finance Analytics.
   after the per-space generate for Clinical Analytics
 - Assembled `generated/abac.auto.tfvars` contains **both** spaces after merge
 - `generated/spaces/clinical_analytics/abac.auto.tfvars` created by SPACE= generate
-- Both Genie Spaces deployed after final apply
+- Both Genie agents deployed after final apply
 
 ---
 
@@ -553,19 +549,19 @@ Validates the independent second environment from playbook.md § 6.
 - `dev/generated/abac.auto.tfvars` contains Finance Analytics, not Clinical Analytics
 - `bu2/generated/abac.auto.tfvars` contains Clinical Analytics, not Finance Analytics
 - `envs/dev/terraform.tfstate` and `envs/bu2/terraform.tfstate` exist and differ
-- Finance Analytics Genie Space deployed in dev, Clinical Analytics deployed in bu2
+- Finance Analytics Genie agent deployed in dev, Clinical Analytics deployed in bu2
 
 ---
 
 ### 7. attach-promote — Attach to UI-created space and promote to prod
 
-Validates the "Import an existing Genie Space" flow from playbook.md § 3, combined
+Validates the "Import an existing Genie agent" flow from playbook.md § 3, combined
 with a dev → prod promotion. This is the adoption story: a data team already built a
-Genie Space in the Databricks UI and now wants to bring it under ABAC governance.
+Genie agent in the Databricks UI and now wants to bring it under ABAC governance.
 
 **Phase 1 — Simulate UI configuration:**
 
-A Finance Analytics Genie Space is created directly via the Genie REST API
+A Finance Analytics Genie agent is created directly via the Genie REST API
 (`POST /api/2.0/genie/spaces`) with `dev_fin` tables. This represents the space a
 data team built in the UI before this tool was adopted.
 
@@ -579,13 +575,13 @@ runs `make generate` (which logs discovered tables), then copies them into
 `data_access/env.auto.tfvars`.
 
 `make generate` imports the space's config (instructions, benchmarks, sample questions)
-verbatim from the Genie API response — not re-generated by the LLM. The ABAC governance
+as a supported subset (a projection, not byte-for-byte) of the Genie API response — not re-generated by the LLM. The ABAC governance
 (groups, tag policies, masking functions) is generated fresh from the table DDLs.
 
 **Phase 3 — Apply:**
 
 `make apply` deploys ABAC governance (group ACLs, column tags, masking functions,
-FGAC policies) **without** creating or deleting the Genie Space. Terraform operates
+FGAC policies) **without** creating or deleting the Genie agent. Terraform operates
 only on `existing_spaces` resources — no `genie_space_create` provisioner runs.
 
 **Phase 4 — Promote:**
@@ -598,7 +594,7 @@ by `make apply ENV=prod` applies the same governance to prod.
 | Step | Action |
 |---|---|
 | 1 | Create `dev_fin` + `prod_fin` test catalogs |
-| 2 | Create a Genie Space via `POST /api/2.0/genie/spaces` (simulating UI setup) |
+| 2 | Create a Genie agent via `POST /api/2.0/genie/spaces` (simulating UI setup) |
 | 3 | Configure `dev` env: `genie_space_id = "<id>"`, no `uc_tables` |
 | 4 | `make generate ENV=dev` — discovers tables from Genie API, generates ABAC |
 | 5 | Assert generated config references `dev_fin` catalog and `Finance Analytics` |
@@ -630,7 +626,7 @@ A `governance` env is set up with both `dev_fin` + `dev_clinical` table referenc
 
 **Phase 2 — BU Finance team:**
 
-A `bu_fin` env is set up with a Finance Analytics space pointing at `dev_fin` tables. `make generate MODE=genie` is run — only `genie_space_configs` is generated (no ABAC, no masking SQL). `make apply-genie` applies only the workspace layer and creates the Genie Space.
+A `bu_fin` env is set up with a Finance Analytics space pointing at `dev_fin` tables. `make generate MODE=genie` is run — only `genie_space_configs` is generated (no ABAC, no masking SQL). `make apply-genie` applies only the workspace layer and creates the Genie agent.
 
 **Phase 3 — Adding a second BU (isolation check):**
 
@@ -675,17 +671,17 @@ A `bu_clin` env is set up with a Clinical Analytics space. `make generate MODE=g
 
 ---
 
-### 9. abac-only — ABAC governance only (no Genie Space) + upgrade path
+### 9. abac-only — ABAC governance only (no Genie agent) + upgrade path
 
 Validates the "ABAC governance only" flow from playbook.md § 2 and the § 2 → § 4 upgrade path.
 
 **Phase 1 — ABAC-only deploy:**
 
-`env.auto.tfvars` is configured with `uc_tables` only — no `genie_spaces` block. Plain `make generate` (no `MODE=` flag) generates groups, tag policies, tag assignments, FGAC policies, and masking functions, but no `genie_space_configs`. `make apply` applies all three layers — account, data_access, and workspace — but creates no Genie Space.
+`env.auto.tfvars` is configured with `uc_tables` only — no `genie_spaces` block. Plain `make generate` (no `MODE=` flag) generates groups, tag policies, tag assignments, FGAC policies, and masking functions, but no `genie_space_configs`. `make apply` applies all three layers — account, data_access, and workspace — but creates no Genie agent.
 
 **Phase 2 — § 2 → § 4 upgrade path:**
 
-A `genie_spaces` block is added to `env.auto.tfvars` and `make generate SPACE="Finance Analytics"` is run (per-space generation, not a full re-generate). `make apply` then creates the Genie Space. The test asserts that the existing `data_access/terraform.tfstate` is preserved (governance not disturbed) and ABAC verification still passes.
+A `genie_spaces` block is added to `env.auto.tfvars` and `make generate SPACE="Finance Analytics"` is run (per-space generation, not a full re-generate). `make apply` then creates the Genie agent. The test asserts that the existing `data_access/terraform.tfstate` is preserved (governance not disturbed) and ABAC verification still passes.
 
 **Key assertions:**
 - `generated/abac.auto.tfvars` does NOT declare `genie_space_configs` after Phase 1
@@ -699,19 +695,19 @@ A `genie_spaces` block is added to `env.auto.tfvars` and `make generate SPACE="F
 
 ---
 
-### 10. multi-space-import — Import two UI-created Genie Spaces at once
+### 10. multi-space-import — Import two UI-created Genie agents at once
 
 Validates the multi-space import pattern from playbook.md § 3.
 
-Two Genie Spaces are created directly via the Genie REST API (simulating spaces built in the Databricks UI). The `env.auto.tfvars` is configured with two `genie_space_id` entries. `make generate` imports both spaces' configs verbatim from the API and generates shared ABAC governance. `make apply` attaches to both spaces (applies governance and ACLs) without creating any new spaces.
+Two Genie agents are created directly via the Genie REST API (simulating spaces built in the Databricks UI). The `env.auto.tfvars` is configured with two `genie_space_id` entries. `make generate` imports both spaces' configs (a supported subset) from the API and generates shared ABAC governance. `make apply` attaches to both spaces (applies governance and ACLs) without creating any new spaces.
 
 **Steps:**
 
 | Step | Action |
 |---|---|
 | 1 | Create `dev_fin` + `dev_clinical` test catalogs |
-| 2 | Create Finance Analytics Genie Space via `POST /api/2.0/genie/spaces` |
-| 3 | Create Clinical Analytics Genie Space via `POST /api/2.0/genie/spaces` |
+| 2 | Create Finance Analytics Genie agent via `POST /api/2.0/genie/spaces` |
+| 3 | Create Clinical Analytics Genie agent via `POST /api/2.0/genie/spaces` |
 | 4 | Configure `dev` env: two `genie_space_id` entries, each with explicit `uc_tables` |
 | 5 | `make generate ENV=dev` — imports both spaces, generates ABAC for both catalogs |
 | 6 | Assert both `Finance Analytics` and `Clinical Analytics` in `generated/abac.auto.tfvars` |
@@ -764,16 +760,16 @@ Tags are unset on `email`, then `ALTER TABLE RENAME COLUMN email TO contact_emai
 | 15 | `make apply` — assert tag on `contact_email` |
 | 16 | `make audit-schema` — assert exit 0 |
 
-### 10. genie-import-no-abac — Import Genie Space, deploy to prod without ABAC
+### 10. genie-import-no-abac — Import Genie agent, deploy to prod without ABAC
 
-Validates the full workflow of importing an existing Genie Space and deploying it to production without generating or managing any ABAC governance. This is a valid use case when a separate governance team manages ABAC centrally.
+Validates the full workflow of importing an existing Genie agent and deploying it to production without generating or managing any ABAC governance. This is a valid use case when a separate governance team manages ABAC centrally.
 
 **Steps:**
 
 | Step | Action |
 |---|---|
 | 1 | Create `dev_fin` + `prod_fin` test catalogs |
-| 2 | Create a Genie Space via REST API (simulating a UI-configured space) |
+| 2 | Create a Genie agent via REST API (simulating a UI-configured space) |
 | 3 | `make setup ENV=import_noabac` — scaffold env |
 | 4 | Write `env.auto.tfvars` with `genie_only = true` and `genie_space_id` pointing to the API-created space |
 | 5 | `make generate ENV=import_noabac MODE=genie` — generate genie config only |
@@ -1004,3 +1000,26 @@ After manually cleaning up, remove the stale state file so subsequent runs start
 ```bash
 rm -f scripts/.test_env_state.json
 ```
+
+---
+
+## Effective-Access Verification (post-apply)
+
+The scenarios above (and `setup_test_data.py --verify`) confirm that governance
+objects — tags, masks, row-filter policies — **exist** after `make apply`. They
+do not confirm those policies actually **take effect** for a querying principal.
+
+To verify by effect, run `make verify-access` after applying an environment. It
+provisions a dedicated service principal per access tier, runs the same query as
+each, and asserts that a lower-tier principal sees the masked value while a
+higher-tier principal sees the raw value (and that row filters restrict rows):
+
+```bash
+make verify-access ENV=dev VERIFY_KEY_COLUMN=customer_id
+```
+
+The value-comparison logic ships with pure unit tests
+(`tests/test_verify_effective_access.py`, in the standard `make test-unit`
+gate); the live workspace calls are guarded behind `GENIERAILS_LIVE_VERIFY=1`.
+See [Effective-Access Verification](effective-access-verification.md) for the
+per-tier test-principal mechanism, options, and the explicit-spec format.

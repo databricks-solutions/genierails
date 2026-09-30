@@ -208,49 +208,6 @@ def build_account_config(full_cfg: dict, existing_cfg: dict | None) -> dict:
     return cfg
 
 
-def reconcile_tag_policy_values(account_cfg: dict, data_access_cfg: dict) -> None:
-    """Remove tag_assignments whose values are not in the account-layer tag policy.
-
-    The autofix in generate_abac.py runs on the full generated ABAC before
-    splitting, but edge cases (per-space assembly, regex mismatches) can leave
-    a tag_assignment in the data_access layer whose value is absent from the
-    account-layer policy.  Instead of blindly adding these (potentially
-    LLM-hallucinated) values to the tag policy, we remove the bad assignments
-    to prevent INVALID_TAG_POLICY_VALUE errors at query time.
-    """
-    policies = {
-        REGISTRY.canonical_key(tp["key"]): {
-            **tp,
-            "values": [
-                REGISTRY.canonical_value(tp["key"], value)
-                for value in tp.get("values", [])
-            ],
-        }
-        for tp in account_cfg.get("tag_policies", [])
-        if tp.get("key")
-    }
-    original = data_access_cfg.get("tag_assignments", [])
-    cleaned = []
-    removed = 0
-    for ta in original:
-        key = REGISTRY.canonical_key(ta.get("tag_key", ""))
-        val = REGISTRY.canonical_value(key, ta.get("tag_value", ""))
-        if key:
-            ta["tag_key"] = key
-        if val:
-            ta["tag_value"] = val
-        if key and val and key in policies:
-            allowed = policies[key].get("values", [])
-            if val not in allowed:
-                print(f"  [SPLIT-REPAIR] Removed tag_assignment '{key}={val}' "
-                      f"(not in tag_policy allowed values: {allowed})")
-                removed += 1
-                continue
-        cleaned.append(ta)
-    if removed:
-        data_access_cfg["tag_assignments"] = cleaned
-
-
 def _strip_var_refs(space_cfg: dict) -> dict:
     """Remove ${var.*} string values from a genie_space_configs entry.
 
@@ -405,11 +362,6 @@ def main():
     account_cfg = build_account_config(full_cfg, existing_account_cfg)
     data_access_cfg = build_data_access_config(full_cfg)
     workspace_cfg = build_workspace_config(full_cfg)
-
-    # Safety net: ensure all tag_assignment values are in the account-layer
-    # tag policies before we write.  Catches edge cases missed by generate_abac.py's
-    # autofix (e.g. per-space assembly, regex edge cases).
-    reconcile_tag_policy_values(account_cfg, data_access_cfg)
 
     account_header = """
 # ============================================================================

@@ -469,6 +469,7 @@ class TestInferColumnCategoriesWithCountry:
         assert "phone" in _infer_column_categories("cat.sch.tbl.phone")
         assert "ssn" in _infer_column_categories("cat.sch.tbl.ssn")
         assert "card" in _infer_column_categories("cat.sch.tbl.credit_card")
+        assert _infer_column_categories("cat.sch.tbl.cardholder_name") == {"name"}
 
     def test_unknown_column_returns_generic(self):
         cats = _infer_column_categories("catalog.schema.table.random_field")

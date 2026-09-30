@@ -90,8 +90,12 @@ run_import() {
 
   echo "  Importing: $address -> $id"
   local import_out
-  import_out=$("$TF_RUNNER" "$LAYER" "$ENV_NAME" import "$address" "$id" 2>&1)
-  local import_rc=$?
+  local import_rc
+  if import_out=$("$TF_RUNNER" "$LAYER" "$ENV_NAME" import "$address" "$id" 2>&1); then
+    import_rc=0
+  else
+    import_rc=$?
+  fi
   if [ "$import_rc" -eq 0 ]; then
     echo "  ✓ Imported $address"
   elif echo "$import_out" | grep -q "Resource already managed by Terraform"; then
@@ -374,22 +378,72 @@ for ta in tag_assignments:
     etype = ta.get('entity_type', '')
     ename = ta.get('entity_name', '')
     tkey  = ta.get('tag_key', '')
-    if not (etype and ename and tkey):
+    tval  = ta.get('tag_value', '')
+    if not (etype and ename and tkey and tval):
         continue
 
     if etype == 'columns':
-        parts = ename.rsplit('.', 1)
-        if len(parts) != 2:
+        parts = ename.split('.')
+        if len(parts) != 4:
             continue
-        table_fqn, col = parts
+        catalog, schema, table, col = parts
+        lookup_sql = (
+            "SELECT tag_value FROM system.information_schema.column_tags "
+            f"WHERE catalog_name = '{catalog}' AND schema_name = '{schema}' "
+            f"AND table_name = '{table}' AND column_name = '{col}' "
+            f"AND tag_name = '{tkey}' LIMIT 1"
+        )
+        table_fqn = '.'.join(parts[:3])
         sql = f"ALTER TABLE {table_fqn} ALTER COLUMN {col} UNSET TAGS ('{tkey}')"
     elif etype == 'tables':
+        parts = ename.split('.')
+        if len(parts) != 3:
+            continue
+        catalog, schema, table = parts
+        lookup_sql = (
+            "SELECT tag_value FROM system.information_schema.table_tags "
+            f"WHERE catalog_name = '{catalog}' AND schema_name = '{schema}' "
+            f"AND table_name = '{table}' AND tag_name = '{tkey}' LIMIT 1"
+        )
         sql = f"ALTER TABLE {ename} UNSET TAGS ('{tkey}')"
     else:
         continue
 
+    lookup_matches_target = False
     try:
         from databricks.sdk.service.sql import StatementState as _SS
+        lookup = w.statement_execution.execute_statement(
+            statement=lookup_sql,
+            warehouse_id=warehouse_id,
+            wait_timeout='30s',
+        )
+        for _poll_attempt in range(30):
+            if getattr(getattr(lookup, 'status', None), 'state', None) not in (
+                    _SS.PENDING, _SS.RUNNING):
+                break
+            import time
+            time.sleep(1)
+            lookup = w.statement_execution.get_statement(lookup.statement_id)
+        else:
+            sys.stderr.write(
+                f'  WARNING: tag lookup timed out for {ename}/{tkey}; clearing tag\n'
+            )
+        raw_lookup_state = getattr(getattr(lookup, 'status', None), 'state', None)
+        lookup_state = (raw_lookup_state.value
+                        if hasattr(raw_lookup_state, 'value')
+                        else str(raw_lookup_state or ''))
+        rows = getattr(getattr(lookup, 'result', None), 'data_array', None) or []
+        current_value = rows[0][0] if rows and rows[0] else None
+        lookup_matches_target = 'SUCCEEDED' in lookup_state and current_value == tval
+    except Exception as e:
+        sys.stderr.write(
+            f'  WARNING: tag lookup failed for {ename}/{tkey}: {e}; clearing tag\n'
+        )
+
+    if lookup_matches_target:
+        continue
+
+    try:
         resp = w.statement_execution.execute_statement(
             statement=sql,
             warehouse_id=warehouse_id,
@@ -406,7 +460,7 @@ for ta in tag_assignments:
             if not ('not found' in err.lower() or 'does not exist' in err.lower() or 'unset' in err.lower()):
                 sys.stderr.write(f'  WARNING: could not clear {tkey} on {ename}: {err}\n')
     except Exception as e:
-        sys.stderr.write(f'  WARNING: SQL failed for {ename}/{tkey}: {e}\n')
+        sys.stderr.write(f'  WARNING: tag cleanup failed for {ename}/{tkey}: {e}\n')
 
 if cleaned:
     print(f'  Cleared {cleaned} stale tag assignment(s).')

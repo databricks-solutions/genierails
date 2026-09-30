@@ -1,6 +1,24 @@
 # Troubleshooting
 
-This document covers import flows, brownfield adoption, and common provider issues.
+This document covers dev-to-prod issues, import flows, brownfield adoption, and common provider issues.
+
+## Dev-to-Prod Walkthrough issues
+
+### `make generate` aborts: "could not read native classification" / empty results
+
+With `enable_classification=true`, generation is **fail-closed**: if native `class.*` results are unreadable or empty, it aborts rather than guessing. This is intentional.
+- **Have you enabled auto-tagging?** It's opt-in (`enable_auto_tagging = false` by default), so no `class.*` column tags are written until you set `enable_auto_tagging = true` and re-run `make enable-classification`. Review detections first ([Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections)), then opt in.
+- Confirm classification is enabled and the **scan has completed** (async, minutes to ~24h) — check `system.information_schema.column_tags` for `class.*` on your footprint.
+- If your data genuinely has no format-matchable PII yet, seed realistic values or wait for the scan.
+- Only to deliberately bypass (not recommended in prod): `GENERATE_ARGS='--allow-llm-sensitivity'`.
+
+### `make derive-assignments` (prod) fails on empty/unmapped classifications
+
+By design, prod refresh rejects empty native results and unmapped `class.*` findings (a finding with no `gr_treatment` mapping). Add the missing mapping to `treatment_config.json` and re-run; it never falls back to the LLM.
+
+### Users can't query after apply / agent not runnable
+
+Check the **exposure gate**: `business_access_enabled` defaults to `false`, which withholds business `SELECT` and Genie `CAN_RUN` even after enforcement is applied. Set it to `true` and re-apply, once `make coverage-gate` passes.
 
 ## Importing Existing Resources (Brownfield)
 
@@ -81,38 +99,36 @@ If you are still recovering an older partial state:
 2. If needed, `make apply ENV=<workspace>` first, then destroy again
 3. Only destroy `ENV=account` after the workspace environments that depend on it are gone
 
-### LLM generation fails with "groups is missing or empty"
+### Generation fails with "groups is missing or empty"
 
-The Foundation Model API sometimes returns truncated output, especially with complex schemas (many tables/columns) or long overlay prompts.
-
-**Solutions:**
-1. Re-run `make generate` — LLM output is non-deterministic, retries often succeed
-2. Reduce prompt complexity: use fewer tables (`SPACE="Single Space"`) or fewer overlays
-3. Try `make generate --dry-run` to inspect the prompt without calling the LLM
-4. If using country + industry overlays together, try generating with just one overlay first
-5. Keep each Genie Space to 4-8 tables for reliable generation
-
-### LLM generates wrong masking functions for columns
-
-The LLM may misclassify columns (e.g., applying `mask_pan_india` to credit card PAN instead of India tax PAN).
+In the consume-IdP-groups model, GenieRails does **not** invent groups — you supply your IdP group→tier mapping. This error almost always means the mapping is missing or a named group isn't synced, **not** LLM truncation. Retrying won't help; fix the input.
 
 **Solutions:**
-1. Use unambiguous column names: `pan_number` instead of `pan`, `card_number` instead of `pan`
-2. Add clear column COMMENTs in your DDL — the LLM reads these during generation
-3. Edit `envs/<env>/generated/abac.auto.tfvars` to fix misclassifications, then run `make validate-generated`
-4. The autofix system catches some mismatches (function category vs. column category), but not all
+1. Pass the mapping: `make generate GENERATE_ARGS='--groups "<idp-tier-1>,<idp-tier-2>"'`. Generation refuses to proceed without it rather than inventing names.
+2. Confirm each named group is **synced into the account from your IdP** (AIM/SCIM). The group-existence preflight fails loudly and names a missing group.
+3. Only for a demo/greenfield account with no IdP groups: use `GENERATE_ARGS='--create-groups'` (and set `manage_groups = true` in `envs/account/env.auto.tfvars`) to let GenieRails create them.
+4. To inspect the prompt without calling the model: `make generate GENERATE_ARGS='--dry-run'`.
 
-### FGAC policy limit exceeded (max 10 per catalog)
+### A column is masked with the wrong function
 
-Databricks enforces a platform limit of 10 FGAC policies per catalog. If your schema has many sensitive columns, the LLM may generate more than 10 policies.
-
-**Symptoms:** `make validate-generated` errors with "exceeds Databricks platform limit of 10", or `make apply` fails with a provider error.
+Sensitivity comes from **native classification** (`class.*`), and GenieRails derives one `gr_treatment` per column deterministically — so a wrong mask usually traces to the classification or the tag→treatment mapping, not an LLM guess.
 
 **Solutions:**
-1. Consolidate policies: use one masking function for multiple columns with the same sensitivity level
-2. Use tag-based conditions to group columns (e.g., all `pii_level=masked` columns share one policy)
-3. Split tables across multiple catalogs if governance requirements differ
-4. The autofix system automatically drops excess policies — review which survived in the generated config
+1. Check the column's `class.*` tag in `system.information_schema.column_tags` — is it classified as you expect? If a type isn't recognized, add a **custom classifier**.
+2. Check the `class.* → gr_treatment` mapping (`treatment_config.json`) and the strictest-wins precedence for multi-tag columns.
+3. Edit `treatment_config.json` / the generated `abac.auto.tfvars`, then re-run `make coverage-gate` + `make validate-generated`.
+4. The LLM only drafts rule *text* and Genie content; it does not decide which columns are sensitive.
+
+### FGAC policy limit exceeded (100 per catalog)
+
+Databricks enforces ~100 FGAC policies (column masks + row filters) per catalog. Option-B treatment derivation keeps you well under it by emitting **one policy per treatment per catalog** — so this is rare.
+
+**Symptoms:** `make coverage-gate` / `make validate-generated` reports the per-catalog policy count exceeds the limit, or `make apply` fails with a provider error.
+
+**Solutions:**
+1. This shouldn't happen under Option-B; if it does, check whether policies are being emitted per-column instead of per-treatment.
+2. Split tables across multiple catalogs if governance requirements differ.
+3. **GenieRails never silently drops sensitive policies to fit the limit** — it fails loudly and lists the affected policies. Free capacity or re-scope; do not work around it by dropping protection.
 
 ### Terraform state conflicts or corruption
 
@@ -145,13 +161,13 @@ Permission errors when fetching table DDL or applying governance.
 3. Check `auth.auto.tfvars` credentials match the correct workspace
 4. Run `make setup ENV=<env>` to verify the SP can connect
 
-### Genie Space API errors (rate limiting, timeouts)
+### Genie agent API errors (rate limiting, timeouts)
 
-The Genie Space REST API may return 429 (rate limit) or timeout errors during import or config push.
+The Genie agent REST API may return 429 (rate limit) or timeout errors during import or config push.
 
 **Solutions:**
 1. Re-run `make generate` — transient API errors resolve on retry
-2. If consistent 403 errors: the SP may not have permission to manage Genie Spaces
+2. If consistent 403 errors: the SP may not have permission to manage Genie agents
 3. For large spaces with many tables: the API may timeout — reduce the number of tables per space
 4. Check workspace network connectivity if behind a firewall/VPN
 
@@ -160,10 +176,11 @@ The Genie Space REST API may return 429 (rate limit) or timeout errors during im
 FGAC policies reference masking functions that don't exist in the catalog.
 
 **Solutions:**
-1. Run `make apply` again — the masking function deployment may have failed silently on the first attempt
-2. Verify the SQL file: `cat envs/<env>/generated/masking_functions.sql` — check for syntax errors
-3. Check the catalog and schema exist: functions are created in the same catalog/schema as your tables
-4. Verify the SP has `CREATE FUNCTION` privilege on the schema
+1. **Run `make coverage-gate` first** — it fails precisely when a treatment's masking function is absent, and names it, before you ever apply. This is the intended guard.
+2. Run `make apply` again — the masking function deployment may have failed silently on the first attempt.
+3. Verify the SQL file: `cat envs/<env>/generated/masking_functions.sql` — check for syntax errors.
+4. Check the catalog and schema exist: functions are created in the same catalog/schema as your tables.
+5. Verify the SP has `CREATE FUNCTION` privilege on the schema.
 
 ### Column tags not appearing after apply
 

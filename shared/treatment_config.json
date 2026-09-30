@@ -1,0 +1,30 @@
+{
+  "tag_key": "gr_treatment",
+  "description": "GenieRails-owned enforcement treatment derived from sensitivity findings. Entries are ordered strictest-first.",
+  "treatments": [
+    {"value": "redact", "masking_function": "mask_redact", "sources": [
+      ["pci_level", "redacted_cvv"], ["pci_level", "redacted_card_full"],
+      ["pii_level", "redacted_address"], ["pii_level", "redacted_mixed"], ["phi_level", "redacted"],
+      ["phi_level", "Restricted_PHI"], ["phi_level", "redacted_notes"]
+    ]},
+    {"value": "ssn_last4", "masking_function": "mask_ssn", "sources": [["pii_level", "masked_ssn"]]},
+    {"value": "card_last4", "masking_function": "mask_credit_card_last4", "udf_signature": "mask_credit_card_last4(card_number STRING) RETURNS STRING", "udf_body": "CASE WHEN card_number IS NULL THEN NULL WHEN length(card_number) <= 4 THEN card_number ELSE concat(repeat('*', length(card_number) - 4), right(card_number, 4)) END", "sources": [["pci_level", "masked_card_last4"]]},
+    {"value": "account_last4", "masking_function": "mask_account_number", "sources": [["pii_level", "masked_account"]]},
+    {"value": "email_partial", "masking_function": "mask_email", "sources": [["pii_level", "masked_email"]]},
+    {"value": "phone_partial", "masking_function": "mask_phone", "sources": [["pii_level", "masked_phone"]]},
+    {"value": "name_partial", "masking_function": "mask_full_name", "sources": [["pii_level", "masked_name"]]},
+    {"value": "date_year", "masking_function": "mask_date_to_year", "sources": [["pii_level", "masked_dob"]]},
+    {"value": "tfn_partial", "masking_function": "mask_tfn", "sources": [["pii_level", "masked_tfn"]]},
+    {"value": "medicare_partial", "masking_function": "mask_medicare", "sources": [["pii_level", "masked_medicare"]]},
+    {"value": "bsb_partial", "masking_function": "mask_bsb", "sources": [["pii_level", "masked_bsb"]]},
+    {"value": "aadhaar_partial", "masking_function": "mask_aadhaar", "sources": [["pii_level", "masked_aadhaar"]]},
+    {"value": "generic_partial", "masking_function": "mask_pii_partial", "sources": [
+      ["pii_level", "masked"], ["pii_level", "full"], ["pii_level", "Limited_PII"],
+      ["pii_level", "Full_PII"], ["pii_level", "masked_pan"], ["pii_level", "masked_nric"],
+      ["pii_level", "masked_mykad"], ["pii_level", "masked_nik"], ["pii_level", "masked_thai_id"],
+      ["pii_level", "masked_philsys"], ["pii_level", "masked_cccd"], ["pii_level", "masked_fin"],
+      ["phi_level", "full"], ["phi_level", "high"], ["phi_level", "Limited_PHI"], ["phi_level", "Full_PHI"]
+    ]},
+    {"value": "round_amount", "masking_function": "mask_amount_rounded", "udf_signature": "mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2)", "udf_body": "CAST(ROUND(amount, -2) AS DECIMAL(18,2))", "sources": [["financial_sensitivity", "rounded_amounts"]]}
+  ]
+}

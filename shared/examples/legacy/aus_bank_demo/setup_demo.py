@@ -2,7 +2,7 @@
 """
 Australian Bank Demo — Setup and Teardown
 
-Provisions a complete demo environment for the GenieRails champion flow:
+Provisions a complete demo environment for the GenieRails dev-to-prod walkthrough:
   - Dev workspace + prod workspace (fresh, isolated)
   - Unity Catalog metastore with cloud storage
   - Sample Australian banking tables (customers, accounts, transactions, credit_cards)
@@ -13,14 +13,14 @@ After setup, follow the README.md to run the demo.
 Usage
 -----
   # Provision everything (from the cloud wrapper directory: aws/ or azure/)
-  python shared/examples/aus_bank_demo/setup_demo.py provision \\
+  python shared/examples/legacy/aus_bank_demo/setup_demo.py provision \\
       --env-file shared/scripts/account-admin.aws.env
 
   # Check status
-  python shared/examples/aus_bank_demo/setup_demo.py status
+  python shared/examples/legacy/aus_bank_demo/setup_demo.py status
 
   # Tear down everything
-  python shared/examples/aus_bank_demo/setup_demo.py teardown
+  python shared/examples/legacy/aus_bank_demo/setup_demo.py teardown
 
 Prerequisites
 -------------
@@ -42,7 +42,7 @@ from pathlib import Path
 # Paths
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
-SHARED_DIR = SCRIPT_DIR.parent.parent  # shared/
+SHARED_DIR = SCRIPT_DIR.parent.parent.parent  # shared/
 SCRIPTS_DIR = SHARED_DIR / "scripts"
 CLOUD_ROOT = Path(os.environ.get("CLOUD_ROOT", SHARED_DIR.parent / "aws"))
 
@@ -418,7 +418,7 @@ uc_tables = [
     print()
     print("  Next steps:")
     print("    1. Run: make generate ENV=dev COUNTRY=ANZ INDUSTRY=financial_services")
-    print("    2. Follow ../shared/examples/aus_bank_demo/README.md for the demo")
+    print("    2. Follow ../shared/examples/legacy/aus_bank_demo/README.md for the demo")
     print()
 
 

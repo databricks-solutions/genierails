@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-ASEAN Bank Demo — Setup and Teardown
+India Bank Demo — Setup and Teardown
 
-Provisions a complete demo environment for the GenieRails champion flow:
+Provisions a complete demo environment for the GenieRails dev-to-prod walkthrough:
   - Dev workspace + prod workspace (fresh, isolated)
   - Unity Catalog metastore with cloud storage
-  - Sample ASEAN banking tables (customers, accounts, transactions, credit_cards)
+  - Sample Indian banking tables (customers, accounts, transactions, credit_cards)
   - An ungoverned Genie Space pointing at the dev tables
 
 After setup, follow the README.md to run the demo.
@@ -13,14 +13,14 @@ After setup, follow the README.md to run the demo.
 Usage
 -----
   # Provision everything (from the cloud wrapper directory: aws/ or azure/)
-  python shared/examples/asean_bank_demo/setup_demo.py provision \
+  python shared/examples/legacy/india_bank_demo/setup_demo.py provision \\
       --env-file shared/scripts/account-admin.aws.env
 
   # Check status
-  python shared/examples/asean_bank_demo/setup_demo.py status
+  python shared/examples/legacy/india_bank_demo/setup_demo.py status
 
   # Tear down everything
-  python shared/examples/asean_bank_demo/setup_demo.py teardown
+  python shared/examples/legacy/india_bank_demo/setup_demo.py teardown
 
 Prerequisites
 -------------
@@ -42,7 +42,7 @@ from pathlib import Path
 # Paths
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent
-SHARED_DIR = SCRIPT_DIR.parent.parent  # shared/
+SHARED_DIR = SCRIPT_DIR.parent.parent.parent  # shared/
 SCRIPTS_DIR = SHARED_DIR / "scripts"
 CLOUD_ROOT = Path(os.environ.get("CLOUD_ROOT", SHARED_DIR.parent / "aws"))
 
@@ -52,8 +52,8 @@ STATE_FILE = SCRIPT_DIR / f".demo_state.{_default_cloud}.json"
 # ---------------------------------------------------------------------------
 # Catalog + table definitions
 # ---------------------------------------------------------------------------
-DEV_CATALOG = "dev_asean_bank"
-PROD_CATALOG = "prod_asean_bank"
+DEV_CATALOG = "dev_lakshmi"
+PROD_CATALOG = "prod_lakshmi"
 SCHEMA = "retail"
 
 SETUP_SQL = f"""
@@ -63,18 +63,18 @@ CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.customers (
   first_name      STRING    COMMENT 'Customer first name',
   last_name       STRING    COMMENT 'Customer last name',
   email           STRING    COMMENT 'Contact email address',
-  phone           STRING    COMMENT 'Phone number (country-specific format)',
+  phone           STRING    COMMENT 'Indian mobile number (+91 format)',
   address         STRING    COMMENT 'Residential address',
   city            STRING    COMMENT 'City',
-  country         STRING    COMMENT 'Country code (SG, MY, TH, ID, PH, VN)',
-  postal_code     STRING    COMMENT 'Postal/ZIP code',
-  nric            STRING    COMMENT 'Singapore NRIC — National Registration Identity Card (9 chars, e.g. S8712345D)',
-  mykad           STRING    COMMENT 'Malaysian MyKad — national IC number (12 digits, encodes date of birth)',
-  thai_id         STRING    COMMENT 'Thai National ID — 13-digit citizen identification number',
-  nik             STRING    COMMENT 'Indonesian NIK — Nomor Induk Kependudukan (16 digits, encodes date of birth and district)',
-  philsys         STRING    COMMENT 'Philippine PhilSys national ID — 12-digit Philippine Identification System number',
-  cccd            STRING    COMMENT 'Vietnamese CCCD — Can Cuoc Cong Dan citizen identity card (12 digits)',
-  date_of_birth   DATE      COMMENT 'Date of birth'
+  state           STRING    COMMENT 'Indian state (Maharashtra, Karnataka, etc.)',
+  pincode         STRING    COMMENT 'Indian PIN code (6 digits)',
+  aadhaar         STRING    COMMENT 'Aadhaar number — 12-digit unique identity issued by UIDAI',
+  pan_number      STRING    COMMENT 'Permanent Account Number — 10-char tax identifier (Income Tax Act)',
+  voter_id        STRING    COMMENT 'Voter ID (EPIC) — Electoral Photo Identity Card',
+  date_of_birth   DATE      COMMENT 'Date of birth',
+  uan             STRING    COMMENT 'Universal Account Number — 12-digit EPF/provident fund identifier',
+  upi_id          STRING    COMMENT 'UPI Virtual Payment Address — registered payment instrument',
+  gstin           STRING    COMMENT 'GSTIN — GST Identification Number for business customers (15 chars)'
 )
 USING delta
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
@@ -83,12 +83,12 @@ TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.accounts (
   account_id      BIGINT       COMMENT 'Unique account identifier',
   customer_id     BIGINT       COMMENT 'FK to customers',
+  ifsc            STRING       COMMENT 'IFSC code — Indian Financial System Code (11 chars, e.g. SBIN0001234)',
   account_number  STRING       COMMENT 'Bank account number',
-  account_type    STRING       COMMENT 'SAVINGS, CURRENT, FIXED_DEPOSIT, MORTGAGE',
-  currency        STRING       COMMENT 'Account currency (SGD, MYR, THB, IDR, PHP, VND)',
-  balance         DECIMAL(18,2) COMMENT 'Current balance in account currency',
+  account_type    STRING       COMMENT 'SAVINGS, CURRENT, FD, RD, HOME_LOAN',
+  balance         DECIMAL(18,2) COMMENT 'Current balance in INR',
   opened_date     DATE         COMMENT 'Date account was opened',
-  branch          STRING       COMMENT 'Branch name and country'
+  branch          STRING       COMMENT 'Branch name (e.g. Fort Mumbai, Connaught Place Delhi)'
 )
 USING delta
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
@@ -98,14 +98,12 @@ CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.transactions (
   transaction_id  BIGINT       COMMENT 'Unique transaction identifier',
   account_id      BIGINT       COMMENT 'FK to accounts',
   transaction_date TIMESTAMP   COMMENT 'Date and time of transaction',
-  amount          DECIMAL(18,2) COMMENT 'Transaction amount in account currency',
-  currency        STRING       COMMENT 'Transaction currency',
+  amount          DECIMAL(18,2) COMMENT 'Transaction amount in INR',
   merchant        STRING       COMMENT 'Merchant or payee name',
-  category        STRING       COMMENT 'Transaction category (RETAIL, TRANSFER, ATM, REMITTANCE, CROSS_BORDER)',
+  category        STRING       COMMENT 'Transaction category (UPI, NEFT, RTGS, IMPS, POS, ATM)',
   aml_risk_flag   STRING       COMMENT 'AML risk assessment: CLEAR, REVIEW, HIGH_RISK, BLOCKED',
-  cross_border    BOOLEAN      COMMENT 'True if cross-border transaction',
-  source_country  STRING       COMMENT 'Originating country code',
-  dest_country    STRING       COMMENT 'Destination country code'
+  cross_border    BOOLEAN      COMMENT 'True if international transaction',
+  country         STRING       COMMENT 'Destination country code (IN, SG, US, AE, etc.)'
 )
 USING delta
 TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
@@ -117,9 +115,8 @@ CREATE OR REPLACE TABLE {DEV_CATALOG}.{SCHEMA}.credit_cards (
   card_number     STRING       COMMENT 'Full credit card PAN — PCI-DSS sensitive',
   cvv             STRING       COMMENT 'Card verification value — PCI-DSS sensitive',
   expiry_date     STRING       COMMENT 'Card expiry (MM/YY)',
-  credit_limit    DECIMAL(18,2) COMMENT 'Credit limit in SGD equivalent',
-  currency        STRING       COMMENT 'Card billing currency',
-  card_type       STRING       COMMENT 'VISA, MASTERCARD, UNIONPAY, JCB',
+  credit_limit    DECIMAL(18,2) COMMENT 'Credit limit in INR',
+  card_type       STRING       COMMENT 'VISA, MASTERCARD, RUPAY',
   status          STRING       COMMENT 'ACTIVE, BLOCKED, EXPIRED'
 )
 USING delta
@@ -127,68 +124,62 @@ TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
 """
 
 SAMPLE_DATA_SQL = f"""
--- ── Customers (realistic ASEAN data — 2 per country) ───────────────────
+-- ── Customers (realistic Indian data) ──────────────────────────────────
 INSERT INTO {DEV_CATALOG}.{SCHEMA}.customers VALUES
-(1001, 'Wei Liang',  'Tan',              'weiliang.tan@email.sg',        '+65 9123 4567',     '42 Orchard Road',         'Singapore',       'SG', '068912',  'S8712345D',       NULL,             NULL,              NULL,               NULL,             NULL,             '1987-03-14'),
-(1002, 'Mei Ling',   'Wong',             'meiling.wong@email.sg',        '+65 8234 5678',     '15 Marina Boulevard',     'Singapore',       'SG', '238859',  'T0198765A',       NULL,             NULL,              NULL,               NULL,             NULL,             '2001-06-22'),
-(1003, 'Ahmad',      'bin Ismail',       'ahmad.ismail@email.my',        '+60 12-345 6789',   '8 Jalan Bukit Bintang',   'Kuala Lumpur',    'MY', '50450',   NULL,              '850615085123',   NULL,              NULL,               NULL,             NULL,             '1985-06-15'),
-(1004, 'Nurul Huda', 'binti Abdullah',   'nurul.huda@email.my',          '+60 13-456 7890',   '23 Gurney Drive',         'Penang',          'MY', '10050',   NULL,              '920304146234',   NULL,              NULL,               NULL,             NULL,             '1992-03-04'),
-(1005, 'Somchai',    'Wongprasert',      'somchai.wong@email.th',        '+66 81 234 5678',   '5 Sukhumvit Soi 11',      'Bangkok',         'TH', '10110',   NULL,              NULL,             '1100112345678',   NULL,               NULL,             NULL,             '1980-01-12'),
-(1006, 'Siriporn',   'Chaiyasit',        'siriporn.chai@email.th',       '+66 89 345 6789',   '12 Nimmanhaemin Road',    'Chiang Mai',      'TH', '50200',   NULL,              NULL,             '5340100567890',   NULL,               NULL,             NULL,             '1993-04-10'),
-(1007, 'Budi',       'Santoso',          'budi.santoso@email.id',        '+62 812 3456 7890', '31 Jalan Sudirman',       'Jakarta',         'ID', '10110',   NULL,              NULL,             NULL,              '3201151290870001', NULL,             NULL,             '1990-12-15'),
-(1008, 'Dewi',       'Kartika',          'dewi.kartika@email.id',        '+62 813 4567 8901', '7 Jalan Basuki Rahmat',   'Surabaya',        'ID', '60271',   NULL,              NULL,             NULL,              '3578064508950002', NULL,             NULL,             '1995-08-04'),
-(1009, 'Juan',       'dela Cruz',        'juan.delacruz@email.ph',       '+63 917 123 4567',  '19 Ayala Avenue',         'Manila',          'PH', '1000',    NULL,              NULL,             NULL,              NULL,               '123456789012',   NULL,             '1988-09-20'),
-(1010, 'Maria',      'Santos',           'maria.santos@email.ph',        '+63 918 234 5678',  '4 Osmena Boulevard',      'Cebu',            'PH', '6000',    NULL,              NULL,             NULL,              NULL,               '234567890123',   NULL,             '1975-02-14'),
-(1011, 'Nguyen Van', 'Minh',             'nguyen.minh@email.vn',         '+84 90 123 4567',   '12 Nguyen Hue Street',    'Ho Chi Minh City','VN', '700000',  NULL,              NULL,             NULL,              NULL,               NULL,             '001085012345',   '1985-10-08'),
-(1012, 'Tran Thi',   'Lan',              'tran.lan@email.vn',            '+84 91 234 5678',   '8 Hoan Kiem',             'Hanoi',           'VN', '100000',  NULL,              NULL,             NULL,              NULL,               NULL,             '024092045678',   '1992-05-16');
+(1001, 'Arjun',    'Sharma',     'arjun.sharma@email.in',      '+91 98201 45678', '42 Marine Drive',        'Mumbai',      'Maharashtra',    '400001', '2345 6789 0123', 'ABCPS1234D', 'MH/01/234/567890', '1985-03-14', '100123456789', 'arjun@okaxis',  NULL),
+(1002, 'Priya',    'Krishnan',   'priya.krishnan@email.in',    '+91 98450 56789', '15 MG Road',             'Bangalore',   'Karnataka',      '560001', '3456 7890 1234', 'BCDPK2345E', 'KA/02/345/678901', '1978-07-22', '200234567890', 'priya@oksbi',   NULL),
+(1003, 'Rajesh',   'Patel',      'rajesh.patel@email.in',      '+91 99780 67890', '8 CG Road',              'Ahmedabad',   'Gujarat',        '380001', '4567 8901 2345', 'CDEPR3456F', 'GJ/03/456/789012', '1992-11-05', '300345678901', 'rajesh@okhdfcbank', '24AADCP1234F1Z5'),
+(1004, 'Deepa',    'Iyer',       'deepa.iyer@email.in',        '+91 98410 78901', '23 Anna Salai',          'Chennai',     'Tamil Nadu',     '600001', '5678 9012 3456', 'DEFPI4567G', 'TN/04/567/890123', '1970-01-30', '400456789012', 'deepa@ybl',     NULL),
+(1005, 'Amit',     'Kumar',      'amit.kumar@email.in',        '+91 98100 89012', '5 Connaught Place',      'Delhi',       'Delhi',          '110001', '6789 0123 4567', 'EFGPA5678H', 'DL/05/678/901234', '1988-09-18', '500567890123', 'amit@paytm',    NULL),
+(1006, 'Sunita',   'Das',        'sunita.das@email.in',        '+91 98300 90123', '12 Park Street',         'Kolkata',     'West Bengal',    '700001', '7890 1234 5678', 'FGHPS6789I', 'WB/06/789/012345', '1995-04-12', '600678901234', 'sunita@okicici', NULL),
+(1007, 'Vikram',   'Singh',      'vikram.singh@email.in',      '+91 98290 01234', '31 MI Road',             'Jaipur',      'Rajasthan',      '302001', '8901 2345 6789', 'GHIPV7890J', 'RJ/07/890/123456', '1982-12-25', '700789012345', 'vikram@okaxis',  NULL),
+(1008, 'Ananya',   'Reddy',      'ananya.reddy@email.in',      '+91 98490 12345', '7 Banjara Hills',        'Hyderabad',   'Telangana',      '500001', '9012 3456 7890', 'HIJPA8901K', 'TS/08/901/234567', '1990-06-08', '800890123456', 'ananya@oksbi',  '36AADCR5678G1Z8'),
+(1009, 'Suresh',   'Menon',      'suresh.menon@email.in',      '+91 98220 23456', '19 FC Road',             'Pune',        'Maharashtra',    '411001', '0123 4567 8901', 'IJKPS9012L', 'MH/09/012/345678', '1975-08-20', '900901234567', 'suresh@okhdfcbank', NULL),
+(1010, 'Kavita',   'Joshi',      'kavita.joshi@email.in',      '+91 98390 34567', '4 Hazratganj',           'Lucknow',     'Uttar Pradesh',  '226001', '1234 5678 9012', 'JKLPK0123M', 'UP/10/123/456789', '1998-02-14', '101012345678', 'kavita@ybl',    NULL);
 
--- ── Accounts (1 per customer, multi-currency) ───────────────────────────
+-- ── Accounts ─────────────────────────────────────────────────────────────
 INSERT INTO {DEV_CATALOG}.{SCHEMA}.accounts VALUES
-(2001, 1001, '0012345678', 'SAVINGS',       'SGD',   85000.00,   '2015-03-10', 'Singapore Marina Bay'),
-(2002, 1002, '0023456789', 'CURRENT',       'SGD',   12500.50,   '2021-07-15', 'Singapore Orchard'),
-(2003, 1003, '1034567890', 'CURRENT',       'MYR',  125000.00,   '2018-01-05', 'Kuala Lumpur KLCC'),
-(2004, 1004, '1045678901', 'SAVINGS',       'MYR',   48000.75,   '2020-06-12', 'Penang Georgetown'),
-(2005, 1005, '2056789012', 'FIXED_DEPOSIT', 'THB', 1500000.00,   '2019-09-20', 'Bangkok Silom'),
-(2006, 1006, '2067890123', 'SAVINGS',       'THB',  320000.00,   '2022-04-08', 'Chiang Mai Old City'),
-(2007, 1007, '3078901234', 'CURRENT',       'IDR', 250000000.00, '2017-11-30', 'Jakarta Sudirman'),
-(2008, 1008, '3089012345', 'SAVINGS',       'IDR',  75000000.00, '2023-01-22', 'Surabaya Tunjungan'),
-(2009, 1009, '4090123456', 'SAVINGS',       'PHP', 2500000.00,   '2016-08-15', 'Manila Makati'),
-(2010, 1010, '4001234567', 'MORTGAGE',      'PHP',  -3500000.00, '2020-03-01', 'Cebu IT Park'),
-(2011, 1011, '5012345678', 'CURRENT',       'VND', 850000000.00, '2019-05-10', 'Ho Chi Minh District 1'),
-(2012, 1012, '5023456789', 'SAVINGS',       'VND', 150000000.00, '2021-12-03', 'Hanoi Hoan Kiem');
+(2001, 1001, 'SBIN0001234', '10012345678', 'SAVINGS',    542500.50,  '2015-03-10', 'Fort Mumbai'),
+(2002, 1001, 'SBIN0001234', '10012345679', 'FD',        1500000.00,  '2020-06-15', 'Fort Mumbai'),
+(2003, 1002, 'HDFC0000123', '20023456789', 'CURRENT',    287300.25,  '2018-07-15', 'MG Road Bangalore'),
+(2004, 1003, 'ICIC0002345', '30034567890', 'SAVINGS',    423100.80,  '2020-01-05', 'CG Road Ahmedabad'),
+(2005, 1004, 'UTIB0003456', '40045678901', 'HOME_LOAN', -4850000.00, '2019-09-20', 'Anna Salai Chennai'),
+(2006, 1005, 'PUNB0004567', '50056789012', 'SAVINGS',    678000.00,  '2021-04-12', 'Connaught Place Delhi'),
+(2007, 1006, 'SBIN0005678', '60067890123', 'CURRENT',    132000.15,  '2023-01-08', 'Park Street Kolkata'),
+(2008, 1007, 'HDFC0006789', '70078901234', 'SAVINGS',    289000.00,  '2017-11-30', 'MI Road Jaipur'),
+(2009, 1008, 'ICIC0007890', '80089012345', 'FD',         750000.00,  '2022-03-22', 'Banjara Hills Hyderabad'),
+(2010, 1009, 'UTIB0008901', '90090123456', 'SAVINGS',    315000.75,  '2016-08-14', 'FC Road Pune');
 
--- ── Transactions (15 transactions, cross-border ASEAN emphasis) ─────────
+-- ── Transactions ─────────────────────────────────────────────────────────
 INSERT INTO {DEV_CATALOG}.{SCHEMA}.transactions VALUES
-(3001, 2001, '2024-11-15 10:23:00', -350.00,     'SGD', 'DBS PayLah',           'RETAIL',       'CLEAR',     false, 'SG', 'SG'),
-(3002, 2001, '2024-11-14 14:10:00', -5000.00,    'SGD', 'SWIFT to KL',          'CROSS_BORDER', 'CLEAR',     true,  'SG', 'MY'),
-(3003, 2003, '2024-11-14 09:00:00', -2500.00,    'MYR', 'Grab Malaysia',        'RETAIL',       'CLEAR',     false, 'MY', 'MY'),
-(3004, 2003, '2024-11-13 16:45:00', -15000.00,   'MYR', 'Remit to Jakarta',     'REMITTANCE',   'REVIEW',    true,  'MY', 'ID'),
-(3005, 2005, '2024-11-15 08:30:00', -25000.00,   'THB', 'PromptPay Transfer',   'TRANSFER',     'CLEAR',     false, 'TH', 'TH'),
-(3006, 2005, '2024-11-12 11:00:00', -180000.00,  'THB', 'Wire to Hanoi',        'CROSS_BORDER', 'HIGH_RISK', true,  'TH', 'VN'),
-(3007, 2007, '2024-11-15 00:00:00', -5000000.00, 'IDR', 'Shopee Indonesia',     'RETAIL',       'CLEAR',     false, 'ID', 'ID'),
-(3008, 2007, '2024-11-14 20:15:00', -85000000.00,'IDR', 'Offshore Holdings BVI','TRANSFER',     'HIGH_RISK', true,  'ID', 'VG'),
-(3009, 2009, '2024-11-15 12:00:00', -15000.00,   'PHP', 'GCash',                'TRANSFER',     'CLEAR',     false, 'PH', 'PH'),
-(3010, 2009, '2024-11-13 07:30:00', -50000.00,   'PHP', 'Remit to Singapore',   'REMITTANCE',   'CLEAR',     true,  'PH', 'SG'),
-(3011, 2011, '2024-11-15 13:20:00', -2500000.00, 'VND', 'MoMo Payment',         'RETAIL',       'CLEAR',     false, 'VN', 'VN'),
-(3012, 2011, '2024-11-12 06:00:00', -45000000.00,'VND', 'Wire to Bangkok',      'CROSS_BORDER', 'REVIEW',    true,  'VN', 'TH'),
-(3013, 2002, '2024-11-10 22:00:00', -8000.00,    'SGD', 'Lazada Singapore',     'RETAIL',       'CLEAR',     false, 'SG', 'SG'),
-(3014, 2004, '2024-11-15 15:00:00', -500.00,     'MYR', 'ATM Withdrawal',       'ATM',          'CLEAR',     false, 'MY', 'MY'),
-(3015, 2008, '2024-11-11 03:00:00', -250000000.00,'IDR','Suspicious Wire',      'TRANSFER',     'BLOCKED',   true,  'ID', 'MM');
+(3001, 2001, '2024-11-15 10:23:00', -2850.50,    'Reliance Fresh',       'UPI',   'CLEAR',     false, 'IN'),
+(3002, 2001, '2024-11-15 14:10:00', -15000.00,   'Flipkart',             'UPI',   'CLEAR',     false, 'IN'),
+(3003, 2002, '2024-11-14 09:00:00', -250000.00,  'NEFT Transfer',        'NEFT',  'REVIEW',    true,  'SG'),
+(3004, 2003, '2024-11-15 16:45:00', -4280.00,    'Swiggy',               'UPI',   'CLEAR',     false, 'IN'),
+(3005, 2004, '2024-11-15 08:30:00', 152000.00,   'Salary Deposit',       'NEFT',  'CLEAR',     false, 'IN'),
+(3006, 2004, '2024-11-13 11:00:00', -500000.00,  'Crypto Exchange Ltd',  'RTGS',  'HIGH_RISK', true,  'SG'),
+(3007, 2005, '2024-11-15 00:00:00', -45000.00,   'Home Loan EMI',        'NEFT',  'CLEAR',     false, 'IN'),
+(3008, 2006, '2024-11-14 20:15:00', -8500.00,    'Amazon India',         'UPI',   'CLEAR',     false, 'IN'),
+(3009, 2001, '2024-11-12 03:00:00', -850000.00,  'Offshore Holdings BVI','RTGS',  'HIGH_RISK', true,  'AE'),
+(3010, 2007, '2024-11-15 12:00:00', -1550.00,    'BigBasket',            'UPI',   'CLEAR',     false, 'IN'),
+(3011, 2008, '2024-11-15 07:30:00', -3200.00,    'IRCTC',                'POS',   'CLEAR',     false, 'IN'),
+(3012, 2010, '2024-11-15 13:20:00', -12500.00,   'Reliance Digital',     'IMPS',  'CLEAR',     false, 'IN'),
+(3013, 2003, '2024-11-10 22:00:00', -2500000.00, 'Wire to Unknown',      'RTGS',  'BLOCKED',   true,  'US'),
+(3014, 2001, '2024-11-15 15:00:00', -10000.00,   'ATM Withdrawal',       'ATM',   'CLEAR',     false, 'IN'),
+(3015, 2006, '2024-11-14 06:00:00', -175000.00,  'SWIFT Transfer',       'NEFT',  'REVIEW',    true,  'US');
 
--- ── Credit Cards (12 cards, multi-currency) ──────────────────────────────
+-- ── Credit Cards ─────────────────────────────────────────────────────────
 INSERT INTO {DEV_CATALOG}.{SCHEMA}.credit_cards VALUES
-(4001, 1001, '4000 1234 5678 9010', '123', '12/26', 25000.00,  'SGD', 'VISA',       'ACTIVE'),
-(4002, 1002, '5100 2345 6789 0121', '456', '03/27', 15000.00,  'SGD', 'MASTERCARD', 'ACTIVE'),
-(4003, 1003, '4000 3456 7890 1232', '789', '06/25', 30000.00,  'MYR', 'VISA',       'EXPIRED'),
-(4004, 1004, '3530 4567 8901 2343', '012', '09/27', 20000.00,  'MYR', 'JCB',        'ACTIVE'),
-(4005, 1005, '6200 5678 9012 3454', '345', '01/28', 50000.00,  'THB', 'UNIONPAY',   'ACTIVE'),
-(4006, 1006, '5100 6789 0123 4565', '678', '11/26', 35000.00,  'THB', 'MASTERCARD', 'ACTIVE'),
-(4007, 1007, '4000 7890 1234 5676', '901', '07/27', 20000.00,  'IDR', 'VISA',       'ACTIVE'),
-(4008, 1008, '5100 8901 2345 6787', '234', '04/26', 15000.00,  'IDR', 'MASTERCARD', 'BLOCKED'),
-(4009, 1009, '4000 9012 3456 7898', '567', '08/27', 18000.00,  'PHP', 'VISA',       'ACTIVE'),
-(4010, 1010, '3530 0123 4567 8909', '890', '02/28', 12000.00,  'PHP', 'JCB',        'ACTIVE'),
-(4011, 1011, '6200 1234 5678 9011', '123', '05/27', 22000.00,  'VND', 'UNIONPAY',   'ACTIVE'),
-(4012, 1012, '5100 2345 6789 0122', '456', '10/25', 10000.00,  'VND', 'MASTERCARD', 'EXPIRED');
+(4001, 1001, '4000 1234 5678 9010', '123', '12/26', 500000.00,  'VISA',       'ACTIVE'),
+(4002, 1002, '5100 2345 6789 0121', '456', '03/27', 300000.00,  'MASTERCARD', 'ACTIVE'),
+(4003, 1003, '6521 3456 7890 1232', '789', '06/25', 200000.00,  'RUPAY',      'ACTIVE'),
+(4004, 1004, '4000 4567 8901 2343', '234', '09/26', 750000.00,  'VISA',       'ACTIVE'),
+(4005, 1005, '5100 5678 9012 3454', '567', '01/28', 250000.00,  'MASTERCARD', 'ACTIVE'),
+(4006, 1006, '6521 6789 0123 4565', '890', '11/25', 150000.00,  'RUPAY',      'EXPIRED'),
+(4007, 1007, '4000 7890 1234 5676', '012', '07/27', 1000000.00, 'VISA',       'ACTIVE'),
+(4008, 1008, '5100 8901 2345 6787', '345', '04/26', 400000.00,  'MASTERCARD', 'ACTIVE'),
+(4009, 1009, '6521 9012 3456 7898', '678', '08/25', 600000.00,  'RUPAY',      'BLOCKED'),
+(4010, 1010, '4000 0123 4567 8909', '901', '02/28', 200000.00,  'VISA',       'ACTIVE');
 """
 
 # Prod catalog gets same schema but no data
@@ -252,7 +243,7 @@ def cmd_provision(env_file: Path) -> None:
     cloud = _default_cloud
 
     print("=" * 64)
-    print("  ASEAN Bank Demo — Setup")
+    print("  India Bank Demo — Setup")
     print("=" * 64)
     print(f"  Cloud: {cloud}")
     print(f"  Credentials: {env_file}")
@@ -290,7 +281,7 @@ def cmd_provision(env_file: Path) -> None:
     prod_host, prod_ws_id = _create_prod_workspace(cfg, cloud, metastore_id, dev_state)
 
     # Phase 3: Create tables via SDK (both dev data + prod empty schema)
-    _step("Creating ASEAN banking tables in dev workspace...")
+    _step("Creating Indian banking tables in dev workspace...")
     warehouse_id = _create_tables_via_sdk(dev_state)
 
     # Create prod catalog (same schema, no data) — uses same metastore
@@ -298,7 +289,7 @@ def cmd_provision(env_file: Path) -> None:
     _create_prod_catalog_via_sdk(dev_state)  # same workspace client — shared metastore
 
     # Phase 4: Create Genie Space
-    _step("Creating Genie Space 'ASEAN Regional Banking Analytics'...")
+    _step("Creating Genie Space 'Lakshmi Bank Analytics'...")
     genie_space_id = _create_genie_space(dev_state)
 
     # Save state
@@ -387,7 +378,7 @@ def cmd_provision(env_file: Path) -> None:
 genie_spaces = [
   {{
     genie_space_id = "{genie_space_id}"
-    name           = "ASEAN Regional Banking Analytics"
+    name           = "Lakshmi Bank Analytics"
     uc_tables = [
 {tables_hcl}
     ]
@@ -428,8 +419,8 @@ uc_tables = [
     print(f"  State file:      {STATE_FILE}")
     print()
     print("  Next steps:")
-    print("    1. Run: make generate ENV=dev COUNTRY=SEA INDUSTRY=financial_services")
-    print("    2. Follow ../shared/examples/asean_bank_demo/README.md for the demo")
+    print("    1. Run: make generate ENV=dev COUNTRY=IN INDUSTRY=financial_services")
+    print("    2. Follow ../shared/examples/legacy/india_bank_demo/README.md for the demo")
     print()
 
 
@@ -472,7 +463,7 @@ def _create_tables_via_sdk(dev_state: dict) -> str:
     for catalog_name in [DEV_CATALOG, PROD_CATALOG]:
         try:
             storage = f"{catalog_storage_base.rstrip('/')}/{catalog_name}" if catalog_storage_base else None
-            w.catalogs.create(name=catalog_name, comment=f"ASEAN bank demo — {catalog_name}",
+            w.catalogs.create(name=catalog_name, comment=f"India bank demo — {catalog_name}",
                               storage_root=storage)
         except Exception:
             pass  # already exists
@@ -633,7 +624,7 @@ def _create_prod_catalog_via_sdk(dev_state: dict) -> None:
 
     storage = f"{catalog_storage_base.rstrip('/')}/{PROD_CATALOG}" if catalog_storage_base else None
     try:
-        w.catalogs.create(name=PROD_CATALOG, comment="ASEAN bank demo — prod",
+        w.catalogs.create(name=PROD_CATALOG, comment="India bank demo — prod",
                           storage_root=storage)
     except Exception:
         pass  # already exists
@@ -746,11 +737,11 @@ def _create_genie_space(dev_state: dict) -> str:
         "config": {
             "sample_questions": [
                 {"id": _gen_id(), "question": [q]} for q in [
-                    "How many customers do we have in each country?",
-                    "What is the total balance by currency?",
-                    "Show me all cross-border transactions between Singapore and Malaysia",
-                    "List all customers with HIGH_RISK or BLOCKED AML flags",
-                    "What are the top remittance corridors by transaction volume?",
+                    "Which customers have high-risk AML flags?",
+                    "What is the total balance by account type?",
+                    "Show me all UPI transactions over ₹1,00,000",
+                    "List all customers with GSTIN (business customers)",
+                    "What are the top 5 merchants by transaction volume?",
                 ]
             ],
         },
@@ -758,33 +749,32 @@ def _create_genie_space(dev_state: dict) -> str:
             "text_instructions": [{
                 "id": _gen_id(),
                 "content": [
-                    "You are a banking analytics assistant for ASEAN Regional Bank, "
-                    "headquartered in Singapore with operations across 6 ASEAN countries: "
-                    "Singapore (SG), Malaysia (MY), Thailand (TH), Indonesia (ID), "
-                    "Philippines (PH), and Vietnam (VN). The bank supports multiple "
-                    "currencies: SGD (Singapore Dollar), MYR (Malaysian Ringgit), THB "
-                    "(Thai Baht), IDR (Indonesian Rupiah), PHP (Philippine Peso), VND "
-                    "(Vietnamese Dong). Customer identity columns are country-specific — "
-                    "each customer has exactly ONE national ID populated based on their "
-                    "country: nric (Singapore), mykad (Malaysia), thai_id (Thailand), "
-                    "nik (Indonesia), philsys (Philippines), cccd (Vietnam). All other "
-                    "ID columns are NULL. IMPORTANT: Do NOT aggregate balances or amounts "
-                    "across different currencies without conversion. AML risk flags: "
-                    "CLEAR (no concerns), REVIEW (under investigation), HIGH_RISK "
-                    "(escalated), BLOCKED (frozen). Cross-border transactions between "
-                    "ASEAN countries are common — use source_country and dest_country "
-                    "for corridor analysis."
+                    "You are a banking analytics assistant for Lakshmi Bank, "
+                    "an Indian retail bank headquartered in Mumbai. All monetary "
+                    "values are in Indian Rupees (INR). Use lakhs (L) and crores "
+                    "(Cr) notation where appropriate (1L = ₹1,00,000; 1Cr = "
+                    "₹1,00,00,000). IFSC codes identify bank branches (format: "
+                    "BANKXXXXXXX, e.g. SBIN0001234). Aadhaar is a 12-digit unique "
+                    "identity number issued by UIDAI. PAN (Permanent Account "
+                    "Number) is a 10-character alphanumeric tax identifier — do "
+                    "NOT confuse with credit card PAN. UPI (Unified Payments "
+                    "Interface) is India's real-time payment system — upi_id is "
+                    "the customer's Virtual Payment Address. GSTIN is a "
+                    "15-character GST identification number for business entities. "
+                    "GSTIN is a 15-character GST identification number for business "
+                    "entities. AML risk flags: CLEAR, REVIEW, HIGH_RISK, "
+                    "BLOCKED. For transaction analysis, negative amounts are "
+                    "debits and positive amounts are credits."
                 ],
             }],
             "sql_snippets": {
                 "filters": [
-                    {"id": _gen_id(), "display_name": "Singapore customers only", "sql": ["country = 'SG'"]},
-                    {"id": _gen_id(), "display_name": "Cross-border only", "sql": ["cross_border = true"]},
+                    {"id": _gen_id(), "display_name": "India domestic only", "sql": ["country = 'IN'"]},
                     {"id": _gen_id(), "display_name": "Active cards only", "sql": ["status = 'ACTIVE'"]},
                 ],
                 "expressions": [
                     {"id": _gen_id(), "alias": "customer_full_name", "sql": ["first_name || ' ' || last_name"]},
-                    {"id": _gen_id(), "alias": "remittance_corridor", "sql": ["source_country || ' -> ' || dest_country"]},
+                    {"id": _gen_id(), "alias": "amount_in_lakhs", "sql": ["amount / 100000"]},
                     {"id": _gen_id(), "alias": "transaction_year_month", "sql": ["DATE_FORMAT(transaction_date, 'yyyy-MM')"]},
                 ],
                 "measures": [
@@ -801,23 +791,23 @@ def _create_genie_space(dev_state: dict) -> str:
             "questions": [
                 {
                     "id": _gen_id(),
-                    "question": ["How many customers are in each country?"],
+                    "question": ["How many customers are in each state?"],
                     "answer": [{"format": "SQL", "content": [
-                        f"SELECT country, COUNT(*) as customer_count FROM {DEV_CATALOG}.{SCHEMA}.customers GROUP BY country ORDER BY customer_count DESC"
+                        f"SELECT state, COUNT(*) as customer_count FROM {DEV_CATALOG}.{SCHEMA}.customers GROUP BY state ORDER BY customer_count DESC"
                     ]}],
                 },
                 {
                     "id": _gen_id(),
-                    "question": ["What is the total balance by currency?"],
+                    "question": ["What is the total balance across all savings accounts?"],
                     "answer": [{"format": "SQL", "content": [
-                        f"SELECT currency, SUM(balance) as total_balance FROM {DEV_CATALOG}.{SCHEMA}.accounts GROUP BY currency ORDER BY total_balance DESC"
+                        f"SELECT SUM(balance) as total_savings FROM {DEV_CATALOG}.{SCHEMA}.accounts WHERE account_type = 'SAVINGS'"
                     ]}],
                 },
                 {
                     "id": _gen_id(),
                     "question": ["Show all HIGH_RISK or BLOCKED transactions"],
                     "answer": [{"format": "SQL", "content": [
-                        f"SELECT t.*, c.first_name, c.last_name, c.country FROM {DEV_CATALOG}.{SCHEMA}.transactions t "
+                        f"SELECT t.*, c.first_name, c.last_name FROM {DEV_CATALOG}.{SCHEMA}.transactions t "
                         f"JOIN {DEV_CATALOG}.{SCHEMA}.accounts a ON t.account_id = a.account_id "
                         f"JOIN {DEV_CATALOG}.{SCHEMA}.customers c ON a.customer_id = c.customer_id "
                         f"WHERE t.aml_risk_flag IN ('HIGH_RISK', 'BLOCKED') ORDER BY t.transaction_date DESC"
@@ -829,7 +819,7 @@ def _create_genie_space(dev_state: dict) -> str:
 
     body = json.dumps({
         "warehouse_id": wh_id,
-        "title": "ASEAN Regional Banking Analytics",
+        "title": "Lakshmi Bank Analytics",
         "serialized_space": serialized_space,
     })
 
@@ -887,7 +877,7 @@ def cmd_status() -> None:
         print("  No demo environment provisioned.")
         return
     print("=" * 64)
-    print("  ASEAN Bank Demo — Status")
+    print("  India Bank Demo — Status")
     print("=" * 64)
     print(f"  Cloud:          {state.get('cloud', '?')}")
     print(f"  Dev workspace:  {state.get('dev', {}).get('workspace_host', '?')}")
@@ -910,7 +900,7 @@ def cmd_teardown(env_file: Path) -> None:
     cfg = _load_env_file(env_file)
 
     print("=" * 64)
-    print("  ASEAN Bank Demo — Teardown")
+    print("  India Bank Demo — Teardown")
     print("=" * 64)
 
     # Step 1: Delete prod workspace via Account API
@@ -997,7 +987,7 @@ def cmd_teardown(env_file: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="ASEAN Bank Demo — Setup and Teardown",
+        description="India Bank Demo — Setup and Teardown",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

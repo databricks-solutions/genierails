@@ -27,14 +27,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Multi-state Terraform architecture**: Split Terraform into three independent
   state layers — `account` (shared tag policies/groups), `env` (catalog-scoped
-  governance), and `workspace` (Genie Spaces/masking functions). Each layer can
+  governance), and `workspace` (Genie agents/masking functions). Each layer can
   be planned, applied, and destroyed independently, enabling safe dev → prod
   promotion and isolated teardown.
 - **Multi-space / multi-catalog support**: `generate_abac.py` gains a `--space`
   flag for incremental per-space ABAC regeneration. New
   `scripts/merge_space_configs.py` additively merges a single space's config
   into the shared `abac.auto.tfvars` without touching other spaces. Terraform
-  workspace module deploys multiple Genie Spaces via `for_each`.
+  workspace module deploys multiple Genie agents via `for_each`.
   `DEST_CATALOG_MAP` supports comma-separated multi-catalog mappings.
 - **GitHub Actions CI/CD**: `validate.yml` runs `make validate` on every PR
   (no Databricks credentials required); `deploy.yml` runs `make apply` on merge
@@ -45,13 +45,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Makefile` `integration-test` target orchestrates the full pipeline:
   setup → generate → apply → verify → promote → apply prod → verify prod →
   teardown.
-- **Genie Space SQL snippets and join specs**: Added `genie_sql_filters`,
+- **Genie agent SQL snippets and join specs**: Added `genie_sql_filters`,
   `genie_sql_measures`, `genie_sql_expressions`, and `genie_join_specs` to the
-  serialized Genie Space config for improved SQL generation accuracy.
+  serialized Genie agent config for improved SQL generation accuracy.
 - **Databricks telemetry**: All API calls (Python SDK, curl) now carry a
   `genie-abac-quickstart/0.1.0` User-Agent product identifier via
   `databricks.sdk.useragent` and `DATABRICKS_USER_AGENT_EXTRA`.
-- **Two-step Genie Space create-then-patch**: Creation now uses a two-step
+- **Two-step Genie agent create-then-patch**: Creation now uses a two-step
   pattern (CREATE, then PATCH) since the CREATE endpoint does not accept
   SQL snippets or join specs.
 - **`docs/cicd.md`**: Pipeline activation guide with workflow configuration
@@ -104,8 +104,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Initial ABAC Terraform module with entity tag assignments and FGAC policies.
 - AI-assisted ABAC generation via `generate_abac.py` and `ABAC_PROMPT.md`.
 - `validate_abac.py` to check AI-generated configs before `terraform apply`.
-- Genie Space lifecycle automation (create, configure ACL, destroy) via Terraform.
+- Genie agent lifecycle automation (create, configure ACL, destroy) via Terraform.
 - Multi-catalog ABAC with auto-deploy and `destroy` support.
 - Finance and healthcare domain examples.
-- Genie Space AI config (SQL snippets seed), three-file config split.
+- Genie agent AI config (SQL snippets seed), three-file config split.
 - Streamlined onboarding via `make setup && make generate && make apply`.

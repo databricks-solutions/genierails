@@ -2,7 +2,7 @@ terraform {
   required_providers {
     databricks = {
       source  = "databricks/databricks"
-      version = "~> 1.91.0"
+      version = "~> 1.111.0"
     }
     null = {
       source  = "hashicorp/null"
@@ -58,7 +58,7 @@ locals {
 
   # The legacy single-space path is only activated when genie_space_title is
   # explicitly set (non-empty).  Having uc_tables in env.auto.tfvars for ABAC
-  # policy generation must NOT cause a Genie Space to be created.
+  # policy generation must NOT cause a Genie agent to be created.
   effective_spaces = length(var.genie_spaces) > 0 ? var.genie_spaces : (
     var.genie_space_title != "" || var.genie_space_id != "" ? [{
       name             = local.legacy_space_name
@@ -95,14 +95,14 @@ locals {
   # When name is omitted (empty string), genie_space_id is used as the key
   # directly — this is the common case when attaching to an existing space.
   #
-  # The name is also used as the default Genie Space title when genie_space_configs
+  # The name is also used as the default Genie agent title when genie_space_configs
   # does not set an explicit title.
   merged_spaces = {
     for s in local.effective_spaces :
     (s.name != ""
       ? trim(replace(lower(s.name), "/[^a-z0-9]+/", "_"), "_")
       : s.genie_space_id
-    ) => {
+      ) => {
       name             = s.name != "" ? s.name : s.genie_space_id
       genie_space_id   = s.genie_space_id
       sql_warehouse_id = s.sql_warehouse_id != "" ? s.sql_warehouse_id : var.sql_warehouse_id
@@ -161,7 +161,7 @@ variable "genie_spaces" {
     uc_tables        = optional(list(string), [])
   }))
   default     = []
-  description = "List of Genie Space definitions. 'name' is the human-readable space title and the lookup key for genie_space_configs. An internal Terraform key is derived automatically by sanitizing the name."
+  description = "List of Genie agent definitions. 'name' is the human-readable agent title and the lookup key for genie_space_configs. An internal Terraform key is derived automatically by sanitizing the name."
 }
 
 variable "genie_space_configs" {
@@ -315,7 +315,7 @@ variable "genie_join_specs" {
 variable "genie_acl_groups" {
   type        = list(string)
   default     = []
-  description = "Groups that should have CAN_RUN access to this Genie Space. Empty = all groups."
+  description = "Groups that should have CAN_RUN access to this Genie agent. Empty = all groups."
 }
 
 # ── Group variables ───────────────────────────────────────────────────────────
@@ -330,6 +330,28 @@ variable "groups" {
     description = optional(string, "")
   }))
   default = {}
+}
+
+variable "business_access_enabled" {
+  type        = bool
+  default     = false
+  description = "Fail-closed exposure gate. Enable only after coverage validation and the schema drift check pass."
+}
+
+# Shared env.auto.tfvars is consumed by both workspace and data-access roots.
+# Classification is implemented only in data_access, but declaring the switch
+# here avoids a misleading undeclared-variable warning during full apply.
+variable "enable_classification" {
+  type    = bool
+  default = false
+}
+
+# Shared env.auto.tfvars is consumed by both workspace and data-access roots.
+# Auto-tagging is implemented only in data_access; declare it here to avoid an
+# undeclared-variable warning during a full apply.
+variable "enable_auto_tagging" {
+  type    = bool
+  default = false
 }
 
 variable "group_members" {
@@ -392,6 +414,7 @@ module "workspace" {
   genie_only                = var.genie_only
   manage_groups             = var.manage_groups
   groups                    = var.groups
+  business_access_enabled   = var.business_access_enabled
   sql_warehouse_id          = var.sql_warehouse_id
   warehouse_name            = var.warehouse_name
   genie_spaces              = local.merged_spaces

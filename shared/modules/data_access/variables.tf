@@ -33,6 +33,42 @@ variable "uc_tables" {
   description = "Optional UC table list used to derive catalogs for grants."
 }
 
+variable "classification_uc_tables" {
+  type        = list(string)
+  default     = []
+  description = "Classification-only UC table footprint; never used to derive grants."
+}
+
+variable "business_access_enabled" {
+  type        = bool
+  default     = false
+  description = "Fail-closed exposure gate. Set true only after the coverage gate and schema drift check pass; controls business-group SELECT grants."
+}
+
+variable "enable_classification" {
+  type        = bool
+  default     = false
+  description = "Opt-in to enable UC Data Classification scanning, scoped to schemas in classification_uc_tables."
+}
+
+variable "enable_auto_tagging" {
+  type        = bool
+  default     = false
+  description = "Opt-in to write class.* tags automatically after UC Data Classification detects sensitive data."
+}
+
+variable "classification_existing_schemas" {
+  type        = map(list(string))
+  default     = {}
+  description = "Existing schemas to preserve when a catalog classification config is shared across environments."
+}
+
+variable "classification_all_schemas" {
+  type        = set(string)
+  default     = []
+  description = "Catalogs whose classification config intentionally covers all schemas (unset included_schemas)."
+}
+
 variable "tag_assignments" {
   type = list(object({
     entity_type = string
@@ -41,7 +77,7 @@ variable "tag_assignments" {
     tag_value   = string
   }))
   default     = []
-  description = "Tag-to-entity mappings."
+  description = "Classifier-owned tag-to-entity facts. Promotion leaves this empty so each environment derives assignments from its own classification scan."
 }
 
 variable "fgac_policies" {

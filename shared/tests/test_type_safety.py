@@ -101,10 +101,31 @@ CREATE TABLE dev_bank.retail.customers (
 );
 """)
         n = autofix_untagged_pii_columns(tfvars, ddl_path=ddl)
-        assert n == 2  # email + phone
+        assert n == 3  # email + phone + first_name (name backstop)
         text = tfvars.read_text()
         assert "masked_email" in text
         assert "masked_phone" in text
+        assert "masked_name" in text
+
+    def test_name_backstop_exact_and_compound_only(self, tmp_path):
+        tfvars = tmp_path / "abac.auto.tfvars"
+        tfvars.write_text("tag_assignments = []\nfgac_policies = []\n")
+        ddl = self._write_ddl(tmp_path, """\
+CREATE TABLE dev_bank.retail.people (
+  full_name STRING,
+  name STRING,
+  surname STRING,
+  given_name STRING,
+  username STRING,
+  table_name STRING
+);
+""")
+        autofix_untagged_pii_columns(tfvars, ddl_path=ddl)
+        text = tfvars.read_text()
+        for col in ("full_name", "name", "surname", "given_name"):
+            assert f'people.{col}", tag_key = "pii_level", tag_value = "masked_name"' in text
+        assert "people.username" not in text
+        assert "people.table_name" not in text
 
     def test_skips_already_tagged_columns(self, tmp_path):
         tfvars = tmp_path / "abac.auto.tfvars"

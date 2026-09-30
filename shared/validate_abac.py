@@ -19,6 +19,7 @@ import argparse
 from pathlib import Path
 
 from tag_vocabulary import REGISTRY
+from treatment_derivation import load_treatment_config
 
 try:
     import hcl2
@@ -201,8 +202,245 @@ def _entity_table_name(entity_type: str, entity_name: str) -> str:
     return ""
 
 
+def validate_policy_overlaps(cfg: dict, result: ValidationResult):
+    """Fail when multiple FGAC policies resolve for one securable object."""
+    assignments = cfg.get("tag_assignments", [])
+    policies = cfg.get("fgac_policies", [])
+    if not isinstance(assignments, list) or not isinstance(policies, list):
+        return
+
+    entity_tags: dict[tuple[str, str], dict[str, set[str]]] = {}
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            continue
+        entity_type = assignment.get("entity_type", "")
+        entity_name = assignment.get("entity_name", "")
+        tag_key = assignment.get("tag_key", "")
+        tag_value = assignment.get("tag_value", "")
+        if entity_type and entity_name and tag_key and tag_value:
+            tags = entity_tags.setdefault((entity_type, entity_name), {})
+            tags.setdefault(tag_key, set()).add(tag_value)
+
+    def catalog_matches(policy: dict, entity_name: str) -> bool:
+        policy_catalog = policy.get("catalog", "") or policy.get("function_catalog", "")
+        entity_catalog = entity_name.split(".")[0] if entity_name else ""
+        return not policy_catalog or not entity_catalog or policy_catalog == entity_catalog
+
+    for (entity_type, entity_name), tags in sorted(entity_tags.items()):
+        if entity_type == "columns":
+            table_name = _entity_table_name(entity_type, entity_name)
+            table_tags = entity_tags.get(("tables", table_name), {})
+            matches = [
+                policy.get("name", "<unnamed>")
+                for policy in policies
+                if isinstance(policy, dict)
+                and policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
+                and catalog_matches(policy, entity_name)
+                and _condition_matches_tags(policy.get("match_condition", ""), tags)
+                and _condition_matches_tags(policy.get("when_condition", ""), table_tags)
+            ]
+            if len(set(matches)) > 1:
+                result.error(
+                    f"Column '{entity_name}' matches multiple column-mask policies: "
+                    f"{sorted(set(matches))}. Unity Catalog allows only one mask to "
+                    f"resolve per column; otherwise apply fails with MULTIPLE_MASKS. "
+                    f"Make these policies' tag conditions mutually exclusive."
+                )
+
+        elif entity_type == "tables":
+            matches = [
+                policy.get("name", "<unnamed>")
+                for policy in policies
+                if isinstance(policy, dict)
+                and policy.get("policy_type") == "POLICY_TYPE_ROW_FILTER"
+                and catalog_matches(policy, entity_name)
+                and _condition_matches_tags(policy.get("when_condition", ""), tags)
+            ]
+            if len(set(matches)) > 1:
+                result.error(
+                    f"Table '{entity_name}' matches multiple row-filter policies: "
+                    f"{sorted(set(matches))}. Unity Catalog allows only one row filter "
+                    f"to resolve per table. Make these policies' tag conditions mutually exclusive."
+                )
+
+
 def _value_requires_coverage(tag_value: str) -> bool:
     return tag_value.strip().lower() not in {"public", "general", "exact"}
+
+
+_DDL_TABLE_RE = re.compile(
+    r"CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+([\w.`]+)\s*\((.*?)\)\s*(?:USING|;|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def parse_ddl_columns(ddl_text: str) -> list[str]:
+    """Return ``catalog.schema.table.column`` for every column in fetched DDL."""
+    columns: list[str] = []
+    for match in _DDL_TABLE_RE.finditer(ddl_text or ""):
+        table = match.group(1).replace("`", "")
+        for line in match.group(2).split("\n"):
+            parts = line.strip().rstrip(",").split()
+            if len(parts) < 2 or parts[0].startswith("--"):
+                continue
+            name = parts[0].strip("`\"")
+            if name.upper() in {"CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "CHECK"}:
+                continue
+            columns.append(f"{table}.{name}")
+    return columns
+
+
+def find_fetched_ddl(tfvars_path: Path) -> Path | None:
+    """Locate ``ddl/_fetched.sql`` next to or one level above the tfvars dir."""
+    for base in (tfvars_path.parent, tfvars_path.parent.parent):
+        candidate = base / "ddl" / "_fetched.sql"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _warn_unclassified_sensitive_columns(
+    ddl_columns: list[str] | None,
+    covered_columns: set[str],
+    result: ValidationResult,
+) -> None:
+    """Non-blocking: surface the fail-open gap for untagged sensitive-looking columns.
+
+    Masks bind only to columns that carry a sensitivity tag / ``gr_treatment``.
+    A column whose name looks sensitive (any non-``generic`` category from
+    ``_infer_column_categories``) but that has neither is unmasked; the gate
+    cannot prove it is sensitive, so it warns instead of blocking.
+    """
+    if not ddl_columns:
+        return
+    covered = {c.lower() for c in covered_columns}
+    gaps = []
+    for column in ddl_columns:
+        if column.lower() in covered:
+            continue
+        categories = _infer_column_categories(column) - {"generic"}
+        if categories:
+            gaps.append(f"{column} (looks like: {', '.join(sorted(categories))})")
+    if gaps:
+        result.warn(
+            "COVERAGE GATE (non-blocking) — sensitive-looking columns with NO "
+            "sensitivity/class.* tag and NO gr_treatment; these are NOT masked "
+            "(fail-open):\n    - " + "\n    - ".join(gaps)
+        )
+
+
+def validate_coverage_gate(
+    cfg: dict,
+    sql_functions: set[str] | None,
+    raw_tfvars: str,
+    result: ValidationResult,
+    ddl_columns: list[str] | None = None,
+) -> None:
+    """Block every classification/treatment coverage gap in generated config.
+
+    When ``ddl_columns`` is supplied, additionally warn (never block) about
+    sensitive-looking columns that carry no sensitivity tag and no treatment.
+    """
+    treatment_cfg = load_treatment_config()
+    mapped_sources = {source for item in treatment_cfg.treatments for source in item.sources}
+    treatment_functions = {item.value: item.masking_function for item in treatment_cfg.treatments}
+    assignments = cfg.get("tag_assignments", []) or []
+    policies = cfg.get("fgac_policies", []) or []
+
+    source_columns: dict[str, list[tuple[str, str]]] = {}
+    treatments: dict[str, str] = {}
+    for item in assignments:
+        if item.get("entity_type") != "columns":
+            continue
+        column = item.get("entity_name", "")
+        source = (item.get("tag_key", ""), item.get("tag_value", ""))
+        if source in mapped_sources:
+            source_columns.setdefault(column, []).append(source)
+        if item.get("tag_key") == treatment_cfg.tag_key:
+            treatments[column] = item.get("tag_value", "")
+
+    unmapped = [
+        (column.strip(), detected.strip())
+        for column, detected in re.findall(
+            r"^\s*#\s*gr\.classification_unmapped:\s*([^|\n]+)\|([^\n]+)$",
+            raw_tfvars,
+            re.MULTILINE,
+        )
+    ]
+    unprotected: list[str] = []
+    missing_policies: set[str] = set()
+    missing_functions: set[str] = set()
+    policy_quota: list[str] = []
+
+    by_catalog: dict[str, list[str]] = {}
+    for policy in policies:
+        catalog = policy.get("catalog", "") or policy.get("function_catalog", "")
+        if catalog:
+            by_catalog.setdefault(catalog, []).append(policy.get("name", "<unnamed>"))
+    for catalog, names in sorted(by_catalog.items()):
+        if len(names) > 100:
+            policy_quota.append(
+                f"catalog {catalog}: {len(names)} policies (limit 100): {', '.join(names)}"
+            )
+
+    protected_columns = set(source_columns) | set(treatments)
+    for column in sorted(protected_columns):
+        sources = source_columns.get(column, [])
+        treatment = treatments.get(column)
+        if not treatment:
+            unprotected.append(f"{column} (detected: {', '.join(f'{k}={v}' for k, v in sources)}; no gr_treatment)")
+            continue
+        catalog = column.split(".", 1)[0]
+        matching = [
+            p for p in policies
+            if p.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
+            and p.get("catalog") == catalog
+            and (treatment_cfg.tag_key, treatment) in _extract_tag_refs(p.get("match_condition", ""))[0]
+        ]
+        if not matching:
+            missing_policies.add(f"{treatment} (catalog {catalog}; used by {column})")
+            unprotected.append(f"{column} (treatment {treatment}; no covering column-mask policy)")
+            continue
+        expected_fn = treatment_functions.get(treatment)
+        if not expected_fn:
+            missing_policies.add(f"{treatment} (no treatment mapping/rule)")
+            unprotected.append(f"{column} (unknown gr_treatment {treatment}; no treatment mapping/rule)")
+        elif not any(p.get("function_name") == expected_fn for p in matching):
+            missing_policies.add(
+                f"{treatment} (catalog {catalog}; expected masking function {expected_fn})"
+            )
+            unprotected.append(
+                f"{column} (treatment {treatment}; covering policy does not resolve to {expected_fn})"
+            )
+        elif sql_functions is None or expected_fn not in sql_functions:
+            missing_functions.add(f"{expected_fn} (treatment {treatment}; used by {column})")
+            unprotected.append(f"{column} (treatment {treatment}; masking function {expected_fn} missing)")
+
+    _warn_unclassified_sensitive_columns(
+        ddl_columns, set(source_columns) | set(treatments), result,
+    )
+
+    groups = [
+        ("detected tags with no mapping/rule", [f"{c} ({d})" for c, d in unmapped]),
+        ("classified but unprotected columns", unprotected),
+        ("treatments missing a column-mask policy", sorted(missing_policies)),
+        ("treatments missing a masking function", sorted(missing_functions)),
+        ("Unity Catalog policy quota exceeded", policy_quota),
+    ]
+    for title, items in groups:
+        if items:
+            result.error(f"COVERAGE GATE — {title}:\n    - " + "\n    - ".join(items))
+    has_column_mask_policy = any(
+        policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
+        for policy in policies
+    )
+    if has_column_mask_policy and not protected_columns:
+        result.error(
+            "COVERAGE GATE — zero classified/treatment columns were supplied; "
+            "refusing a vacuous pass (populate assignments from classification before retrying)"
+        )
+    elif not any(items for _, items in groups):
+        result.ok(f"Coverage gate: {len(protected_columns)} classified/treatment column(s) fully protected")
 
 
 def _load_country_categories(
@@ -304,7 +542,8 @@ def _infer_column_categories(entity_name: str) -> set[str]:
         categories.add("address")
     if "birth" in col or col in {"dob", "date_of_birth"}:
         categories.add("date")
-    if "card" in col or "cvv" in col or "pan" in col:
+    if (("card" in col and "cardholder" not in col and "card_holder" not in col)
+            or "cvv" in col or "pan" in col):
         categories.add("card")
     if "amount" in col or "balance" in col or "limit" in col:
         categories.add("amount")
@@ -340,6 +579,15 @@ FUNCTION_EXPECTED_CATEGORIES = {
 def validate_groups(cfg: dict, result: ValidationResult):
     groups = cfg.get("groups")
     if not groups:
+        referenced = {
+            principal
+            for policy in (cfg.get("fgac_policies") or [])
+            for field in ("to_principals", "except_principals")
+            for principal in (policy.get(field) or [])
+        }
+        if referenced and {principal.lower() for principal in referenced} <= BUILTIN_PRINCIPALS:
+            result.ok("groups: built-in principals only (no managed group definitions required)")
+            return set()
         result.error("'groups' is missing or empty — at least one group is required")
         return set()
     if not isinstance(groups, dict):
@@ -578,16 +826,17 @@ def validate_fgac_policies(
                     f"Terraform prepends catalog.schema automatically"
                 )
             # Validate function argument count matches policy type.
-            # Row filters use `using = []` so the function must take 0 args.
+            # A row filter with match_alias binds that matched column through
+            # `using`; a row filter without an alias remains zero-argument.
             # Column masks get the column passed implicitly via on_column,
             # so the function must take exactly 1 arg.
             if sql_function_arg_counts and fn in sql_function_arg_counts:
                 argc = sql_function_arg_counts[fn]
-                if ptype == "POLICY_TYPE_ROW_FILTER" and argc != 0:
+                expected_row_filter_args = 1 if p.get("match_alias") else 0
+                if ptype == "POLICY_TYPE_ROW_FILTER" and argc != expected_row_filter_args:
                     result.warn(
                         f"{prefix}: ROW_FILTER function '{fn}' takes {argc} argument(s) "
-                        f"but row filters require 0-argument functions. Use a dedicated "
-                        f"filter function (e.g. filter_<name>()) that returns BOOLEAN."
+                        f"but this policy binds {expected_row_filter_args} argument(s)."
                     )
                 elif ptype == "POLICY_TYPE_COLUMN_MASK" and argc != 1:
                     result.warn(
@@ -658,6 +907,8 @@ def validate_fgac_policies(
                 f"tag_assignments[{i}]: non-public tag '{ta.get('tag_key')}={tval}' on "
                 f"'{ta.get('entity_name')}' is not covered by any active fgac_policy"
             )
+
+    validate_policy_overlaps(cfg, result)
 
     # Detect unsafe tag/function mismatches, especially heterogeneous contact collapse.
     assignments_by_tag: dict[tuple[str, str], list[dict]] = {}
@@ -893,6 +1144,17 @@ def main():
     parser.add_argument("tfvars", help="Path to abac.auto.tfvars file")
     parser.add_argument("sql", nargs="?", help="Path to masking_functions.sql (optional)")
     parser.add_argument(
+        "--coverage-gate",
+        action="store_true",
+        help="Block if any classification-derived treatment lacks a mask policy/function",
+    )
+    parser.add_argument(
+        "--ddl",
+        metavar="PATH",
+        help="Fetched DDL used by --coverage-gate to warn about untagged "
+             "sensitive-looking columns (default: auto-detect ddl/_fetched.sql)",
+    )
+    parser.add_argument(
         "--country",
         metavar="CODE",
         help="Comma-separated region codes for country-specific column inference "
@@ -983,6 +1245,19 @@ def main():
                            sql_function_arg_counts=sql_function_arg_counts)
     validate_group_members(merged_cfg, group_names, result)
     validate_acl_groups(merged_cfg, group_names, result)
+    if args.coverage_gate:
+        if sql_path is None:
+            result.error("COVERAGE GATE — masking_functions.sql is required")
+        ddl_path = Path(args.ddl).resolve() if args.ddl else find_fetched_ddl(tfvars_path)
+        ddl_columns = None
+        if ddl_path and ddl_path.exists():
+            ddl_columns = parse_ddl_columns(ddl_path.read_text())
+        elif args.ddl:
+            result.warn(f"COVERAGE GATE — DDL file {ddl_path} not found; untagged-column check skipped")
+        validate_coverage_gate(
+            merged_cfg, sql_functions, tfvars_path.read_text(), result,
+            ddl_columns=ddl_columns,
+        )
 
     result.print_report()
     sys.exit(0 if result.passed else 1)

@@ -50,6 +50,15 @@ import time
 from pathlib import Path
 
 from tag_vocabulary import REGISTRY
+from sensitivity_source import (
+    ClassificationSource,
+    Finding,
+    LLMSource,
+    LLM as _SRC_LLM,
+    SensitivitySource,
+    select_findings,
+)
+from treatment_derivation import derive_treatment_model, load_treatment_config
 
 PRODUCT_NAME = "genierails"
 PRODUCT_VERSION = "0.1.0"
@@ -396,8 +405,177 @@ def _parse_str_field(val) -> str:
     return val or ""
 
 
+def _normalize_footprint_table(value: str) -> str:
+    """Return a stable three-part table identifier, or an empty string."""
+    value = (value or "").strip().strip("`\"")
+    value = ".".join(part.strip("`\"") for part in value.split("."))
+    return value if len(value.split(".")) == 3 else ""
+
+
+def discover_agent_footprint(
+    serialized_space: str | dict | None = None,
+    declared_footprint: list | None = None,
+    corroborated_footprint: list | None = None,
+) -> list[dict]:
+    """Enumerate the deterministic table/column footprint reachable by a Genie agent.
+
+    Sources are additive: explicitly declared entries support greenfield spaces,
+    while an existing space contributes its data sources and table/column
+    references found in SQL definitions (benchmarks, snippets and joins).  A
+    caller may pass workspace-corroborated entries (for example, successfully
+    readable UC table metadata) without coupling this pure merge routine to the
+    Databricks SDK.
+
+    Entries may be strings (``catalog.schema.table`` or a fully-qualified
+    column) or mappings with ``table``/``identifier`` and optional ``columns``.
+    The result is sorted and de-duplicated.  An empty columns list means the
+    whole table is reachable; otherwise columns are sorted and de-duplicated.
+    """
+    import json as _json
+
+    tables: dict[str, set[str]] = {}
+    table_display: dict[str, str] = {}
+    whole_table: set[str] = set()
+
+    def add(value, columns=None):
+        if isinstance(value, dict):
+            columns = value.get("columns", columns)
+            value = value.get("table") or value.get("identifier") or value.get("name") or ""
+        raw = str(value or "").strip().strip("`\"")
+        parts = [p.strip("`\"") for p in raw.split(".")]
+        table = _normalize_footprint_table(".".join(parts[:3])) if len(parts) >= 3 else ""
+        if not table:
+            return
+        table_key = table.lower()
+        tables.setdefault(table_key, set())
+        table_display.setdefault(table_key, table)
+        implied = parts[3] if len(parts) == 4 else ""
+        col_values = columns if isinstance(columns, (list, tuple, set)) else ([columns] if columns else [])
+        normalized_columns = {
+            str(c).split(".")[-1].strip().strip("`\"") for c in col_values if str(c).strip()
+        }
+        if implied:
+            normalized_columns.add(implied)
+        if normalized_columns:
+            tables[table_key].update(normalized_columns)
+        else:
+            # A whole-table declaration supersedes any named columns for it.
+            whole_table.add(table_key)
+
+    for entry in declared_footprint or []:
+        add(entry)
+    for entry in corroborated_footprint or []:
+        add(entry)
+
+    if isinstance(serialized_space, str):
+        try:
+            space = _json.loads(serialized_space)
+        except Exception:
+            space = {}
+    else:
+        space = serialized_space or {}
+
+    for entry in space.get("data_sources", {}).get("tables", []) or []:
+        add(entry)
+
+    # Genie definitions contain executable SQL outside data_sources.  Capture
+    # qualified table and column references so they cannot silently escape the
+    # declared scan/grant boundary.
+    sql_fragments: list[str] = []
+    snippets = space.get("instructions", {}).get("sql_snippets", {}) or {}
+    for kind in ("filters", "expressions", "measures"):
+        for item in snippets.get(kind, []) or []:
+            sql_fragments.append(_parse_str_field(item.get("sql", "")))
+    for join in space.get("instructions", {}).get("join_specs", []) or []:
+        add(join.get("left", {}).get("identifier", ""))
+        add(join.get("right", {}).get("identifier", ""))
+        sql_fragments.append(_parse_str_field(join.get("sql", "")))
+    for benchmark in space.get("benchmarks", {}).get("questions", []) or []:
+        for answer in benchmark.get("answer", []) or []:
+            if str(answer.get("format", "")).upper() == "SQL":
+                sql_fragments.append(_parse_str_field(answer.get("content", "")))
+
+    qualified = re.compile(r"(?<![\w.])`?([A-Za-z_]\w*)`?\s*\.\s*`?([A-Za-z_]\w*)`?\s*\.\s*`?([A-Za-z_]\w*)`?(?:\s*\.\s*`?([A-Za-z_]\w*)`?)?")
+    for sql in sql_fragments:
+        for catalog, schema, table, column in qualified.findall(sql or ""):
+            add(f"{catalog}.{schema}.{table}" + (f".{column}" if column else ""))
+
+    return [
+        {
+            "table": table_display[table_key],
+            "columns": [] if table_key in whole_table else sorted(tables[table_key], key=str.lower),
+        }
+        for table_key in sorted(tables)
+    ]
+
+
+def footprint_table_refs(footprint: list[dict]) -> list[str]:
+    """Return the canonical table list consumed by fetch/classification paths."""
+    return [entry["table"] for entry in footprint if entry.get("table")]
+
+
+def footprint_contains_column(footprint: list[dict], column_fqn: str) -> bool:
+    """Whether a classified column belongs to the coverage denominator."""
+    parts = column_fqn.split(".")
+    if len(parts) != 4:
+        return False
+    table, column = ".".join(parts[:3]).lower(), parts[3].lower()
+    for entry in footprint:
+        footprint_table = str(entry.get("table") or "").lower()
+        if footprint_table.endswith(".*") and table.startswith(footprint_table[:-1]):
+            return True
+        if footprint_table == table:
+            columns = [str(value).lower() for value in (entry.get("columns") or [])]
+            if not columns or column in columns:
+                return True
+    return False
+
+
+def scope_ddl_to_footprint(ddl_text: str, footprint: list[dict]) -> str:
+    """Restrict fetched DDL columns to the canonical footprint when explicit."""
+    explicit: dict[str, set[str]] = {}
+    for item in footprint:
+        if item.get("table") and item.get("columns"):
+            table = str(item["table"]).lower()
+            explicit.setdefault(table, set()).update(
+                str(column).lower() for column in item["columns"]
+            )
+    whole_tables = {
+        str(item["table"]).lower()
+        for item in footprint if item.get("table") and not item.get("columns")
+    }
+    if not explicit:
+        return ddl_text
+    pattern = re.compile(
+        r"(CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+([\w.`]+)\s*\()(.*?)(\)\s*;)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    def replace(match: re.Match) -> str:
+        table = ".".join(part.strip("`") for part in match.group(2).split(".")).lower()
+        if table in whole_tables or any(
+            name.endswith(".*") and table.startswith(name[:-1])
+            for name in whole_tables | set(explicit)
+        ):
+            return match.group(0)
+        wanted = explicit.get(table)
+        if not wanted:
+            return match.group(0)
+        kept = []
+        for line in match.group(3).splitlines():
+            name = line.strip().lstrip(",").split(None, 1)[0].strip("`,") if line.strip() else ""
+            if name.lower() in wanted:
+                kept.append(line)
+        if kept:
+            kept[-1] = re.sub(r",\s*$", "", kept[-1])
+        body = "\n" + "\n".join(kept) + "\n"
+        return match.group(1) + body + match.group(4)
+
+    return pattern.sub(replace, ddl_text)
+
+
 def parse_genie_config_from_serialized_space(serialized: str, description: str = "") -> dict:
-    """Parse a Genie Space's serialized_space JSON into a genie_space_configs dict.
+    """Parse a Genie agent's serialized_space JSON into a genie_space_configs dict.
 
     Returns a dict with keys: description, instructions, sample_questions,
     benchmarks, sql_filters, sql_expressions, sql_measures, join_specs.
@@ -663,7 +841,7 @@ def remove_hcl_top_level_list(text: str, key: str) -> str:
 
 
 def _fetch_via_patch_fallback(w, space_id: str) -> dict:
-    """Read a Genie Space via a no-op PATCH (workaround for Partner AI gate).
+    """Read a Genie agent via a no-op PATCH (workaround for Partner AI gate).
 
     On workspaces where Partner Powered AI hasn't propagated, GET
     /api/2.0/genie/spaces/{id} is blocked.  However, PATCH is not gated
@@ -698,7 +876,7 @@ def fetch_tables_from_genie_space(
     auth_cfg: dict,
     quick_check_only: bool = False,
 ) -> tuple[list[str], dict, str]:
-    """Fetch tables and config from an existing Genie Space via the REST API.
+    """Fetch tables and config from an existing Genie agent via the REST API.
 
     Returns (table_identifiers, genie_config_dict, space_title).
     Uses GET /api/2.0/genie/spaces/{space_id} and parses serialized_space.
@@ -718,7 +896,7 @@ def fetch_tables_from_genie_space(
     configure_databricks_env(auth_cfg)
     w = WorkspaceClient(product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
 
-    print(f"  Querying Genie Space {space_id}...")
+    print(f"  Querying Genie agent {space_id}...")
     _used_patch_fallback = False
     try:
         resp = w.api_client.do(
@@ -735,18 +913,18 @@ def fetch_tables_from_genie_space(
             resp = _fetch_via_patch_fallback(w, space_id)
             _used_patch_fallback = True
         else:
-            print(f"  WARNING: Could not reach Genie Space {space_id}: {e}")
+            print(f"  WARNING: Could not reach Genie agent {space_id}: {e}")
             return [], {}, ""
 
     if not isinstance(resp, dict):
-        print(f"  WARNING: Unexpected response type from Genie Space {space_id}.")
+        print(f"  WARNING: Unexpected response type from Genie agent {space_id}.")
         return [], {}, ""
 
     space_title = resp.get("title", "")
     description = resp.get("description", "")
     serialized = resp.get("serialized_space", "")
 
-    # Genie Spaces may take 1-3 minutes after creation before serialized_space
+    # Genie agents may take 1-3 minutes after creation before serialized_space
     # is populated by the Databricks backend (async processing).
     # Skip retries when uc_tables is already provided (quick_check_only=True) —
     # in that case we only need the space config, not table discovery, and
@@ -754,7 +932,7 @@ def fetch_tables_from_genie_space(
     if not serialized and not quick_check_only:
         retry_delays = [5, 10, 20, 30, 45, 60, 90]
         for attempt, delay in enumerate(retry_delays, start=1):
-            print(f"  Genie Space {space_id} has no serialized_space yet — "
+            print(f"  Genie agent {space_id} has no serialized_space yet — "
                   f"retrying in {delay}s (attempt {attempt}/{len(retry_delays)})...")
             _time.sleep(delay)
             try:
@@ -775,22 +953,21 @@ def fetch_tables_from_genie_space(
                 break
 
     if not serialized:
-        print(f"  WARNING: Genie Space {space_id} returned no serialized_space after retries.")
+        print(f"  WARNING: Genie agent {space_id} returned no serialized_space after retries.")
         return [], {}, space_title
 
     # --- Tables ---
     try:
         space_data = _json.loads(serialized)
-        tables = space_data.get("data_sources", {}).get("tables", [])
-        identifiers = [t["identifier"] for t in tables if "identifier" in t]
+        identifiers = footprint_table_refs(discover_agent_footprint(space_data))
     except Exception as e:
-        print(f"  WARNING: Could not parse table list from Genie Space {space_id}: {e}")
+        print(f"  WARNING: Could not parse table list from Genie agent {space_id}: {e}")
         identifiers = []
 
     if identifiers:
         print(f"    Discovered {len(identifiers)} table(s): {', '.join(identifiers)}")
     else:
-        print(f"  WARNING: Genie Space {space_id} has no tables configured yet.")
+        print(f"  WARNING: Genie agent {space_id} has no tables configured yet.")
 
     # --- Config ---
     genie_config = parse_genie_config_from_serialized_space(serialized, description=description)
@@ -907,8 +1084,17 @@ def build_prompt(ddl_text: str,
                  space_names: list[str] | None = None,
                  mode: str = "full",
                  countries: list[str] | None = None,
-                 industries: list[str] | None = None) -> str:
+                 industries: list[str] | None = None,
+                 create_groups: bool = False) -> str:
     """Build the full prompt by injecting DDL and optional group names into the template.
+
+    create_groups controls group ownership in the generated config:
+      * False (DEFAULT, consume) — the LLM must reuse the supplied ``group_names``
+        exactly and must NOT invent, propose, or rename groups. The template's
+        group-invention instructions are stripped so the LLM cannot mint groups
+        that the consume-by-default account layer would then fail to look up.
+      * True (opt-in, demo/greenfield) — the LLM proposes its own access-tier
+        groups and the account layer creates them.
 
     When countries is set, country-specific identifier overlays are loaded from
     shared/countries/ and injected into the prompt to teach the LLM about
@@ -926,6 +1112,23 @@ def build_prompt(ddl_text: str,
     keys in genie_space_configs — preventing it from inventing its own titles.
     """
     template = PROMPT_TEMPLATE_PATH.read_text()
+
+    # Consume-by-default: unless create mode is explicitly requested, strip the
+    # template's group-invention instructions so the LLM reuses the supplied
+    # IdP-synced groups instead of minting new ones. Keeping numbering intact,
+    # each invention line is rewritten (not deleted) into a consume instruction.
+    if not create_groups:
+        template = template.replace(
+            '1. Create **groups** (access tiers like "Junior_Analyst", "Admin")',
+            '1. Use the **groups** provided under "REQUIRED GROUP NAMES" — existing '
+            'IdP-synced access tiers. Do NOT invent, rename, or add groups.',
+        ).replace(
+            "3. Propose groups — typically 2-5 access tiers "
+            "(e.g., restricted, standard, privileged, admin)",
+            '3. Use the group names provided under "REQUIRED GROUP NAMES" exactly — '
+            "do NOT propose or invent new groups (they are owned by the IdP and "
+            "consumed by name, not created here).",
+        )
 
     section_marker = "### MY TABLES"
     idx = template.find(section_marker)
@@ -954,7 +1157,7 @@ def build_prompt(ddl_text: str,
     space_names_lines = ""
     if space_names:
         space_names_lines = (
-            "\n### REQUIRED GENIE SPACE NAMES\n\n"
+            "\n### REQUIRED GENIE AGENT NAMES\n\n"
             "Use EXACTLY these name(s) as the keys in `genie_space_configs`. "
             "Do NOT rename, merge, or invent alternative titles. "
             "Each name must appear verbatim as a map key.\n\n"
@@ -967,7 +1170,7 @@ def build_prompt(ddl_text: str,
     if per_space_name:
         per_space_instruction = (
             "\n### PER-SPACE GENERATION MODE\n\n"
-            f"You are generating config for a SINGLE Genie Space named: \"{per_space_name}\"\n\n"
+            f"You are generating config for a SINGLE Genie agent named: \"{per_space_name}\"\n\n"
             "IMPORTANT CONSTRAINTS:\n"
             "- Generate ONLY: genie_space_configs (for this space), tag_assignments "
             "(for the tables listed below), fgac_policies, masking functions, and "
@@ -985,20 +1188,20 @@ def build_prompt(ddl_text: str,
             "You are generating ABAC governance configuration for a central Data Governance team.\n\n"
             "IMPORTANT CONSTRAINTS:\n"
             "- Generate: groups, tag_policies, tag_assignments, fgac_policies, and masking functions.\n"
-            "- Do NOT generate 'genie_space_configs' — Genie space content is managed independently "
+            "- Do NOT generate 'genie_space_configs' — Genie agent content is managed independently "
             "by each BU team. Omit the genie_space_configs block entirely from your output.\n"
             "- Focus on data classification (tags), access policies (FGAC), and masking functions "
-            "that apply to the governed tables regardless of which Genie spaces query them.\n\n"
+            "that apply to the governed tables regardless of which Genie agents query them.\n\n"
         )
     elif mode == "genie":
         per_space_instruction = (
             "\n### GENIE-ONLY MODE\n\n"
-            "You are generating Genie Space configurations for a BU team. "
+            "You are generating Genie agent configurations for a BU team. "
             "The ABAC governance (groups, tag policies, tag assignments, FGAC policies, masking "
             "functions) is managed by a central Data Governance team — do NOT generate any of that.\n\n"
             "IMPORTANT CONSTRAINTS:\n"
             "- Generate ONLY: genie_space_configs (with instructions, sample_questions, benchmarks, "
-            "sql_measures, sql_filters, sql_expressions, and join_specs for each Genie Space).\n"
+            "sql_measures, sql_filters, sql_expressions, and join_specs for each Genie agent).\n"
             "- Do NOT generate 'groups' — use the group names listed under REQUIRED GROUP NAMES.\n"
             "- Do NOT generate 'tag_policies' — those are managed by the governance team.\n"
             "- Do NOT generate 'tag_assignments' — those are managed by the governance team.\n"
@@ -1204,7 +1407,7 @@ def sanitize_tfvars_hcl(hcl_block: str) -> str:
         "# ----------------------------------------------------------------------------\n"
         "# Keys are group names. Use these to represent business personas (e.g., Analyst,\n"
         "# Researcher, Compliance). These groups are used for workspace onboarding,\n"
-        "# Databricks One consumer access, data grants, and optional Genie Space ACLs.\n"
+        "# Databricks One consumer access, data grants, and optional Genie agent ACLs.\n"
         "#\n"
         + docs
     )
@@ -1293,12 +1496,12 @@ def sanitize_tfvars_hcl(hcl_block: str) -> str:
 
     genie_configs_block = (
         "# ----------------------------------------------------------------------------\n"
-        "# Genie Space configs (per-space semantic configuration + ACLs)\n"
+        "# Genie agent configs (per-space semantic configuration + ACLs)\n"
         "# ----------------------------------------------------------------------------\n"
         "# Each key is the human-readable space name matching genie_spaces[*].name in\n"
         "# env.auto.tfvars. Contains instructions, benchmarks, SQL measures, and ACLs.\n"
         "#\n"
-        "# acl_groups: controls which groups get CAN_RUN on this Genie Space.\n"
+        "# acl_groups: controls which groups get CAN_RUN on this Genie agent.\n"
         "#   - List the group names that should have access to this specific space\n"
         "#   - Groups NOT listed are excluded from the space\n"
         "#   - Empty list or omitted = all groups get access (backward compatible)\n"
@@ -1659,6 +1862,120 @@ def _fetch_live_tag_policy_values() -> dict[str, set[str]]:
     except Exception as exc:
         print(f"  [AUTOFIX] Could not fetch live tag policies ({exc}); using file-only values")
         return {}
+
+
+class NativeClassificationRequiredError(RuntimeError):
+    """Raised when native classification is required but cannot be read."""
+
+
+def _fetch_live_classification_source(
+    table_refs: list[str] | None,
+    auth_cfg: dict,
+    *,
+    require_native: bool = False,
+) -> SensitivitySource | None:
+    """Best-effort: build a ClassificationSource from native UC Data Classification.
+
+    Queries ``system.information_schema.column_tags`` (``class.*`` namespace) —
+    and ``system.data_classification.results`` when present — through a SQL
+    warehouse, using the same statement-execution pattern as
+    scripts/audit_schema_drift.py.
+
+    Returns ``None`` for unavailable/empty native data only when native mode is
+    not required.  With ``require_native=True`` every unreadable or empty scan
+    is a hard failure, preventing a silent downgrade to LLM inference.
+    """
+    # Concrete tables and schema-scoped ``catalog.schema.*`` footprints are both
+    # readable; dropping wildcards here silently skipped native classification.
+    catalog = str(auth_cfg.get("uc_catalog") or "").strip().strip("`\"")
+    table_fqns = []
+    unresolved = []
+    for ref in table_refs or []:
+        normalized = ".".join(
+            part.strip().strip("`\"") for part in str(ref).strip().split(".")
+        )
+        parts = normalized.split(".")
+        if len(parts) == 2 and catalog:
+            normalized = f"{catalog}.{normalized}"
+            parts = normalized.split(".")
+        if len(parts) == 3 and "*" not in parts[:2]:
+            table_fqns.append(normalized)
+        else:
+            unresolved.append(str(ref))
+    if unresolved and require_native:
+        raise NativeClassificationRequiredError(
+            "Required native classification footprint contains unresolvable "
+            f"table references: {', '.join(unresolved)}"
+        )
+    if not table_fqns:
+        if require_native:
+            raise NativeClassificationRequiredError(
+                "No resolvable catalog.schema.table footprint is available for "
+                "required native classification"
+            )
+        return None
+    try:
+        from databricks.sdk import WorkspaceClient
+        from databricks.sdk.service.sql import StatementState
+
+        configure_databricks_env(auth_cfg)
+        w = WorkspaceClient(product=PRODUCT_NAME, product_version=PRODUCT_VERSION)
+
+        warehouse_id = str(auth_cfg.get("sql_warehouse_id") or "").strip()
+        if not warehouse_id:
+            for wh in w.warehouses.list():
+                if wh.id:
+                    warehouse_id = wh.id
+                    break
+        if not warehouse_id:
+            message = "No SQL warehouse available for native classification read"
+            if require_native:
+                raise NativeClassificationRequiredError(message)
+            print(f"  [SENSITIVITY] {message}; using DDL inference only")
+            return None
+
+        def _run_sql(sql: str) -> list:
+            r = w.statement_execution.execute_statement(
+                statement=sql, warehouse_id=warehouse_id, wait_timeout="50s",
+            )
+            while r.status and r.status.state in (StatementState.PENDING, StatementState.RUNNING):
+                time.sleep(2)
+                r = w.statement_execution.get_statement(r.statement_id)
+            if r.status and r.status.state == StatementState.FAILED:
+                err = getattr(r.status, "error", None)
+                msg = getattr(err, "message", str(err)) if err else "unknown"
+                raise RuntimeError(msg)
+            if r.result and r.result.data_array:
+                return r.result.data_array
+            return []
+
+        source = ClassificationSource.from_run_sql(_run_sql, table_fqns)
+        if not source.has_native_data():
+            message = (
+                "Native classification read succeeded but returned 0 class.* "
+                "findings for the declared footprint — if you haven't enabled "
+                "auto-tagging yet, review detections, then set "
+                "enable_auto_tagging = true and re-apply enable-classification"
+            )
+            if require_native:
+                raise NativeClassificationRequiredError(message)
+            print(f"  [SENSITIVITY] {message}; using DDL inference only")
+            return None
+        print(
+            "  [SENSITIVITY] Native UC Data Classification found for "
+            f"{len(source.classified_columns())} column(s) (class.* tags) — "
+            "using as authoritative sensitivity source"
+        )
+        return source
+    except Exception as exc:
+        if require_native:
+            if isinstance(exc, NativeClassificationRequiredError):
+                raise
+            raise NativeClassificationRequiredError(
+                f"Could not read required native classification: {exc}"
+            ) from exc
+        print(f"  [SENSITIVITY] Could not read native classification ({exc}); using DDL inference only")
+        return None
 
 
 def autofix_tag_policies(tfvars_path: Path) -> int:
@@ -2207,12 +2524,12 @@ _FGAC_PER_CATALOG_LIMIT = 100  # max policies per catalog
 
 
 def autofix_fgac_policy_count(tfvars_path: Path) -> int:
-    """Trim fgac_policies to at most _FGAC_PER_CATALOG_LIMIT per catalog.
+    """Fail when generated policies exceed Unity Catalog's catalog quota.
 
-    When trimming is required, preserve coverage of non-public tag assignments
-    first, then drop lower-priority policies such as amount rounding.
-
-    Returns the number of policies removed.
+    Option-B treatment derivation normally emits only one mask per treatment
+    and catalog, so quota pressure is substantially reduced.  It is never safe
+    to resolve an excess by deleting policies (or the sensitive assignments
+    they protect), however.
     """
     try:
         import hcl2  # type: ignore
@@ -2230,358 +2547,23 @@ def autofix_fgac_policy_count(tfvars_path: Path) -> int:
     if not policies:
         return 0
 
-    def _value_requires_coverage(tag_value: str) -> bool:
-        return tag_value.strip().lower() not in {"public", "general", "exact"}
-
-    def _extract_tag_refs(condition: str) -> tuple[list[tuple[str, str]], list[str]]:
-        value_refs = re.findall(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", condition or "")
-        key_refs = re.findall(r"hasTag\(\s*'([^']+)'\s*\)", condition or "")
-        return value_refs, key_refs
-
-    def _condition_matches_tags(condition: str, tags: dict[str, set[str]]) -> bool:
-        if not condition:
-            return True
-        expr = condition
-
-        def repl_value(match: re.Match) -> str:
-            key, value = match.group(1), match.group(2)
-            return str(value in tags.get(key, set()))
-
-        def repl_key(match: re.Match) -> str:
-            key = match.group(1)
-            return str(key in tags and bool(tags[key]))
-
-        expr = re.sub(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", repl_value, expr)
-        expr = re.sub(r"hasTag\(\s*'([^']+)'\s*\)", repl_key, expr)
-        expr = re.sub(r"\bAND\b", " and ", expr)
-        expr = re.sub(r"\bOR\b", " or ", expr)
-        if re.search(r"[^()\sA-Za-z]", expr):
-            return False
-        try:
-            return bool(eval(expr, {"__builtins__": {}}, {}))
-        except Exception:
-            return False
-
-    def _entity_table_name(entity_type: str, entity_name: str) -> str:
-        if entity_type == "tables":
-            return entity_name
-        if entity_type == "columns":
-            return ".".join(entity_name.split(".")[:3])
-        return ""
-
-    def _assignment_priority(entity_name: str, tag_key: str, tag_value: str, entity_type: str) -> int:
-        if entity_type == "tables":
-            key_blob = f"{tag_key} {tag_value} {entity_name}".lower()
-            if any(tok in key_blob for tok in ("aml", "hipaa", "pci", "compliance", "audit")):
-                return 85
-            return 50
-
-        blob = f"{entity_name} {tag_key} {tag_value}".lower()
-        if any(tok in blob for tok in ("ssn", "mrn", "cvv", "pan", "government", "token", "secret", "account_number", "iban")):
-            return 100
-        if any(tok in blob for tok in ("card_number", "credit_card")):
-            return 95
-        # Country-specific regulated identifiers (ANZ, India, ASEAN)
-        if any(tok in blob for tok in (
-            "tfn", "tax_file", "medicare", "bsb", "ird", "nhi",       # ANZ
-            "aadhaar", "pan_number", "uan", "ifsc",                    # India
-            "nric", "fin_number", "mykad", "nik",                      # ASEAN
-            "aml_risk", "compliance", "audit",                         # Compliance flags
-        )):
-            return 90
-        if any(tok in blob for tok in ("address", "birth", "dob", "date_of_birth")):
-            return 80
-        if any(tok in blob for tok in ("email", "phone", "name")):
-            return 70
-        if any(tok in blob for tok in ("amount", "balance", "limit", "rounded")):
-            return 20
-        return 40
-
-    assignments = cfg.get("tag_assignments", []) or []
-    entity_tags: dict[tuple[str, str], dict[str, set[str]]] = {}
-    assignment_meta: dict[str, dict] = {}
-    for ta in assignments:
-        etype = ta.get("entity_type", "")
-        ename = ta.get("entity_name", "")
-        tkey = ta.get("tag_key", "")
-        tval = ta.get("tag_value", "")
-        if not (etype and ename and tkey and tval):
-            continue
-        per_entity = entity_tags.setdefault((etype, ename), {})
-        per_entity.setdefault(tkey, set()).add(tval)
-        if not _value_requires_coverage(tval):
-            continue
-        assignment_id = f"{etype}|{ename}|{tkey}|{tval}"
-        assignment_meta[assignment_id] = {
-            "entity_type": etype,
-            "entity_name": ename,
-            "tag_key": tkey,
-            "tag_value": tval,
-            "catalog": ename.split(".")[0],
-            "priority": _assignment_priority(ename, tkey, tval, etype),
-        }
-
-    def _policy_matches_assignment(policy: dict, assignment: dict) -> bool:
-        policy_catalog = policy.get("catalog", "") or policy.get("function_catalog", "")
-        entity_name = assignment["entity_name"]
-        entity_type = assignment["entity_type"]
-        if policy_catalog and policy_catalog != assignment["catalog"]:
-            return False
-
-        table_name = _entity_table_name(entity_type, entity_name)
-        table_tags = entity_tags.get(("tables", table_name), {})
-        if entity_type == "columns":
-            if policy.get("policy_type") != "POLICY_TYPE_COLUMN_MASK":
-                return False
-            column_tags = entity_tags.get(("columns", entity_name), {})
-            if not _condition_matches_tags(policy.get("match_condition", ""), column_tags):
-                return False
-            return _condition_matches_tags(policy.get("when_condition", ""), table_tags)
-
-        if entity_type == "tables":
-            when_condition = policy.get("when_condition", "")
-            if not when_condition:
-                return False
-            return _condition_matches_tags(when_condition, table_tags)
-
-        return False
-
     per_catalog_policies: dict[str, list[tuple[int, dict]]] = {}
     for idx, p in enumerate(policies):
         cat = p.get("catalog", "") or p.get("function_catalog", "")
         if cat:
             per_catalog_policies.setdefault(cat, []).append((idx, p))
 
-    to_drop: set[str] = set()
-    assignments_to_remove: list[tuple[str, str, str]] = []  # (tag_key, tag_value, entity_name)
+    excess: list[str] = []
     for cat, indexed_policies in per_catalog_policies.items():
-        if len(indexed_policies) <= _FGAC_PER_CATALOG_LIMIT:
-            continue
-
-        protected_assignments = {
-            aid: meta for aid, meta in assignment_meta.items() if meta["catalog"] == cat
-        }
-        selected_names: list[str] = []
-        covered_ids: set[str] = set()
-        remaining = list(indexed_policies)
-
-        while remaining and len(selected_names) < _FGAC_PER_CATALOG_LIMIT:
-            best_tuple = None
-            best_idx = None
-            for list_idx, (original_idx, policy) in enumerate(remaining):
-                policy_name = policy.get("name", "")
-                policy_type = policy.get("policy_type", "")
-                coverage = {
-                    aid for aid, meta in protected_assignments.items() if _policy_matches_assignment(policy, meta)
-                }
-                new_coverage = coverage - covered_ids
-                coverage_score = sum(protected_assignments[aid]["priority"] for aid in new_coverage)
-                base_priority = max(
-                    (protected_assignments[aid]["priority"] for aid in coverage),
-                    default=(60 if policy_type == "POLICY_TYPE_ROW_FILTER" else 10),
-                )
-                score = (coverage_score, len(new_coverage), base_priority, -original_idx)
-                if best_tuple is None or score > best_tuple:
-                    best_tuple = score
-                    best_idx = list_idx
-
-            if best_idx is None:
-                break
-            original_idx, chosen = remaining.pop(best_idx)
-            chosen_name = chosen.get("name", "")
-            if not chosen_name:
-                continue
-            selected_names.append(chosen_name)
-            covered_ids.update(
-                aid for aid, meta in protected_assignments.items() if _policy_matches_assignment(chosen, meta)
+        if len(indexed_policies) > _FGAC_PER_CATALOG_LIMIT:
+            names = [p.get("name", "<unnamed>") for _, p in indexed_policies]
+            excess.append(
+                f"catalog '{cat}' has {len(indexed_policies)} policies "
+                f"(limit {_FGAC_PER_CATALOG_LIMIT}): {', '.join(names)}"
             )
-
-        if len(selected_names) < _FGAC_PER_CATALOG_LIMIT:
-            extras = [
-                p.get("name", "")
-                for _idx, p in indexed_policies
-                if p.get("name", "") and p.get("name", "") not in selected_names
-            ]
-            selected_names.extend(extras[: _FGAC_PER_CATALOG_LIMIT - len(selected_names)])
-
-        kept = set(selected_names)
-        dropped = [p.get("name", "") for _idx, p in indexed_policies if p.get("name", "") not in kept]
-        if dropped:
-            to_drop.update(dropped)
-            print(
-                f"  [AUTOFIX] Catalog '{cat}': {len(indexed_policies)} fgac_policies exceeds "
-                f"limit of {_FGAC_PER_CATALOG_LIMIT}. Dropping {len(dropped)}: "
-                + ", ".join(dropped)
-            )
-            uncovered_assignments = [
-                meta
-                for aid, meta in protected_assignments.items()
-                if aid not in covered_ids
-            ]
-            if uncovered_assignments:
-                uncovered_desc = [
-                    f"{meta['entity_name']} ({meta['tag_key']} = '{meta['tag_value']}')"
-                    for meta in uncovered_assignments
-                ]
-                print(
-                    "  [AUTOFIX] Policy cap leaves uncovered sensitive assignments, removing them: "
-                    + ", ".join(uncovered_desc)
-                )
-                assignments_to_remove.extend(
-                    (meta["tag_key"], meta["tag_value"], meta["entity_name"])
-                    for meta in uncovered_assignments
-                )
-
-    if not to_drop and not assignments_to_remove:
-        return 0
-
-    # Remove each excess policy block from the HCL text using brace counting
-    # so that nested blocks (column_mask = { ... }, match_columns = [...]) are
-    # handled correctly.  A plain regex can't handle nested braces.
-    def _remove_block(txt: str, block_name: str) -> tuple[str, bool]:
-        """Find the policy block with `name = "block_name"` and remove it."""
-        name_pat = re.compile(r'name\s*=\s*"' + re.escape(block_name) + r'"')
-        m = name_pat.search(txt)
-        if not m:
-            return txt, False
-
-        pos = m.start()
-
-        # Walk backward from `name =` to find the opening { of the block.
-        depth = 0
-        block_start = None
-        i = pos - 1
-        while i >= 0:
-            c = txt[i]
-            if c == '}':
-                depth += 1
-            elif c == '{':
-                if depth == 0:
-                    block_start = i
-                    break
-                depth -= 1
-            i -= 1
-
-        if block_start is None:
-            return txt, False
-
-        # Walk forward from block_start to find the matching }.
-        depth = 0
-        block_end = None
-        i = block_start
-        while i < len(txt):
-            c = txt[i]
-            if c == '{':
-                depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0:
-                    block_end = i
-                    break
-            i += 1
-
-        if block_end is None:
-            return txt, False
-
-        # Determine slice boundaries that include surrounding whitespace and
-        # the trailing comma (same algorithm as autofix_invalid_tag_values so
-        # that the removal always leaves well-formed HCL).
-        end = block_end + 1
-        while end < len(txt) and txt[end] in (",", " ", "\t"):
-            end += 1
-        start = block_start
-        while start > 0 and txt[start - 1] in (" ", "\t"):
-            start -= 1
-        if start > 0 and txt[start - 1] == "\n":
-            start -= 1
-
-        return txt[:start] + txt[end:], True
-
-    removed = 0
-    for name in to_drop:
-        text, did_remove = _remove_block(text, name)
-        if did_remove:
-            removed += 1
-
-    # Remove tag_assignments left uncovered by dropped policies
-    assignments_removed = 0
-    for tag_key, tag_value, entity_name in assignments_to_remove:
-        # Match blocks containing all three: entity_name, tag_key, tag_value
-        pattern = re.compile(
-            r'entity_name\s*=\s*"' + re.escape(entity_name) + r'"'
-            r'.*?'
-            r'tag_key\s*=\s*"' + re.escape(tag_key) + r'"'
-            r'.*?'
-            r'tag_value\s*=\s*"' + re.escape(tag_value) + r'"',
-            re.DOTALL,
-        )
-        # Also check alternate field orderings
-        pattern_rev = re.compile(
-            r'tag_key\s*=\s*"' + re.escape(tag_key) + r'"'
-            r'.*?'
-            r'tag_value\s*=\s*"' + re.escape(tag_value) + r'"'
-            r'.*?'
-            r'entity_name\s*=\s*"' + re.escape(entity_name) + r'"',
-            re.DOTALL,
-        )
-        m = pattern.search(text) or pattern_rev.search(text)
-        if not m:
-            continue
-        pos = m.start()
-        # Walk backward to find the opening {
-        depth = 0
-        block_start = None
-        i = pos - 1
-        while i >= 0:
-            c = text[i]
-            if c == '}':
-                depth += 1
-            elif c == '{':
-                if depth == 0:
-                    block_start = i
-                    break
-                depth -= 1
-            i -= 1
-        if block_start is None:
-            continue
-        # Walk forward to find the matching }
-        depth = 0
-        block_end = None
-        i = block_start
-        while i < len(text):
-            c = text[i]
-            if c == '{':
-                depth += 1
-            elif c == '}':
-                depth -= 1
-                if depth == 0:
-                    block_end = i
-                    break
-            i += 1
-        if block_end is None:
-            continue
-        end = block_end + 1
-        while end < len(text) and text[end] in (",", " ", "\t"):
-            end += 1
-        start = block_start
-        while start > 0 and text[start - 1] in (" ", "\t"):
-            start -= 1
-        if start > 0 and text[start - 1] == "\n":
-            start -= 1
-        text = text[:start] + text[end:]
-        assignments_removed += 1
-        print(
-            f"  [AUTOFIX] Removed uncovered tag_assignment: "
-            f"{entity_name} ({tag_key} = '{tag_value}')"
-        )
-
-    if removed or assignments_removed:
-        # Clean up stray commas and double-blank lines left by removal
-        text = _cleanup_stray_commas(text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        tfvars_path.write_text(text)
-
-    return removed
+    if excess:
+        raise ValueError("FGAC policy quota exceeded; no policies were dropped. " + " | ".join(excess))
+    return 0
 
 
 def _find_bracket_section(text: str, section_name: str) -> tuple[int, int] | None:
@@ -2724,6 +2706,148 @@ def _render_fgac_policy_block(policy: dict) -> str:
         lines.append(f"    {key:<16} = {rendered}")
     lines.append("  }")
     return "\n".join(lines)
+
+
+def derive_enforcement_treatments(tfvars_path: Path) -> int:
+    """Materialize one ``gr_treatment`` value and mask per sensitive column."""
+    try:
+        import hcl2
+        text = tfvars_path.read_text()
+        cfg = hcl2.loads(text)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Cannot derive enforcement treatments from {tfvars_path}: {exc}"
+        ) from exc
+
+    provenance = re.findall(
+        r"^\s*#\s*gr\.classification_unmapped:[^\n]+$", text, re.MULTILINE
+    )
+    derived, changes = derive_treatment_model(cfg, load_treatment_config())
+    if not changes:
+        return 0
+    text = _replace_bracket_section(
+        text, "tag_policies",
+        [_render_tag_policy_block(item) for item in derived.get("tag_policies", [])],
+    )
+    text = _replace_bracket_section(
+        text, "tag_assignments",
+        [_render_tag_assignment_block(item) for item in derived.get("tag_assignments", [])],
+    )
+    text = _replace_bracket_section(
+        text, "fgac_policies",
+        [_render_fgac_policy_block(item) for item in derived.get("fgac_policies", [])],
+    )
+    if provenance:
+        text = "\n".join(provenance) + "\n" + text
+    tfvars_path.write_text(text)
+    return changes
+
+
+def strip_native_source_assignments(tfvars_path: Path) -> int:
+    """Keep only gr_treatment for native-classification enforcement.
+
+    Native class.* tags already carry the authoritative sensitivity signal.
+    Materializing intermediate pii_level/pci_level values is redundant and can
+    conflict with centrally owned vocabularies; Option B needs only the single
+    derived gr_treatment assignment.
+    """
+    import hcl2
+
+    text = tfvars_path.read_text()
+    cfg = hcl2.loads(text)
+    treatment_cfg = load_treatment_config()
+    mapped_sources = {
+        source for treatment in treatment_cfg.treatments for source in treatment.sources
+    }
+    assignments = cfg.get("tag_assignments", []) or []
+    sensitivity_keys = {key for key, _ in mapped_sources}
+    retained = [
+        assignment for assignment in assignments
+        if not (
+            assignment.get("entity_type") == "columns"
+            and (assignment.get("tag_key"), assignment.get("tag_value")) in mapped_sources
+        )
+    ]
+    removed = len(assignments) - len(retained)
+    if removed:
+        text = _replace_bracket_section(
+            text,
+            "tag_assignments",
+            [_render_tag_assignment_block(item) for item in retained],
+        )
+        # Native class.* is the source vocabulary; do not emit centrally owned
+        # sensitivity tag-policy definitions that this layer must not mutate.
+        policies = [
+            policy for policy in (cfg.get("tag_policies", []) or [])
+            if policy.get("key") not in sensitivity_keys
+        ]
+        text = _replace_bracket_section(
+            text,
+            "tag_policies",
+            [_render_tag_policy_block(item) for item in policies],
+        )
+        tfvars_path.write_text(text)
+    return removed
+
+
+def derive_and_finalize_treatments(
+    tfvars_path: Path,
+    *,
+    native_authoritative: bool,
+) -> tuple[int, int]:
+    """Run the identical treatment finalization used by initial and retry paths."""
+    derived = derive_enforcement_treatments(tfvars_path)
+    stripped = strip_native_source_assignments(tfvars_path) if native_authoritative else 0
+    return derived, stripped
+
+
+def ensure_derived_treatment_functions(tfvars_path: Path, sql_path: Path | None) -> int:
+    """Emit deterministic UDFs required by derived treatment policies.
+
+    A derived ``gr_treatment`` policy is configuration-owned, so a missing or
+    bodyless LLM function must not make the generic reference repair replace its
+    configured function with ``mask_redact``.  Treatments with a deterministic
+    definition in treatment_config.json are restored before reference repair.
+    """
+    if not sql_path or not sql_path.exists():
+        return 0
+    import hcl2
+
+    cfg = hcl2.loads(tfvars_path.read_text())
+    required_values = {
+        value
+        for policy in (cfg.get("fgac_policies", []) or [])
+        for value in re.findall(
+            r"hasTagValue\(\s*'gr_treatment'\s*,\s*'([^']+)'\s*\)",
+            policy.get("match_condition", "") or "",
+        )
+    }
+    existing = _parse_sql_function_names(sql_path)
+    definitions = {
+        treatment.value: treatment
+        for treatment in load_treatment_config().treatments
+        if treatment.udf_signature and treatment.udf_body
+    }
+    missing = [
+        definitions[value] for value in sorted(required_values)
+        if value in definitions and definitions[value].masking_function not in existing
+    ]
+    if not missing:
+        return 0
+
+    sql = sql_path.read_text().rstrip()
+    blocks = ["\n\n-- === Treatment functions restored from treatment_config.json ==="]
+    for treatment in missing:
+        blocks.append(
+            f"\nCREATE OR REPLACE FUNCTION {treatment.udf_signature}\n"
+            f"RETURN {treatment.udf_body};"
+        )
+        print(
+            f"  [AUTOFIX] Restored treatment function "
+            f"'{treatment.masking_function}' from treatment_config.json"
+        )
+    sql_path.write_text(sql + "\n" + "\n".join(blocks) + "\n")
+    return len(missing)
 
 
 def _parse_sql_function_names(sql_path: Path | None) -> set[str]:
@@ -3208,7 +3332,7 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
         # picking arbitrary alphabetical first (which caused mask_abn to be
         # chosen for every uncategorized string column when ANZ overlay is loaded).
         # Skip last-resort for numeric/date columns — a wrong-type function is
-        # worse than no policy (the tag assignment will be removed as uncovered).
+        # worse than no policy (the blocking coverage gate will surface the gap).
         if available_functions and not is_numeric_or_date:
             # Extract semantic tokens from the tag value (strip common prefixes)
             tv_norm = tval.replace("masked_", "").replace("redacted_", "")
@@ -3226,7 +3350,7 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
                         return ranked[0]
                     # No semantic match — don't pick random filter (would cause
                     # category mismatch at query time). Return None so the tag
-                    # stays uncovered and gets removed by autofix_remove_uncovered_tags.
+                    # stays uncovered and is rejected by the coverage gate.
             else:
                 mask_fns = [f for f in available_functions if f.startswith("mask_") and _arg_count_ok(f)]
                 if mask_fns:
@@ -3403,7 +3527,7 @@ def autofix_genie_config_fields(tfvars_path: Path) -> int:
 
     for section, required_fields in section_required.items():
         # Find ALL occurrences of this section in the file (there may be one
-        # per genie space in an assembled multi-space file).  Process in
+        # per Genie agent in an assembled multi-space file).  Process in
         # reverse order so that earlier offsets are not shifted by edits.
         all_ranges: list[tuple[int, int]] = []
         search_start = 0
@@ -3576,7 +3700,7 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
 
 
 def autofix_missing_genie_space_entries(tfvars_path: Path, auth_cfg: dict) -> int:
-    """Ensure each configured Genie space has a genie_space_configs entry."""
+    """Ensure each configured Genie agent has a genie_space_configs entry."""
     configured_spaces = auth_cfg.get("genie_spaces", []) or []
     if not configured_spaces or not tfvars_path.exists():
         return 0
@@ -3621,7 +3745,7 @@ _FUNCTION_EXPECTED_CATEGORIES = {
     "mask_email": {"email"},
     "mask_phone": {"phone"},
     "mask_ssn": {"ssn"},
-    "mask_full_name": {"name"},
+    "mask_full_name": {"name", "customer_pii", "customer_profile"},
     "mask_credit_card_full": {"card"},
     "mask_credit_card_last4": {"card"},
     "mask_amount_rounded": {"amount"},
@@ -3678,7 +3802,7 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
         categories.add("address")
     if "birth" in col or col in {"dob", "date_of_birth"}:
         categories.add("date")
-    if "card" in col or "cvv" in col:
+    if ("card" in col and "cardholder" not in col and "card_holder" not in col) or "cvv" in col:
         categories.add("card")
     if "amount" in col or "balance" in col or "limit" in col:
         categories.add("amount")
@@ -4382,6 +4506,18 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
             continue
 
         value_refs, key_refs = _extract_tag_refs(p.get("match_condition", ""))
+        treatment_functions = {
+            item.value: item.masking_function
+            for item in load_treatment_config().treatments
+        }
+        # A gr_treatment policy is already type-checked by the treatment
+        # contract. Do not let the generic category repair override its
+        # canonical function (which the coverage gate intentionally enforces).
+        if any(
+            key == "gr_treatment" and treatment_functions.get(value) == fn
+            for key, value in value_refs
+        ):
+            continue
         matched: list[dict] = []
         for key, value in value_refs:
             matched.extend(assignments_by_tag.get((key, value), []))
@@ -5007,6 +5143,11 @@ _PII_COLUMN_TAG_MAP: list[tuple[list[str], str, str]] = [
     (["address", "street_address", "residential_address"],   "pii_level", "redacted_address"),
     (["date_of_birth", "dob", "birth_date", "birthdate"],    "pii_level", "masked_dob"),
     (["ssn", "social_security"],                             "pii_level", "masked_ssn"),
+    # Person names (backstop only — realistic data is tagged natively as class.name).
+    # Bare "name" is matched exactly via _PII_EXACT_COLUMN_TAG_MAP, not as a
+    # substring, so username/table_name/file_name are not swept in.
+    (["full_name", "first_name", "last_name", "given_name", "surname",
+      "family_name", "middle_name"],                         "pii_level", "masked_name"),
     # ANZ
     (["tfn", "tax_file_number"],                             "pii_level", "masked_tfn"),
     (["medicare", "medicare_number"],                        "pii_level", "masked_medicare"),
@@ -5020,6 +5161,12 @@ _PII_COLUMN_TAG_MAP: list[tuple[list[str], str, str]] = [
     (["account_number", "bank_account"],                     "pii_level", "masked_account"),
     (["card_number", "credit_card", "pan"],                  "pci_level", "masked_card_last4"),
     (["cvv", "cvc", "card_verification"],                    "pci_level", "redacted_cvv"),
+]
+
+# Exact-column-name patterns (no substring matching) for hints too generic to
+# match as substrings.
+_PII_EXACT_COLUMN_TAG_MAP: list[tuple[list[str], str, str]] = [
+    (["name"],                                               "pii_level", "masked_name"),
 ]
 
 # Columns that look like amounts/balances → financial_sensitivity tag
@@ -5038,6 +5185,7 @@ _PII_TAG_REQUIRED_FUNCTIONS: dict[str, list[str]] = {
     "redacted_address": ["mask_redact", "mask_pii_partial"],
     "masked_dob":       ["mask_date_to_year"],
     "masked_ssn":       ["mask_ssn", "mask_redact", "mask_pii_partial"],
+    "masked_name":      ["mask_full_name", "mask_name", "mask_redact", "mask_pii_partial"],
     "masked_tfn":       ["mask_tfn", "mask_redact"],
     "masked_medicare":  ["mask_medicare", "mask_redact"],
     "masked_bsb":       ["mask_bsb", "mask_redact"],
@@ -5054,6 +5202,9 @@ def autofix_untagged_pii_columns(
     tfvars_path: Path,
     ddl_path: Path | None = None,
     sql_path: Path | None = None,
+    classification_source: SensitivitySource | None = None,
+    agent_footprint: list[dict] | None = None,
+    authoritative_classification: bool = False,
 ) -> int:
     """Detect PII/sensitive columns in the DDL that the LLM forgot to tag.
 
@@ -5061,6 +5212,15 @@ def autofix_untagged_pii_columns(
     adds tag_assignment entries for any that are missing.  This prevents the
     common failure where the LLM generates groups and policies but omits
     tag assignments for obvious columns like email, phone, or address.
+
+    Sensitivity per column is resolved through the :class:`SensitivitySource`
+    interface: when ``classification_source`` supplies native UC Data
+    Classification (``class.*``) findings for a column, those are authoritative;
+    otherwise the deterministic DDL name-pattern inference (the LLM path's
+    backstop, wrapped as :class:`LLMSource`) decides.  Every added assignment is
+    logged with the source that produced it.  When ``classification_source`` is
+    ``None`` (the default), the result is identical to the legacy name-pattern
+    behaviour.
 
     Returns the number of tag assignments added.
     """
@@ -5117,6 +5277,38 @@ def autofix_untagged_pii_columns(
     if not all_columns:
         return 0
 
+    # A live native-classification run is authoritative for the whole declared
+    # footprint.  Remove LLM-produced sensitivity assignments first so they
+    # cannot suppress or augment the real class.* inventory.  Non-sensitivity
+    # governance assignments (for example row-scope tags) are preserved.
+    if authoritative_classification and classification_source is not None:
+        treatment_cfg = load_treatment_config()
+        sensitivity_sources = {
+            source for treatment in treatment_cfg.treatments for source in treatment.sources
+        }
+        sensitivity_keys = {key for key, _ in sensitivity_sources}
+        all_column_names = {full for full, _ in all_columns}
+        assignments = cfg.get("tag_assignments", []) or []
+        retained_assignments = [
+            assignment for assignment in assignments
+            if not (
+                assignment.get("entity_type") == "columns"
+                and assignment.get("entity_name") in all_column_names
+                and assignment.get("tag_key") in sensitivity_keys
+            )
+        ]
+        if len(retained_assignments) != len(assignments):
+            text = _replace_bracket_section(
+                text,
+                "tag_assignments",
+                [_render_tag_assignment_block(item) for item in retained_assignments],
+            )
+            assignments = retained_assignments
+            existing_tags = {
+                item.get("entity_name", "") for item in assignments
+                if item.get("entity_type") == "columns"
+            }
+
     # Check which masking functions are available in the SQL file.
     # Only add financial tags (rounded_amounts) if mask_amount_rounded is available,
     # and only add date tags (masked_dob) if mask_date_to_year is available.
@@ -5145,24 +5337,117 @@ def autofix_untagged_pii_columns(
     ]
     if "mask_amount_rounded" in available_fns:
         active_patterns.extend(_FINANCIAL_COLUMN_TAG_MAP)
+    active_exact_patterns = [
+        (hints, key, val) for hints, key, val in _PII_EXACT_COLUMN_TAG_MAP
+        if _any_covering_fn_available(val)
+    ]
 
-    # Check each column against PII patterns
-    new_assignments: list[dict] = []
-    for full_name, col_name in all_columns:
-        if full_name in existing_tags:
-            continue
-        for hints, tag_key, tag_value in active_patterns:
-            if col_name in hints or any(h in col_name for h in hints):
-                new_assignments.append({
-                    "entity_type": "columns",
-                    "entity_name": full_name,
-                    "tag_key": tag_key,
-                    "tag_value": tag_value,
-                })
-                break  # first match wins
+    # Resolve each untagged column's sensitivity through the SensitivitySource
+    # interface.  The deterministic DDL name-pattern matcher below is the LLM
+    # path's backstop, wrapped as an LLMSource; native classification (when
+    # supplied) takes precedence per column via select_findings.
+    col_name_by_full = dict(all_columns)
+    candidate_columns = [
+        full for full, _ in all_columns
+        if authoritative_classification or full not in existing_tags
+    ]
+    if agent_footprint is not None:
+        # The same canonical footprint that selected the classification tables
+        # also supplies the coverage-gate denominator at column granularity.
+        candidate_columns = [
+            column for column in candidate_columns
+            if footprint_contains_column(agent_footprint, column)
+        ]
 
-    if not new_assignments:
+    def _ddl_pattern_infer(cols: list[str]) -> list[Finding]:
+        out: list[Finding] = []
+        for full_name in cols:
+            col_name = col_name_by_full.get(full_name, full_name.split(".")[-1].lower())
+            exact = next((p for p in active_exact_patterns if col_name in p[0]), None)
+            if exact is not None:
+                out.append(Finding(
+                    entity_name=full_name, tag_key=exact[1], tag_value=exact[2],
+                    source=_SRC_LLM, detail=col_name,
+                ))
+                continue
+            for hints, tag_key, tag_value in active_patterns:
+                if col_name in hints or any(h in col_name for h in hints):
+                    out.append(Finding(
+                        entity_name=full_name,
+                        tag_key=tag_key,
+                        tag_value=tag_value,
+                        source=_SRC_LLM,
+                        detail=col_name,
+                    ))
+                    break  # first match wins
+        return out
+
+    llm_source = LLMSource(_ddl_pattern_infer)
+    if authoritative_classification and classification_source is not None:
+        findings = classification_source.findings_for(candidate_columns)
+    else:
+        findings = select_findings(candidate_columns, classification_source, llm_source)
+
+    # Never discard an authoritative classification finding because protection
+    # is incomplete. Preserve it in generated config so the blocking coverage
+    # gate can reject the gap and show the operator exactly what must be fixed.
+
+    # Surface natively-classified columns we could not tag (unmapped class.*
+    # semantic), so a reviewer / coverage gate sees that authority was claimed
+    # but no governed tag applied.  These columns are still NOT handed to the LLM
+    # (select_findings claimed them), preventing a silent LLM override.
+    unmapped_findings: list[tuple[str, str]] = []
+    if classification_source is not None and hasattr(classification_source, "unmapped_columns"):
+        unmapped_findings = classification_source.unmapped_columns(candidate_columns)
+        for entity_name, semantic in unmapped_findings:
+            print(
+                f"  [SENSITIVITY] Column {entity_name} carries native "
+                f"class.{semantic} with no governed mapping — left untagged "
+                "(LLM override suppressed)"
+            )
+
+    if not findings and not unmapped_findings:
         return 0
+
+    # Native classification can report multiple semantics for one column (for
+    # example email + phone + name in free text). Several semantics can map to
+    # the same governed tag key, but UC permits only one value per key/entity.
+    # Collapse same-key collisions using Option-B's configured precedence.
+    # Findings from different tag families remain intact so the later treatment
+    # derivation can still resolve cross-family precedence (for example PII + PCI).
+    treatment_cfg = load_treatment_config()
+    treatment_rank = {
+        source: rank
+        for rank, treatment in enumerate(treatment_cfg.treatments)
+        for source in treatment.sources
+    }
+    findings_by_key: dict[tuple[str, str], list[Finding]] = {}
+    for finding in findings:
+        key = (finding.entity_name, finding.tag_key)
+        findings_by_key.setdefault(key, []).append(finding)
+    collapsed: dict[tuple[str, str], Finding] = {}
+    for key, candidates in findings_by_key.items():
+        current = min(
+            candidates,
+            key=lambda finding: treatment_rank.get(
+                (finding.tag_key, finding.tag_value), len(treatment_rank)
+            ),
+        )
+        # Domain-specific partial masks are unsafe for narrative text that the
+        # native classifier says contains several different PII semantics. Use
+        # a canonical full-redaction value instead of applying (for example)
+        # an email parser to a sentence containing an embedded email and phone.
+        if key[1] == "pii_level" and len({f.tag_value for f in candidates}) > 1:
+            current = Finding(
+                entity_name=current.entity_name,
+                tag_key="pii_level",
+                tag_value="redacted_mixed",
+                source=current.source,
+                detail="multi-semantic native PII",
+            )
+        collapsed[key] = current
+    collapsed_findings = list(collapsed.values())
+    new_assignments: list[dict] = [f.as_assignment() for f in collapsed_findings]
 
     # Inject new tag assignments into the HCL text
     # Find the tag_assignments section and append before the closing ]
@@ -5183,20 +5468,33 @@ def autofix_untagged_pii_columns(
         insert_pos = ta_section.end(2)
 
     lines = []
-    for ta in new_assignments:
+    for f in collapsed_findings:
         lines.append(
-            f'  {{ entity_type = "columns", entity_name = "{ta["entity_name"]}", '
-            f'tag_key = "{ta["tag_key"]}", tag_value = "{ta["tag_value"]}" }},'
+            f'  {{ entity_type = "columns", entity_name = "{f.entity_name}", '
+            f'tag_key = "{f.tag_key}", tag_value = "{f.tag_value}" }},'
         )
-        print(f"  [AUTOFIX] Added tag_assignment: {ta['entity_name']} ({ta['tag_key']} = '{ta['tag_value']}')")
+        print(
+            f"  [AUTOFIX] Added tag_assignment: {f.entity_name} "
+            f"({f.tag_key} = '{f.tag_value}') [source: {f.source}]"
+        )
 
-    injection = "\n" + "\n".join(lines) + "\n"
+    markers = [
+        f"# gr.classification_unmapped: {entity_name}|class.{semantic}"
+        for entity_name, semantic in unmapped_findings
+    ]
+    injection = "\n" + "\n".join(markers + lines) + "\n"
     text = text[:insert_pos] + injection + text[insert_pos:]
     tfvars_path.write_text(text)
-    return len(new_assignments)
+    return len(collapsed_findings)
 
 
 def autofix_remove_uncovered_tags(tfvars_path: Path, sql_path: Path | None = None) -> int:
+    """Deprecated safety shim: uncovered sensitive tags are never removed.
+
+    Coverage gaps are intentionally preserved for the blocking coverage gate.
+    """
+    return 0
+
     """Last-resort: remove tag_assignments that no active FGAC policy covers.
 
     After all other autofixes have had a chance, any non-public tag_assignment
@@ -5649,6 +5947,100 @@ def load_groups_from_account_config() -> list[str]:
     except Exception as e:
         print(f"  WARNING: Could not read account groups from {account_abac}: {e}")
     return []
+
+
+# ---------------------------------------------------------------------------
+# IdP group preflight (consume-by-default)
+#
+# GenieRails consumes existing IdP-synced access-tier groups by default and does
+# not mint them. Before we hand a group->tier mapping to Terraform, verify every
+# referenced group actually exists as an account-level (IdP-synced) group, so a
+# typo or an un-synced group fails loudly here instead of silently producing a
+# grant that matches nobody.
+# ---------------------------------------------------------------------------
+class GroupPreflightError(RuntimeError):
+    """Raised when a referenced access-tier group is not synced from the IdP."""
+
+
+def find_missing_idp_groups(referenced, existing) -> list[str]:
+    """Return the referenced group names that are absent from ``existing``.
+
+    Pure helper: comparison is exact on display name. ``existing`` is any
+    iterable of account-level group display names. Order and de-duplication of
+    the returned list follow first appearance in ``referenced``.
+    """
+    existing_set = {g for g in existing if g}
+    missing: list[str] = []
+    seen: set[str] = set()
+    for name in referenced:
+        if name and name not in existing_set and name not in seen:
+            missing.append(name)
+            seen.add(name)
+    return missing
+
+
+def preflight_consume_groups(referenced, existing, *, create_groups: bool = False) -> None:
+    """Consume-by-default group-existence preflight.
+
+    In the default (consume) path, every referenced access-tier group must
+    already exist as an IdP-synced account group; otherwise raise
+    :class:`GroupPreflightError` naming the missing group(s) with an actionable
+    remediation. In the opt-in create/greenfield path (``create_groups=True``)
+    this is a no-op, since GenieRails mints the groups itself.
+    """
+    if create_groups:
+        return
+    missing = find_missing_idp_groups(referenced, existing)
+    if not missing:
+        return
+    bullets = "".join(f"    - {g}\n" for g in missing)
+    raise GroupPreflightError(
+        "IdP group preflight failed — the following access-tier group(s) are "
+        "referenced but are NOT synced from your identity provider into the "
+        "Databricks account:\n"
+        f"{bullets}"
+        "\nGenieRails consumes IdP-owned groups by default and does not create "
+        "them. To fix this:\n"
+        "  - Enable AIM (or SCIM where AIM is unavailable) so your IdP syncs "
+        "these groups into the account, then re-run; or\n"
+        "  - Pass the exact existing group names via --groups "
+        "'<tier1>,<tier2>,...' (the group->tier mapping); or\n"
+        "  - For a demo/greenfield deployment with no IdP, re-run with "
+        "--create-groups so GenieRails mints the groups (account layer "
+        "manage_groups = true)."
+    )
+
+
+def list_account_group_names(auth_cfg: dict) -> list[str] | None:
+    """Best-effort list of account-level group display names via the Databricks SDK.
+
+    Returns ``None`` (preflight is then skipped with a warning) when the SDK or
+    account credentials are unavailable, so generation still works offline / in
+    workspace-only setups. Returns a (possibly empty) list on success.
+    """
+    try:
+        from databricks.sdk import AccountClient
+    except Exception:
+        return None
+
+    host = auth_cfg.get("databricks_account_host")
+    account_id = auth_cfg.get("databricks_account_id")
+    client_id = auth_cfg.get("databricks_client_id")
+    client_secret = auth_cfg.get("databricks_client_secret")
+    if not (host and account_id and client_id and client_secret):
+        return None
+
+    try:
+        ac = AccountClient(
+            host=host,
+            account_id=account_id,
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+        return [g.display_name for g in ac.groups.list() if g.display_name]
+    except Exception as e:
+        print(f"  WARNING: Could not list account groups for IdP preflight: {e}")
+        return None
 
 
 def bootstrap_per_space_dirs(out_dir: Path, auth_cfg: dict, hcl_text: str) -> None:
@@ -6181,6 +6573,11 @@ def main():
              "(overrides uc_tables in env.auto.tfvars). "
              "E.g. prod.sales.customers or prod.sales.* for all tables in a schema",
     )
+    parser.add_argument(
+        "--footprint", nargs="+", metavar="CATALOG.SCHEMA.TABLE[.COLUMN]",
+        help="Declared reachable footprint for a not-yet-created Genie agent. "
+             "Accepts table or column FQNs and overrides declared_footprint/uc_tables.",
+    )
     parser.add_argument("--catalog", help="Catalog for masking UDFs (auto-derived from first uc_tables entry if omitted)")
     parser.add_argument("--schema", help="Schema for masking UDFs (auto-derived from first uc_tables entry if omitted)")
     parser.add_argument(
@@ -6211,15 +6608,39 @@ def main():
         help="Auto-split validated output into account + env data_access + workspace configs")
     parser.add_argument("--dry-run", action="store_true", help="Build the prompt and print it without calling the LLM")
     parser.add_argument(
+        "--allow-llm-sensitivity",
+        action="store_true",
+        help=(
+            "Explicitly allow LLM/DDL sensitivity inference when native "
+            "classification is enabled but unreadable or empty. Without this "
+            "opt-out, enabled native classification is fail-closed."
+        ),
+    )
+    # --groups (consume) and --create-groups (invent) are mutually exclusive:
+    # you either point GenieRails at existing IdP-synced groups OR opt into
+    # minting new ones — never both (that would aim the create path at an
+    # IdP-owned group, i.e. mixed ownership). argparse rejects the combination.
+    group_mode = parser.add_mutually_exclusive_group()
+    group_mode.add_argument(
         "--groups",
-        help="Comma-separated group names to use in generated config. "
-             "When set, the LLM uses these exact names instead of inventing new ones. "
-             "Useful for IDP-synced groups (e.g. --groups 'Finance_Analyst,Clinical_Staff').",
+        help="Comma-separated existing group names to consume, one per access tier "
+             "(the group->tier mapping). When set, the LLM uses these exact IdP-synced "
+             "names instead of inventing new ones. This is the primary, expected input "
+             "for the default consume path (e.g. --groups 'Finance_Analyst,Clinical_Staff'). "
+             "Mutually exclusive with --create-groups.",
+    )
+    group_mode.add_argument(
+        "--create-groups",
+        action="store_true",
+        help="OPT-IN (demo/greenfield only): let the LLM invent access-tier group names "
+             "and have the account layer CREATE them (set manage_groups = true in "
+             "envs/account/env.auto.tfvars). Off by default — GenieRails consumes existing "
+             "IdP-synced groups and does not mint them. Mutually exclusive with --groups.",
     )
     parser.add_argument(
         "--space",
         metavar="SPACE_NAME",
-        help="Name of a single Genie Space to (re)generate. "
+        help="Name of a single Genie agent to (re)generate. "
              "Fetches only that space's tables, instructs the LLM to skip groups and "
              "tag_policies (shared state), and writes output to generated/spaces/<key>/. "
              "Existing groups are auto-loaded from envs/account/abac.auto.tfvars. "
@@ -6264,7 +6685,7 @@ def main():
             "governance — generate ABAC only (groups, tag policies, tag assignments, "
             "FGAC policies, masking functions); genie_space_configs is suppressed. "
             "Use this for the central Data Governance team. "
-            "genie — generate Genie space configs only (instructions, benchmarks, "
+            "genie — generate Genie agent configs only (instructions, benchmarks, "
             "SQL measures/filters/expressions, join specs); all ABAC output and SQL "
             "masking functions are suppressed. Existing groups are auto-loaded. "
             "Use this for BU teams that consume pre-existing governance. "
@@ -6327,6 +6748,9 @@ def main():
     # after writing we merge the new content back into generated/abac.auto.tfvars.
     target_space_cfg: dict | None = None
     space_key: str = ""
+    # Track whether the consumed group names came from account-config auto-load
+    # (vs. the literal --groups CLI arg) so we can label them accurately below.
+    groups_auto_loaded = False
 
     if args.space:
         genie_spaces_cfg_all = auth_cfg.get("genie_spaces", [])
@@ -6337,7 +6761,7 @@ def main():
                 break
 
         if target_space_cfg is None:
-            print(f"ERROR: No Genie Space named '{args.space}' found in env.auto.tfvars.")
+            print(f"ERROR: No Genie agent named '{args.space}' found in env.auto.tfvars.")
             print("  Available spaces:")
             for sp in genie_spaces_cfg_all:
                 print(f"    - {sp.get('name') or sp.get('genie_space_id') or '(unnamed)'}")
@@ -6352,32 +6776,90 @@ def main():
         print(f"  Space key:  {space_key}")
         print(f"  Out dir:    {out_dir}")
 
-        # Auto-load existing groups from the account config so the LLM reuses them
-        if not args.groups:
+        # Auto-load existing groups from the account config so the LLM reuses
+        # them (consume path only — never in the opt-in --create-groups path).
+        if not args.groups and not args.create_groups:
             existing_groups = load_groups_from_account_config()
             if existing_groups:
                 args.groups = ",".join(existing_groups)
+                groups_auto_loaded = True
 
     # In genie mode, also auto-load groups from account config so the LLM knows
-    # which pre-existing groups are available for space ACLs.
-    if args.mode == "genie" and not args.space and not args.groups:
+    # which pre-existing groups are available for space ACLs (consume path only).
+    if args.mode == "genie" and not args.space and not args.groups and not args.create_groups:
         existing_groups = load_groups_from_account_config()
         if existing_groups:
             args.groups = ",".join(existing_groups)
+            groups_auto_loaded = True
             print(f"  Auto-loaded {len(existing_groups)} group(s) from account config (genie mode)")
+
+    # ── Resolve group-generation mode (consume-by-default) ───────────────────
+    # Done BEFORE any table fetch / LLM call so the default path can never
+    # silently invent groups. Two modes:
+    #   consume (DEFAULT): use the supplied group->tier mapping exactly; the
+    #     account layer looks these IdP-synced groups up (does not mint them).
+    #   create (--create-groups, opt-in demo/greenfield): the LLM invents names
+    #     and the account layer creates them (manage_groups = true).
+    group_names: list[str] | None = None
+    if args.groups:
+        group_names = [g.strip() for g in args.groups.split(",") if g.strip()]
+        src = "auto-loaded from account config" if groups_auto_loaded else "--groups CLI"
+        print(f"  Groups:   {', '.join(group_names)} ({src})")
+
+    if args.create_groups:
+        print("  Group mode: CREATE (opt-in demo/greenfield) — the LLM proposes "
+              "access-tier groups and the account layer will mint them; set "
+              "manage_groups = true in envs/account.")
+    elif not group_names:
+        # Consume mode with no mapping: refuse rather than let the LLM invent.
+        print(
+            "ERROR: consume-by-default requires a group->tier mapping.\n"
+            "  GenieRails consumes existing IdP-synced groups by default and will "
+            "not invent them.\n"
+            "  Fix one of:\n"
+            "    - Pass the existing group names, one per access tier, via "
+            "--groups '<tier1>,<tier2>,...'\n"
+            "      (e.g. make generate GENERATE_ARGS='--groups "
+            "\"Finance_Analyst,Clinical_Staff\"'); or\n"
+            "    - For a demo/greenfield account with no IdP-synced groups, opt in "
+            "with --create-groups\n"
+            "      (e.g. make generate GENERATE_ARGS='--create-groups') and set "
+            "manage_groups = true in envs/account."
+        )
+        sys.exit(1)
+    else:
+        # Consume mode with a mapping: verify every referenced access-tier group
+        # already exists as an IdP-synced account group. Runs on ALL consume
+        # paths (literal --groups and auto-loaded config names). A missing group
+        # fails loudly here instead of producing a grant that matches nobody.
+        # Skipped with a note only when account creds are unavailable, so
+        # offline / workspace-only generation still works.
+        existing = list_account_group_names(auth_cfg)
+        if existing is None:
+            print("  NOTE: skipping IdP group preflight — no account credentials "
+                  "available; ensure these groups are IdP-synced before apply.")
+        else:
+            try:
+                preflight_consume_groups(group_names, existing, create_groups=False)
+            except GroupPreflightError as e:
+                print(f"ERROR: {e}")
+                sys.exit(1)
+            print(f"  IdP preflight: all {len(group_names)} referenced group(s) "
+                  "found in the account.")
 
     catalog = args.catalog or ""
     schema = args.schema or ""
 
     catalog_schemas: list[tuple[str, str]] | None = None
 
-    # ── Auto-discover tables and config from genie_spaces entries ────────────
+    # ── Auto-discover the canonical reachable footprint ─────────────────────
     # For spaces where genie_space_id is set but uc_tables is empty, query the
-    # Genie Space API to learn what tables and config that space contains.
+    # Genie agent API to learn what tables and config that space contains.
     # The existing space's genie_space_configs is parsed verbatim from the API
     # (no LLM involvement) and injected into the generated abac.auto.tfvars
     # after the LLM runs, replacing whatever the LLM generated for that space.
     api_genie_configs: dict[str, dict] = {}  # space_name -> config parsed from API
+    footprint_entries: list = list(auth_cfg.get("declared_footprint", []) or [])
 
     if not args.tables:
         genie_spaces_cfg = auth_cfg.get("genie_spaces", [])
@@ -6390,6 +6872,8 @@ def main():
 
             for space in genie_spaces_cfg:
                 space_tables = space.get("uc_tables") or []
+                space_declared = space.get("declared_footprint") or []
+                footprint_entries.extend(space_declared or space_tables)
                 space_id = space.get("genie_space_id") or ""
                 space_name = space.get("name") or space_id
 
@@ -6399,9 +6883,9 @@ def main():
                     # When uc_tables IS set, use quick_check_only to skip long
                     # retries — serialized_space is optional in that case.
                     if not space_tables:
-                        print(f"\n  Genie Space '{space_name}' has no uc_tables — querying API...")
+                        print(f"\n  Genie agent '{space_name}' has no uc_tables — querying API...")
                     else:
-                        print(f"\n  Querying existing Genie Space '{space_name}' for config...")
+                        print(f"\n  Querying existing Genie agent '{space_name}' for config...")
 
                     tables, genie_cfg, api_title = fetch_tables_from_genie_space(
                         space_id, auth_cfg, quick_check_only=bool(space_tables)
@@ -6413,6 +6897,7 @@ def main():
                     if not space_tables:
                         all_space_tables.extend(tables)
                         discovered_from_api.extend(tables)
+                        footprint_entries.extend(tables)
                     else:
                         all_space_tables.extend(space_tables)
 
@@ -6429,17 +6914,23 @@ def main():
 
             if discovered_from_api:
                 print(
-                    "\n  Auto-discovered tables from existing Genie Space(s):\n"
+                    "\n  Auto-discovered tables from existing Genie agent(s):\n"
                     + "".join(f"    - {t}\n" for t in discovered_from_api)
                     + "\n  NOTE: Add these tables to data_access/env.auto.tfvars so that\n"
                     "  UC grants and masking functions are applied to them as well."
                 )
 
-    # Resolve table refs: CLI --tables overrides uc_tables from config
-    table_refs = args.tables or auth_cfg.get("uc_tables") or None
+    # This canonical object is the single source for DDL/classification scan
+    # scope and, consequently, the classified-column coverage denominator.
+    configured = list(auth_cfg.get("uc_tables") or []) + footprint_entries
+    declared = args.footprint or args.tables or configured
+    agent_footprint = discover_agent_footprint(declared_footprint=declared)
+    table_refs = footprint_table_refs(agent_footprint) or None
 
     if table_refs:
-        source = "--tables CLI" if args.tables else "uc_tables in auth config"
+        source = "--footprint CLI" if args.footprint else ("--tables CLI" if args.tables else "agent footprint")
+        column_count = sum(len(item.get("columns") or []) for item in agent_footprint)
+        print(f"  Footprint: {len(agent_footprint)} table(s), {column_count} explicitly scoped column(s)")
         print(f"  Provider: {args.provider}")
         print(f"  Out dir:  {out_dir}")
         print(f"  Tables:   {', '.join(table_refs)} (from {source})")
@@ -6448,6 +6939,7 @@ def main():
         ddl_text, catalog_schemas = fetch_tables_from_databricks(
             table_refs, auth_cfg,
         )
+        ddl_text = scope_ddl_to_footprint(ddl_text, agent_footprint)
 
         if not catalog or not schema:
             if not catalog_schemas:
@@ -6493,11 +6985,8 @@ def main():
 
         ddl_text = load_ddl_files(ddl_dir)
 
-    group_names = None
-    if args.groups:
-        group_names = [g.strip() for g in args.groups.split(",") if g.strip()]
-        src = "auto-loaded from account config" if target_space_cfg is not None and not args.groups.startswith(args.groups) else "--groups CLI"
-        print(f"  Groups:   {', '.join(group_names)} ({src})")
+    # group_names + consume/create mode were resolved (and preflighted) above,
+    # before any table fetch, so the default path can never silently invent.
 
     # Collect space names from config so the LLM uses them verbatim as
     # genie_space_configs keys instead of inventing its own titles.
@@ -6527,6 +7016,7 @@ def main():
         mode=args.mode,
         countries=countries,
         industries=industries,
+        create_groups=args.create_groups,
     )
 
     if args.dry_run:
@@ -6567,7 +7057,7 @@ def main():
 
 This folder contains a **first draft** of:
 - `masking_functions.sql` — masking UDFs + row filter functions
-- `abac.auto.tfvars` — groups, tags, FGAC policies, and Genie Space config
+- `abac.auto.tfvars` — groups, tags, FGAC policies, and Genie agent config
 
 Before you apply, tune for your business roles, security requirements, and Genie accuracy:
 
@@ -6587,7 +7077,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
 - **Masking behavior**: Are you using the right approach (partial, redact, hash) per sensitivity and use case?
 - **Row filters and exceptions**: Are filters too broad/strict? Are exceptions minimal and intentional?
 
-## Checklist — Genie Space Metadata & ACLs
+## Checklist — Genie agent Metadata & ACLs
 
 - **Genie title & description**: Does the AI-generated title/description accurately represent the space?
 - **Genie sample questions**: Do the sample questions reflect what business users will ask?
@@ -6711,7 +7201,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
         # ── Strip legacy Genie keys when no genie_spaces are configured ───────
         # The LLM sometimes hallucinates legacy single-space keys (genie_space_title,
         # genie_space_description, etc.) even when env.auto.tfvars has no genie_spaces.
-        # Strip them to prevent Terraform from creating an unexpected Genie Space.
+        # Strip them to prevent Terraform from creating an unexpected Genie agent.
         _configured_spaces = auth_cfg.get("genie_spaces", [])
         if args.mode not in ("genie",) and not _configured_spaces and not args.space:
             _legacy_genie_block_keys = (
@@ -6752,12 +7242,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
         # ── Inject API-parsed genie_space_configs for existing spaces ─────────
         # The LLM generates genie_space_configs from DDL, but for spaces with a
         # genie_space_id the UI config is authoritative. Replace the LLM-generated
-        # block with the verbatim parse from the Genie Space API.
+        # block with the verbatim parse from the Genie agent API.
         # Skip in governance mode — genie_space_configs is managed by BU teams.
         if api_genie_configs and args.mode != "governance":
             hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_configs")
             injected_hcl = (
-                "\n# genie_space_configs parsed verbatim from the existing Genie Space(s).\n"
+                "\n# genie_space_configs parsed verbatim from the existing Genie agent(s).\n"
                 "# Edit here to manage space config as code; make apply pushes changes back.\n"
                 + format_genie_space_configs_hcl(api_genie_configs)
             )
@@ -6822,12 +7312,32 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_overlay_fns:
             print(f"  Auto-fixed: injected {n_overlay_fns} overlay-provided masking function(s)")
 
+        # Resolve the sensitivity source once. When classification is enabled,
+        # native class.* is required unless the operator explicitly opts out.
+        native_expected = bool(auth_cfg.get("enable_classification"))
+        try:
+            classification_source = (
+                _fetch_live_classification_source(
+                    table_refs,
+                    auth_cfg,
+                    require_native=native_expected and not args.allow_llm_sensitivity,
+                )
+                if args.mode != "genie" else None
+            )
+        except NativeClassificationRequiredError as exc:
+            print(f"ERROR: {exc}")
+            print("  Re-run with --allow-llm-sensitivity only to explicitly accept LLM/DDL inference.")
+            sys.exit(1)
+
         # Skip PII autofix in genie mode — tag_assignments are managed by the governance team
         if args.mode != "genie":
             n_pii_tags = autofix_untagged_pii_columns(
                 tfvars_path,
                 ddl_path=out_dir / "ddl" / "_fetched.sql" if out_dir else None,
                 sql_path=sql_path if sql_block else None,
+                classification_source=classification_source,
+                agent_footprint=agent_footprint,
+                authoritative_classification=classification_source is not None,
             )
             if n_pii_tags:
                 print(f"  Auto-fixed: added {n_pii_tags} tag_assignment(s) for untagged PII columns")
@@ -6846,10 +7356,6 @@ Before you apply, tune for your business roles, security requirements, and Genie
         n_repaired = autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
         if n_repaired:
             print(f"  Auto-fixed: added {n_repaired} fgac_policy/ies for uncovered sensitive tags")
-
-        n_dropped = autofix_fgac_policy_count(tfvars_path)
-        if n_dropped:
-            print(f"  Auto-fixed: dropped {n_dropped} fgac_policy/ies exceeding per-catalog limit ({_FGAC_PER_CATALOG_LIMIT})")
 
         # Second pass: autofix_missing_fgac_policies (above) may have injected
         # new hasTagValue() conditions referencing values that weren't in the
@@ -6872,7 +7378,28 @@ Before you apply, tune for your business roles, security requirements, and Genie
             env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
             n_acl = autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
             if n_acl:
-                print(f"  Auto-fixed: populated acl_groups for {n_acl} genie space(s)")
+                print(f"  Auto-fixed: populated acl_groups for {n_acl} Genie agent(s)")
+
+        if args.mode != "genie":
+            n_treatments, n_native_sources = derive_and_finalize_treatments(
+                tfvars_path,
+                native_authoritative=classification_source is not None,
+            )
+            if n_treatments:
+                print(f"  Derived GenieRails enforcement treatments ({n_treatments} change(s))")
+            if n_native_sources:
+                print(
+                    "  Native classification authoritative: removed "
+                    f"{n_native_sources} redundant source-family assignment(s)"
+                )
+
+            ensure_derived_treatment_functions(
+                tfvars_path, sql_path if sql_block else None,
+            )
+
+        # Check the hard UC quota after Option-B has collapsed masks to one
+        # policy per treatment/catalog. Never delete policies to fit the cap.
+        autofix_fgac_policy_count(tfvars_path)
 
         n_fn_canonical = autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
         if n_fn_canonical:
@@ -7011,12 +7538,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if n_final_canonical:
             print(f"  Auto-fixed (final pass): normalized {n_final_canonical} tag vocabulary reference(s)")
 
-        # Last-resort: drop tag_assignments that no active FGAC policy covers.
-        # Prevents "is not covered by any active fgac_policy" validation failures.
-        # Pass SQL path so policies referencing missing functions are treated as inactive.
-        n_uncovered = autofix_remove_uncovered_tags(tfvars_path, sql_path if sql_block else None)
-        if n_uncovered:
-            print(f"  Auto-fixed (final pass): removed {n_uncovered} uncovered tag_assignment(s)")
+        # Uncovered sensitive assignments remain intact: validation/coverage
+        # must block rather than silently shrinking the protected surface.
 
         # ── Final governance mode safety strip ─────────────────────────────────
         # Multiple code paths (autofixes, semantic retries) can re-introduce
@@ -7087,10 +7610,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
                             tfvars_path,
                             ddl_path=out_dir / "ddl" / "_fetched.sql" if out_dir else None,
                             sql_path=sql_path if sql_block else None,
+                            classification_source=classification_source,
+                            agent_footprint=agent_footprint,
+                            authoritative_classification=classification_source is not None,
                         )
                         autofix_tag_policies(tfvars_path)  # register new PII tag values
                     autofix_missing_fgac_policies(tfvars_path, sql_path if sql_block else None)
-                    autofix_fgac_policy_count(tfvars_path)
                     if args.mode != "governance":
                         autofix_genie_config_fields(tfvars_path)
                         # CRITICAL: Ensure every configured genie_space has a
@@ -7099,6 +7624,15 @@ Before you apply, tune for your business roles, security requirements, and Genie
                         autofix_missing_genie_space_entries(tfvars_path, auth_cfg)
                         env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
                         autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
+                    if args.mode != "genie":
+                        derive_and_finalize_treatments(
+                            tfvars_path,
+                            native_authoritative=classification_source is not None,
+                        )
+                        ensure_derived_treatment_functions(
+                            tfvars_path, sql_path if sql_block else None,
+                        )
+                    autofix_fgac_policy_count(tfvars_path)
                     autofix_canonical_function_names(tfvars_path, sql_path if sql_block else None)
                     autofix_invalid_function_refs(tfvars_path, sql_path if sql_block else None)
                     autofix_fgac_arg_count_mismatch(tfvars_path, sql_path if sql_block else None)
@@ -7112,8 +7646,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     autofix_malformed_conditions(tfvars_path)
                     # Deploy overlay-injected fns cross-catalog (multi-catalog support)
                     autofix_cross_catalog_function_deployment(tfvars_path, sql_path if sql_block else None)
-                    # Last-resort: drop uncovered tag_assignments
-                    autofix_remove_uncovered_tags(tfvars_path, sql_path if sql_block else None)
+                    # Preserve uncovered assignments for the blocking gate.
                     # Final governance strip after retry autofixes
                     if args.mode == "governance":
                         _retry_text = tfvars_path.read_text()
@@ -7185,9 +7718,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 )
                 if n_repaired_assembled:
                     print(f"  Auto-fixed assembled abac: added {n_repaired_assembled} fgac_policy/ies for uncovered sensitive tags")
-                n_dropped_assembled = autofix_fgac_policy_count(assembled_abac_path)
-                if n_dropped_assembled:
-                    print(f"  Auto-fixed assembled abac: dropped {n_dropped_assembled} fgac_policy/ies exceeding per-catalog limit ({_FGAC_PER_CATALOG_LIMIT})")
+                autofix_fgac_policy_count(assembled_abac_path)
                 n_fields_assembled = autofix_genie_config_fields(assembled_abac_path)
                 if n_fields_assembled:
                     print(f"  Auto-fixed assembled abac: added {n_fields_assembled} missing required field(s) in genie_space_configs")

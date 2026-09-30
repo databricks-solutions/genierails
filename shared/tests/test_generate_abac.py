@@ -6,7 +6,9 @@ relevant autofix function, and asserts the expected outcome.
 """
 import re
 import sys
+import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +16,8 @@ import pytest
 # Make sure the project root is importable regardless of how pytest is invoked
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import generate_abac
 
 from generate_abac import (
     fix_hcl_syntax,
@@ -889,41 +893,41 @@ fgac_policies = [
 """
 
     def test_no_change_when_under_limit(self, tmp_tfvars, monkeypatch):
-        import generate_abac
         monkeypatch.setattr(generate_abac, "_FGAC_PER_CATALOG_LIMIT", 5)
         path = tmp_tfvars(self._make_hcl(["p1", "p2", "p3"]))
         count = autofix_fgac_policy_count(path)
         assert count == 0
         assert_valid_hcl(path)
 
-    def test_removes_excess_policies_when_over_limit(self, tmp_tfvars, monkeypatch):
+    def test_errors_without_removing_excess_policies(self, tmp_tfvars, monkeypatch):
         import generate_abac
         monkeypatch.setattr(generate_abac, "_FGAC_PER_CATALOG_LIMIT", 2)
         path = tmp_tfvars(self._make_hcl(["p1", "p2", "p3", "p4"]))
-        count = autofix_fgac_policy_count(path)
-        assert count == 2
+        original = path.read_text()
+        with pytest.raises(ValueError, match="no policies were dropped") as exc:
+            autofix_fgac_policy_count(path)
+        assert "p1, p2, p3, p4" in str(exc.value)
+        assert path.read_text() == original
         cfg = assert_valid_hcl(path)
-        remaining = cfg.get("fgac_policies", [])
-        assert len(remaining) == 2
+        assert len(cfg.get("fgac_policies", [])) == 4
 
-    def test_remove_block_leaves_valid_hcl(self, tmp_tfvars, monkeypatch):
-        """After _remove_block runs, the file must still parse as valid HCL."""
+    def test_cap_error_leaves_valid_hcl(self, tmp_tfvars, monkeypatch):
         import generate_abac
         monkeypatch.setattr(generate_abac, "_FGAC_PER_CATALOG_LIMIT", 1)
         path = tmp_tfvars(self._make_hcl(["alpha", "beta", "gamma"]))
-        autofix_fgac_policy_count(path)
+        with pytest.raises(ValueError):
+            autofix_fgac_policy_count(path)
         assert_valid_hcl(path)
 
-    def test_remove_block_no_stray_commas(self, tmp_tfvars, monkeypatch):
-        """Ensure no double-commas after block removal and the result is valid HCL."""
+    def test_cap_error_does_not_rewrite_content(self, tmp_tfvars, monkeypatch):
         import generate_abac
         monkeypatch.setattr(generate_abac, "_FGAC_PER_CATALOG_LIMIT", 1)
         path = tmp_tfvars(self._make_hcl(["x", "y"]))
-        autofix_fgac_policy_count(path)
+        original = path.read_text()
+        with pytest.raises(ValueError):
+            autofix_fgac_policy_count(path)
         text = path.read_text()
-        # HCL allows trailing commas before ] — only double commas are invalid
-        assert ",,\n" not in text
-        # The remaining HCL must still parse
+        assert text == original
         assert_valid_hcl(path)
 
     def test_multiple_catalogs_each_respect_limit(self, tmp_tfvars, monkeypatch):
@@ -964,9 +968,10 @@ fgac_policies = [
         hcl += "]\n"
 
         path = tmp_tfvars(hcl)
-        # 3 per catalog, limit 2 → 1 removal per catalog = 2 total
-        count = autofix_fgac_policy_count(path)
-        assert count == 2
+        with pytest.raises(ValueError) as exc:
+            autofix_fgac_policy_count(path)
+        assert "catalog 'cat_a'" in str(exc.value)
+        assert "catalog 'cat_b'" in str(exc.value)
         assert_valid_hcl(path)
 
 
@@ -1070,3 +1075,195 @@ CREATE OR REPLACE FUNCTION orphan(x INT);
         out = path.read_text()
         assert "USE CATALOG dev_fin;" in out
         assert "USE SCHEMA finance;" in out
+
+
+def test_strip_native_source_assignments_keeps_single_treatment(tmp_path):
+    path = tmp_path / "abac.auto.tfvars"
+    path.write_text('''tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.tbl.email", tag_key = "pii_level", tag_value = "masked_email" },
+  { entity_type = "columns", entity_name = "cat.sch.tbl.email", tag_key = "gr_treatment", tag_value = "email_partial" },
+  { entity_type = "columns", entity_name = "cat.sch.tbl.region", tag_key = "gr_row_scope", tag_value = "region_code" }
+]
+''')
+
+    assert generate_abac.strip_native_source_assignments(path) == 1
+    cfg = assert_valid_hcl(path)
+    assert [(a["tag_key"], a["tag_value"]) for a in cfg["tag_assignments"]] == [
+        ("gr_treatment", "email_partial"),
+        ("gr_row_scope", "region_code"),
+    ]
+
+
+def test_initial_and_retry_paths_share_authoritative_pipeline_wiring():
+    source = inspect.getsource(generate_abac.main)
+    assert source.count("authoritative_classification=classification_source is not None") == 2
+    assert source.count("derive_and_finalize_treatments(") == 2
+
+
+def test_native_finalizer_is_idempotent_and_strips_source_families(tmp_path):
+    path = tmp_path / "abac.auto.tfvars"
+    path.write_text('''tag_policies = [
+  { key = "pii_level", values = ["masked_email"] },
+  { key = "gr_treatment", values = ["email_partial"] }
+]
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.tbl.email", tag_key = "pii_level", tag_value = "masked_email" }
+]
+fgac_policies = []
+''')
+    generate_abac.derive_and_finalize_treatments(path, native_authoritative=True)
+    first = path.read_text()
+    generate_abac.derive_and_finalize_treatments(path, native_authoritative=True)
+    second = path.read_text()
+    cfg = assert_valid_hcl(path)
+    assert second == first
+    assert [(a["tag_key"], a["tag_value"]) for a in cfg["tag_assignments"]] == [
+        ("gr_treatment", "email_partial")
+    ]
+    assert [p["key"] for p in cfg["tag_policies"]] == ["gr_treatment"]
+
+
+def test_derived_treatments_restore_configured_functions_before_ref_repair(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text('''tag_policies = []
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.payments.credit_card_number", tag_key = "pci_level", tag_value = "masked_card_last4" },
+  { entity_type = "columns", entity_name = "cat.sch.payments.amount", tag_key = "financial_sensitivity", tag_value = "rounded_amounts" }
+]
+fgac_policies = [
+  { name = "template", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "cat", to_principals = ["users"], function_schema = "sch", match_condition = "hasTagValue('pii_level', 'masked')", function_name = "mask_redact" }
+]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text('''USE CATALOG cat;
+USE SCHEMA sch;
+CREATE FUNCTION mask_redact(input STRING) RETURNS STRING RETURN '***';
+CREATE FUNCTION mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2);
+''')
+
+    generate_abac.autofix_remove_bodyless_functions(sql)
+    generate_abac.derive_and_finalize_treatments(tfvars, native_authoritative=True)
+    assert generate_abac.ensure_derived_treatment_functions(tfvars, sql) == 2
+    generate_abac.autofix_invalid_function_refs(tfvars, sql)
+
+    cfg = assert_valid_hcl(tfvars)
+    functions = {
+        p["match_condition"]: p["function_name"] for p in cfg["fgac_policies"]
+    }
+    assert functions["hasTagValue('gr_treatment', 'card_last4')"] == "mask_credit_card_last4"
+    assert functions["hasTagValue('gr_treatment', 'round_amount')"] == "mask_amount_rounded"
+    sql_text = sql.read_text()
+    assert "FUNCTION mask_credit_card_last4" in sql_text
+    assert "FUNCTION mask_amount_rounded" in sql_text
+
+
+def test_category_mismatch_autofix_preserves_canonical_treatment_function(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text('''tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.tbl.phone_number", tag_key = "gr_treatment", tag_value = "email_partial" }
+]
+fgac_policies = [
+  {
+    name = "mask_email"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "cat"
+    to_principals = ["users"]
+    function_schema = "sch"
+    match_condition = "hasTagValue('gr_treatment', 'email_partial')"
+    function_name = "mask_email"
+  }
+]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "CREATE FUNCTION mask_email(input STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_redact(input STRING) RETURNS STRING RETURN '***';\n"
+    )
+
+    before = tfvars.read_text()
+    assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == 0
+    assert tfvars.read_text() == before
+    assert assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"] == "mask_email"
+
+
+def test_required_native_classification_fails_without_warehouse(monkeypatch):
+    import databricks.sdk
+
+    class FakeWarehouses:
+        @staticmethod
+        def list():
+            return []
+
+    class FakeClient:
+        warehouses = FakeWarehouses()
+
+    monkeypatch.setattr(generate_abac, "configure_databricks_env", lambda _: None)
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", lambda **_: FakeClient())
+
+    with pytest.raises(generate_abac.NativeClassificationRequiredError, match="No SQL warehouse"):
+        generate_abac._fetch_live_classification_source(
+            ["cat.sch.*"], {}, require_native=True,
+        )
+    assert generate_abac._fetch_live_classification_source(
+        ["cat.sch.*"], {}, require_native=False,
+    ) is None
+
+
+def test_required_native_classification_fails_for_unresolvable_footprint():
+    with pytest.raises(
+        generate_abac.NativeClassificationRequiredError,
+        match="footprint contains unresolvable table references",
+    ):
+        generate_abac._fetch_live_classification_source(
+            ["schema_table"], {}, require_native=True,
+        )
+
+
+def test_required_native_classification_qualifies_schema_table(monkeypatch):
+    import databricks.sdk
+
+    class FakeWarehouses:
+        @staticmethod
+        def list():
+            return []
+
+    class FakeClient:
+        warehouses = FakeWarehouses()
+
+    monkeypatch.setattr(generate_abac, "configure_databricks_env", lambda _: None)
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", lambda **_: FakeClient())
+
+    with pytest.raises(generate_abac.NativeClassificationRequiredError, match="No SQL warehouse"):
+        generate_abac._fetch_live_classification_source(
+            ["sch.table"], {"uc_catalog": "cat"}, require_native=True,
+        )
+
+
+def test_required_native_classification_fails_on_successful_empty_scan(monkeypatch):
+    import databricks.sdk
+    from databricks.sdk.service.sql import StatementState
+
+    class FakeStatements:
+        @staticmethod
+        def execute_statement(**_):
+            return SimpleNamespace(
+                status=SimpleNamespace(state=StatementState.SUCCEEDED),
+                result=SimpleNamespace(data_array=[]),
+            )
+
+    class FakeClient:
+        statement_execution = FakeStatements()
+
+    monkeypatch.setattr(generate_abac, "configure_databricks_env", lambda _: None)
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", lambda **_: FakeClient())
+
+    with pytest.raises(
+        generate_abac.NativeClassificationRequiredError,
+        match=r"returned 0 class\.\* findings",
+    ) as exc_info:
+        generate_abac._fetch_live_classification_source(
+            ["cat.sch.*"], {"sql_warehouse_id": "warehouse"}, require_native=True,
+        )
+    assert "review detections" in str(exc_info.value)
+    assert "enable_auto_tagging = true" in str(exc_info.value)
+    assert "re-apply enable-classification" in str(exc_info.value)

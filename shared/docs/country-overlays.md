@@ -6,9 +6,9 @@
 
 ## Overview
 
-By default, the ABAC generator produces governance rules using US-centric PII patterns (SSN, credit card, HIPAA). The **country overlay** system injects region-specific identifier knowledge — column patterns, masking functions, and regulatory context — into the LLM prompt so it produces governance appropriate for non-US datasets.
+> **Overlays tune the *rules*, not the *sensitivity decision*.** In the dev-to-prod walkthrough, **Unity Catalog native Data Classification** (`class.*` tags) is the authoritative source of what's sensitive, and GenieRails derives one `gr_treatment` per column from it. A country overlay only adds **region-specific masking functions, regulatory context, and rule-generation hints** to the generation prompt — it never decides sensitivity and never proves coverage (that's `make coverage-gate`). Overlays are optional context layered *after* classification.
 
-Each overlay is a self-contained YAML file under `shared/countries/`.
+The **country overlay** system injects region-specific identifier knowledge — column patterns, masking functions, and regulatory context — into the generation prompt so GenieRails drafts region-appropriate masking functions and rules for non-US datasets. Each overlay is a self-contained YAML file under `shared/countries/`.
 
 ### Supported regions
 
@@ -34,9 +34,13 @@ country = ""               # US/global defaults (no overlay)
 
 ### 2. Generate and apply
 
+Enable native classification first (sensitivity is native; the overlay only adds regional rule context), then prove coverage before applying:
+
 ```bash
-make generate ENV=dev
-make apply ENV=dev
+make enable-classification ENV=dev   # or the Databricks UI (recommended); then wait for class.* tags
+make generate ENV=dev GENERATE_ARGS='--groups "<your-idp-groups>"'
+make coverage-gate ENV=dev           # blocks if any classified column is unprotected
+make apply ENV=dev                   # business_access_enabled stays false until you verify + open the gate
 ```
 
 Or override the country via CLI without editing the file:
@@ -102,11 +106,11 @@ The YAML overlay plugs into the generate and validate stages — the apply stage
 │                                                                 │
 │  Deploys to Databricks (no country-specific logic here):        │
 │  • Creates masking UDFs, tag assignments, FGAC policies         │
-│  • Sets up Genie Spaces                                         │
+│  • Sets up Genie agents                                         │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Key insight:** The YAML file teaches the LLM about your region's identifiers (generate) and extends the validation rules (validate). The apply stage deploys whatever the LLM produced — no country-specific logic.
+**Key insight:** The YAML overlay adds region-specific masking functions and prompt context to *generation* and extends *validation* rules. It does **not** decide sensitivity — native `class.*` classification does that, and `make coverage-gate` (a separate step) proves every classified column is covered. The apply stage deploys whatever was generated — no country-specific logic.
 
 ---
 
@@ -193,11 +197,11 @@ The existing `TestYamlFileIntegrity` test class automatically validates new YAML
 
 ## FAQ
 
-**What if the LLM ignores the country overlay?**
-Make `column_hints` more specific, add disambiguation warnings in `prompt_overlay`, or add stronger instructions (e.g. "You MUST use mask_tfn for any column matching tfn").
+**What if a region-specific identifier isn't getting masked?**
+First check that native classification actually tagged the column (`class.*`) — that's what drives protection. The overlay only supplies the *masking function* and prompt context. If a region-specific type isn't recognized by UC classification, add a **custom classifier** for it; strengthening `column_hints`/`prompt_overlay` only affects the LLM's rule drafting, not the sensitivity decision.
 
 **What if an identifier doesn't need masking?**
 Set `masking_function: null`. The identifier is still listed so the LLM knows not to mask it unnecessarily (e.g. India's IFSC code is public bank routing info).
 
 **Do I need to update Terraform?**
-No. Country overlays only affect generation and validation. Terraform deploys whatever the LLM produces.
+No Terraform *code* changes. The overlay's masking functions do get deployed (they're written into the generated `masking_functions.sql`), but there's no country-specific Terraform logic — apply deploys whatever was generated, and `make coverage-gate` still gates it.

@@ -30,17 +30,17 @@ output "sql_warehouse_id" {
 }
 
 output "genie_space_acls_applied" {
-  description = "Whether Genie Space ACLs were applied to any space."
+  description = "Whether Genie agent ACLs were applied to any space."
   value       = length(null_resource.genie_space_acls) > 0 || length(null_resource.genie_space_acls_created) > 0
 }
 
 output "genie_space_acls_groups" {
-  description = "Per-space groups granted CAN_RUN on each Genie Space."
-  value = local.genie_space_groups
+  description = "Per-space groups granted CAN_RUN on each Genie agent."
+  value       = local.genie_space_groups
 }
 
 output "genie_spaces_created" {
-  description = "Set of Genie Space keys that were auto-created (genie_space_id was empty)."
+  description = "Set of Genie agent keys that were auto-created (genie_space_id was empty)."
   value       = keys(null_resource.genie_space_create)
 }
 

@@ -2,7 +2,7 @@ terraform {
   required_providers {
     databricks = {
       source  = "databricks/databricks"
-      version = "~> 1.91.0"
+      version = "~> 1.111.0"
     }
     null = {
       source  = "hashicorp/null"
@@ -35,9 +35,16 @@ provider "databricks" {
 
 locals {
   project_root = abspath("${path.root}/../..")
+  classification_uc_tables = distinct(concat(
+    var.uc_tables,
+    flatten([for space in var.genie_spaces : space.uc_tables]),
+  ))
   # 3-part entries (catalog.schema.table) are already fully qualified and passed through as-is.
   # 2-part entries (schema.table) are prefixed with uc_catalog (legacy schema-relative support).
   full_uc_tables = [for t in var.uc_tables :
+    length(split(".", t)) >= 3 ? t : (var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t)
+  ]
+  full_classification_uc_tables = [for t in local.classification_uc_tables :
     length(split(".", t)) >= 3 ? t : (var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t)
   ]
 }
@@ -81,6 +88,47 @@ variable "uc_catalog" {
 variable "uc_tables" {
   type    = list(string)
   default = []
+}
+
+variable "genie_spaces" {
+  type = list(object({
+    name             = optional(string, "")
+    genie_space_id   = optional(string, "")
+    sql_warehouse_id = optional(string, "")
+    uc_tables        = optional(list(string), [])
+  }))
+  default     = []
+  description = "Workspace definitions whose UC tables also form the classification footprint."
+}
+
+variable "business_access_enabled" {
+  type        = bool
+  default     = false
+  description = "Fail-closed exposure gate. Enable only after coverage validation and the schema drift check pass."
+}
+
+variable "enable_classification" {
+  type        = bool
+  default     = false
+  description = "Opt-in to enable UC Data Classification scanning, scoped to schemas in the combined classification footprint."
+}
+
+variable "enable_auto_tagging" {
+  type        = bool
+  default     = false
+  description = "Opt-in to automatically apply class.* tags for classification detections."
+}
+
+variable "classification_existing_schemas" {
+  type        = map(list(string))
+  default     = {}
+  description = "Existing catalog classification scope preserved when adopting a singleton catalog config."
+}
+
+variable "classification_all_schemas" {
+  type        = set(string)
+  default     = []
+  description = "Catalog classification configs whose remote included_schemas is unset (all schemas)."
 }
 
 variable "manage_groups" {
@@ -214,18 +262,24 @@ module "data_access" {
     databricks.workspace = databricks.workspace
   }
 
-  databricks_account_id     = var.databricks_account_id
-  databricks_client_id      = var.databricks_client_id
-  databricks_client_secret  = var.databricks_client_secret
-  databricks_workspace_host = var.databricks_workspace_host
-  groups                   = var.groups
-  uc_tables                = local.full_uc_tables
-  tag_assignments          = var.tag_assignments
-  fgac_policies            = var.fgac_policies
-  sql_warehouse_id         = var.sql_warehouse_id
-  warehouse_name           = var.warehouse_name
-  masking_sql_file         = "${var.env_dir}/masking_functions.sql"
-  deploy_masking_script    = "${local.project_root}/deploy_masking_functions.py"
+  databricks_account_id           = var.databricks_account_id
+  databricks_client_id            = var.databricks_client_id
+  databricks_client_secret        = var.databricks_client_secret
+  databricks_workspace_host       = var.databricks_workspace_host
+  groups                          = var.groups
+  uc_tables                       = local.full_uc_tables
+  classification_uc_tables        = local.full_classification_uc_tables
+  business_access_enabled         = var.business_access_enabled
+  enable_classification           = var.enable_classification
+  enable_auto_tagging             = var.enable_auto_tagging
+  classification_existing_schemas = var.classification_existing_schemas
+  classification_all_schemas      = var.classification_all_schemas
+  tag_assignments                 = var.tag_assignments
+  fgac_policies                   = var.fgac_policies
+  sql_warehouse_id                = var.sql_warehouse_id
+  warehouse_name                  = var.warehouse_name
+  masking_sql_file                = "${var.env_dir}/masking_functions.sql"
+  deploy_masking_script           = "${local.project_root}/deploy_masking_functions.py"
 }
 
 output "sql_warehouse_id" {
@@ -234,4 +288,30 @@ output "sql_warehouse_id" {
 
 output "catalogs" {
   value = module.data_access.catalogs
+}
+
+output "grant_uc_tables" {
+  description = "Fully qualified table footprint used for grants."
+  value       = local.full_uc_tables
+}
+
+output "classification_uc_tables" {
+  description = "Fully qualified table footprint used only for classification."
+  value       = local.full_classification_uc_tables
+}
+
+output "classification_catalog_schemas" {
+  value = module.data_access.classification_catalog_schemas
+}
+
+output "classification_auto_tag_configs" {
+  value = module.data_access.classification_auto_tag_configs
+}
+
+output "schema_grant_resource_keys" {
+  value = module.data_access.schema_grant_resource_keys
+}
+
+output "table_grant_resource_keys" {
+  value = module.data_access.table_grant_resource_keys
 }

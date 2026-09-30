@@ -13,7 +13,7 @@ envs/
 │
 ├── dev/                            ← WORKSPACE + DATA ACCESS (per environment)
 │   ├── env.auto.tfvars            ← input config: tables, warehouse, genie_spaces
-│   ├── abac.auto.tfvars           ← Genie Space configs (title, instructions,
+│   ├── abac.auto.tfvars           ← Genie agent configs (title, instructions,
 │   │                                 benchmarks, SQL measures, sample questions)
 │   ├── auth.auto.tfvars           ← credentials (NEVER commit)
 │   ├── generated/                 ← ephemeral LLM draft (gitignored)
@@ -31,7 +31,7 @@ envs/
 | Groups and tag policies | Account | `envs/account/abac.auto.tfvars` |
 | Tag assignments and FGAC policies | Data Access | `envs/<env>/data_access/abac.auto.tfvars` |
 | Masking SQL functions | Data Access | `envs/<env>/data_access/masking_functions.sql` |
-| Genie Space configuration | Workspace | `envs/<env>/abac.auto.tfvars` |
+| Genie agent configuration | Workspace | `envs/<env>/abac.auto.tfvars` |
 | Environment input (tables, warehouse) | Workspace | `envs/<env>/env.auto.tfvars` |
 
 The `generated/` folder is ephemeral — it holds the raw LLM draft for review and tuning. After `make promote` splits it into the three layers, the split configs become the source of truth.
@@ -44,7 +44,7 @@ The `generated/` folder is ephemeral — it holds the raw LLM draft for review a
 |------|-----|
 | `envs/account/abac.auto.tfvars` | Shared groups and tag policies — the governance baseline |
 | `envs/<env>/env.auto.tfvars` | Your environment config (tables, warehouse, spaces) |
-| `envs/<env>/abac.auto.tfvars` | Genie Space configuration (tuned instructions, benchmarks) |
+| `envs/<env>/abac.auto.tfvars` | Genie agent configuration (tuned instructions, benchmarks) |
 | `envs/<env>/data_access/abac.auto.tfvars` | Tag assignments and FGAC policies |
 | `envs/<env>/data_access/masking_functions.sql` | Masking SQL UDFs deployed to the warehouse |
 
@@ -122,7 +122,7 @@ terraform apply \
   -var-file="../../../envs/dev/data_access/abac.auto.tfvars" \
   -var="env_dir=$(pwd)/../../../envs/dev/data_access"
 
-# 3. Workspace layer (Genie Spaces, ACLs)
+# 3. Workspace layer (Genie agents, ACLs)
 cd shared/roots/workspace
 terraform init -backend-config="path=../../../envs/dev/terraform.tfstate"
 terraform apply \
@@ -153,7 +153,7 @@ Two Terraform resources use `local-exec` provisioners that call Python scripts:
 | Layer | Script | Purpose |
 |-------|--------|---------|
 | Data Access | `deploy_masking_functions.py` | Deploys masking SQL UDFs to the warehouse |
-| Workspace | `genie_space.sh` | Creates/updates Genie Spaces via REST API |
+| Workspace | `genie_space.sh` | Creates/updates Genie agents via REST API |
 
 These scripts must be available at their expected paths (relative to `shared/scripts/`). If you relocate files, update the `genie_script_path` and `masking_script_path` variables in the Terraform roots.
 

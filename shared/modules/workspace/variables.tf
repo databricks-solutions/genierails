@@ -42,6 +42,12 @@ variable "groups" {
   description = "Map of group name -> config. Workspace state looks these groups up by name."
 }
 
+variable "business_access_enabled" {
+  type        = bool
+  default     = false
+  description = "Fail-closed exposure gate. Set true only after the coverage gate and schema drift check pass; controls business-group Genie ACLs."
+}
+
 variable "sql_warehouse_id" {
   type        = string
   default     = ""
@@ -104,7 +110,7 @@ variable "genie_spaces" {
     })
   }))
   default     = {}
-  description = "Map of Genie Space key to merged infra + semantic config. Produced by the workspace root."
+  description = "Map of Genie agent key to merged infra + semantic config. Produced by the workspace root."
 }
 
 variable "genie_only" {

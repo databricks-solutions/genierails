@@ -4,73 +4,17 @@
 
 # GenieRails
 
-Put Genie onboarding on rails — with built-in guardrails. Point GenieRails at your tables, and it generates everything you need to run a governed Genie Space: groups, tag policies, column masks, row filters, ACLs, entitlements, and the Space itself. No Terraform to write.
+Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent from dev to production without exposing sensitive data: Unity Catalog's built-in classifier decides *what* is sensitive, GenieRails derives *how* it's protected and applies it as code — groups, column masks, row filters, ACLs, entitlements, and the agent itself — and a **coverage gate blocks the release** until every *classified* sensitive column the agent can reach is covered. No Terraform to write.
 
-## What you get
+**▶ Start here — the [Dev-to-Prod Walkthrough](shared/examples/dev_to_prod/):** the canonical end-to-end guide (native classification → coverage gate → safe dev→prod promotion, ~30 min). It ships an optional sample environment, so you can run the whole thing even without your own tables or agent.
 
-- **Role-based groups** — e.g. `Finance_Analyst`, `Compliance_Officer`, each with tailored data access
-- **Tag-based governance** — Unity Catalog tag policies that classify sensitive columns (PII, PCI, PHI)
-- **Column masking** — AI-generated SQL UDFs that mask sensitive data (SSN, credit cards, emails) per group
-- **Row-level security** — filter rows by region, department, compliance scope, or any business dimension
-- **Consumer entitlements** — workspace consume access granted to each group automatically
-- **Per-space Genie ACLs** — `CAN_RUN` permissions scoped per space, so each group only accesses the spaces it needs
-- **Genie Space as code** — instructions, benchmarks, SQL measures, all version-controlled
-- **Dev → prod promotion** — one command to replicate governance to production with catalog remapping
+## How it works
 
-## Getting Started
-
-Check the [Prerequisites](shared/docs/prerequisites.md) first (Python, Terraform, Databricks account setup), then pick your cloud:
-
-| My workspace is on... | Start here |
-| --- | --- |
-| AWS   | [`aws/README.md`](aws/README.md) |
-| Azure | [`azure/README.md`](azure/README.md) |
-
-> **Want to see it in action first?** Watch the video and try the three end-to-end demos, each walking through the complete workflow in approximately 20 minutes.
-> 
-
-https://github.com/user-attachments/assets/b58d83e7-d95c-416d-9df3-03292d9db617
-
-
-> - [Australian Bank Demo](shared/examples/aus_bank_demo/) — ANZ-specific masking (TFN, Medicare, BSB), PCI compliance, AML row filters
-> - [India Bank Demo](shared/examples/india_bank_demo/) — Aadhaar, PAN, GSTIN, UPI masking, DPDP Act 2023 compliance
-> - [ASEAN Bank Demo](shared/examples/asean_bank_demo/) — 6-country national IDs (NRIC, MyKad, Thai ID, NIK, PhilSys, CCCD), multi-currency, cross-border remittances
-
-**Where to start:**
-
-| Your situation | Start here | Time |
-|---|---|---|
-| Want to see a demo first | [Australian Bank Demo](shared/examples/aus_bank_demo/), [India](shared/examples/india_bank_demo/), or [ASEAN](shared/examples/asean_bank_demo/) | ~20 min |
-| Have an existing Genie Space in the UI | [From UI to Production](shared/docs/from-ui-to-production.md) | ~45 min |
-| Starting from scratch (no Genie Space yet) | [Quickstart](shared/docs/quickstart.md) | ~30 min |
-| Need the full reference | [Playbook](shared/docs/playbook.md) | Reference |
-
-## Repository Layout
-
-```
-genierails/
-├── aws/            Cloud wrapper for AWS deployments
-├── azure/          Cloud wrapper for Azure deployments
-└── shared/         All shared code (Terraform modules, scripts, tests, docs)
-```
-
-`aws/` and `azure/` are the entry points — always run `make` commands from one of these directories. `shared/` holds all Terraform modules, Python scripts, and docs, and is invoked automatically through the cloud wrapper.
+1. **Unity Catalog decides what's sensitive.** Its built-in [Data Classification](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) scanner reads your data and tags each sensitive column (`class.*`, e.g. `class.email_address`).
+2. **GenieRails decides how it's protected.** From those tags it derives one treatment per column — column masks and row filters — plus access rules mapped to your existing IdP groups (it *consumes* your groups, never invents them), and applies it all as Terraform, so you don't write any.
+3. **A coverage gate is the safety net.** The release fails ("says NO") if any classified-sensitive column has no protection, so an ungoverned agent can't reach users.
+4. **Dev rehearses; prod is the real thing.** Build and test in dev, promote the *rules* to prod, let prod classify its *own* data, prove coverage, and open the agent to users **last**.
 
 ## Documentation
 
-**Getting Started:**
-- [Prerequisites](shared/docs/prerequisites.md) — OS, Python, Terraform, network, Databricks account, cloud credentials
-- [From UI to Production](shared/docs/from-ui-to-production.md) — import your existing Genie Space, add governance, promote to prod
-- [Quickstart](shared/docs/quickstart.md) — create a Genie Space from scratch
-- [Playbook](shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios
-
-**Reference:**
-- [Version Control & Standalone Terraform](shared/docs/version-control.md) — what to commit, version pinning, running Terraform directly
-- [Architecture](shared/docs/architecture.md) — layers, artifact ownership, config files, Genie Space lifecycle
-- [Country & Region Overlays](shared/docs/country-overlays.md) — region-specific PII governance (ANZ, India, Southeast Asia)
-- [Industry Overlays](shared/docs/industry-overlays.md) — industry-specific masking and access patterns (Financial Services, Healthcare, Retail)
-- [Central Governance, Self-Service Genie](shared/docs/self-service-genie.md) — central ABAC team + BU teams self-serve Genie spaces
-- [Advanced Usage](shared/docs/advanced.md) — IDP-synced groups, ABAC-only mode, masking UDF reuse, legacy migration
-- [CI/CD Integration](shared/docs/cicd.md) — validate and deploy from a pipeline
-- [Troubleshooting](shared/docs/troubleshooting.md) — imports, provider quirks, brownfield workflows
-- [Integration Testing](shared/docs/integration-testing.md) — unit tests, integration scenarios, test data
+**[Browse all docs →](shared/docs/)** — the full index: walkthrough, quickstart, playbook, architecture, CI/CD, overlays, effective-access verification, and troubleshooting.

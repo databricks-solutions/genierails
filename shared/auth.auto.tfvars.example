@@ -26,7 +26,7 @@
 #
 # Full mode (default):
 #   - Account Admin   — create groups, assign groups to workspaces
-#   - Workspace Admin  — create warehouses, manage Genie Spaces and permissions
+#   - Workspace Admin  — create warehouses, manage Genie agents and permissions
 #   - Metastore Admin  — create tag policies, FGAC policies, grants, masking functions
 #
 # Genie-only mode (set genie_only = true in env.auto.tfvars):
