@@ -74,10 +74,16 @@ make enable-classification ENV=dev   # scans only — nothing is tagged until yo
 The as-code path applies the `databricks_data_classification_catalog_config` resource. On a workspace without a serverless usage policy it can fail with `Usage policy ID must not be empty` ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)); the UI path above avoids this issue. If needed, create or attach a serverless usage policy first. Creating one requires Workspace Admin (non-admins need *Serverless usage policy: Manager*). Docs: [AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies).
 </details>
 
-**1b. Review detections, opt into tags, then confirm they landed.** The first scan is asynchronous (minutes to ~24h) — kick it off, grab a coffee ☕, and come back. Two easy steps, mostly in the Databricks UI:
+**1b. Review detections.** The first scan is asynchronous (minutes to ~24h) — kick it off, grab a coffee ☕, and come back. Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) to see what the scanner found on your columns and **exclude any false positives**. Nothing is tagged yet — auto-tagging defaults off.
 
-- **Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) to see what the scanner found on your columns and **exclude any false positives**. Nothing is tagged yet — auto-tagging defaults off.
-- **Opt in.** After review, **enable automatic tagging in the UI** (per class). The `class.*` tags then land on the reviewed columns (visible in **Catalog Explorer**). Then continue to **1c**. *(As code: set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-run `make enable-classification ENV=dev`.)*
+<details>
+<summary><strong>Next — Enable automatic tagging after review</strong></summary>
+
+After review, **enable automatic tagging in the UI** (per class). The `class.*` tags then land on the reviewed columns and appear in **Catalog Explorer**. Then continue to **1c**.
+
+As code, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-run `make enable-classification ENV=dev`.
+
+</details>
 
 **1c. Draft the protection rules.**
 ```bash
@@ -117,7 +123,7 @@ Promotion creates `envs/prod/` with configuration templates. Fill in both files:
 **Done when —** `envs/prod/` points at the prod catalog and both production configuration files are filled in.
 
 <details>
-<summary><strong>What promote carries vs. leaves behind</strong> (rules travel, facts don't)</summary>
+<summary><strong>Details — What promotion carries and leaves behind</strong></summary>
 
 It carries the **rules** — the mapping, masking functions, access/row-filter policies, and group→tier mapping — and **leaves dev's tag assignments behind** (which columns got tagged is a *fact* about dev's data; prod re-derives its own in Phase 3).
 </details>
@@ -135,15 +141,23 @@ It carries the **rules** — the mapping, masking functions, access/row-filter p
 With the production configuration from Phase 2 in place, **turn on prod's scanner in the Databricks UI** on the prod catalog (same as step 1a). It scans **without writing tags** (auto-tagging defaults off, so prod gets its *own* review, just like dev). Then, exactly as in dev's **1b**:
 
 <details>
-<summary>Prefer to enable it as code?</summary>
+<summary><strong>Alternative — Enable classification as code</strong></summary>
 
 ```bash
 make enable-classification ENV=prod   # same as step 1a, now on prod
 ```
 </details>
 
-- **Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) on the prod catalog and **exclude any false positives** — prod's real data may surface sensitive types dev never saw.
-- **Opt in.** **Enable automatic tagging in the UI** (per class); the `class.*` tags then land. *(As code: set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` — add the line if promote didn't write it — and re-run `make enable-classification ENV=prod`.)*
+**Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) on the prod catalog and **exclude any false positives** — prod's real data may surface sensitive types dev never saw.
+
+<details>
+<summary><strong>Next — Enable automatic tagging after review</strong></summary>
+
+**Enable automatic tagging in the UI** (per class); the `class.*` tags then land.
+
+As code, set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` (add the line if promote didn't write it) and re-run `make enable-classification ENV=prod`.
+
+</details>
 
 **Done when —** prod's `class.*` tags appear on the prod catalog (check in Catalog Explorer / Review detections). The scan is async — grab a coffee ☕ and re-check; nothing yet just means it hasn't finished.
 
