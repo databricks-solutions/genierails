@@ -218,15 +218,32 @@ business_access_enabled = true
 make apply ENV=prod    # creates the Genie agent + RELEASES the withheld business SELECT and Genie run access
 ```
 
-Confirm masking live and capture the evidence report. `verify-access` automatically grants its temporary per-tier test SPs `CAN_USE` on the selected warehouse; it does not change the tier groups' permanent warehouse ACLs.
+Confirm masking live. `verify-access` automatically grants its temporary per-tier test SPs `CAN_USE` on the selected warehouse; it does not change the tier groups' permanent warehouse ACLs.
 
 ```bash
 make verify-access ENV=prod VERIFY_KEY_COLUMN=customer_id   # unprivileged = masked, authorized = raw (the gate is open now)
-make evidence      ENV=prod                                 # writes a compliance report (JSON + Markdown) to envs/prod/generated/evidence/
 ```
 
-> Auto-created the warehouse (`sql_warehouse_id=""`)? Get its id from the cloud root: `ENVS_DIR="$PWD/envs" ../shared/scripts/terraform_layer.sh workspace prod output -raw sql_warehouse_id`.
-> For a **live, approver-signed** compliance snapshot (queries the deployed masks/grants rather than the config), run: `GENIERAILS_EVIDENCE_INTEGRATION=1 GENIERAILS_EVIDENCE_APPROVED_BY="<you>" make evidence ENV=prod WAREHOUSE_ID=<id>`.
+<details>
+<summary><strong>Optional — Capture compliance evidence</strong></summary>
+
+Run `make evidence ENV=prod` to write a configuration-based JSON and Markdown report to `envs/prod/generated/evidence/`.
+
+For a live, approver-signed snapshot of the deployed masks and grants, supply the warehouse ID:
+
+```bash
+GENIERAILS_EVIDENCE_INTEGRATION=1 \
+GENIERAILS_EVIDENCE_APPROVED_BY="<you>" \
+make evidence ENV=prod WAREHOUSE_ID=<id>
+```
+
+If GenieRails auto-created the warehouse, get its ID from the cloud root:
+
+```bash
+ENVS_DIR="$PWD/envs" ../shared/scripts/terraform_layer.sh workspace prod output -raw sql_warehouse_id
+```
+
+</details>
 
 **Done when —** `verify-access` shows masked values for the unprivileged tier and raw for the authorized tier; business users can open the Genie agent and get useful, masked answers.
 
