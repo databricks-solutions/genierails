@@ -59,38 +59,15 @@ uc_tables = [
 ]
 ```
 
-## Step 2 — Follow the dev-to-prod walkthrough
+## Step 2 — Hand back to the walkthrough
 
-With the tables persisted, run the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)** from **Phase 1** — it works identically for an imported agent:
+That's the whole import. You now have what the walkthrough's Phase 0 asks for — `genie_spaces` (your agent) and `uc_tables` (its tables). **Return to the [dev-to-prod walkthrough](../examples/dev_to_prod/README.md) at Phase 1 and follow it to the end** (classify → generate → coverage gate → promote → prod re-derive → expose last). It runs identically for an imported agent — don't repeat the commands here.
 
-```bash
-make enable-classification ENV=dev        # or the Databricks UI (recommended); then wait for class.* tags
-make generate ENV=dev GENERATE_ARGS='--groups "<your IdP group names>"'
-make coverage-gate ENV=dev                # blocks if any classified column is unprotected
-make validate-generated ENV=dev
-make apply ENV=dev                         # business_access_enabled=false; attaches to your existing agent (never recreates it)
-```
+Just three things are import-specific as you go:
 
-Two import-specific notes as you review `generated/`:
-
-- **`acl_groups`** (which groups can run each agent) are **derived** — populated from your generated groups and the FGAC policies that cover each agent's tables. Review them; they reference your IdP groups, they aren't invented.
-- `make apply` **attaches** to the existing agent (applies governance + per-space ACLs and pushes any config changes back to the API); it does not create or delete it.
-
-Then continue the dev-to-prod walkthrough through promotion, prod re-derivation, and exposure:
-
-```bash
-make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_fin=prod_fin"
-# prod: fill envs/prod/auth.auto.tfvars, run make enable-classification ENV=prod, wait for prod class.* tags, then:
-make derive-assignments ENV=prod   # re-derives tag assignments from prod's live tags; reuses the promoted rules, no LLM
-make coverage-gate ENV=prod
-make apply-governance ENV=prod     # enforcement only; exposure gate still closed
-# open exposure only after the gate is green:
-#   envs/prod/env.auto.tfvars -> business_access_enabled = true
-make apply ENV=prod                # releases business SELECT + Genie CAN_RUN
-make verify-access ENV=prod VERIFY_KEY_COLUMN=<key>
-```
-
-For prod, leave `genie_space_id` empty to create a fresh prod agent from the promoted config, or set it to an existing prod agent ID to attach. (Warehouse `CAN_USE` is not managed by GenieRails — grant it yourself.)
+- **`acl_groups`** (which groups can run each agent) are **derived** — from your generated groups and the FGAC policies covering each agent's tables. Review them; they reference your IdP groups, they aren't invented.
+- **`make apply` attaches** to your existing agent — it applies governance + per-space ACLs and pushes config changes back to the API, but never creates or deletes the agent.
+- **In prod**, leave `genie_space_id` empty to create a fresh prod agent from the promoted config, or set it to an existing prod agent ID to attach.
 
 ## Multi-agent import
 
