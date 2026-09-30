@@ -138,6 +138,8 @@ resource "databricks_entity_tag_assignment" "assignments" {
   tag_key     = each.value.tag_key
   tag_value   = each.value.tag_value
 
+  depends_on = [databricks_grant.terraform_sp_manage_catalog]
+
   # Classification facts are owned by the environment's classifier. Do not
   # reconcile classifier updates back to a promoted Terraform snapshot.
   lifecycle {

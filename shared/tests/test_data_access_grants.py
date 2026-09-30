@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -49,8 +50,36 @@ def test_deployment_sp_self_grant_includes_apply_tag():
     source = MAIN_TF.read_text()
     deployer = _resource_body(source, "terraform_sp_manage_catalog")
 
-    assert '"MANAGE"' in deployer
-    assert '"APPLY_TAG"' in deployer
+    match = re.search(r"privileges\s*=\s*\[([^]]+)\]", deployer)
+    assert match is not None
+    assert set(re.findall(r'"([A-Z_]+)"', match.group(1))) == {
+        "USE_CATALOG",
+        "USE_SCHEMA",
+        "EXECUTE",
+        "MANAGE",
+        "CREATE_FUNCTION",
+        "APPLY_TAG",
+    }
+
+
+def test_tag_assignments_wait_for_deployment_sp_grant():
+    source = MAIN_TF.read_text()
+    start = source.index('resource "databricks_entity_tag_assignment" "assignments" {')
+    end = source.index('resource "time_sleep" "wait_for_tag_propagation"', start)
+
+    assert "depends_on = [databricks_grant.terraform_sp_manage_catalog]" in source[start:end]
+
+
+def test_masking_functions_and_policies_wait_for_deployment_sp_grant():
+    source = MAIN_TF.read_text()
+    for start_marker, end_marker in (
+        ('resource "null_resource" "deploy_masking_functions" {',
+         'resource "databricks_policy_info" "policies" {'),
+        ('resource "databricks_policy_info" "policies" {', None),
+    ):
+        start = source.index(start_marker)
+        end = source.index(end_marker, start) if end_marker else len(source)
+        assert "databricks_grant.terraform_sp_manage_catalog" in source[start:end]
 
 
 def test_business_select_is_fail_closed_while_structural_grants_remain():

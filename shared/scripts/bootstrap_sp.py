@@ -54,7 +54,10 @@ def parser() -> argparse.ArgumentParser:
                    help="mint a new secret even when reusing an existing SP")
     p.add_argument("--model-endpoint", default=os.environ.get("MODEL_ENDPOINT", MODEL_ENDPOINT),
                    help="serving endpoint to grant CAN_QUERY (env: MODEL_ENDPOINT)")
-    p.add_argument("--target-catalog", help="existing catalog to grant MANAGE and APPLY_TAG")
+    p.add_argument(
+        "--target-catalog",
+        help="existing catalog to grant USE_CATALOG, USE_SCHEMA, MANAGE, and APPLY_TAG",
+    )
     return p
 
 
@@ -67,7 +70,10 @@ def _plan(cfg: Config, emit: Callable[[str], None]) -> None:
     for workspace_id in cfg.workspace_ids:
         emit(f"  workspace {workspace_id}: grant ADMIN")
         if cfg.target_catalog:
-            emit(f"  workspace {workspace_id}: grant MANAGE + APPLY_TAG on catalog {cfg.target_catalog}")
+            emit(
+                f"  workspace {workspace_id}: grant USE_CATALOG + USE_SCHEMA + "
+                f"MANAGE + APPLY_TAG on catalog {cfg.target_catalog}"
+            )
         else:
             emit(f"  workspace {workspace_id}: grant CREATE_CATALOG on its metastore")
         emit(f"  workspace {workspace_id}: grant CAN_QUERY on {cfg.model_endpoint}")
@@ -91,6 +97,61 @@ def _value(obj: Any, name: str) -> Any:
 def _role_values(sp: Any) -> set[str]:
     roles = sp.get("roles", []) if isinstance(sp, dict) else getattr(sp, "roles", None) or []
     return {str(_value(role, "value")) for role in roles}
+
+
+def _workspace_client(account: Any, workspace_client: Callable[[str], Any], workspace_id: int) -> Any:
+    workspace = account.workspaces.get(workspace_id=workspace_id)
+    host = str(_value(workspace, "workspace_url"))
+    if not host.startswith("http"):
+        host = "https://" + host
+    return workspace_client(host), host
+
+
+def _preflight_target_catalog(
+    cfg: Config,
+    account: Any,
+    workspace_client: Callable[[str], Any],
+) -> None:
+    if not cfg.target_catalog:
+        return
+    for workspace_id in cfg.workspace_ids:
+        try:
+            workspace, _host = _workspace_client(account, workspace_client, workspace_id)
+            catalog = workspace.catalogs.get(cfg.target_catalog)
+            caller = workspace.current_user.me()
+            caller_name = str(_value(caller, "user_name"))
+            caller_principals = {caller_name, str(_value(caller, "display_name"))}
+            for group in _value(caller, "groups") or []:
+                caller_principals.update(
+                    str(value) for value in (
+                        _value(group, "display"),
+                        _value(group, "value"),
+                    ) if value
+                )
+            metastore = workspace.metastores.current()
+            owns_scope = (
+                str(_value(catalog, "owner")) in caller_principals
+                or str(_value(metastore, "owner")) in caller_principals
+            )
+            effective = workspace.grants.get_effective(
+                securable_type="catalog",
+                full_name=cfg.target_catalog,
+                principal=caller_name,
+            )
+            can_manage = any(
+                str(_value(privilege, "privilege").value) == "MANAGE"
+                for assignment in effective.privilege_assignments or []
+                for privilege in assignment.privileges or []
+            )
+            if not owns_scope and not can_manage:
+                raise PermissionError("caller is not an owner and lacks effective MANAGE")
+        except Exception as exc:
+            raise RuntimeError(
+                f"preflight failed for catalog {cfg.target_catalog!r} in workspace "
+                f"{workspace_id}: the catalog is unavailable or the bootstrap caller lacks "
+                "grant authority. Have the catalog owner run bootstrap or grant the deployment "
+                "service principal USE CATALOG, USE SCHEMA, MANAGE, and APPLY TAG."
+            ) from exc
 
 
 def _grant_tag_policy_roles(account: Any, cfg: Config, client_id: str) -> bool:
@@ -133,6 +194,7 @@ def bootstrap(
         return 1
 
     account, workspace_client = client_factory(cfg)
+    _preflight_target_catalog(cfg, account, workspace_client)
     escaped_name = cfg.sp_name.replace('"', '\\"')
     existing = list(account.service_principals.list(filter=f'displayName eq "{escaped_name}"'))
     if len(existing) > 1:
@@ -188,11 +250,7 @@ def bootstrap(
             permissions=[WorkspacePermission.ADMIN],
         )
         emit(f"GRANTED workspace {workspace_id}: ADMIN")
-        workspace = account.workspaces.get(workspace_id=workspace_id)
-        host = str(_value(workspace, "workspace_url"))
-        if not host.startswith("http"):
-            host = "https://" + host
-        w = workspace_client(host)
+        w, host = _workspace_client(account, workspace_client, workspace_id)
         if cfg.target_catalog:
             try:
                 w.grants.update(
@@ -200,19 +258,26 @@ def bootstrap(
                     full_name=cfg.target_catalog,
                     changes=[PermissionsChange(
                         principal=client_id,
-                        add=[Privilege.MANAGE, Privilege.APPLY_TAG],
+                        add=[
+                            Privilege.USE_CATALOG,
+                            Privilege.USE_SCHEMA,
+                            Privilege.MANAGE,
+                            Privilege.APPLY_TAG,
+                        ],
                     )],
                 )
             except Exception as exc:
                 raise RuntimeError(
-                    f"could not grant MANAGE + APPLY_TAG on catalog {cfg.target_catalog!r} "
+                    f"could not grant USE_CATALOG + USE_SCHEMA + MANAGE + APPLY_TAG on "
+                    f"catalog {cfg.target_catalog!r} "
                     f"in workspace {workspace_id}. The bootstrap caller lacks authority or "
                     "the catalog is unavailable; have the catalog owner grant the deployment "
-                    f"service principal {client_id!r} MANAGE and APPLY TAG."
+                    f"service principal {client_id!r} USE CATALOG, USE SCHEMA, MANAGE, and "
+                    "APPLY TAG."
                 ) from exc
             emit(
-                f"GRANTED workspace {workspace_id}: MANAGE + APPLY_TAG on catalog "
-                f"{cfg.target_catalog}"
+                f"GRANTED workspace {workspace_id}: USE_CATALOG + USE_SCHEMA + MANAGE + "
+                f"APPLY_TAG on catalog {cfg.target_catalog}"
             )
         else:
             metastore_id = str(_value(w.metastores.current(), "metastore_id"))
@@ -252,9 +317,8 @@ def bootstrap(
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parser().parse_args(argv)
-    cfg = Config(
+def _config_from_args(args: argparse.Namespace) -> Config:
+    return Config(
         account_id=args.account_id,
         workspace_ids=args.workspace_id,
         sp_name=args.sp_name,
@@ -265,6 +329,10 @@ def main(argv: list[str] | None = None) -> int:
         model_endpoint=args.model_endpoint,
         target_catalog=args.target_catalog,
     )
+
+
+def main(argv: list[str] | None = None) -> int:
+    cfg = _config_from_args(parser().parse_args(argv))
     try:
         return bootstrap(cfg)
     except KeyboardInterrupt:
