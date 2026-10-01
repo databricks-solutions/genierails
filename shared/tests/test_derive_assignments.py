@@ -7,8 +7,13 @@ import hcl2
 import pytest
 
 import generate_abac
-from generate_abac import NativeClassificationRequiredError, _find_bracket_section
+from generate_abac import (
+    NativeClassificationRequiredError,
+    _find_bracket_section,
+    derive_enforcement_treatments,
+)
 from sensitivity_source import ClassificationSource
+from scripts.remap_generated_config import remap_hcl
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts/derive_assignments.py"
@@ -158,6 +163,44 @@ def test_stricter_card_override_survives_certification_and_is_idempotent(tmp_pat
     assert MODULE.derive_assignments(config, auth, env) == 1
     assignments = hcl2.loads(config.read_text())["tag_assignments"]
     assert next(a for a in assignments if a.get("entity_name") == column)["tag_value"] == "redact"
+    once = config.read_bytes()
+    assert MODULE.derive_assignments(config, auth, env) == 0
+    assert config.read_bytes() == once
+
+
+def test_source_less_dev_draft_override_survives_promote_and_prod_certify(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    dev_draft = tmp_path / "dev.auto.tfvars"
+    dev_draft.write_text('''
+tag_policies = []
+tag_assignments = [
+  { entity_type = "columns", entity_name = "dev.sales.customers.amount", tag_key = "gr_treatment", tag_value = "round_amount" },
+  { entity_type = "columns", entity_name = "dev.sales.customers.email", tag_key = "pii_level", tag_value = "masked_email" },
+]
+fgac_policies = [
+  { name = "round", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["reviewed_group"], match_condition = "hasTagValue('gr_treatment', 'round_amount')", function_name = "mask_amount_rounded", function_schema = "security" },
+  { name = "email", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["reviewed_group"], match_condition = "hasTagValue('pii_level', 'masked_email')", function_name = "mask_email", function_schema = "security" },
+]
+''')
+    derive_enforcement_treatments(dev_draft)
+    promoted = remap_hcl(dev_draft.read_text(), [("dev", "prod")])
+    assert hcl2.loads(promoted)["treatment_overrides"] == [{
+        "entity_name": "prod.sales.customers.amount",
+        "treatment": "round_amount",
+    }]
+    config.write_text(promoted)
+    native = ClassificationSource(tag_rows=[
+        # Native mode remains available, but amount itself has no native finding.
+        ("prod", "sales", "customers", "email", "class.email_address", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    assert MODULE.derive_assignments(config, auth, env) == 2
+    assignments = hcl2.loads(config.read_text())["tag_assignments"]
+    assert next(
+        item for item in assignments
+        if item.get("entity_name") == "prod.sales.customers.amount"
+    )["tag_value"] == "round_amount"
     once = config.read_bytes()
     assert MODULE.derive_assignments(config, auth, env) == 0
     assert config.read_bytes() == once

@@ -15,7 +15,11 @@ from treatment_derivation import (
     matching_masks_by_column,
     resolve_treatment,
 )
-from generate_abac import autofix_acl_groups, derive_enforcement_treatments
+from generate_abac import (
+    autofix_acl_groups,
+    derive_enforcement_treatments,
+    strip_native_source_assignments,
+)
 
 
 def _base_config():
@@ -428,6 +432,70 @@ fgac_policies = [
         "entity_name": "dev.sales.cards.card_number",
         "treatment": "redact",
     }]
+
+
+def test_source_less_explicit_draft_treatment_becomes_override(tmp_path):
+    path = tmp_path / "abac.auto.tfvars"
+    path.write_text('''
+tag_policies = []
+tag_assignments = [
+  { entity_type = "columns", entity_name = "dev.sales.payments.amount", tag_key = "gr_treatment", tag_value = "round_amount" },
+]
+fgac_policies = [
+  { name = "round", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["payments"], match_condition = "hasTagValue('gr_treatment', 'round_amount')", function_name = "mask_amount_rounded", function_schema = "security" },
+]
+''')
+    derive_enforcement_treatments(path)
+    import hcl2
+    assert hcl2.loads(path.read_text())["treatment_overrides"] == [{
+        "entity_name": "dev.sales.payments.amount",
+        "treatment": "round_amount",
+    }]
+
+
+def test_source_less_override_fallback_mask_is_acl_neutral():
+    column = "dev.sales.payments.amount"
+    cfg = {
+        "tag_policies": [],
+        "tag_assignments": [{
+            "entity_type": "columns", "entity_name": column,
+            "tag_key": "gr_treatment", "tag_value": "round_amount",
+        }],
+        "fgac_policies": [],
+    }
+    derived, _ = derive_treatment_model(
+        cfg, load_treatment_config(), capture_source_less_explicit=True
+    )
+    mask = derived["fgac_policies"][0]
+    assert mask["comment"] == ACL_NEUTRAL_FALLBACK_COMMENT
+    assert mask["to_principals"] == ["account users"]
+    assert derived["treatment_overrides"] == [{
+        "entity_name": column, "treatment": "round_amount",
+    }]
+
+
+def test_native_derived_treatment_never_becomes_sticky_override(tmp_path):
+    path = tmp_path / "abac.auto.tfvars"
+    path.write_text('''
+tag_policies = []
+tag_assignments = [
+  { entity_type = "columns", entity_name = "dev.sales.payments.amount", tag_key = "financial_sensitivity", tag_value = "rounded_amounts" },
+]
+fgac_policies = [
+  { name = "round", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["payments"], match_condition = "hasTagValue('financial_sensitivity', 'rounded_amounts')", function_name = "mask_amount_rounded", function_schema = "security" },
+]
+''')
+    derive_enforcement_treatments(path)
+    strip_native_source_assignments(path)
+    derive_enforcement_treatments(path)
+
+    import hcl2
+    parsed = hcl2.loads(path.read_text())
+    assert "treatment_overrides" not in parsed
+    assert [
+        item["tag_value"] for item in parsed["tag_assignments"]
+        if item["tag_key"] == "gr_treatment"
+    ] == ["round_amount"]
 
 
 def test_numeric_and_date_treatments_are_not_escalated():

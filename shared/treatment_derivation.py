@@ -142,7 +142,12 @@ def collapse_sensitivity_assignments(
     return collapsed
 
 
-def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, int]:
+def derive_treatment_model(
+    cfg: dict,
+    config: TreatmentConfig,
+    *,
+    capture_source_less_explicit: bool = False,
+) -> tuple[dict, int]:
     """Collapse mapped column findings and rebuild masks on ``gr_treatment``.
 
     Non-column assignments and unmapped governance tags are preserved. All
@@ -211,11 +216,13 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
         )
         if treatment is None:
             continue
-        if (
-            explicit_treatment
-            and source_treatment
-            and treatment_rank[explicit_treatment.value]
-            < treatment_rank[source_treatment.value]
+        if explicit_treatment and (
+            (
+                source_treatment
+                and treatment_rank[explicit_treatment.value]
+                < treatment_rank[source_treatment.value]
+            )
+            or (source_treatment is None and capture_source_less_explicit)
         ):
             overrides_by_column[column] = {
                 "entity_name": column,

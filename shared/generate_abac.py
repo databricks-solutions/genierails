@@ -2959,7 +2959,21 @@ def derive_enforcement_treatments(tfvars_path: Path) -> int:
     provenance = re.findall(
         r"^\s*#\s*gr\.classification_unmapped:[^\n]+$", text, re.MULTILINE
     )
-    derived, changes = derive_treatment_model(cfg, load_treatment_config())
+    # Only an untransformed draft can contribute a source-less, model-authored
+    # explicit treatment. Generated masks are durable provenance that this file
+    # has already passed through derivation; without this guard, its own
+    # gr_treatment output could become a sticky override on the next pass.
+    already_derived = any(
+        str(policy.get("name") or "").startswith("gr_mask_")
+        and str(policy.get("match_alias") or "").startswith("gr_treatment_")
+        and str(policy.get("comment") or "").startswith("GenieRails treatment")
+        for policy in (cfg.get("fgac_policies") or [])
+    )
+    derived, changes = derive_treatment_model(
+        cfg,
+        load_treatment_config(),
+        capture_source_less_explicit=not already_derived,
+    )
     if not changes:
         return 0
     text = _replace_bracket_section(
