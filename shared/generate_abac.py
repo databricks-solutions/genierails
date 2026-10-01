@@ -347,12 +347,7 @@ def persist_discovered_uc_tables(
     existing_cfg = _load_tfvars(
         path, "previously discovered UC tables", strict=True
     )
-    existing_value = existing_cfg.get("discovered_uc_tables", [])
-    if not isinstance(existing_value, list):
-        raise ValueError(
-            f"Invalid discovered_uc_tables in {path}: expected a list"
-        )
-    existing = list(dict.fromkeys(existing_value))
+    existing = _validated_discovered_uc_tables(existing_cfg, path)
     current = list(dict.fromkeys(str(table) for table in tables if table))
     desired = list(dict.fromkeys(existing + current)) if merge_existing else current
 
@@ -399,17 +394,26 @@ def preserve_discovered_tables_for_incomplete_run(
 ) -> list[str]:
     """Keep persisted tables governed and put them back in the masking footprint."""
     cfg = _load_tfvars(path, "previously discovered UC tables", strict=True)
-    discovered_value = cfg.get("discovered_uc_tables", [])
-    if not isinstance(discovered_value, list):
-        raise ValueError(
-            f"Invalid discovered_uc_tables in {path}: expected a list"
-        )
-    preserved = list(dict.fromkeys(discovered_value))
+    preserved = _validated_discovered_uc_tables(cfg, path)
     tables[:] = list(dict.fromkeys(tables + preserved))
     footprint_entries.extend(
         table for table in preserved if table not in footprint_entries
     )
     return preserved
+
+
+def _validated_discovered_uc_tables(cfg: dict, path: Path) -> list[str]:
+    """Return deduplicated persisted tables or reject malformed grant input."""
+    discovered_value = cfg.get("discovered_uc_tables", [])
+    if not isinstance(discovered_value, list):
+        raise ValueError(
+            f"Invalid discovered_uc_tables in {path}: expected a list"
+        )
+    if any(not isinstance(table, str) for table in discovered_value):
+        raise ValueError(
+            f"Invalid discovered_uc_tables in {path}: every entry must be a string"
+        )
+    return list(dict.fromkeys(discovered_value))
 
 
 def configure_databricks_env(auth_cfg: dict):
@@ -6984,10 +6988,10 @@ def main():
     api_genie_configs: dict[str, dict] = {}  # space_name -> config parsed from API
     footprint_entries: list = list(auth_cfg.get("declared_footprint", []) or [])
     preserved_discovery: list[str] = []
+    all_space_tables: list[str] = []
 
     if not args.tables:
         genie_spaces_cfg = auth_cfg.get("genie_spaces", [])
-        all_space_tables: list[str] = []
         discovery_incomplete = False
         preserve_existing_discovery = bool(args.footprint)
         # In per-space mode, restrict scanning to only the target space
@@ -7040,12 +7044,6 @@ def main():
             # footprint just as for an incomplete API discovery.
             preserve_existing_discovery = discovery_incomplete or preserve_existing_discovery
 
-            # Merge space tables with any top-level uc_tables (dedup, space tables first)
-            existing_top = auth_cfg.get("uc_tables") or []
-            merged = list(dict.fromkeys(all_space_tables + existing_top))
-            if merged:
-                auth_cfg["uc_tables"] = merged
-
             if discovered_from_api:
                 print(
                     "\n  Auto-discovered tables from existing Genie agent(s):\n"
@@ -7079,14 +7077,36 @@ def main():
             except ValueError as e:
                 print(f"ERROR: {e}")
                 sys.exit(1)
+    else:
+        # --tables narrows the requested scan, but it cannot narrow Terraform's
+        # persisted grant input. Keep every already-discovered grant target in
+        # masking/coverage and in the downstream semantic checks.
+        try:
+            preserved_discovery = preserve_discovered_tables_for_incomplete_run(
+                auth_file.parent / "data_access" / "discovered_uc_tables.auto.tfvars",
+                all_space_tables,
+                footprint_entries,
+            )
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
+
+    # Downstream fail-closed checks consume auth_cfg["uc_tables"]. Perform this
+    # merge only after preservation so no granted table bypasses those checks.
+    existing_top = auth_cfg.get("uc_tables") or []
+    auth_cfg["uc_tables"] = list(dict.fromkeys(all_space_tables + existing_top))
 
     # This canonical object is the single source for DDL/classification scan
     # scope and, consequently, the classified-column coverage denominator.
     configured = list(auth_cfg.get("uc_tables") or []) + footprint_entries
     declared = (
-        list(dict.fromkeys(args.footprint + preserved_discovery))
+        list(dict.fromkeys(args.footprint + all_space_tables))
         if args.footprint
-        else args.tables or configured
+        else (
+            list(dict.fromkeys(args.tables + all_space_tables))
+            if args.tables
+            else configured
+        )
     )
     agent_footprint = discover_agent_footprint(declared_footprint=declared)
     table_refs = footprint_table_refs(agent_footprint) or None
