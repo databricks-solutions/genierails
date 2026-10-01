@@ -60,15 +60,21 @@ def main() -> int:
         for catalog in catalogs
     }
 
+    workspace_id = _value(auth, "databricks_workspace_id")
+    routing_headers = (
+        {"X-Databricks-Org-Id": workspace_id}
+        if workspace_id
+        else None
+    )
     client = WorkspaceClient(
         host=_value(auth, "databricks_workspace_host"),
         client_id=_value(auth, "databricks_client_id"),
         client_secret=_value(auth, "databricks_client_secret"),
+        custom_headers=routing_headers,
     )
     existing: dict[str, list[str]] = {}
     all_schemas: set[str] = set()
     usage_policy_id = _value(auth, "serverless_usage_policy_id")
-    workspace_id = _value(auth, "databricks_workspace_id")
     for catalog in catalogs:
         name = f"catalogs/{catalog}/config"
         try:
@@ -76,7 +82,7 @@ def main() -> int:
         except NotFound:
             if usage_policy_id:
                 headers = (
-                    {"X-Databricks-Workspace-Id": workspace_id}
+                    {"X-Databricks-Org-Id": workspace_id}
                     if workspace_id
                     else {}
                 )

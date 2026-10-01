@@ -308,7 +308,7 @@ def test_prepare_seeds_aws_classification_with_serverless_usage_policy(
                     "auto_tag_configs": [],
                     "usage_policy_id": "policy-123",
                 },
-                "headers": {"X-Databricks-Workspace-Id": "12345"},
+                "headers": {"X-Databricks-Org-Id": "12345"},
             },
         )
     ]

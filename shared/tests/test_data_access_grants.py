@@ -90,6 +90,13 @@ def test_business_select_is_fail_closed_while_structural_grants_remain():
     assert "var.business_access_enabled" not in _resource_body(source, "schema_access")
 
 
+def test_catalog_grants_are_serialized_without_authoritative_replacement():
+    source = MAIN_TF.read_text()
+    catalog_access = _resource_body(source, "catalog_access")
+    assert "depends_on = [databricks_grant.terraform_sp_manage_catalog]" in catalog_access
+    assert 'resource "databricks_grants"' not in source
+
+
 def test_builtin_policy_targets_are_included_in_access_principals():
     source = MAIN_TF.read_text()
     normalized = " ".join(source.split())

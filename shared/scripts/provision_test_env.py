@@ -888,7 +888,9 @@ def _provision_aws_serverless_budget_policy(account_client, state: dict) -> None
                 "binding_workspace_ids": [workspace_id],
                 "custom_tags": [{"key": "genierails_ci", "value": run_id}],
             },
-            "request_id": f"genierails-ci-{run_id}",
+            # The API requires a UUID here; descriptive strings are rejected
+            # with INVALID_PARAMETER_VALUE even though older backends accepted them.
+            "request_id": str(uuid.uuid4()),
         },
         # Budget policies are account resources, but creation by a Workspace
         # Admin requires the workspace context used by the UI. The generated

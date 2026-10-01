@@ -1,4 +1,5 @@
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -45,14 +46,12 @@ def test_aws_provision_creates_workspace_bound_serverless_budget_policy():
     assert method == "POST"
     assert path == "/api/2.1/accounts/account-123/budget-policies"
     assert call["headers"] == {"X-Databricks-Org-Id": "12345"}
-    assert call["body"] == {
-        "policy": {
-            "policy_name": "genierails-ci-run123",
-            "binding_workspace_ids": [12345],
-            "custom_tags": [{"key": "genierails_ci", "value": "run123"}],
-        },
-        "request_id": "genierails-ci-run123",
+    assert call["body"]["policy"] == {
+        "policy_name": "genierails-ci-run123",
+        "binding_workspace_ids": [12345],
+        "custom_tags": [{"key": "genierails_ci", "value": "run123"}],
     }
+    uuid.UUID(call["body"]["request_id"])
     assert state["serverless_budget_policy_id"] == "policy-123"
     assert state["serverless_budget_policy_name"] == "genierails-ci-run123"
 

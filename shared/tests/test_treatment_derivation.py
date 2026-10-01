@@ -67,6 +67,18 @@ def test_single_tag_ssn_resolves_to_treatment():
     assert [item["tag_value"] for item in treatments] == ["ssn_last4"]
 
 
+def test_compensation_mask_is_numeric_type_compatible():
+    config = load_treatment_config()
+    treatment = next(
+        item for item in config.treatments
+        if item.value == "compensation_redacted"
+    )
+    assert treatment.udf_signature == (
+        "mask_compensation_redact(input DECIMAL(18,2)) RETURNS DECIMAL(18,2)"
+    )
+    assert treatment.udf_body == "CAST(NULL AS DECIMAL(18,2))"
+
+
 def test_unknown_tag_resolves_to_no_treatment():
     assert resolve_treatment(
         [("pii_level", "future_unknown_value")], load_treatment_config()
