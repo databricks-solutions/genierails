@@ -31,3 +31,23 @@ def test_same_environment_split_keeps_tag_assignments():
     assert data_access["fgac_policies"] == generated["fgac_policies"]
     assert data_access["groups"] == generated["groups"]
     assert data_access["tag_assignments"] == generated["tag_assignments"]
+
+
+def test_data_access_split_derives_only_agent_acl_map_from_workspace_config():
+    generated = {
+        "genie_space_configs": {
+            "Agent A": {"title": "A", "acl_groups": ["a_group"]},
+            "Agent B": {"title": "B", "acl_groups": ["b_group", "shared_group"]},
+        },
+        "discovered_uc_tables": ["cat.schema.table"],
+        "discovered_table_agents": {"cat.schema.table": ["Agent A"]},
+    }
+
+    data_access = build_data_access_config(generated)
+
+    assert data_access == {
+        "genie_space_acl_groups": {
+            "Agent A": ["a_group"],
+            "Agent B": ["b_group", "shared_group"],
+        }
+    }

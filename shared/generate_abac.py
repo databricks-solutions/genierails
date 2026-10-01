@@ -341,15 +341,38 @@ def load_auth_config(
 
 
 def persist_discovered_uc_tables(
-    path: Path, tables: list[str], *, merge_existing: bool = False
+    path: Path,
+    tables: list[str],
+    *,
+    table_agents: dict[str, list[str]] | None = None,
+    merge_existing: bool = False,
 ) -> tuple[list[str], list[str], list[str]]:
     """Atomically persist the tool-owned Genie table footprint."""
     existing_cfg = _load_tfvars(
         path, "previously discovered UC tables", strict=True
     )
     existing = _validated_discovered_uc_tables(existing_cfg, path)
+    existing_agents = _validated_discovered_table_agents(existing_cfg, path)
+    current_agents = _validated_discovered_table_agents(
+        {"discovered_table_agents": table_agents or {}}, path
+    )
     current = list(dict.fromkeys(str(table) for table in tables if table))
+    current = list(dict.fromkeys(current + list(current_agents)))
     desired = list(dict.fromkeys(existing + current)) if merge_existing else current
+    if merge_existing:
+        desired_agents = {
+            table: list(dict.fromkeys(
+                existing_agents.get(table, []) + current_agents.get(table, [])
+            ))
+            for table in desired
+            if table in existing_agents or table in current_agents
+        }
+    else:
+        desired_agents = {
+            table: current_agents[table]
+            for table in desired
+            if table in current_agents
+        }
 
     existing_set = set(existing)
     desired_set = set(desired)
@@ -369,6 +392,11 @@ def persist_discovered_uc_tables(
     rendered += "discovered_uc_tables = [\n"
     rendered += "".join(f"  {json.dumps(table)},\n" for table in desired)
     rendered += "]\n"
+    rendered += "\n# Table FQN -> Genie agents that expose it.\n"
+    rendered += "discovered_table_agents = {\n"
+    for table, agents in desired_agents.items():
+        rendered += f"  {json.dumps(table)} = {json.dumps(agents)}\n"
+    rendered += "}\n"
     if path.exists() and path.read_text() == rendered:
         path.chmod(0o644)
         print(f"    unchanged: {path}")
@@ -395,6 +423,12 @@ def preserve_discovered_tables_for_incomplete_run(
     """Keep persisted tables governed and put them back in the masking footprint."""
     cfg = _load_tfvars(path, "previously discovered UC tables", strict=True)
     preserved = _validated_discovered_uc_tables(cfg, path)
+    agents = _validated_discovered_table_agents(cfg, path)
+    if preserved and not agents:
+        print(
+            "  WARNING: legacy discovered_uc_tables has no agent attribution; "
+            "SELECT grants fall back to all access principals until generate re-derives it."
+        )
     tables[:] = list(dict.fromkeys(tables + preserved))
     footprint_entries.extend(
         table for table in preserved if table not in footprint_entries
@@ -414,6 +448,26 @@ def _validated_discovered_uc_tables(cfg: dict, path: Path) -> list[str]:
             f"Invalid discovered_uc_tables in {path}: every entry must be a string"
         )
     return list(dict.fromkeys(discovered_value))
+
+
+def _validated_discovered_table_agents(cfg: dict, path: Path) -> dict[str, list[str]]:
+    """Return validated table-to-agent facts from the environment-local file."""
+    value = cfg.get("discovered_table_agents", {})
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"Invalid discovered_table_agents in {path}: expected a map"
+        )
+    normalized: dict[str, list[str]] = {}
+    for table, agents in value.items():
+        if not isinstance(table, str) or not isinstance(agents, list) or any(
+            not isinstance(agent, str) for agent in agents
+        ):
+            raise ValueError(
+                f"Invalid discovered_table_agents in {path}: expected string table keys "
+                "and lists of agent-name strings"
+            )
+        normalized[table] = list(dict.fromkeys(agents))
+    return normalized
 
 
 def configure_databricks_env(auth_cfg: dict):
@@ -6467,7 +6521,7 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict, mode: str = 
     # incomplete response (e.g. only groups + tag_policies without the FGAC
     # sections), which would wipe all existing governance on apply.
     # Skip in genie mode — 0 tag_assignments is correct (governance team manages ABAC).
-    uc_tables = auth_cfg.get("uc_tables", [])
+    uc_tables = list(auth_cfg.get("uc_tables") or [])
     if not uc_tables:
         for gs in auth_cfg.get("genie_spaces", []):
             uc_tables.extend(gs.get("uc_tables", []))
@@ -6640,7 +6694,7 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict, mode: str = 
 
     # Check 6: all input catalogs are represented in tag_assignments
     # When DDL spans multiple catalogs, the LLM sometimes "forgets" one.
-    uc_tables = auth_cfg.get("uc_tables", []) or []
+    uc_tables = list(auth_cfg.get("uc_tables") or [])
     # Also collect tables from genie_spaces[].uc_tables
     for sp in auth_cfg.get("genie_spaces", []) or []:
         if isinstance(sp, dict):
@@ -6989,6 +7043,7 @@ def main():
     footprint_entries: list = list(auth_cfg.get("declared_footprint", []) or [])
     preserved_discovery: list[str] = []
     all_space_tables: list[str] = []
+    discovered_table_agents: dict[str, list[str]] = {}
 
     if not args.tables:
         genie_spaces_cfg = auth_cfg.get("genie_spaces", [])
@@ -7006,6 +7061,8 @@ def main():
                 footprint_entries.extend(space_declared or space_tables)
                 space_id = space.get("genie_space_id") or ""
                 space_name = space.get("name") or space_id
+                agent_name = space_name
+                exposed_tables = list(space_tables)
 
                 if space_id:
                     # Always query the API for existing spaces to get config.
@@ -7025,8 +7082,10 @@ def main():
 
                     # Use the API title as the canonical name if no name was given
                     effective_name = space_name if space_name != space_id else (api_title or space_id)
+                    agent_name = effective_name
 
                     if not space_tables:
+                        exposed_tables = list(tables)
                         all_space_tables.extend(tables)
                         discovered_from_api.extend(tables)
                         footprint_entries.extend(tables)
@@ -7037,6 +7096,11 @@ def main():
                         api_genie_configs[effective_name] = genie_cfg
                 else:
                     all_space_tables.extend(space_tables)
+
+                for table in exposed_tables:
+                    owners = discovered_table_agents.setdefault(table, [])
+                    if agent_name and agent_name not in owners:
+                        owners.append(agent_name)
 
             # An explicit CLI footprint bounds what is scanned on this run; it
             # does not prove that previously discovered, still-granted tables
@@ -7072,6 +7136,7 @@ def main():
                 persist_discovered_uc_tables(
                     auth_file.parent / "data_access" / "discovered_uc_tables.auto.tfvars",
                     all_space_tables,
+                    table_agents=discovered_table_agents,
                     merge_existing=target_space_cfg is not None or preserve_existing_discovery,
                 )
             except ValueError as e:
@@ -7093,7 +7158,7 @@ def main():
 
     # Downstream fail-closed checks consume auth_cfg["uc_tables"]. Perform this
     # merge only after preservation so no granted table bypasses those checks.
-    existing_top = auth_cfg.get("uc_tables") or []
+    existing_top = list(auth_cfg.get("uc_tables") or [])
     auth_cfg["uc_tables"] = list(dict.fromkeys(all_space_tables + existing_top))
 
     # This canonical object is the single source for DDL/classification scan

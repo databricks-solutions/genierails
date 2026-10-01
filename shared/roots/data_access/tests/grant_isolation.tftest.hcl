@@ -2,7 +2,7 @@ mock_provider "databricks" {}
 mock_provider "null" {}
 mock_provider "time" {}
 
-run "effective_tables_reach_classification_and_grants" {
+run "per_agent_select_grants_are_isolated_and_shared_tables_union_acls" {
   command = plan
 
   variables {
@@ -11,24 +11,39 @@ run "effective_tables_reach_classification_and_grants" {
     databricks_client_id      = "service-principal"
     databricks_client_secret  = "secret"
     databricks_workspace_host = "https://example.invalid"
-    uc_tables                 = ["grants_catalog.business.orders"]
-    genie_spaces              = [{ uc_tables = ["classification_catalog.space_only.events"] }]
-    discovered_uc_tables      = ["discovered_catalog.agent.facts"]
-    groups                    = { analysts = {} }
+    uc_tables = ["grants_catalog.business.orders"]
+    genie_spaces = [
+      { name = "Agent A", uc_tables = ["agent_catalog.space.a_only", "agent_catalog.space.shared"] },
+      { name = "Agent B", uc_tables = ["agent_catalog.space.b_only", "agent_catalog.space.shared"] },
+    ]
+    genie_space_acl_groups = {
+      "Agent A" = ["agent_a_group"]
+      "Agent B" = ["agent_b_group"]
+    }
+    discovered_uc_tables = ["discovered_catalog.agent.facts"]
+    discovered_table_agents = {
+      "discovered_catalog.agent.facts" = ["Agent A"]
+    }
+    groups = {
+      agent_a_group = {}
+      agent_b_group = {}
+    }
     business_access_enabled   = true
     enable_classification     = true
     sql_warehouse_id          = "warehouse"
   }
 
   assert {
-    condition     = toset(output.catalogs) == toset(["grants_catalog", "classification_catalog", "discovered_catalog"])
+    condition     = toset(output.catalogs) == toset(["grants_catalog", "agent_catalog", "discovered_catalog"])
     error_message = "all effective catalogs must enter service-principal and business catalog grants"
   }
 
   assert {
     condition = toset(output.grant_uc_tables) == toset([
       "grants_catalog.business.orders",
-      "classification_catalog.space_only.events",
+      "agent_catalog.space.a_only",
+      "agent_catalog.space.b_only",
+      "agent_catalog.space.shared",
       "discovered_catalog.agent.facts",
     ])
     error_message = "user, Genie-space, and discovered tables must enter the grant footprint"
@@ -36,18 +51,25 @@ run "effective_tables_reach_classification_and_grants" {
 
   assert {
     condition = toset(output.schema_grant_resource_keys) == toset([
-      "grants_catalog.business|analysts",
-      "classification_catalog.space_only|analysts",
-      "discovered_catalog.agent|analysts",
+      "grants_catalog.business|agent_a_group",
+      "grants_catalog.business|agent_b_group",
+      "agent_catalog.space|agent_a_group",
+      "agent_catalog.space|agent_b_group",
+      "discovered_catalog.agent|agent_a_group",
+      "discovered_catalog.agent|agent_b_group",
     ])
     error_message = "schema grant resources must be sourced from the effective governed table footprint"
   }
 
   assert {
     condition = toset(output.table_grant_resource_keys) == toset([
-      "grants_catalog.business.orders|analysts",
-      "classification_catalog.space_only.events|analysts",
-      "discovered_catalog.agent.facts|analysts",
+      "grants_catalog.business.orders|agent_a_group",
+      "grants_catalog.business.orders|agent_b_group",
+      "agent_catalog.space.a_only|agent_a_group",
+      "agent_catalog.space.b_only|agent_b_group",
+      "agent_catalog.space.shared|agent_a_group",
+      "agent_catalog.space.shared|agent_b_group",
+      "discovered_catalog.agent.facts|agent_a_group",
     ])
     error_message = "table grant resources must be sourced from the effective governed table footprint"
   }
@@ -55,10 +77,44 @@ run "effective_tables_reach_classification_and_grants" {
   assert {
     condition = toset(output.classification_uc_tables) == toset([
       "grants_catalog.business.orders",
-      "classification_catalog.space_only.events",
+      "agent_catalog.space.a_only",
+      "agent_catalog.space.b_only",
+      "agent_catalog.space.shared",
       "discovered_catalog.agent.facts",
     ])
     error_message = "classification must cover the union of normal and Genie-space-only tables"
+  }
+}
+
+run "legacy_unattributed_discovery_falls_back_to_all_principals" {
+  command = plan
+
+  variables {
+    env_dir                   = "../../examples/healthcare"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_host = "https://example.invalid"
+    discovered_uc_tables      = ["legacy_catalog.agent.facts"]
+    groups = {
+      agent_a_group = {}
+      agent_b_group = {}
+    }
+    business_access_enabled = true
+    sql_warehouse_id        = "warehouse"
+  }
+
+  assert {
+    condition = toset(output.table_grant_resource_keys) == toset([
+      "legacy_catalog.agent.facts|agent_a_group",
+      "legacy_catalog.agent.facts|agent_b_group",
+    ])
+    error_message = "legacy unattributed discovered tables must retain all-tier SELECT access"
+  }
+
+  assert {
+    condition     = toset(output.legacy_unattributed_discovered_tables) == toset(["legacy_catalog.agent.facts"])
+    error_message = "legacy fallback must be visible as a warning-oriented output"
   }
 }
 

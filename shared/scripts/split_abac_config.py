@@ -30,6 +30,7 @@ DATA_ACCESS_KEYS = (
     "groups",
     "tag_assignments",
     "fgac_policies",
+    "genie_space_acl_groups",
 )
 
 WORKSPACE_KEYS = (
@@ -305,6 +306,13 @@ def build_data_access_config(full_cfg: dict) -> dict:
         if value in ("", [], {}):
             continue
         cfg[key] = value
+    genie_configs = full_cfg.get("genie_space_configs") or {}
+    if isinstance(genie_configs, dict) and genie_configs:
+        cfg["genie_space_acl_groups"] = {
+            name: list(space.get("acl_groups") or [])
+            for name, space in genie_configs.items()
+            if isinstance(space, dict)
+        }
     return cfg
 
 

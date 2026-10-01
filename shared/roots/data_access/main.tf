@@ -35,6 +35,9 @@ provider "databricks" {
 
 locals {
   project_root = abspath("${path.root}/../..")
+  full_admin_uc_tables = [for t in var.uc_tables :
+    length(split(".", t)) >= 3 ? t : (var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t)
+  ]
   configured_uc_tables = distinct(concat(
     var.uc_tables,
     flatten([for space in var.genie_spaces : space.uc_tables]),
@@ -47,6 +50,28 @@ locals {
   full_discovered_uc_tables = [for t in var.discovered_uc_tables :
     length(split(".", t)) >= 3 ? t : (var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t)
   ]
+  full_discovered_table_agents = {
+    for table, agents in var.discovered_table_agents :
+    length(split(".", table)) >= 3 ? table : (var.uc_catalog != "" ? "${var.uc_catalog}.${table}" : table) => agents
+  }
+  _explicit_table_agent_pairs = flatten([
+    for space in var.genie_spaces : [
+      for table in space.uc_tables : {
+        table = length(split(".", table)) >= 3 ? table : (var.uc_catalog != "" ? "${var.uc_catalog}.${table}" : table)
+        agent = space.name != "" ? space.name : space.genie_space_id
+      }
+    ]
+  ])
+  explicit_table_agents = {
+    for pair in local._explicit_table_agent_pairs : pair.table => pair.agent...
+  }
+  table_agents = {
+    for table in distinct(concat(keys(local.explicit_table_agents), keys(local.full_discovered_table_agents))) :
+    table => distinct(concat(
+      lookup(local.explicit_table_agents, table, []),
+      lookup(local.full_discovered_table_agents, table, []),
+    ))
+  }
   full_effective_uc_tables = distinct(concat(local.full_uc_tables, local.full_discovered_uc_tables))
 }
 
@@ -103,6 +128,12 @@ variable "discovered_uc_tables" {
   description = "Tool-owned per-environment table facts discovered from Genie agents."
 }
 
+variable "discovered_table_agents" {
+  type        = map(list(string))
+  default     = {}
+  description = "Tool-owned per-environment mapping from discovered UC table FQN to exposing Genie agent names."
+}
+
 variable "genie_spaces" {
   type = list(object({
     name             = optional(string, "")
@@ -112,6 +143,12 @@ variable "genie_spaces" {
   }))
   default     = []
   description = "Workspace definitions whose UC tables also form the classification footprint."
+}
+
+variable "genie_space_acl_groups" {
+  type        = map(list(string))
+  default     = {}
+  description = "Generated mapping from Genie agent name to groups authorized for CAN_RUN."
 }
 
 variable "business_access_enabled" {
@@ -281,7 +318,10 @@ module "data_access" {
   databricks_workspace_host       = var.databricks_workspace_host
   groups                          = var.groups
   uc_tables                       = local.full_uc_tables
+  admin_uc_tables                 = local.full_admin_uc_tables
   discovered_uc_tables            = local.full_discovered_uc_tables
+  table_agents                    = local.table_agents
+  genie_space_acl_groups          = var.genie_space_acl_groups
   classification_uc_tables        = local.full_effective_uc_tables
   business_access_enabled         = var.business_access_enabled
   enable_classification           = var.enable_classification
@@ -328,4 +368,9 @@ output "schema_grant_resource_keys" {
 
 output "table_grant_resource_keys" {
   value = module.data_access.table_grant_resource_keys
+}
+
+output "legacy_unattributed_discovered_tables" {
+  description = "Legacy discovered tables falling back to all access principals until make generate re-derives agent attribution."
+  value       = module.data_access.legacy_unattributed_discovered_tables
 }

@@ -39,9 +39,13 @@ def test_promotion_does_not_copy_or_overwrite_environment_discovery(tmp_path, mo
     (source / "env.auto.tfvars").write_text("genie_spaces = []\nuc_tables = []\n")
     (source / "data_access" / "discovered_uc_tables.auto.tfvars").write_text(
         'discovered_uc_tables = ["dev_catalog.agent.orders"]\n'
+        'discovered_table_agents = { "dev_catalog.agent.orders" = ["Dev agent"] }\n'
     )
     prod_fact = dest / "data_access" / "discovered_uc_tables.auto.tfvars"
-    prod_fact.write_text('discovered_uc_tables = ["prod_catalog.agent.orders"]\n')
+    prod_fact.write_text(
+        'discovered_uc_tables = ["prod_catalog.agent.orders"]\n'
+        'discovered_table_agents = { "prod_catalog.agent.orders" = ["Prod agent"] }\n'
+    )
 
     monkeypatch.setattr(
         sys,
@@ -52,4 +56,5 @@ def test_promotion_does_not_copy_or_overwrite_environment_discovery(tmp_path, mo
 
     assert prod_fact.read_text() == (
         'discovered_uc_tables = ["prod_catalog.agent.orders"]\n'
+        'discovered_table_agents = { "prod_catalog.agent.orders" = ["Prod agent"] }\n'
     )

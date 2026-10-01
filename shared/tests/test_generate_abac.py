@@ -93,6 +93,25 @@ def test_per_space_discovery_merges_without_wiping_other_agents(tmp_path):
     ]
 
 
+def test_discovered_table_agents_persist_shared_agent_union(tmp_path):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    persist_discovered_uc_tables(
+        path,
+        ["main.shared.events", "main.a.only"],
+        table_agents={
+            "main.shared.events": ["Agent A", "Agent B", "Agent A"],
+            "main.a.only": ["Agent A"],
+        },
+    )
+
+    cfg = assert_valid_hcl(path)
+    assert cfg["discovered_uc_tables"] == ["main.shared.events", "main.a.only"]
+    assert cfg["discovered_table_agents"] == {
+        "main.shared.events": ["Agent A", "Agent B"],
+        "main.a.only": ["Agent A"],
+    }
+
+
 def test_full_discovery_reflects_current_state_and_reports_disappeared(tmp_path, capsys):
     path = tmp_path / "discovered_uc_tables.auto.tfvars"
     persist_discovered_uc_tables(path, ["main.old.table", "main.kept.table"])
@@ -265,6 +284,12 @@ def test_main_footprint_includes_new_api_table_in_discovery_and_masking(monkeypa
     }
     assert set(auth_cfg["uc_tables"]) == {
         "main.persisted.customers", "new_catalog.live.events",
+    }
+    discovered_cfg = assert_valid_hcl(
+        tmp_path / "data_access" / "discovered_uc_tables.auto.tfvars"
+    )
+    assert discovered_cfg["discovered_table_agents"] == {
+        "new_catalog.live.events": ["Live agent"]
     }
 
 

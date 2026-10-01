@@ -32,7 +32,7 @@ def test_group_grants_follow_catalog_schema_table_chain():
     assert "schema     = each.value.schema" in schema
     assert 'privileges = ["USE_SCHEMA"]' in schema
 
-    assert "setproduct(local.effective_uc_tables, local.access_principals)" in table
+    assert "for pair in local.table_access_pairs" in table
     assert "table      = each.value.table" in table
     assert 'privileges = ["SELECT"]' in table
 
@@ -95,12 +95,25 @@ def test_builtin_policy_targets_are_included_in_access_principals():
     normalized = " ".join(source.split())
     assert (
         "access_principals = distinct(concat( keys(var.groups), "
-        "flatten([for p in var.fgac_policies : p.to_principals]), ))"
+        "flatten([for p in var.fgac_policies : p.to_principals]), "
+        "flatten(values(var.genie_space_acl_groups)), ))"
     ) in normalized
-    for resource in ("catalog_access", "schema_access", "table_access"):
+    for resource in ("catalog_access", "schema_access"):
         body = _resource_body(source, resource)
         assert "local.access_principals" in body
         assert "keys(var.groups)" not in body
+    assert "local.table_access_pairs" in _resource_body(source, "table_access")
+
+
+def test_table_select_principals_are_derived_per_table():
+    source = MAIN_TF.read_text()
+
+    assert "table_access_principals = {" in source
+    assert "lookup(var.table_agents, table, [])" in source
+    assert "lookup(var.genie_space_acl_groups, agent, [])" in source
+    assert "contains(var.admin_uc_tables, table)" in source
+    assert "contains(local.legacy_unattributed_discovered_tables, table)" in source
+    assert "setproduct(local.effective_uc_tables, local.access_principals)" not in source
 
 
 def test_masking_deployer_does_not_declassify_oauth_secret():

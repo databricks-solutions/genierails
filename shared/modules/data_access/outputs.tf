@@ -29,3 +29,8 @@ output "table_grant_resource_keys" {
   description = "Instantiated table grant resource keys."
   value       = keys(databricks_grant.table_access)
 }
+
+output "legacy_unattributed_discovered_tables" {
+  description = "Discovered tables using the backward-compatible all-principals fallback because agent attribution is absent."
+  value       = local.legacy_unattributed_discovered_tables
+}

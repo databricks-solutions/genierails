@@ -33,10 +33,29 @@ variable "uc_tables" {
   description = "Optional UC table list used to derive catalogs for grants."
 }
 
+variable "admin_uc_tables" {
+  type        = list(string)
+  default     = []
+  description = "Top-level administrator-authored tables that intentionally grant SELECT to every access principal."
+}
+
 variable "discovered_uc_tables" {
   type        = list(string)
   default     = []
   description = "Tool-owned per-environment table facts discovered from Genie agents."
+}
+
+
+variable "table_agents" {
+  type        = map(list(string))
+  default     = {}
+  description = "Mapping from table FQN to Genie agents that expose the table."
+}
+
+variable "genie_space_acl_groups" {
+  type        = map(list(string))
+  default     = {}
+  description = "Mapping from Genie agent name to its CAN_RUN groups."
 }
 
 variable "classification_uc_tables" {
