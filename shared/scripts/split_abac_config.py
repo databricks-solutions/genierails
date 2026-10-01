@@ -70,6 +70,9 @@ def load_generated_config(source_path: Path) -> dict:
         full_cfg["genie_space_derived_acl_groups"] = derived_cfg.get(
             "genie_space_derived_acl_groups", {}
         )
+        full_cfg["genie_space_derived_acl_groups_authoritative"] = derived_cfg.get(
+            "genie_space_derived_acl_groups_authoritative", False
+        )
     return full_cfg
 
 
@@ -80,10 +83,15 @@ def quote_key(key: str) -> str:
 
 
 def resolve_space_acl(
-    space_name: str, space: dict, derived_acls: dict
+    space_name: str,
+    space: dict,
+    derived_acls: dict,
+    derived_authoritative: bool = False,
 ) -> list[str]:
     """Resolve explicit/legacy/derived ACLs, failing closed when unavailable."""
-    if "acl_groups" in space:
+    if derived_authoritative and space_name in derived_acls:
+        value = derived_acls[space_name]
+    elif "acl_groups" in space:
         value = space["acl_groups"]
     elif "genie_acl_groups" in space:
         value = space["genie_acl_groups"]
@@ -342,6 +350,9 @@ def build_workspace_config(full_cfg: dict) -> dict:
                 cfg.pop(legacy_key, None)
 
     derived_acls = full_cfg.get("genie_space_derived_acl_groups") or {}
+    derived_authoritative = bool(
+        full_cfg.get("genie_space_derived_acl_groups_authoritative", False)
+    )
     genie_configs = cfg.get("genie_space_configs") or {}
     if isinstance(genie_configs, dict):
         resolved_configs = {}
@@ -350,7 +361,9 @@ def build_workspace_config(full_cfg: dict) -> dict:
                 resolved_configs[name] = space
                 continue
             resolved = dict(space)
-            resolved["acl_groups"] = resolve_space_acl(name, space, derived_acls)
+            resolved["acl_groups"] = resolve_space_acl(
+                name, space, derived_acls, derived_authoritative
+            )
             resolved.pop("genie_acl_groups", None)
             resolved_configs[name] = resolved
         cfg["genie_space_configs"] = resolved_configs
@@ -371,9 +384,14 @@ def build_data_access_config(full_cfg: dict) -> dict:
     if not genie_configs:
         genie_configs = _convert_legacy_to_genie_space_configs(full_cfg) or {}
     derived_acls = full_cfg.get("genie_space_derived_acl_groups") or {}
+    derived_authoritative = bool(
+        full_cfg.get("genie_space_derived_acl_groups_authoritative", False)
+    )
     if isinstance(genie_configs, dict) and genie_configs:
         cfg["genie_space_acl_groups"] = {
-            name: resolve_space_acl(name, space, derived_acls)
+            name: resolve_space_acl(
+                name, space, derived_acls, derived_authoritative
+            )
             for name, space in genie_configs.items()
             if isinstance(space, dict)
         }

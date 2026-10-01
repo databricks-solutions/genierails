@@ -329,7 +329,9 @@ print(', '.join(cats) if cats else '(none detected)') \
 			$$map_flags; \
 		python3 "$(SHARED_ROOT)/scripts/derive_genie_acls.py" \
 			"$$dest_env_dir/generated/abac.auto.tfvars" \
-			"$$dest_env_dir/env.auto.tfvars"; \
+			"$$dest_env_dir/env.auto.tfvars" \
+			--canonical-workspace "$$dest_env_dir/abac.auto.tfvars" \
+			--ignore-explicit; \
 		cd "$$dest_env_dir" && python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" generated/abac.auto.tfvars ../$(ACCOUNT_ENV)/abac.auto.tfvars $(DATA_ACCESS_SUBDIR)/abac.auto.tfvars abac.auto.tfvars; \
 		acl_ok=1; \
 		cp "$$dest_env_dir/generated/masking_functions.sql" "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/masking_functions.sql"; \
@@ -353,7 +355,9 @@ print(', '.join(cats) if cats else '(none detected)') \
 		acl_ok=0; trap 'if [ "$$acl_ok" != 1 ]; then rm -f "$(ENV_DIR)/generated/genie_space_derived_acl_groups.auto.tfvars" "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars" "$(ENV_DIR)/abac.auto.tfvars"; fi' EXIT; \
 		python3 "$(SHARED_ROOT)/scripts/derive_genie_acls.py" \
 			"$(ENV_DIR)/generated/abac.auto.tfvars" \
-			"$(ENV_DIR)/env.auto.tfvars"; \
+			"$(ENV_DIR)/env.auto.tfvars" \
+			--canonical-workspace "$(ENV_DIR)/abac.auto.tfvars" \
+			--ignore-explicit; \
 		if [ -f "$(ENV_DIR)/generated/masking_functions.sql" ]; then \
 			cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars generated/masking_functions.sql; \
 		else \
@@ -506,7 +510,9 @@ apply-genie: _bootstrap _guard-workspace-target ## [BU team] Apply workspace lay
 		echo "=== Extracting workspace config from genie draft ($(ENV)) ==="; \
 		python3 "$(SHARED_ROOT)/scripts/derive_genie_acls.py" \
 			"$(ENV_DIR)/generated/abac.auto.tfvars" \
-			"$(ENV_DIR)/env.auto.tfvars"; \
+			"$(ENV_DIR)/env.auto.tfvars" \
+			--canonical-workspace "$(ENV_DIR)/abac.auto.tfvars" \
+			--ignore-explicit; \
 		python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" \
 			"$(ENV_DIR)/generated/abac.auto.tfvars" \
 			"$(ACCOUNT_ENV_DIR)/abac.auto.tfvars" \

@@ -3782,7 +3782,36 @@ def autofix_genie_config_fields(tfvars_path: Path) -> int:
     return added
 
 
-def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -> int:
+def _workspace_acl_hints(path: Path | None) -> dict[str, list[str]]:
+    """Load canonical per-space ACLs from an already promoted workspace layer."""
+    if path is None or not path.exists():
+        return {}
+    import hcl2
+
+    cfg = hcl2.loads(path.read_text())
+    spaces = cfg.get("genie_space_configs") or {}
+    if isinstance(spaces, list):
+        spaces = spaces[0] if spaces else {}
+    hints: dict[str, list[str]] = {}
+    for name, value in spaces.items():
+        if isinstance(value, list):
+            value = value[0] if value else {}
+        if not isinstance(value, dict) or "acl_groups" not in value:
+            continue
+        acl = value["acl_groups"]
+        if not isinstance(acl, list) or not all(isinstance(item, str) for item in acl):
+            raise ValueError(f"Canonical ACL for Genie space {name!r} is invalid")
+        hints[str(name)] = list(acl)
+    return hints
+
+
+def autofix_acl_groups(
+    tfvars_path: Path,
+    env_tfvars_path: Path | None = None,
+    *,
+    canonical_workspace_path: Path | None = None,
+    ignore_explicit: bool = False,
+) -> int:
     """Write policy-derived ACLs separately without mutating authored HCL."""
     import hcl2
 
@@ -3802,6 +3831,7 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
         groups = groups[0] if groups else {}
     fgac_policies = cfg.get("fgac_policies") or []
     id_to_name = cfg.get("genie_space_id_to_name") or {}
+    canonical_hints = _workspace_acl_hints(canonical_workspace_path)
     if isinstance(fgac_policies, list) and len(fgac_policies) == 1 and isinstance(fgac_policies[0], list):
         fgac_policies = fgac_policies[0]
 
@@ -3873,7 +3903,16 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
             cfg_entry = cfg_entry[0] if cfg_entry else {}
         if not isinstance(cfg_entry, dict):
             continue
-        if "acl_groups" in cfg_entry or "genie_acl_groups" in cfg_entry:
+        # Direct/per-space callers preserve explicit authored ACLs. Full
+        # generation and promotion ignore model-produced ACL fields and instead
+        # use the last promoted canonical workspace ACL, when one exists.
+        if not ignore_explicit and (
+            "acl_groups" in cfg_entry or "genie_acl_groups" in cfg_entry
+        ):
+            continue
+
+        if space_name in canonical_hints:
+            derived[str(space_name)] = canonical_hints[space_name]
             continue
 
         cats = space_catalogs.get(space_name, set())
@@ -3899,7 +3938,10 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
     derived_path = tfvars_path.with_name(
         "genie_space_derived_acl_groups.auto.tfvars"
     )
-    lines = ["# Tool-owned; re-derived for this environment.", "genie_space_derived_acl_groups = {"]
+    lines = ["# Tool-owned; re-derived for this environment."]
+    if ignore_explicit:
+        lines.append("genie_space_derived_acl_groups_authoritative = true")
+    lines.append("genie_space_derived_acl_groups = {")
     for space_name, acl_groups in derived.items():
         rendered = ", ".join(json.dumps(group) for group in acl_groups)
         lines.append(f"  {json.dumps(space_name)} = [{rendered}]")
@@ -7718,7 +7760,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
             if target_space_cfg is None:
                 env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
                 n_acl = autofix_acl_groups(
-                    tfvars_path, env_tfvars if env_tfvars.exists() else None
+                    tfvars_path,
+                    env_tfvars if env_tfvars.exists() else None,
+                    canonical_workspace_path=tfvars_path.parent.parent / "abac.auto.tfvars",
+                    ignore_explicit=True,
                 )
                 if n_acl:
                     print(f"  Derived ACL sidecar for {n_acl} Genie agent(s)")
@@ -7977,6 +8022,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
                             autofix_acl_groups(
                                 tfvars_path,
                                 env_tfvars if env_tfvars.exists() else None,
+                                canonical_workspace_path=(
+                                    tfvars_path.parent.parent / "abac.auto.tfvars"
+                                ),
+                                ignore_explicit=True,
                             )
                     if args.mode != "genie":
                         derive_and_finalize_treatments(

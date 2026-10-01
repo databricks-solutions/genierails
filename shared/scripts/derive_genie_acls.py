@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -12,16 +13,26 @@ from generate_abac import autofix_acl_groups  # noqa: E402
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        print("Usage: derive_genie_acls.py <generated-abac.tfvars> <env.tfvars>")
-        return 2
-    abac_path = Path(sys.argv[1])
-    env_path = Path(sys.argv[2])
+    parser = argparse.ArgumentParser()
+    parser.add_argument("abac")
+    parser.add_argument("env")
+    parser.add_argument("--canonical-workspace")
+    parser.add_argument("--ignore-explicit", action="store_true")
+    args = parser.parse_args()
+    abac_path = Path(args.abac)
+    env_path = Path(args.env)
     if not abac_path.exists() or not env_path.exists():
         print("ERROR: generated ABAC and environment tfvars must both exist")
         return 1
     try:
-        count = autofix_acl_groups(abac_path, env_path)
+        count = autofix_acl_groups(
+            abac_path,
+            env_path,
+            canonical_workspace_path=(
+                Path(args.canonical_workspace) if args.canonical_workspace else None
+            ),
+            ignore_explicit=args.ignore_explicit,
+        )
     except ValueError as exc:
         print(f"ERROR: {exc}")
         return 1

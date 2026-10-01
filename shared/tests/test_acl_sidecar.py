@@ -101,6 +101,76 @@ genie_space_configs = { Renamed = { title = "Renamed" } }
     )
 
 
+def test_full_generation_uses_canonical_acl_hints_over_model_acl(tmp_path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    canonical = tmp_path / "abac.auto.tfvars"
+    abac.write_text('''
+groups = { gA = {}, gB = {} }
+fgac_policies = [
+  { name = "mask" catalog = "shared" except_principals = ["gA"] }
+]
+genie_space_configs = {
+  payments = { title = "Payments", acl_groups = ["gA", "gB"] }
+  hr = { title = "HR", acl_groups = ["gA", "gB"] }
+}
+''')
+    env.write_text('''genie_spaces = [
+  { name = "payments", uc_tables = ["shared.payments.t"] },
+  { name = "hr", uc_tables = ["shared.hr.t"] },
+]
+''')
+    canonical.write_text('''genie_space_configs = {
+  payments = { acl_groups = ["gA"] }
+  hr = { acl_groups = ["gB"] }
+}
+''')
+
+    assert autofix_acl_groups(
+        abac,
+        env,
+        canonical_workspace_path=canonical,
+        ignore_explicit=True,
+    ) == 2
+    with (generated / "genie_space_derived_acl_groups.auto.tfvars").open() as handle:
+        assert hcl2.load(handle)["genie_space_derived_acl_groups"] == {
+            "hr": ["gB"],
+            "payments": ["gA"],
+        }
+    loaded = load_generated_config(abac)
+    assert build_data_access_config(loaded)["genie_space_acl_groups"] == {
+        "payments": ["gA"],
+        "hr": ["gB"],
+    }
+    assert {
+        name: value["acl_groups"]
+        for name, value in build_workspace_config(loaded)[
+            "genie_space_configs"
+        ].items()
+    } == {"payments": ["gA"], "hr": ["gB"]}
+
+
+def test_direct_autofix_still_preserves_explicit_empty_acl(tmp_path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    abac.write_text('''
+groups = { gA = {} }
+fgac_policies = [{ name = "mask" catalog = "cat" except_principals = ["gA"] }]
+genie_space_configs = { Private = { title = "Private", acl_groups = [] } }
+''')
+    env.write_text(
+        'genie_spaces = [{ name = "Private", uc_tables = ["cat.s.t"] }]\n'
+    )
+
+    assert autofix_acl_groups(abac, env) == 0
+    with (generated / "genie_space_derived_acl_groups.auto.tfvars").open() as handle:
+        assert hcl2.load(handle)["genie_space_derived_acl_groups"] == {}
+
+
 def test_id_only_space_uses_resolved_title_for_both_consumers(tmp_path):
     generated = tmp_path / "generated"
     generated.mkdir()
