@@ -98,6 +98,11 @@ def main():
     cfg = hcl2.load(open(os.path.join(source_env_dir, "env.auto.tfvars")))
     spaces = cfg.get("genie_spaces", [])
     top_level_tables = cfg.get("uc_tables") or []
+    generated_path = os.path.join(source_env_dir, "generated", "abac.auto.tfvars")
+    id_to_name = {}
+    if os.path.exists(generated_path):
+        generated_cfg = hcl2.load(open(generated_path))
+        id_to_name = generated_cfg.get("genie_space_id_to_name") or {}
 
     # Load source auth for API queries
     auth_cfg = {}
@@ -124,6 +129,31 @@ def main():
             if not uc_tables and api_tables:
                 space["uc_tables"] = api_tables
                 print(f"  Discovered {len(api_tables)} table(s)")
+
+        # Promotion clears source workspace IDs. Preserve the canonical key as
+        # the destination name so generated configs, ACLs, table attribution,
+        # and workspace lookup continue to identify the same logical space.
+        if not _str(space.get("name", "")) and space_id:
+            canonical_name = _str(id_to_name.get(space_id, ""))
+            if canonical_name:
+                space["name"] = canonical_name
+
+    canonical_names = [_str(space.get("name", "")) for space in spaces]
+    missing = [i for i, name in enumerate(canonical_names) if not name]
+    if missing:
+        print(
+            "ERROR: Cannot promote Genie space(s) without a canonical name. "
+            "Run `make generate` in the source environment first."
+        )
+        sys.exit(1)
+    duplicates = sorted({name for name in canonical_names if canonical_names.count(name) > 1})
+    if duplicates:
+        print(
+            "ERROR: Multiple Genie spaces resolve to the same canonical name: "
+            + ", ".join(repr(name) for name in duplicates)
+            + ". Set distinct names before promoting."
+        )
+        sys.exit(1)
 
     # Build dest env.auto.tfvars
     lines = ["genie_spaces = ["]

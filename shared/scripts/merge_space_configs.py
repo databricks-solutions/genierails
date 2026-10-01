@@ -350,6 +350,7 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     space_cfg = load_hcl_safe(space_abac)
 
     new_genie_cfgs: dict = space_cfg.get("genie_space_configs") or {}
+    new_id_to_name: dict = space_cfg.get("genie_space_id_to_name") or {}
     new_tag_assignments: list = space_cfg.get("tag_assignments") or []
     new_fgac_policies: list = space_cfg.get("fgac_policies") or []
     new_tag_policies: list = space_cfg.get("tag_policies") or []
@@ -359,6 +360,7 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     assembled_text = assembled_abac.read_text() if assembled_abac.exists() else ""
 
     existing_genie_cfgs: dict = assembled_cfg.get("genie_space_configs") or {}
+    existing_id_to_name: dict = assembled_cfg.get("genie_space_id_to_name") or {}
     existing_tag_assignments: list = assembled_cfg.get("tag_assignments") or []
     existing_fgac_policies: list = assembled_cfg.get("fgac_policies") or []
     existing_tag_policies: list = assembled_cfg.get("tag_policies") or []
@@ -425,6 +427,7 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
 
     # ── Merge genie_space_configs ─────────────────────────────────────────
     merged_genie = dict(existing_genie_cfgs)
+    merged_id_to_name = {**existing_id_to_name, **new_id_to_name}
     new_names = set(new_genie_cfgs)
     for old_name in list(merged_genie):
         if sanitize_space_key(old_name) == space_key and old_name not in new_names:
@@ -433,6 +436,22 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     for space_name, cfg in new_genie_cfgs.items():
         merged_genie[space_name] = cfg
         print(f"    genie_space_configs: updated entry '{space_name}'")
+
+    env_path = generated_dir.parent / "env.auto.tfvars"
+    if env_path.exists():
+        env_cfg = load_hcl_safe(env_path)
+        active_names = {
+            (space.get("name") or merged_id_to_name.get(space.get("genie_space_id", ""), ""))
+            for space in (env_cfg.get("genie_spaces") or [])
+            if isinstance(space, dict)
+        }
+        active_names.discard("")
+        for orphan in sorted(set(merged_genie) - active_names):
+            del merged_genie[orphan]
+            print(
+                f"  WARNING: Dropped orphan genie_space_configs entry {orphan!r}; "
+                "it has no matching genie_spaces entry."
+            )
 
     # ── Merge tag_assignments (dedup by entity_name + tag_key) ───────────
     def _normalize_assignment(assignment: dict) -> dict:
@@ -505,6 +524,15 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     if merged_genie:
         updated = updated.rstrip() + "\n\n" + format_genie_space_configs_hcl(merged_genie) + "\n"
 
+    updated = remove_hcl_top_level_block(updated, "genie_space_id_to_name")
+    if merged_id_to_name:
+        updated = (
+            updated.rstrip()
+            + "\n\ngenie_space_id_to_name = "
+            + _render_value(dict(sorted(merged_id_to_name.items())))
+            + "\n"
+        )
+
     # Replace tag_assignments block
     updated = remove_hcl_top_level_list(updated, "tag_assignments")
     if merged_tag_assignments:
@@ -526,7 +554,6 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     candidate = Path(candidate_name)
     try:
         candidate.write_text(updated)
-        env_path = generated_dir.parent / "env.auto.tfvars"
         autofix_acl_groups(candidate, env_path if env_path.exists() else None)
         candidate.replace(assembled_abac)
     except Exception:

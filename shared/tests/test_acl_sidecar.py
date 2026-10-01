@@ -221,6 +221,33 @@ def test_per_space_rename_removes_old_key_atomically(tmp_path):
     assert set(configs) == {"New Name"}
 
 
+def test_per_space_id_only_rename_drops_orphan_config_with_warning(tmp_path):
+    generated = tmp_path / "generated"
+    per_space = generated / "spaces" / "new_name"
+    per_space.mkdir(parents=True)
+    (tmp_path / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ genie_space_id = "s1", uc_tables = [] }]\n'
+    )
+    assembled = generated / "abac.auto.tfvars"
+    assembled.write_text('''
+genie_space_configs = { "Old Name" = { title = "Old Name", acl_groups = ["hr_g"] } }
+genie_space_id_to_name = { s1 = "Old Name" }
+''')
+    (per_space / "abac.auto.tfvars").write_text('''
+genie_space_configs = { "New Name" = { title = "New Name", acl_groups = ["pay_g"] } }
+genie_space_id_to_name = { s1 = "New Name" }
+''')
+    result = subprocess.run(
+        [sys.executable, str(SHARED / "scripts/merge_space_configs.py"), str(generated), "new_name"],
+        check=True, text=True, capture_output=True,
+    )
+    with assembled.open() as handle:
+        config = hcl2.load(handle)
+    assert set(config["genie_space_configs"]) == {"New Name"}
+    assert config["genie_space_id_to_name"] == {"s1": "New Name"}
+    assert "Dropped orphan genie_space_configs entry 'Old Name'" in result.stdout
+
+
 def test_per_space_failed_acl_derivation_preserves_assembled_file(tmp_path):
     generated = tmp_path / "generated"
     per_space = generated / "spaces" / "pay"
@@ -237,3 +264,66 @@ def test_per_space_failed_acl_derivation_preserves_assembled_file(tmp_path):
     )
     assert result.returncode != 0
     assert assembled.read_text() == original
+
+
+def test_cross_env_promote_preserves_id_only_canonical_acl_in_both_layers(tmp_path):
+    cloud = tmp_path / "cloud"
+    dev = cloud / "envs" / "dev"
+    generated = dev / "generated"
+    account = cloud / "envs" / "account"
+    generated.mkdir(parents=True)
+    account.mkdir(parents=True)
+    (tmp_path / "Makefile").write_text(
+        f"SHARED_ROOT := {SHARED}\nCLOUD_ROOT := {cloud}\nCLOUD := aws\n"
+        f"include {SHARED / 'Makefile.shared'}\n"
+    )
+    (dev / "env.auto.tfvars").write_text('''genie_spaces = [
+  { genie_space_id = "s1", uc_tables = ["paycat.s.t"] },
+  { name = "HR", genie_space_id = "s2", uc_tables = ["hrcat.s.t"] },
+]
+''')
+    (generated / "abac.auto.tfvars").write_text('''
+groups = { pay_group = {}, hr_group = {} }
+fgac_policies = [
+  { name = "pay" catalog = "paycat" to_principals = ["pay_group"] },
+  { name = "hr" catalog = "hrcat" to_principals = ["hr_group"] },
+]
+genie_space_configs = {
+  Payments = { title = "Payments" }
+  HR = { title = "HR" }
+}
+genie_space_id_to_name = { s1 = "Payments", s2 = "HR" }
+''')
+    (generated / "masking_functions.sql").write_text("-- none\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    python = bin_dir / "python3"
+    python.write_text(
+        "#!/bin/sh\ncase \"$1\" in *validate_abac.py) exit 0;; esac\n"
+        f"exec {sys.executable} \"$@\"\n"
+    )
+    python.chmod(0o755)
+    import os
+    result = subprocess.run(
+        ["make", "promote", "SOURCE_ENV=dev", "DEST_ENV=prod",
+         "DEST_CATALOG_MAP=paycat=ppay,hrcat=phr"],
+        cwd=tmp_path, text=True, capture_output=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    prod = cloud / "envs" / "prod"
+    with (prod / "env.auto.tfvars").open() as handle:
+        prod_spaces = hcl2.load(handle)["genie_spaces"]
+    assert [(s["name"], s["genie_space_id"]) for s in prod_spaces] == [
+        ("Payments", ""), ("HR", "")
+    ]
+    with (prod / "data_access" / "abac.auto.tfvars").open() as handle:
+        data_cfg = hcl2.load(handle)
+    with (prod / "abac.auto.tfvars").open() as handle:
+        workspace_cfg = hcl2.load(handle)
+    expected = {"Payments": ["pay_group"], "HR": ["hr_group"]}
+    assert data_cfg["genie_space_acl_groups"] == expected
+    assert {
+        name: cfg["acl_groups"]
+        for name, cfg in workspace_cfg["genie_space_configs"].items()
+    } == expected

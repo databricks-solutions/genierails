@@ -3812,12 +3812,15 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
     if env_tfvars_path and env_tfvars_path.exists():
         try:
             env_cfg = hcl2.loads(env_tfvars_path.read_text())
+            resolved_names: list[str] = []
             for space in (env_cfg.get("genie_spaces") or []):
                 if isinstance(space, list):
                     space = space[0] if space else {}
                 name = space.get("name", "") or id_to_name.get(
                     space.get("genie_space_id", ""), ""
                 )
+                if name:
+                    resolved_names.append(name)
                 tables = space.get("uc_tables") or []
                 if isinstance(tables, list) and tables:
                     if isinstance(tables[0], list):
@@ -3825,6 +3828,17 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
                     cats = {t.split(".")[0] for t in tables if "." in t}
                     if cats:
                         space_catalogs[name] = cats
+            duplicates = sorted({
+                name for name in resolved_names if resolved_names.count(name) > 1
+            })
+            if duplicates:
+                raise ValueError(
+                    "Multiple Genie spaces resolve to the same canonical name: "
+                    + ", ".join(repr(name) for name in duplicates)
+                    + ". Set distinct names."
+                )
+        except ValueError:
+            raise
         except Exception:
             pass
 
@@ -7151,6 +7165,12 @@ def main():
                         all_space_tables.extend(space_tables)
 
                     if genie_cfg:
+                        if effective_name in api_genie_configs:
+                            print(
+                                "ERROR: Multiple Genie spaces resolve to the same canonical "
+                                f"name {effective_name!r}. Set distinct names."
+                            )
+                            sys.exit(1)
                         api_genie_configs[effective_name] = genie_cfg
                 else:
                     all_space_tables.extend(space_tables)

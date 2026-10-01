@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 import hcl2
+import pytest
 
 from scripts import remap_env_config
 
@@ -58,3 +59,49 @@ def test_promotion_does_not_copy_or_overwrite_environment_discovery(tmp_path, mo
         'discovered_uc_tables = ["prod_catalog.agent.orders"]\n'
         'discovered_table_agents = { "prod_catalog.agent.orders" = ["Prod agent"] }\n'
     )
+
+
+def test_id_only_spaces_promote_with_distinct_canonical_titles(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    (source / "generated").mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text('''genie_spaces = [
+  { genie_space_id = "s1", uc_tables = ["paycat.s.t"] },
+  { genie_space_id = "s2", uc_tables = ["hrcat.s.t"] },
+  { name = "Named", genie_space_id = "s3", uc_tables = ["paycat.s.n"] },
+]
+''')
+    (source / "generated" / "abac.auto.tfvars").write_text(
+        'genie_space_id_to_name = { s1 = "Payments", s2 = "HR", s3 = "Ignored Title" }\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "paycat=ppay,hrcat=phr"
+    ])
+    remap_env_config.main()
+    with (dest / "env.auto.tfvars").open() as handle:
+        spaces = hcl2.load(handle)["genie_spaces"]
+    assert [(s["name"], s["genie_space_id"]) for s in spaces] == [
+        ("Payments", ""), ("HR", ""), ("Named", "")
+    ]
+
+
+def test_duplicate_resolved_titles_fail_loud(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    (source / "generated").mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text('''genie_spaces = [
+  { genie_space_id = "s1", uc_tables = ["a.s.t"] },
+  { genie_space_id = "s2", uc_tables = ["b.s.t"] },
+]
+''')
+    (source / "generated" / "abac.auto.tfvars").write_text(
+        'genie_space_id_to_name = { s1 = "Same", s2 = "Same" }\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "a=pa,b=pb"
+    ])
+    with pytest.raises(SystemExit) as exc:
+        remap_env_config.main()
+    assert exc.value.code == 1
+    assert "same canonical name" in capsys.readouterr().out
+    assert not (dest / "env.auto.tfvars").exists()
