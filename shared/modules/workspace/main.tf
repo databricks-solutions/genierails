@@ -275,7 +275,8 @@ resource "null_resource" "genie_space_acls_created" {
   }
 
   triggers = {
-    groups = local.genie_space_groups[each.key]
+    groups          = local.genie_space_groups[each.key]
+    space_create_id = null_resource.genie_space_create[each.key].id
   }
 
   provisioner "local-exec" {

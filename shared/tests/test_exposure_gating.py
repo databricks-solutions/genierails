@@ -42,6 +42,13 @@ def test_genie_creation_ignores_worktree_local_path_changes():
     assert 'ignore_changes = [triggers["id_file"], triggers["script"]]' in block
 
 
+def test_created_space_acl_reapplies_after_space_recreation():
+    source = (SHARED / "modules/workspace/main.tf").read_text()
+    start = source.index('resource "null_resource" "genie_space_acls_created"')
+    block = source[start:]
+    assert "space_create_id = null_resource.genie_space_create[each.key].id" in block
+
+
 def test_roots_forward_the_same_gate_to_both_modules():
     assignment = r"business_access_enabled\s*=\s*var\.business_access_enabled"
     assert re.search(assignment, (SHARED / "roots/data_access/main.tf").read_text())
