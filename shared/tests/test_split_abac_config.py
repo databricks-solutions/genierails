@@ -67,10 +67,33 @@ def test_data_access_split_accepts_legacy_genie_acl_groups():
             "hr": {"genie_acl_groups": ["hr_group"]},
         }
     }
-
     assert build_data_access_config(generated)["genie_space_acl_groups"] == {
         "payments": ["payments_group"],
         "hr": ["hr_group"],
+    }
+
+
+def test_legacy_single_space_conversion_preserves_authored_acl():
+    generated = {
+        "genie_space_title": "Payments",
+        "genie_acl_groups": ["shared_group"],
+    }
+    workspace = build_workspace_config(generated)
+    assert workspace["genie_space_configs"]["Payments"]["acl_groups"] == [
+        "shared_group"
+    ]
+    assert build_data_access_config(generated)["genie_space_acl_groups"] == {
+        "Payments": ["shared_group"],
+    }
+
+
+def test_legacy_single_space_conversion_preserves_explicit_empty_acl():
+    generated = {"genie_space_title": "Nobody", "genie_acl_groups": []}
+    assert build_workspace_config(generated)["genie_space_configs"]["Nobody"][
+        "acl_groups"
+    ] == []
+    assert build_data_access_config(generated)["genie_space_acl_groups"] == {
+        "Nobody": []
     }
 
 

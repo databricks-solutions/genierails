@@ -118,6 +118,27 @@ run "legacy_unattributed_discovery_falls_back_to_all_principals" {
   }
 }
 
+run "id_only_space_uses_canonical_title_for_select" {
+  command = plan
+  variables {
+    env_dir                   = "../../examples/healthcare"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_host = "https://example.invalid"
+    genie_spaces = [{ genie_space_id = "space-1", uc_tables = ["pay.agent.facts"] }]
+    genie_space_id_to_name = { "space-1" = "Payments" }
+    genie_space_acl_groups = { Payments = ["pay_group"] }
+    groups = { pay_group = {}, hr_group = {} }
+    business_access_enabled = true
+    sql_warehouse_id = "warehouse"
+  }
+  assert {
+    condition = toset(output.table_grant_resource_keys) == toset(["pay.agent.facts|pay_group"])
+    error_message = "id-only spaces must scope SELECT via their canonical resolved title"
+  }
+}
+
 run "empty_agent_list_is_fail_closed" {
   command = plan
 

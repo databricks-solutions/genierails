@@ -72,6 +72,12 @@ locals {
     var.genie_space_title != "" ? { (local.legacy_space_name) = local.legacy_genie_config } : {}
   )
 
+  canonical_space_names = {
+    for idx, s in local.effective_spaces : idx => (
+      s.name != "" ? s.name : lookup(var.genie_space_id_to_name, s.genie_space_id, s.genie_space_id)
+    )
+  }
+
   # Empty config used as fallback when a space has no abac config entry.
   empty_genie_config = {
     title            = ""
@@ -122,11 +128,11 @@ locals {
       : s.genie_space_id)
       : "${s.name != "" ? trim(replace(lower(s.name), "/[^a-z0-9]+/", "_"), "_") : s.genie_space_id}--${s.genie_space_id != "" ? s.genie_space_id : idx}"
       ) => {
-      name             = s.name != "" ? s.name : s.genie_space_id
+      name             = local.canonical_space_names[idx]
       genie_space_id   = s.genie_space_id
       sql_warehouse_id = s.sql_warehouse_id != "" ? s.sql_warehouse_id : var.sql_warehouse_id
       uc_tables        = s.uc_tables
-      config           = try(local.effective_genie_space_configs[s.name], local.empty_genie_config)
+      config           = try(local.effective_genie_space_configs[local.canonical_space_names[idx]], local.empty_genie_config)
     }
   }
 }
@@ -186,6 +192,12 @@ variable "genie_spaces" {
   }))
   default     = []
   description = "List of Genie agent definitions. 'name' is the human-readable agent title and the lookup key for genie_space_configs. An internal Terraform key is derived automatically by sanitizing the name."
+}
+
+variable "genie_space_id_to_name" {
+  type        = map(string)
+  default     = {}
+  description = "Tool-owned mapping from imported Genie space IDs to their canonical names."
 }
 
 variable "genie_space_configs" {

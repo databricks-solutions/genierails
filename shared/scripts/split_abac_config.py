@@ -31,12 +31,14 @@ DATA_ACCESS_KEYS = (
     "tag_assignments",
     "fgac_policies",
     "genie_space_acl_groups",
+    "genie_space_id_to_name",
 )
 
 WORKSPACE_KEYS = (
     "groups",
     # New multi-space format.
     "genie_space_configs",
+    "genie_space_id_to_name",
     # Legacy single-space keys (kept for backward compatibility with old generated configs).
     "genie_space_title",
     "genie_space_description",
@@ -291,8 +293,15 @@ def _convert_legacy_to_genie_space_configs(cfg: dict) -> dict | None:
         "sql_measures": _val("genie_sql_measures", []),
         "join_specs": _val("genie_join_specs", []),
     }
+    if "genie_acl_groups" in cfg:
+        space_config["genie_acl_groups"] = cfg["genie_acl_groups"]
+    elif "acl_groups" in cfg:
+        space_config["acl_groups"] = cfg["acl_groups"]
     # Strip empty values
-    space_config = {k: v for k, v in space_config.items() if v not in ("", [], {}, None)}
+    space_config = {
+        k: v for k, v in space_config.items()
+        if k in {"acl_groups", "genie_acl_groups"} or v not in ("", [], {}, None)
+    }
 
     print(f"  [SPLIT] Converted legacy genie keys to genie_space_configs[\"{title}\"]")
     return {title: space_config}
@@ -359,6 +368,8 @@ def build_data_access_config(full_cfg: dict) -> dict:
             continue
         cfg[key] = value
     genie_configs = full_cfg.get("genie_space_configs") or {}
+    if not genie_configs:
+        genie_configs = _convert_legacy_to_genie_space_configs(full_cfg) or {}
     derived_acls = full_cfg.get("genie_space_derived_acl_groups") or {}
     if isinstance(genie_configs, dict) and genie_configs:
         cfg["genie_space_acl_groups"] = {

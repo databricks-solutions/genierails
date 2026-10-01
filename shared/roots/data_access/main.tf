@@ -58,7 +58,7 @@ locals {
     for space in var.genie_spaces : [
       for table in space.uc_tables : {
         table = length(split(".", table)) >= 3 ? table : (var.uc_catalog != "" ? "${var.uc_catalog}.${table}" : table)
-        agent = space.name != "" ? space.name : space.genie_space_id
+        agent = space.name != "" ? space.name : lookup(var.genie_space_id_to_name, space.genie_space_id, space.genie_space_id)
       }
     ]
   ])
@@ -132,6 +132,12 @@ variable "discovered_table_agents" {
   type        = map(list(string))
   default     = {}
   description = "Tool-owned per-environment mapping from discovered UC table FQN to exposing Genie agent names."
+}
+
+variable "genie_space_id_to_name" {
+  type        = map(string)
+  default     = {}
+  description = "Tool-owned mapping from imported Genie space IDs to their canonical names."
 }
 
 variable "genie_spaces" {

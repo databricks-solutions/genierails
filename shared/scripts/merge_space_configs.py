@@ -27,8 +27,10 @@ established by full generation.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -41,6 +43,7 @@ except ImportError:
     sys.exit(2)
 
 from tag_vocabulary import REGISTRY  # noqa: E402
+from generate_abac import autofix_acl_groups, sanitize_space_key  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +425,11 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
 
     # ── Merge genie_space_configs ─────────────────────────────────────────
     merged_genie = dict(existing_genie_cfgs)
+    new_names = set(new_genie_cfgs)
+    for old_name in list(merged_genie):
+        if sanitize_space_key(old_name) == space_key and old_name not in new_names:
+            del merged_genie[old_name]
+            print(f"    genie_space_configs: removed renamed entry '{old_name}'")
     for space_name, cfg in new_genie_cfgs.items():
         merged_genie[space_name] = cfg
         print(f"    genie_space_configs: updated entry '{space_name}'")
@@ -509,7 +517,21 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
         fgac_hcl = "fgac_policies = " + _render_value(merged_fgac)
         updated = updated.rstrip() + "\n\n" + fgac_hcl + "\n"
 
-    assembled_abac.write_text(updated)
+    # Validate ACL derivation against the complete candidate before replacing
+    # the assembled file, so a failed rename/catalog change is atomic.
+    fd, candidate_name = tempfile.mkstemp(
+        prefix=".abac.auto.tfvars.", dir=generated_dir, text=True
+    )
+    os.close(fd)
+    candidate = Path(candidate_name)
+    try:
+        candidate.write_text(updated)
+        env_path = generated_dir.parent / "env.auto.tfvars"
+        autofix_acl_groups(candidate, env_path if env_path.exists() else None)
+        candidate.replace(assembled_abac)
+    except Exception:
+        candidate.unlink(missing_ok=True)
+        raise
     print(f"    Written: {assembled_abac}")
 
     # ── Merge masking_functions.sql (dedup by function name) ─────────────

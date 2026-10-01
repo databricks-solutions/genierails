@@ -2667,7 +2667,9 @@ def scenario_multi_space(
                     _assert_acl_excludes_groups(auth_file, env, _space_name, _excluded,
                                                 f"ACL exclusion: {_space_name}")
         except Exception as _acl_exc:
-            print(f"  {_yellow('WARN')} Could not verify per-space ACLs: {_acl_exc}")
+            raise AssertionError(
+                f"Could not resolve/verify per-space ACLs: {_acl_exc}"
+            ) from _acl_exc
     else:
         print(f"  {_yellow('WARN')} Skipping ACL verification — generated config not found")
 

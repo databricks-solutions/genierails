@@ -20,7 +20,11 @@ def main() -> int:
     if not abac_path.exists() or not env_path.exists():
         print("ERROR: generated ABAC and environment tfvars must both exist")
         return 1
-    count = autofix_acl_groups(abac_path, env_path)
+    try:
+        count = autofix_acl_groups(abac_path, env_path)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 1
     print(f"Derived ACL sidecar for {count} Genie agent(s)")
     return 0
 

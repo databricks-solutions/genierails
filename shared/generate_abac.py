@@ -923,6 +923,15 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
     return "\n".join(lines)
 
 
+def format_string_map_hcl(name: str, values: dict[str, str]) -> str:
+    """Render a deterministic tool-owned string map."""
+    lines = [f"{name} = {{"]
+    for key in sorted(values):
+        lines.append(f"  {_hcl_str(key)} = {_hcl_str(values[key])}")
+    lines.append("}")
+    return "\n".join(lines)
+
+
 def remove_hcl_top_level_block(text: str, key: str) -> str:
     """Remove a top-level HCL assignment block 'key = { ... }' from text.
 
@@ -1674,7 +1683,7 @@ def sanitize_tfvars_hcl(hcl_block: str) -> str:
         "# acl_groups: controls which groups get CAN_RUN on this Genie agent.\n"
         "#   - List the group names that should have access to this specific space\n"
         "#   - Groups NOT listed are excluded from the space\n"
-        "#   - Empty list or omitted = all groups get access (backward compatible)\n"
+        "#   - Empty list = nobody; omitted = derived from policies or generation fails\n"
         "#   - In multi-space setups, use this to ensure Finance groups only see\n"
         "#     the Finance space, Clinical groups only see the Clinical space, etc.\n"
         "#\n"
@@ -3792,6 +3801,7 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
     if isinstance(groups, list):
         groups = groups[0] if groups else {}
     fgac_policies = cfg.get("fgac_policies") or []
+    id_to_name = cfg.get("genie_space_id_to_name") or {}
     if isinstance(fgac_policies, list) and len(fgac_policies) == 1 and isinstance(fgac_policies[0], list):
         fgac_policies = fgac_policies[0]
 
@@ -3805,7 +3815,9 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
             for space in (env_cfg.get("genie_spaces") or []):
                 if isinstance(space, list):
                     space = space[0] if space else {}
-                name = space.get("name", "")
+                name = space.get("name", "") or id_to_name.get(
+                    space.get("genie_space_id", ""), ""
+                )
                 tables = space.get("uc_tables") or []
                 if isinstance(tables, list) and tables:
                     if isinstance(tables[0], list):
@@ -7088,6 +7100,7 @@ def main():
     preserved_discovery: list[str] = []
     all_space_tables: list[str] = []
     discovered_table_agents: dict[str, list[str]] = {}
+    genie_space_id_to_name: dict[str, str] = {}
 
     if not args.tables:
         genie_spaces_cfg = auth_cfg.get("genie_spaces", [])
@@ -7127,6 +7140,7 @@ def main():
                     # Use the API title as the canonical name if no name was given
                     effective_name = space_name if space_name != space_id else (api_title or space_id)
                     agent_name = effective_name
+                    genie_space_id_to_name[space_id] = effective_name
 
                     if not space_tables:
                         exposed_tables = list(tables)
@@ -7379,7 +7393,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
   - Each space includes all groups that need access
   - Groups that should NOT see this space are excluded
   - In multi-space setups, Finance groups should only be in the Finance space, Clinical groups in the Clinical space, etc.
-  - Empty `acl_groups` means all groups get access (backward compatible)
+  - Empty `acl_groups` means nobody; omitted ACLs are policy-derived or fail closed
 - **Validate before apply**: Run validation before `terraform apply`.
 
 ## Suggested workflow
@@ -7546,6 +7560,15 @@ Before you apply, tune for your business roles, security requirements, and Genie
             print(
                 f"  Injected genie_space_configs from Genie API for: "
                 f"{', '.join(api_genie_configs)}"
+            )
+
+        if genie_space_id_to_name and args.mode != "governance":
+            hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_id_to_name")
+            hcl_block = (
+                hcl_block.rstrip()
+                + "\n\n# Tool-owned canonical identity for id-only imported spaces.\n"
+                + format_string_map_hcl("genie_space_id_to_name", genie_space_id_to_name)
+                + "\n"
             )
 
         tfvars_path = out_dir / "abac.auto.tfvars"
@@ -7877,6 +7900,13 @@ Before you apply, tune for your business roles, security requirements, and Genie
                             hcl_block = remove_hcl_top_level_block(hcl_block, _gk)
                         for _gk in ("tag_assignments", "fgac_policies"):
                             hcl_block = remove_hcl_top_level_list(hcl_block, _gk)
+                    if genie_space_id_to_name and args.mode != "governance":
+                        hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_id_to_name")
+                        hcl_block = (
+                            hcl_block.rstrip() + "\n\n"
+                            + format_string_map_hcl("genie_space_id_to_name", genie_space_id_to_name)
+                            + "\n"
+                        )
                     extra_comments = overlay_detection_comments if overlay_detection_comments else ""
                     tfvars_path.write_text(hcl_header + extra_comments + hcl_block + "\n")
                     fix_hcl_syntax(tfvars_path)
