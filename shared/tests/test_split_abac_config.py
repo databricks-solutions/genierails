@@ -51,3 +51,17 @@ def test_data_access_split_derives_only_agent_acl_map_from_workspace_config():
             "Agent B": ["b_group", "shared_group"],
         }
     }
+
+
+def test_data_access_split_accepts_legacy_genie_acl_groups():
+    generated = {
+        "genie_space_configs": {
+            "payments": {"genie_acl_groups": ["payments_group"]},
+            "hr": {"genie_acl_groups": ["hr_group"]},
+        }
+    }
+
+    assert build_data_access_config(generated)["genie_space_acl_groups"] == {
+        "payments": ["payments_group"],
+        "hr": ["hr_group"],
+    }

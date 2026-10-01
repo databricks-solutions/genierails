@@ -29,12 +29,78 @@ from generate_abac import (
     autofix_missing_fgac_policies,
     autofix_fgac_policy_count,
     autofix_remove_bodyless_functions,
+    autofix_acl_groups,
     bootstrap_per_space_dirs,
     extract_code_blocks,
     persist_discovered_uc_tables,
     strip_abac_for_genie_mode,
 )
 from tests.conftest import assert_valid_hcl
+
+
+def test_autofix_acl_groups_canonicalizes_legacy_key_without_nested_insertion(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text('''
+groups = { payments_group = { description = "Payments" } }
+fgac_policies = []
+genie_space_configs = {
+  payments = {
+    genie_benchmarks = [{ question = "Q" sql = "SELECT 1" }]
+    genie_acl_groups = ["payments_group"]
+  }
+}
+''')
+
+    assert autofix_acl_groups(tfvars) == 1
+    parsed = assert_valid_hcl(tfvars)
+    space = parsed["genie_space_configs"]["payments"]
+    assert space["acl_groups"] == ["payments_group"]
+    assert "genie_acl_groups" not in space
+    assert "acl_groups" not in space["genie_benchmarks"][0]
+
+
+def test_autofix_acl_groups_inserts_at_space_top_level_after_nested_objects(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env_tfvars = tmp_path / "env.auto.tfvars"
+    tfvars.write_text('''
+groups = {
+  payments_group = { description = "Payments" }
+  hr_group       = { description = "HR" }
+}
+fgac_policies = [{
+  name = "payments_mask"
+  catalog = "payments_catalog"
+  to_principals = ["payments_group"]
+  policy_type = "POLICY_TYPE_COLUMN_MASK"
+  function_name = "mask_value"
+  function_catalog = "payments_catalog"
+  function_schema = "governance"
+}]
+genie_space_configs = {
+  "Payments agent" = {
+    title = "Payments"
+    genie_benchmarks = [
+      { question = "Total?" sql = "SELECT count(*) FROM payments" },
+    ]
+    sql_filters = [
+      { sql = "amount > 0" display_name = "Positive" },
+    ]
+  }
+}
+''')
+    env_tfvars.write_text('''
+genie_spaces = [{
+  name = "Payments agent"
+  uc_tables = ["payments_catalog.payments.transactions"]
+}]
+''')
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 1
+    parsed = assert_valid_hcl(tfvars)
+    space = parsed["genie_space_configs"]["Payments agent"]
+    assert space["acl_groups"] == ["payments_group"]
+    assert "acl_groups" not in space["genie_benchmarks"][0]
+    assert "acl_groups" not in space["sql_filters"][0]
 
 
 def test_genie_mode_strips_all_abac_sections_including_tag_policy_list():

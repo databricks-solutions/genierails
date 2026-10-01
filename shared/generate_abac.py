@@ -3769,6 +3769,13 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
     import hcl2
 
     text = tfvars_path.read_text()
+    # Older prompts and model responses may emit ``genie_acl_groups`` even
+    # though all downstream layers consume the canonical ``acl_groups`` key.
+    # Canonicalize before parsing so we neither lose the intended ACLs during
+    # split nor try to inject a duplicate field into a nested child block.
+    text, canonicalized = re.subn(
+        r"(?m)^(\s*)genie_acl_groups(\s*=)", r"\1acl_groups\2", text
+    )
     try:
         cfg = hcl2.loads(text)
     except Exception:
@@ -3806,8 +3813,11 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
             pass
 
     if not space_catalogs:
-        # Fallback: if we can't determine per-space catalogs, assign all groups to all spaces
-        return 0
+        # There is no safe policy-derived ACL to add, but still preserve a
+        # legacy ACL spelling that was canonicalized above.
+        if canonicalized:
+            tfvars_path.write_text(text)
+        return canonicalized
 
     # Build group → set of catalogs from fgac_policies
     group_catalogs: dict[str, set[str]] = {}
@@ -3832,7 +3842,7 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
             group_catalogs.setdefault(g, set()).add(catalog)
 
     # For each space, find groups whose FGAC catalogs overlap with the space's catalogs
-    fixed = 0
+    fixed = canonicalized
     for space_name, cfg_entry in genie_cfgs.items():
         if isinstance(cfg_entry, list):
             cfg_entry = cfg_entry[0] if cfg_entry else {}
@@ -3857,16 +3867,40 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
             # If no specific groups found, use all groups (backward compat)
             space_groups = sorted(groups.keys())
 
-        # Insert acl_groups into the HCL text for this space
-        # Find the space's config block and add acl_groups before the closing }
-        import re
-        # Match the space's config block: "Space Name" = { ... }
-        escaped_name = re.escape(space_name)
-        pattern = rf'("{escaped_name}"\s*=\s*\{{[^}}]*?)(\n\s*\}})'
-        acl_line = "\n    acl_groups = [\n" + "".join(f'      "{g}",\n' for g in space_groups) + "    ]"
-        new_text, count = re.subn(pattern, rf'\1{acl_line}\2', text, count=1, flags=re.DOTALL)
-        if count > 0:
-            text = new_text
+        # Insert at the closing brace of the *space* object. A ``[^}]*``
+        # regex stops at the first nested benchmark/filter object and puts the
+        # ACL in that child instead of at the space's top level.
+        section_match = re.search(r"(?m)^genie_space_configs\s*=\s*\{", text)
+        count = 0
+        if section_match:
+            outer_open = text.find("{", section_match.start(), section_match.end())
+            outer_blocks = _find_brace_blocks(text[outer_open:])
+            if outer_blocks:
+                outer_close = outer_open + outer_blocks[0][1]
+                section_text = text[outer_open + 1:outer_close]
+                escaped_name = re.escape(space_name)
+                entry_match = re.search(
+                    rf'(?m)^([ \t]*)(?:"{escaped_name}"|{escaped_name})\s*=\s*\{{',
+                    section_text,
+                )
+                if entry_match:
+                    entry_open = outer_open + 1 + section_text.find(
+                        "{", entry_match.start(), entry_match.end()
+                    )
+                    entry_blocks = _find_brace_blocks(text[entry_open:outer_close])
+                    if entry_blocks:
+                        entry_close = entry_open + entry_blocks[0][1]
+                        closing_line = text.rfind("\n", entry_open, entry_close) + 1
+                        field_indent = entry_match.group(1) + "  "
+                        item_indent = field_indent + "  "
+                        acl_line = (
+                            f"{field_indent}acl_groups = [\n"
+                            + "".join(f'{item_indent}"{g}",\n' for g in space_groups)
+                            + f"{field_indent}]\n"
+                        )
+                        text = text[:closing_line] + acl_line + text[closing_line:]
+                        count = 1
+        if count:
             fixed += 1
 
     if fixed:
