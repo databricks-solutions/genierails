@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).with_name("treatment_config.json")
+LOGGER = logging.getLogger(__name__)
+
+# A fallback mask is required when classification finds a sensitive column in a
+# catalog for which the model emitted no mask.  It must mask fail-closed without
+# making its borrowed principals authoritative for catalog access derivation.
+ACL_NEUTRAL_FALLBACK_COMMENT = (
+    "GenieRails treatment fallback; principals are masking-only, not access scope"
+)
 
 
 @dataclass(frozen=True)
@@ -164,6 +174,7 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
 
     derived: list[dict] = []
     used: dict[str, Treatment] = {}
+    source_tags_by_catalog_treatment: dict[tuple[str, str], list[set[tuple[str, str]]]] = {}
     treatments_by_value = {item.value: item for item in config.treatments}
     for column in sorted(set(by_column) | set(existing_treatments)):
         findings = by_column.get(column, [])
@@ -195,6 +206,13 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
             if escalated is not None:
                 treatment = escalated
         used[treatment.value] = treatment
+        catalog = column.split(".", 1)[0]
+        source_tags = set(findings)
+        if explicit_treatment:
+            source_tags.add((config.tag_key, explicit_treatment.value))
+        source_tags_by_catalog_treatment.setdefault(
+            (catalog, treatment.value), []
+        ).append(source_tags)
         derived.append({
             "entity_type": "columns", "entity_name": column,
             "tag_key": config.tag_key, "tag_value": treatment.value,
@@ -213,15 +231,17 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
     existing_policies = [dict(policy) for policy in (cfg.get("fgac_policies") or [])]
     column_masks = [p for p in existing_policies if p.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"]
     other_policies = [p for p in existing_policies if p.get("policy_type") != "POLICY_TYPE_COLUMN_MASK"]
-    template = column_masks[0] if column_masks else {}
-    # The model may put only one access tier on its first mask. That mask is a
-    # structural template, not an authoritative principal boundary: every
-    # configured business tier that can reach a governed table must receive
-    # the treatment (explicit exceptions still remain raw).
-    configured_groups = sorted((cfg.get("groups") or {}).keys())
-    mask_principals = sorted(set(template.get("to_principals") or []) | set(configured_groups))
-    if not mask_principals:
-        mask_principals = ["account users"]
+    global_mask_principals = sorted({
+        principal
+        for policy in column_masks
+        for principal in (policy.get("to_principals") or [])
+    }) or ["account users"]
+
+    def policy_refs(policy: dict) -> set[tuple[str, str]]:
+        return set(re.findall(
+            r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)",
+            policy.get("match_condition", ""),
+        ))
 
     catalogs_by_treatment: dict[str, set[str]] = {}
     for assignment in derived:
@@ -232,20 +252,61 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
     new_masks: list[dict] = []
     for treatment in config.treatments:
         for catalog in sorted(catalogs_by_treatment.get(treatment.value, set())):
+            tag_sets = source_tags_by_catalog_treatment[(catalog, treatment.value)]
+            replaced_masks = []
+            for candidate in column_masks:
+                if candidate.get("catalog") != catalog:
+                    continue
+                if candidate.get("comment") == ACL_NEUTRAL_FALLBACK_COMMENT:
+                    continue
+                refs = policy_refs(candidate)
+                if refs and any(refs <= tags for tags in tag_sets):
+                    replaced_masks.append(candidate)
+
+            fallback = not replaced_masks
+            principals = sorted({
+                principal
+                for candidate in replaced_masks
+                for principal in (candidate.get("to_principals") or [])
+            }) if replaced_masks else global_mask_principals
+            exceptions = sorted({
+                principal
+                for candidate in replaced_masks
+                for principal in (candidate.get("except_principals") or [])
+            })
+            overlap = sorted(set(principals) & set(exceptions))
+            if overlap:
+                raise ValueError(
+                    f"Column masks for catalog {catalog!r} and treatment "
+                    f"{treatment.value!r} put principals in both to_principals "
+                    f"and except_principals: {overlap!r}"
+                )
+            if len(replaced_masks) > 1:
+                LOGGER.warning(
+                    "Collapsing %d model column masks into treatment %s on catalog %s; "
+                    "unioning their principals",
+                    len(replaced_masks), treatment.value, catalog,
+                )
+            template = replaced_masks[0] if replaced_masks else (
+                next((p for p in column_masks if p.get("catalog") == catalog), None)
+                or (column_masks[0] if column_masks else {})
+            )
             policy = {
                 "name": f"gr_mask_{catalog}_{treatment.value}",
                 "policy_type": "POLICY_TYPE_COLUMN_MASK",
                 "catalog": catalog,
-                "to_principals": mask_principals,
-                "comment": f"GenieRails treatment {treatment.value}; strictest-wins derivation",
+                "to_principals": principals,
+                "comment": ACL_NEUTRAL_FALLBACK_COMMENT if fallback else (
+                    f"GenieRails treatment {treatment.value}; strictest-wins derivation"
+                ),
                 "match_condition": f"hasTagValue('{config.tag_key}', '{treatment.value}')",
                 "match_alias": f"gr_treatment_{treatment.value}",
                 "function_name": treatment.masking_function,
                 "function_catalog": catalog,
                 "function_schema": template.get("function_schema") or "default",
             }
-            if template.get("except_principals"):
-                policy["except_principals"] = list(template["except_principals"])
+            if exceptions:
+                policy["except_principals"] = exceptions
             new_masks.append(policy)
 
     result = dict(cfg)

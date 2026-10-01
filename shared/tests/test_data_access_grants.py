@@ -115,7 +115,9 @@ def test_builtin_policy_targets_are_included_in_access_principals():
     normalized = " ".join(source.split())
     assert (
         "access_principals = distinct(concat( keys(var.groups), "
-        "flatten([for p in var.fgac_policies : p.to_principals]), "
+        "flatten([ for p in var.fgac_policies : p.to_principals "
+        "if !startswith(p.comment, \"GenieRails treatment fallback; "
+        "principals are masking-only\") ]), "
         "flatten(values(var.genie_space_acl_groups)), ))"
     ) in normalized
     for resource in ("catalog_access", "schema_access"):

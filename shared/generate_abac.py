@@ -3913,6 +3913,13 @@ def autofix_acl_groups(
     for pol in fgac_policies:
         if isinstance(pol, list):
             pol = pol[0] if pol else {}
+        # A treatment fallback borrows principals solely to ensure that a newly
+        # classified column is masked.  It carries no model evidence that those
+        # groups belong on this catalog, so it must not widen Genie/SELECT scope.
+        if str(pol.get("comment", "")).startswith(
+            "GenieRails treatment fallback; principals are masking-only"
+        ):
+            continue
         catalog = pol.get("catalog") or pol.get("function_catalog") or ""
         if isinstance(catalog, list):
             catalog = catalog[0] if catalog else ""

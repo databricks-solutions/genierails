@@ -9,11 +9,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from treatment_derivation import (
+    ACL_NEUTRAL_FALLBACK_COMMENT,
     derive_treatment_model,
     load_treatment_config,
     matching_masks_by_column,
     resolve_treatment,
 )
+from generate_abac import autofix_acl_groups, derive_enforcement_treatments
 
 
 def _base_config():
@@ -150,10 +152,11 @@ def test_derivation_is_idempotent_and_preserves_masks_and_source_tags():
     assert any(item["tag_key"] == "pci_level" for item in twice["tag_assignments"])
 
 
-def test_derived_masks_cover_every_configured_business_tier():
+def test_catalog_treatment_uses_only_its_model_principals():
     cfg = _base_config()
     cfg["groups"] = {"payments": {}, "hr": {}}
-    cfg["fgac_policies"][0]["to_principals"] = ["hr"]
+    for policy in cfg["fgac_policies"]:
+        policy["to_principals"] = ["hr"]
 
     derived, _ = derive_treatment_model(cfg, load_treatment_config())
 
@@ -162,7 +165,143 @@ def test_derived_masks_cover_every_configured_business_tier():
         if policy["policy_type"] == "POLICY_TYPE_COLUMN_MASK"
     ]
     assert masks
-    assert all(policy["to_principals"] == ["hr", "payments"] for policy in masks)
+    assert all(policy["to_principals"] == ["hr"] for policy in masks)
+
+
+def test_b1_real_acl_autofix_keeps_catalog_groups_isolated(tmp_path):
+    abac = tmp_path / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    abac.write_text('''
+groups = { gA = {}, gB = {} }
+tag_policies = [
+  { key = "pay_level", values = ["secret"] },
+  { key = "hr_level", values = ["secret"] },
+]
+tag_assignments = [
+  { entity_type = "columns", entity_name = "pay.s.t.card", tag_key = "pay_level", tag_value = "secret" },
+  { entity_type = "columns", entity_name = "hr.s.t.ssn", tag_key = "hr_level", tag_value = "secret" },
+]
+fgac_policies = [
+  { name = "pay", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "pay", to_principals = ["gA"], match_condition = "hasTagValue('pay_level', 'secret')", function_name = "mask_redact", function_schema = "security" },
+  { name = "hr", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "hr", to_principals = ["gB"], match_condition = "hasTagValue('hr_level', 'secret')", function_name = "mask_redact", function_schema = "security" },
+]
+genie_space_configs = { payments = {}, hr = {} }
+''')
+    env.write_text('''genie_spaces = [
+  { name = "payments", uc_tables = ["pay.s.t"] },
+  { name = "hr", uc_tables = ["hr.s.t"] },
+]''')
+
+    # Extend the real treatment mapping only for this focused reproduction.
+    config = load_treatment_config()
+    mapped = list(config.treatments)
+    redact = next(item for item in mapped if item.value == "redact")
+    from treatment_derivation import Treatment, TreatmentConfig
+    custom = TreatmentConfig(config.tag_key, config.description, tuple([
+        Treatment(
+            value=redact.value, masking_function=redact.masking_function,
+            sources=redact.sources | {("pay_level", "secret"), ("hr_level", "secret")},
+            udf_signature=redact.udf_signature, udf_body=redact.udf_body,
+            class_labels=redact.class_labels,
+        ),
+        *[item for item in mapped if item.value != "redact"],
+    ]))
+    import generate_abac
+    original_loader = generate_abac.load_treatment_config
+    generate_abac.load_treatment_config = lambda: custom
+    try:
+        derive_enforcement_treatments(abac)
+    finally:
+        generate_abac.load_treatment_config = original_loader
+    assert autofix_acl_groups(abac, env) == 2
+
+    import hcl2
+    with (tmp_path / "genie_space_derived_acl_groups.auto.tfvars").open() as handle:
+        assert hcl2.load(handle)["genie_space_derived_acl_groups"] == {
+            "payments": ["gA"], "hr": ["gB"],
+        }
+
+
+def test_b2_exceptions_stay_catalog_local_and_never_overlap():
+    cfg = _base_config()
+    cfg["tag_assignments"].extend([{
+        "entity_type": "columns", "entity_name": "cat.sch.people.email",
+        "tag_key": "pii_level", "tag_value": "masked_email",
+    }, {
+        "entity_type": "columns", "entity_name": "hr.sch.people.email",
+        "tag_key": "pii_level", "tag_value": "masked_email",
+    }])
+    cfg["fgac_policies"] = [
+        {**cfg["fgac_policies"][0], "catalog": "cat", "to_principals": ["pay"], "except_principals": ["gA"]},
+        {**cfg["fgac_policies"][0], "name": "hr_email", "catalog": "hr", "to_principals": ["gA"]},
+    ]
+    derived, _ = derive_treatment_model(cfg, load_treatment_config())
+    masks = {
+        p["catalog"]: p for p in derived["fgac_policies"]
+        if "email_partial" in p["match_condition"]
+    }
+    assert masks["cat"]["except_principals"] == ["gA"]
+    assert "except_principals" not in masks["hr"]
+    assert masks["hr"]["to_principals"] == ["gA"]
+    assert all(
+        not (set(p["to_principals"]) & set(p.get("except_principals", [])))
+        for p in masks.values()
+    )
+
+
+def test_catalog_without_model_mask_falls_back_fail_closed_but_acl_neutral():
+    cfg = _base_config()
+    cfg["fgac_policies"][1]["to_principals"] = ["pci_team"]
+    cfg["tag_assignments"].append({
+        "entity_type": "columns", "entity_name": "other.sch.people.email",
+        "tag_key": "pii_level", "tag_value": "masked_email",
+    })
+    derived, _ = derive_treatment_model(cfg, load_treatment_config())
+    other = next(p for p in derived["fgac_policies"] if p["catalog"] == "other")
+    assert other["to_principals"] == ["analysts", "pci_team"]
+    assert other["comment"] == ACL_NEUTRAL_FALLBACK_COMMENT
+
+
+def test_pattern_a_privileged_tier_is_raw_only_where_model_omits_it():
+    cfg = _base_config()
+    cfg["tag_assignments"].extend([{
+        "entity_type": "columns", "entity_name": "cat.sch.people.email",
+        "tag_key": "pii_level", "tag_value": "masked_email",
+    }, {
+        "entity_type": "columns", "entity_name": "hr.sch.people.email",
+        "tag_key": "pii_level", "tag_value": "masked_email",
+    }])
+    cfg["fgac_policies"] = [
+        {**cfg["fgac_policies"][0], "to_principals": ["standard"]},
+        {**cfg["fgac_policies"][0], "name": "hr_email", "catalog": "hr", "to_principals": ["standard", "privileged"]},
+    ]
+    derived, _ = derive_treatment_model(cfg, load_treatment_config())
+    masks = {
+        p["catalog"]: p for p in derived["fgac_policies"]
+        if "email_partial" in p["match_condition"]
+    }
+    assert masks["cat"]["to_principals"] == ["standard"]
+    assert masks["hr"]["to_principals"] == ["privileged", "standard"]
+
+
+def test_multiple_masks_collapsed_for_one_catalog_treatment_warn_and_union(caplog):
+    cfg = _base_config()
+    cfg["fgac_policies"][0]["to_principals"] = ["email_team"]
+    cfg["fgac_policies"][1]["to_principals"] = ["pci_team"]
+    derived, _ = derive_treatment_model(cfg, load_treatment_config())
+    redact = next(
+        p for p in derived["fgac_policies"]
+        if p["catalog"] == "cat" and "'redact'" in p["match_condition"]
+    )
+    assert redact["to_principals"] == ["email_team", "pci_team"]
+    assert "Collapsing 2 model column masks" in caplog.text
+
+
+def test_model_mask_principal_overlap_is_rejected_fail_closed():
+    cfg = _base_config()
+    cfg["fgac_policies"][0]["except_principals"] = ["analysts"]
+    with pytest.raises(ValueError, match="both to_principals and except_principals"):
+        derive_treatment_model(cfg, load_treatment_config())
 
 
 def test_rekeyed_masks_match_no_column_more_than_once():
