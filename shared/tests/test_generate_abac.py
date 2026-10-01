@@ -43,9 +43,9 @@ def _acl_autofix_files(tmp_path, spaces_hcl, env_spaces_hcl=None):
     tfvars = tmp_path / "abac.auto.tfvars"
     env_tfvars = tmp_path / "env.auto.tfvars"
     tfvars.write_text(f'''
-groups = {{ pay_group = {{}} hr_group = {{}} }}
+groups = {{ pay_group = {{}} hr_group = {{}} shared_group = {{}} }}
 fgac_policies = [
-  {{ name = "pay" catalog = "pay_cat" to_principals = ["pay_group"] }},
+  {{ name = "pay" catalog = "pay_cat" to_principals = ["pay_group"] except_principals = ["shared_group"] }},
   {{ name = "hr" catalog = "hr_cat" to_principals = ["hr_group"] }},
 ]
 genie_space_configs = {{
@@ -61,183 +61,82 @@ genie_spaces = [
     return tfvars, env_tfvars
 
 
-def test_autofix_acl_groups_canonicalizes_legacy_key_without_nested_insertion(tmp_path):
-    tfvars = tmp_path / "abac.auto.tfvars"
-    tfvars.write_text('''
-groups = { payments_group = { description = "Payments" } }
-fgac_policies = []
-genie_space_configs = {
-  payments = {
-    genie_benchmarks = [{ question = "Q" sql = "SELECT 1" }]
-    genie_acl_groups = ["payments_group"]
-  }
-}
-''')
+@pytest.mark.parametrize(
+    "space_body",
+    [
+        '{ title = "Pay", acl_groups = ["shared_group"] }',
+        '{ title = "Pay", /* c */ acl_groups = ["shared_group"] }',
+        '{ title = "Pay"\n # c\n acl_groups = ["shared_group"] }',
+        '{ title = "Pay", "acl_groups" = ["shared_group"] }',
+        '{ title = "Pay", genie_acl_groups = ["shared_group"] }',
+        '{ title = "Pay", acl_groups = [] }',
+    ],
+)
+def test_acl_derivation_preserves_every_explicit_acl_layout(tmp_path, space_body):
+    tfvars, env_tfvars = _acl_autofix_files(tmp_path, f'  "Pay" = {space_body}')
+    before = tfvars.read_bytes()
 
-    assert autofix_acl_groups(tfvars) == 1
-    parsed = assert_valid_hcl(tfvars)
-    space = parsed["genie_space_configs"]["payments"]
-    assert space["acl_groups"] == ["payments_group"]
-    assert "genie_acl_groups" not in space
-    assert "acl_groups" not in space["genie_benchmarks"][0]
-
-
-def test_autofix_acl_groups_inserts_at_space_top_level_after_nested_objects(tmp_path):
-    tfvars = tmp_path / "abac.auto.tfvars"
-    env_tfvars = tmp_path / "env.auto.tfvars"
-    tfvars.write_text('''
-groups = {
-  payments_group = { description = "Payments" }
-  hr_group       = { description = "HR" }
-}
-fgac_policies = [{
-  name = "payments_mask"
-  catalog = "payments_catalog"
-  to_principals = ["payments_group"]
-  policy_type = "POLICY_TYPE_COLUMN_MASK"
-  function_name = "mask_value"
-  function_catalog = "payments_catalog"
-  function_schema = "governance"
-}]
-genie_space_configs = {
-  "Payments agent" = {
-    title = "Payments"
-    genie_benchmarks = [
-      { question = "Total?" sql = "SELECT count(*) FROM payments" },
-    ]
-    sql_filters = [
-      { sql = "amount > 0" display_name = "Positive" },
-    ]
-  }
-}
-''')
-    env_tfvars.write_text('''
-genie_spaces = [{
-  name = "Payments agent"
-  uc_tables = ["payments_catalog.payments.transactions"]
-}]
-''')
-
-    assert autofix_acl_groups(tfvars, env_tfvars) == 1
-    parsed = assert_valid_hcl(tfvars)
-    space = parsed["genie_space_configs"]["Payments agent"]
-    assert space["acl_groups"] == ["payments_group"]
-    assert "acl_groups" not in space["genie_benchmarks"][0]
-    assert "acl_groups" not in space["sql_filters"][0]
-
-
-@pytest.mark.parametrize("body", ["{}", '{ title = "Pay" }'])
-def test_autofix_acl_groups_handles_one_line_space_and_is_idempotent(tmp_path, body):
-    tfvars, env_tfvars = _acl_autofix_files(tmp_path, f'  "Pay" = {body}')
-
-    assert autofix_acl_groups(tfvars, env_tfvars) == 1
-    first = tfvars.read_text()
     assert autofix_acl_groups(tfvars, env_tfvars) == 0
 
-    assert tfvars.read_text() == first
-    assert first.count("acl_groups") == 1
-    assert assert_valid_hcl(tfvars)["genie_space_configs"]["Pay"]["acl_groups"] == ["pay_group"]
+    assert tfvars.read_bytes() == before
+    derived = assert_valid_hcl(
+        tmp_path / "genie_space_derived_acl_groups.auto.tfvars"
+    )
+    assert derived["genie_space_derived_acl_groups"] == {}
 
 
-def test_autofix_acl_groups_ignores_nested_same_name_key(tmp_path):
-    tfvars, env_tfvars = _acl_autofix_files(tmp_path, '''
-  Pay = {
-    meta = {
-      HR = { title = "nested HR" }
-    }
-  }
-  HR = { title = "real HR" }
-''')
+def test_acl_derivation_matches_policy_overlap_and_is_idempotent(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(
+        tmp_path, '  Pay = { title = "Pay" } HR = { title = "HR" }'
+    )
+    before = tfvars.read_bytes()
 
     assert autofix_acl_groups(tfvars, env_tfvars) == 2
+    first_derived = (
+        tmp_path / "genie_space_derived_acl_groups.auto.tfvars"
+    ).read_bytes()
+    assert autofix_acl_groups(tfvars, env_tfvars) == 2
 
-    parsed = assert_valid_hcl(tfvars)["genie_space_configs"]
-    assert parsed["Pay"]["acl_groups"] == ["pay_group"]
-    assert parsed["HR"]["acl_groups"] == ["hr_group"]
-    assert "acl_groups" not in parsed["Pay"]["meta"]["HR"]
-    split = build_data_access_config({"genie_space_configs": parsed})
-    assert split["genie_space_acl_groups"] == {
-        "Pay": ["pay_group"],
+    assert tfvars.read_bytes() == before
+    assert (tmp_path / "genie_space_derived_acl_groups.auto.tfvars").read_bytes() == first_derived
+    derived = assert_valid_hcl(
+        tmp_path / "genie_space_derived_acl_groups.auto.tfvars"
+    )["genie_space_derived_acl_groups"]
+    assert derived == {
         "HR": ["hr_group"],
+        "Pay": ["pay_group", "shared_group"],
     }
 
 
-def test_autofix_acl_groups_inserts_before_same_line_closing_brace(tmp_path):
+def test_acl_derivation_leaves_instruction_text_byte_identical(tmp_path):
     tfvars, env_tfvars = _acl_autofix_files(tmp_path, '''
   Pay = {
-    genie_benchmarks = [
-      { question = "Q" sql = "SELECT 1" },
-    ] }
-''')
-
-    assert autofix_acl_groups(tfvars, env_tfvars) == 1
-
-    parsed = assert_valid_hcl(tfvars)["genie_space_configs"]["Pay"]
-    assert parsed["acl_groups"] == ["pay_group"]
-    assert "acl_groups" not in parsed["genie_benchmarks"][0]
-
-
-def test_autofix_acl_groups_heredoc_odd_quote_fails_loud(tmp_path):
-    tfvars, env_tfvars = _acl_autofix_files(tmp_path, '''
-  Pay = {
+    title = "literal { genie_acl_groups = x }"
     instructions = <<-EOT
-He said "unclosed
+Never emit genie_acl_groups = x, even with { braces }.
 EOT
   }
 ''')
+    before = tfvars.read_bytes()
 
-    with pytest.raises(ValueError, match="heredoc contains unmatched quote"):
+    assert autofix_acl_groups(tfvars, env_tfvars) == 1
+
+    assert tfvars.read_bytes() == before
+
+
+def test_acl_derivation_accepts_colon_syntax(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(
+        tmp_path, '  Pay: { title: "Pay" }\n  HR: { title: "HR" }'
+    )
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 2
+
+
+def test_acl_derivation_fails_loud_on_invalid_hcl(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(tmp_path, '  Pay = { title = "Pay" ')
+
+    with pytest.raises(ValueError, match="Cannot derive Genie ACLs"):
         autofix_acl_groups(tfvars, env_tfvars)
-
-    assert "acl_groups" not in tfvars.read_text()
-
-
-def test_autofix_acl_groups_does_not_rename_top_level_legacy_key(tmp_path):
-    tfvars, env_tfvars = _acl_autofix_files(
-        tmp_path,
-        '  Pay = { genie_acl_groups = ["pay_group"] }',
-    )
-    tfvars.write_text('genie_acl_groups = ["legacy"]\n' + tfvars.read_text())
-
-    assert autofix_acl_groups(tfvars, env_tfvars) == 1
-
-    parsed = assert_valid_hcl(tfvars)
-    assert parsed["genie_acl_groups"] == ["legacy"]
-    assert parsed["genie_space_configs"]["Pay"]["acl_groups"] == ["pay_group"]
-
-
-def test_autofix_acl_groups_preserves_same_line_legacy_acl(tmp_path):
-    tfvars, env_tfvars = _acl_autofix_files(
-        tmp_path,
-        '  "Pay" = { title = "Pay", genie_acl_groups = ["shared_g"] }',
-    )
-
-    assert autofix_acl_groups(tfvars, env_tfvars) == 1
-
-    parsed = assert_valid_hcl(tfvars)["genie_space_configs"]["Pay"]
-    assert parsed["acl_groups"] == ["shared_g"]
-    assert "genie_acl_groups" not in parsed
-    assert tfvars.read_text().count("acl_groups") == 1
-
-
-def test_autofix_acl_groups_respects_explicit_empty_acl(tmp_path):
-    tfvars, env_tfvars = _acl_autofix_files(
-        tmp_path, '  "Pay" = { title = "Pay", acl_groups = [] }'
-    )
-
-    assert autofix_acl_groups(tfvars, env_tfvars) == 0
-    assert assert_valid_hcl(tfvars)["genie_space_configs"]["Pay"]["acl_groups"] == []
-    assert tfvars.read_text().count("acl_groups") == 1
-
-
-def test_autofix_acl_groups_ignores_odd_quote_heredoc_outside_spaces(tmp_path):
-    tfvars, env_tfvars = _acl_autofix_files(tmp_path, '  Pay = { title = "Pay" }')
-    tfvars.write_text('notes = <<EOT\n5" display\nEOT\n' + tfvars.read_text())
-
-    assert autofix_acl_groups(tfvars, env_tfvars) == 1
-    assert assert_valid_hcl(tfvars)["genie_space_configs"]["Pay"]["acl_groups"] == [
-        "pay_group"
-    ]
 
 
 def test_generator_infers_compensation_amounts_without_string_classifiers():
@@ -1876,12 +1775,26 @@ fgac_policies = [{{
     assert policy["function_name"] == "mask_amount_rounded"
 
 
-@pytest.mark.parametrize("tag_value", ["salary_band", "wage_type", "compensation_code"])
-def test_category_mismatch_does_not_treat_qualified_compensation_as_numeric(
-    tmp_path, tag_value
+@pytest.mark.parametrize(
+    ("tag_value", "numeric"),
+    [
+        ("rounded_amount", True),
+        ("amount_rounded", True),
+        ("annual_salary", True),
+        ("salary_band", False),
+        ("wage_type", False),
+        ("compensation_code", False),
+        ("price_tier", False),
+        ("cost_center", False),
+    ],
+)
+def test_no_assignment_category_repair_uses_only_tag_value_identifier(
+    tmp_path, tag_value, numeric
 ):
     tfvars = tmp_path / "abac.auto.tfvars"
-    tfvars.write_text(f'''tag_assignments = []
+    tfvars.write_text(f'''tag_assignments = [
+  {{ entity_type = "columns", entity_name = "cat.sch.other.email", tag_key = "other", tag_value = "other" }}
+]
 fgac_policies = [{{
   name = "mask_label"
   policy_type = "POLICY_TYPE_COLUMN_MASK"
@@ -1898,13 +1811,27 @@ fgac_policies = [{{
         "CREATE FUNCTION mask_amount_rounded(input DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN input;\n"
     )
 
-    assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == 0
-    assert assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"] == "mask_email"
+    expected_changes = 1 if numeric else 0
+    assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == expected_changes
+    expected_function = "mask_amount_rounded" if numeric else "mask_email"
+    assert assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"] == expected_function
 
 
-@pytest.mark.parametrize("tag_value", ["salary_band", "wage_type", "compensation_code"])
-def test_arg_count_repair_does_not_choose_decimal_mask_for_compensation_label(
-    tmp_path, tag_value
+@pytest.mark.parametrize(
+    ("tag_value", "numeric"),
+    [
+        ("rounded_amount", True),
+        ("amount_rounded", True),
+        ("annual_salary", True),
+        ("salary_band", False),
+        ("wage_type", False),
+        ("compensation_code", False),
+        ("price_tier", False),
+        ("cost_center", False),
+    ],
+)
+def test_arg_count_repair_uses_only_tag_value_identifier(
+    tmp_path, tag_value, numeric
 ):
     tfvars = tmp_path / "abac.auto.tfvars"
     tfvars.write_text(f'''fgac_policies = [{{
@@ -1928,7 +1855,48 @@ def test_arg_count_repair_does_not_choose_decimal_mask_for_compensation_label(
 
     assert generate_abac.autofix_fgac_arg_count_mismatch(tfvars, sql) == 1
     policies = assert_valid_hcl(tfvars)["fgac_policies"]
-    assert all(p["function_name"] != "mask_amount_rounded" for p in policies)
+    if numeric:
+        assert policies[0]["function_name"] == "mask_amount_rounded"
+    else:
+        assert all(p["function_name"] != "mask_amount_rounded" for p in policies)
+
+
+@pytest.mark.parametrize(
+    ("entity_name", "tag_value"),
+    [
+        ("c.billing.price_history.email", "masked_email"),
+        ("c.cost.t.customer_name", "masked_name"),
+        ("c.s.t.email", "cost_center"),
+        ("c.s.t.email", "price_tier"),
+    ],
+)
+def test_matched_assignment_never_uses_qualifier_path_or_string_tag_as_numeric(
+    tmp_path, entity_name, tag_value
+):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text(f'''tag_assignments = [
+  {{ entity_type = "columns", entity_name = "{entity_name}", tag_key = "pii_level", tag_value = "{tag_value}" }}
+]
+fgac_policies = [{{
+  name = "mask_string"
+  policy_type = "POLICY_TYPE_COLUMN_MASK"
+  catalog = "c"
+  to_principals = ["users"]
+  function_schema = "sch"
+  match_condition = "hasTagValue('pii_level', '{tag_value}')"
+  function_name = "mask_email"
+}}]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "CREATE FUNCTION mask_email(input STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_pii_partial(input STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_amount_rounded(input DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN input;\n"
+    )
+
+    generate_abac.autofix_function_category_mismatch(tfvars, sql)
+    function = assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"]
+    assert function != "mask_amount_rounded"
 
 
 def test_required_native_classification_fails_without_warehouse(monkeypatch):

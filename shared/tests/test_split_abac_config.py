@@ -5,7 +5,12 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from split_abac_config import build_account_config, build_data_access_config
+from split_abac_config import (
+    build_account_config,
+    build_data_access_config,
+    build_workspace_config,
+    load_generated_config,
+)
 
 
 def test_same_environment_split_keeps_tag_assignments():
@@ -65,3 +70,46 @@ def test_data_access_split_accepts_legacy_genie_acl_groups():
         "payments": ["payments_group"],
         "hr": ["hr_group"],
     }
+
+
+def test_workspace_and_data_access_consumers_resolve_identical_acl_precedence():
+    generated = {
+        "genie_space_configs": {
+            "canonical": {"acl_groups": []},
+            "legacy": {"genie_acl_groups": ["legacy_group"]},
+            "derived": {"title": "Derived"},
+        },
+        "genie_space_derived_acl_groups": {
+            "canonical": ["must_not_widen"],
+            "legacy": ["must_not_override"],
+            "derived": ["derived_group"],
+        },
+    }
+
+    data_access = build_data_access_config(generated)["genie_space_acl_groups"]
+    workspace = build_workspace_config(generated)
+
+    assert data_access == {
+        "canonical": [],
+        "legacy": ["legacy_group"],
+        "derived": ["derived_group"],
+    }
+    assert {
+        name: config["acl_groups"]
+        for name, config in workspace["genie_space_configs"].items()
+    } == data_access
+
+
+def test_split_loads_tool_owned_acl_sidecar_for_both_consumers(tmp_path):
+    source = tmp_path / "abac.auto.tfvars"
+    source.write_text('genie_space_configs = { Pay = { title = "Pay" } }\n')
+    (tmp_path / "genie_space_derived_acl_groups.auto.tfvars").write_text(
+        'genie_space_derived_acl_groups = { Pay = ["pay_group"] }\n'
+    )
+
+    loaded = load_generated_config(source)
+    data_access = build_data_access_config(loaded)["genie_space_acl_groups"]
+    workspace = build_workspace_config(loaded)["genie_space_configs"]
+
+    assert data_access == {"Pay": ["pay_group"]}
+    assert workspace["Pay"]["acl_groups"] == data_access["Pay"]

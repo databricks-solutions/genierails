@@ -3761,159 +3761,17 @@ def autofix_genie_config_fields(tfvars_path: Path) -> int:
     return added
 
 
-def _acl_hcl_braces(text: str) -> tuple[dict[int, int], dict[int, int | None]]:
-    """Return brace matches and parents for ACL edits, rejecting unsafe heredocs."""
-    matches: dict[int, int] = {}
-    parents: dict[int, int | None] = {}
-    stack: list[int] = []
-    in_string = False
-    escape_next = False
-    line_comment = False
-    block_comment = False
-    i = 0
-    while i < len(text):
-        if line_comment:
-            if text[i] == "\n":
-                line_comment = False
-            i += 1
-            continue
-        if block_comment:
-            if text.startswith("*/", i):
-                block_comment = False
-                i += 2
-            else:
-                i += 1
-            continue
-        if in_string:
-            if escape_next:
-                escape_next = False
-            elif text[i] == "\\":
-                escape_next = True
-            elif text[i] == '"':
-                in_string = False
-            i += 1
-            continue
-        if text.startswith("<<", i):
-            header = re.match(r"<<-?([A-Za-z_][A-Za-z0-9_]*)[^\n]*\n", text[i:])
-            if not header:
-                raise ValueError("Cannot safely place acl_groups: malformed heredoc")
-            marker = header.group(1)
-            body_start = i + header.end()
-            terminator = re.search(
-                rf"(?m)^[ \t]*{re.escape(marker)}[ \t]*(?:\n|$)", text[body_start:]
-            )
-            if not terminator:
-                raise ValueError("Cannot safely place acl_groups: unterminated heredoc")
-            i = body_start + terminator.end()
-            continue
-        if text.startswith("//", i) or text[i] == "#":
-            line_comment = True
-            i += 2 if text.startswith("//", i) else 1
-            continue
-        if text.startswith("/*", i):
-            block_comment = True
-            i += 2
-            continue
-        if text[i] == '"':
-            in_string = True
-        elif text[i] == "{":
-            parents[i] = stack[-1] if stack else None
-            stack.append(i)
-        elif text[i] == "}":
-            if not stack:
-                raise ValueError("Cannot safely place acl_groups: unmatched closing brace")
-            matches[stack.pop()] = i
-        i += 1
-    if in_string or block_comment or stack:
-        raise ValueError("Cannot safely place acl_groups: unterminated HCL structure")
-    return matches, parents
-
-
-def _acl_space_entries(text: str) -> tuple[int, dict[str, tuple[int, int, str]]]:
-    """Locate direct object entries one level inside genie_space_configs."""
-    matches, parents = _acl_hcl_braces(text)
-    section = re.search(r"(?m)^genie_space_configs\s*=\s*\{", text)
-    if not section:
-        raise ValueError("Cannot safely place acl_groups: genie_space_configs not found")
-    outer_open = text.find("{", section.start(), section.end())
-    outer_close = matches.get(outer_open)
-    if outer_close is None:
-        raise ValueError("Cannot safely place acl_groups: incomplete genie_space_configs")
-    section_text = text[outer_open + 1:outer_close]
-    for heredoc in re.finditer(r"<<-?([A-Za-z_][A-Za-z0-9_]*)[^\n]*\n", section_text):
-        marker = heredoc.group(1)
-        body_start = heredoc.end()
-        terminator = re.search(
-            rf"(?m)^[ \t]*{re.escape(marker)}[ \t]*(?:\n|$)",
-            section_text[body_start:],
-        )
-        if terminator and section_text[body_start:body_start + terminator.start()].count('"') % 2:
-            raise ValueError(
-                "Cannot safely place acl_groups: heredoc contains unmatched quote"
-            )
-    entries: dict[str, tuple[int, int, str]] = {}
-    entry_pattern = re.compile(
-        r'(?m)^([ \t]*)(?:"((?:\\.|[^"\\])*)"|([A-Za-z_][A-Za-z0-9_-]*))\s*=\s*\{'
-    )
-    for match in entry_pattern.finditer(text, outer_open + 1, outer_close):
-        entry_open = text.find("{", match.start(), match.end())
-        if parents.get(entry_open) != outer_open:
-            continue
-        entry_close = matches.get(entry_open)
-        if entry_close is None or entry_close > outer_close:
-            raise ValueError("Cannot safely place acl_groups: incomplete space object")
-        name = bytes(match.group(2), "utf-8").decode("unicode_escape") if match.group(2) is not None else match.group(3)
-        entries[name] = (entry_open, entry_close, match.group(1))
-    return outer_open, entries
-
-
-def _canonicalize_space_acl_keys(text: str) -> tuple[str, int]:
-    """Rename legacy ACL keys only when they are direct fields of a space."""
-    _, entries = _acl_space_entries(text)
-    replacements: list[tuple[int, int]] = []
-    matches, _ = _acl_hcl_braces(text)
-    field_pattern = re.compile(
-        r"(?:^|[,{\n])\s*(genie_acl_groups|acl_groups)\s*=", re.MULTILINE
-    )
-    for entry_open, entry_close, _indent in entries.values():
-        for match in field_pattern.finditer(text, entry_open, entry_close):
-            if match.group(1) != "genie_acl_groups":
-                continue
-            key_start = match.start(1)
-            if any(open_pos > entry_open and open_pos < key_start < close for open_pos, close in matches.items()):
-                continue
-            replacements.append((key_start, key_start + len("genie_acl_groups")))
-    for start, end in reversed(replacements):
-        text = text[:start] + "acl_groups" + text[end:]
-    return text, len(replacements)
-
-
 def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -> int:
-    """Populate acl_groups in genie_space_configs from FGAC policy analysis.
-
-    For each space, finds which groups have FGAC policies on that space's tables
-    and adds them to acl_groups. If acl_groups is already set, it's left unchanged.
-
-    Returns the number of spaces that had acl_groups populated.
-    """
+    """Write policy-derived ACLs separately without mutating authored HCL."""
     import hcl2
 
     text = tfvars_path.read_text()
-    if not re.search(r"(?m)^genie_space_configs\s*=\s*\{", text):
-        try:
-            hcl2.loads(text)
-        except Exception as exc:
-            raise ValueError(f"Cannot safely place acl_groups: generated HCL is invalid: {exc}") from exc
-        return 0
-    # Older prompts and model responses may emit ``genie_acl_groups`` even
-    # though all downstream layers consume the canonical ``acl_groups`` key.
-    # Canonicalize before parsing so we neither lose the intended ACLs during
-    # split nor try to inject a duplicate field into a nested child block.
-    text, canonicalized = _canonicalize_space_acl_keys(text)
     try:
         cfg = hcl2.loads(text)
     except Exception as exc:
-        raise ValueError(f"Cannot safely place acl_groups: generated HCL is invalid: {exc}") from exc
+        raise ValueError(
+            f"Cannot derive Genie ACLs: generated HCL is invalid: {exc}"
+        ) from exc
 
     genie_cfgs = cfg.get("genie_space_configs") or {}
     if isinstance(genie_cfgs, list):
@@ -3946,13 +3804,6 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
         except Exception:
             pass
 
-    if not space_catalogs:
-        # There is no safe policy-derived ACL to add, but still preserve a
-        # legacy ACL spelling that was canonicalized above.
-        if canonicalized:
-            tfvars_path.write_text(text)
-        return canonicalized
-
     # Build group → set of catalogs from fgac_policies
     group_catalogs: dict[str, set[str]] = {}
     for pol in fgac_policies:
@@ -3975,13 +3826,17 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
         for g in except_p:
             group_catalogs.setdefault(g, set()).add(catalog)
 
-    # For each space, find groups whose FGAC catalogs overlap with the space's catalogs
-    fixed = canonicalized
-    for space_name, cfg_entry in genie_cfgs.items():
+    # Only missing ACLs are derived. Presence of either spelling, including [],
+    # is explicit intent and is resolved by both downstream consumers.
+    derived: dict[str, list[str]] = {}
+    for space_name in sorted(genie_cfgs):
+        cfg_entry = genie_cfgs[space_name]
         if isinstance(cfg_entry, list):
             cfg_entry = cfg_entry[0] if cfg_entry else {}
-        if "acl_groups" in cfg_entry:
-            continue  # Explicit ACLs, including [], must never be widened.
+        if not isinstance(cfg_entry, dict):
+            continue
+        if "acl_groups" in cfg_entry or "genie_acl_groups" in cfg_entry:
+            continue
 
         cats = space_catalogs.get(space_name, set())
         if not cats:
@@ -3996,26 +3851,20 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
         if not space_groups:
             # If no specific groups found, use all groups (backward compat)
             space_groups = sorted(groups.keys())
+        derived[str(space_name)] = space_groups
 
-        _, entries = _acl_space_entries(text)
-        entry = entries.get(space_name)
-        if entry is None:
-            raise ValueError(f"Cannot safely place acl_groups for space {space_name!r}")
-        _entry_open, entry_close, entry_indent = entry
-        field_indent = entry_indent + "  "
-        item_indent = field_indent + "  "
-        acl_block = (
-            f"{field_indent}acl_groups = [\n"
-            + "".join(f'{item_indent}"{g}",\n' for g in space_groups)
-            + f"{field_indent}]"
-        )
-        insertion = "\n" + acl_block + "\n" + entry_indent
-        text = text[:entry_close] + insertion + text[entry_close:]
-        fixed += 1
-
-    if fixed:
-        tfvars_path.write_text(text)
-    return fixed
+    derived_path = tfvars_path.with_name(
+        "genie_space_derived_acl_groups.auto.tfvars"
+    )
+    lines = ["# Tool-owned; re-derived for this environment.", "genie_space_derived_acl_groups = {"]
+    for space_name, acl_groups in derived.items():
+        rendered = ", ".join(json.dumps(group) for group in acl_groups)
+        lines.append(f"  {json.dumps(space_name)} = [{rendered}]")
+    lines.append("}")
+    rendered_text = "\n".join(lines) + "\n"
+    if not derived_path.exists() or derived_path.read_text() != rendered_text:
+        derived_path.write_text(rendered_text)
+    return len(derived)
 
 
 def autofix_missing_genie_space_entries(tfvars_path: Path, auth_cfg: dict) -> int:
@@ -4123,8 +3972,7 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
         categories.add("date")
     if ("card" in col and "cardholder" not in col and "card_holder" not in col) or "cvv" in col:
         categories.add("card")
-    is_compensation_amount = _has_unqualified_compensation_token(col)
-    if "amount" in col or "balance" in col or "limit" in col or is_compensation_amount:
+    if _identifier_indicates_numeric_amount(col):
         categories.add("amount")
     # Government/financial IDs — country-specific columns
     if any(k in col for k in (
@@ -4150,21 +3998,28 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
     return categories or {"generic"}
 
 
-def _has_unqualified_compensation_token(text: str) -> bool:
-    tokens = set(re.split(r"[^a-z0-9]+", text.lower()))
-    qualifiers = {"band", "type", "category", "code", "label", "description"}
+def _identifier_indicates_numeric_amount(identifier: str) -> bool:
+    """Classify one column/tag-value identifier, never a qualified FQN/blob."""
+    tokens = set(re.split(r"[^a-z0-9]+", identifier.lower()))
+    qualifiers = {
+        "band", "type", "category", "code", "label", "description",
+        "tier", "center", "history",
+    }
     return bool(
-        tokens & {"salary", "wage", "compensation"}
+        tokens & {
+            "amount", "balance", "limit", "rounded", "price", "cost",
+            "salary", "wage", "compensation",
+        }
         and not tokens & qualifiers
     )
 
 
-def _text_indicates_numeric_amount(text: str) -> bool:
-    normalized = text.lower()
-    tokens = set(re.split(r"[^a-z0-9]+", normalized))
-    return bool(
-        tokens & {"amount", "balance", "limit", "rounded", "price", "cost"}
-        or _has_unqualified_compensation_token(normalized)
+def _condition_numeric_tag_values(condition: str) -> bool:
+    return any(
+        _identifier_indicates_numeric_amount(value)
+        for value in re.findall(
+            r"hasTagValue\(\s*'[^']+'\s*,\s*'([^']+)'\s*\)", condition or ""
+        )
     )
 
 
@@ -4518,7 +4373,7 @@ def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = N
             if p.get("name") == pname:
                 policy_match = (p.get("match_condition", "") or "") + " " + (p.get("when_condition", "") or "")
                 break
-        is_numeric = _text_indicates_numeric_amount(policy_match)
+        is_numeric = _condition_numeric_tag_values(policy_match)
         is_date = any(tok in policy_match.lower() for tok in ("dob", "birth", "date"))
 
         if is_numeric:
@@ -4867,8 +4722,9 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
             # No matching tag assignments — but the policy may still have a wrong
             # function (e.g. duplicate _2/_3 policies).  Check the condition keywords
             # to detect type mismatches even without matched assignments.
-            cond = (p.get("match_condition", "") or "").lower()
-            cond_is_numeric = _text_indicates_numeric_amount(cond)
+            cond_raw = p.get("match_condition", "") or ""
+            cond = cond_raw.lower()
+            cond_is_numeric = _condition_numeric_tag_values(cond_raw)
             cond_is_date = any(tok in cond for tok in ("dob", "birth", "date"))
             if cond_is_numeric and fn != "mask_amount_rounded" and "mask_amount_rounded" in (available_functions or set()):
                 replacements.append((p.get("name", ""), fn, "mask_amount_rounded"))
@@ -4879,19 +4735,24 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
         categories = set()
         for ta in matched:
             categories.update(_infer_column_categories_full(ta.get("entity_name", "")))
-        matched_blob = " ".join(
-            ta.get("entity_name", "") + " " + ta.get("tag_value", "") for ta in matched
-        ).lower()
-        is_numeric = (
-            "amount" in categories
-            or _text_indicates_numeric_amount(matched_blob)
+        is_numeric = "amount" in categories or any(
+            _identifier_indicates_numeric_amount(
+                str(ta.get("entity_name", "")).rsplit(".", 1)[-1]
+            )
+            or _identifier_indicates_numeric_amount(str(ta.get("tag_value", "")))
+            for ta in matched
         )
-        if categories.issubset(expected) and not is_numeric:
+        if categories.issubset(expected):
             continue
 
         # Check if the matched columns are numeric/date — if so, replace
         # with the correct type-specific function, not mask_redact (STRING).
-        is_date = any(tok in matched_blob for tok in (
+        matched_leaf_values = " ".join(
+            str(ta.get("entity_name", "")).rsplit(".", 1)[-1]
+            + " " + str(ta.get("tag_value", ""))
+            for ta in matched
+        ).lower()
+        is_date = any(tok in matched_leaf_values for tok in (
             "dob", "birth", "date_of_birth", "opened_date", "expiry",
         ))
         if is_numeric:

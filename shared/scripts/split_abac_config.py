@@ -57,6 +57,20 @@ def load_hcl(path: Path) -> dict:
         return hcl2.load(f)
 
 
+def load_generated_config(source_path: Path) -> dict:
+    """Load the authored draft plus its tool-owned derived ACL sidecar."""
+    full_cfg = load_hcl(source_path)
+    derived_path = source_path.with_name(
+        "genie_space_derived_acl_groups.auto.tfvars"
+    )
+    if derived_path.exists():
+        derived_cfg = load_hcl(derived_path)
+        full_cfg["genie_space_derived_acl_groups"] = derived_cfg.get(
+            "genie_space_derived_acl_groups", {}
+        )
+    return full_cfg
+
+
 def quote_key(key: str) -> str:
     if IDENT_RE.match(key):
         return key
@@ -294,6 +308,26 @@ def build_workspace_config(full_cfg: dict) -> dict:
             ):
                 cfg.pop(legacy_key, None)
 
+    derived_acls = full_cfg.get("genie_space_derived_acl_groups") or {}
+    genie_configs = cfg.get("genie_space_configs") or {}
+    if isinstance(genie_configs, dict):
+        resolved_configs = {}
+        for name, space in genie_configs.items():
+            if not isinstance(space, dict):
+                resolved_configs[name] = space
+                continue
+            resolved = dict(space)
+            resolved["acl_groups"] = list(
+                space["acl_groups"]
+                if "acl_groups" in space
+                else space["genie_acl_groups"]
+                if "genie_acl_groups" in space
+                else derived_acls.get(name, [])
+            )
+            resolved.pop("genie_acl_groups", None)
+            resolved_configs[name] = resolved
+        cfg["genie_space_configs"] = resolved_configs
+
     return cfg
 
 
@@ -307,9 +341,16 @@ def build_data_access_config(full_cfg: dict) -> dict:
             continue
         cfg[key] = value
     genie_configs = full_cfg.get("genie_space_configs") or {}
+    derived_acls = full_cfg.get("genie_space_derived_acl_groups") or {}
     if isinstance(genie_configs, dict) and genie_configs:
         cfg["genie_space_acl_groups"] = {
-            name: list(space.get("acl_groups") or space.get("genie_acl_groups") or [])
+            name: list(
+                space["acl_groups"]
+                if "acl_groups" in space
+                else space["genie_acl_groups"]
+                if "genie_acl_groups" in space
+                else derived_acls.get(name, [])
+            )
             for name, space in genie_configs.items()
             if isinstance(space, dict)
         }
@@ -362,7 +403,7 @@ def main():
         print(f"ERROR: source file not found: {source_path}")
         sys.exit(1)
 
-    full_cfg = load_hcl(source_path)
+    full_cfg = load_generated_config(source_path)
     existing_account_cfg = (
         load_hcl(account_path) if account_path.exists() else None
     )
