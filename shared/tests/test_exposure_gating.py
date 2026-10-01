@@ -49,6 +49,13 @@ def test_created_space_acl_reapplies_after_space_recreation():
     assert "space_create_id = null_resource.genie_space_create[each.key].id" in block
 
 
+def test_apply_fingerprint_includes_terraform_and_genie_code():
+    makefile = (SHARED / "Makefile.shared").read_text()
+    assert '$(SHARED_ROOT)/roots/$$layer' in makefile
+    assert '$(SHARED_ROOT)/modules/$$layer' in makefile
+    assert '$(SHARED_ROOT)/scripts/genie_space.sh' in makefile
+
+
 def test_roots_forward_the_same_gate_to_both_modules():
     assignment = r"business_access_enabled\s*=\s*var\.business_access_enabled"
     assert re.search(assignment, (SHARED / "roots/data_access/main.tf").read_text())
