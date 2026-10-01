@@ -77,6 +77,29 @@ def quote_key(key: str) -> str:
     return json.dumps(key)
 
 
+def resolve_space_acl(
+    space_name: str, space: dict, derived_acls: dict
+) -> list[str]:
+    """Resolve explicit/legacy/derived ACLs, failing closed when unavailable."""
+    if "acl_groups" in space:
+        value = space["acl_groups"]
+    elif "genie_acl_groups" in space:
+        value = space["genie_acl_groups"]
+    elif space_name in derived_acls:
+        value = derived_acls[space_name]
+    else:
+        raise ValueError(
+            f"Genie space {space_name!r} has no resolved ACL. Run `make generate` "
+            "to re-derive ACLs or set acl_groups explicitly."
+        )
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(
+            f"Genie space {space_name!r} ACL must be a list of group names "
+            "(explicit [] means no business access); interpolation/null is not allowed."
+        )
+    return list(value)
+
+
 def render_scalar(value) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -232,7 +255,8 @@ def _strip_var_refs(space_cfg: dict) -> dict:
     """
     return {
         k: v for k, v in space_cfg.items()
-        if not (isinstance(v, str) and "${var." in v)
+        if k in {"acl_groups", "genie_acl_groups"}
+        or not (isinstance(v, str) and "${var." in v)
     }
 
 
@@ -317,13 +341,7 @@ def build_workspace_config(full_cfg: dict) -> dict:
                 resolved_configs[name] = space
                 continue
             resolved = dict(space)
-            resolved["acl_groups"] = list(
-                space["acl_groups"]
-                if "acl_groups" in space
-                else space["genie_acl_groups"]
-                if "genie_acl_groups" in space
-                else derived_acls.get(name, [])
-            )
+            resolved["acl_groups"] = resolve_space_acl(name, space, derived_acls)
             resolved.pop("genie_acl_groups", None)
             resolved_configs[name] = resolved
         cfg["genie_space_configs"] = resolved_configs
@@ -344,13 +362,7 @@ def build_data_access_config(full_cfg: dict) -> dict:
     derived_acls = full_cfg.get("genie_space_derived_acl_groups") or {}
     if isinstance(genie_configs, dict) and genie_configs:
         cfg["genie_space_acl_groups"] = {
-            name: list(
-                space["acl_groups"]
-                if "acl_groups" in space
-                else space["genie_acl_groups"]
-                if "genie_acl_groups" in space
-                else derived_acls.get(name, [])
-            )
+            name: resolve_space_acl(name, space, derived_acls)
             for name, space in genie_configs.items()
             if isinstance(space, dict)
         }

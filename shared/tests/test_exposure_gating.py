@@ -22,8 +22,10 @@ def test_workspace_business_acls_are_gated_but_creation_is_not():
     source = (SHARED / "modules/workspace/main.tf").read_text()
 
     assert source.count(
-        'if var.business_access_enabled && lookup(local.genie_space_groups, k, "") != ""'
+        "if var.business_access_enabled && "
+        "contains(keys(local.genie_space_groups), k)"
     ) == 2
+    assert source.count('GENIE_ALLOW_EMPTY_ACL    = "1"') == 2
 
     create_start = source.index('resource "null_resource" "genie_space_create"')
     create_end = source.index(

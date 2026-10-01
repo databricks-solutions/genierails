@@ -139,6 +139,65 @@ def test_acl_derivation_fails_loud_on_invalid_hcl(tmp_path):
         autofix_acl_groups(tfvars, env_tfvars)
 
 
+def test_acl_derivation_fails_closed_when_no_policy_maps_space(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(
+        tmp_path, '  Pay = { title = "Pay" }'
+    )
+    tfvars.write_text(tfvars.read_text().replace(
+        'catalog = "pay_cat"', 'catalog = "unrelated_cat"'
+    ))
+
+    with pytest.raises(ValueError, match="no policy groups.*Set acl_groups"):
+        autofix_acl_groups(tfvars, env_tfvars)
+
+
+def test_missing_space_formatter_preserves_title_and_legacy_acl(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env_tfvars = tmp_path / "env.auto.tfvars"
+    tfvars.write_text('''groups = { shared_g = {} hr_g = {} }
+fgac_policies = [
+  { name = "hr" catalog = "hr_cat" to_principals = ["hr_g"] }
+]
+genie_space_configs = {
+  Pay = { title = "Payments", genie_acl_groups = ["shared_g"] }
+}
+''')
+    env_tfvars.write_text('''genie_spaces = [
+  { name = "Pay", uc_tables = ["pay_cat.s.t"] },
+  { name = "HR", uc_tables = ["hr_cat.s.t"] },
+]
+''')
+
+    assert generate_abac.autofix_missing_genie_space_entries(
+        tfvars, {"genie_spaces": [
+            {"name": "Pay"}, {"name": "HR"},
+        ]}
+    ) == 1
+    assert autofix_acl_groups(tfvars, env_tfvars) == 1
+
+    parsed = assert_valid_hcl(tfvars)["genie_space_configs"]
+    assert parsed["Pay"]["title"] == "Payments"
+    assert parsed["Pay"]["acl_groups"] == ["shared_g"]
+    derived = assert_valid_hcl(
+        tmp_path / "genie_space_derived_acl_groups.auto.tfvars"
+    )["genie_space_derived_acl_groups"]
+    assert derived == {"HR": ["hr_g"]}
+
+
+def test_missing_space_formatter_preserves_explicit_empty_acl(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text(
+        'genie_space_configs = { Pay = { title = "Pay" acl_groups = [] } }\n'
+    )
+
+    assert generate_abac.autofix_missing_genie_space_entries(
+        tfvars, {"genie_spaces": [{"name": "Pay"}, {"name": "HR"}]}
+    ) == 1
+
+    parsed = assert_valid_hcl(tfvars)["genie_space_configs"]
+    assert parsed["Pay"]["acl_groups"] == []
+
+
 def test_generator_infers_compensation_amounts_without_string_classifiers():
     for column in ("annual_salary", "hourly_wage", "total_compensation"):
         assert "amount" in generate_abac._infer_column_categories_full(f"cat.sch.tbl.{column}")
@@ -1776,6 +1835,44 @@ fgac_policies = [{{
 
 
 @pytest.mark.parametrize(
+    ("column", "tag_value"),
+    [
+        ("v", "rounded_amount"),
+        ("v", "masked_amount"),
+        ("txn_value", "amount"),
+    ],
+)
+def test_mask_redact_is_repaired_for_numeric_tag_identifiers(
+    tmp_path, column, tag_value
+):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text(f'''tag_assignments = [
+  {{ entity_type = "columns", entity_name = "cat.sch.tbl.{column}", tag_key = "sensitivity", tag_value = "{tag_value}" }}
+]
+fgac_policies = [{{
+  name = "mask_numeric"
+  policy_type = "POLICY_TYPE_COLUMN_MASK"
+  catalog = "cat"
+  to_principals = ["users"]
+  function_schema = "sch"
+  match_condition = "hasTagValue('sensitivity', '{tag_value}')"
+  function_name = "mask_redact"
+}}]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "CREATE FUNCTION mask_redact(input STRING) RETURNS STRING RETURN '***';\n"
+        "CREATE FUNCTION mask_amount_rounded(input DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN input;\n"
+    )
+
+    assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == 1
+    assert (
+        assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"]
+        == "mask_amount_rounded"
+    )
+
+
+@pytest.mark.parametrize(
     ("tag_value", "numeric"),
     [
         ("rounded_amount", True),
@@ -1786,6 +1883,8 @@ fgac_policies = [{{
         ("compensation_code", False),
         ("price_tier", False),
         ("cost_center", False),
+        ("price_tiers", False),
+        ("cost_centers", False),
     ],
 )
 def test_no_assignment_category_repair_uses_only_tag_value_identifier(
@@ -1828,6 +1927,8 @@ fgac_policies = [{{
         ("compensation_code", False),
         ("price_tier", False),
         ("cost_center", False),
+        ("price_tiers", False),
+        ("cost_centers", False),
     ],
 )
 def test_arg_count_repair_uses_only_tag_value_identifier(

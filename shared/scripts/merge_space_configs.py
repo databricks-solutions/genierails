@@ -161,6 +161,21 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
                 lines.append("      },")
             lines.append("    ]")
 
+        if "acl_groups" in cfg or "genie_acl_groups" in cfg:
+            acl_groups = (
+                cfg["acl_groups"]
+                if "acl_groups" in cfg
+                else cfg["genie_acl_groups"]
+            )
+            if not isinstance(acl_groups, list) or not all(
+                isinstance(group, str) for group in acl_groups
+            ):
+                raise ValueError("acl_groups must be a list of group names")
+            lines.append("    acl_groups = [")
+            for group in acl_groups:
+                lines.append(f"      {_hcl_str(group)},")
+            lines.append("    ]")
+
         lines.append("  }")
 
     lines.append("}")

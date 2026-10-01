@@ -30,14 +30,10 @@ locals {
     : databricks_sql_endpoint.warehouse[0].id
   )
 
-  # Per-space group list: use acl_groups if set, otherwise all groups (backward compat).
+  # ACL resolution is fail-closed before this module. Explicit [] means nobody.
   # When var.groups is empty (genie-only mode), ACLs are skipped entirely.
   genie_space_groups = length(var.groups) > 0 ? {
-    for key, space in var.genie_spaces : key => (
-      length(try(space.config.acl_groups, [])) > 0
-      ? join(",", space.config.acl_groups)
-      : join(",", keys(var.groups))
-    )
+    for key, space in var.genie_spaces : key => join(",", space.config.acl_groups)
   } : {}
 
   # Spaces that already have an ID — apply ACLs, and config if defined.
@@ -100,7 +96,7 @@ resource "databricks_sql_endpoint" "warehouse" {
 resource "null_resource" "genie_space_acls" {
   for_each = {
     for k, v in local.existing_spaces : k => v
-    if var.business_access_enabled && lookup(local.genie_space_groups, k, "") != ""
+    if var.business_access_enabled && contains(keys(local.genie_space_groups), k)
   }
 
   triggers = {
@@ -117,6 +113,7 @@ resource "null_resource" "genie_space_acls" {
       DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
       GENIE_SPACE_OBJECT_ID    = each.value.genie_space_id
       GENIE_GROUPS_CSV         = local.genie_space_groups[each.key]
+      GENIE_ALLOW_EMPTY_ACL    = "1"
     }
   }
 
@@ -267,7 +264,7 @@ resource "null_resource" "genie_space_acls_created" {
   # where groups are managed by the governance team in a separate environment).
   for_each = {
     for k, v in local.new_spaces : k => v
-    if var.business_access_enabled && lookup(local.genie_space_groups, k, "") != ""
+    if var.business_access_enabled && contains(keys(local.genie_space_groups), k)
   }
 
   triggers = {
@@ -283,6 +280,7 @@ resource "null_resource" "genie_space_acls_created" {
       DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
       GENIE_ID_FILE            = "${var.genie_id_file_prefix}_${each.key}"
       GENIE_GROUPS_CSV         = local.genie_space_groups[each.key]
+      GENIE_ALLOW_EMPTY_ACL    = "1"
     }
   }
 

@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 MAIN_TF = Path(__file__).parents[1] / "modules" / "data_access" / "main.tf"
+WORKSPACE_MAIN_TF = Path(__file__).parents[1] / "modules" / "workspace" / "main.tf"
 
 
 def _resource_body(source: str, name: str) -> str:
@@ -88,6 +89,18 @@ def test_business_select_is_fail_closed_while_structural_grants_remain():
     assert "for_each = var.business_access_enabled ? {" in _resource_body(source, "table_access")
     assert "var.business_access_enabled" not in _resource_body(source, "catalog_access")
     assert "var.business_access_enabled" not in _resource_body(source, "schema_access")
+
+
+def test_explicit_empty_agent_acl_is_fail_closed_in_both_layers():
+    data_access = MAIN_TF.read_text()
+    workspace = WORKSPACE_MAIN_TF.read_text()
+
+    assert "length(local.scoped_table_access_principals[table]) == 0" not in data_access
+    assert 'join(",", space.config.acl_groups)' in workspace
+    assert 'join(",", keys(var.groups))' not in workspace.split(
+        "genie_space_groups =", 1
+    )[1].split("existing_spaces =", 1)[0]
+    assert 'GENIE_ALLOW_EMPTY_ACL    = "1"' in workspace
 
 
 def test_catalog_grants_are_serialized_without_authoritative_replacement():

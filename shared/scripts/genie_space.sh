@@ -704,7 +704,7 @@ elif [[ "$COMMAND" == "set-acls" ]]; then
     exit 1
   fi
 
-  if [[ -z "${GENIE_GROUPS_CSV:-}" ]]; then
+  if [[ -z "${GENIE_GROUPS_CSV:-}" && "${GENIE_ALLOW_EMPTY_ACL:-}" != "1" ]]; then
     echo "ERROR: GENIE_GROUPS_CSV not set. Pass comma-separated group names." >&2
     echo "  Example: GENIE_GROUPS_CSV='Analyst,Admin' $0 set-acls" >&2
     exit 1

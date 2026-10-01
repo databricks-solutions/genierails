@@ -819,6 +819,9 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
     for space_name, cfg in configs.items():
         lines.append(f"  {_hcl_str(space_name)} = {{")
 
+        if cfg.get("title"):
+            lines.append(f"    title = {_hcl_str(cfg['title'])}")
+
         if cfg.get("description"):
             lines.append(f"    description = {_hcl_str(cfg['description'])}")
 
@@ -899,9 +902,18 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
                 # Skip malformed join_specs (e.g. plain strings from LLM)
             lines.append("    ]")
 
-        if cfg.get("acl_groups"):
+        if "acl_groups" in cfg or "genie_acl_groups" in cfg:
+            acl_groups = (
+                cfg["acl_groups"]
+                if "acl_groups" in cfg
+                else cfg["genie_acl_groups"]
+            )
+            if not isinstance(acl_groups, list) or not all(
+                isinstance(group, str) for group in acl_groups
+            ):
+                raise ValueError("acl_groups must be a list of group names")
             lines.append("    acl_groups = [")
-            for g in cfg["acl_groups"]:
+            for g in acl_groups:
                 lines.append(f"      {_hcl_str(g)},")
             lines.append("    ]")
 
@@ -3840,7 +3852,10 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
 
         cats = space_catalogs.get(space_name, set())
         if not cats:
-            continue
+            raise ValueError(
+                f"Cannot derive ACL for Genie space {space_name!r}: no mapped catalogs. "
+                "Set acl_groups explicitly."
+            )
 
         # Find groups that have policies on this space's catalogs
         space_groups = sorted({
@@ -3849,8 +3864,10 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
         })
 
         if not space_groups:
-            # If no specific groups found, use all groups (backward compat)
-            space_groups = sorted(groups.keys())
+            raise ValueError(
+                f"Cannot derive ACL for Genie space {space_name!r}: no policy groups "
+                "map to its catalogs. Set acl_groups explicitly."
+            )
         derived[str(space_name)] = space_groups
 
     derived_path = tfvars_path.with_name(
@@ -4004,6 +4021,8 @@ def _identifier_indicates_numeric_amount(identifier: str) -> bool:
     qualifiers = {
         "band", "type", "category", "code", "label", "description",
         "tier", "center", "history",
+        "bands", "types", "categories", "codes", "labels", "descriptions",
+        "tiers", "centers", "histories",
     }
     return bool(
         tokens & {
@@ -4742,7 +4761,7 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
             or _identifier_indicates_numeric_amount(str(ta.get("tag_value", "")))
             for ta in matched
         )
-        if categories.issubset(expected):
+        if categories.issubset(expected) and not is_numeric:
             continue
 
         # Check if the matched columns are numeric/date — if so, replace
@@ -7647,10 +7666,13 @@ Before you apply, tune for your business roles, security requirements, and Genie
             if n_missing_spaces:
                 print(f"  Auto-fixed: added {n_missing_spaces} missing genie_space_configs entr(y/ies)")
 
-            env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
-            n_acl = autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
-            if n_acl:
-                print(f"  Auto-fixed: populated acl_groups for {n_acl} Genie agent(s)")
+            if target_space_cfg is None:
+                env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
+                n_acl = autofix_acl_groups(
+                    tfvars_path, env_tfvars if env_tfvars.exists() else None
+                )
+                if n_acl:
+                    print(f"  Derived ACL sidecar for {n_acl} Genie agent(s)")
 
         if args.mode != "genie":
             n_treatments, n_native_sources = derive_and_finalize_treatments(
@@ -7894,8 +7916,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
                         # genie_space_configs entry. Retry LLM output may drop
                         # space names that the test assertion checks for.
                         autofix_missing_genie_space_entries(tfvars_path, auth_cfg)
-                        env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
-                        autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
+                        if target_space_cfg is None:
+                            env_tfvars = tfvars_path.parent.parent / "env.auto.tfvars"
+                            autofix_acl_groups(
+                                tfvars_path,
+                                env_tfvars if env_tfvars.exists() else None,
+                            )
                     if args.mode != "genie":
                         derive_and_finalize_treatments(
                             tfvars_path,
@@ -8023,6 +8049,16 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     print(f"  Auto-fixed assembled abac: removed {n_bad_col_assembled} row filter(s) with bad column refs")
                 # Final HCL syntax pass on assembled config
                 fix_hcl_syntax(assembled_abac_path)
+                assembled_env_tfvars = assembled_dir.parent / "env.auto.tfvars"
+                n_acl_assembled = autofix_acl_groups(
+                    assembled_abac_path,
+                    assembled_env_tfvars if assembled_env_tfvars.exists() else None,
+                )
+                if n_acl_assembled:
+                    print(
+                        "  Derived assembled ACL sidecar for "
+                        f"{n_acl_assembled} Genie agent(s)"
+                    )
 
         # ── Full generation: bootstrap per-space dirs from the assembled output ─
         elif target_space_cfg is None and not args.space:

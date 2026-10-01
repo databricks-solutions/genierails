@@ -31,6 +31,42 @@ class TestSplitTagPolicies:
 
 
 class TestMergeSpaceConfigs:
+    def test_merge_round_trips_title_legacy_acl_and_explicit_empty_acl(
+        self, tmp_path
+    ):
+        generated_dir = tmp_path / "generated"
+        space_dir = generated_dir / "spaces" / "hr"
+        space_dir.mkdir(parents=True)
+        (generated_dir / "masking_functions.sql").write_text("")
+        (space_dir / "masking_functions.sql").write_text("")
+        (generated_dir / "abac.auto.tfvars").write_text('''
+tag_policies = []
+tag_assignments = []
+fgac_policies = []
+genie_space_configs = {
+  Pay = { title = "Payments" genie_acl_groups = ["shared_g"] }
+  Empty = { title = "Nobody" acl_groups = [] }
+}
+''')
+        (space_dir / "abac.auto.tfvars").write_text('''
+tag_policies = []
+tag_assignments = []
+fgac_policies = []
+genie_space_configs = { HR = { title = "Human Resources" acl_groups = ["hr_g"] } }
+''')
+
+        merge_into_assembled(generated_dir, "hr")
+
+        with open(generated_dir / "abac.auto.tfvars") as handle:
+            spaces = hcl2.load(handle)["genie_space_configs"]
+        assert spaces["Pay"] == {
+            "title": "Payments", "acl_groups": ["shared_g"]
+        }
+        assert spaces["Empty"] == {"title": "Nobody", "acl_groups": []}
+        assert spaces["HR"] == {
+            "title": "Human Resources", "acl_groups": ["hr_g"]
+        }
+
     def test_merge_into_assembled_raises_on_conflicting_canonical_assignment(
         self,
         tmp_path,

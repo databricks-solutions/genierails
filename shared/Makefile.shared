@@ -326,6 +326,9 @@ print(', '.join(cats) if cats else '(none detected)') \
 			"$$dest_env_dir/generated/abac.auto.tfvars" \
 			"$$dest_env_dir/generated/masking_functions.sql" \
 			$$map_flags; \
+		python3 "$(SHARED_ROOT)/scripts/derive_genie_acls.py" \
+			"$$dest_env_dir/generated/abac.auto.tfvars" \
+			"$$dest_env_dir/env.auto.tfvars"; \
 		cd "$$dest_env_dir" && python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" generated/abac.auto.tfvars ../$(ACCOUNT_ENV)/abac.auto.tfvars $(DATA_ACCESS_SUBDIR)/abac.auto.tfvars abac.auto.tfvars; \
 		cp "$$dest_env_dir/generated/masking_functions.sql" "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/masking_functions.sql"; \
 		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; fi; \
@@ -344,6 +347,9 @@ print(', '.join(cats) if cats else '(none detected)') \
 			exit 0; \
 		fi; \
 		echo "=== Split generated/ to account + data_access + workspace ($(ENV)) ==="; \
+		python3 "$(SHARED_ROOT)/scripts/derive_genie_acls.py" \
+			"$(ENV_DIR)/generated/abac.auto.tfvars" \
+			"$(ENV_DIR)/env.auto.tfvars"; \
 		if [ -f "$(ENV_DIR)/generated/masking_functions.sql" ]; then \
 			cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars generated/masking_functions.sql; \
 		else \
@@ -580,7 +586,7 @@ clean: ## Remove generated files and Terraform state for the selected environmen
 		exit 0; \
 	fi
 	@echo "=== Clean ($(ENV)) ==="
-	@rm -rf "$(ENV_DIR)/generated/abac.auto.tfvars" "$(ENV_DIR)/generated/masking_functions.sql" "$(ENV_DIR)/generated/generated_response.md"
+	@rm -rf "$(ENV_DIR)/generated/abac.auto.tfvars" "$(ENV_DIR)/generated/masking_functions.sql" "$(ENV_DIR)/generated/generated_response.md" "$(ENV_DIR)/generated/genie_space_derived_acl_groups.auto.tfvars"
 	@rm -rf "$(ENV_DIR)/.terraform" "$(ENV_DIR)"/*.tfstate "$(ENV_DIR)"/*.tfstate.backup "$(ENV_DIR)"/.terraform.lock.hcl "$(ENV_DIR)"/.*.apply.sha
 	@rm -rf "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/.terraform" "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/*.tfstate "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/*.tfstate.backup "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/.terraform.lock.hcl "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/.*.apply.sha
 	@echo "Cleaned generated files and Terraform state in $(ENV_DIR)."

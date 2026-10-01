@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from split_abac_config import (
@@ -113,3 +115,24 @@ def test_split_loads_tool_owned_acl_sidecar_for_both_consumers(tmp_path):
 
     assert data_access == {"Pay": ["pay_group"]}
     assert workspace["Pay"]["acl_groups"] == data_access["Pay"]
+
+
+def test_missing_sidecar_entry_fails_closed_for_both_consumers():
+    generated = {"genie_space_configs": {"Pay": {"title": "Pay"}}}
+
+    with pytest.raises(ValueError, match="Run `make generate`.*set acl_groups"):
+        build_data_access_config(generated)
+    with pytest.raises(ValueError, match="Run `make generate`.*set acl_groups"):
+        build_workspace_config(generated)
+
+
+@pytest.mark.parametrize("invalid_acl", [None, "${var.groups}", ["ok", 7]])
+def test_invalid_explicit_acl_fails_loud_for_both_consumers(invalid_acl):
+    generated = {
+        "genie_space_configs": {"Pay": {"acl_groups": invalid_acl}}
+    }
+
+    with pytest.raises(ValueError, match="must be a list of group names"):
+        build_data_access_config(generated)
+    with pytest.raises(ValueError, match="must be a list of group names"):
+        build_workspace_config(generated)

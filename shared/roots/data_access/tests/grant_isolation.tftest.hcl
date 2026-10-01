@@ -118,7 +118,7 @@ run "legacy_unattributed_discovery_falls_back_to_all_principals" {
   }
 }
 
-run "empty_agent_list_falls_back_to_all_principals" {
+run "empty_agent_list_is_fail_closed" {
   command = plan
 
   variables {
@@ -140,11 +140,37 @@ run "empty_agent_list_falls_back_to_all_principals" {
   }
 
   assert {
-    condition = toset(output.table_grant_resource_keys) == toset([
-      "orphan_catalog.agent.facts|agent_a_group",
-      "orphan_catalog.agent.facts|agent_b_group",
-    ])
-    error_message = "an explicitly empty owner list must fail safe to all access principals"
+    condition     = length(output.table_grant_resource_keys) == 0
+    error_message = "an explicitly empty owner list must not grant SELECT to all principals"
+  }
+}
+
+run "explicit_empty_space_acl_means_no_select_grants" {
+  command = plan
+
+  variables {
+    env_dir                   = "../../examples/healthcare"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_host = "https://example.invalid"
+    genie_spaces = [
+      { name = "Nobody", uc_tables = ["closed_catalog.agent.facts"] },
+    ]
+    genie_space_acl_groups = {
+      Nobody = []
+    }
+    groups = {
+      agent_a_group = {}
+      agent_b_group = {}
+    }
+    business_access_enabled = true
+    sql_warehouse_id        = "warehouse"
+  }
+
+  assert {
+    condition     = length(output.table_grant_resource_keys) == 0
+    error_message = "explicit acl_groups=[] must mean no business SELECT access"
   }
 }
 

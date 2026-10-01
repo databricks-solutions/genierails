@@ -339,7 +339,7 @@ variable "genie_join_specs" {
 variable "genie_acl_groups" {
   type        = list(string)
   default     = []
-  description = "Groups that should have CAN_RUN access to this Genie agent. Empty = all groups."
+  description = "Groups that should have CAN_RUN access to this Genie agent. Explicit empty means no business access."
 }
 
 # ── Group variables ───────────────────────────────────────────────────────────

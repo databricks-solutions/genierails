@@ -61,7 +61,6 @@ locals {
     for table in local.effective_uc_tables : table => (
       contains(var.admin_uc_tables, table)
       || contains(local.legacy_unattributed_discovered_tables, table)
-      || length(local.scoped_table_access_principals[table]) == 0
       ? local.access_principals
       : local.scoped_table_access_principals[table]
     )
