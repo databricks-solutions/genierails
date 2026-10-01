@@ -167,13 +167,12 @@ resource "null_resource" "genie_space_create" {
   for_each = local.new_spaces
 
   # Paths and credentials are runtime execution details, never space identity.
-  # Keeping legacy trigger keys preserves existing state without allowing a
-  # worktree move or credential rotation to trash a live curated space.
+  # The host is deliberately not ignored: moving a space to another workspace
+  # must destroy it in its original workspace before creating its replacement.
   lifecycle {
     ignore_changes = [
       triggers["id_file"],
       triggers["script"],
-      triggers["host"],
       triggers["client_id"],
       triggers["client_secret"],
     ]
@@ -212,7 +211,8 @@ resource "null_resource" "genie_space_create" {
     command = "bash ../../scripts/genie_space.sh trash"
 
     environment = {
-      GENIE_ID_BASENAME = basename(self.triggers.id_file)
+      GENIE_ID_BASENAME   = basename(self.triggers.id_file)
+      GENIE_EXPECTED_HOST = self.triggers.host
     }
   }
 

@@ -613,8 +613,15 @@ trash_genie_space() {
     fi
   fi
 
-  local workspace_url="${DATABRICKS_HOST}"
-  workspace_url="${workspace_url%/}"
+  local auth_host="${DATABRICKS_HOST%/}"
+  local expected_host="${GENIE_EXPECTED_HOST:-}"
+  expected_host="${expected_host%/}"
+  local workspace_url="$auth_host"
+
+  if [[ -n "$expected_host" && "$expected_host" != "$auth_host" ]]; then
+    echo "Genie agent belongs to ${expected_host}; current authentication host is ${auth_host}. Targeting the original host with current credentials."
+    workspace_url="$expected_host"
+  fi
 
   if [[ -z "$workspace_url" ]]; then
     echo "Need workspace URL. Set DATABRICKS_HOST." >&2
@@ -635,7 +642,10 @@ trash_genie_space() {
   fi
 
   local token
-  token=$(resolve_token "$workspace_url" "") || exit 1
+  if ! token=$(resolve_token "$workspace_url" ""); then
+    echo "ERROR: Cannot authenticate to Genie agent host ${workspace_url} with credentials from current auth host ${auth_host}." >&2
+    exit 1
+  fi
 
   echo "Trashing Genie agent ${space_id}..."
   local response
@@ -652,9 +662,13 @@ trash_genie_space() {
   if [[ "$http_code" == "200" || "$http_code" == "204" ]]; then
     echo "Genie agent ${space_id} trashed successfully."
     rm -f "${GENIE_ID_FILE}"
-  elif [[ "$http_code" == "404" ]]; then
+  elif [[ "$http_code" == "404" && ( -z "$expected_host" || "$workspace_url" == "$expected_host" ) ]]; then
     echo "Genie agent ${space_id} not found (already deleted). Cleaning up ID file."
     rm -f "${GENIE_ID_FILE}"
+  elif [[ "$http_code" == "401" || "$http_code" == "403" ]]; then
+    echo "ERROR: Cannot authenticate to Genie agent host ${workspace_url} with credentials from current auth host ${auth_host} (HTTP ${http_code})." >&2
+    echo "API response: ${response_body}" >&2
+    exit 1
   else
     echo "Failed to trash Genie agent (HTTP ${http_code})."
     echo "API response: ${response_body}"
