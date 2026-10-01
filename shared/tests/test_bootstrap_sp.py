@@ -10,6 +10,7 @@ from scripts.bootstrap_sp import (
     _config_from_args,
     _plan,
     _preflight_target_catalog,
+    _workspace_client,
     bootstrap,
     parser,
 )
@@ -65,6 +66,22 @@ def _preflight(workspace):
     _preflight_target_catalog(
         _cfg(target_catalog="existing_catalog"), account, workspace_factory
     )
+
+
+def test_workspace_client_derives_azure_host_from_deployment_name():
+    account = MagicMock()
+    account.workspaces.get.return_value = SimpleNamespace(
+        workspace_url=None,
+        deployment_name="adb-7405605806702166.6",
+        cloud="azure",
+    )
+    workspace_factory = MagicMock(return_value="workspace-client")
+
+    client, host = _workspace_client(account, workspace_factory, 7405605806702166)
+
+    assert client == "workspace-client"
+    assert host == "https://adb-7405605806702166.6.azuredatabricks.net"
+    workspace_factory.assert_called_once_with(host)
 
 
 def test_preflight_catalog_owner_passes_without_effective_grant_lookup():

@@ -101,7 +101,17 @@ def _role_values(sp: Any) -> set[str]:
 
 def _workspace_client(account: Any, workspace_client: Callable[[str], Any], workspace_id: int) -> Any:
     workspace = account.workspaces.get(workspace_id=workspace_id)
-    host = str(_value(workspace, "workspace_url"))
+    host = _value(workspace, "workspace_url")
+    if not host:
+        deployment_name = _value(workspace, "deployment_name")
+        cloud = str(_value(workspace, "cloud") or "").lower()
+        if deployment_name and "azure" in cloud:
+            host = f"{deployment_name}.azuredatabricks.net"
+    if not host:
+        raise RuntimeError(
+            f"workspace {workspace_id} did not return a usable workspace URL"
+        )
+    host = str(host)
     if not host.startswith("http"):
         host = "https://" + host
     return workspace_client(host), host
