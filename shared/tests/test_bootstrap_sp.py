@@ -83,6 +83,21 @@ def test_workspace_client_derives_azure_host_from_deployment_name():
     workspace_factory.assert_called_once_with(host)
 
 
+def test_workspace_client_derives_aws_host_from_deployment_name():
+    account = MagicMock()
+    account.workspaces.get.return_value = SimpleNamespace(
+        deployment_name="dbc-b89659bd-e807",
+        cloud="aws",
+    )
+    workspace_factory = MagicMock(return_value="workspace-client")
+
+    client, host = _workspace_client(account, workspace_factory, 123)
+
+    assert client == "workspace-client"
+    assert host == "https://dbc-b89659bd-e807.cloud.databricks.com"
+    workspace_factory.assert_called_once_with(host)
+
+
 def test_preflight_catalog_owner_passes_without_effective_grant_lookup():
     _account, workspace, _workspace_factory, _factory = _fake()
 

@@ -111,6 +111,8 @@ def _workspace_client(account: Any, workspace_client: Callable[[str], Any], work
         cloud = str(_value(workspace, "cloud") or "").lower()
         if deployment_name and "azure" in cloud:
             host = f"{deployment_name}.azuredatabricks.net"
+        elif deployment_name and "aws" in cloud:
+            host = f"{deployment_name}.cloud.databricks.com"
     if not host:
         raise RuntimeError(
             f"workspace {workspace_id} did not return a usable workspace URL"

@@ -3482,7 +3482,9 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
                     preferred.extend(["mask_credit_card_last4", "mask_credit_card_full"])
                 else:
                     preferred.extend(["mask_credit_card_full", "mask_credit_card_last4"])
-            if any(tok in blob for tok in ("amount", "balance", "limit", "rounded")):
+            if any(tok in blob for tok in (
+                "amount", "balance", "limit", "rounded", "salary", "wage", "compensation"
+            )):
                 preferred.append("mask_amount_rounded")
             if "diagnosis" in blob:
                 preferred.append("mask_diagnosis_code")
@@ -3493,7 +3495,8 @@ def autofix_missing_fgac_policies(tfvars_path: Path, sql_path: Path | None = Non
         # IMPORTANT: mask_redact returns STRING — never use it for columns tagged
         # with non-STRING values (amounts/dates).  These need type-specific masks.
         is_numeric_or_date = any(tok in blob for tok in (
-            "amount", "balance", "credit_limit", "rounded", "price", "cost", "salary",
+            "amount", "balance", "credit_limit", "rounded", "price", "cost",
+            "salary", "wage", "compensation",
             "dob", "birth", "date_of_birth", "opened_date", "expiry",
         ))
         if not is_table:
@@ -3758,6 +3761,122 @@ def autofix_genie_config_fields(tfvars_path: Path) -> int:
     return added
 
 
+def _acl_hcl_braces(text: str) -> tuple[dict[int, int], dict[int, int | None]]:
+    """Return brace matches and parents for ACL edits, rejecting unsafe heredocs."""
+    matches: dict[int, int] = {}
+    parents: dict[int, int | None] = {}
+    stack: list[int] = []
+    in_string = False
+    escape_next = False
+    line_comment = False
+    block_comment = False
+    i = 0
+    while i < len(text):
+        if line_comment:
+            if text[i] == "\n":
+                line_comment = False
+            i += 1
+            continue
+        if block_comment:
+            if text.startswith("*/", i):
+                block_comment = False
+                i += 2
+            else:
+                i += 1
+            continue
+        if in_string:
+            if escape_next:
+                escape_next = False
+            elif text[i] == "\\":
+                escape_next = True
+            elif text[i] == '"':
+                in_string = False
+            i += 1
+            continue
+        if text.startswith("<<", i):
+            header = re.match(r"<<-?([A-Za-z_][A-Za-z0-9_]*)[^\n]*\n", text[i:])
+            if not header:
+                raise ValueError("Cannot safely place acl_groups: malformed heredoc")
+            marker = header.group(1)
+            body_start = i + header.end()
+            terminator = re.search(
+                rf"(?m)^[ \t]*{re.escape(marker)}[ \t]*(?:\n|$)", text[body_start:]
+            )
+            if not terminator:
+                raise ValueError("Cannot safely place acl_groups: unterminated heredoc")
+            body_end = body_start + terminator.start()
+            if text[body_start:body_end].count('"') % 2:
+                raise ValueError(
+                    "Cannot safely place acl_groups: heredoc contains unmatched quote"
+                )
+            i = body_start + terminator.end()
+            continue
+        if text.startswith("//", i) or text[i] == "#":
+            line_comment = True
+            i += 2 if text.startswith("//", i) else 1
+            continue
+        if text.startswith("/*", i):
+            block_comment = True
+            i += 2
+            continue
+        if text[i] == '"':
+            in_string = True
+        elif text[i] == "{":
+            parents[i] = stack[-1] if stack else None
+            stack.append(i)
+        elif text[i] == "}":
+            if not stack:
+                raise ValueError("Cannot safely place acl_groups: unmatched closing brace")
+            matches[stack.pop()] = i
+        i += 1
+    if in_string or block_comment or stack:
+        raise ValueError("Cannot safely place acl_groups: unterminated HCL structure")
+    return matches, parents
+
+
+def _acl_space_entries(text: str) -> tuple[int, dict[str, tuple[int, int, str]]]:
+    """Locate direct object entries one level inside genie_space_configs."""
+    matches, parents = _acl_hcl_braces(text)
+    section = re.search(r"(?m)^genie_space_configs\s*=\s*\{", text)
+    if not section:
+        raise ValueError("Cannot safely place acl_groups: genie_space_configs not found")
+    outer_open = text.find("{", section.start(), section.end())
+    outer_close = matches.get(outer_open)
+    if outer_close is None:
+        raise ValueError("Cannot safely place acl_groups: incomplete genie_space_configs")
+    entries: dict[str, tuple[int, int, str]] = {}
+    entry_pattern = re.compile(
+        r'(?m)^([ \t]*)(?:"((?:\\.|[^"\\])*)"|([A-Za-z_][A-Za-z0-9_-]*))\s*=\s*\{'
+    )
+    for match in entry_pattern.finditer(text, outer_open + 1, outer_close):
+        entry_open = text.find("{", match.start(), match.end())
+        if parents.get(entry_open) != outer_open:
+            continue
+        entry_close = matches.get(entry_open)
+        if entry_close is None or entry_close > outer_close:
+            raise ValueError("Cannot safely place acl_groups: incomplete space object")
+        name = bytes(match.group(2), "utf-8").decode("unicode_escape") if match.group(2) is not None else match.group(3)
+        entries[name] = (entry_open, entry_close, match.group(1))
+    return outer_open, entries
+
+
+def _canonicalize_space_acl_keys(text: str) -> tuple[str, int]:
+    """Rename legacy ACL keys only when they are direct fields of a space."""
+    _, entries = _acl_space_entries(text)
+    replacements: list[tuple[int, int]] = []
+    matches, _ = _acl_hcl_braces(text)
+    for entry_open, entry_close, _indent in entries.values():
+        for match in re.finditer(r"(?m)^\s*genie_acl_groups\s*=", text[entry_open + 1:entry_close]):
+            start = entry_open + 1 + match.start()
+            key_start = text.find("genie_acl_groups", start, entry_open + 1 + match.end())
+            if any(open_pos > entry_open and open_pos < key_start < close for open_pos, close in matches.items()):
+                continue
+            replacements.append((key_start, key_start + len("genie_acl_groups")))
+    for start, end in reversed(replacements):
+        text = text[:start] + "acl_groups" + text[end:]
+    return text, len(replacements)
+
+
 def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -> int:
     """Populate acl_groups in genie_space_configs from FGAC policy analysis.
 
@@ -3769,17 +3888,21 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
     import hcl2
 
     text = tfvars_path.read_text()
+    if not re.search(r"(?m)^genie_space_configs\s*=\s*\{", text):
+        try:
+            hcl2.loads(text)
+        except Exception as exc:
+            raise ValueError(f"Cannot safely place acl_groups: generated HCL is invalid: {exc}") from exc
+        return 0
     # Older prompts and model responses may emit ``genie_acl_groups`` even
     # though all downstream layers consume the canonical ``acl_groups`` key.
     # Canonicalize before parsing so we neither lose the intended ACLs during
     # split nor try to inject a duplicate field into a nested child block.
-    text, canonicalized = re.subn(
-        r"(?m)^(\s*)genie_acl_groups(\s*=)", r"\1acl_groups\2", text
-    )
+    text, canonicalized = _canonicalize_space_acl_keys(text)
     try:
         cfg = hcl2.loads(text)
-    except Exception:
-        return 0
+    except Exception as exc:
+        raise ValueError(f"Cannot safely place acl_groups: generated HCL is invalid: {exc}") from exc
 
     genie_cfgs = cfg.get("genie_space_configs") or {}
     if isinstance(genie_cfgs, list):
@@ -3867,41 +3990,21 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
             # If no specific groups found, use all groups (backward compat)
             space_groups = sorted(groups.keys())
 
-        # Insert at the closing brace of the *space* object. A ``[^}]*``
-        # regex stops at the first nested benchmark/filter object and puts the
-        # ACL in that child instead of at the space's top level.
-        section_match = re.search(r"(?m)^genie_space_configs\s*=\s*\{", text)
-        count = 0
-        if section_match:
-            outer_open = text.find("{", section_match.start(), section_match.end())
-            outer_blocks = _find_brace_blocks(text[outer_open:])
-            if outer_blocks:
-                outer_close = outer_open + outer_blocks[0][1]
-                section_text = text[outer_open + 1:outer_close]
-                escaped_name = re.escape(space_name)
-                entry_match = re.search(
-                    rf'(?m)^([ \t]*)(?:"{escaped_name}"|{escaped_name})\s*=\s*\{{',
-                    section_text,
-                )
-                if entry_match:
-                    entry_open = outer_open + 1 + section_text.find(
-                        "{", entry_match.start(), entry_match.end()
-                    )
-                    entry_blocks = _find_brace_blocks(text[entry_open:outer_close])
-                    if entry_blocks:
-                        entry_close = entry_open + entry_blocks[0][1]
-                        closing_line = text.rfind("\n", entry_open, entry_close) + 1
-                        field_indent = entry_match.group(1) + "  "
-                        item_indent = field_indent + "  "
-                        acl_line = (
-                            f"{field_indent}acl_groups = [\n"
-                            + "".join(f'{item_indent}"{g}",\n' for g in space_groups)
-                            + f"{field_indent}]\n"
-                        )
-                        text = text[:closing_line] + acl_line + text[closing_line:]
-                        count = 1
-        if count:
-            fixed += 1
+        _, entries = _acl_space_entries(text)
+        entry = entries.get(space_name)
+        if entry is None:
+            raise ValueError(f"Cannot safely place acl_groups for space {space_name!r}")
+        _entry_open, entry_close, entry_indent = entry
+        field_indent = entry_indent + "  "
+        item_indent = field_indent + "  "
+        acl_block = (
+            f"{field_indent}acl_groups = [\n"
+            + "".join(f'{item_indent}"{g}",\n' for g in space_groups)
+            + f"{field_indent}]"
+        )
+        insertion = "\n" + acl_block + "\n" + entry_indent
+        text = text[:entry_close] + insertion + text[entry_close:]
+        fixed += 1
 
     if fixed:
         tfvars_path.write_text(text)
@@ -4013,7 +4116,13 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
         categories.add("date")
     if ("card" in col and "cardholder" not in col and "card_holder" not in col) or "cvv" in col:
         categories.add("card")
-    if "amount" in col or "balance" in col or "limit" in col:
+    compensation_tokens = set(re.split(r"[^a-z0-9]+", col))
+    compensation_qualifiers = {"band", "type", "category", "code", "label", "description"}
+    is_compensation_amount = bool(
+        compensation_tokens & {"salary", "wage", "compensation"}
+        and not compensation_tokens & compensation_qualifiers
+    )
+    if "amount" in col or "balance" in col or "limit" in col or is_compensation_amount:
         categories.add("amount")
     # Government/financial IDs — country-specific columns
     if any(k in col for k in (
@@ -4389,7 +4498,9 @@ def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = N
             if p.get("name") == pname:
                 policy_match = (p.get("match_condition", "") or "") + " " + (p.get("when_condition", "") or "")
                 break
-        is_numeric = any(tok in policy_match.lower() for tok in ("rounded", "amount", "balance", "credit_limit"))
+        is_numeric = any(tok in policy_match.lower() for tok in (
+            "rounded", "amount", "balance", "credit_limit", "salary", "wage", "compensation"
+        ))
         is_date = any(tok in policy_match.lower() for tok in ("dob", "birth", "date"))
 
         if is_numeric:
@@ -4708,9 +4819,9 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
         if p.get("policy_type") != "POLICY_TYPE_COLUMN_MASK":
             continue
         fn = p.get("function_name", "")
-        if fn in _GENERIC_SAFE_FUNCTIONS:
+        if fn in _GENERIC_SAFE_FUNCTIONS and fn != "mask_redact":
             continue
-        expected = _FUNCTION_EXPECTED_CATEGORIES.get(fn)
+        expected = {"generic"} if fn == "mask_redact" else _FUNCTION_EXPECTED_CATEGORIES.get(fn)
         if not expected:
             continue
 
@@ -4739,7 +4850,9 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
             # function (e.g. duplicate _2/_3 policies).  Check the condition keywords
             # to detect type mismatches even without matched assignments.
             cond = (p.get("match_condition", "") or "").lower()
-            cond_is_numeric = any(tok in cond for tok in ("rounded", "amount", "balance", "credit_limit"))
+            cond_is_numeric = any(tok in cond for tok in (
+                "rounded", "amount", "balance", "credit_limit", "salary", "wage", "compensation"
+            ))
             cond_is_date = any(tok in cond for tok in ("dob", "birth", "date"))
             if cond_is_numeric and fn != "mask_amount_rounded" and "mask_amount_rounded" in (available_functions or set()):
                 replacements.append((p.get("name", ""), fn, "mask_amount_rounded"))
@@ -4758,9 +4871,7 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
         matched_blob = " ".join(
             ta.get("entity_name", "") + " " + ta.get("tag_value", "") for ta in matched
         ).lower()
-        is_numeric = any(tok in matched_blob for tok in (
-            "amount", "balance", "credit_limit", "rounded", "price", "cost", "salary",
-        ))
+        is_numeric = "amount" in categories
         is_date = any(tok in matched_blob for tok in (
             "dob", "birth", "date_of_birth", "opened_date", "expiry",
         ))

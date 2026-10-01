@@ -36,6 +36,29 @@ from generate_abac import (
     strip_abac_for_genie_mode,
 )
 from tests.conftest import assert_valid_hcl
+from scripts.split_abac_config import build_data_access_config
+
+
+def _acl_autofix_files(tmp_path, spaces_hcl, env_spaces_hcl=None):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env_tfvars = tmp_path / "env.auto.tfvars"
+    tfvars.write_text(f'''
+groups = {{ pay_group = {{}} hr_group = {{}} }}
+fgac_policies = [
+  {{ name = "pay" catalog = "pay_cat" to_principals = ["pay_group"] }},
+  {{ name = "hr" catalog = "hr_cat" to_principals = ["hr_group"] }},
+]
+genie_space_configs = {{
+{spaces_hcl}
+}}
+''')
+    env_tfvars.write_text(env_spaces_hcl or '''
+genie_spaces = [
+  { name = "Pay" uc_tables = ["pay_cat.s.t"] },
+  { name = "HR" uc_tables = ["hr_cat.s.t"] },
+]
+''')
+    return tfvars, env_tfvars
 
 
 def test_autofix_acl_groups_canonicalizes_legacy_key_without_nested_insertion(tmp_path):
@@ -101,6 +124,94 @@ genie_spaces = [{
     assert space["acl_groups"] == ["payments_group"]
     assert "acl_groups" not in space["genie_benchmarks"][0]
     assert "acl_groups" not in space["sql_filters"][0]
+
+
+@pytest.mark.parametrize("body", ["{}", '{ title = "Pay" }'])
+def test_autofix_acl_groups_handles_one_line_space_and_is_idempotent(tmp_path, body):
+    tfvars, env_tfvars = _acl_autofix_files(tmp_path, f'  "Pay" = {body}')
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 1
+    first = tfvars.read_text()
+    assert autofix_acl_groups(tfvars, env_tfvars) == 0
+
+    assert tfvars.read_text() == first
+    assert first.count("acl_groups") == 1
+    assert assert_valid_hcl(tfvars)["genie_space_configs"]["Pay"]["acl_groups"] == ["pay_group"]
+
+
+def test_autofix_acl_groups_ignores_nested_same_name_key(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(tmp_path, '''
+  Pay = {
+    meta = {
+      HR = { title = "nested HR" }
+    }
+  }
+  HR = { title = "real HR" }
+''')
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 2
+
+    parsed = assert_valid_hcl(tfvars)["genie_space_configs"]
+    assert parsed["Pay"]["acl_groups"] == ["pay_group"]
+    assert parsed["HR"]["acl_groups"] == ["hr_group"]
+    assert "acl_groups" not in parsed["Pay"]["meta"]["HR"]
+    split = build_data_access_config({"genie_space_configs": parsed})
+    assert split["genie_space_acl_groups"] == {
+        "Pay": ["pay_group"],
+        "HR": ["hr_group"],
+    }
+
+
+def test_autofix_acl_groups_inserts_before_same_line_closing_brace(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(tmp_path, '''
+  Pay = {
+    genie_benchmarks = [
+      { question = "Q" sql = "SELECT 1" },
+    ] }
+''')
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 1
+
+    parsed = assert_valid_hcl(tfvars)["genie_space_configs"]["Pay"]
+    assert parsed["acl_groups"] == ["pay_group"]
+    assert "acl_groups" not in parsed["genie_benchmarks"][0]
+
+
+def test_autofix_acl_groups_heredoc_odd_quote_fails_loud(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(tmp_path, '''
+  Pay = {
+    instructions = <<-EOT
+He said "unclosed
+EOT
+  }
+''')
+
+    with pytest.raises(ValueError, match="heredoc contains unmatched quote"):
+        autofix_acl_groups(tfvars, env_tfvars)
+
+    assert "acl_groups" not in tfvars.read_text()
+
+
+def test_autofix_acl_groups_does_not_rename_top_level_legacy_key(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(
+        tmp_path,
+        '  Pay = { genie_acl_groups = ["pay_group"] }',
+    )
+    tfvars.write_text('genie_acl_groups = ["legacy"]\n' + tfvars.read_text())
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 1
+
+    parsed = assert_valid_hcl(tfvars)
+    assert parsed["genie_acl_groups"] == ["legacy"]
+    assert parsed["genie_space_configs"]["Pay"]["acl_groups"] == ["pay_group"]
+
+
+def test_generator_infers_compensation_amounts_without_string_classifiers():
+    for column in ("annual_salary", "hourly_wage", "total_compensation"):
+        assert "amount" in generate_abac._infer_column_categories_full(f"cat.sch.tbl.{column}")
+
+    assert generate_abac._infer_column_categories_full("cat.sch.tbl.salary_band") == {"generic"}
+    assert generate_abac._infer_column_categories_full("cat.sch.tbl.wage_type") == {"generic"}
 
 
 def test_genie_mode_strips_all_abac_sections_including_tag_policy_list():
@@ -1689,6 +1800,32 @@ fgac_policies = [
     assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == 0
     assert tfvars.read_text() == before
     assert assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"] == "mask_email"
+
+
+def test_category_mismatch_repairs_numeric_wage_mask_to_amount_function(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text('''tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.payroll.hourly_wage", tag_key = "pii_level", tag_value = "masked_wage" }
+]
+fgac_policies = [{
+  name = "mask_wage"
+  policy_type = "POLICY_TYPE_COLUMN_MASK"
+  catalog = "cat"
+  to_principals = ["users"]
+  function_schema = "sch"
+  match_condition = "hasTagValue('pii_level', 'masked_wage')"
+  function_name = "mask_redact"
+}]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "CREATE FUNCTION mask_redact(input STRING) RETURNS STRING RETURN '***';\n"
+        "CREATE FUNCTION mask_amount_rounded(input DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN ROUND(input, -2);\n"
+    )
+
+    assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == 1
+    policy = assert_valid_hcl(tfvars)["fgac_policies"][0]
+    assert policy["function_name"] == "mask_amount_rounded"
 
 
 def test_required_native_classification_fails_without_warehouse(monkeypatch):
