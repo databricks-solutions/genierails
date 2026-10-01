@@ -5,6 +5,8 @@
     {
       "value": "redact",
       "masking_function": "mask_redact",
+      "udf_signature": "mask_redact(input STRING) RETURNS STRING",
+      "udf_body": "CASE WHEN input IS NULL THEN NULL ELSE '[REDACTED]' END",
       "sources": [
         [
           "pci_level",

@@ -1785,6 +1785,25 @@ CREATE FUNCTION mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2);
     assert "FUNCTION mask_date_to_year" in sql_text
 
 
+def test_redact_treatment_restores_mask_when_model_omits_it(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text('''tag_policies = []
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.customers.address", tag_key = "gr_treatment", tag_value = "redact" }
+]
+fgac_policies = [
+  { name = "redact", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "cat", to_principals = ["users"], function_schema = "sch", match_condition = "hasTagValue('gr_treatment', 'redact')", function_name = "mask_redact" }
+]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text("USE CATALOG cat;\nUSE SCHEMA sch;\n")
+
+    assert generate_abac.ensure_derived_treatment_functions(tfvars, sql) == 1
+    sql_text = sql.read_text()
+    assert "FUNCTION mask_redact(input STRING) RETURNS STRING" in sql_text
+    assert "ELSE '[REDACTED]'" in sql_text
+
+
 def test_category_mismatch_autofix_preserves_canonical_treatment_function(tmp_path):
     tfvars = tmp_path / "abac.auto.tfvars"
     tfvars.write_text('''tag_assignments = [

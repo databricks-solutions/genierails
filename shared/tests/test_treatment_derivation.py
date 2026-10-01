@@ -79,6 +79,15 @@ def test_compensation_mask_is_numeric_type_compatible():
     assert treatment.udf_body == "CAST(NULL AS DECIMAL(18,2))"
 
 
+def test_generic_redaction_mask_has_deterministic_string_udf():
+    config = load_treatment_config()
+    treatment = next(item for item in config.treatments if item.value == "redact")
+    assert treatment.udf_signature == "mask_redact(input STRING) RETURNS STRING"
+    assert treatment.udf_body == (
+        "CASE WHEN input IS NULL THEN NULL ELSE '[REDACTED]' END"
+    )
+
+
 def test_unknown_tag_resolves_to_no_treatment():
     assert resolve_treatment(
         [("pii_level", "future_unknown_value")], load_treatment_config()
