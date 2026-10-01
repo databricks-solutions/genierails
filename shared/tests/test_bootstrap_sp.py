@@ -71,7 +71,6 @@ def _preflight(workspace):
 def test_workspace_client_derives_azure_host_from_deployment_name():
     account = MagicMock()
     account.workspaces.get.return_value = SimpleNamespace(
-        workspace_url=None,
         deployment_name="adb-7405605806702166.6",
         cloud="azure",
     )

@@ -101,7 +101,11 @@ def _role_values(sp: Any) -> set[str]:
 
 def _workspace_client(account: Any, workspace_client: Callable[[str], Any], workspace_id: int) -> Any:
     workspace = account.workspaces.get(workspace_id=workspace_id)
-    host = _value(workspace, "workspace_url")
+    host = (
+        workspace.get("workspace_url")
+        if isinstance(workspace, dict)
+        else getattr(workspace, "workspace_url", None)
+    )
     if not host:
         deployment_name = _value(workspace, "deployment_name")
         cloud = str(_value(workspace, "cloud") or "").lower()
