@@ -91,7 +91,7 @@ def _clients(cfg: Config) -> tuple[Any, Callable[[str], Any]]:
 
 
 def _value(obj: Any, name: str) -> Any:
-    return obj.get(name) if isinstance(obj, dict) else getattr(obj, name)
+    return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
 
 
 def _role_values(sp: Any) -> set[str]:
@@ -109,14 +109,19 @@ def _workspace_client(account: Any, workspace_client: Callable[[str], Any], work
     if not host:
         deployment_name = _value(workspace, "deployment_name")
         cloud = str(_value(workspace, "cloud") or "").lower()
-        if deployment_name and "azure" in cloud:
-            host = f"{deployment_name}.azuredatabricks.net"
-        elif deployment_name and "aws" in cloud:
-            host = f"{deployment_name}.cloud.databricks.com"
-    if not host:
-        raise RuntimeError(
-            f"workspace {workspace_id} did not return a usable workspace URL"
-        )
+        if deployment_name:
+            deployment_name = str(deployment_name)
+            if (
+                ".azuredatabricks.net" in deployment_name
+                or ".cloud.databricks.com" in deployment_name
+            ):
+                host = deployment_name
+            elif "azure" in cloud:
+                host = f"{deployment_name}.azuredatabricks.net"
+            else:
+                host = f"{deployment_name}.cloud.databricks.com"
+        else:
+            host = f"dbc-{workspace_id}.cloud.databricks.com"
     host = str(host)
     if not host.startswith("http"):
         host = "https://" + host

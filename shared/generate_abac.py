@@ -3804,11 +3804,6 @@ def _acl_hcl_braces(text: str) -> tuple[dict[int, int], dict[int, int | None]]:
             )
             if not terminator:
                 raise ValueError("Cannot safely place acl_groups: unterminated heredoc")
-            body_end = body_start + terminator.start()
-            if text[body_start:body_end].count('"') % 2:
-                raise ValueError(
-                    "Cannot safely place acl_groups: heredoc contains unmatched quote"
-                )
             i = body_start + terminator.end()
             continue
         if text.startswith("//", i) or text[i] == "#":
@@ -3844,6 +3839,18 @@ def _acl_space_entries(text: str) -> tuple[int, dict[str, tuple[int, int, str]]]
     outer_close = matches.get(outer_open)
     if outer_close is None:
         raise ValueError("Cannot safely place acl_groups: incomplete genie_space_configs")
+    section_text = text[outer_open + 1:outer_close]
+    for heredoc in re.finditer(r"<<-?([A-Za-z_][A-Za-z0-9_]*)[^\n]*\n", section_text):
+        marker = heredoc.group(1)
+        body_start = heredoc.end()
+        terminator = re.search(
+            rf"(?m)^[ \t]*{re.escape(marker)}[ \t]*(?:\n|$)",
+            section_text[body_start:],
+        )
+        if terminator and section_text[body_start:body_start + terminator.start()].count('"') % 2:
+            raise ValueError(
+                "Cannot safely place acl_groups: heredoc contains unmatched quote"
+            )
     entries: dict[str, tuple[int, int, str]] = {}
     entry_pattern = re.compile(
         r'(?m)^([ \t]*)(?:"((?:\\.|[^"\\])*)"|([A-Za-z_][A-Za-z0-9_-]*))\s*=\s*\{'
@@ -3865,10 +3872,14 @@ def _canonicalize_space_acl_keys(text: str) -> tuple[str, int]:
     _, entries = _acl_space_entries(text)
     replacements: list[tuple[int, int]] = []
     matches, _ = _acl_hcl_braces(text)
+    field_pattern = re.compile(
+        r"(?:^|[,{\n])\s*(genie_acl_groups|acl_groups)\s*=", re.MULTILINE
+    )
     for entry_open, entry_close, _indent in entries.values():
-        for match in re.finditer(r"(?m)^\s*genie_acl_groups\s*=", text[entry_open + 1:entry_close]):
-            start = entry_open + 1 + match.start()
-            key_start = text.find("genie_acl_groups", start, entry_open + 1 + match.end())
+        for match in field_pattern.finditer(text, entry_open, entry_close):
+            if match.group(1) != "genie_acl_groups":
+                continue
+            key_start = match.start(1)
             if any(open_pos > entry_open and open_pos < key_start < close for open_pos, close in matches.items()):
                 continue
             replacements.append((key_start, key_start + len("genie_acl_groups")))
@@ -3969,12 +3980,8 @@ def autofix_acl_groups(tfvars_path: Path, env_tfvars_path: Path | None = None) -
     for space_name, cfg_entry in genie_cfgs.items():
         if isinstance(cfg_entry, list):
             cfg_entry = cfg_entry[0] if cfg_entry else {}
-        existing_acl = cfg_entry.get("acl_groups") or []
-        if isinstance(existing_acl, list) and existing_acl:
-            if isinstance(existing_acl[0], list):
-                existing_acl = existing_acl[0]
-            if existing_acl:
-                continue  # already set, don't override
+        if "acl_groups" in cfg_entry:
+            continue  # Explicit ACLs, including [], must never be widened.
 
         cats = space_catalogs.get(space_name, set())
         if not cats:
@@ -4116,12 +4123,7 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
         categories.add("date")
     if ("card" in col and "cardholder" not in col and "card_holder" not in col) or "cvv" in col:
         categories.add("card")
-    compensation_tokens = set(re.split(r"[^a-z0-9]+", col))
-    compensation_qualifiers = {"band", "type", "category", "code", "label", "description"}
-    is_compensation_amount = bool(
-        compensation_tokens & {"salary", "wage", "compensation"}
-        and not compensation_tokens & compensation_qualifiers
-    )
+    is_compensation_amount = _has_unqualified_compensation_token(col)
     if "amount" in col or "balance" in col or "limit" in col or is_compensation_amount:
         categories.add("amount")
     # Government/financial IDs — country-specific columns
@@ -4146,6 +4148,24 @@ def _infer_column_categories_full(entity_name: str) -> set[str]:
     if "pan" in col:
         categories.add("government_id")
     return categories or {"generic"}
+
+
+def _has_unqualified_compensation_token(text: str) -> bool:
+    tokens = set(re.split(r"[^a-z0-9]+", text.lower()))
+    qualifiers = {"band", "type", "category", "code", "label", "description"}
+    return bool(
+        tokens & {"salary", "wage", "compensation"}
+        and not tokens & qualifiers
+    )
+
+
+def _text_indicates_numeric_amount(text: str) -> bool:
+    normalized = text.lower()
+    tokens = set(re.split(r"[^a-z0-9]+", normalized))
+    return bool(
+        tokens & {"amount", "balance", "limit", "rounded", "price", "cost"}
+        or _has_unqualified_compensation_token(normalized)
+    )
 
 
 def autofix_canonical_function_names(tfvars_path: Path, sql_path: Path | None = None) -> int:
@@ -4498,9 +4518,7 @@ def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = N
             if p.get("name") == pname:
                 policy_match = (p.get("match_condition", "") or "") + " " + (p.get("when_condition", "") or "")
                 break
-        is_numeric = any(tok in policy_match.lower() for tok in (
-            "rounded", "amount", "balance", "credit_limit", "salary", "wage", "compensation"
-        ))
+        is_numeric = _text_indicates_numeric_amount(policy_match)
         is_date = any(tok in policy_match.lower() for tok in ("dob", "birth", "date"))
 
         if is_numeric:
@@ -4850,9 +4868,7 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
             # function (e.g. duplicate _2/_3 policies).  Check the condition keywords
             # to detect type mismatches even without matched assignments.
             cond = (p.get("match_condition", "") or "").lower()
-            cond_is_numeric = any(tok in cond for tok in (
-                "rounded", "amount", "balance", "credit_limit", "salary", "wage", "compensation"
-            ))
+            cond_is_numeric = _text_indicates_numeric_amount(cond)
             cond_is_date = any(tok in cond for tok in ("dob", "birth", "date"))
             if cond_is_numeric and fn != "mask_amount_rounded" and "mask_amount_rounded" in (available_functions or set()):
                 replacements.append((p.get("name", ""), fn, "mask_amount_rounded"))
@@ -4863,15 +4879,18 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
         categories = set()
         for ta in matched:
             categories.update(_infer_column_categories_full(ta.get("entity_name", "")))
-        if categories.issubset(expected):
+        matched_blob = " ".join(
+            ta.get("entity_name", "") + " " + ta.get("tag_value", "") for ta in matched
+        ).lower()
+        is_numeric = (
+            "amount" in categories
+            or _text_indicates_numeric_amount(matched_blob)
+        )
+        if categories.issubset(expected) and not is_numeric:
             continue
 
         # Check if the matched columns are numeric/date — if so, replace
         # with the correct type-specific function, not mask_redact (STRING).
-        matched_blob = " ".join(
-            ta.get("entity_name", "") + " " + ta.get("tag_value", "") for ta in matched
-        ).lower()
-        is_numeric = "amount" in categories
         is_date = any(tok in matched_blob for tok in (
             "dob", "birth", "date_of_birth", "opened_date", "expiry",
         ))

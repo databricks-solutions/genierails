@@ -206,12 +206,47 @@ def test_autofix_acl_groups_does_not_rename_top_level_legacy_key(tmp_path):
     assert parsed["genie_space_configs"]["Pay"]["acl_groups"] == ["pay_group"]
 
 
+def test_autofix_acl_groups_preserves_same_line_legacy_acl(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(
+        tmp_path,
+        '  "Pay" = { title = "Pay", genie_acl_groups = ["shared_g"] }',
+    )
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 1
+
+    parsed = assert_valid_hcl(tfvars)["genie_space_configs"]["Pay"]
+    assert parsed["acl_groups"] == ["shared_g"]
+    assert "genie_acl_groups" not in parsed
+    assert tfvars.read_text().count("acl_groups") == 1
+
+
+def test_autofix_acl_groups_respects_explicit_empty_acl(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(
+        tmp_path, '  "Pay" = { title = "Pay", acl_groups = [] }'
+    )
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 0
+    assert assert_valid_hcl(tfvars)["genie_space_configs"]["Pay"]["acl_groups"] == []
+    assert tfvars.read_text().count("acl_groups") == 1
+
+
+def test_autofix_acl_groups_ignores_odd_quote_heredoc_outside_spaces(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(tmp_path, '  Pay = { title = "Pay" }')
+    tfvars.write_text('notes = <<EOT\n5" display\nEOT\n' + tfvars.read_text())
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 1
+    assert assert_valid_hcl(tfvars)["genie_space_configs"]["Pay"]["acl_groups"] == [
+        "pay_group"
+    ]
+
+
 def test_generator_infers_compensation_amounts_without_string_classifiers():
     for column in ("annual_salary", "hourly_wage", "total_compensation"):
         assert "amount" in generate_abac._infer_column_categories_full(f"cat.sch.tbl.{column}")
 
     assert generate_abac._infer_column_categories_full("cat.sch.tbl.salary_band") == {"generic"}
     assert generate_abac._infer_column_categories_full("cat.sch.tbl.wage_type") == {"generic"}
+    assert generate_abac._infer_column_categories_full("cat.sch.tbl.compensation_code") == {"generic"}
 
 
 def test_genie_mode_strips_all_abac_sections_including_tag_policy_list():
@@ -1802,30 +1837,98 @@ fgac_policies = [
     assert assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"] == "mask_email"
 
 
-def test_category_mismatch_repairs_numeric_wage_mask_to_amount_function(tmp_path):
+@pytest.mark.parametrize(
+    ("column", "tag_value"),
+    [
+        ("unit_price", "masked_value"),
+        ("total_cost", "masked_value"),
+        ("metric", "rounded_amount"),
+        ("metric", "amount_rounded"),
+        ("annual_salary", "masked_value"),
+    ],
+)
+def test_category_mismatch_repairs_numeric_mask_to_amount_function(
+    tmp_path, column, tag_value
+):
     tfvars = tmp_path / "abac.auto.tfvars"
-    tfvars.write_text('''tag_assignments = [
-  { entity_type = "columns", entity_name = "cat.sch.payroll.hourly_wage", tag_key = "pii_level", tag_value = "masked_wage" }
+    tfvars.write_text(f'''tag_assignments = [
+  {{ entity_type = "columns", entity_name = "cat.sch.payroll.{column}", tag_key = "pii_level", tag_value = "{tag_value}" }}
 ]
-fgac_policies = [{
+fgac_policies = [{{
   name = "mask_wage"
   policy_type = "POLICY_TYPE_COLUMN_MASK"
   catalog = "cat"
   to_principals = ["users"]
   function_schema = "sch"
-  match_condition = "hasTagValue('pii_level', 'masked_wage')"
-  function_name = "mask_redact"
-}]
+  match_condition = "hasTagValue('pii_level', '{tag_value}')"
+  function_name = "mask_email"
+}}]
 ''')
     sql = tmp_path / "masking_functions.sql"
     sql.write_text(
-        "CREATE FUNCTION mask_redact(input STRING) RETURNS STRING RETURN '***';\n"
+        "CREATE FUNCTION mask_email(input STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_pii_partial(input STRING) RETURNS STRING RETURN input;\n"
         "CREATE FUNCTION mask_amount_rounded(input DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN ROUND(input, -2);\n"
     )
 
     assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == 1
     policy = assert_valid_hcl(tfvars)["fgac_policies"][0]
     assert policy["function_name"] == "mask_amount_rounded"
+
+
+@pytest.mark.parametrize("tag_value", ["salary_band", "wage_type", "compensation_code"])
+def test_category_mismatch_does_not_treat_qualified_compensation_as_numeric(
+    tmp_path, tag_value
+):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text(f'''tag_assignments = []
+fgac_policies = [{{
+  name = "mask_label"
+  policy_type = "POLICY_TYPE_COLUMN_MASK"
+  catalog = "cat"
+  to_principals = ["users"]
+  function_schema = "sch"
+  match_condition = "hasTagValue('pii_level', '{tag_value}')"
+  function_name = "mask_email"
+}}]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "CREATE FUNCTION mask_email(input STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_amount_rounded(input DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN input;\n"
+    )
+
+    assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == 0
+    assert assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"] == "mask_email"
+
+
+@pytest.mark.parametrize("tag_value", ["salary_band", "wage_type", "compensation_code"])
+def test_arg_count_repair_does_not_choose_decimal_mask_for_compensation_label(
+    tmp_path, tag_value
+):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text(f'''fgac_policies = [{{
+  name = "mask_label"
+  policy_type = "POLICY_TYPE_COLUMN_MASK"
+  catalog = "cat"
+  to_principals = ["users"]
+  function_catalog = "cat"
+  function_schema = "sch"
+  match_condition = "hasTagValue('pii_level', '{tag_value}')"
+  function_name = "mask_bad"
+}}]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "USE CATALOG cat; USE SCHEMA sch;\n"
+        "CREATE FUNCTION mask_bad(input STRING, salt STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_redact(input STRING) RETURNS STRING RETURN '***';\n"
+        "CREATE FUNCTION mask_amount_rounded(input DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN input;\n"
+    )
+
+    assert generate_abac.autofix_fgac_arg_count_mismatch(tfvars, sql) == 1
+    policies = assert_valid_hcl(tfvars)["fgac_policies"]
+    assert all(p["function_name"] != "mask_amount_rounded" for p in policies)
 
 
 def test_required_native_classification_fails_without_warehouse(monkeypatch):
