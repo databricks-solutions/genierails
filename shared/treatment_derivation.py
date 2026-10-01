@@ -214,6 +214,14 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
     column_masks = [p for p in existing_policies if p.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"]
     other_policies = [p for p in existing_policies if p.get("policy_type") != "POLICY_TYPE_COLUMN_MASK"]
     template = column_masks[0] if column_masks else {}
+    # The model may put only one access tier on its first mask. That mask is a
+    # structural template, not an authoritative principal boundary: every
+    # configured business tier that can reach a governed table must receive
+    # the treatment (explicit exceptions still remain raw).
+    configured_groups = sorted((cfg.get("groups") or {}).keys())
+    mask_principals = sorted(set(template.get("to_principals") or []) | set(configured_groups))
+    if not mask_principals:
+        mask_principals = ["account users"]
 
     catalogs_by_treatment: dict[str, set[str]] = {}
     for assignment in derived:
@@ -228,7 +236,7 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
                 "name": f"gr_mask_{catalog}_{treatment.value}",
                 "policy_type": "POLICY_TYPE_COLUMN_MASK",
                 "catalog": catalog,
-                "to_principals": list(template.get("to_principals") or ["account users"]),
+                "to_principals": mask_principals,
                 "comment": f"GenieRails treatment {treatment.value}; strictest-wins derivation",
                 "match_condition": f"hasTagValue('{config.tag_key}', '{treatment.value}')",
                 "match_alias": f"gr_treatment_{treatment.value}",

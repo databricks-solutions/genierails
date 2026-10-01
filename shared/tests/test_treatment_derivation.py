@@ -150,6 +150,21 @@ def test_derivation_is_idempotent_and_preserves_masks_and_source_tags():
     assert any(item["tag_key"] == "pci_level" for item in twice["tag_assignments"])
 
 
+def test_derived_masks_cover_every_configured_business_tier():
+    cfg = _base_config()
+    cfg["groups"] = {"payments": {}, "hr": {}}
+    cfg["fgac_policies"][0]["to_principals"] = ["hr"]
+
+    derived, _ = derive_treatment_model(cfg, load_treatment_config())
+
+    masks = [
+        policy for policy in derived["fgac_policies"]
+        if policy["policy_type"] == "POLICY_TYPE_COLUMN_MASK"
+    ]
+    assert masks
+    assert all(policy["to_principals"] == ["hr", "payments"] for policy in masks)
+
+
 def test_rekeyed_masks_match_no_column_more_than_once():
     derived, _ = derive_treatment_model(_base_config(), load_treatment_config())
     matches = matching_masks_by_column(derived)
