@@ -59,7 +59,12 @@ from sensitivity_source import (
     SensitivitySource,
     select_findings,
 )
-from treatment_derivation import derive_treatment_model, load_treatment_config
+from treatment_derivation import (
+    ACL_NEUTRAL_FALLBACK_COMMENT,
+    DERIVED_TREATMENT_MASK_COMMENT_PREFIX,
+    derive_treatment_model,
+    load_treatment_config,
+)
 
 PRODUCT_NAME = "genierails"
 PRODUCT_VERSION = "0.1.0"
@@ -2966,7 +2971,9 @@ def derive_enforcement_treatments(tfvars_path: Path) -> int:
     already_derived = any(
         str(policy.get("name") or "").startswith("gr_mask_")
         and str(policy.get("match_alias") or "").startswith("gr_treatment_")
-        and str(policy.get("comment") or "").startswith("GenieRails treatment")
+        and str(policy.get("comment") or "").startswith(
+            DERIVED_TREATMENT_MASK_COMMENT_PREFIX
+        )
         for policy in (cfg.get("fgac_policies") or [])
     )
     derived, changes = derive_treatment_model(
@@ -3950,7 +3957,7 @@ def autofix_acl_groups(
         # classified column is masked.  It carries no model evidence that those
         # groups belong on this catalog, so it must not widen Genie/SELECT scope.
         if str(pol.get("comment", "")).startswith(
-            "GenieRails treatment fallback; principals are masking-only"
+            ACL_NEUTRAL_FALLBACK_COMMENT
         ):
             continue
         catalog = pol.get("catalog") or pol.get("function_catalog") or ""

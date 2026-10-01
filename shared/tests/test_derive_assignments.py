@@ -14,6 +14,7 @@ from generate_abac import (
 )
 from sensitivity_source import ClassificationSource
 from scripts.remap_generated_config import remap_hcl
+from scripts.merge_space_configs import merge_into_assembled
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts/derive_assignments.py"
@@ -204,6 +205,76 @@ fgac_policies = [
     once = config.read_bytes()
     assert MODULE.derive_assignments(config, auth, env) == 0
     assert config.read_bytes() == once
+
+
+def test_per_space_override_merge_survives_promote_and_prod_certify(tmp_path, monkeypatch):
+    generated = tmp_path / "dev" / "generated"
+    second = generated / "spaces" / "second"
+    second.mkdir(parents=True)
+    (tmp_path / "dev" / "env.auto.tfvars").write_text('''
+genie_spaces = [
+  { name = "First", uc_tables = ["dev.sales.customers"], acl_groups = ["g"] },
+  { name = "Second", uc_tables = ["dev.sales.customers"], acl_groups = ["g"] },
+]
+''')
+    common_policies = '''
+  { name = "redact", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["g"], match_condition = "hasTagValue('gr_treatment', 'redact')", function_name = "mask_redact", function_schema = "security" },
+  { name = "round", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["g"], match_condition = "hasTagValue('gr_treatment', 'round_amount')", function_name = "mask_amount_rounded", function_schema = "security" },
+  { name = "email", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["g"], match_condition = "hasTagValue('gr_treatment', 'email_partial')", function_name = "mask_email", function_schema = "security" },
+'''
+    (generated / "abac.auto.tfvars").write_text(f'''
+groups = {{ g = {{}} }}
+tag_policies = [{{ key = "gr_treatment", values = ["redact", "round_amount", "email_partial"] }}]
+tag_assignments = []
+treatment_overrides = [
+  {{ entity_name = "dev.sales.customers.first_secret", treatment = "redact" }},
+  {{ entity_name = "dev.sales.customers.shared", treatment = "redact" }},
+]
+fgac_policies = [{common_policies}]
+genie_space_configs = {{ First = {{ title = "First" }} }}
+''')
+    (second / "abac.auto.tfvars").write_text(f'''
+tag_policies = [{{ key = "gr_treatment", values = ["redact", "round_amount", "email_partial"] }}]
+tag_assignments = [
+  {{ entity_type = "columns", entity_name = "dev.sales.customers.amount", tag_key = "gr_treatment", tag_value = "round_amount" }},
+  {{ entity_type = "columns", entity_name = "dev.sales.customers.shared", tag_key = "gr_treatment", tag_value = "round_amount" }},
+  {{ entity_type = "columns", entity_name = "dev.sales.customers.email", tag_key = "gr_treatment", tag_value = "email_partial" }},
+]
+treatment_overrides = [
+  {{ entity_name = "dev.sales.customers.amount", treatment = "round_amount" }},
+  {{ entity_name = "dev.sales.customers.shared", treatment = "round_amount" }},
+]
+fgac_policies = [{common_policies}]
+genie_space_configs = {{ Second = {{ title = "Second" }} }}
+''')
+    (generated / "masking_functions.sql").write_text("")
+    (second / "masking_functions.sql").write_text("")
+
+    merge_into_assembled(generated, "second")
+    assembled = hcl2.loads((generated / "abac.auto.tfvars").read_text())
+    assert assembled["treatment_overrides"] == [
+        {"entity_name": "dev.sales.customers.amount", "treatment": "round_amount"},
+        {"entity_name": "dev.sales.customers.first_secret", "treatment": "redact"},
+        {"entity_name": "dev.sales.customers.shared", "treatment": "redact"},
+    ]
+
+    prod = tmp_path / "prod"
+    prod.mkdir()
+    config, auth, env = _files(prod)
+    config.write_text(remap_hcl((generated / "abac.auto.tfvars").read_text(), [("dev", "prod")]))
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "email", "class.email_address", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+    MODULE.derive_assignments(config, auth, env)
+    assignments = {
+        item["entity_name"]: item["tag_value"]
+        for item in hcl2.loads(config.read_text())["tag_assignments"]
+        if item.get("tag_key") == "gr_treatment"
+    }
+    assert assignments["prod.sales.customers.amount"] == "round_amount"
+    assert assignments["prod.sales.customers.first_secret"] == "redact"
+    assert assignments["prod.sales.customers.shared"] == "redact"
 
 
 def test_weaker_override_cannot_downgrade_native(tmp_path, monkeypatch):

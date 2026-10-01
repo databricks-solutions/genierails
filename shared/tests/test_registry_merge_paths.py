@@ -11,7 +11,10 @@ sys.path.insert(0, str(SHARED_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from split_abac_config import merge_tag_policies  # noqa: E402
-from merge_space_configs import merge_into_assembled  # noqa: E402
+from merge_space_configs import (  # noqa: E402
+    merge_into_assembled,
+    merge_treatment_overrides,
+)
 
 
 class TestSplitTagPolicies:
@@ -31,6 +34,23 @@ class TestSplitTagPolicies:
 
 
 class TestMergeSpaceConfigs:
+    def test_treatment_override_merge_preserves_other_spaces_and_strictest_wins(self):
+        merged = merge_treatment_overrides(
+            [
+                {"entity_name": "dev.s.first.secret", "treatment": "redact"},
+                {"entity_name": "dev.s.second.amount", "treatment": "redact"},
+                {"entity_name": "dev.s.second.removed", "treatment": "round_amount"},
+            ],
+            [
+                {"entity_name": "dev.s.second.amount", "treatment": "round_amount"},
+            ],
+            {"dev.s.second.amount", "dev.s.second.removed"},
+        )
+        assert merged == [
+            {"entity_name": "dev.s.first.secret", "treatment": "redact"},
+            {"entity_name": "dev.s.second.amount", "treatment": "redact"},
+        ]
+
     def test_merge_round_trips_titles_but_never_draft_acls(
         self, tmp_path
     ):

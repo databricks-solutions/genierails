@@ -14,8 +14,10 @@ LOGGER = logging.getLogger(__name__)
 # A fallback mask is required when classification finds a sensitive column in a
 # catalog for which the model emitted no mask.  It must mask fail-closed without
 # making its borrowed principals authoritative for catalog access derivation.
+DERIVED_TREATMENT_MASK_COMMENT_PREFIX = "GenieRails treatment"
 ACL_NEUTRAL_FALLBACK_COMMENT = (
-    "GenieRails treatment fallback; principals are masking-only, not access scope"
+    f"{DERIVED_TREATMENT_MASK_COMMENT_PREFIX} fallback; principals are masking-only, "
+    "not access scope"
 )
 
 
@@ -332,7 +334,8 @@ def derive_treatment_model(
                 "catalog": catalog,
                 "to_principals": principals,
                 "comment": ACL_NEUTRAL_FALLBACK_COMMENT if fallback else (
-                    f"GenieRails treatment {treatment.value}; strictest-wins derivation"
+                    f"{DERIVED_TREATMENT_MASK_COMMENT_PREFIX} {treatment.value}; "
+                    "strictest-wins derivation"
                 ),
                 "match_condition": f"hasTagValue('{config.tag_key}', '{treatment.value}')",
                 "match_alias": f"gr_treatment_{treatment.value}",

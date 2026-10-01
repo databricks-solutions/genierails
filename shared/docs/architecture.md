@@ -53,6 +53,8 @@ The layers are designed so that different teams can own different layers indepen
 
 `tag_assignments` are environment facts and are deliberately emptied during cross-environment promotion. `treatment_overrides` are reviewed rules keyed by fully-qualified column: promotion carries and catalog-remaps them, and production `derive-assignments` merges them with native findings using strictest-wins. An override still protects an untagged column inside the declared governed footprint; a stale override outside that footprint is warned and skipped. Overrides select an already-reviewed mask only—they never supply principals, grants, or ACLs—and the mask coverage gate remains mandatory.
 
+Incremental `make generate SPACE=<name>` assembly replaces overrides for that space's generated columns, preserves overrides owned by other spaces, de-duplicates by fully-qualified column, and resolves conflicting old/new entries with the same strictest-first treatment precedence.
+
 When an override needs a treatment for which the model supplied no catalog-local mask, treatment derivation creates the normal fail-closed fallback mask. Its principals come from the existing mask-principal union for that catalog (or `account users` when no mask exists); those principals are masking scope only, marked by the ACL-neutral fallback comment, and are excluded from access/`SELECT` derivation. The override therefore cannot grant or widen access.
 
 Examples:
