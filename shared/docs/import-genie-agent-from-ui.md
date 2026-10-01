@@ -23,7 +23,11 @@ Add the agent ID to the development environment:
 ```hcl
 # envs/dev/env.auto.tfvars
 genie_spaces = [
-  { genie_space_id = "01ef7b3c2a4d5e6f" },
+  {
+    genie_space_id = "01ef7b3c2a4d5e6f"
+    # Optional: omit to derive fresh from policies; [] means nobody.
+    # acl_groups = ["payments_ops"]
+  },
 ]
 ```
 
@@ -69,7 +73,7 @@ Continue at [Phase 1 of the dev-to-prod walkthrough](../examples/dev_to_prod/REA
 
 For an imported agent:
 
-- `acl_groups` are derived from the IdP groups and policies covering the agent's tables. Review them before applying.
+- Omit `acl_groups` on the agent's `genie_spaces[]` entry to derive it fresh from current policies. To override derivation, set the user-owned field there; an explicit `[]` means nobody. Generated drafts are not an authoritative ACL input.
 - `make apply` updates the attached agent's configuration and ACLs without creating or deleting it.
 - In production, leave `genie_space_id` empty to create a new agent, or set an existing production agent ID to attach to it.
 

@@ -46,6 +46,10 @@ def test_data_access_split_derives_only_agent_acl_map_from_workspace_config():
             "Agent A": {"title": "A", "acl_groups": ["a_group"]},
             "Agent B": {"title": "B", "acl_groups": ["b_group", "shared_group"]},
         },
+        "genie_space_derived_acl_groups": {
+            "Agent A": ["derived_a"],
+            "Agent B": ["derived_b"],
+        },
         "discovered_uc_tables": ["cat.schema.table"],
         "discovered_table_agents": {"cat.schema.table": ["Agent A"]},
     }
@@ -54,23 +58,21 @@ def test_data_access_split_derives_only_agent_acl_map_from_workspace_config():
 
     assert data_access == {
         "genie_space_acl_groups": {
-            "Agent A": ["a_group"],
-            "Agent B": ["b_group", "shared_group"],
+            "Agent A": ["derived_a"],
+            "Agent B": ["derived_b"],
         }
     }
 
 
-def test_data_access_split_accepts_legacy_genie_acl_groups():
+def test_multi_space_model_legacy_acl_is_not_authoritative():
     generated = {
         "genie_space_configs": {
             "payments": {"genie_acl_groups": ["payments_group"]},
             "hr": {"genie_acl_groups": ["hr_group"]},
         }
     }
-    assert build_data_access_config(generated)["genie_space_acl_groups"] == {
-        "payments": ["payments_group"],
-        "hr": ["hr_group"],
-    }
+    with pytest.raises(ValueError, match="no resolved ACL"):
+        build_data_access_config(generated)
 
 
 def test_legacy_single_space_conversion_preserves_authored_acl():
@@ -115,8 +117,8 @@ def test_workspace_and_data_access_consumers_resolve_identical_acl_precedence():
     workspace = build_workspace_config(generated)
 
     assert data_access == {
-        "canonical": [],
-        "legacy": ["legacy_group"],
+        "canonical": ["must_not_widen"],
+        "legacy": ["must_not_override"],
         "derived": ["derived_group"],
     }
     assert {
@@ -149,13 +151,13 @@ def test_missing_sidecar_entry_fails_closed_for_both_consumers():
         build_workspace_config(generated)
 
 
-@pytest.mark.parametrize("invalid_acl", [None, "${var.groups}", ["ok", 7]])
-def test_invalid_explicit_acl_fails_loud_for_both_consumers(invalid_acl):
+@pytest.mark.parametrize("model_acl", [None, "${var.groups}", ["ok", 7], []])
+def test_model_acl_is_ignored_and_missing_sidecar_fails_closed(model_acl):
     generated = {
-        "genie_space_configs": {"Pay": {"acl_groups": invalid_acl}}
+        "genie_space_configs": {"Pay": {"acl_groups": model_acl}}
     }
 
-    with pytest.raises(ValueError, match="must be a list of group names"):
+    with pytest.raises(ValueError, match="no resolved ACL"):
         build_data_access_config(generated)
-    with pytest.raises(ValueError, match="must be a list of group names"):
+    with pytest.raises(ValueError, match="no resolved ACL"):
         build_workspace_config(generated)

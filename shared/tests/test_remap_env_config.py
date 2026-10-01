@@ -85,6 +85,28 @@ def test_id_only_spaces_promote_with_distinct_canonical_titles(tmp_path, monkeyp
     ]
 
 
+def test_promotion_carries_user_acl_overrides_including_explicit_empty(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    (source / "generated").mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text('''genie_spaces = [
+  { name = "Payments", uc_tables = ["dev.pay.t"], acl_groups = ["pay_group"] },
+  { name = "Private", uc_tables = ["dev.private.t"], acl_groups = [] },
+  { name = "Derived", uc_tables = ["dev.derived.t"] },
+]
+''')
+    (source / "generated" / "abac.auto.tfvars").write_text("")
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    remap_env_config.main()
+    with (dest / "env.auto.tfvars").open() as handle:
+        spaces = hcl2.load(handle)["genie_spaces"]
+    assert spaces[0]["acl_groups"] == ["pay_group"]
+    assert spaces[1]["acl_groups"] == []
+    assert "acl_groups" not in spaces[2]
+
+
 def test_duplicate_resolved_titles_fail_loud(tmp_path, monkeypatch, capsys):
     source = tmp_path / "dev"
     dest = tmp_path / "prod"

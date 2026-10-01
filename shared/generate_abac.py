@@ -1675,17 +1675,14 @@ def sanitize_tfvars_hcl(hcl_block: str) -> str:
 
     genie_configs_block = (
         "# ----------------------------------------------------------------------------\n"
-        "# Genie agent configs (per-space semantic configuration + ACLs)\n"
+        "# Genie agent configs (per-space semantic configuration)\n"
         "# ----------------------------------------------------------------------------\n"
         "# Each key is the human-readable space name matching genie_spaces[*].name in\n"
-        "# env.auto.tfvars. Contains instructions, benchmarks, SQL measures, and ACLs.\n"
+        "# env.auto.tfvars. Contains instructions, benchmarks, and SQL measures.\n"
         "#\n"
-        "# acl_groups: controls which groups get CAN_RUN on this Genie agent.\n"
-        "#   - List the group names that should have access to this specific space\n"
-        "#   - Groups NOT listed are excluded from the space\n"
-        "#   - Empty list = nobody; omitted = derived from policies or generation fails\n"
-        "#   - In multi-space setups, use this to ensure Finance groups only see\n"
-        "#     the Finance space, Clinical groups only see the Clinical space, etc.\n"
+        "# ACL ownership: set optional acl_groups on the matching genie_spaces[] entry\n"
+        "# in env.auto.tfvars. Explicit [] means nobody; omission derives from policies.\n"
+        "# Any ACL fields in this generated draft are ignored.\n"
         "#\n"
         + docs
     )
@@ -3782,37 +3779,15 @@ def autofix_genie_config_fields(tfvars_path: Path) -> int:
     return added
 
 
-def _workspace_acl_hints(path: Path | None) -> dict[str, list[str]]:
-    """Load canonical per-space ACLs from an already promoted workspace layer."""
-    if path is None or not path.exists():
-        return {}
-    import hcl2
-
-    cfg = hcl2.loads(path.read_text())
-    spaces = cfg.get("genie_space_configs") or {}
-    if isinstance(spaces, list):
-        spaces = spaces[0] if spaces else {}
-    hints: dict[str, list[str]] = {}
-    for name, value in spaces.items():
-        if isinstance(value, list):
-            value = value[0] if value else {}
-        if not isinstance(value, dict) or "acl_groups" not in value:
-            continue
-        acl = value["acl_groups"]
-        if not isinstance(acl, list) or not all(isinstance(item, str) for item in acl):
-            raise ValueError(f"Canonical ACL for Genie space {name!r} is invalid")
-        hints[str(name)] = list(acl)
-    return hints
-
-
 def autofix_acl_groups(
     tfvars_path: Path,
     env_tfvars_path: Path | None = None,
-    *,
-    canonical_workspace_path: Path | None = None,
-    ignore_explicit: bool = False,
 ) -> int:
-    """Write policy-derived ACLs separately without mutating authored HCL."""
+    """Resolve ACLs from user-owned env input or fresh policy derivation.
+
+    ACL fields emitted by the model in the generated draft are deliberately
+    ignored. Durable explicit intent belongs only in env.auto.tfvars.
+    """
     import hcl2
 
     text = tfvars_path.read_text()
@@ -3831,12 +3806,13 @@ def autofix_acl_groups(
         groups = groups[0] if groups else {}
     fgac_policies = cfg.get("fgac_policies") or []
     id_to_name = cfg.get("genie_space_id_to_name") or {}
-    canonical_hints = _workspace_acl_hints(canonical_workspace_path)
     if isinstance(fgac_policies, list) and len(fgac_policies) == 1 and isinstance(fgac_policies[0], list):
         fgac_policies = fgac_policies[0]
 
     # Build space_name → set of catalogs from env.auto.tfvars or from tag_assignments
     space_catalogs: dict[str, set[str]] = {}
+    user_acls: dict[str, list[str]] = {}
+    active_space_names: set[str] | None = None
 
     # Try to get uc_tables per space from env.auto.tfvars
     if env_tfvars_path and env_tfvars_path.exists():
@@ -3851,6 +3827,16 @@ def autofix_acl_groups(
                 )
                 if name:
                     resolved_names.append(name)
+                    if "acl_groups" in space:
+                        acl = space["acl_groups"]
+                        if not isinstance(acl, list) or not all(
+                            isinstance(item, str) for item in acl
+                        ):
+                            raise ValueError(
+                                f"User ACL for Genie space {name!r} must be a list "
+                                "of group names (explicit [] means nobody)"
+                            )
+                        user_acls[name] = list(acl)
                 tables = space.get("uc_tables") or []
                 if isinstance(tables, list) and tables:
                     if isinstance(tables[0], list):
@@ -3867,6 +3853,7 @@ def autofix_acl_groups(
                     + ", ".join(repr(name) for name in duplicates)
                     + ". Set distinct names."
                 )
+            active_space_names = set(resolved_names)
         except ValueError:
             raise
         except Exception:
@@ -3894,32 +3881,28 @@ def autofix_acl_groups(
         for g in except_p:
             group_catalogs.setdefault(g, set()).add(catalog)
 
-    # Only missing ACLs are derived. Presence of either spelling, including [],
-    # is explicit intent and is resolved by both downstream consumers.
+    # Every active space gets a sidecar entry. User-owned env ACLs win,
+    # including explicit []; otherwise derive fresh from current policies.
+    # Model-written ACL fields in genie_space_configs are never consulted.
     derived: dict[str, list[str]] = {}
-    for space_name in sorted(genie_cfgs):
+    candidate_names = set(genie_cfgs)
+    if active_space_names is not None:
+        candidate_names &= active_space_names
+    for space_name in sorted(candidate_names):
         cfg_entry = genie_cfgs[space_name]
         if isinstance(cfg_entry, list):
             cfg_entry = cfg_entry[0] if cfg_entry else {}
         if not isinstance(cfg_entry, dict):
             continue
-        # Direct/per-space callers preserve explicit authored ACLs. Full
-        # generation and promotion ignore model-produced ACL fields and instead
-        # use the last promoted canonical workspace ACL, when one exists.
-        if not ignore_explicit and (
-            "acl_groups" in cfg_entry or "genie_acl_groups" in cfg_entry
-        ):
-            continue
-
-        if space_name in canonical_hints:
-            derived[str(space_name)] = canonical_hints[space_name]
+        if space_name in user_acls:
+            derived[str(space_name)] = user_acls[space_name]
             continue
 
         cats = space_catalogs.get(space_name, set())
         if not cats:
             raise ValueError(
                 f"Cannot derive ACL for Genie space {space_name!r}: no mapped catalogs. "
-                "Set acl_groups explicitly."
+                "Set acl_groups on this genie_spaces[] entry in env.auto.tfvars."
             )
 
         # Find groups that have policies on this space's catalogs
@@ -3931,17 +3914,18 @@ def autofix_acl_groups(
         if not space_groups:
             raise ValueError(
                 f"Cannot derive ACL for Genie space {space_name!r}: no policy groups "
-                "map to its catalogs. Set acl_groups explicitly."
+                "map to its catalogs. Set acl_groups on this genie_spaces[] entry "
+                "in env.auto.tfvars."
             )
         derived[str(space_name)] = space_groups
 
     derived_path = tfvars_path.with_name(
         "genie_space_derived_acl_groups.auto.tfvars"
     )
-    lines = ["# Tool-owned; re-derived for this environment."]
-    if ignore_explicit:
-        lines.append("genie_space_derived_acl_groups_authoritative = true")
-    lines.append("genie_space_derived_acl_groups = {")
+    lines = [
+        "# Tool-owned; resolved from env.auto.tfvars overrides or freshly derived policies.",
+        "genie_space_derived_acl_groups = {",
+    ]
     for space_name, acl_groups in derived.items():
         rendered = ", ".join(json.dumps(group) for group in acl_groups)
         lines.append(f"  {json.dumps(space_name)} = [{rendered}]")
@@ -7460,8 +7444,9 @@ Before you apply, tune for your business roles, security requirements, and Genie
 - **Per-space ACLs (`acl_groups`)**: Each space lists which groups get `CAN_RUN` access. Verify that:
   - Each space includes all groups that need access
   - Groups that should NOT see this space are excluded
-  - In multi-space setups, Finance groups should only be in the Finance space, Clinical groups in the Clinical space, etc.
-  - Empty `acl_groups` means nobody; omitted ACLs are policy-derived or fail closed
+  - Set durable per-agent `acl_groups` only on `genie_spaces[]` in `env.auto.tfvars`
+  - Explicit `acl_groups = []` means nobody; omission derives fresh from policies
+  - ACL fields in the generated draft are ignored
 - **Validate before apply**: Run validation before `terraform apply`.
 
 ## Suggested workflow
@@ -7762,8 +7747,6 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 n_acl = autofix_acl_groups(
                     tfvars_path,
                     env_tfvars if env_tfvars.exists() else None,
-                    canonical_workspace_path=tfvars_path.parent.parent / "abac.auto.tfvars",
-                    ignore_explicit=True,
                 )
                 if n_acl:
                     print(f"  Derived ACL sidecar for {n_acl} Genie agent(s)")
@@ -8022,10 +8005,6 @@ Before you apply, tune for your business roles, security requirements, and Genie
                             autofix_acl_groups(
                                 tfvars_path,
                                 env_tfvars if env_tfvars.exists() else None,
-                                canonical_workspace_path=(
-                                    tfvars_path.parent.parent / "abac.auto.tfvars"
-                                ),
-                                ignore_explicit=True,
                             )
                     if args.mode != "genie":
                         derive_and_finalize_treatments(

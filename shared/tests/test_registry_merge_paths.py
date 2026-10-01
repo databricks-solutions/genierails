@@ -37,6 +37,12 @@ class TestMergeSpaceConfigs:
         generated_dir = tmp_path / "generated"
         space_dir = generated_dir / "spaces" / "hr"
         space_dir.mkdir(parents=True)
+        (tmp_path / "env.auto.tfvars").write_text('''genie_spaces = [
+  { name = "Pay", uc_tables = [], acl_groups = ["shared_g"] },
+  { name = "Empty", uc_tables = [], acl_groups = [] },
+  { name = "HR", uc_tables = [], acl_groups = ["hr_g"] },
+]
+''')
         (generated_dir / "masking_functions.sql").write_text("")
         (space_dir / "masking_functions.sql").write_text("")
         (generated_dir / "abac.auto.tfvars").write_text('''

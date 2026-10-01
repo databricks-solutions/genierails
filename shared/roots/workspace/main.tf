@@ -65,6 +65,7 @@ locals {
       genie_space_id   = var.genie_space_id
       sql_warehouse_id = var.sql_warehouse_id
       uc_tables        = local.legacy_full_uc_tables
+      acl_groups       = null
     }] : []
   )
 
@@ -189,6 +190,7 @@ variable "genie_spaces" {
     genie_space_id   = optional(string, "")
     sql_warehouse_id = optional(string, "")
     uc_tables        = optional(list(string), [])
+    acl_groups       = optional(list(string), null)
   }))
   default     = []
   description = "List of Genie agent definitions. 'name' is the human-readable agent title and the lookup key for genie_space_configs. An internal Terraform key is derived automatically by sanitizing the name."

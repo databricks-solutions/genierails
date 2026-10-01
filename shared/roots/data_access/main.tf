@@ -146,6 +146,7 @@ variable "genie_spaces" {
     genie_space_id   = optional(string, "")
     sql_warehouse_id = optional(string, "")
     uc_tables        = optional(list(string), [])
+    acl_groups       = optional(list(string), null)
   }))
   default     = []
   description = "Workspace definitions whose UC tables also form the classification footprint."

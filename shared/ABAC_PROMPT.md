@@ -422,7 +422,7 @@ Before outputting, perform this coverage check:
    - benchmark SQL
    - masking function parameter and return types
 9. Every `match_condition` and `when_condition` MUST only use `hasTagValue()` and/or `hasTag()` — no other functions or operators
-10. Generate Genie agent config — all nine fields below. **Derive everything from the user's actual tables, columns, and domain** — do NOT copy the finance/healthcare examples below if the user's data is from a different industry. Adapt terminology, metrics, filters, and joins to whatever vertical the tables belong to (retail, manufacturing, telecom, education, logistics, etc.).
+10. Generate Genie agent semantic config — all nine fields below. **Derive everything from the user's actual tables, columns, and domain** — do NOT copy the finance/healthcare examples below if the user's data is from a different industry. Adapt terminology, metrics, filters, and joins to whatever vertical the tables belong to (retail, manufacturing, telecom, education, logistics, etc.). Do not emit `acl_groups` or `genie_acl_groups`: durable user ACL intent belongs on `genie_spaces[]` in `env.auto.tfvars`; when omitted there, the tool derives ACLs from policies.
 
 Fields to include:
 
@@ -435,7 +435,6 @@ Fields to include:
 - `genie_sql_measures` — standard aggregate metrics derived from the user's numeric columns (e.g., sums, averages, counts that are meaningful in the domain). Each measure has `alias`, `sql`, `display_name`, `comment`, and `instruction`.
 - `genie_sql_expressions` — computed dimensions derived from the user's date/category columns (e.g., year extraction, bucketing, status grouping). Each expression has `alias`, `sql`, `display_name`, `comment`, and `instruction`.
 - `genie_join_specs` — relationships between the user's tables based on foreign key columns (look for matching ID columns like `CustomerID`, `OrderID`, `ProductID`). Each join has `left_table`, `left_alias`, `right_table`, `right_alias`, `sql`, `comment`, and `instruction`.
-- `acl_groups` — list of group names that should have CAN_RUN access to this Genie agent. **Only include groups whose FGAC policies reference this space's tables.** For example, if Finance_Analyst has policies on `dev_fin.finance.*` tables, include them in the Finance Analytics space but NOT in the Clinical Analytics space. This ensures each space is only accessible to relevant roles.
 
 ### Output Format — Genie agent Config (in `abac.auto.tfvars`)
 
@@ -519,12 +518,6 @@ genie_join_specs = [
   },
 ]
 
-# Groups that should have CAN_RUN access to this Genie agent.
-# Only include groups whose FGAC policies reference this space's tables.
-acl_groups = [
-  "<Group_Name_1>",
-  "<Group_Name_2>",
-]
 ```
 
 ---

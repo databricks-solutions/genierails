@@ -72,17 +72,19 @@ genie_spaces = [
         '{ title = "Pay", acl_groups = [] }',
     ],
 )
-def test_acl_derivation_preserves_every_explicit_acl_layout(tmp_path, space_body):
+def test_model_written_acl_layout_never_overrides_policy_derivation(tmp_path, space_body):
     tfvars, env_tfvars = _acl_autofix_files(tmp_path, f'  "Pay" = {space_body}')
     before = tfvars.read_bytes()
 
-    assert autofix_acl_groups(tfvars, env_tfvars) == 0
+    assert autofix_acl_groups(tfvars, env_tfvars) == 1
 
     assert tfvars.read_bytes() == before
     derived = assert_valid_hcl(
         tmp_path / "genie_space_derived_acl_groups.auto.tfvars"
     )
-    assert derived["genie_space_derived_acl_groups"] == {}
+    assert derived["genie_space_derived_acl_groups"] == {
+        "Pay": ["pay_group", "shared_group"]
+    }
 
 
 def test_acl_derivation_matches_policy_overlap_and_is_idempotent(tmp_path):
@@ -163,7 +165,7 @@ genie_space_configs = {
 }
 ''')
     env_tfvars.write_text('''genie_spaces = [
-  { name = "Pay", uc_tables = ["pay_cat.s.t"] },
+  { name = "Pay", uc_tables = ["pay_cat.s.t"], acl_groups = ["shared_g"] },
   { name = "HR", uc_tables = ["hr_cat.s.t"] },
 ]
 ''')
@@ -173,7 +175,7 @@ genie_space_configs = {
             {"name": "Pay"}, {"name": "HR"},
         ]}
     ) == 1
-    assert autofix_acl_groups(tfvars, env_tfvars) == 1
+    assert autofix_acl_groups(tfvars, env_tfvars) == 2
 
     parsed = assert_valid_hcl(tfvars)["genie_space_configs"]
     assert parsed["Pay"]["title"] == "Payments"
@@ -181,7 +183,7 @@ genie_space_configs = {
     derived = assert_valid_hcl(
         tmp_path / "genie_space_derived_acl_groups.auto.tfvars"
     )["genie_space_derived_acl_groups"]
-    assert derived == {"HR": ["hr_g"]}
+    assert derived == {"HR": ["hr_g"], "Pay": ["shared_g"]}
 
 
 def test_missing_space_formatter_preserves_explicit_empty_acl(tmp_path):

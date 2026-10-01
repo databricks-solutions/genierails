@@ -101,7 +101,7 @@ genie_space_configs = { Renamed = { title = "Renamed" } }
     )
 
 
-def test_full_generation_uses_canonical_acl_hints_over_model_acl(tmp_path):
+def test_full_generation_ignores_model_and_previous_output_acl(tmp_path):
     generated = tmp_path / "generated"
     generated.mkdir()
     abac = generated / "abac.auto.tfvars"
@@ -110,7 +110,8 @@ def test_full_generation_uses_canonical_acl_hints_over_model_acl(tmp_path):
     abac.write_text('''
 groups = { gA = {}, gB = {} }
 fgac_policies = [
-  { name = "mask" catalog = "shared" except_principals = ["gA"] }
+  { name = "payments" catalog = "pay" to_principals = ["gA"] },
+  { name = "hr" catalog = "hr" to_principals = ["gB"] }
 ]
 genie_space_configs = {
   payments = { title = "Payments", acl_groups = ["gA", "gB"] }
@@ -118,22 +119,18 @@ genie_space_configs = {
 }
 ''')
     env.write_text('''genie_spaces = [
-  { name = "payments", uc_tables = ["shared.payments.t"] },
-  { name = "hr", uc_tables = ["shared.hr.t"] },
+  { name = "payments", uc_tables = ["pay.payments.t"] },
+  { name = "hr", uc_tables = ["hr.hr.t"] },
 ]
 ''')
     canonical.write_text('''genie_space_configs = {
-  payments = { acl_groups = ["gA"] }
-  hr = { acl_groups = ["gB"] }
+  payments = { acl_groups = ["gA", "gB"] }
+  hr = { acl_groups = ["gA", "gB"] }
 }
 ''')
 
-    assert autofix_acl_groups(
-        abac,
-        env,
-        canonical_workspace_path=canonical,
-        ignore_explicit=True,
-    ) == 2
+    assert canonical.exists()  # mutation fixture: previous output must not be read
+    assert autofix_acl_groups(abac, env) == 2
     with (generated / "genie_space_derived_acl_groups.auto.tfvars").open() as handle:
         assert hcl2.load(handle)["genie_space_derived_acl_groups"] == {
             "hr": ["gB"],
@@ -152,7 +149,7 @@ genie_space_configs = {
     } == {"payments": ["gA"], "hr": ["gB"]}
 
 
-def test_direct_autofix_still_preserves_explicit_empty_acl(tmp_path):
+def test_user_owned_explicit_empty_acl_wins_over_model_and_policy(tmp_path):
     generated = tmp_path / "generated"
     generated.mkdir()
     abac = generated / "abac.auto.tfvars"
@@ -163,12 +160,51 @@ fgac_policies = [{ name = "mask" catalog = "cat" except_principals = ["gA"] }]
 genie_space_configs = { Private = { title = "Private", acl_groups = [] } }
 ''')
     env.write_text(
-        'genie_spaces = [{ name = "Private", uc_tables = ["cat.s.t"] }]\n'
+        'genie_spaces = [{ name = "Private", uc_tables = ["cat.s.t"], acl_groups = [] }]\n'
     )
 
-    assert autofix_acl_groups(abac, env) == 0
+    assert autofix_acl_groups(abac, env) == 1
     with (generated / "genie_space_derived_acl_groups.auto.tfvars").open() as handle:
-        assert hcl2.load(handle)["genie_space_derived_acl_groups"] == {}
+        assert hcl2.load(handle)["genie_space_derived_acl_groups"] == {"Private": []}
+
+
+def test_policy_change_rederives_acl_without_previous_output_freezing(tmp_path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    previous_output = tmp_path / "abac.auto.tfvars"
+    env.write_text('genie_spaces = [{ name = "Pay", uc_tables = ["cat.s.t"] }]\n')
+    previous_output.write_text(
+        'genie_space_configs = { Pay = { acl_groups = ["old_wide_group"] } }\n'
+    )
+    abac.write_text('''
+groups = { old_group = {}, new_group = {} }
+fgac_policies = [{ name = "p", catalog = "cat", to_principals = ["old_group"] }]
+genie_space_configs = { Pay = { acl_groups = ["model_group"] } }
+''')
+    assert autofix_acl_groups(abac, env) == 1
+    sidecar = generated / "genie_space_derived_acl_groups.auto.tfvars"
+    with sidecar.open() as handle:
+        assert hcl2.load(handle)["genie_space_derived_acl_groups"] == {
+            "Pay": ["old_group"]
+        }
+
+    abac.write_text(abac.read_text().replace('["old_group"]', '["new_group"]'))
+    assert autofix_acl_groups(abac, env) == 1
+    with sidecar.open() as handle:
+        assert hcl2.load(handle)["genie_space_derived_acl_groups"] == {
+            "Pay": ["new_group"]
+        }
+
+
+def test_no_acl_path_reads_previous_workspace_output():
+    generator = (SHARED / "generate_abac.py").read_text()
+    cli = (SHARED / "scripts/derive_genie_acls.py").read_text()
+    makefile = (SHARED / "Makefile.shared").read_text()
+    forbidden = ("_workspace_acl_hints", "canonical_workspace", "--canonical-workspace", "--ignore-explicit")
+    assert all(token not in generator + cli + makefile for token in forbidden)
+    assert "genie_space_derived_acl_groups_authoritative" not in generator + cli + makefile
 
 
 def test_id_only_space_uses_resolved_title_for_both_consumers(tmp_path):
@@ -275,6 +311,9 @@ def test_per_space_rename_removes_old_key_atomically(tmp_path):
     generated = tmp_path / "generated"
     per_space = generated / "spaces" / "old_name"
     per_space.mkdir(parents=True)
+    (tmp_path / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "New Name", uc_tables = [], acl_groups = [] }]\n'
+    )
     assembled = generated / "abac.auto.tfvars"
     assembled.write_text(
         'genie_space_configs = { "Old Name" = { title = "Old Name", acl_groups = [] } }\n'
@@ -296,7 +335,7 @@ def test_per_space_id_only_rename_drops_orphan_config_with_warning(tmp_path):
     per_space = generated / "spaces" / "new_name"
     per_space.mkdir(parents=True)
     (tmp_path / "env.auto.tfvars").write_text(
-        'genie_spaces = [{ genie_space_id = "s1", uc_tables = [] }]\n'
+        'genie_spaces = [{ genie_space_id = "s1", uc_tables = [], acl_groups = [] }]\n'
     )
     assembled = generated / "abac.auto.tfvars"
     assembled.write_text('''
@@ -367,7 +406,7 @@ def test_just_merged_config_is_never_pruned_as_orphan(tmp_path):
     per_space = generated / "spaces" / "new"
     per_space.mkdir(parents=True)
     (tmp_path / "env.auto.tfvars").write_text(
-        'genie_spaces = [{ name = "Active", uc_tables = [] }]\n'
+        'genie_spaces = [{ name = "Active", uc_tables = [], acl_groups = [] }]\n'
     )
     assembled = generated / "abac.auto.tfvars"
     assembled.write_text(
@@ -415,12 +454,12 @@ def test_cross_env_promote_preserves_id_only_canonical_acl_in_both_layers(tmp_pa
         f"include {SHARED / 'Makefile.shared'}\n"
     )
     (dev / "env.auto.tfvars").write_text('''genie_spaces = [
-  { genie_space_id = "s1", uc_tables = ["paycat.s.t"] },
-  { name = "HR", genie_space_id = "s2", uc_tables = ["hrcat.s.t"] },
+  { genie_space_id = "s1", uc_tables = ["paycat.s.t"], acl_groups = ["pay_override"] },
+  { name = "HR", genie_space_id = "s2", uc_tables = ["hrcat.s.t"], acl_groups = [] },
 ]
 ''')
     (generated / "abac.auto.tfvars").write_text('''
-groups = { pay_group = {}, hr_group = {} }
+groups = { pay_group = {}, hr_group = {}, pay_override = {} }
 fgac_policies = [
   { name = "pay" catalog = "paycat" to_principals = ["pay_group"] },
   { name = "hr" catalog = "hrcat" to_principals = ["hr_group"] },
@@ -458,7 +497,9 @@ genie_space_id_to_name = { s1 = "Payments", s2 = "HR" }
         data_cfg = hcl2.load(handle)
     with (prod / "abac.auto.tfvars").open() as handle:
         workspace_cfg = hcl2.load(handle)
-    expected = {"Payments": ["pay_group"], "HR": ["hr_group"]}
+    assert prod_spaces[0]["acl_groups"] == ["pay_override"]
+    assert prod_spaces[1]["acl_groups"] == []
+    expected = {"Payments": ["pay_override"], "HR": []}
     assert data_cfg["genie_space_acl_groups"] == expected
     assert {
         name: cfg["acl_groups"]
