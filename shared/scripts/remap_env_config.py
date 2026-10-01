@@ -171,10 +171,10 @@ def main():
         lines.append(f'    ]')
         if "acl_groups" in space:
             acl_groups = space["acl_groups"]
-            if acl_groups is None:
-                acl_groups = None
-            elif not isinstance(acl_groups, list) or not all(
-                isinstance(group, str) for group in acl_groups
+            if acl_groups is not None and (
+                not isinstance(acl_groups, list) or not all(
+                    isinstance(group, str) for group in acl_groups
+                )
             ):
                 print(
                     f"ERROR: acl_groups for Genie space {name!r} must be a list "

@@ -43,7 +43,11 @@ except ImportError:
     sys.exit(2)
 
 from tag_vocabulary import REGISTRY  # noqa: E402
-from generate_abac import autofix_acl_groups, sanitize_space_key  # noqa: E402
+from generate_abac import (  # noqa: E402
+    autofix_acl_groups,
+    reject_unowned_draft_acls,
+    sanitize_space_key,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -324,12 +328,19 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     space_sql = space_dir / "masking_functions.sql"
     assembled_abac = generated_dir / "abac.auto.tfvars"
     assembled_sql = generated_dir / "masking_functions.sql"
+    env_path = generated_dir.parent / "env.auto.tfvars"
 
     if not space_abac.exists():
         print(f"  ERROR: Per-space config not found: {space_abac}")
         sys.exit(1)
 
     print(f"\n  Merging generated/spaces/{space_key}/ into generated/...")
+
+    # Security migration guard: inspect both sources before the formatter drops
+    # draft ACL fields. This prevents a sibling's legacy ACL from silently
+    # widening to fresh policy derivation during per-space generation.
+    reject_unowned_draft_acls(assembled_abac, env_path)
+    reject_unowned_draft_acls(space_abac, env_path)
 
     # ── Load per-space content ────────────────────────────────────────────
     space_cfg = load_hcl_safe(space_abac)
@@ -422,7 +433,6 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
         merged_genie[space_name] = cfg
         print(f"    genie_space_configs: updated entry '{space_name}'")
 
-    env_path = generated_dir.parent / "env.auto.tfvars"
     if env_path.exists():
         try:
             with env_path.open() as handle:
@@ -561,7 +571,11 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     candidate = Path(candidate_name)
     try:
         candidate.write_text(updated)
-        autofix_acl_groups(candidate, env_path if env_path.exists() else None)
+        autofix_acl_groups(
+            candidate,
+            env_path if env_path.exists() else None,
+            reject_draft_acls=True,
+        )
         candidate.replace(assembled_abac)
     except Exception:
         candidate.unlink(missing_ok=True)

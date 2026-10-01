@@ -166,11 +166,17 @@ resource "null_resource" "genie_space_config_existing" {
 resource "null_resource" "genie_space_create" {
   for_each = local.new_spaces
 
-  # Absolute local paths change when an otherwise identical Terraform state is
-  # reused from a clean worktree. They are execution details, not reasons to
-  # trash and recreate a live Genie space.
+  # Paths and credentials are runtime execution details, never space identity.
+  # Keeping legacy trigger keys preserves existing state without allowing a
+  # worktree move or credential rotation to trash a live curated space.
   lifecycle {
-    ignore_changes = [triggers["id_file"], triggers["script"]]
+    ignore_changes = [
+      triggers["id_file"],
+      triggers["script"],
+      triggers["host"],
+      triggers["client_id"],
+      triggers["client_secret"],
+    ]
   }
 
   triggers = {
@@ -182,13 +188,13 @@ resource "null_resource" "genie_space_create" {
   }
 
   provisioner "local-exec" {
-    command = "${self.triggers.script} create"
+    command = "${var.genie_script_path} create"
 
     environment = {
-      DATABRICKS_HOST          = self.triggers.host
-      DATABRICKS_CLIENT_ID     = self.triggers.client_id
-      DATABRICKS_CLIENT_SECRET = self.triggers.client_secret
-      GENIE_ID_FILE            = self.triggers.id_file
+      DATABRICKS_HOST          = var.databricks_workspace_host
+      DATABRICKS_CLIENT_ID     = var.databricks_client_id
+      DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
+      GENIE_ID_FILE            = "${var.genie_id_file_prefix}_${each.key}"
       GENIE_TABLES_CSV         = join(",", each.value.uc_tables)
       GENIE_WAREHOUSE_ID = (
         each.value.sql_warehouse_id != ""
@@ -200,14 +206,13 @@ resource "null_resource" "genie_space_create" {
   }
 
   provisioner "local-exec" {
-    when    = destroy
-    command = "${self.triggers.script} trash"
+    when = destroy
+    # terraform_layer.sh always executes from shared/roots/workspace. Keep this
+    # command project-relative so state remains portable across worktrees.
+    command = "bash ../../scripts/genie_space.sh trash"
 
     environment = {
-      DATABRICKS_HOST          = self.triggers.host
-      DATABRICKS_CLIENT_ID     = self.triggers.client_id
-      DATABRICKS_CLIENT_SECRET = self.triggers.client_secret
-      GENIE_ID_FILE            = self.triggers.id_file
+      GENIE_ID_BASENAME = basename(self.triggers.id_file)
     }
   }
 
@@ -233,6 +238,7 @@ resource "null_resource" "genie_space_config" {
     sql_measures    = jsonencode(each.value.config.sql_measures)
     sql_expressions = jsonencode(each.value.config.sql_expressions)
     join_specs      = jsonencode(each.value.config.join_specs)
+    space_create_id = null_resource.genie_space_create[each.key].id
   }
 
   provisioner "local-exec" {

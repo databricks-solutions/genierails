@@ -3930,23 +3930,8 @@ def autofix_acl_groups(
         for g in except_p:
             group_catalogs.setdefault(g, set()).add(catalog)
 
-    if reject_draft_acls and has_configured_spaces:
-        for space_name, cfg_entry in genie_cfgs.items():
-            if isinstance(cfg_entry, list):
-                cfg_entry = cfg_entry[0] if cfg_entry else {}
-            if not isinstance(cfg_entry, dict):
-                continue
-            draft_key = next(
-                (key for key in ("acl_groups", "genie_acl_groups") if key in cfg_entry),
-                None,
-            )
-            if draft_key and space_name not in user_acls:
-                raise ValueError(
-                    f"Genie space {space_name!r} has legacy draft {draft_key}="
-                    f"{cfg_entry[draft_key]!r}. Move this value to the matching "
-                    "genie_spaces[] entry in env.auto.tfvars (use [] for nobody), "
-                    "then remove it from generated/abac.auto.tfvars."
-                )
+    if reject_draft_acls:
+        reject_unowned_draft_acls(tfvars_path, env_tfvars_path)
 
     # Every active space gets a sidecar entry. User-owned env ACLs win,
     # including explicit []; otherwise derive fresh from current policies.
@@ -3985,23 +3970,25 @@ def autofix_acl_groups(
         derived[str(space_name)] = space_groups
         policy_derived_names.add(str(space_name))
 
-    # Catalog-scoped policies cannot distinguish two Genie spaces that expose
-    # different tables from the same catalog.  Reusing the same derived group
-    # set for both spaces would silently broaden CAN_RUN and SELECT.  Require
-    # user-owned per-space ACLs for this ambiguous topology instead of guessing.
-    policy_names = sorted(policy_derived_names)
-    for index, left in enumerate(policy_names):
-        for right in policy_names[index + 1:]:
-            shared_catalogs = space_catalogs.get(left, set()) & space_catalogs.get(
-                right, set()
+    # Catalog-scoped policies cannot distinguish table subsets belonging to two
+    # active spaces in the same catalog. Any space derived from policy in that
+    # topology must become an explicit user-owned ACL; already-explicit spaces
+    # remain valid and are never blocked.
+    all_active_names = sorted(candidate_names)
+    for derived_name in sorted(policy_derived_names):
+        for other_name in all_active_names:
+            if other_name == derived_name:
+                continue
+            shared_catalogs = space_catalogs.get(derived_name, set()) & space_catalogs.get(
+                other_name, set()
             )
-            if shared_catalogs and derived[left] == derived[right]:
+            if shared_catalogs:
                 raise ValueError(
-                    "Cannot safely derive distinct Genie ACLs for spaces "
-                    f"{left!r} and {right!r}: they share catalog(s) "
-                    f"{sorted(shared_catalogs)!r} and resolve to the same policy "
-                    f"groups {derived[left]!r}. Set acl_groups on each ambiguous "
-                    "genie_spaces[] entry in env.auto.tfvars."
+                    f"Cannot safely derive ACL for Genie space {derived_name!r}: "
+                    f"it shares catalog(s) {sorted(shared_catalogs)!r} with active "
+                    f"space {other_name!r}. Catalog policies cannot distinguish "
+                    "their table subsets. Set acl_groups on this genie_spaces[] "
+                    "entry in env.auto.tfvars."
                 )
 
     derived_path = tfvars_path.with_name(
@@ -4020,6 +4007,54 @@ def autofix_acl_groups(
     if not derived_path.exists() or derived_path.read_text() != rendered_text:
         derived_path.write_text(rendered_text)
     return len(derived)
+
+
+def reject_unowned_draft_acls(
+    tfvars_path: Path,
+    env_tfvars_path: Path | None,
+) -> None:
+    """Reject legacy ACL fields before any formatter can erase their intent."""
+    import hcl2
+
+    if not tfvars_path.exists() or not env_tfvars_path or not env_tfvars_path.exists():
+        return
+    try:
+        cfg = hcl2.loads(tfvars_path.read_text())
+        env_cfg = hcl2.loads(env_tfvars_path.read_text())
+    except Exception as exc:
+        raise ValueError(f"Cannot inspect legacy Genie ACLs: invalid HCL: {exc}") from exc
+
+    configured_spaces = env_cfg.get("genie_spaces") or []
+    if not configured_spaces:
+        return
+    id_to_name = cfg.get("genie_space_id_to_name") or {}
+    user_acl_names: set[str] = set()
+    for space in configured_spaces:
+        if not isinstance(space, dict) or space.get("acl_groups") is None:
+            continue
+        name = space.get("name") or id_to_name.get(space.get("genie_space_id", ""), "")
+        if name:
+            user_acl_names.add(name)
+
+    genie_cfgs = cfg.get("genie_space_configs") or {}
+    if not isinstance(genie_cfgs, dict):
+        return
+    for space_name, cfg_entry in genie_cfgs.items():
+        if isinstance(cfg_entry, list):
+            cfg_entry = cfg_entry[0] if cfg_entry else {}
+        if not isinstance(cfg_entry, dict):
+            continue
+        draft_key = next(
+            (key for key in ("acl_groups", "genie_acl_groups") if key in cfg_entry),
+            None,
+        )
+        if draft_key and space_name not in user_acl_names:
+            raise ValueError(
+                f"Genie space {space_name!r} has legacy draft {draft_key}="
+                f"{cfg_entry[draft_key]!r}. Move this value to the matching "
+                "genie_spaces[] entry in env.auto.tfvars (use [] for nobody), "
+                "then remove it from generated/abac.auto.tfvars."
+            )
 
 
 def autofix_missing_genie_space_entries(tfvars_path: Path, auth_cfg: dict) -> int:
@@ -7728,6 +7763,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
         print(f"  abac.auto.tfvars written to: {tfvars_path}")
 
         fix_hcl_syntax(tfvars_path)
+        if _configured_spaces:
+            strip_draft_genie_acl_fields(tfvars_path)
 
         n_canonical = autofix_canonical_tag_vocabulary(tfvars_path)
         if n_canonical:
@@ -8066,6 +8103,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     if _configured_spaces:
                         strip_draft_genie_acl_fields(tfvars_path)
                     fix_hcl_syntax(tfvars_path)
+                    if _configured_spaces:
+                        strip_draft_genie_acl_fields(tfvars_path)
                     autofix_canonical_tag_vocabulary(tfvars_path)
                     autofix_ambiguous_tag_values(tfvars_path)
                     autofix_invalid_tag_values(tfvars_path)

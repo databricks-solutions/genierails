@@ -361,9 +361,108 @@ genie_space_configs = { payments = {}, hr = {} }
 ]
 ''')
 
-    with pytest.raises(ValueError, match="Cannot safely derive distinct Genie ACLs"):
+    with pytest.raises(ValueError, match="shares catalog.*Set acl_groups"):
         autofix_acl_groups(abac, env)
 
+    assert not (generated / "genie_space_derived_acl_groups.auto.tfvars").exists()
+
+
+def test_shared_catalog_superset_groups_still_fail_closed(tmp_path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    abac.write_text('''
+groups = { gA = {}, gB = {}, gC = {} }
+fgac_policies = [
+  { name = "c1" catalog = "c1" to_principals = ["gA", "gB"] },
+  { name = "c2" catalog = "c2" to_principals = ["gC"] },
+]
+genie_space_configs = { A = {}, B = {} }
+''')
+    env.write_text('''genie_spaces = [
+  { name = "A", uc_tables = ["c1.s.a", "c2.s.a"] },
+  { name = "B", uc_tables = ["c1.s.b"] },
+]
+''')
+    with pytest.raises(ValueError, match="shares catalog.*Set acl_groups"):
+        autofix_acl_groups(abac, env)
+
+
+def test_user_acl_space_does_not_make_shared_catalog_safe_for_derived_peer(tmp_path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    abac.write_text('''
+groups = { gA = {}, gB = {} }
+fgac_policies = [{ name = "shared" catalog = "shared" to_principals = ["gA", "gB"] }]
+genie_space_configs = { A = {}, B = {} }
+''')
+    env.write_text('''genie_spaces = [
+  { name = "A", uc_tables = ["shared.s.a"], acl_groups = ["gA"] },
+  { name = "B", uc_tables = ["shared.s.b"] },
+]
+''')
+    with pytest.raises(ValueError, match="Genie space 'B'.*shares catalog"):
+        autofix_acl_groups(abac, env)
+
+
+@pytest.mark.parametrize(
+    "spaces",
+    [
+        '[{ name = "A", uc_tables = ["c1.s.a"] }]',
+        '[{ name = "A", uc_tables = ["c1.s.a"] }, { name = "B", uc_tables = ["c2.s.b"] }]',
+    ],
+)
+def test_policy_derivation_allows_single_or_catalog_disjoint_spaces(tmp_path, spaces):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    abac.write_text('''
+groups = { gA = {}, gB = {} }
+fgac_policies = [
+  { name = "a" catalog = "c1" to_principals = ["gA"] },
+  { name = "b" catalog = "c2" to_principals = ["gB"] },
+]
+genie_space_configs = { A = {}, B = {} }
+''')
+    env.write_text(f"genie_spaces = {spaces}\n")
+    assert autofix_acl_groups(abac, env) == len(hcl2.loads(env.read_text())["genie_spaces"])
+
+
+def test_per_space_merge_rejects_sibling_legacy_acl_before_formatter_wipes_it(tmp_path):
+    generated = tmp_path / "generated"
+    per_space = generated / "spaces" / "hr"
+    per_space.mkdir(parents=True)
+    env = tmp_path / "env.auto.tfvars"
+    env.write_text('''genie_spaces = [
+  { name = "Pay", uc_tables = ["shared.pay.t"] },
+  { name = "HR", uc_tables = ["shared.hr.t"], acl_groups = [] },
+]
+''')
+    assembled = generated / "abac.auto.tfvars"
+    original = '''
+groups = { pay_g = {}, auditor_g = {}, hr_g = {} }
+fgac_policies = [{ name = "shared" catalog = "shared" to_principals = ["pay_g", "auditor_g", "hr_g"] }]
+genie_space_configs = { Pay = { title = "Pay", acl_groups = ["pay_g"] } HR = { title = "HR" } }
+'''
+    assembled.write_text(original)
+    (per_space / "abac.auto.tfvars").write_text(
+        'genie_space_configs = { HR = { title = "HR" } }\n'
+    )
+    (generated / "masking_functions.sql").write_text("")
+    (per_space / "masking_functions.sql").write_text("")
+
+    result = subprocess.run(
+        [sys.executable, str(SHARED / "scripts/merge_space_configs.py"), str(generated), "hr"],
+        text=True, capture_output=True,
+    )
+    assert result.returncode != 0
+    assert "Genie space 'Pay' has legacy draft acl_groups=['pay_g']" in result.stderr
+    assert "genie_spaces[] entry in env.auto.tfvars" in result.stderr
+    assert assembled.read_text() == original
     assert not (generated / "genie_space_derived_acl_groups.auto.tfvars").exists()
 
 
@@ -485,10 +584,10 @@ def test_per_space_rename_removes_old_key_atomically(tmp_path):
     )
     assembled = generated / "abac.auto.tfvars"
     assembled.write_text(
-        'genie_space_configs = { "Old Name" = { title = "Old Name", acl_groups = [] } }\n'
+        'genie_space_configs = { "Old Name" = { title = "Old Name" } }\n'
     )
     (per_space / "abac.auto.tfvars").write_text(
-        'genie_space_configs = { "New Name" = { title = "New Name", acl_groups = [] } }\n'
+        'genie_space_configs = { "New Name" = { title = "New Name" } }\n'
     )
     subprocess.run(
         [sys.executable, str(SHARED / "scripts/merge_space_configs.py"), str(generated), "old_name"],
@@ -542,7 +641,7 @@ def test_per_space_merge_aborts_on_invalid_environment_without_writing(tmp_path)
         text=True, capture_output=True,
     )
     assert result.returncode != 0
-    assert "Cannot safely prune orphan Genie configs" in result.stderr
+    assert "invalid HCL" in result.stderr
     assert assembled.read_text() == original
 
 
@@ -555,10 +654,10 @@ def test_unknown_id_only_space_fails_closed_without_canonical_name(tmp_path):
     )
     assembled = generated / "abac.auto.tfvars"
     assembled.write_text(
-        'genie_space_configs = { Curated = { instructions = "keep", acl_groups = [] } }\n'
+        'genie_space_configs = { Curated = { instructions = "keep" } }\n'
     )
     (per_space / "abac.auto.tfvars").write_text(
-        'genie_space_configs = { Pay = { acl_groups = [] } }\n'
+        'genie_space_configs = { Pay = { title = "Pay" } }\n'
     )
     original = assembled.read_text()
     result = subprocess.run(
@@ -579,10 +678,10 @@ def test_just_merged_config_is_never_pruned_as_orphan(tmp_path):
     )
     assembled = generated / "abac.auto.tfvars"
     assembled.write_text(
-        'genie_space_configs = { Active = { acl_groups = [] }, Old = { acl_groups = [] } }\n'
+        'genie_space_configs = { Active = { title = "Active" }, Old = { title = "Old" } }\n'
     )
     (per_space / "abac.auto.tfvars").write_text(
-        'genie_space_configs = { New = { acl_groups = [] } }\n'
+        'genie_space_configs = { New = { title = "New" } }\n'
     )
     subprocess.run(
         [sys.executable, str(SHARED / "scripts/merge_space_configs.py"), str(generated), "new"],

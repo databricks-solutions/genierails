@@ -598,6 +598,21 @@ PYEOF
 
 # ---------- Trash (delete) a Genie agent ----------
 trash_genie_space() {
+  # Destroy provisioners can outlive the worktree that created their state.
+  # Resolve the current environment path and credentials at execution time.
+  if [[ -n "${LAYER_ENV_DIR:-}" ]]; then
+    if [[ -n "${GENIE_ID_BASENAME:-}" ]]; then
+      GENIE_ID_FILE="${LAYER_ENV_DIR}/${GENIE_ID_BASENAME}"
+    fi
+    local auth_tfvars="${LAYER_ENV_DIR}/auth.auto.tfvars"
+    if [[ -f "$auth_tfvars" ]]; then
+      DATABRICKS_HOST=$(python3 -c 'import hcl2,sys; print(hcl2.load(open(sys.argv[1])).get("databricks_workspace_host", ""))' "$auth_tfvars")
+      DATABRICKS_CLIENT_ID=$(python3 -c 'import hcl2,sys; print(hcl2.load(open(sys.argv[1])).get("databricks_client_id", ""))' "$auth_tfvars")
+      DATABRICKS_CLIENT_SECRET=$(python3 -c 'import hcl2,sys; print(hcl2.load(open(sys.argv[1])).get("databricks_client_secret", ""))' "$auth_tfvars")
+      export DATABRICKS_HOST DATABRICKS_CLIENT_ID DATABRICKS_CLIENT_SECRET
+    fi
+  fi
+
   local workspace_url="${DATABRICKS_HOST}"
   workspace_url="${workspace_url%/}"
 
@@ -605,9 +620,6 @@ trash_genie_space() {
     echo "Need workspace URL. Set DATABRICKS_HOST." >&2
     exit 1
   fi
-
-  local token
-  token=$(resolve_token "$workspace_url" "") || exit 1
 
   local space_id=""
 
@@ -617,9 +629,13 @@ trash_genie_space() {
   fi
 
   if [[ -z "$space_id" ]]; then
-    echo "No Genie agent ID file found at ${GENIE_ID_FILE:-<not set>}. Nothing to trash."
-    exit 0
+    echo "ERROR: Cannot identify Genie agent to trash: ID file missing or empty at ${GENIE_ID_FILE:-<not set>}." >&2
+    echo "Refusing to continue because this would orphan the live space." >&2
+    exit 1
   fi
+
+  local token
+  token=$(resolve_token "$workspace_url" "") || exit 1
 
   echo "Trashing Genie agent ${space_id}..."
   local response

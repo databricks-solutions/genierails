@@ -97,10 +97,14 @@ def resolve_space_acl(
     elif allow_legacy_explicit and "genie_acl_groups" in space:
         value = space["genie_acl_groups"]
     else:
+        advice = (
+            "set the legacy top-level genie_acl_groups list"
+            if allow_legacy_explicit
+            else "set acl_groups on its genie_spaces[] entry in env.auto.tfvars"
+        )
         raise ValueError(
             f"Genie space {space_name!r} has no resolved ACL. Run `make generate` "
-            "to re-derive ACLs or set acl_groups on its genie_spaces[] entry in "
-            "env.auto.tfvars."
+            f"to re-derive ACLs or {advice}."
         )
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(
