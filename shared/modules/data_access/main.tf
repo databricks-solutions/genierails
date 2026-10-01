@@ -205,9 +205,8 @@ resource "databricks_grant" "catalog_access" {
   principal  = each.value.group
   privileges = ["USE_CATALOG"]
 
-  # The provider updates catalog permissions with a read/modify/write cycle.
-  # Serialize principals on the same catalog to avoid stale snapshots dropping
-  # or rejecting unrelated grants when these resources apply concurrently.
+  # Order group grants after the deployment SP grant to avoid the SP-vs-group
+  # read/modify/write race on catalog permissions.
   depends_on = [databricks_grant.terraform_sp_manage_catalog]
 }
 

@@ -196,14 +196,21 @@ def test_prepare_resolves_two_part_tables_and_preserves_all_schema_scope(tmp_pat
             requested.append(name)
             return SimpleNamespace(included_schemas=None)
 
+    client_kwargs = {}
+
+    def fake_workspace_client(**kwargs):
+        client_kwargs.update(kwargs)
+        return SimpleNamespace(data_classification=FakeClassification())
+
     monkeypatch.setattr(
         module,
         "WorkspaceClient",
-        lambda **_: SimpleNamespace(data_classification=FakeClassification()),
+        fake_workspace_client,
     )
     monkeypatch.setattr(module.sys, "argv", ["prepare", str(env_dir)])
 
     assert module.main() == 0
+    assert client_kwargs["custom_headers"] is None
     assert requested == ["catalogs/real_catalog/config"]
     generated = (env_dir / "data_access/classification.auto.tfvars").read_text()
     assert 'classification_all_schemas = ["real_catalog"]' in generated
@@ -282,22 +289,26 @@ def test_prepare_seeds_aws_classification_with_serverless_usage_policy(
             raise module.NotFound("missing")
 
     api_calls = []
+    client_kwargs = {}
 
     class FakeAPI:
         def do(self, method, path, **kwargs):
             api_calls.append((method, path, kwargs))
             return {}
 
-    monkeypatch.setattr(
-        module,
-        "WorkspaceClient",
-        lambda **_: SimpleNamespace(
+    def fake_workspace_client(**kwargs):
+        client_kwargs.update(kwargs)
+        return SimpleNamespace(
             data_classification=FakeClassification(), api_client=FakeAPI()
-        ),
-    )
+        )
+
+    monkeypatch.setattr(module, "WorkspaceClient", fake_workspace_client)
     monkeypatch.setattr(module.sys, "argv", ["prepare", str(env_dir)])
 
     assert module.main() == 0
+    assert client_kwargs["custom_headers"] == {
+        "X-Databricks-Org-Id": "12345"
+    }
     assert api_calls == [
         (
             "POST",
@@ -308,7 +319,6 @@ def test_prepare_seeds_aws_classification_with_serverless_usage_policy(
                     "auto_tag_configs": [],
                     "usage_policy_id": "policy-123",
                 },
-                "headers": {"X-Databricks-Org-Id": "12345"},
             },
         )
     ]

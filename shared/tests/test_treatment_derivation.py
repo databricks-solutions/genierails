@@ -212,6 +212,15 @@ def test_numeric_and_date_treatments_are_not_escalated():
     ) == ["round_amount"]
 
 
+@pytest.mark.parametrize("column_name", ["compensation_summary", "salary_notes"])
+def test_free_text_named_compensation_stays_numeric_treatment(column_name):
+    column = f"cat.sch.p.{column_name}"
+    assert _treatment_of(
+        # Generation maps class.compensation to this treatment before derivation.
+        _single(column, "gr_treatment", "compensation_redacted"), column
+    ) == ["compensation_redacted"]
+
+
 def test_rederive_treatment_only_config_is_idempotent():
     cfg = {
         "tag_policies": [],

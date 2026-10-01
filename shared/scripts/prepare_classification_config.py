@@ -81,11 +81,6 @@ def main() -> int:
             remote = client.data_classification.get_catalog_config(name)
         except NotFound:
             if usage_policy_id:
-                headers = (
-                    {"X-Databricks-Org-Id": workspace_id}
-                    if workspace_id
-                    else {}
-                )
                 client.api_client.do(
                     "POST",
                     f"/api/data-classification/v1/catalogs/{catalog}/config",
@@ -96,7 +91,6 @@ def main() -> int:
                         "auto_tag_configs": [],
                         "usage_policy_id": usage_policy_id,
                     },
-                    headers=headers,
                 )
                 existing[catalog] = desired_schemas[catalog]
             continue

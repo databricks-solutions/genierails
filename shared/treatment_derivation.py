@@ -56,9 +56,11 @@ def load_treatment_config(path: Path = CONFIG_PATH) -> TreatmentConfig:
 # one specific identifier format (email/phone/SSN/card/...).  Applied to a
 # free-text column these leak any *other* PII embedded in the text, so a
 # free-text column holding one of these is escalated to full redaction.
-# Numeric/date treatments (round_amount, date_year) are excluded: mask_redact is
-# STRING-typed and would not bind to DECIMAL/DATE columns.
-_FREE_TEXT_ESCALATION_EXCLUDED = frozenset({"redact", "round_amount", "date_year"})
+# Numeric/date treatments (round_amount, compensation_redacted, date_year) are
+# excluded: mask_redact is STRING-typed and would not bind to DECIMAL/DATE columns.
+_FREE_TEXT_ESCALATION_EXCLUDED = frozenset(
+    {"redact", "round_amount", "date_year", "compensation_redacted"}
+)
 _FREE_TEXT_ESCALATION_TARGET = "redact"
 
 # Column-name tokens that mark a narrative / free-text column.
