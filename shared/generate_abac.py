@@ -7098,9 +7098,10 @@ def main():
                     all_space_tables.extend(space_tables)
 
                 for table in exposed_tables:
-                    owners = discovered_table_agents.setdefault(table, [])
-                    if agent_name and agent_name not in owners:
-                        owners.append(agent_name)
+                    if agent_name:
+                        owners = discovered_table_agents.setdefault(table, [])
+                        if agent_name not in owners:
+                            owners.append(agent_name)
 
             # An explicit CLI footprint bounds what is scanned on this run; it
             # does not prove that previously discovered, still-granted tables

@@ -408,7 +408,7 @@ _apply-layer:
 	if [ "$$layer" = "account" ]; then \
 		$(MAKE) --no-print-directory sync-tags; \
 	fi; \
-	files="$$env_dir/auth.auto.tfvars $$env_dir/env.auto.tfvars $$env_dir/abac.auto.tfvars $$env_dir/classification.auto.tfvars"; \
+	files="$$env_dir/auth.auto.tfvars $$env_dir/env.auto.tfvars $$env_dir/abac.auto.tfvars $$env_dir/classification.auto.tfvars $$env_dir/discovered_uc_tables.auto.tfvars"; \
 	if [ -f "$$env_dir/masking_functions.sql" ]; then files="$$files $$env_dir/masking_functions.sql"; fi; \
 	fingerprint_file="$$env_dir/.$$layer.apply.sha"; \
 	current_fingerprint="$$( { for file in $$files; do [ -f "$$file" ] && shasum "$$file"; done; [ -z "$$apply_flags" ] || printf '%s\n' "$$apply_flags"; } | shasum | awk '{print $$1}')"; \

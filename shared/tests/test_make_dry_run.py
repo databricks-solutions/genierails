@@ -126,6 +126,49 @@ def test_apply_layer_real_path_keeps_command_and_fingerprint_behavior(tmp_path):
     assert (env_dir / ".test.apply.sha").read_text().strip()
 
 
+def test_discovered_agent_attribution_changes_apply_fingerprint(tmp_path):
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    (env_dir / "abac.auto.tfvars").write_text("# present\n")
+    discovered = env_dir / "discovered_uc_tables.auto.tfvars"
+    discovered.write_text(
+        'discovered_uc_tables = ["cat.sch.tbl"]\n'
+        'discovered_table_agents = { "cat.sch.tbl" = ["Agent A", "Old A"] }\n'
+    )
+    runner_log = tmp_path / "runner.log"
+    runner = tmp_path / "record-runner"
+    runner.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> \"{runner_log}\"\n"
+    )
+    runner.chmod(0o755)
+    args = [
+        "make", "--no-print-directory", "_apply-layer", "LAYER=test",
+        "TARGET_ENV=dev", f"LAYER_ENV_DIR={env_dir}", f"ROOT_RUNNER={runner}",
+    ]
+
+    first = subprocess.run(
+        args, cwd=CLOUD_ROOT, text=True, capture_output=True, env=_clean_env()
+    )
+    first_fingerprint = (env_dir / ".test.apply.sha").read_text()
+    discovered.write_text(
+        'discovered_uc_tables = ["cat.sch.tbl"]\n'
+        'discovered_table_agents = { "cat.sch.tbl" = ["Agent A"] }\n'
+    )
+    second = subprocess.run(
+        args, cwd=CLOUD_ROOT, text=True, capture_output=True, env=_clean_env()
+    )
+    second_fingerprint = (env_dir / ".test.apply.sha").read_text()
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert first_fingerprint != second_fingerprint
+    assert runner_log.read_text().splitlines() == [
+        "test dev apply -parallelism=1 -auto-approve",
+        "test dev apply -parallelism=1 -auto-approve",
+    ]
+
+
 def test_rehearsal_apply_flag_follows_tfvars_and_changes_fingerprint(tmp_path):
     env_dir = tmp_path / "env"
     env_dir.mkdir()

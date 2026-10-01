@@ -50,17 +50,20 @@ locals {
     toset(keys(var.table_agents)),
   )
 
+  scoped_table_access_principals = {
+    for table in local.effective_uc_tables : table => distinct(flatten([
+      for agent in lookup(var.table_agents, table, []) :
+      lookup(var.genie_space_acl_groups, agent, [])
+    ]))
+  }
+
   table_access_principals = {
     for table in local.effective_uc_tables : table => (
-      contains(var.admin_uc_tables, table) || contains(local.legacy_unattributed_discovered_tables, table)
+      contains(var.admin_uc_tables, table)
+      || contains(local.legacy_unattributed_discovered_tables, table)
+      || length(local.scoped_table_access_principals[table]) == 0
       ? local.access_principals
-      : distinct(flatten([
-        for agent in lookup(var.table_agents, table, []) : (
-          length(lookup(var.genie_space_acl_groups, agent, [])) > 0
-          ? lookup(var.genie_space_acl_groups, agent, [])
-          : local.access_principals
-        )
-      ]))
+      : local.scoped_table_access_principals[table]
     )
   }
 

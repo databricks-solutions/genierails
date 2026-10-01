@@ -293,6 +293,25 @@ def test_main_footprint_includes_new_api_table_in_discovery_and_masking(monkeypa
     }
 
 
+def test_main_does_not_write_empty_owner_attribution(monkeypatch, tmp_path):
+    _run_main_until_footprint(
+        monkeypatch,
+        tmp_path,
+        [],
+        '''genie_spaces = [{
+  name = ""
+  genie_space_id = ""
+  uc_tables = ["main.unnamed.events"]
+}]\n''',
+    )
+
+    discovered_cfg = assert_valid_hcl(
+        tmp_path / "data_access" / "discovered_uc_tables.auto.tfvars"
+    )
+    assert "main.unnamed.events" in discovered_cfg["discovered_uc_tables"]
+    assert "main.unnamed.events" not in discovered_cfg["discovered_table_agents"]
+
+
 def test_main_incomplete_empty_discovery_reaches_empty_governance_guard(monkeypatch, tmp_path):
     _, _, auth_cfg = _run_main_until_footprint(
         monkeypatch,
