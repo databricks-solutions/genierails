@@ -166,6 +166,13 @@ resource "null_resource" "genie_space_config_existing" {
 resource "null_resource" "genie_space_create" {
   for_each = local.new_spaces
 
+  # Absolute local paths change when an otherwise identical Terraform state is
+  # reused from a clean worktree. They are execution details, not reasons to
+  # trash and recreate a live Genie space.
+  lifecycle {
+    ignore_changes = [triggers["id_file"], triggers["script"]]
+  }
+
   triggers = {
     id_file       = "${var.genie_id_file_prefix}_${each.key}"
     script        = var.genie_script_path

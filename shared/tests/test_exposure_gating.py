@@ -34,6 +34,14 @@ def test_workspace_business_acls_are_gated_but_creation_is_not():
     assert "business_access_enabled" not in source[create_start:create_end]
 
 
+def test_genie_creation_ignores_worktree_local_path_changes():
+    source = (SHARED / "modules/workspace/main.tf").read_text()
+    start = source.index('resource "null_resource" "genie_space_create"')
+    end = source.index('resource "null_resource" "genie_space_config"', start)
+    block = source[start:end]
+    assert 'ignore_changes = [triggers["id_file"], triggers["script"]]' in block
+
+
 def test_roots_forward_the_same_gate_to_both_modules():
     assignment = r"business_access_enabled\s*=\s*var\.business_access_enabled"
     assert re.search(assignment, (SHARED / "roots/data_access/main.tf").read_text())
