@@ -76,14 +76,15 @@ def test_model_written_acl_layout_never_overrides_policy_derivation(tmp_path, sp
     tfvars, env_tfvars = _acl_autofix_files(tmp_path, f'  "Pay" = {space_body}')
     before = tfvars.read_bytes()
 
-    assert autofix_acl_groups(tfvars, env_tfvars) == 1
+    assert autofix_acl_groups(tfvars, env_tfvars) == 2
 
     assert tfvars.read_bytes() == before
     derived = assert_valid_hcl(
         tmp_path / "genie_space_derived_acl_groups.auto.tfvars"
     )
     assert derived["genie_space_derived_acl_groups"] == {
-        "Pay": ["pay_group", "shared_group"]
+        "HR": ["hr_group"],
+        "Pay": ["pay_group", "shared_group"],
     }
 
 
@@ -121,7 +122,7 @@ EOT
 ''')
     before = tfvars.read_bytes()
 
-    assert autofix_acl_groups(tfvars, env_tfvars) == 1
+    assert autofix_acl_groups(tfvars, env_tfvars) == 2
 
     assert tfvars.read_bytes() == before
 
@@ -153,7 +154,7 @@ def test_acl_derivation_fails_closed_when_no_policy_maps_space(tmp_path):
         autofix_acl_groups(tfvars, env_tfvars)
 
 
-def test_missing_space_formatter_preserves_title_and_legacy_acl(tmp_path):
+def test_missing_space_formatter_preserves_title_but_drops_draft_acl(tmp_path):
     tfvars = tmp_path / "abac.auto.tfvars"
     env_tfvars = tmp_path / "env.auto.tfvars"
     tfvars.write_text('''groups = { shared_g = {} hr_g = {} }
@@ -179,14 +180,15 @@ genie_space_configs = {
 
     parsed = assert_valid_hcl(tfvars)["genie_space_configs"]
     assert parsed["Pay"]["title"] == "Payments"
-    assert parsed["Pay"]["acl_groups"] == ["shared_g"]
+    assert "acl_groups" not in parsed["Pay"]
+    assert "genie_acl_groups" not in parsed["Pay"]
     derived = assert_valid_hcl(
         tmp_path / "genie_space_derived_acl_groups.auto.tfvars"
     )["genie_space_derived_acl_groups"]
     assert derived == {"HR": ["hr_g"], "Pay": ["shared_g"]}
 
 
-def test_missing_space_formatter_preserves_explicit_empty_acl(tmp_path):
+def test_missing_space_formatter_drops_draft_explicit_empty_acl(tmp_path):
     tfvars = tmp_path / "abac.auto.tfvars"
     tfvars.write_text(
         'genie_space_configs = { Pay = { title = "Pay" acl_groups = [] } }\n'
@@ -197,7 +199,7 @@ def test_missing_space_formatter_preserves_explicit_empty_acl(tmp_path):
     ) == 1
 
     parsed = assert_valid_hcl(tfvars)["genie_space_configs"]
-    assert parsed["Pay"]["acl_groups"] == []
+    assert "acl_groups" not in parsed["Pay"]
 
 
 def test_generator_infers_compensation_amounts_without_string_classifiers():

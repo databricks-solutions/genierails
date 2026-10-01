@@ -31,7 +31,7 @@ class TestSplitTagPolicies:
 
 
 class TestMergeSpaceConfigs:
-    def test_merge_round_trips_title_legacy_acl_and_explicit_empty_acl(
+    def test_merge_round_trips_titles_but_never_draft_acls(
         self, tmp_path
     ):
         generated_dir = tmp_path / "generated"
@@ -65,13 +65,9 @@ genie_space_configs = { HR = { title = "Human Resources" acl_groups = ["hr_g"] }
 
         with open(generated_dir / "abac.auto.tfvars") as handle:
             spaces = hcl2.load(handle)["genie_space_configs"]
-        assert spaces["Pay"] == {
-            "title": "Payments", "acl_groups": ["shared_g"]
-        }
-        assert spaces["Empty"] == {"title": "Nobody", "acl_groups": []}
-        assert spaces["HR"] == {
-            "title": "Human Resources", "acl_groups": ["hr_g"]
-        }
+        assert spaces["Pay"] == {"title": "Payments"}
+        assert spaces["Empty"] == {"title": "Nobody"}
+        assert spaces["HR"] == {"title": "Human Resources"}
 
     def test_merge_into_assembled_raises_on_conflicting_canonical_assignment(
         self,

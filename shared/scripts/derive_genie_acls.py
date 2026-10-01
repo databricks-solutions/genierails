@@ -21,7 +21,7 @@ def main() -> int:
         print("ERROR: generated ABAC and environment tfvars must both exist")
         return 1
     try:
-        count = autofix_acl_groups(abac_path, env_path)
+        count = autofix_acl_groups(abac_path, env_path, reject_draft_acls=True)
     except ValueError as exc:
         print(f"ERROR: {exc}")
         return 1

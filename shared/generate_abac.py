@@ -902,21 +902,6 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
                 # Skip malformed join_specs (e.g. plain strings from LLM)
             lines.append("    ]")
 
-        if "acl_groups" in cfg or "genie_acl_groups" in cfg:
-            acl_groups = (
-                cfg["acl_groups"]
-                if "acl_groups" in cfg
-                else cfg["genie_acl_groups"]
-            )
-            if not isinstance(acl_groups, list) or not all(
-                isinstance(group, str) for group in acl_groups
-            ):
-                raise ValueError("acl_groups must be a list of group names")
-            lines.append("    acl_groups = [")
-            for g in acl_groups:
-                lines.append(f"      {_hcl_str(g)},")
-            lines.append("    ]")
-
         lines.append("  }")
 
     lines.append("}")
@@ -995,6 +980,56 @@ def remove_hcl_top_level_list(text: str, key: str) -> str:
         block_end += 1
 
     return text[:start] + text[block_end:]
+
+
+def strip_multi_space_legacy_genie_keys(text: str) -> str:
+    """Remove flat legacy Genie fields when env.auto.tfvars owns multi-space input."""
+    for key in (
+        "genie_benchmarks", "genie_sql_filters", "genie_sql_expressions",
+        "genie_sql_measures", "genie_join_specs",
+    ):
+        text = remove_hcl_top_level_block(text, key)
+    for key in ("genie_sample_questions", "genie_acl_groups"):
+        text = remove_hcl_top_level_list(text, key)
+    scalar_re = re.compile(
+        r'^\s*(?:genie_space_title|genie_space_description|genie_instructions)\s*=\s*"[^"\n]*"\s*$',
+        re.MULTILINE,
+    )
+    return scalar_re.sub("", text)
+
+
+def strip_draft_genie_acl_fields(tfvars_path: Path) -> int:
+    """Remove model/API ACL fields from multi-space semantic draft entries."""
+    import hcl2
+
+    text = tfvars_path.read_text()
+    try:
+        cfg = hcl2.loads(text)
+    except Exception:
+        return 0
+    configs = cfg.get("genie_space_configs") or {}
+    if isinstance(configs, list):
+        configs = configs[0] if configs else {}
+    if not isinstance(configs, dict):
+        return 0
+    cleaned: dict[str, dict] = {}
+    removed = 0
+    for name, value in configs.items():
+        if isinstance(value, list):
+            value = value[0] if value else {}
+        if not isinstance(value, dict):
+            cleaned[name] = value
+            continue
+        entry = dict(value)
+        for key in ("acl_groups", "genie_acl_groups"):
+            if key in entry:
+                entry.pop(key)
+                removed += 1
+        cleaned[name] = entry
+    if removed:
+        text = remove_hcl_top_level_block(text, "genie_space_configs").rstrip()
+        tfvars_path.write_text(text + "\n\n" + format_genie_space_configs_hcl(cleaned) + "\n")
+    return removed
 
 
 def strip_abac_for_genie_mode(text: str) -> str:
@@ -3782,6 +3817,8 @@ def autofix_genie_config_fields(tfvars_path: Path) -> int:
 def autofix_acl_groups(
     tfvars_path: Path,
     env_tfvars_path: Path | None = None,
+    *,
+    reject_draft_acls: bool = False,
 ) -> int:
     """Resolve ACLs from user-owned env input or fresh policy derivation.
 
@@ -3813,29 +3850,39 @@ def autofix_acl_groups(
     space_catalogs: dict[str, set[str]] = {}
     user_acls: dict[str, list[str]] = {}
     active_space_names: set[str] | None = None
+    has_configured_spaces = False
 
     # Try to get uc_tables per space from env.auto.tfvars
     if env_tfvars_path and env_tfvars_path.exists():
         try:
             env_cfg = hcl2.loads(env_tfvars_path.read_text())
+            configured_spaces = env_cfg.get("genie_spaces") or []
+            has_configured_spaces = bool(configured_spaces)
             resolved_names: list[str] = []
-            for space in (env_cfg.get("genie_spaces") or []):
+            for space in configured_spaces:
                 if isinstance(space, list):
                     space = space[0] if space else {}
                 name = space.get("name", "") or id_to_name.get(
                     space.get("genie_space_id", ""), ""
                 )
-                if name:
-                    resolved_names.append(name)
-                    if "acl_groups" in space:
-                        acl = space["acl_groups"]
-                        if not isinstance(acl, list) or not all(
+                if not name:
+                    raise ValueError(
+                        "Cannot derive Genie ACL: a genie_spaces[] entry has no "
+                        "name and its genie_space_id has no canonical name mapping."
+                    )
+                resolved_names.append(name)
+                if "acl_groups" in space:
+                    acl = space["acl_groups"]
+                    if acl is not None and (
+                        not isinstance(acl, list) or not all(
                             isinstance(item, str) for item in acl
-                        ):
-                            raise ValueError(
-                                f"User ACL for Genie space {name!r} must be a list "
-                                "of group names (explicit [] means nobody)"
-                            )
+                        )
+                    ):
+                        raise ValueError(
+                            f"User ACL for Genie space {name!r} must be a list "
+                            "of group names (explicit [] means nobody)"
+                        )
+                    if acl is not None:
                         user_acls[name] = list(acl)
                 tables = space.get("uc_tables") or []
                 if isinstance(tables, list) and tables:
@@ -3856,8 +3903,10 @@ def autofix_acl_groups(
             active_space_names = set(resolved_names)
         except ValueError:
             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            raise ValueError(
+                f"Cannot derive Genie ACLs: environment HCL is invalid: {exc}"
+            ) from exc
 
     # Build group → set of catalogs from fgac_policies
     group_catalogs: dict[str, set[str]] = {}
@@ -3881,20 +3930,35 @@ def autofix_acl_groups(
         for g in except_p:
             group_catalogs.setdefault(g, set()).add(catalog)
 
+    if reject_draft_acls and has_configured_spaces:
+        for space_name, cfg_entry in genie_cfgs.items():
+            if isinstance(cfg_entry, list):
+                cfg_entry = cfg_entry[0] if cfg_entry else {}
+            if not isinstance(cfg_entry, dict):
+                continue
+            draft_key = next(
+                (key for key in ("acl_groups", "genie_acl_groups") if key in cfg_entry),
+                None,
+            )
+            if draft_key and space_name not in user_acls:
+                raise ValueError(
+                    f"Genie space {space_name!r} has legacy draft {draft_key}="
+                    f"{cfg_entry[draft_key]!r}. Move this value to the matching "
+                    "genie_spaces[] entry in env.auto.tfvars (use [] for nobody), "
+                    "then remove it from generated/abac.auto.tfvars."
+                )
+
     # Every active space gets a sidecar entry. User-owned env ACLs win,
     # including explicit []; otherwise derive fresh from current policies.
     # Model-written ACL fields in genie_space_configs are never consulted.
     derived: dict[str, list[str]] = {}
     policy_derived_names: set[str] = set()
-    candidate_names = set(genie_cfgs)
-    if active_space_names is not None:
-        candidate_names &= active_space_names
+    candidate_names = (
+        set(active_space_names)
+        if active_space_names is not None
+        else set(genie_cfgs)
+    )
     for space_name in sorted(candidate_names):
-        cfg_entry = genie_cfgs[space_name]
-        if isinstance(cfg_entry, list):
-            cfg_entry = cfg_entry[0] if cfg_entry else {}
-        if not isinstance(cfg_entry, dict):
-            continue
         if space_name in user_acls:
             derived[str(space_name)] = user_acls[space_name]
             continue
@@ -3945,6 +4009,7 @@ def autofix_acl_groups(
     )
     lines = [
         "# Tool-owned; resolved from env.auto.tfvars overrides or freshly derived policies.",
+        f"genie_space_legacy_mode = {'false' if has_configured_spaces else 'true'}",
         "genie_space_derived_acl_groups = {",
     ]
     for space_name, acl_groups in derived.items():
@@ -7577,12 +7642,17 @@ Before you apply, tune for your business roles, security requirements, and Genie
             print("  [genie mode] Stripped ABAC sections from output (groups, tag_policies, tag_assignments, fgac_policies)")
             print("  [genie mode] Tip: set genie_only = true in env.auto.tfvars for least-privilege SP access (Workspace Admin only)")
 
-        # ── Strip legacy Genie keys when no genie_spaces are configured ───────
+        # ── Strip legacy Genie keys according to environment ownership ────────
         # The LLM sometimes hallucinates legacy single-space keys (genie_space_title,
         # genie_space_description, etc.) even when env.auto.tfvars has no genie_spaces.
         # Strip them to prevent Terraform from creating an unexpected Genie agent.
         _configured_spaces = auth_cfg.get("genie_spaces", [])
-        if args.mode not in ("genie",) and not _configured_spaces and not args.space:
+        if _configured_spaces:
+            _before = hcl_block
+            hcl_block = strip_multi_space_legacy_genie_keys(hcl_block)
+            if hcl_block != _before:
+                print("  [auto-strip] Removed flat legacy Genie fields from multi-space draft")
+        elif args.mode not in ("genie",) and not args.space:
             _legacy_genie_block_keys = (
                 "genie_space_configs",
                 "genie_benchmarks",
@@ -7648,6 +7718,13 @@ Before you apply, tune for your business roles, security requirements, and Genie
         tfvars_path = out_dir / "abac.auto.tfvars"
         extra_comments = overlay_detection_comments if overlay_detection_comments else ""
         tfvars_path.write_text(hcl_header + extra_comments + hcl_block + "\n")
+        if _configured_spaces:
+            n_draft_acls = strip_draft_genie_acl_fields(tfvars_path)
+            if n_draft_acls:
+                print(
+                    f"  [auto-strip] Removed {n_draft_acls} model/API ACL field(s); "
+                    "set durable ACLs on genie_spaces[] in env.auto.tfvars"
+                )
         print(f"  abac.auto.tfvars written to: {tfvars_path}")
 
         fix_hcl_syntax(tfvars_path)
@@ -7940,6 +8017,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if args.mode == "governance":
             _gov_text = tfvars_path.read_text()
             _gov_cleaned = remove_hcl_top_level_block(_gov_text, "genie_space_configs")
+            if _configured_spaces:
+                _gov_cleaned = strip_multi_space_legacy_genie_keys(_gov_cleaned)
             if _gov_cleaned != _gov_text:
                 tfvars_path.write_text(_gov_cleaned)
                 print("  [governance mode] Final strip: removed genie_space_configs re-introduced by autofixes")
@@ -7984,6 +8063,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
                         )
                     extra_comments = overlay_detection_comments if overlay_detection_comments else ""
                     tfvars_path.write_text(hcl_header + extra_comments + hcl_block + "\n")
+                    if _configured_spaces:
+                        strip_draft_genie_acl_fields(tfvars_path)
                     fix_hcl_syntax(tfvars_path)
                     autofix_canonical_tag_vocabulary(tfvars_path)
                     autofix_ambiguous_tag_values(tfvars_path)
@@ -8054,6 +8135,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
                     if args.mode == "governance":
                         _retry_text = tfvars_path.read_text()
                         _retry_cleaned = remove_hcl_top_level_block(_retry_text, "genie_space_configs")
+                        if _configured_spaces:
+                            _retry_cleaned = strip_multi_space_legacy_genie_keys(_retry_cleaned)
                         if _retry_cleaned != _retry_text:
                             tfvars_path.write_text(_retry_cleaned)
                             print("  [governance mode] Final strip (retry): removed genie_space_configs")

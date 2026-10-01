@@ -110,7 +110,7 @@ variable "genie_spaces" {
     })
   }))
   default     = {}
-  description = "Map of Genie agent key to merged infra + semantic config. Produced by the workspace root."
+  description = "Map of Genie agent key to merged infra, resolved ACL, and semantic config produced by the workspace root. Durable ACL ownership remains in env genie_spaces[], not generated semantic drafts."
 }
 
 variable "genie_only" {

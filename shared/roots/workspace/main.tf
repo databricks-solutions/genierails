@@ -193,7 +193,7 @@ variable "genie_spaces" {
     acl_groups       = optional(list(string), null)
   }))
   default     = []
-  description = "List of Genie agent definitions. 'name' is the human-readable agent title and the lookup key for genie_space_configs. An internal Terraform key is derived automatically by sanitizing the name."
+  description = "User-owned Genie agent definitions. 'name' is the semantic-config lookup key. acl_groups omitted/null derives fresh from policy principals, [] explicitly grants nobody, and a non-empty list is the durable override; generated semantic drafts do not own ACLs."
 }
 
 variable "genie_space_id_to_name" {
@@ -244,7 +244,7 @@ variable "genie_space_configs" {
     acl_groups = optional(list(string), [])
   }))
   default     = {}
-  description = "Map of space key to Genie semantic config (title, benchmarks, join specs, etc.). Keys must match genie_spaces[*].key."
+  description = "Tool-owned semantic config (title, benchmarks, joins, etc.). Keys match genie_spaces names. Any nested acl_groups is resolved input for compatibility, not durable ACL ownership; durable intent belongs on genie_spaces[]."
 }
 
 # ── Shared warehouse variable ─────────────────────────────────────────────────
@@ -353,7 +353,7 @@ variable "genie_join_specs" {
 variable "genie_acl_groups" {
   type        = list(string)
   default     = []
-  description = "Groups that should have CAN_RUN access to this Genie agent. Explicit empty means no business access."
+  description = "Legacy single-agent CAN_RUN groups. Explicit empty means no business access. Multi-agent durable ACL intent belongs on genie_spaces[].acl_groups instead."
 }
 
 # ── Group variables ───────────────────────────────────────────────────────────

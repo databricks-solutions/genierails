@@ -8,7 +8,11 @@ import hcl2
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from generate_abac import autofix_acl_groups  # noqa: E402
+from generate_abac import (  # noqa: E402
+    autofix_acl_groups,
+    strip_draft_genie_acl_fields,
+    strip_multi_space_legacy_genie_keys,
+)
 from scripts.split_abac_config import (  # noqa: E402
     build_data_access_config,
     build_workspace_config,
@@ -196,6 +200,147 @@ genie_space_configs = { Pay = { acl_groups = ["model_group"] } }
         assert hcl2.load(handle)["genie_space_derived_acl_groups"] == {
             "Pay": ["new_group"]
         }
+
+
+def test_multispace_legacy_shaped_draft_never_uses_flat_wide_acl(tmp_path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    abac.write_text('''
+groups = { pay_g = {}, hr_g = {}, wide_g = {} }
+fgac_policies = [
+  { name = "pay" catalog = "paycat" to_principals = ["pay_g"] },
+  { name = "hr" catalog = "hrcat" to_principals = ["hr_g"] },
+]
+genie_space_title = "Pay"
+genie_acl_groups = ["wide_g"]
+''')
+    env.write_text('''genie_spaces = [
+  { name = "Pay", uc_tables = ["paycat.s.t"], acl_groups = [] },
+  { name = "HR", uc_tables = ["hrcat.s.t"] },
+]
+''')
+
+    assert autofix_acl_groups(abac, env, reject_draft_acls=True) == 2
+    loaded = load_generated_config(abac)
+    expected = {"HR": ["hr_g"], "Pay": []}
+    assert loaded["genie_space_legacy_mode"] is False
+    assert build_data_access_config(loaded)["genie_space_acl_groups"] == expected
+    assert {
+        name: value["acl_groups"]
+        for name, value in build_workspace_config(loaded)["genie_space_configs"].items()
+    } == expected
+    assert "wide_g" not in str(expected)
+
+
+def test_multispace_legacy_shaped_draft_derives_when_env_acl_unset(tmp_path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    abac.write_text('''
+groups = { pay_g = {}, wide_g = {} }
+fgac_policies = [{ name = "pay" catalog = "paycat" to_principals = ["pay_g"] }]
+genie_space_title = "Pay"
+genie_acl_groups = ["wide_g"]
+''')
+    env.write_text('genie_spaces = [{ name = "Pay", uc_tables = ["paycat.s.t"] }]\n')
+
+    assert autofix_acl_groups(abac, env, reject_draft_acls=True) == 1
+    loaded = load_generated_config(abac)
+    assert build_data_access_config(loaded)["genie_space_acl_groups"] == {
+        "Pay": ["pay_g"]
+    }
+
+
+def test_governance_multispace_strip_removes_all_flat_legacy_genie_fields():
+    draft = '''
+genie_space_title = "Pay"
+genie_space_description = "old"
+genie_instructions = "old"
+genie_acl_groups = ["wide_g"]
+genie_sample_questions = ["old"]
+genie_benchmarks = { b = {} }
+'''
+    cleaned = strip_multi_space_legacy_genie_keys(draft)
+    assert "genie_" not in cleaned
+
+
+def test_existing_draft_acl_fails_loud_until_moved_to_env(tmp_path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    abac.write_text('''
+groups = { pay_g = {}, hr_g = {}, auditor_g = {} }
+fgac_policies = [
+  { name = "pay" catalog = "paycat" to_principals = ["pay_g"] except_principals = ["auditor_g"] },
+  { name = "hr" catalog = "hrcat" to_principals = ["hr_g"] },
+]
+genie_space_configs = {
+  Pay = { acl_groups = ["pay_g"] }
+  HR = { acl_groups = [] }
+}
+''')
+    env.write_text('''genie_spaces = [
+  { name = "Pay", uc_tables = ["paycat.s.t"] },
+  { name = "HR", uc_tables = ["hrcat.s.t"] },
+]
+''')
+    result = subprocess.run(
+        [sys.executable, str(SHARED / "scripts/derive_genie_acls.py"), str(abac), str(env)],
+        text=True, capture_output=True,
+    )
+    assert result.returncode == 1
+    assert "Genie space 'Pay'" in result.stdout
+    assert "['pay_g']" in result.stdout
+    assert "genie_spaces[] entry in env.auto.tfvars" in result.stdout
+    assert not (generated / "genie_space_derived_acl_groups.auto.tfvars").exists()
+
+    env.write_text('''genie_spaces = [
+  { name = "Pay", uc_tables = ["paycat.s.t"], acl_groups = ["pay_g"] },
+  { name = "HR", uc_tables = ["hrcat.s.t"], acl_groups = [] },
+]
+''')
+    result = subprocess.run(
+        [sys.executable, str(SHARED / "scripts/derive_genie_acls.py"), str(abac), str(env)],
+        text=True, capture_output=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert build_data_access_config(load_generated_config(abac))[
+        "genie_space_acl_groups"
+    ] == {"Pay": ["pay_g"], "HR": []}
+
+
+def test_fresh_draft_acl_fields_are_stripped_before_persistence(tmp_path):
+    abac = tmp_path / "abac.auto.tfvars"
+    abac.write_text('''genie_space_configs = {
+  Pay = { title = "Pay", acl_groups = ["wide_g"] }
+  HR = { title = "HR", genie_acl_groups = [] }
+}
+''')
+    assert strip_draft_genie_acl_fields(abac) == 2
+    parsed = hcl2.loads(abac.read_text())["genie_space_configs"]
+    assert parsed == {"Pay": {"title": "Pay"}, "HR": {"title": "HR"}}
+    assert "acl_groups" not in abac.read_text()
+
+
+def test_null_env_acl_is_unset_and_derives_from_policy(tmp_path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    abac.write_text('''
+groups = { pay_g = {} }
+fgac_policies = [{ name = "pay" catalog = "paycat" to_principals = ["pay_g"] }]
+genie_space_configs = { Pay = { title = "Pay" } }
+''')
+    env.write_text('genie_spaces = [{ name = "Pay", uc_tables = ["paycat.s.t"], acl_groups = null }]\n')
+    assert autofix_acl_groups(abac, env) == 1
+    assert build_data_access_config(load_generated_config(abac))[
+        "genie_space_acl_groups"
+    ] == {"Pay": ["pay_g"]}
 
 
 def test_shared_catalog_policy_derivation_fails_closed_when_spaces_are_ambiguous(tmp_path):
@@ -401,7 +546,7 @@ def test_per_space_merge_aborts_on_invalid_environment_without_writing(tmp_path)
     assert assembled.read_text() == original
 
 
-def test_unknown_id_only_space_keeps_all_configs_and_warns(tmp_path):
+def test_unknown_id_only_space_fails_closed_without_canonical_name(tmp_path):
     generated = tmp_path / "generated"
     per_space = generated / "spaces" / "pay"
     per_space.mkdir(parents=True)
@@ -415,14 +560,14 @@ def test_unknown_id_only_space_keeps_all_configs_and_warns(tmp_path):
     (per_space / "abac.auto.tfvars").write_text(
         'genie_space_configs = { Pay = { acl_groups = [] } }\n'
     )
+    original = assembled.read_text()
     result = subprocess.run(
         [sys.executable, str(SHARED / "scripts/merge_space_configs.py"), str(generated), "pay"],
-        check=True, text=True, capture_output=True,
+        text=True, capture_output=True,
     )
-    with assembled.open() as handle:
-        configs = hcl2.load(handle)["genie_space_configs"]
-    assert set(configs) == {"Curated", "Pay"}
-    assert "Keeping all configs" in result.stdout
+    assert result.returncode != 0
+    assert "has no canonical name mapping" in result.stderr
+    assert assembled.read_text() == original
 
 
 def test_just_merged_config_is_never_pruned_as_orphan(tmp_path):

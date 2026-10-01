@@ -70,6 +70,9 @@ def load_generated_config(source_path: Path) -> dict:
         full_cfg["genie_space_derived_acl_groups"] = derived_cfg.get(
             "genie_space_derived_acl_groups", {}
         )
+        full_cfg["genie_space_legacy_mode"] = derived_cfg.get(
+            "genie_space_legacy_mode", False
+        )
     return full_cfg
 
 
@@ -332,7 +335,7 @@ def build_workspace_config(full_cfg: dict) -> dict:
         cfg[key] = value
 
     # Convert legacy single-space keys to genie_space_configs if needed
-    is_legacy = "genie_space_configs" not in cfg
+    is_legacy = full_cfg.get("genie_space_legacy_mode") is True
     if is_legacy:
         converted = _convert_legacy_to_genie_space_configs(full_cfg)
         if converted:
@@ -349,6 +352,9 @@ def build_workspace_config(full_cfg: dict) -> dict:
 
     derived_acls = full_cfg.get("genie_space_derived_acl_groups") or {}
     genie_configs = cfg.get("genie_space_configs") or {}
+    if not is_legacy and not genie_configs and derived_acls:
+        genie_configs = {name: {} for name in derived_acls}
+        cfg["genie_space_configs"] = genie_configs
     if isinstance(genie_configs, dict):
         resolved_configs = {}
         for name, space in genie_configs.items():
@@ -376,9 +382,13 @@ def build_data_access_config(full_cfg: dict) -> dict:
             continue
         cfg[key] = value
     genie_configs = full_cfg.get("genie_space_configs") or {}
-    is_legacy = not bool(genie_configs)
+    is_legacy = full_cfg.get("genie_space_legacy_mode") is True
     if is_legacy:
         genie_configs = _convert_legacy_to_genie_space_configs(full_cfg) or {}
+    elif not genie_configs and (full_cfg.get("genie_space_derived_acl_groups") or {}):
+        genie_configs = {
+            name: {} for name in full_cfg["genie_space_derived_acl_groups"]
+        }
     derived_acls = full_cfg.get("genie_space_derived_acl_groups") or {}
     if isinstance(genie_configs, dict) and genie_configs:
         cfg["genie_space_acl_groups"] = {

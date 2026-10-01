@@ -79,6 +79,7 @@ def test_legacy_single_space_conversion_preserves_authored_acl():
     generated = {
         "genie_space_title": "Payments",
         "genie_acl_groups": ["shared_group"],
+        "genie_space_legacy_mode": True,
     }
     workspace = build_workspace_config(generated)
     assert workspace["genie_space_configs"]["Payments"]["acl_groups"] == [
@@ -90,7 +91,11 @@ def test_legacy_single_space_conversion_preserves_authored_acl():
 
 
 def test_legacy_single_space_conversion_preserves_explicit_empty_acl():
-    generated = {"genie_space_title": "Nobody", "genie_acl_groups": []}
+    generated = {
+        "genie_space_title": "Nobody",
+        "genie_acl_groups": [],
+        "genie_space_legacy_mode": True,
+    }
     assert build_workspace_config(generated)["genie_space_configs"]["Nobody"][
         "acl_groups"
     ] == []

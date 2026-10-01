@@ -237,6 +237,11 @@ Prod swaps `generate` for `derive-assignments` (re-derive facts from prod's own 
 
 | File | What it contains |
 | ---- | ---------------- |
-| `generated/abac.auto.tfvars` | Groups, tag policies, tag assignments, FGAC policies, genie_space_configs (including per-space `acl_groups`) |
+| `generated/abac.auto.tfvars` | Groups, tag policies, tag assignments, FGAC policies, and semantic `genie_space_configs`; it does not own per-space ACL intent |
 | `generated/masking_functions.sql` | SQL masking and row-filter functions |
 | `generated/spaces/<key>/` | Per-space drafts (used by `make generate SPACE="..."`) |
+
+Per-space `acl_groups` is user-owned on `genie_spaces[]` in `env.auto.tfvars`.
+Omitted or `null` means derive fresh from current policy principals (including
+`except_principals`); `[]` explicitly means nobody; a non-empty list is a
+durable override. Generated or imported semantic drafts cannot override it.

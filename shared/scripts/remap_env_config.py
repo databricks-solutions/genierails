@@ -171,16 +171,19 @@ def main():
         lines.append(f'    ]')
         if "acl_groups" in space:
             acl_groups = space["acl_groups"]
-            if not isinstance(acl_groups, list) or not all(
+            if acl_groups is None:
+                acl_groups = None
+            elif not isinstance(acl_groups, list) or not all(
                 isinstance(group, str) for group in acl_groups
             ):
                 print(
                     f"ERROR: acl_groups for Genie space {name!r} must be a list "
-                    "of group names (explicit [] means nobody)."
+                    "of group names, null, or omitted ([] means nobody)."
                 )
                 sys.exit(1)
-            rendered_acl = ", ".join(json.dumps(group) for group in acl_groups)
-            lines.append(f"    acl_groups       = [{rendered_acl}]")
+            if acl_groups is not None:
+                rendered_acl = ", ".join(json.dumps(group) for group in acl_groups)
+                lines.append(f"    acl_groups       = [{rendered_acl}]")
         lines.append("  },")
     lines.append("]")
     lines.append("")

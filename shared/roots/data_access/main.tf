@@ -149,13 +149,13 @@ variable "genie_spaces" {
     acl_groups       = optional(list(string), null)
   }))
   default     = []
-  description = "Workspace definitions whose UC tables also form the classification footprint."
+  description = "User-owned workspace definitions and classification footprint. acl_groups omitted/null derives fresh from policy to_principals plus except_principals; [] explicitly grants nobody; a non-empty list is the durable override."
 }
 
 variable "genie_space_acl_groups" {
   type        = map(list(string))
   default     = {}
-  description = "Generated mapping from Genie agent name to groups authorized for CAN_RUN."
+  description = "Tool-owned resolved ACL mapping. Inputs come only from genie_spaces: explicit lists win (including []); omitted/null entries are freshly derived from policy to_principals plus except_principals."
 }
 
 variable "business_access_enabled" {
