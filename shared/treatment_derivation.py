@@ -213,6 +213,19 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
         source_tags_by_catalog_treatment.setdefault(
             (catalog, treatment.value), []
         ).append(source_tags)
+        # Native-only certification re-derives from the source finding and does
+        # not carry a model-authored explicit treatment forward.  When the
+        # model deliberately selected a stricter treatment, retain a dormant
+        # policy for the native-derived treatment as an ACL-neutral fallback so
+        # the reviewed rulebook can still certify without widening access.
+        if (
+            explicit_treatment
+            and source_treatment
+            and source_treatment.value != treatment.value
+        ):
+            source_tags_by_catalog_treatment.setdefault(
+                (catalog, source_treatment.value), []
+            ).append(set(findings))
         derived.append({
             "entity_type": "columns", "entity_name": column,
             "tag_key": config.tag_key, "tag_value": treatment.value,
@@ -248,6 +261,8 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
         parts = assignment["entity_name"].split(".")
         if len(parts) >= 4:
             catalogs_by_treatment.setdefault(assignment["tag_value"], set()).add(parts[0])
+    for catalog, treatment_value in source_tags_by_catalog_treatment:
+        catalogs_by_treatment.setdefault(treatment_value, set()).add(catalog)
 
     new_masks: list[dict] = []
     for treatment in config.treatments:

@@ -367,6 +367,32 @@ def test_identifier_columns_keep_partial_treatment():
     ) == ["card_last4"]
 
 
+def test_stricter_explicit_treatment_keeps_native_fallback_acl_neutral():
+    column = "cat.sch.p.card_number"
+    cfg = {
+        "tag_policies": [],
+        "tag_assignments": [
+            _single(column, "pci_level", "masked_card_last4")["tag_assignments"][0],
+            _single(column, "gr_treatment", "redact")["tag_assignments"][0],
+        ],
+        "fgac_policies": [{
+            "name": "model_redact",
+            "policy_type": "POLICY_TYPE_COLUMN_MASK",
+            "catalog": "cat",
+            "to_principals": ["payments"],
+            "match_condition": "hasTagValue('gr_treatment', 'redact')",
+            "function_name": "mask_redact",
+            "function_schema": "security",
+        }],
+    }
+
+    derived, _ = derive_treatment_model(cfg, load_treatment_config())
+    assert _treatment_of(cfg, column) == ["redact"]
+    masks = {p["match_alias"]: p for p in derived["fgac_policies"]}
+    assert masks["gr_treatment_card_last4"]["comment"] == ACL_NEUTRAL_FALLBACK_COMMENT
+    assert masks["gr_treatment_card_last4"]["to_principals"] == ["payments"]
+
+
 def test_numeric_and_date_treatments_are_not_escalated():
     # mask_redact is STRING-typed; escalating a DECIMAL/DATE column would break binding.
     assert _treatment_of(
