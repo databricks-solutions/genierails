@@ -367,6 +367,26 @@ genie_space_configs = { payments = {}, hr = {} }
     assert not (generated / "genie_space_derived_acl_groups.auto.tfvars").exists()
 
 
+def test_shared_catalog_error_precedes_missing_policy_group_error(tmp_path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    abac.write_text('''
+groups = { gA = {}, gB = {} }
+fgac_policies = [{ name = "mask" catalog = "cat" to_principals = ["account users"] }]
+genie_space_configs = { payments = {}, hr = {} }
+''')
+    env.write_text('''genie_spaces = [
+  { name = "payments", uc_tables = ["cat.payments.t"] },
+  { name = "hr", uc_tables = ["cat.hr.t"] },
+]
+''')
+
+    with pytest.raises(ValueError, match="shares catalog"):
+        autofix_acl_groups(abac, env)
+
+
 def test_shared_catalog_superset_groups_still_fail_closed(tmp_path):
     generated = tmp_path / "generated"
     generated.mkdir()

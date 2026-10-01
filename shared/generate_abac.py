@@ -3955,6 +3955,22 @@ def autofix_acl_groups(
                 "Set acl_groups on this genie_spaces[] entry in env.auto.tfvars."
             )
 
+        # Shared-catalog topology is ambiguous regardless of whether the draft
+        # happened to emit recognizable account-group principals. Report the
+        # ownership error before attempting policy-group resolution.
+        for other_name in sorted(candidate_names):
+            if other_name == space_name:
+                continue
+            shared_catalogs = cats & space_catalogs.get(other_name, set())
+            if shared_catalogs:
+                raise ValueError(
+                    f"Cannot safely derive ACL for Genie space {space_name!r}: "
+                    f"it shares catalog(s) {sorted(shared_catalogs)!r} with active "
+                    f"space {other_name!r}. Catalog policies cannot distinguish "
+                    "their table subsets. Set acl_groups on this genie_spaces[] "
+                    "entry in env.auto.tfvars."
+                )
+
         # Find groups that have policies on this space's catalogs
         space_groups = sorted({
             g for g, g_cats in group_catalogs.items()
