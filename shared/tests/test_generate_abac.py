@@ -116,6 +116,17 @@ def test_persist_parse_failure_aborts_without_overwriting_with_empty(tmp_path):
     assert path.read_text() == corrupt
 
 
+@pytest.mark.parametrize("invalid", ['"not-a-list"', '{ table = "main.kept.table" }'])
+def test_discovered_tables_must_be_a_list(tmp_path, invalid):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    path.write_text(f"discovered_uc_tables = {invalid}\n")
+
+    with pytest.raises(ValueError, match="expected a list"):
+        persist_discovered_uc_tables(path, [])
+
+    assert path.read_text() == f"discovered_uc_tables = {invalid}\n"
+
+
 def test_strict_environment_parse_failure_aborts(tmp_path):
     auth = tmp_path / "auth.auto.tfvars"
     env = tmp_path / "env.auto.tfvars"
@@ -139,6 +150,61 @@ def test_incomplete_discovery_folds_persisted_tables_into_masking_footprint(tmp_
     assert preserved == ["main.persisted.customers"]
     assert effective_tables == ["main.live.orders", "main.persisted.customers"]
     assert footprint == ["main.live.orders", "main.persisted.customers"]
+
+
+def _run_main_until_footprint(monkeypatch, tmp_path, cli_args, env_text, fetch_result=None):
+    auth = tmp_path / "auth.auto.tfvars"
+    auth.write_text("")
+    (tmp_path / "env.auto.tfvars").write_text(env_text)
+    discovered = tmp_path / "data_access" / "discovered_uc_tables.auto.tfvars"
+    persist_discovered_uc_tables(discovered, ["main.persisted.customers"])
+
+    if fetch_result is not None:
+        monkeypatch.setattr(generate_abac, "fetch_tables_from_genie_space", lambda *a, **k: fetch_result)
+    captured = {}
+
+    def stop_at_footprint(*, declared_footprint, **_kwargs):
+        captured["declared"] = list(declared_footprint)
+        raise RuntimeError("stop after main wiring")
+
+    monkeypatch.setattr(generate_abac, "discover_agent_footprint", stop_at_footprint)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["generate_abac.py", "--auth-file", str(auth), "--create-groups", *cli_args],
+    )
+    with pytest.raises(RuntimeError, match="stop after main wiring"):
+        generate_abac.main()
+    return captured["declared"], assert_valid_hcl(discovered)["discovered_uc_tables"]
+
+
+def test_main_incomplete_discovery_preserves_grants_and_remasks(monkeypatch, tmp_path):
+    declared, persisted = _run_main_until_footprint(
+        monkeypatch,
+        tmp_path,
+        [],
+        '''genie_spaces = [{
+  name = "Live agent"
+  genie_space_id = "space-1"
+  uc_tables = ["main.live.orders"]
+}]\n''',
+        fetch_result=([], {}, "Live agent", False),
+    )
+
+    assert set(declared) == {"main.live.orders", "main.persisted.customers"}
+    assert persisted == ["main.persisted.customers", "main.live.orders"]
+
+
+def test_main_explicit_footprint_preserves_grants_and_remasks(monkeypatch, tmp_path):
+    declared, persisted = _run_main_until_footprint(
+        monkeypatch,
+        tmp_path,
+        ["--footprint", "main.requested.orders"],
+        "genie_spaces = []\n",
+    )
+
+    assert set(declared) == {"main.requested.orders", "main.persisted.customers"}
+    assert persisted == ["main.persisted.customers"]
 
 
 def test_discovered_file_is_world_readable(tmp_path):

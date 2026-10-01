@@ -347,7 +347,12 @@ def persist_discovered_uc_tables(
     existing_cfg = _load_tfvars(
         path, "previously discovered UC tables", strict=True
     )
-    existing = list(dict.fromkeys(existing_cfg.get("discovered_uc_tables", []) or []))
+    existing_value = existing_cfg.get("discovered_uc_tables", [])
+    if not isinstance(existing_value, list):
+        raise ValueError(
+            f"Invalid discovered_uc_tables in {path}: expected a list"
+        )
+    existing = list(dict.fromkeys(existing_value))
     current = list(dict.fromkeys(str(table) for table in tables if table))
     desired = list(dict.fromkeys(existing + current)) if merge_existing else current
 
@@ -394,7 +399,12 @@ def preserve_discovered_tables_for_incomplete_run(
 ) -> list[str]:
     """Keep persisted tables governed and put them back in the masking footprint."""
     cfg = _load_tfvars(path, "previously discovered UC tables", strict=True)
-    preserved = list(dict.fromkeys(cfg.get("discovered_uc_tables", []) or []))
+    discovered_value = cfg.get("discovered_uc_tables", [])
+    if not isinstance(discovered_value, list):
+        raise ValueError(
+            f"Invalid discovered_uc_tables in {path}: expected a list"
+        )
+    preserved = list(dict.fromkeys(discovered_value))
     tables[:] = list(dict.fromkeys(tables + preserved))
     footprint_entries.extend(
         table for table in preserved if table not in footprint_entries
@@ -6973,11 +6983,13 @@ def main():
     # after the LLM runs, replacing whatever the LLM generated for that space.
     api_genie_configs: dict[str, dict] = {}  # space_name -> config parsed from API
     footprint_entries: list = list(auth_cfg.get("declared_footprint", []) or [])
+    preserved_discovery: list[str] = []
 
     if not args.tables:
         genie_spaces_cfg = auth_cfg.get("genie_spaces", [])
         all_space_tables: list[str] = []
         discovery_incomplete = False
+        preserve_existing_discovery = bool(args.footprint)
         # In per-space mode, restrict scanning to only the target space
         if target_space_cfg is not None:
             genie_spaces_cfg = [target_space_cfg]
@@ -7022,21 +7034,11 @@ def main():
                 else:
                     all_space_tables.extend(space_tables)
 
-            if discovery_incomplete:
-                try:
-                    preserved = preserve_discovered_tables_for_incomplete_run(
-                        auth_file.parent / "data_access" / "discovered_uc_tables.auto.tfvars",
-                        all_space_tables,
-                        footprint_entries,
-                    )
-                except ValueError as e:
-                    print(f"ERROR: {e}")
-                    sys.exit(1)
-                if preserved:
-                    print(
-                        "\n  Discovery incomplete; preserving and regenerating governance "
-                        f"for {len(preserved)} persisted table(s)."
-                    )
+            # An explicit CLI footprint bounds what is scanned on this run; it
+            # does not prove that previously discovered, still-granted tables
+            # disappeared. Preserve them and put them back into the masking
+            # footprint just as for an incomplete API discovery.
+            preserve_existing_discovery = discovery_incomplete or preserve_existing_discovery
 
             # Merge space tables with any top-level uc_tables (dedup, space tables first)
             existing_top = auth_cfg.get("uc_tables") or []
@@ -7051,12 +7053,28 @@ def main():
                     + "\n  Persisted for automatic UC grants, classification, and masking scope."
                 )
 
+        if preserve_existing_discovery:
+            try:
+                preserved_discovery = preserve_discovered_tables_for_incomplete_run(
+                    auth_file.parent / "data_access" / "discovered_uc_tables.auto.tfvars",
+                    all_space_tables,
+                    footprint_entries,
+                )
+            except ValueError as e:
+                print(f"ERROR: {e}")
+                sys.exit(1)
+            if preserved_discovery:
+                print(
+                    "\n  Discovery incomplete or explicitly bounded; preserving and "
+                    f"regenerating governance for {len(preserved_discovery)} persisted table(s)."
+                )
+
         if not args.dry_run:
             try:
                 persist_discovered_uc_tables(
                     auth_file.parent / "data_access" / "discovered_uc_tables.auto.tfvars",
                     all_space_tables,
-                    merge_existing=target_space_cfg is not None or discovery_incomplete,
+                    merge_existing=target_space_cfg is not None or preserve_existing_discovery,
                 )
             except ValueError as e:
                 print(f"ERROR: {e}")
@@ -7065,7 +7083,11 @@ def main():
     # This canonical object is the single source for DDL/classification scan
     # scope and, consequently, the classified-column coverage denominator.
     configured = list(auth_cfg.get("uc_tables") or []) + footprint_entries
-    declared = args.footprint or args.tables or configured
+    declared = (
+        list(dict.fromkeys(args.footprint + preserved_discovery))
+        if args.footprint
+        else args.tables or configured
+    )
     agent_footprint = discover_agent_footprint(declared_footprint=declared)
     table_refs = footprint_table_refs(agent_footprint) or None
 
