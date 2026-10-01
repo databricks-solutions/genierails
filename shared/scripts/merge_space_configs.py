@@ -16,6 +16,8 @@ The script patches (not replaces) the assembled outputs:
         existing keys have their values union-merged so the account layer can
         create any tag_key introduced by the new space)
       * tag_assignments: appends new entries (dedup by entity_name + tag_key)
+      * treatment_overrides: replaces entries for the merged space's columns,
+        preserves other spaces, and resolves conflicts strictest-first
       * fgac_policies: appends new entries (dedup by policy name)
   - generated/masking_functions.sql:
       * appends new CREATE FUNCTION blocks (dedup by function name)
@@ -27,8 +29,10 @@ established by full generation.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -41,6 +45,12 @@ except ImportError:
     sys.exit(2)
 
 from tag_vocabulary import REGISTRY  # noqa: E402
+from generate_abac import (  # noqa: E402
+    autofix_acl_groups,
+    reject_unowned_draft_acls,
+    sanitize_space_key,
+)
+from treatment_derivation import load_treatment_config  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +322,55 @@ def load_hcl_safe(path: Path) -> dict:
         return {}
 
 
+def merge_treatment_overrides(
+    existing: list[dict],
+    incoming: list[dict],
+    merged_space_columns: set[str],
+) -> list[dict]:
+    """Replace one space's overrides while preserving strictest protection."""
+    treatment_config = load_treatment_config()
+    treatment_rank = {
+        treatment.value: index
+        for index, treatment in enumerate(treatment_config.treatments)
+    }
+
+    def strictest(items: list[dict]) -> dict[str, dict]:
+        by_column: dict[str, dict] = {}
+        for item in items:
+            column = item.get("entity_name", "")
+            treatment = item.get("treatment", "")
+            if not column or treatment not in treatment_rank:
+                raise ValueError(
+                    f"Invalid treatment override {column or '<missing column>'}="
+                    f"{treatment!r} in per-space merge"
+                )
+            current = by_column.get(column)
+            if (
+                current is None
+                or treatment_rank[treatment]
+                < treatment_rank[current["treatment"]]
+            ):
+                by_column[column] = {
+                    "entity_name": column,
+                    "treatment": treatment,
+                }
+        return by_column
+
+    retained = [
+        item for item in existing
+        if item.get("entity_name", "") not in merged_space_columns
+    ]
+    incoming_columns = {
+        item.get("entity_name", "") for item in incoming if item.get("entity_name")
+    }
+    conflicts = [
+        item for item in existing
+        if item.get("entity_name", "") in incoming_columns
+    ]
+    merged = strictest(retained + conflicts + incoming)
+    return [merged[column] for column in sorted(merged)]
+
+
 def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     """Patch the assembled generated/abac.auto.tfvars and masking_functions.sql
     with content from generated/spaces/<space_key>/.
@@ -321,6 +380,7 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     space_sql = space_dir / "masking_functions.sql"
     assembled_abac = generated_dir / "abac.auto.tfvars"
     assembled_sql = generated_dir / "masking_functions.sql"
+    env_path = generated_dir.parent / "env.auto.tfvars"
 
     if not space_abac.exists():
         print(f"  ERROR: Per-space config not found: {space_abac}")
@@ -328,11 +388,19 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
 
     print(f"\n  Merging generated/spaces/{space_key}/ into generated/...")
 
+    # Security migration guard: inspect both sources before the formatter drops
+    # draft ACL fields. This prevents a sibling's legacy ACL from silently
+    # widening to fresh policy derivation during per-space generation.
+    reject_unowned_draft_acls(assembled_abac, env_path)
+    reject_unowned_draft_acls(space_abac, env_path)
+
     # ── Load per-space content ────────────────────────────────────────────
     space_cfg = load_hcl_safe(space_abac)
 
     new_genie_cfgs: dict = space_cfg.get("genie_space_configs") or {}
+    new_id_to_name: dict = space_cfg.get("genie_space_id_to_name") or {}
     new_tag_assignments: list = space_cfg.get("tag_assignments") or []
+    new_treatment_overrides: list = space_cfg.get("treatment_overrides") or []
     new_fgac_policies: list = space_cfg.get("fgac_policies") or []
     new_tag_policies: list = space_cfg.get("tag_policies") or []
 
@@ -341,7 +409,9 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     assembled_text = assembled_abac.read_text() if assembled_abac.exists() else ""
 
     existing_genie_cfgs: dict = assembled_cfg.get("genie_space_configs") or {}
+    existing_id_to_name: dict = assembled_cfg.get("genie_space_id_to_name") or {}
     existing_tag_assignments: list = assembled_cfg.get("tag_assignments") or []
+    existing_treatment_overrides: list = assembled_cfg.get("treatment_overrides") or []
     existing_fgac_policies: list = assembled_cfg.get("fgac_policies") or []
     existing_tag_policies: list = assembled_cfg.get("tag_policies") or []
 
@@ -407,9 +477,52 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
 
     # ── Merge genie_space_configs ─────────────────────────────────────────
     merged_genie = dict(existing_genie_cfgs)
+    merged_id_to_name = {**existing_id_to_name, **new_id_to_name}
+    new_names = set(new_genie_cfgs)
+    for old_name in list(merged_genie):
+        if sanitize_space_key(old_name) == space_key and old_name not in new_names:
+            del merged_genie[old_name]
+            print(f"    genie_space_configs: removed renamed entry '{old_name}'")
     for space_name, cfg in new_genie_cfgs.items():
         merged_genie[space_name] = cfg
         print(f"    genie_space_configs: updated entry '{space_name}'")
+
+    if env_path.exists():
+        try:
+            with env_path.open() as handle:
+                env_cfg = hcl2.load(handle)
+        except Exception as exc:
+            raise ValueError(
+                f"Cannot safely prune orphan Genie configs because {env_path} "
+                f"is invalid: {exc}"
+            ) from exc
+        unknown_id_only = [
+            space.get("genie_space_id", "")
+            for space in (env_cfg.get("genie_spaces") or [])
+            if isinstance(space, dict)
+            and not space.get("name")
+            and not merged_id_to_name.get(space.get("genie_space_id", ""))
+        ]
+        active_names = {
+            (space.get("name") or merged_id_to_name.get(space.get("genie_space_id", ""), ""))
+            for space in (env_cfg.get("genie_spaces") or [])
+            if isinstance(space, dict)
+        }
+        active_names.discard("")
+        if unknown_id_only:
+            print(
+                "  WARNING: Cannot safely identify orphan Genie configs because "
+                "id-only space(s) lack canonical-name attribution: "
+                + ", ".join(repr(space_id) for space_id in unknown_id_only)
+                + ". Keeping all configs."
+            )
+        else:
+            for orphan in sorted(set(merged_genie) - active_names - new_names):
+                del merged_genie[orphan]
+                print(
+                    f"  WARNING: Dropped orphan genie_space_configs entry {orphan!r}; "
+                    "it has no matching genie_spaces entry."
+                )
 
     # ── Merge tag_assignments (dedup by entity_name + tag_key) ───────────
     def _normalize_assignment(assignment: dict) -> dict:
@@ -453,6 +566,23 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     if added_ta:
         print(f"    tag_assignments: added {added_ta} new entry/entries")
 
+    # ── Merge reviewed treatment overrides by column ─────────────────────
+    merged_space_columns = {
+        item.get("entity_name", "")
+        for item in new_tag_assignments
+        if item.get("entity_type") == "columns" and item.get("entity_name")
+    } | {
+        item.get("entity_name", "")
+        for item in new_treatment_overrides
+        if item.get("entity_name")
+    }
+
+    merged_treatment_overrides = merge_treatment_overrides(
+        existing_treatment_overrides,
+        new_treatment_overrides,
+        merged_space_columns,
+    )
+
     # ── Merge fgac_policies (dedup by name) ───────────────────────────────
     existing_pol_names = {p.get("name", "") for p in existing_fgac_policies}
     added_pol = 0
@@ -482,11 +612,29 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     if merged_genie:
         updated = updated.rstrip() + "\n\n" + format_genie_space_configs_hcl(merged_genie) + "\n"
 
+    updated = remove_hcl_top_level_block(updated, "genie_space_id_to_name")
+    if merged_id_to_name:
+        updated = (
+            updated.rstrip()
+            + "\n\ngenie_space_id_to_name = "
+            + _render_value(dict(sorted(merged_id_to_name.items())))
+            + "\n"
+        )
+
     # Replace tag_assignments block
     updated = remove_hcl_top_level_list(updated, "tag_assignments")
     if merged_tag_assignments:
         ta_hcl = "tag_assignments = " + _render_value(merged_tag_assignments)
         updated = updated.rstrip() + "\n\n" + ta_hcl + "\n"
+
+    # Replace treatment_overrides even when the merged space removed its last
+    # override; omission of an empty block keeps the native-only path unchanged.
+    updated = remove_hcl_top_level_list(updated, "treatment_overrides")
+    if merged_treatment_overrides:
+        overrides_hcl = "treatment_overrides = " + _render_value(
+            merged_treatment_overrides
+        )
+        updated = updated.rstrip() + "\n\n" + overrides_hcl + "\n"
 
     # Replace fgac_policies block
     updated = remove_hcl_top_level_list(updated, "fgac_policies")
@@ -494,7 +642,24 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
         fgac_hcl = "fgac_policies = " + _render_value(merged_fgac)
         updated = updated.rstrip() + "\n\n" + fgac_hcl + "\n"
 
-    assembled_abac.write_text(updated)
+    # Validate ACL derivation against the complete candidate before replacing
+    # the assembled file, so a failed rename/catalog change is atomic.
+    fd, candidate_name = tempfile.mkstemp(
+        prefix=".abac.auto.tfvars.", dir=generated_dir, text=True
+    )
+    os.close(fd)
+    candidate = Path(candidate_name)
+    try:
+        candidate.write_text(updated)
+        autofix_acl_groups(
+            candidate,
+            env_path if env_path.exists() else None,
+            reject_draft_acls=True,
+        )
+        candidate.replace(assembled_abac)
+    except Exception:
+        candidate.unlink(missing_ok=True)
+        raise
     print(f"    Written: {assembled_abac}")
 
     # ── Merge masking_functions.sql (dedup by function name) ─────────────

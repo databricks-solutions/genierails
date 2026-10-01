@@ -286,7 +286,7 @@ validate: _bootstrap ## Validate split config in the selected environment
 	fi
 
 promote: _bootstrap _guard-workspace-target ## Split generated/ into layers (same-env), or cross-env: make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_cat=prod_cat"
-	@$(_DRY_RUN_GUARD); if [ -n "$(DEST_ENV)" ]; then \
+	@set -e; $(_DRY_RUN_GUARD); if [ -n "$(DEST_ENV)" ]; then \
 		if [ "$(DEST_ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(DEST_ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
 			echo "ERROR: DEST_ENV cannot be '$(ACCOUNT_ENV)' or '$(DATA_ACCESS_SUBDIR)'."; exit 1; \
 		fi; \
@@ -317,6 +317,7 @@ print(', '.join(cats) if cats else '(none detected)') \
 		echo "=== Cross-env promote: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
 		$(MAKE) --no-print-directory _prepare-env ENV="$(DEST_ENV)" ENV_DIR="$(DEST_ENV_DIR)"; \
 		dest_env_dir="$(DEST_ENV_DIR)"; \
+		acl_ok=0; trap 'if [ "$$acl_ok" != 1 ]; then rm -f "$$dest_env_dir/generated/genie_space_derived_acl_groups.auto.tfvars" "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars" "$$dest_env_dir/abac.auto.tfvars"; fi' EXIT; \
 		python3 "$(SHARED_ROOT)/scripts/remap_env_config.py" "$(SOURCE_ENV_DIR)" "$$dest_env_dir" "$(DEST_CATALOG_MAP)" || exit 1; \
 		mkdir -p "$$dest_env_dir/generated"; \
 		map_flags=$$(python3 -c 'pairs = [p.strip() for p in "$(DEST_CATALOG_MAP)".split(",") if "=" in p]; print(" ".join("--map " + p for p in pairs))'); \
@@ -326,7 +327,11 @@ print(', '.join(cats) if cats else '(none detected)') \
 			"$$dest_env_dir/generated/abac.auto.tfvars" \
 			"$$dest_env_dir/generated/masking_functions.sql" \
 			$$map_flags; \
+		python3 "$(SHARED_ROOT)/scripts/derive_genie_acls.py" \
+			"$$dest_env_dir/generated/abac.auto.tfvars" \
+			"$$dest_env_dir/env.auto.tfvars"; \
 		cd "$$dest_env_dir" && python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" generated/abac.auto.tfvars ../$(ACCOUNT_ENV)/abac.auto.tfvars $(DATA_ACCESS_SUBDIR)/abac.auto.tfvars abac.auto.tfvars; \
+		acl_ok=1; \
 		cp "$$dest_env_dir/generated/masking_functions.sql" "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/masking_functions.sql"; \
 		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; fi; \
 		cd "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql; fi; \
@@ -335,6 +340,7 @@ print(', '.join(cats) if cats else '(none detected)') \
 		echo "=== Promote complete: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
 		echo "  Next: edit $$dest_env_dir/auth.auto.tfvars  ($(DEST_ENV) workspace credentials)"; \
 		echo "  Then: make apply ENV=$(DEST_ENV)"; \
+		trap - EXIT; \
 	else \
 		if [ "$(SOURCE_ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(SOURCE_ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
 			echo "ERROR: SOURCE_ENV must be a workspace environment, not $(SOURCE_ENV)."; exit 1; \
@@ -344,18 +350,23 @@ print(', '.join(cats) if cats else '(none detected)') \
 			exit 0; \
 		fi; \
 		echo "=== Split generated/ to account + data_access + workspace ($(ENV)) ==="; \
+		acl_ok=0; trap 'if [ "$$acl_ok" != 1 ]; then rm -f "$(ENV_DIR)/generated/genie_space_derived_acl_groups.auto.tfvars" "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars" "$(ENV_DIR)/abac.auto.tfvars"; fi' EXIT; \
+		python3 "$(SHARED_ROOT)/scripts/derive_genie_acls.py" \
+			"$(ENV_DIR)/generated/abac.auto.tfvars" \
+			"$(ENV_DIR)/env.auto.tfvars"; \
 		if [ -f "$(ENV_DIR)/generated/masking_functions.sql" ]; then \
 			cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars generated/masking_functions.sql; \
 		else \
 			cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars; \
 		fi; \
 		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" generated/abac.auto.tfvars ../$(ACCOUNT_ENV)/abac.auto.tfvars $(DATA_ACCESS_SUBDIR)/abac.auto.tfvars abac.auto.tfvars; \
+		acl_ok=1; \
 		if [ -f "$(ENV_DIR)/generated/masking_functions.sql" ]; then \
 			cp "$(ENV_DIR)/generated/masking_functions.sql" "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/masking_functions.sql"; \
 		fi; \
 		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; fi; \
 		cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql; fi; \
-		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; \
+		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; trap - EXIT; \
 	fi
 
 _prepare-classification:
@@ -408,10 +419,10 @@ _apply-layer:
 	if [ "$$layer" = "account" ]; then \
 		$(MAKE) --no-print-directory sync-tags; \
 	fi; \
-	files="$$env_dir/auth.auto.tfvars $$env_dir/env.auto.tfvars $$env_dir/abac.auto.tfvars $$env_dir/classification.auto.tfvars"; \
+	files="$$env_dir/auth.auto.tfvars $$env_dir/env.auto.tfvars $$env_dir/abac.auto.tfvars $$env_dir/classification.auto.tfvars $$env_dir/discovered_uc_tables.auto.tfvars"; \
 	if [ -f "$$env_dir/masking_functions.sql" ]; then files="$$files $$env_dir/masking_functions.sql"; fi; \
 	fingerprint_file="$$env_dir/.$$layer.apply.sha"; \
-	current_fingerprint="$$( { for file in $$files; do [ -f "$$file" ] && shasum "$$file"; done; [ -z "$$apply_flags" ] || printf '%s\n' "$$apply_flags"; } | shasum | awk '{print $$1}')"; \
+	current_fingerprint="$$( { for file in $$files; do [ -f "$$file" ] && shasum "$$file"; done; find "$(SHARED_ROOT)/roots/$$layer" "$(SHARED_ROOT)/modules/$$layer" -type f -name '*.tf' ! -path '*/tests/*' ! -path '*/.terraform/*' 2>/dev/null | LC_ALL=C sort | while IFS= read -r code_file; do shasum "$$code_file"; done; if [ "$$layer" = "workspace" ]; then shasum "$(SHARED_ROOT)/scripts/genie_space.sh"; elif [ "$$layer" = "data_access" ]; then shasum "$(SHARED_ROOT)/deploy_masking_functions.py"; fi; [ -z "$$apply_flags" ] || printf '%s\n' "$$apply_flags"; } | shasum | awk '{print $$1}')"; \
 	if [ -f "$$fingerprint_file" ] && [ "$$(cat "$$fingerprint_file")" = "$$current_fingerprint" ]; then \
 		echo "=== Skipping terraform apply ($$layer:$$target_env): inputs unchanged ==="; \
 		exit 0; \
@@ -493,6 +504,9 @@ apply-genie: _bootstrap _guard-workspace-target ## [BU team] Apply workspace lay
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 		echo "=== Extracting workspace config from genie draft ($(ENV)) ==="; \
+		python3 "$(SHARED_ROOT)/scripts/derive_genie_acls.py" \
+			"$(ENV_DIR)/generated/abac.auto.tfvars" \
+			"$(ENV_DIR)/env.auto.tfvars"; \
 		python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" \
 			"$(ENV_DIR)/generated/abac.auto.tfvars" \
 			"$(ACCOUNT_ENV_DIR)/abac.auto.tfvars" \
@@ -580,7 +594,7 @@ clean: ## Remove generated files and Terraform state for the selected environmen
 		exit 0; \
 	fi
 	@echo "=== Clean ($(ENV)) ==="
-	@rm -rf "$(ENV_DIR)/generated/abac.auto.tfvars" "$(ENV_DIR)/generated/masking_functions.sql" "$(ENV_DIR)/generated/generated_response.md"
+	@rm -rf "$(ENV_DIR)/generated/abac.auto.tfvars" "$(ENV_DIR)/generated/masking_functions.sql" "$(ENV_DIR)/generated/generated_response.md" "$(ENV_DIR)/generated/genie_space_derived_acl_groups.auto.tfvars"
 	@rm -rf "$(ENV_DIR)/.terraform" "$(ENV_DIR)"/*.tfstate "$(ENV_DIR)"/*.tfstate.backup "$(ENV_DIR)"/.terraform.lock.hcl "$(ENV_DIR)"/.*.apply.sha
 	@rm -rf "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/.terraform" "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/*.tfstate "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/*.tfstate.backup "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/.terraform.lock.hcl "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/.*.apply.sha
 	@echo "Cleaned generated files and Terraform state in $(ENV_DIR)."

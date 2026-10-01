@@ -61,6 +61,7 @@ The supported mechanism is therefore a set of **dedicated test principals**:
 - one **service principal per access tier**,
 - each added as a **member of that tier's account group** (e.g. `Junior_Analyst`,
   `Compliance_Officer`),
+- each granted temporary **`CAN_USE`** on the selected SQL warehouse,
 - each authenticating with **its own OAuth credentials** (`client_id` /
   `client_secret`) so it runs the query as itself.
 
@@ -114,8 +115,9 @@ The live path is **guarded**: it runs only when both `--live` is passed *and*
 The guard is enforced at construction of the live verifier **and re-checked
 before every network call**, so no live call can happen without the flag. It
 requires account-admin credentials (to create service principals and manage
-group membership) and a running SQL warehouse. Test principals are deleted
-automatically at the end unless `KEEP_PRINCIPALS=1`.
+group membership), Workspace Admin permission (to grant warehouse access), and
+a running SQL warehouse. Test principals receive `CAN_USE` automatically and
+are deleted at the end unless `KEEP_PRINCIPALS=1`.
 
 Exit code is non-zero unless **every** check PASSes (see *Inconclusive never
 passes* above), so it drops into a CI pipeline.

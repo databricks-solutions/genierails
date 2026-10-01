@@ -48,6 +48,11 @@ def _live_unmapped_markers(auth_path: Path, env_path: Path) -> list[tuple[str, s
     declared.extend(runtime.get("declared_footprint") or [])
     for space in runtime.get("genie_spaces") or []:
         declared.extend(space.get("declared_footprint") or space.get("uc_tables") or [])
+    discovered_path = env_path.parent / "data_access" / "discovered_uc_tables.auto.tfvars"
+    if discovered_path.is_file():
+        with discovered_path.open() as handle:
+            discovered = hcl2.load(handle)
+        declared.extend(discovered.get("discovered_uc_tables") or [])
     table_refs = footprint_table_refs(discover_agent_footprint(declared_footprint=declared))
     native = _fetch_live_classification_source(table_refs, runtime, require_native=True)
     if native is None or not native.has_native_data():

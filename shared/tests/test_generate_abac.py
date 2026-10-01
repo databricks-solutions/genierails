@@ -7,6 +7,7 @@ relevant autofix function, and asserts the expected outcome.
 import re
 import sys
 import inspect
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,10 +29,517 @@ from generate_abac import (
     autofix_missing_fgac_policies,
     autofix_fgac_policy_count,
     autofix_remove_bodyless_functions,
+    autofix_acl_groups,
     bootstrap_per_space_dirs,
     extract_code_blocks,
+    persist_discovered_uc_tables,
+    strip_abac_for_genie_mode,
 )
 from tests.conftest import assert_valid_hcl
+from scripts.split_abac_config import build_data_access_config
+
+
+def _acl_autofix_files(tmp_path, spaces_hcl, env_spaces_hcl=None):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env_tfvars = tmp_path / "env.auto.tfvars"
+    tfvars.write_text(f'''
+groups = {{ pay_group = {{}} hr_group = {{}} shared_group = {{}} }}
+fgac_policies = [
+  {{ name = "pay" catalog = "pay_cat" to_principals = ["pay_group"] except_principals = ["shared_group"] }},
+  {{ name = "hr" catalog = "hr_cat" to_principals = ["hr_group"] }},
+]
+genie_space_configs = {{
+{spaces_hcl}
+}}
+''')
+    env_tfvars.write_text(env_spaces_hcl or '''
+genie_spaces = [
+  { name = "Pay" uc_tables = ["pay_cat.s.t"] },
+  { name = "HR" uc_tables = ["hr_cat.s.t"] },
+]
+''')
+    return tfvars, env_tfvars
+
+
+@pytest.mark.parametrize(
+    "space_body",
+    [
+        '{ title = "Pay", acl_groups = ["shared_group"] }',
+        '{ title = "Pay", /* c */ acl_groups = ["shared_group"] }',
+        '{ title = "Pay"\n # c\n acl_groups = ["shared_group"] }',
+        '{ title = "Pay", "acl_groups" = ["shared_group"] }',
+        '{ title = "Pay", genie_acl_groups = ["shared_group"] }',
+        '{ title = "Pay", acl_groups = [] }',
+    ],
+)
+def test_model_written_acl_layout_never_overrides_policy_derivation(tmp_path, space_body):
+    tfvars, env_tfvars = _acl_autofix_files(tmp_path, f'  "Pay" = {space_body}')
+    before = tfvars.read_bytes()
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 2
+
+    assert tfvars.read_bytes() == before
+    derived = assert_valid_hcl(
+        tmp_path / "genie_space_derived_acl_groups.auto.tfvars"
+    )
+    assert derived["genie_space_derived_acl_groups"] == {
+        "HR": ["hr_group"],
+        "Pay": ["pay_group", "shared_group"],
+    }
+
+
+def test_acl_derivation_matches_policy_overlap_and_is_idempotent(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(
+        tmp_path, '  Pay = { title = "Pay" } HR = { title = "HR" }'
+    )
+    before = tfvars.read_bytes()
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 2
+    first_derived = (
+        tmp_path / "genie_space_derived_acl_groups.auto.tfvars"
+    ).read_bytes()
+    assert autofix_acl_groups(tfvars, env_tfvars) == 2
+
+    assert tfvars.read_bytes() == before
+    assert (tmp_path / "genie_space_derived_acl_groups.auto.tfvars").read_bytes() == first_derived
+    derived = assert_valid_hcl(
+        tmp_path / "genie_space_derived_acl_groups.auto.tfvars"
+    )["genie_space_derived_acl_groups"]
+    assert derived == {
+        "HR": ["hr_group"],
+        "Pay": ["pay_group", "shared_group"],
+    }
+
+
+def test_acl_derivation_leaves_instruction_text_byte_identical(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(tmp_path, '''
+  Pay = {
+    title = "literal { genie_acl_groups = x }"
+    instructions = <<-EOT
+Never emit genie_acl_groups = x, even with { braces }.
+EOT
+  }
+''')
+    before = tfvars.read_bytes()
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 2
+
+    assert tfvars.read_bytes() == before
+
+
+def test_acl_derivation_accepts_colon_syntax(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(
+        tmp_path, '  Pay: { title: "Pay" }\n  HR: { title: "HR" }'
+    )
+
+    assert autofix_acl_groups(tfvars, env_tfvars) == 2
+
+
+def test_acl_derivation_fails_loud_on_invalid_hcl(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(tmp_path, '  Pay = { title = "Pay" ')
+
+    with pytest.raises(ValueError, match="Cannot derive Genie ACLs"):
+        autofix_acl_groups(tfvars, env_tfvars)
+
+
+def test_acl_derivation_fails_closed_when_no_policy_maps_space(tmp_path):
+    tfvars, env_tfvars = _acl_autofix_files(
+        tmp_path, '  Pay = { title = "Pay" }'
+    )
+    tfvars.write_text(tfvars.read_text().replace(
+        'catalog = "pay_cat"', 'catalog = "unrelated_cat"'
+    ))
+
+    with pytest.raises(ValueError, match="no policy groups.*Set acl_groups"):
+        autofix_acl_groups(tfvars, env_tfvars)
+
+
+def test_missing_space_formatter_preserves_title_but_drops_draft_acl(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env_tfvars = tmp_path / "env.auto.tfvars"
+    tfvars.write_text('''groups = { shared_g = {} hr_g = {} }
+fgac_policies = [
+  { name = "hr" catalog = "hr_cat" to_principals = ["hr_g"] }
+]
+genie_space_configs = {
+  Pay = { title = "Payments", genie_acl_groups = ["shared_g"] }
+}
+''')
+    env_tfvars.write_text('''genie_spaces = [
+  { name = "Pay", uc_tables = ["pay_cat.s.t"], acl_groups = ["shared_g"] },
+  { name = "HR", uc_tables = ["hr_cat.s.t"] },
+]
+''')
+
+    assert generate_abac.autofix_missing_genie_space_entries(
+        tfvars, {"genie_spaces": [
+            {"name": "Pay"}, {"name": "HR"},
+        ]}
+    ) == 1
+    assert autofix_acl_groups(tfvars, env_tfvars) == 2
+
+    parsed = assert_valid_hcl(tfvars)["genie_space_configs"]
+    assert parsed["Pay"]["title"] == "Payments"
+    assert "acl_groups" not in parsed["Pay"]
+    assert "genie_acl_groups" not in parsed["Pay"]
+    derived = assert_valid_hcl(
+        tmp_path / "genie_space_derived_acl_groups.auto.tfvars"
+    )["genie_space_derived_acl_groups"]
+    assert derived == {"HR": ["hr_g"], "Pay": ["shared_g"]}
+
+
+def test_missing_space_formatter_drops_draft_explicit_empty_acl(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text(
+        'genie_space_configs = { Pay = { title = "Pay" acl_groups = [] } }\n'
+    )
+
+    assert generate_abac.autofix_missing_genie_space_entries(
+        tfvars, {"genie_spaces": [{"name": "Pay"}, {"name": "HR"}]}
+    ) == 1
+
+    parsed = assert_valid_hcl(tfvars)["genie_space_configs"]
+    assert "acl_groups" not in parsed["Pay"]
+
+
+def test_generator_infers_compensation_amounts_without_string_classifiers():
+    for column in ("annual_salary", "hourly_wage", "total_compensation"):
+        assert "amount" in generate_abac._infer_column_categories_full(f"cat.sch.tbl.{column}")
+
+    assert generate_abac._infer_column_categories_full("cat.sch.tbl.salary_band") == {"generic"}
+    assert generate_abac._infer_column_categories_full("cat.sch.tbl.wage_type") == {"generic"}
+    assert generate_abac._infer_column_categories_full("cat.sch.tbl.compensation_code") == {"generic"}
+
+
+def test_genie_mode_strips_all_abac_sections_including_tag_policy_list():
+    source = '''
+groups = { "analysts" = { description = "tier" } }
+group_members = { "analysts" = ["user@example.com"] }
+tag_policies = [{ key = "pii", values = ["masked"] }]
+tag_assignments = [{ entity_type = "columns", entity_name = "c.s.t.email", tag_key = "pii", tag_value = "masked" }]
+fgac_policies = [{ name = "mask", policy_type = "POLICY_TYPE_COLUMN_MASK" }]
+genie_space_configs = { "sales" = { title = "Sales" } }
+'''
+
+    stripped = strip_abac_for_genie_mode(source)
+
+    assert "groups =" not in stripped
+    assert "group_members =" not in stripped
+    assert "tag_policies =" not in stripped
+    assert "tag_assignments =" not in stripped
+    assert "fgac_policies =" not in stripped
+    assert 'genie_space_configs = { "sales" = { title = "Sales" } }' in stripped
+
+
+def test_discovered_table_writeback_aggregates_and_is_idempotent(tmp_path, capsys):
+    path = tmp_path / "data_access" / "discovered_uc_tables.auto.tfvars"
+    tables = ["main.sales.orders", "main.hr.people", "main.sales.orders"]
+
+    added, present, disappeared = persist_discovered_uc_tables(path, tables)
+    first = path.read_bytes()
+    first_mtime = path.stat().st_mtime_ns
+    assert added == ["main.sales.orders", "main.hr.people"]
+    assert present == []
+    assert disappeared == []
+    assert assert_valid_hcl(path)["discovered_uc_tables"] == [
+        "main.sales.orders", "main.hr.people"
+    ]
+
+    added, present, disappeared = persist_discovered_uc_tables(path, tables)
+    assert path.read_bytes() == first
+    assert path.stat().st_mtime_ns == first_mtime
+    assert added == []
+    assert present == ["main.sales.orders", "main.hr.people"]
+    assert disappeared == []
+    assert "unchanged:" in capsys.readouterr().out
+
+
+def test_per_space_discovery_merges_without_wiping_other_agents(tmp_path):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    persist_discovered_uc_tables(path, ["main.finance.transactions"])
+
+    persist_discovered_uc_tables(
+        path, ["main.support.tickets"], merge_existing=True
+    )
+
+    assert assert_valid_hcl(path)["discovered_uc_tables"] == [
+        "main.finance.transactions", "main.support.tickets"
+    ]
+
+
+def test_discovered_table_agents_persist_shared_agent_union(tmp_path):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    persist_discovered_uc_tables(
+        path,
+        ["main.shared.events", "main.a.only"],
+        table_agents={
+            "main.shared.events": ["Agent A", "Agent B", "Agent A"],
+            "main.a.only": ["Agent A"],
+        },
+    )
+
+    cfg = assert_valid_hcl(path)
+    assert cfg["discovered_uc_tables"] == ["main.shared.events", "main.a.only"]
+    assert cfg["discovered_table_agents"] == {
+        "main.shared.events": ["Agent A", "Agent B"],
+        "main.a.only": ["Agent A"],
+    }
+
+
+def test_full_discovery_reflects_current_state_and_reports_disappeared(tmp_path, capsys):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    persist_discovered_uc_tables(path, ["main.old.table", "main.kept.table"])
+    capsys.readouterr()
+
+    _, present, disappeared = persist_discovered_uc_tables(path, ["main.kept.table"])
+
+    assert present == ["main.kept.table"]
+    assert disappeared == ["main.old.table"]
+    assert "disappeared: main.old.table" in capsys.readouterr().out
+
+
+def test_persist_parse_failure_aborts_without_overwriting_with_empty(tmp_path):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    corrupt = 'discovered_uc_tables = ["main.kept.table"\n'
+    path.write_text(corrupt)
+
+    with pytest.raises(ValueError, match="Failed to parse previously discovered"):
+        persist_discovered_uc_tables(path, [])
+
+    assert path.read_text() == corrupt
+
+
+@pytest.mark.parametrize("operation", ["persist", "preserve"])
+@pytest.mark.parametrize("invalid", ['"not-a-list"', '{ table = "main.kept.table" }'])
+def test_discovered_tables_must_be_a_list(tmp_path, invalid, operation):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    path.write_text(f"discovered_uc_tables = {invalid}\n")
+
+    with pytest.raises(ValueError, match="expected a list"):
+        if operation == "persist":
+            persist_discovered_uc_tables(path, [])
+        else:
+            generate_abac.preserve_discovered_tables_for_incomplete_run(path, [], [])
+
+    assert path.read_text() == f"discovered_uc_tables = {invalid}\n"
+
+
+def test_non_string_discovered_table_exits_cleanly_from_main(tmp_path, monkeypatch, capsys):
+    auth = tmp_path / "auth.auto.tfvars"
+    auth.write_text("")
+    discovered = tmp_path / "data_access" / "discovered_uc_tables.auto.tfvars"
+    discovered.parent.mkdir()
+    discovered.write_text('discovered_uc_tables = [{ table = "main.kept.table" }]\n')
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "generate_abac.py", "--auth-file", str(auth), "--create-groups",
+            "--tables", "main.requested.orders",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        generate_abac.main()
+
+    output = capsys.readouterr().out
+    assert exc.value.code == 1
+    assert "ERROR: Invalid discovered_uc_tables" in output
+    assert "every entry must be a string" in output
+
+
+def test_strict_environment_parse_failure_aborts(tmp_path):
+    auth = tmp_path / "auth.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    auth.write_text("")
+    env.write_text('genie_spaces = [\n')
+
+    with pytest.raises(ValueError, match="Failed to parse environment"):
+        generate_abac.load_auth_config(auth, env, strict_env=True)
+
+
+def test_incomplete_discovery_folds_persisted_tables_into_masking_footprint(tmp_path):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    persist_discovered_uc_tables(path, ["main.persisted.customers"])
+    effective_tables = ["main.live.orders"]
+    footprint = ["main.live.orders"]
+
+    preserved = generate_abac.preserve_discovered_tables_for_incomplete_run(
+        path, effective_tables, footprint
+    )
+
+    assert preserved == ["main.persisted.customers"]
+    assert effective_tables == ["main.live.orders", "main.persisted.customers"]
+    assert footprint == ["main.live.orders", "main.persisted.customers"]
+
+
+def _run_main_until_footprint(monkeypatch, tmp_path, cli_args, env_text, fetch_result=None):
+    auth = tmp_path / "auth.auto.tfvars"
+    auth.write_text("")
+    (tmp_path / "env.auto.tfvars").write_text(env_text)
+    discovered = tmp_path / "data_access" / "discovered_uc_tables.auto.tfvars"
+    persist_discovered_uc_tables(discovered, ["main.persisted.customers"])
+
+    if fetch_result is not None:
+        monkeypatch.setattr(generate_abac, "fetch_tables_from_genie_space", lambda *a, **k: fetch_result)
+    captured = {}
+    real_discover = generate_abac.discover_agent_footprint
+
+    def capture_footprint(*, declared_footprint, **kwargs):
+        captured["declared"] = list(declared_footprint)
+        return real_discover(declared_footprint=declared_footprint, **kwargs)
+
+    def stop_after_wiring(_table_refs, auth_cfg):
+        captured["auth_cfg"] = auth_cfg
+        raise RuntimeError("stop after main wiring")
+
+    monkeypatch.setattr(generate_abac, "discover_agent_footprint", capture_footprint)
+    monkeypatch.setattr(generate_abac, "fetch_tables_from_databricks", stop_after_wiring)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["generate_abac.py", "--auth-file", str(auth), "--create-groups", *cli_args],
+    )
+    with pytest.raises(RuntimeError, match="stop after main wiring"):
+        generate_abac.main()
+    return (
+        captured["declared"],
+        assert_valid_hcl(discovered)["discovered_uc_tables"],
+        captured["auth_cfg"],
+    )
+
+
+def test_unreachable_api_warns_before_using_raw_space_id_as_name(
+    monkeypatch, tmp_path, capsys
+):
+    _run_main_until_footprint(
+        monkeypatch,
+        tmp_path,
+        [],
+        'genie_spaces = [{ genie_space_id = "dev-space-id", uc_tables = ["c.s.t"] }]\n',
+        fetch_result=([], {}, "", False),
+    )
+    output = capsys.readouterr().out
+    assert "Genie API lookup failed for 'dev-space-id'" in output
+    assert "raw workspace-specific ID" in output
+
+
+def test_main_incomplete_discovery_preserves_grants_and_remasks(monkeypatch, tmp_path):
+    declared, persisted, auth_cfg = _run_main_until_footprint(
+        monkeypatch,
+        tmp_path,
+        [],
+        '''genie_spaces = [{
+  name = "Live agent"
+  genie_space_id = "space-1"
+  uc_tables = ["main.live.orders"]
+}]\n''',
+        fetch_result=([], {}, "Live agent", False),
+    )
+
+    assert set(declared) == {"main.live.orders", "main.persisted.customers"}
+    assert persisted == ["main.persisted.customers", "main.live.orders"]
+    assert set(auth_cfg["uc_tables"]) == {"main.live.orders", "main.persisted.customers"}
+
+
+def test_main_explicit_footprint_preserves_grants_and_remasks(monkeypatch, tmp_path):
+    declared, persisted, _ = _run_main_until_footprint(
+        monkeypatch,
+        tmp_path,
+        ["--footprint", "main.requested.orders"],
+        "genie_spaces = []\n",
+    )
+
+    assert set(declared) == {"main.requested.orders", "main.persisted.customers"}
+    assert persisted == ["main.persisted.customers"]
+
+
+def test_main_footprint_includes_new_api_table_in_discovery_and_masking(monkeypatch, tmp_path):
+    declared, persisted, auth_cfg = _run_main_until_footprint(
+        monkeypatch,
+        tmp_path,
+        ["--footprint", "main.requested.orders"],
+        '''genie_spaces = [{
+  name = "Live agent"
+  genie_space_id = "space-1"
+  uc_tables = []
+}]\n''',
+        fetch_result=(["new_catalog.live.events"], {}, "Live agent", True),
+    )
+
+    assert set(persisted) == {"main.persisted.customers", "new_catalog.live.events"}
+    assert set(declared) == {
+        "main.requested.orders", "main.persisted.customers", "new_catalog.live.events",
+    }
+    assert set(auth_cfg["uc_tables"]) == {
+        "main.persisted.customers", "new_catalog.live.events",
+    }
+    discovered_cfg = assert_valid_hcl(
+        tmp_path / "data_access" / "discovered_uc_tables.auto.tfvars"
+    )
+    assert discovered_cfg["discovered_table_agents"] == {
+        "new_catalog.live.events": ["Live agent"]
+    }
+
+
+def test_main_does_not_write_empty_owner_attribution(monkeypatch, tmp_path):
+    _run_main_until_footprint(
+        monkeypatch,
+        tmp_path,
+        [],
+        '''genie_spaces = [{
+  name = ""
+  genie_space_id = ""
+  uc_tables = ["main.unnamed.events"]
+}]\n''',
+    )
+
+    discovered_cfg = assert_valid_hcl(
+        tmp_path / "data_access" / "discovered_uc_tables.auto.tfvars"
+    )
+    assert "main.unnamed.events" in discovered_cfg["discovered_uc_tables"]
+    assert "main.unnamed.events" not in discovered_cfg["discovered_table_agents"]
+
+
+def test_main_incomplete_empty_discovery_reaches_empty_governance_guard(monkeypatch, tmp_path):
+    _, _, auth_cfg = _run_main_until_footprint(
+        monkeypatch,
+        tmp_path,
+        [],
+        '''genie_spaces = [{
+  name = "Live agent"
+  genie_space_id = "space-1"
+  uc_tables = []
+}]\n''',
+        fetch_result=([], {}, "Live", False),
+    )
+    generated = tmp_path / "empty.auto.tfvars"
+    generated.write_text("tag_assignments = []\nfgac_policies = []\n")
+    monkeypatch.setattr(generate_abac, "_fetch_live_tag_policy_values", lambda: {})
+
+    errors, _ = generate_abac.post_generate_semantic_check(generated, auth_cfg)
+
+    assert any("0 tag_assignments and 0 fgac_policies" in error for error in errors)
+    assert "main.persisted.customers" in auth_cfg["uc_tables"]
+
+
+def test_main_tables_unions_persisted_grants_into_declared_and_checks(monkeypatch, tmp_path):
+    declared, persisted, auth_cfg = _run_main_until_footprint(
+        monkeypatch,
+        tmp_path,
+        ["--tables", "main.requested.orders"],
+        "genie_spaces = []\n",
+    )
+
+    assert set(declared) == {"main.requested.orders", "main.persisted.customers"}
+    assert persisted == ["main.persisted.customers"]
+    assert auth_cfg["uc_tables"] == ["main.persisted.customers"]
+
+
+def test_discovered_file_is_world_readable(tmp_path):
+    path = tmp_path / "discovered_uc_tables.auto.tfvars"
+    persist_discovered_uc_tables(path, ["main.sales.orders"])
+    assert path.stat().st_mode & 0o777 == 0o644
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -545,6 +1053,123 @@ genie_space_configs = {
 
         assert (out_dir / "spaces" / "finance_analytics" / "abac.auto.tfvars").exists()
         assert (out_dir / "spaces" / "clinical_analytics" / "abac.auto.tfvars").exists()
+
+
+class TestGenieFetchFailureIsolation:
+
+    def test_patch_fallback_failure_does_not_block_later_spaces(self, monkeypatch, capsys):
+        """One broken fallback is warning-only and the next agent is still fetched."""
+        calls = []
+
+        class FakeApiClient:
+            def do(self, method, path, **kwargs):
+                space_id = path.rsplit("/", 1)[-1]
+                calls.append((method, space_id))
+                if space_id == "broken":
+                    if method == "GET":
+                        raise RuntimeError("Partner Powered AI is unavailable")
+                    raise RuntimeError("PATCH endpoint failed")
+                return {
+                    "title": "Healthy agent",
+                    "serialized_space": json.dumps({}),
+                }
+
+        class FakeWorkspaceClient:
+            def __init__(self, **kwargs):
+                self.api_client = FakeApiClient()
+
+        monkeypatch.setattr(generate_abac, "configure_databricks_env", lambda _: None)
+        monkeypatch.setattr(
+            sys.modules["databricks.sdk"], "WorkspaceClient", FakeWorkspaceClient
+        )
+
+        spaces = ["broken", "healthy"]
+        governed = []
+        for space_id in spaces:
+            tables, config, title, complete = generate_abac.fetch_tables_from_genie_space(
+                space_id, {}, quick_check_only=True
+            )
+            if complete and title:
+                governed.append(space_id)
+
+        assert governed == ["healthy"]
+        assert ("PATCH", "broken") in calls
+        assert ("GET", "healthy") in calls
+        assert "WARNING: Could not reach Genie agent broken via PATCH fallback" in capsys.readouterr().out
+
+    def test_title_without_serialized_space_is_incomplete(self, monkeypatch):
+        class FakeApiClient:
+            def do(self, method, path, **kwargs):
+                return {"title": "Still provisioning", "serialized_space": ""}
+
+        class FakeWorkspaceClient:
+            def __init__(self, **kwargs):
+                self.api_client = FakeApiClient()
+
+        monkeypatch.setattr(generate_abac, "configure_databricks_env", lambda _: None)
+        monkeypatch.setattr("time.sleep", lambda _: None)
+        monkeypatch.setattr(
+            sys.modules["databricks.sdk"], "WorkspaceClient", FakeWorkspaceClient
+        )
+
+        tables, config, title, complete = generate_abac.fetch_tables_from_genie_space(
+            "provisioning", {}
+        )
+
+        assert (tables, config, title) == ([], {}, "Still provisioning")
+        assert complete is False
+
+
+class TestDatabricksModelCompatibility:
+
+    @staticmethod
+    def _install_fake_client(monkeypatch, content):
+        calls = []
+
+        class FakeServingEndpoints:
+            def query(self, **kwargs):
+                calls.append(kwargs)
+                message = SimpleNamespace(content=content)
+                return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+        class FakeWorkspaceClient:
+            def __init__(self, **kwargs):
+                self.serving_endpoints = FakeServingEndpoints()
+
+        monkeypatch.setattr("databricks.sdk.WorkspaceClient", FakeWorkspaceClient)
+        monkeypatch.setattr("databricks.sdk.config.Config", lambda **kwargs: object())
+        return calls
+
+    def test_claude_5_omits_temperature_and_normalizes_content_blocks(self, monkeypatch):
+        calls = self._install_fake_client(
+            monkeypatch,
+            [
+                {"type": "reasoning", "summary": []},
+                {"type": "text", "text": "```sql\nSELECT 1;\n```"},
+                SimpleNamespace(type="text", text="```hcl\ngroups = {}\n```"),
+            ],
+        )
+
+        result = generate_abac.call_databricks("prompt", "databricks-claude-sonnet-5-5")
+
+        assert "temperature" not in calls[0]
+        assert result == "```sql\nSELECT 1;\n```\n```hcl\ngroups = {}\n```"
+
+    def test_claude_4_keeps_deterministic_temperature_and_string_content(self, monkeypatch):
+        calls = self._install_fake_client(monkeypatch, "plain response")
+
+        result = generate_abac.call_databricks("prompt", "databricks-claude-sonnet-4-6")
+
+        assert calls[0]["temperature"] == 0
+        assert result == "plain response"
+
+    def test_structured_response_without_text_fails_clearly(self, monkeypatch):
+        self._install_fake_client(
+            monkeypatch, [{"type": "reasoning", "summary": []}]
+        )
+
+        with pytest.raises(ValueError, match="returned no text content"):
+            generate_abac.call_databricks("prompt", "databricks-claude-sonnet-5")
 
 
 class TestExtractCodeBlocks:
@@ -1128,7 +1753,8 @@ def test_derived_treatments_restore_configured_functions_before_ref_repair(tmp_p
     tfvars.write_text('''tag_policies = []
 tag_assignments = [
   { entity_type = "columns", entity_name = "cat.sch.payments.credit_card_number", tag_key = "pci_level", tag_value = "masked_card_last4" },
-  { entity_type = "columns", entity_name = "cat.sch.payments.amount", tag_key = "financial_sensitivity", tag_value = "rounded_amounts" }
+  { entity_type = "columns", entity_name = "cat.sch.payments.amount", tag_key = "financial_sensitivity", tag_value = "rounded_amounts" },
+  { entity_type = "columns", entity_name = "cat.sch.customers.date_of_birth", tag_key = "pii_level", tag_value = "masked_dob" }
 ]
 fgac_policies = [
   { name = "template", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "cat", to_principals = ["users"], function_schema = "sch", match_condition = "hasTagValue('pii_level', 'masked')", function_name = "mask_redact" }
@@ -1143,7 +1769,7 @@ CREATE FUNCTION mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2);
 
     generate_abac.autofix_remove_bodyless_functions(sql)
     generate_abac.derive_and_finalize_treatments(tfvars, native_authoritative=True)
-    assert generate_abac.ensure_derived_treatment_functions(tfvars, sql) == 2
+    assert generate_abac.ensure_derived_treatment_functions(tfvars, sql) == 3
     generate_abac.autofix_invalid_function_refs(tfvars, sql)
 
     cfg = assert_valid_hcl(tfvars)
@@ -1152,9 +1778,30 @@ CREATE FUNCTION mask_amount_rounded(amount DECIMAL(18,2)) RETURNS DECIMAL(18,2);
     }
     assert functions["hasTagValue('gr_treatment', 'card_last4')"] == "mask_credit_card_last4"
     assert functions["hasTagValue('gr_treatment', 'round_amount')"] == "mask_amount_rounded"
+    assert functions["hasTagValue('gr_treatment', 'date_year')"] == "mask_date_to_year"
     sql_text = sql.read_text()
     assert "FUNCTION mask_credit_card_last4" in sql_text
     assert "FUNCTION mask_amount_rounded" in sql_text
+    assert "FUNCTION mask_date_to_year" in sql_text
+
+
+def test_redact_treatment_restores_mask_when_model_omits_it(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text('''tag_policies = []
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.customers.address", tag_key = "gr_treatment", tag_value = "redact" }
+]
+fgac_policies = [
+  { name = "redact", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "cat", to_principals = ["users"], function_schema = "sch", match_condition = "hasTagValue('gr_treatment', 'redact')", function_name = "mask_redact" }
+]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text("USE CATALOG cat;\nUSE SCHEMA sch;\n")
+
+    assert generate_abac.ensure_derived_treatment_functions(tfvars, sql) == 1
+    sql_text = sql.read_text()
+    assert "FUNCTION mask_redact(input STRING) RETURNS STRING" in sql_text
+    assert "ELSE '[REDACTED]'" in sql_text
 
 
 def test_category_mismatch_autofix_preserves_canonical_treatment_function(tmp_path):
@@ -1184,6 +1831,211 @@ fgac_policies = [
     assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == 0
     assert tfvars.read_text() == before
     assert assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"] == "mask_email"
+
+
+@pytest.mark.parametrize(
+    ("column", "tag_value"),
+    [
+        ("unit_price", "masked_value"),
+        ("total_cost", "masked_value"),
+        ("metric", "rounded_amount"),
+        ("metric", "amount_rounded"),
+        ("annual_salary", "masked_value"),
+    ],
+)
+def test_category_mismatch_repairs_numeric_mask_to_amount_function(
+    tmp_path, column, tag_value
+):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text(f'''tag_assignments = [
+  {{ entity_type = "columns", entity_name = "cat.sch.payroll.{column}", tag_key = "pii_level", tag_value = "{tag_value}" }}
+]
+fgac_policies = [{{
+  name = "mask_wage"
+  policy_type = "POLICY_TYPE_COLUMN_MASK"
+  catalog = "cat"
+  to_principals = ["users"]
+  function_schema = "sch"
+  match_condition = "hasTagValue('pii_level', '{tag_value}')"
+  function_name = "mask_email"
+}}]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "CREATE FUNCTION mask_email(input STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_pii_partial(input STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_amount_rounded(input DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN ROUND(input, -2);\n"
+    )
+
+    assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == 1
+    policy = assert_valid_hcl(tfvars)["fgac_policies"][0]
+    assert policy["function_name"] == "mask_amount_rounded"
+
+
+@pytest.mark.parametrize(
+    ("column", "tag_value"),
+    [
+        ("v", "rounded_amount"),
+        ("v", "masked_amount"),
+        ("txn_value", "amount"),
+    ],
+)
+def test_mask_redact_is_repaired_for_numeric_tag_identifiers(
+    tmp_path, column, tag_value
+):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text(f'''tag_assignments = [
+  {{ entity_type = "columns", entity_name = "cat.sch.tbl.{column}", tag_key = "sensitivity", tag_value = "{tag_value}" }}
+]
+fgac_policies = [{{
+  name = "mask_numeric"
+  policy_type = "POLICY_TYPE_COLUMN_MASK"
+  catalog = "cat"
+  to_principals = ["users"]
+  function_schema = "sch"
+  match_condition = "hasTagValue('sensitivity', '{tag_value}')"
+  function_name = "mask_redact"
+}}]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "CREATE FUNCTION mask_redact(input STRING) RETURNS STRING RETURN '***';\n"
+        "CREATE FUNCTION mask_amount_rounded(input DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN input;\n"
+    )
+
+    assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == 1
+    assert (
+        assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"]
+        == "mask_amount_rounded"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tag_value", "numeric"),
+    [
+        ("rounded_amount", True),
+        ("amount_rounded", True),
+        ("annual_salary", True),
+        ("salary_band", False),
+        ("wage_type", False),
+        ("compensation_code", False),
+        ("price_tier", False),
+        ("cost_center", False),
+        ("price_tiers", False),
+        ("cost_centers", False),
+    ],
+)
+def test_no_assignment_category_repair_uses_only_tag_value_identifier(
+    tmp_path, tag_value, numeric
+):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text(f'''tag_assignments = [
+  {{ entity_type = "columns", entity_name = "cat.sch.other.email", tag_key = "other", tag_value = "other" }}
+]
+fgac_policies = [{{
+  name = "mask_label"
+  policy_type = "POLICY_TYPE_COLUMN_MASK"
+  catalog = "cat"
+  to_principals = ["users"]
+  function_schema = "sch"
+  match_condition = "hasTagValue('pii_level', '{tag_value}')"
+  function_name = "mask_email"
+}}]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "CREATE FUNCTION mask_email(input STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_amount_rounded(input DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN input;\n"
+    )
+
+    expected_changes = 1 if numeric else 0
+    assert generate_abac.autofix_function_category_mismatch(tfvars, sql) == expected_changes
+    expected_function = "mask_amount_rounded" if numeric else "mask_email"
+    assert assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"] == expected_function
+
+
+@pytest.mark.parametrize(
+    ("tag_value", "numeric"),
+    [
+        ("rounded_amount", True),
+        ("amount_rounded", True),
+        ("annual_salary", True),
+        ("salary_band", False),
+        ("wage_type", False),
+        ("compensation_code", False),
+        ("price_tier", False),
+        ("cost_center", False),
+        ("price_tiers", False),
+        ("cost_centers", False),
+    ],
+)
+def test_arg_count_repair_uses_only_tag_value_identifier(
+    tmp_path, tag_value, numeric
+):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text(f'''fgac_policies = [{{
+  name = "mask_label"
+  policy_type = "POLICY_TYPE_COLUMN_MASK"
+  catalog = "cat"
+  to_principals = ["users"]
+  function_catalog = "cat"
+  function_schema = "sch"
+  match_condition = "hasTagValue('pii_level', '{tag_value}')"
+  function_name = "mask_bad"
+}}]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "USE CATALOG cat; USE SCHEMA sch;\n"
+        "CREATE FUNCTION mask_bad(input STRING, salt STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_redact(input STRING) RETURNS STRING RETURN '***';\n"
+        "CREATE FUNCTION mask_amount_rounded(input DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN input;\n"
+    )
+
+    assert generate_abac.autofix_fgac_arg_count_mismatch(tfvars, sql) == 1
+    policies = assert_valid_hcl(tfvars)["fgac_policies"]
+    if numeric:
+        assert policies[0]["function_name"] == "mask_amount_rounded"
+    else:
+        assert all(p["function_name"] != "mask_amount_rounded" for p in policies)
+
+
+@pytest.mark.parametrize(
+    ("entity_name", "tag_value"),
+    [
+        ("c.billing.price_history.email", "masked_email"),
+        ("c.cost.t.customer_name", "masked_name"),
+        ("c.s.t.email", "cost_center"),
+        ("c.s.t.email", "price_tier"),
+    ],
+)
+def test_matched_assignment_never_uses_qualifier_path_or_string_tag_as_numeric(
+    tmp_path, entity_name, tag_value
+):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text(f'''tag_assignments = [
+  {{ entity_type = "columns", entity_name = "{entity_name}", tag_key = "pii_level", tag_value = "{tag_value}" }}
+]
+fgac_policies = [{{
+  name = "mask_string"
+  policy_type = "POLICY_TYPE_COLUMN_MASK"
+  catalog = "c"
+  to_principals = ["users"]
+  function_schema = "sch"
+  match_condition = "hasTagValue('pii_level', '{tag_value}')"
+  function_name = "mask_email"
+}}]
+''')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "CREATE FUNCTION mask_email(input STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_pii_partial(input STRING) RETURNS STRING RETURN input;\n"
+        "CREATE FUNCTION mask_amount_rounded(input DECIMAL(18,2)) RETURNS DECIMAL(18,2) RETURN input;\n"
+    )
+
+    generate_abac.autofix_function_category_mismatch(tfvars, sql)
+    function = assert_valid_hcl(tfvars)["fgac_policies"][0]["function_name"]
+    assert function != "mask_amount_rounded"
 
 
 def test_required_native_classification_fails_without_warehouse(monkeypatch):

@@ -598,16 +598,35 @@ PYEOF
 
 # ---------- Trash (delete) a Genie agent ----------
 trash_genie_space() {
-  local workspace_url="${DATABRICKS_HOST}"
-  workspace_url="${workspace_url%/}"
+  # Destroy provisioners can outlive the worktree that created their state.
+  # Resolve the current environment path and credentials at execution time.
+  if [[ -n "${LAYER_ENV_DIR:-}" ]]; then
+    if [[ -n "${GENIE_ID_BASENAME:-}" ]]; then
+      GENIE_ID_FILE="${LAYER_ENV_DIR}/${GENIE_ID_BASENAME}"
+    fi
+    local auth_tfvars="${LAYER_ENV_DIR}/auth.auto.tfvars"
+    if [[ -f "$auth_tfvars" ]]; then
+      DATABRICKS_HOST=$(python3 -c 'import hcl2,sys; print(hcl2.load(open(sys.argv[1])).get("databricks_workspace_host", ""))' "$auth_tfvars")
+      DATABRICKS_CLIENT_ID=$(python3 -c 'import hcl2,sys; print(hcl2.load(open(sys.argv[1])).get("databricks_client_id", ""))' "$auth_tfvars")
+      DATABRICKS_CLIENT_SECRET=$(python3 -c 'import hcl2,sys; print(hcl2.load(open(sys.argv[1])).get("databricks_client_secret", ""))' "$auth_tfvars")
+      export DATABRICKS_HOST DATABRICKS_CLIENT_ID DATABRICKS_CLIENT_SECRET
+    fi
+  fi
+
+  local auth_host="${DATABRICKS_HOST%/}"
+  local expected_host="${GENIE_EXPECTED_HOST:-}"
+  expected_host="${expected_host%/}"
+  local workspace_url="$auth_host"
+
+  if [[ -n "$expected_host" && "$expected_host" != "$auth_host" ]]; then
+    echo "Genie agent belongs to ${expected_host}; current authentication host is ${auth_host}. Targeting the original host with current credentials."
+    workspace_url="$expected_host"
+  fi
 
   if [[ -z "$workspace_url" ]]; then
     echo "Need workspace URL. Set DATABRICKS_HOST." >&2
     exit 1
   fi
-
-  local token
-  token=$(resolve_token "$workspace_url" "") || exit 1
 
   local space_id=""
 
@@ -617,8 +636,15 @@ trash_genie_space() {
   fi
 
   if [[ -z "$space_id" ]]; then
-    echo "No Genie agent ID file found at ${GENIE_ID_FILE:-<not set>}. Nothing to trash."
-    exit 0
+    echo "ERROR: Cannot identify Genie agent to trash: ID file missing or empty at ${GENIE_ID_FILE:-<not set>}." >&2
+    echo "Refusing to continue because this would orphan the live space." >&2
+    exit 1
+  fi
+
+  local token
+  if ! token=$(resolve_token "$workspace_url" ""); then
+    echo "ERROR: Cannot authenticate to Genie agent host ${workspace_url} with credentials from current auth host ${auth_host}." >&2
+    exit 1
   fi
 
   echo "Trashing Genie agent ${space_id}..."
@@ -636,9 +662,13 @@ trash_genie_space() {
   if [[ "$http_code" == "200" || "$http_code" == "204" ]]; then
     echo "Genie agent ${space_id} trashed successfully."
     rm -f "${GENIE_ID_FILE}"
-  elif [[ "$http_code" == "404" ]]; then
+  elif [[ "$http_code" == "404" && ( -z "$expected_host" || "$workspace_url" == "$expected_host" ) ]]; then
     echo "Genie agent ${space_id} not found (already deleted). Cleaning up ID file."
     rm -f "${GENIE_ID_FILE}"
+  elif [[ "$http_code" == "401" || "$http_code" == "403" ]]; then
+    echo "ERROR: Cannot authenticate to Genie agent host ${workspace_url} with credentials from current auth host ${auth_host} (HTTP ${http_code})." >&2
+    echo "API response: ${response_body}" >&2
+    exit 1
   else
     echo "Failed to trash Genie agent (HTTP ${http_code})."
     echo "API response: ${response_body}"
@@ -704,7 +734,7 @@ elif [[ "$COMMAND" == "set-acls" ]]; then
     exit 1
   fi
 
-  if [[ -z "${GENIE_GROUPS_CSV:-}" ]]; then
+  if [[ -z "${GENIE_GROUPS_CSV:-}" && "${GENIE_ALLOW_EMPTY_ACL:-}" != "1" ]]; then
     echo "ERROR: GENIE_GROUPS_CSV not set. Pass comma-separated group names." >&2
     echo "  Example: GENIE_GROUPS_CSV='Analyst,Admin' $0 set-acls" >&2
     exit 1

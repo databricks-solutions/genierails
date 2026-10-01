@@ -11,7 +11,10 @@ sys.path.insert(0, str(SHARED_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 from split_abac_config import merge_tag_policies  # noqa: E402
-from merge_space_configs import merge_into_assembled  # noqa: E402
+from merge_space_configs import (  # noqa: E402
+    merge_into_assembled,
+    merge_treatment_overrides,
+)
 
 
 class TestSplitTagPolicies:
@@ -31,6 +34,61 @@ class TestSplitTagPolicies:
 
 
 class TestMergeSpaceConfigs:
+    def test_treatment_override_merge_preserves_other_spaces_and_strictest_wins(self):
+        merged = merge_treatment_overrides(
+            [
+                {"entity_name": "dev.s.first.secret", "treatment": "redact"},
+                {"entity_name": "dev.s.second.amount", "treatment": "redact"},
+                {"entity_name": "dev.s.second.removed", "treatment": "round_amount"},
+            ],
+            [
+                {"entity_name": "dev.s.second.amount", "treatment": "round_amount"},
+            ],
+            {"dev.s.second.amount", "dev.s.second.removed"},
+        )
+        assert merged == [
+            {"entity_name": "dev.s.first.secret", "treatment": "redact"},
+            {"entity_name": "dev.s.second.amount", "treatment": "redact"},
+        ]
+
+    def test_merge_round_trips_titles_but_never_draft_acls(
+        self, tmp_path
+    ):
+        generated_dir = tmp_path / "generated"
+        space_dir = generated_dir / "spaces" / "hr"
+        space_dir.mkdir(parents=True)
+        (tmp_path / "env.auto.tfvars").write_text('''genie_spaces = [
+  { name = "Pay", uc_tables = [], acl_groups = ["shared_g"] },
+  { name = "Empty", uc_tables = [], acl_groups = [] },
+  { name = "HR", uc_tables = [], acl_groups = ["hr_g"] },
+]
+''')
+        (generated_dir / "masking_functions.sql").write_text("")
+        (space_dir / "masking_functions.sql").write_text("")
+        (generated_dir / "abac.auto.tfvars").write_text('''
+tag_policies = []
+tag_assignments = []
+fgac_policies = []
+genie_space_configs = {
+  Pay = { title = "Payments" genie_acl_groups = ["shared_g"] }
+  Empty = { title = "Nobody" acl_groups = [] }
+}
+''')
+        (space_dir / "abac.auto.tfvars").write_text('''
+tag_policies = []
+tag_assignments = []
+fgac_policies = []
+genie_space_configs = { HR = { title = "Human Resources" acl_groups = ["hr_g"] } }
+''')
+
+        merge_into_assembled(generated_dir, "hr")
+
+        with open(generated_dir / "abac.auto.tfvars") as handle:
+            spaces = hcl2.load(handle)["genie_space_configs"]
+        assert spaces["Pay"] == {"title": "Payments"}
+        assert spaces["Empty"] == {"title": "Nobody"}
+        assert spaces["HR"] == {"title": "Human Resources"}
+
     def test_merge_into_assembled_raises_on_conflicting_canonical_assignment(
         self,
         tmp_path,

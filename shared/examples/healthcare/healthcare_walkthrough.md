@@ -2,7 +2,7 @@
 
 A step-by-step example applying GenieRails to a healthcare scenario with four clinical tables. This shows the complete flow from table DDL to a governed Genie agent.
 
-For the general workflow, see [From UI to Production](../../docs/from-ui-to-production.md) or [Quickstart](../../docs/quickstart.md).
+For the general workflow, see [Import a Genie Agent from UI into Code](../../docs/import-genie-agent-from-ui.md) or [Quickstart](../../docs/quickstart.md).
 
 ---
 

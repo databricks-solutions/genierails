@@ -65,12 +65,19 @@ locals {
       genie_space_id   = var.genie_space_id
       sql_warehouse_id = var.sql_warehouse_id
       uc_tables        = local.legacy_full_uc_tables
+      acl_groups       = null
     }] : []
   )
 
   effective_genie_space_configs = length(var.genie_space_configs) > 0 ? var.genie_space_configs : (
     var.genie_space_title != "" ? { (local.legacy_space_name) = local.legacy_genie_config } : {}
   )
+
+  canonical_space_names = {
+    for idx, s in local.effective_spaces : idx => (
+      s.name != "" ? s.name : lookup(var.genie_space_id_to_name, s.genie_space_id, s.genie_space_id)
+    )
+  }
 
   # Empty config used as fallback when a space has no abac config entry.
   empty_genie_config = {
@@ -94,20 +101,39 @@ locals {
   #
   # When name is omitted (empty string), genie_space_id is used as the key
   # directly — this is the common case when attaching to an existing space.
+  # Preserve that legacy key for the first occurrence.  If another space has
+  # the same sanitized key, disambiguate it with its stable existing-space ID,
+  # or with its list index when it has not been created yet.  The "--" separator
+  # cannot occur in a sanitized name.  Thus ordinary deployments keep their
+  # current resource addresses while collisions cannot overwrite an entry in
+  # this map.
   #
   # The name is also used as the default Genie agent title when genie_space_configs
   # does not set an explicit title.
   merged_spaces = {
-    for s in local.effective_spaces :
-    (s.name != ""
-      ? trim(replace(lower(s.name), "/[^a-z0-9]+/", "_"), "_")
-      : s.genie_space_id
+    for idx, s in local.effective_spaces :
+    (length([
+      for prior_idx, prior in local.effective_spaces : prior
+      if prior_idx < idx && (
+        prior.name != ""
+        ? trim(replace(lower(prior.name), "/[^a-z0-9]+/", "_"), "_")
+        : prior.genie_space_id
+        ) == (
+        s.name != ""
+        ? trim(replace(lower(s.name), "/[^a-z0-9]+/", "_"), "_")
+        : s.genie_space_id
+      )
+      ]) == 0
+      ? (s.name != ""
+        ? trim(replace(lower(s.name), "/[^a-z0-9]+/", "_"), "_")
+      : s.genie_space_id)
+      : "${s.name != "" ? trim(replace(lower(s.name), "/[^a-z0-9]+/", "_"), "_") : s.genie_space_id}--${s.genie_space_id != "" ? s.genie_space_id : idx}"
       ) => {
-      name             = s.name != "" ? s.name : s.genie_space_id
+      name             = local.canonical_space_names[idx]
       genie_space_id   = s.genie_space_id
       sql_warehouse_id = s.sql_warehouse_id != "" ? s.sql_warehouse_id : var.sql_warehouse_id
       uc_tables        = s.uc_tables
-      config           = try(local.effective_genie_space_configs[s.name], local.empty_genie_config)
+      config           = try(local.effective_genie_space_configs[local.canonical_space_names[idx]], local.empty_genie_config)
     }
   }
 }
@@ -147,6 +173,11 @@ variable "databricks_workspace_id" {
   type = string
 }
 
+variable "serverless_usage_policy_id" {
+  type    = string
+  default = ""
+}
+
 variable "databricks_workspace_host" {
   type = string
 }
@@ -159,9 +190,16 @@ variable "genie_spaces" {
     genie_space_id   = optional(string, "")
     sql_warehouse_id = optional(string, "")
     uc_tables        = optional(list(string), [])
+    acl_groups       = optional(list(string), null)
   }))
   default     = []
-  description = "List of Genie agent definitions. 'name' is the human-readable agent title and the lookup key for genie_space_configs. An internal Terraform key is derived automatically by sanitizing the name."
+  description = "User-owned Genie agent definitions. 'name' is the semantic-config lookup key. acl_groups omitted/null derives fresh from policy principals, [] explicitly grants nobody, and a non-empty list is the durable override; generated semantic drafts do not own ACLs."
+}
+
+variable "genie_space_id_to_name" {
+  type        = map(string)
+  default     = {}
+  description = "Tool-owned mapping from imported Genie space IDs to their canonical names."
 }
 
 variable "genie_space_configs" {
@@ -206,7 +244,7 @@ variable "genie_space_configs" {
     acl_groups = optional(list(string), [])
   }))
   default     = {}
-  description = "Map of space key to Genie semantic config (title, benchmarks, join specs, etc.). Keys must match genie_spaces[*].key."
+  description = "Tool-owned semantic config (title, benchmarks, joins, etc.). Keys match genie_spaces names. Any nested acl_groups is resolved input for compatibility, not durable ACL ownership; durable intent belongs on genie_spaces[]."
 }
 
 # ── Shared warehouse variable ─────────────────────────────────────────────────
@@ -315,7 +353,7 @@ variable "genie_join_specs" {
 variable "genie_acl_groups" {
   type        = list(string)
   default     = []
-  description = "Groups that should have CAN_RUN access to this Genie agent. Empty = all groups."
+  description = "Legacy single-agent CAN_RUN groups. Explicit empty means no business access. Multi-agent durable ACL intent belongs on genie_spaces[].acl_groups instead."
 }
 
 # ── Group variables ───────────────────────────────────────────────────────────

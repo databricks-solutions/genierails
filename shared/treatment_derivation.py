@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).with_name("treatment_config.json")
+LOGGER = logging.getLogger(__name__)
+
+# A fallback mask is required when classification finds a sensitive column in a
+# catalog for which the model emitted no mask.  It must mask fail-closed without
+# making its borrowed principals authoritative for catalog access derivation.
+DERIVED_TREATMENT_MASK_COMMENT_PREFIX = "GenieRails treatment"
+ACL_NEUTRAL_FALLBACK_COMMENT = (
+    f"{DERIVED_TREATMENT_MASK_COMMENT_PREFIX} fallback; principals are masking-only, "
+    "not access scope"
+)
 
 
 @dataclass(frozen=True)
@@ -56,9 +68,11 @@ def load_treatment_config(path: Path = CONFIG_PATH) -> TreatmentConfig:
 # one specific identifier format (email/phone/SSN/card/...).  Applied to a
 # free-text column these leak any *other* PII embedded in the text, so a
 # free-text column holding one of these is escalated to full redaction.
-# Numeric/date treatments (round_amount, date_year) are excluded: mask_redact is
-# STRING-typed and would not bind to DECIMAL/DATE columns.
-_FREE_TEXT_ESCALATION_EXCLUDED = frozenset({"redact", "round_amount", "date_year"})
+# Numeric/date treatments (round_amount, compensation_redacted, date_year) are
+# excluded: mask_redact is STRING-typed and would not bind to DECIMAL/DATE columns.
+_FREE_TEXT_ESCALATION_EXCLUDED = frozenset(
+    {"redact", "round_amount", "date_year", "compensation_redacted"}
+)
 _FREE_TEXT_ESCALATION_TARGET = "redact"
 
 # Column-name tokens that mark a narrative / free-text column.
@@ -130,7 +144,12 @@ def collapse_sensitivity_assignments(
     return collapsed
 
 
-def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, int]:
+def derive_treatment_model(
+    cfg: dict,
+    config: TreatmentConfig,
+    *,
+    capture_source_less_explicit: bool = False,
+) -> tuple[dict, int]:
     """Collapse mapped column findings and rebuild masks on ``gr_treatment``.
 
     Non-column assignments and unmapped governance tags are preserved. All
@@ -162,7 +181,25 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
 
     derived: list[dict] = []
     used: dict[str, Treatment] = {}
+    source_tags_by_catalog_treatment: dict[tuple[str, str], list[set[tuple[str, str]]]] = {}
+    source_schemas_by_catalog_treatment: dict[tuple[str, str], set[str]] = {}
     treatments_by_value = {item.value: item for item in config.treatments}
+    treatment_rank = {
+        item.value: index for index, item in enumerate(config.treatments)
+    }
+    # Overrides are reviewed, portable rules rather than environment facts.
+    # Preserve already-materialized rules, and add only a genuinely stricter
+    # explicit treatment observed alongside a native-derived treatment.  This
+    # distinction prevents an ordinary derived gr_treatment from becoming a
+    # sticky override on a later, native-only pass.
+    overrides_by_column = {
+        item.get("entity_name", ""): {
+            "entity_name": item.get("entity_name", ""),
+            "treatment": item.get("treatment", ""),
+        }
+        for item in (cfg.get("treatment_overrides") or [])
+        if item.get("entity_name") and item.get("treatment") in treatments_by_value
+    }
     for column in sorted(set(by_column) | set(existing_treatments)):
         findings = by_column.get(column, [])
         source_treatment = resolve_treatment(findings, config)
@@ -182,6 +219,18 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
         )
         if treatment is None:
             continue
+        if explicit_treatment and (
+            (
+                source_treatment
+                and treatment_rank[explicit_treatment.value]
+                < treatment_rank[source_treatment.value]
+            )
+            or (source_treatment is None and capture_source_less_explicit)
+        ):
+            overrides_by_column[column] = {
+                "entity_name": column,
+                "treatment": explicit_treatment.value,
+            }
         if (
             treatment.value not in _FREE_TEXT_ESCALATION_EXCLUDED
             and is_free_text_column(column, treatment.masking_function)
@@ -193,6 +242,18 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
             if escalated is not None:
                 treatment = escalated
         used[treatment.value] = treatment
+        catalog = column.split(".", 1)[0]
+        source_tags = set(findings)
+        if explicit_treatment:
+            source_tags.add((config.tag_key, explicit_treatment.value))
+        source_tags_by_catalog_treatment.setdefault(
+            (catalog, treatment.value), []
+        ).append(source_tags)
+        parts = column.split(".")
+        if len(parts) >= 4:
+            source_schemas_by_catalog_treatment.setdefault(
+                (catalog, treatment.value), set()
+            ).add(parts[1])
         derived.append({
             "entity_type": "columns", "entity_name": column,
             "tag_key": config.tag_key, "tag_value": treatment.value,
@@ -211,37 +272,102 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
     existing_policies = [dict(policy) for policy in (cfg.get("fgac_policies") or [])]
     column_masks = [p for p in existing_policies if p.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"]
     other_policies = [p for p in existing_policies if p.get("policy_type") != "POLICY_TYPE_COLUMN_MASK"]
-    template = column_masks[0] if column_masks else {}
+    global_mask_principals = sorted({
+        principal
+        for policy in column_masks
+        for principal in (policy.get("to_principals") or [])
+    }) or ["account users"]
+
+    def policy_refs(policy: dict) -> set[tuple[str, str]]:
+        return set(re.findall(
+            r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)",
+            policy.get("match_condition", ""),
+        ))
 
     catalogs_by_treatment: dict[str, set[str]] = {}
     for assignment in derived:
         parts = assignment["entity_name"].split(".")
         if len(parts) >= 4:
             catalogs_by_treatment.setdefault(assignment["tag_value"], set()).add(parts[0])
+    for catalog, treatment_value in source_tags_by_catalog_treatment:
+        catalogs_by_treatment.setdefault(treatment_value, set()).add(catalog)
 
     new_masks: list[dict] = []
     for treatment in config.treatments:
         for catalog in sorted(catalogs_by_treatment.get(treatment.value, set())):
+            tag_sets = source_tags_by_catalog_treatment[(catalog, treatment.value)]
+            replaced_masks = []
+            for candidate in column_masks:
+                if candidate.get("catalog") != catalog:
+                    continue
+                if candidate.get("comment") == ACL_NEUTRAL_FALLBACK_COMMENT:
+                    continue
+                refs = policy_refs(candidate)
+                if refs and any(refs <= tags for tags in tag_sets):
+                    replaced_masks.append(candidate)
+
+            fallback = not replaced_masks
+            principals = sorted({
+                principal
+                for candidate in replaced_masks
+                for principal in (candidate.get("to_principals") or [])
+            }) if replaced_masks else global_mask_principals
+            exceptions = sorted({
+                principal
+                for candidate in replaced_masks
+                for principal in (candidate.get("except_principals") or [])
+            })
+            overlap = sorted(set(principals) & set(exceptions))
+            if overlap:
+                raise ValueError(
+                    f"Column masks for catalog {catalog!r} and treatment "
+                    f"{treatment.value!r} put principals in both to_principals "
+                    f"and except_principals: {overlap!r}"
+                )
+            if len(replaced_masks) > 1:
+                LOGGER.warning(
+                    "Collapsing %d model column masks into treatment %s on catalog %s; "
+                    "unioning their principals",
+                    len(replaced_masks), treatment.value, catalog,
+                )
+            template = replaced_masks[0] if replaced_masks else (
+                next((p for p in column_masks if p.get("catalog") == catalog), None)
+                or (column_masks[0] if column_masks else {})
+            )
+            fallback_schemas = sorted(source_schemas_by_catalog_treatment.get(
+                (catalog, treatment.value), set()
+            ))
             policy = {
                 "name": f"gr_mask_{catalog}_{treatment.value}",
                 "policy_type": "POLICY_TYPE_COLUMN_MASK",
                 "catalog": catalog,
-                "to_principals": list(template.get("to_principals") or ["account users"]),
-                "comment": f"GenieRails treatment {treatment.value}; strictest-wins derivation",
+                "to_principals": principals,
+                "comment": ACL_NEUTRAL_FALLBACK_COMMENT if fallback else (
+                    f"{DERIVED_TREATMENT_MASK_COMMENT_PREFIX} {treatment.value}; "
+                    "strictest-wins derivation"
+                ),
                 "match_condition": f"hasTagValue('{config.tag_key}', '{treatment.value}')",
                 "match_alias": f"gr_treatment_{treatment.value}",
                 "function_name": treatment.masking_function,
                 "function_catalog": catalog,
-                "function_schema": template.get("function_schema") or "default",
+                "function_schema": (
+                    fallback_schemas[0]
+                    if fallback and fallback_schemas
+                    else template.get("function_schema") or "default"
+                ),
             }
-            if template.get("except_principals"):
-                policy["except_principals"] = list(template["except_principals"])
+            if exceptions:
+                policy["except_principals"] = exceptions
             new_masks.append(policy)
 
     result = dict(cfg)
     result["tag_policies"] = tag_policies
     result["tag_assignments"] = retained + derived
     result["fgac_policies"] = other_policies + new_masks
+    if overrides_by_column or "treatment_overrides" in cfg:
+        result["treatment_overrides"] = [
+            overrides_by_column[column] for column in sorted(overrides_by_column)
+        ]
     changes = len(derived) + len(column_masks) + len(new_masks)
     return result, changes
 

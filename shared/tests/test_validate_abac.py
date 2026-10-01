@@ -19,6 +19,7 @@ from validate_abac import (  # noqa: E402
     parse_sql_functions,
     parse_sql_function_arg_counts,
     _condition_matches_tags,
+    _infer_column_categories,
 )
 
 
@@ -47,6 +48,11 @@ def _ok_cfg() -> dict:
         ],
         "fgac_policies": [],
     }
+
+
+def test_financial_compensation_columns_are_amount_category():
+    for column in ("annual_salary", "hourly_wage", "total_compensation"):
+        assert _infer_column_categories(f"catalog.hr.employees.{column}") == {"amount"}
 
 
 # ===========================================================================

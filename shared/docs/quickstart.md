@@ -1,6 +1,6 @@
 # Quickstart: Create a Genie agent from Scratch
 
-> **Already have a Genie agent?** Most users do — see [From UI to Production](from-ui-to-production.md) instead.
+> **Already have a Genie agent?** Most users do — [import it from the UI into code](import-genie-agent-from-ui.md) first.
 
 > **Using country or industry overlays?** Add `COUNTRY=ANZ` and/or `INDUSTRY=financial_services` to your `make generate` command for region-specific masking. See [Country Overlays](country-overlays.md) and [Industry Overlays](industry-overlays.md).
 
@@ -47,7 +47,9 @@ vi envs/dev/generated/abac.auto.tfvars
 #   - tag assignments   (one gr_treatment derived per classified column)
 #   - FGAC policies
 #   - genie_space_configs (title, instructions, benchmarks, filters, measures per agent)
-#   - acl_groups per agent (which of your groups can run each Genie agent)
+# Durable ACLs are not owned by this generated draft. Set acl_groups only on
+# matching genie_spaces[] entries in env.auto.tfvars: omit/null derives from
+# current policies, [] grants nobody, and a non-empty list is an explicit override.
 
 vi envs/dev/generated/masking_functions.sql
 # Review and iterate on the generated masking and row-filter functions.
@@ -66,7 +68,7 @@ make apply               # releases business SELECT + Genie CAN_RUN
 2. `make enable-classification` applies only the UC catalog classification configuration (scanning); auto-tagging is opt-in via `enable_auto_tagging` (default off). It does not need generated ABAC or masking files
 3. You review detections, set `enable_auto_tagging = true`, re-apply, then wait for the scan to write `class.*` tags
 4. `make generate` fetches DDLs and native classification, then writes a draft into `envs/dev/generated/`
-5. You tune the generated governance and Genie config
+5. You tune generated governance and semantic config; durable agent ACL intent remains in `env.auto.tfvars`
 6. `make coverage-gate` blocks the release if any classified sensitive column has no protection
 7. `make apply` splits the generated draft into layered configs and applies all three layers (with `business_access_enabled = false`, enforcement is applied but business access is withheld until you open the gate and re-apply)
 
@@ -123,7 +125,7 @@ Each entry in `genie_spaces` operates in one of two modes based on whether `geni
 | `genie_space_id` | What the tool does |
 | --- | --- |
 | **empty** (default) | Creates and fully manages the space: title, benchmarks, instructions, group ACLs, full lifecycle. Requires `uc_tables`. |
-| **set** | Attaches to the existing space. Never creates or deletes it. See [From UI to Production](from-ui-to-production.md). |
+| **set** | Attaches to the existing space. Never creates or deletes it. See [Import a Genie Agent from UI into Code](import-genie-agent-from-ui.md). |
 
 ---
 

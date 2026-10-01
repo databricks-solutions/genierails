@@ -197,6 +197,33 @@ def test_prod_live_unmapped_fallback_scaffolds_shared_rulebook_and_becomes_mappe
     assert (tfvars.read_text(), sql.read_text(), config_path.read_text(), vocabulary.read_text()) == snapshot
 
 
+def test_live_scaffold_uses_imported_discovered_tables(tmp_path, monkeypatch):
+    auth = tmp_path / "auth.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    discovered_dir = tmp_path / "data_access"
+    discovered_dir.mkdir()
+    auth.write_text('databricks_workspace_host = "https://unused.invalid"\n')
+    env.write_text('uc_tables = []\ngenie_spaces = [{ genie_space_id = "agent" }]\n')
+    (discovered_dir / "discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = ["cat.sch.imported"]\n'
+    )
+    native = ClassificationSource(tag_rows=[
+        ("cat", "sch", "imported", "secret", "class.future_secret", ""),
+    ], mapping={})
+    seen = {}
+
+    def fake_fetch(table_refs, *_args, **_kwargs):
+        seen["table_refs"] = table_refs
+        return native
+
+    monkeypatch.setattr(scaffold_module, "_fetch_live_classification_source", fake_fetch)
+
+    assert scaffold_module._live_unmapped_markers(auth, env) == [
+        ("cat.sch.imported.secret", "class.future_secret", "future_secret")
+    ]
+    assert seen["table_refs"] == ["cat.sch.imported"]
+
+
 def test_scaffold_does_not_touch_already_mapped_label(tmp_path):
     tfvars, sql, config, vocabulary = _fixture(
         tmp_path, marker="class.email", marker_entity="cat.sch.people.work_email",

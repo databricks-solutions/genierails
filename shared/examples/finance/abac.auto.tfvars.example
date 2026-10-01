@@ -26,8 +26,6 @@ genie_space_configs = {
       the masking policies handle this automatically.
     EOT
 
-    acl_groups = ["Junior_Analyst", "Senior_Analyst", "Compliance_Officer"]
-
     sample_questions = [
       "What were the total transactions last month?",
       "Show me the top 10 customers by transaction volume.",

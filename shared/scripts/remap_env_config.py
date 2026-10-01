@@ -98,6 +98,11 @@ def main():
     cfg = hcl2.load(open(os.path.join(source_env_dir, "env.auto.tfvars")))
     spaces = cfg.get("genie_spaces", [])
     top_level_tables = cfg.get("uc_tables") or []
+    generated_path = os.path.join(source_env_dir, "generated", "abac.auto.tfvars")
+    id_to_name = {}
+    if os.path.exists(generated_path):
+        generated_cfg = hcl2.load(open(generated_path))
+        id_to_name = generated_cfg.get("genie_space_id_to_name") or {}
 
     # Load source auth for API queries
     auth_cfg = {}
@@ -125,6 +130,31 @@ def main():
                 space["uc_tables"] = api_tables
                 print(f"  Discovered {len(api_tables)} table(s)")
 
+        # Promotion clears source workspace IDs. Preserve the canonical key as
+        # the destination name so generated configs, ACLs, table attribution,
+        # and workspace lookup continue to identify the same logical space.
+        if not _str(space.get("name", "")) and space_id:
+            canonical_name = _str(id_to_name.get(space_id, ""))
+            if canonical_name:
+                space["name"] = canonical_name
+
+    canonical_names = [_str(space.get("name", "")) for space in spaces]
+    missing = [i for i, name in enumerate(canonical_names) if not name]
+    if missing:
+        print(
+            "ERROR: Cannot promote Genie space(s) without a canonical name. "
+            "Run `make generate` in the source environment first."
+        )
+        sys.exit(1)
+    duplicates = sorted({name for name in canonical_names if canonical_names.count(name) > 1})
+    if duplicates:
+        print(
+            "ERROR: Multiple Genie spaces resolve to the same canonical name: "
+            + ", ".join(repr(name) for name in duplicates)
+            + ". Set distinct names before promoting."
+        )
+        sys.exit(1)
+
     # Build dest env.auto.tfvars
     lines = ["genie_spaces = ["]
     for space in spaces:
@@ -133,12 +163,27 @@ def main():
         remapped_tables = [remap_table(t) for t in uc_tables]
 
         lines.append("  {")
-        lines.append(f'    name             = "{name}"')
+        lines.append(f"    name             = {json.dumps(name)}")
         lines.append(f'    genie_space_id   = ""')
         lines.append(f'    uc_tables = [')
         for t in remapped_tables:
             lines.append(f'      "{t}",')
         lines.append(f'    ]')
+        if "acl_groups" in space:
+            acl_groups = space["acl_groups"]
+            if acl_groups is not None and (
+                not isinstance(acl_groups, list) or not all(
+                    isinstance(group, str) for group in acl_groups
+                )
+            ):
+                print(
+                    f"ERROR: acl_groups for Genie space {name!r} must be a list "
+                    "of group names, null, or omitted ([] means nobody)."
+                )
+                sys.exit(1)
+            if acl_groups is not None:
+                rendered_acl = ", ".join(json.dumps(group) for group in acl_groups)
+                lines.append(f"    acl_groups       = [{rendered_acl}]")
         lines.append("  },")
     lines.append("]")
     lines.append("")
@@ -148,6 +193,11 @@ def main():
     lines.append("]")
     lines.append("")
     lines.append('sql_warehouse_id = ""  # auto-create in dest workspace')
+    lines.append("")
+    lines.append("# Safe production defaults; use the UI workflow before opening access.")
+    lines.append("enable_classification = true")
+    lines.append("enable_auto_tagging = false")
+    lines.append("business_access_enabled = false")
 
     # Write
     os.makedirs(dest_env_dir, exist_ok=True)

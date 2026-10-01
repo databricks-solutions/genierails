@@ -6,7 +6,7 @@ GenieRails puts Genie onboarding on rails: Unity Catalog's classifier decides wh
 
 | Starting point | You have... | Guide |
 |---|---|---|
-| **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [From UI to Production](from-ui-to-production.md) |
+| **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [Import a Genie Agent from UI into Code](import-genie-agent-from-ui.md) |
 | **I'm starting from scratch** | Tables in Unity Catalog, no Genie agent yet | [Quickstart](quickstart.md) |
 
 > Both routes converge on the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)** — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion).
@@ -75,7 +75,7 @@ make promote SOURCE_ENV=dev DEST_ENV=prod \
 - The promote command auto-detects all source catalog names from `genie_spaces[*].uc_tables`
 - Every detected catalog must have a mapping — the command fails clearly if any are missing
 
-> If you followed [From UI to Production](from-ui-to-production.md), promotion was already covered in Step 4.
+> If you imported an existing agent with [Import a Genie Agent from UI into Code](import-genie-agent-from-ui.md), continue with the same promotion steps below.
 
 ### Country and industry overlays
 
@@ -237,6 +237,11 @@ Prod swaps `generate` for `derive-assignments` (re-derive facts from prod's own 
 
 | File | What it contains |
 | ---- | ---------------- |
-| `generated/abac.auto.tfvars` | Groups, tag policies, tag assignments, FGAC policies, genie_space_configs (including per-space `acl_groups`) |
+| `generated/abac.auto.tfvars` | Groups, tag policies, tag assignments, FGAC policies, and semantic `genie_space_configs`; it does not own per-space ACL intent |
 | `generated/masking_functions.sql` | SQL masking and row-filter functions |
 | `generated/spaces/<key>/` | Per-space drafts (used by `make generate SPACE="..."`) |
+
+Per-space `acl_groups` is user-owned on `genie_spaces[]` in `env.auto.tfvars`.
+Omitted or `null` means derive fresh from current policy principals (including
+`except_principals`); `[]` explicitly means nobody; a non-empty list is a
+durable override. Generated or imported semantic drafts cannot override it.

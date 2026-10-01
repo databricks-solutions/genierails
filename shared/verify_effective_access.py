@@ -672,6 +672,7 @@ def load_auth(auth_file: Path) -> dict[str, str]:
         or "https://accounts.cloud.databricks.com",
         "account_id": _as_str(auth.get("databricks_account_id"))
         or os.environ.get("DATABRICKS_ACCOUNT_ID", ""),
+        "workspace_id": _as_str(auth.get("databricks_workspace_id")),
     }
 
 
@@ -791,6 +792,39 @@ class EffectiveAccessVerifier:
                 schemas=[iam.PatchSchema.URN_IETF_PARAMS_SCIM_API_MESSAGES_2_0_PATCH_OP],
             )
 
+        workspace_id = self.auth.get("workspace_id", "")
+        if not workspace_id:
+            raise RuntimeError(
+                "databricks_workspace_id is required to assign verification "
+                "principals to the workspace"
+            )
+        a.workspace_assignment.update(
+            workspace_id=int(workspace_id),
+            principal_id=int(sp.id),
+            permissions=[iam.WorkspacePermission.USER],
+        )
+        deadline = time.time() + int(
+            os.environ.get("GENIERAILS_VERIFY_WORKSPACE_SYNC_TIMEOUT", "90")
+        )
+        while True:
+            visible = next(
+                (
+                    item
+                    for item in self.admin_ws.service_principals.list(
+                        filter=f'applicationId eq "{sp.application_id}"'
+                    )
+                ),
+                None,
+            )
+            if visible is not None:
+                break
+            if time.time() >= deadline:
+                raise TimeoutError(
+                    f"Verification principal {sp.application_id} was assigned to "
+                    "the workspace but did not become visible before timeout"
+                )
+            time.sleep(2)
+
         return TestPrincipal(
             tier=tier,
             display_name=display_name,
@@ -806,6 +840,23 @@ class EffectiveAccessVerifier:
                 self.account.service_principals.delete(principal.sp_id)
         except Exception as exc:  # best-effort cleanup
             print(f"  WARN: could not delete {principal.display_name}: {exc}")
+
+    def grant_warehouse_use(self, principal: TestPrincipal) -> None:
+        """Grant a temporary test principal CAN_USE on the query warehouse."""
+        self._guard()
+        from databricks.sdk.service import iam
+
+        warehouse_id = self.resolve_warehouse()
+        self.admin_ws.permissions.update(
+            request_object_type="warehouses",
+            request_object_id=warehouse_id,
+            access_control_list=[
+                iam.AccessControlRequest(
+                    service_principal_name=principal.application_id,
+                    permission_level=iam.PermissionLevel.CAN_USE,
+                )
+            ],
+        )
 
     def _ws_for(self, principal: TestPrincipal):
         self._guard()
@@ -896,7 +947,10 @@ def verify_effective_access_live(
     try:
         for tier in sorted(spec.principals):
             print(f"  Provisioning test principal for tier: {tier}")
-            principals[tier] = verifier.provision_principal(tier)
+            principal = verifier.provision_principal(tier)
+            principals[tier] = principal
+            print(f"  Granting warehouse CAN_USE to test principal: {tier}")
+            verifier.grant_warehouse_use(principal)
 
         # Newly-added group membership can take a short while to propagate.
         time.sleep(int(os.environ.get("GENIERAILS_VERIFY_PROPAGATION_SLEEP", "10")))

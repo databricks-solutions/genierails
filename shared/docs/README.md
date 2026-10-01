@@ -4,7 +4,7 @@ New here? Start with the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/)**
 
 ### Guides
 - **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/)** — the canonical end-to-end walkthrough.
-- **[From UI to Production](from-ui-to-production.md)** — import a UI-built Genie agent, then govern it via the walkthrough.
+- **[Import a Genie Agent from UI into Code](import-genie-agent-from-ui.md)** — import a UI-built Genie agent, then govern it via the walkthrough.
 - **[Quickstart](quickstart.md)** — create a Genie agent from scratch.
 - **[Playbook](playbook.md)** — after your first deployment: add agents, promote, overlays, advanced scenarios.
 

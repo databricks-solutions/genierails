@@ -3,9 +3,28 @@
     "gr_treatment": {
       "canonical_key": "gr_treatment",
       "description": "GenieRails-owned, derived enforcement treatment.",
-      "canonical_values": ["redact", "ssn_last4", "card_last4", "account_last4", "email_partial", "phone_partial", "name_partial", "date_year", "tfn_partial", "medicare_partial", "bsb_partial", "aadhaar_partial", "generic_partial", "round_amount"],
+      "canonical_values": [
+        "redact",
+        "ssn_last4",
+        "card_last4",
+        "account_last4",
+        "email_partial",
+        "phone_partial",
+        "name_partial",
+        "date_year",
+        "tfn_partial",
+        "medicare_partial",
+        "bsb_partial",
+        "aadhaar_partial",
+        "generic_partial",
+        "round_amount",
+        "compensation_redacted"
+      ],
       "key_aliases": [],
-      "value_aliases": {}
+      "value_aliases": {},
+      "review_values": {
+        "compensation_redacted": "Numeric compensation is fully redacted to NULL with a type-compatible DECIMAL mask."
+      }
     },
     "pii_level": {
       "canonical_key": "pii_level",

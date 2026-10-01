@@ -17,6 +17,7 @@ terraform {
 }
 
 locals {
+  effective_uc_tables = distinct(concat(var.uc_tables, var.discovered_uc_tables))
   effective_warehouse_id = (
     var.sql_warehouse_id != ""
     ? var.sql_warehouse_id
@@ -40,8 +41,39 @@ locals {
   # the access set from both managed groups and policy targets.
   access_principals = distinct(concat(
     keys(var.groups),
-    flatten([for p in var.fgac_policies : p.to_principals]),
+    flatten([
+      for p in var.fgac_policies : p.to_principals
+      if !startswith(p.comment, "GenieRails treatment fallback; principals are masking-only")
+    ]),
+    flatten(values(var.genie_space_acl_groups)),
   ))
+
+  legacy_unattributed_discovered_tables = setsubtract(
+    toset(var.discovered_uc_tables),
+    toset(keys(var.table_agents)),
+  )
+
+  scoped_table_access_principals = {
+    for table in local.effective_uc_tables : table => distinct(flatten([
+      for agent in lookup(var.table_agents, table, []) :
+      lookup(var.genie_space_acl_groups, agent, [])
+    ]))
+  }
+
+  table_access_principals = {
+    for table in local.effective_uc_tables : table => (
+      contains(var.admin_uc_tables, table)
+      || contains(local.legacy_unattributed_discovered_tables, table)
+      ? local.access_principals
+      : local.scoped_table_access_principals[table]
+    )
+  }
+
+  table_access_pairs = flatten([
+    for table, principals in local.table_access_principals : [
+      for principal in principals : { table = table, principal = principal }
+    ]
+  ])
 
   _ta_catalogs = [
     for ta in var.tag_assignments :
@@ -54,7 +86,7 @@ locals {
   ]
 
   _uc_catalogs = [
-    for t in var.uc_tables :
+    for t in local.effective_uc_tables :
     split(".", t)[0]
   ]
 
@@ -64,7 +96,7 @@ locals {
   ]
 
   uc_schemas = distinct([
-    for t in var.uc_tables :
+    for t in local.effective_uc_tables :
     join(".", slice(split(".", t), 0, 2))
   ])
 
@@ -174,6 +206,10 @@ resource "databricks_grant" "catalog_access" {
   catalog    = each.value.catalog
   principal  = each.value.group
   privileges = ["USE_CATALOG"]
+
+  # Order group grants after the deployment SP grant to avoid the SP-vs-group
+  # read/modify/write race on catalog permissions.
+  depends_on = [databricks_grant.terraform_sp_manage_catalog]
 }
 
 resource "databricks_grant" "schema_access" {
@@ -190,8 +226,8 @@ resource "databricks_grant" "schema_access" {
 
 resource "databricks_grant" "table_access" {
   for_each = var.business_access_enabled ? {
-    for pair in setproduct(var.uc_tables, local.access_principals) :
-    "${pair[0]}|${pair[1]}" => { table = pair[0], group = pair[1] }
+    for pair in local.table_access_pairs :
+    "${pair.table}|${pair.principal}" => { table = pair.table, group = pair.principal }
   } : {}
 
   provider   = databricks.workspace

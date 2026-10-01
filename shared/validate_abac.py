@@ -545,7 +545,7 @@ def _infer_column_categories(entity_name: str) -> set[str]:
     if (("card" in col and "cardholder" not in col and "card_holder" not in col)
             or "cvv" in col or "pan" in col):
         categories.add("card")
-    if "amount" in col or "balance" in col or "limit" in col:
+    if any(hint in col for hint in ("amount", "balance", "limit", "salary", "wage", "compensation")):
         categories.add("amount")
     # Country-specific patterns (populated by --country flag)
     for hint, category in _country_hint_to_category.items():

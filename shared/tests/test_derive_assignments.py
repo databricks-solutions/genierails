@@ -7,8 +7,14 @@ import hcl2
 import pytest
 
 import generate_abac
-from generate_abac import NativeClassificationRequiredError, _find_bracket_section
+from generate_abac import (
+    NativeClassificationRequiredError,
+    _find_bracket_section,
+    derive_enforcement_treatments,
+)
 from sensitivity_source import ClassificationSource
+from scripts.remap_generated_config import remap_hcl
+from scripts.merge_space_configs import merge_into_assembled
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts/derive_assignments.py"
@@ -130,6 +136,203 @@ def test_refresh_fails_closed_when_promoted_mask_does_not_cover_treatment(tmp_pa
     before = config.read_bytes()
     native = ClassificationSource(tag_rows=[
         ("prod", "sales", "customers", "ssn", "class.us_ssn", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    with pytest.raises(RuntimeError, match="no matching column-mask policy"):
+        MODULE.derive_assignments(config, auth, env)
+    assert config.read_bytes() == before
+
+
+def _add_override(config, column, treatment):
+    text = config.read_text()
+    config.write_text(
+        f'treatment_overrides = [{{ entity_name = "{column}", treatment = "{treatment}" }}]\n'
+        + text
+    )
+
+
+def test_stricter_card_override_survives_certification_and_is_idempotent(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    column = "prod.sales.customers.card_number"
+    _add_override(config, column, "redact")
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "card_number", "class.credit_card_number", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    assert MODULE.derive_assignments(config, auth, env) == 1
+    assignments = hcl2.loads(config.read_text())["tag_assignments"]
+    assert next(a for a in assignments if a.get("entity_name") == column)["tag_value"] == "redact"
+    once = config.read_bytes()
+    assert MODULE.derive_assignments(config, auth, env) == 0
+    assert config.read_bytes() == once
+
+
+def test_source_less_dev_draft_override_survives_promote_and_prod_certify(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    dev_draft = tmp_path / "dev.auto.tfvars"
+    dev_draft.write_text('''
+tag_policies = []
+tag_assignments = [
+  { entity_type = "columns", entity_name = "dev.sales.customers.amount", tag_key = "gr_treatment", tag_value = "round_amount" },
+  { entity_type = "columns", entity_name = "dev.sales.customers.email", tag_key = "pii_level", tag_value = "masked_email" },
+]
+fgac_policies = [
+  { name = "round", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["reviewed_group"], match_condition = "hasTagValue('gr_treatment', 'round_amount')", function_name = "mask_amount_rounded", function_schema = "security" },
+  { name = "email", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["reviewed_group"], match_condition = "hasTagValue('pii_level', 'masked_email')", function_name = "mask_email", function_schema = "security" },
+]
+''')
+    derive_enforcement_treatments(dev_draft)
+    promoted = remap_hcl(dev_draft.read_text(), [("dev", "prod")])
+    assert hcl2.loads(promoted)["treatment_overrides"] == [{
+        "entity_name": "prod.sales.customers.amount",
+        "treatment": "round_amount",
+    }]
+    config.write_text(promoted)
+    native = ClassificationSource(tag_rows=[
+        # Native mode remains available, but amount itself has no native finding.
+        ("prod", "sales", "customers", "email", "class.email_address", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    assert MODULE.derive_assignments(config, auth, env) == 2
+    assignments = hcl2.loads(config.read_text())["tag_assignments"]
+    assert next(
+        item for item in assignments
+        if item.get("entity_name") == "prod.sales.customers.amount"
+    )["tag_value"] == "round_amount"
+    once = config.read_bytes()
+    assert MODULE.derive_assignments(config, auth, env) == 0
+    assert config.read_bytes() == once
+
+
+def test_per_space_override_merge_survives_promote_and_prod_certify(tmp_path, monkeypatch):
+    generated = tmp_path / "dev" / "generated"
+    second = generated / "spaces" / "second"
+    second.mkdir(parents=True)
+    (tmp_path / "dev" / "env.auto.tfvars").write_text('''
+genie_spaces = [
+  { name = "First", uc_tables = ["dev.sales.customers"], acl_groups = ["g"] },
+  { name = "Second", uc_tables = ["dev.sales.customers"], acl_groups = ["g"] },
+]
+''')
+    common_policies = '''
+  { name = "redact", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["g"], match_condition = "hasTagValue('gr_treatment', 'redact')", function_name = "mask_redact", function_schema = "security" },
+  { name = "round", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["g"], match_condition = "hasTagValue('gr_treatment', 'round_amount')", function_name = "mask_amount_rounded", function_schema = "security" },
+  { name = "email", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["g"], match_condition = "hasTagValue('gr_treatment', 'email_partial')", function_name = "mask_email", function_schema = "security" },
+'''
+    (generated / "abac.auto.tfvars").write_text(f'''
+groups = {{ g = {{}} }}
+tag_policies = [{{ key = "gr_treatment", values = ["redact", "round_amount", "email_partial"] }}]
+tag_assignments = []
+treatment_overrides = [
+  {{ entity_name = "dev.sales.customers.first_secret", treatment = "redact" }},
+  {{ entity_name = "dev.sales.customers.shared", treatment = "redact" }},
+]
+fgac_policies = [{common_policies}]
+genie_space_configs = {{ First = {{ title = "First" }} }}
+''')
+    (second / "abac.auto.tfvars").write_text(f'''
+tag_policies = [{{ key = "gr_treatment", values = ["redact", "round_amount", "email_partial"] }}]
+tag_assignments = [
+  {{ entity_type = "columns", entity_name = "dev.sales.customers.amount", tag_key = "gr_treatment", tag_value = "round_amount" }},
+  {{ entity_type = "columns", entity_name = "dev.sales.customers.shared", tag_key = "gr_treatment", tag_value = "round_amount" }},
+  {{ entity_type = "columns", entity_name = "dev.sales.customers.email", tag_key = "gr_treatment", tag_value = "email_partial" }},
+]
+treatment_overrides = [
+  {{ entity_name = "dev.sales.customers.amount", treatment = "round_amount" }},
+  {{ entity_name = "dev.sales.customers.shared", treatment = "round_amount" }},
+]
+fgac_policies = [{common_policies}]
+genie_space_configs = {{ Second = {{ title = "Second" }} }}
+''')
+    (generated / "masking_functions.sql").write_text("")
+    (second / "masking_functions.sql").write_text("")
+
+    merge_into_assembled(generated, "second")
+    assembled = hcl2.loads((generated / "abac.auto.tfvars").read_text())
+    assert assembled["treatment_overrides"] == [
+        {"entity_name": "dev.sales.customers.amount", "treatment": "round_amount"},
+        {"entity_name": "dev.sales.customers.first_secret", "treatment": "redact"},
+        {"entity_name": "dev.sales.customers.shared", "treatment": "redact"},
+    ]
+
+    prod = tmp_path / "prod"
+    prod.mkdir()
+    config, auth, env = _files(prod)
+    config.write_text(remap_hcl((generated / "abac.auto.tfvars").read_text(), [("dev", "prod")]))
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "email", "class.email_address", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+    MODULE.derive_assignments(config, auth, env)
+    assignments = {
+        item["entity_name"]: item["tag_value"]
+        for item in hcl2.loads(config.read_text())["tag_assignments"]
+        if item.get("tag_key") == "gr_treatment"
+    }
+    assert assignments["prod.sales.customers.amount"] == "round_amount"
+    assert assignments["prod.sales.customers.first_secret"] == "redact"
+    assert assignments["prod.sales.customers.shared"] == "redact"
+
+
+def test_weaker_override_cannot_downgrade_native(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    column = "prod.sales.customers.card_number"
+    _add_override(config, column, "card_last4")
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "card_number", "class.card_security_code", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    MODULE.derive_assignments(config, auth, env)
+    assignments = hcl2.loads(config.read_text())["tag_assignments"]
+    assert next(a for a in assignments if a.get("entity_name") == column)["tag_value"] == "redact"
+
+
+def test_override_applies_without_native_tag_when_column_is_in_footprint(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    column = "prod.sales.customers.card_number"
+    _add_override(config, column, "redact")
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "email", "class.email_address", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    MODULE.derive_assignments(config, auth, env)
+    assignments = hcl2.loads(config.read_text())["tag_assignments"]
+    assert next(a for a in assignments if a.get("entity_name") == column)["tag_value"] == "redact"
+
+
+def test_override_for_removed_table_warns_and_skips(tmp_path, monkeypatch, capsys):
+    config, auth, env = _files(tmp_path)
+    column = "prod.sales.removed.card_number"
+    _add_override(config, column, "redact")
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "email", "class.email_address", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    MODULE.derive_assignments(config, auth, env)
+    assert "no longer in the governed footprint" in capsys.readouterr().err
+    assert not any(
+        a.get("entity_name") == column
+        for a in hcl2.loads(config.read_text())["tag_assignments"]
+    )
+
+
+def test_override_still_requires_promoted_mask_coverage(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    column = "prod.sales.customers.card_number"
+    _add_override(config, column, "redact")
+    config.write_text(config.read_text().replace(
+        "hasTagValue('gr_treatment', 'redact')",
+        "hasTagValue('gr_treatment', 'email_partial')",
+    ))
+    before = config.read_bytes()
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "card_number", "class.credit_card_number", ""),
     ])
     monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
 

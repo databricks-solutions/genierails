@@ -26,8 +26,6 @@ genie_space_configs = {
       For billing questions, note that non-billing staff see rounded amounts.
     EOT
 
-    acl_groups = ["Nurse", "Physician", "Billing_Clerk", "Chief_Medical_Officer"]
-
     sample_questions = [
       "How many patients were admitted last week?",
       "What are the most common diagnoses in the US_EAST region?",

@@ -2640,10 +2640,15 @@ def scenario_multi_space(
     gen_abac = ENVS_DIR / env / "generated" / "abac.auto.tfvars"
     if gen_abac.exists():
         try:
-            import hcl2 as _hcl2_ms
-            with open(gen_abac) as _f_ms:
-                _gen_cfg = _hcl2_ms.load(_f_ms)
-            _gsc = _gen_cfg.get("genie_space_configs") or {}
+            from scripts.split_abac_config import (
+                build_workspace_config as _build_workspace_config_ms,
+                load_generated_config as _load_generated_config_ms,
+            )
+
+            _gen_cfg = _load_generated_config_ms(gen_abac)
+            _gsc = _build_workspace_config_ms(_gen_cfg).get(
+                "genie_space_configs"
+            ) or {}
             if isinstance(_gsc, list):
                 _gsc = _gsc[0] if _gsc else {}
             _all_groups = set((_gen_cfg.get("groups") or {}).keys())
@@ -2653,24 +2658,18 @@ def scenario_multi_space(
             for _space_name, _space_cfg in _gsc.items():
                 if isinstance(_space_cfg, list):
                     _space_cfg = _space_cfg[0] if _space_cfg else {}
-                _acl = _space_cfg.get("acl_groups") or []
-                if isinstance(_acl, list) and _acl:
-                    if isinstance(_acl[0], list):
-                        _acl = _acl[0]
-                    if _acl:
-                        _expected = set(_acl)
-                        _excluded = _all_groups - _expected
-                        _assert_acl_groups(auth_file, env, _space_name, _expected,
-                                          f"Per-space ACL: {_space_name}")
-                        if _excluded:
-                            _assert_acl_excludes_groups(auth_file, env, _space_name, _excluded,
-                                                       f"ACL exclusion: {_space_name}")
-                    else:
-                        print(f"  {_green('PASS')}  {_space_name}: acl_groups empty (all groups get access — backward compat)")
-                else:
-                    print(f"  {_green('PASS')}  {_space_name}: no acl_groups (all groups get access — backward compat)")
+                _acl = _space_cfg["acl_groups"]
+                _expected = set(_acl)
+                _excluded = _all_groups - _expected
+                _assert_acl_groups(auth_file, env, _space_name, _expected,
+                                   f"Per-space ACL: {_space_name}")
+                if _excluded:
+                    _assert_acl_excludes_groups(auth_file, env, _space_name, _excluded,
+                                                f"ACL exclusion: {_space_name}")
         except Exception as _acl_exc:
-            print(f"  {_yellow('WARN')} Could not verify per-space ACLs: {_acl_exc}")
+            raise AssertionError(
+                f"Could not resolve/verify per-space ACLs: {_acl_exc}"
+            ) from _acl_exc
     else:
         print(f"  {_yellow('WARN')} Skipping ACL verification — generated config not found")
 

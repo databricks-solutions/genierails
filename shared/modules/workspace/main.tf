@@ -30,14 +30,10 @@ locals {
     : databricks_sql_endpoint.warehouse[0].id
   )
 
-  # Per-space group list: use acl_groups if set, otherwise all groups (backward compat).
+  # ACL resolution is fail-closed before this module. Explicit [] means nobody.
   # When var.groups is empty (genie-only mode), ACLs are skipped entirely.
   genie_space_groups = length(var.groups) > 0 ? {
-    for key, space in var.genie_spaces : key => (
-      length(try(space.config.acl_groups, [])) > 0
-      ? join(",", space.config.acl_groups)
-      : join(",", keys(var.groups))
-    )
+    for key, space in var.genie_spaces : key => join(",", space.config.acl_groups)
   } : {}
 
   # Spaces that already have an ID — apply ACLs, and config if defined.
@@ -100,7 +96,7 @@ resource "databricks_sql_endpoint" "warehouse" {
 resource "null_resource" "genie_space_acls" {
   for_each = {
     for k, v in local.existing_spaces : k => v
-    if var.business_access_enabled && lookup(local.genie_space_groups, k, "") != ""
+    if var.business_access_enabled && contains(keys(local.genie_space_groups), k)
   }
 
   triggers = {
@@ -117,6 +113,7 @@ resource "null_resource" "genie_space_acls" {
       DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
       GENIE_SPACE_OBJECT_ID    = each.value.genie_space_id
       GENIE_GROUPS_CSV         = local.genie_space_groups[each.key]
+      GENIE_ALLOW_EMPTY_ACL    = "1"
     }
   }
 
@@ -169,6 +166,18 @@ resource "null_resource" "genie_space_config_existing" {
 resource "null_resource" "genie_space_create" {
   for_each = local.new_spaces
 
+  # Paths and credentials are runtime execution details, never space identity.
+  # The host is deliberately not ignored: moving a space to another workspace
+  # must destroy it in its original workspace before creating its replacement.
+  lifecycle {
+    ignore_changes = [
+      triggers["id_file"],
+      triggers["script"],
+      triggers["client_id"],
+      triggers["client_secret"],
+    ]
+  }
+
   triggers = {
     id_file       = "${var.genie_id_file_prefix}_${each.key}"
     script        = var.genie_script_path
@@ -178,13 +187,13 @@ resource "null_resource" "genie_space_create" {
   }
 
   provisioner "local-exec" {
-    command = "${self.triggers.script} create"
+    command = "${var.genie_script_path} create"
 
     environment = {
-      DATABRICKS_HOST          = self.triggers.host
-      DATABRICKS_CLIENT_ID     = self.triggers.client_id
-      DATABRICKS_CLIENT_SECRET = self.triggers.client_secret
-      GENIE_ID_FILE            = self.triggers.id_file
+      DATABRICKS_HOST          = var.databricks_workspace_host
+      DATABRICKS_CLIENT_ID     = var.databricks_client_id
+      DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
+      GENIE_ID_FILE            = "${var.genie_id_file_prefix}_${each.key}"
       GENIE_TABLES_CSV         = join(",", each.value.uc_tables)
       GENIE_WAREHOUSE_ID = (
         each.value.sql_warehouse_id != ""
@@ -196,14 +205,14 @@ resource "null_resource" "genie_space_create" {
   }
 
   provisioner "local-exec" {
-    when    = destroy
-    command = "${self.triggers.script} trash"
+    when = destroy
+    # terraform_layer.sh always executes from shared/roots/workspace. Keep this
+    # command project-relative so state remains portable across worktrees.
+    command = "bash ../../scripts/genie_space.sh trash"
 
     environment = {
-      DATABRICKS_HOST          = self.triggers.host
-      DATABRICKS_CLIENT_ID     = self.triggers.client_id
-      DATABRICKS_CLIENT_SECRET = self.triggers.client_secret
-      GENIE_ID_FILE            = self.triggers.id_file
+      GENIE_ID_BASENAME   = basename(self.triggers.id_file)
+      GENIE_EXPECTED_HOST = self.triggers.host
     }
   }
 
@@ -229,6 +238,7 @@ resource "null_resource" "genie_space_config" {
     sql_measures    = jsonencode(each.value.config.sql_measures)
     sql_expressions = jsonencode(each.value.config.sql_expressions)
     join_specs      = jsonencode(each.value.config.join_specs)
+    space_create_id = null_resource.genie_space_create[each.key].id
   }
 
   provisioner "local-exec" {
@@ -267,11 +277,12 @@ resource "null_resource" "genie_space_acls_created" {
   # where groups are managed by the governance team in a separate environment).
   for_each = {
     for k, v in local.new_spaces : k => v
-    if var.business_access_enabled && lookup(local.genie_space_groups, k, "") != ""
+    if var.business_access_enabled && contains(keys(local.genie_space_groups), k)
   }
 
   triggers = {
-    groups = local.genie_space_groups[each.key]
+    groups          = local.genie_space_groups[each.key]
+    space_create_id = null_resource.genie_space_create[each.key].id
   }
 
   provisioner "local-exec" {
@@ -283,6 +294,7 @@ resource "null_resource" "genie_space_acls_created" {
       DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
       GENIE_ID_FILE            = "${var.genie_id_file_prefix}_${each.key}"
       GENIE_GROUPS_CSV         = local.genie_space_groups[each.key]
+      GENIE_ALLOW_EMPTY_ACL    = "1"
     }
   }
 

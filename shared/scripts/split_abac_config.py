@@ -30,12 +30,15 @@ DATA_ACCESS_KEYS = (
     "groups",
     "tag_assignments",
     "fgac_policies",
+    "genie_space_acl_groups",
+    "genie_space_id_to_name",
 )
 
 WORKSPACE_KEYS = (
     "groups",
     # New multi-space format.
     "genie_space_configs",
+    "genie_space_id_to_name",
     # Legacy single-space keys (kept for backward compatibility with old generated configs).
     "genie_space_title",
     "genie_space_description",
@@ -56,10 +59,59 @@ def load_hcl(path: Path) -> dict:
         return hcl2.load(f)
 
 
+def load_generated_config(source_path: Path) -> dict:
+    """Load the authored draft plus its tool-owned derived ACL sidecar."""
+    full_cfg = load_hcl(source_path)
+    derived_path = source_path.with_name(
+        "genie_space_derived_acl_groups.auto.tfvars"
+    )
+    if derived_path.exists():
+        derived_cfg = load_hcl(derived_path)
+        full_cfg["genie_space_derived_acl_groups"] = derived_cfg.get(
+            "genie_space_derived_acl_groups", {}
+        )
+        full_cfg["genie_space_legacy_mode"] = derived_cfg.get(
+            "genie_space_legacy_mode", False
+        )
+    return full_cfg
+
+
 def quote_key(key: str) -> str:
     if IDENT_RE.match(key):
         return key
     return json.dumps(key)
+
+
+def resolve_space_acl(
+    space_name: str,
+    space: dict,
+    derived_acls: dict,
+    *,
+    allow_legacy_explicit: bool = False,
+) -> list[str]:
+    """Resolve tool-owned ACLs, with explicit draft fields allowed only in legacy mode."""
+    if space_name in derived_acls:
+        value = derived_acls[space_name]
+    elif allow_legacy_explicit and "acl_groups" in space:
+        value = space["acl_groups"]
+    elif allow_legacy_explicit and "genie_acl_groups" in space:
+        value = space["genie_acl_groups"]
+    else:
+        advice = (
+            "set the legacy top-level genie_acl_groups list"
+            if allow_legacy_explicit
+            else "set acl_groups on its genie_spaces[] entry in env.auto.tfvars"
+        )
+        raise ValueError(
+            f"Genie space {space_name!r} has no resolved ACL. Run `make generate` "
+            f"to re-derive ACLs or {advice}."
+        )
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(
+            f"Genie space {space_name!r} ACL must be a list of group names "
+            "(explicit [] means no business access); interpolation/null is not allowed."
+        )
+    return list(value)
 
 
 def render_scalar(value) -> str:
@@ -217,7 +269,8 @@ def _strip_var_refs(space_cfg: dict) -> dict:
     """
     return {
         k: v for k, v in space_cfg.items()
-        if not (isinstance(v, str) and "${var." in v)
+        if k in {"acl_groups", "genie_acl_groups"}
+        or not (isinstance(v, str) and "${var." in v)
     }
 
 
@@ -252,8 +305,15 @@ def _convert_legacy_to_genie_space_configs(cfg: dict) -> dict | None:
         "sql_measures": _val("genie_sql_measures", []),
         "join_specs": _val("genie_join_specs", []),
     }
+    if "genie_acl_groups" in cfg:
+        space_config["genie_acl_groups"] = cfg["genie_acl_groups"]
+    elif "acl_groups" in cfg:
+        space_config["acl_groups"] = cfg["acl_groups"]
     # Strip empty values
-    space_config = {k: v for k, v in space_config.items() if v not in ("", [], {}, None)}
+    space_config = {
+        k: v for k, v in space_config.items()
+        if k in {"acl_groups", "genie_acl_groups"} or v not in ("", [], {}, None)
+    }
 
     print(f"  [SPLIT] Converted legacy genie keys to genie_space_configs[\"{title}\"]")
     return {title: space_config}
@@ -279,7 +339,8 @@ def build_workspace_config(full_cfg: dict) -> dict:
         cfg[key] = value
 
     # Convert legacy single-space keys to genie_space_configs if needed
-    if "genie_space_configs" not in cfg:
+    is_legacy = full_cfg.get("genie_space_legacy_mode") is True
+    if is_legacy:
         converted = _convert_legacy_to_genie_space_configs(full_cfg)
         if converted:
             cfg["genie_space_configs"] = converted
@@ -293,6 +354,25 @@ def build_workspace_config(full_cfg: dict) -> dict:
             ):
                 cfg.pop(legacy_key, None)
 
+    derived_acls = full_cfg.get("genie_space_derived_acl_groups") or {}
+    genie_configs = cfg.get("genie_space_configs") or {}
+    if not is_legacy and not genie_configs and derived_acls:
+        genie_configs = {name: {} for name in derived_acls}
+        cfg["genie_space_configs"] = genie_configs
+    if isinstance(genie_configs, dict):
+        resolved_configs = {}
+        for name, space in genie_configs.items():
+            if not isinstance(space, dict):
+                resolved_configs[name] = space
+                continue
+            resolved = dict(space)
+            resolved["acl_groups"] = resolve_space_acl(
+                name, space, derived_acls, allow_legacy_explicit=is_legacy
+            )
+            resolved.pop("genie_acl_groups", None)
+            resolved_configs[name] = resolved
+        cfg["genie_space_configs"] = resolved_configs
+
     return cfg
 
 
@@ -305,6 +385,23 @@ def build_data_access_config(full_cfg: dict) -> dict:
         if value in ("", [], {}):
             continue
         cfg[key] = value
+    genie_configs = full_cfg.get("genie_space_configs") or {}
+    is_legacy = full_cfg.get("genie_space_legacy_mode") is True
+    if is_legacy:
+        genie_configs = _convert_legacy_to_genie_space_configs(full_cfg) or {}
+    elif not genie_configs and (full_cfg.get("genie_space_derived_acl_groups") or {}):
+        genie_configs = {
+            name: {} for name in full_cfg["genie_space_derived_acl_groups"]
+        }
+    derived_acls = full_cfg.get("genie_space_derived_acl_groups") or {}
+    if isinstance(genie_configs, dict) and genie_configs:
+        cfg["genie_space_acl_groups"] = {
+            name: resolve_space_acl(
+                name, space, derived_acls, allow_legacy_explicit=is_legacy
+            )
+            for name, space in genie_configs.items()
+            if isinstance(space, dict)
+        }
     return cfg
 
 
@@ -354,7 +451,7 @@ def main():
         print(f"ERROR: source file not found: {source_path}")
         sys.exit(1)
 
-    full_cfg = load_hcl(source_path)
+    full_cfg = load_generated_config(source_path)
     existing_account_cfg = (
         load_hcl(account_path) if account_path.exists() else None
     )

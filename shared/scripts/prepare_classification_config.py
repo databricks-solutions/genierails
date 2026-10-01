@@ -38,6 +38,10 @@ def main() -> int:
     tables = list(config.get("uc_tables") or [])
     for space in config.get("genie_spaces") or []:
         tables.extend(space.get("uc_tables") or [])
+    discovered_path = env_dir / "data_access" / "discovered_uc_tables.auto.tfvars"
+    if discovered_path.exists():
+        discovered = _load(discovered_path)
+        tables.extend(discovered.get("discovered_uc_tables") or [])
     uc_catalog = _value(config, "uc_catalog")
     full_tables = [
         table if len(table.split(".")) >= 3 else f"{uc_catalog}.{table}"
@@ -45,19 +49,50 @@ def main() -> int:
         if len(table.split(".")) >= 3 or uc_catalog
     ]
     catalogs = sorted({table.split(".")[0] for table in full_tables})
+    desired_schemas = {
+        catalog: sorted(
+            {
+                table.split(".")[1]
+                for table in full_tables
+                if table.split(".")[0] == catalog
+            }
+        )
+        for catalog in catalogs
+    }
 
+    workspace_id = _value(auth, "databricks_workspace_id")
+    routing_headers = (
+        {"X-Databricks-Org-Id": workspace_id}
+        if workspace_id
+        else None
+    )
     client = WorkspaceClient(
         host=_value(auth, "databricks_workspace_host"),
         client_id=_value(auth, "databricks_client_id"),
         client_secret=_value(auth, "databricks_client_secret"),
+        custom_headers=routing_headers,
     )
     existing: dict[str, list[str]] = {}
     all_schemas: set[str] = set()
+    usage_policy_id = _value(auth, "serverless_usage_policy_id")
     for catalog in catalogs:
         name = f"catalogs/{catalog}/config"
         try:
             remote = client.data_classification.get_catalog_config(name)
         except NotFound:
+            if usage_policy_id:
+                client.api_client.do(
+                    "POST",
+                    f"/api/data-classification/v1/catalogs/{catalog}/config",
+                    body={
+                        "included_schemas": {
+                            "names": desired_schemas[catalog],
+                        },
+                        "auto_tag_configs": [],
+                        "usage_policy_id": usage_policy_id,
+                    },
+                )
+                existing[catalog] = desired_schemas[catalog]
             continue
         if remote.included_schemas is None:
             all_schemas.add(catalog)

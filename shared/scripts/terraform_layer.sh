@@ -79,7 +79,7 @@ _unlock_init
 trap - EXIT
 
 VAR_ARGS=()
-for tfvars in auth.auto.tfvars env.auto.tfvars abac.auto.tfvars classification.auto.tfvars; do
+for tfvars in auth.auto.tfvars env.auto.tfvars abac.auto.tfvars classification.auto.tfvars discovered_uc_tables.auto.tfvars; do
   if [ -f "$ENV_DIR/$tfvars" ]; then
     VAR_ARGS+=(-var-file="$ENV_DIR/$tfvars")
   fi
