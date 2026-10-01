@@ -469,6 +469,7 @@ def test_source_less_override_fallback_mask_is_acl_neutral():
     mask = derived["fgac_policies"][0]
     assert mask["comment"] == ACL_NEUTRAL_FALLBACK_COMMENT
     assert mask["to_principals"] == ["account users"]
+    assert mask["function_schema"] == "sales"
     assert derived["treatment_overrides"] == [{
         "entity_name": column, "treatment": "round_amount",
     }]

@@ -182,6 +182,7 @@ def derive_treatment_model(
     derived: list[dict] = []
     used: dict[str, Treatment] = {}
     source_tags_by_catalog_treatment: dict[tuple[str, str], list[set[tuple[str, str]]]] = {}
+    source_schemas_by_catalog_treatment: dict[tuple[str, str], set[str]] = {}
     treatments_by_value = {item.value: item for item in config.treatments}
     treatment_rank = {
         item.value: index for index, item in enumerate(config.treatments)
@@ -248,6 +249,11 @@ def derive_treatment_model(
         source_tags_by_catalog_treatment.setdefault(
             (catalog, treatment.value), []
         ).append(source_tags)
+        parts = column.split(".")
+        if len(parts) >= 4:
+            source_schemas_by_catalog_treatment.setdefault(
+                (catalog, treatment.value), set()
+            ).add(parts[1])
         derived.append({
             "entity_type": "columns", "entity_name": column,
             "tag_key": config.tag_key, "tag_value": treatment.value,
@@ -328,6 +334,9 @@ def derive_treatment_model(
                 next((p for p in column_masks if p.get("catalog") == catalog), None)
                 or (column_masks[0] if column_masks else {})
             )
+            fallback_schemas = sorted(source_schemas_by_catalog_treatment.get(
+                (catalog, treatment.value), set()
+            ))
             policy = {
                 "name": f"gr_mask_{catalog}_{treatment.value}",
                 "policy_type": "POLICY_TYPE_COLUMN_MASK",
@@ -341,7 +350,11 @@ def derive_treatment_model(
                 "match_alias": f"gr_treatment_{treatment.value}",
                 "function_name": treatment.masking_function,
                 "function_catalog": catalog,
-                "function_schema": template.get("function_schema") or "default",
+                "function_schema": (
+                    fallback_schemas[0]
+                    if fallback and fallback_schemas
+                    else template.get("function_schema") or "default"
+                ),
             }
             if exceptions:
                 policy["except_principals"] = exceptions
