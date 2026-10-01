@@ -176,6 +176,22 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
     used: dict[str, Treatment] = {}
     source_tags_by_catalog_treatment: dict[tuple[str, str], list[set[tuple[str, str]]]] = {}
     treatments_by_value = {item.value: item for item in config.treatments}
+    treatment_rank = {
+        item.value: index for index, item in enumerate(config.treatments)
+    }
+    # Overrides are reviewed, portable rules rather than environment facts.
+    # Preserve already-materialized rules, and add only a genuinely stricter
+    # explicit treatment observed alongside a native-derived treatment.  This
+    # distinction prevents an ordinary derived gr_treatment from becoming a
+    # sticky override on a later, native-only pass.
+    overrides_by_column = {
+        item.get("entity_name", ""): {
+            "entity_name": item.get("entity_name", ""),
+            "treatment": item.get("treatment", ""),
+        }
+        for item in (cfg.get("treatment_overrides") or [])
+        if item.get("entity_name") and item.get("treatment") in treatments_by_value
+    }
     for column in sorted(set(by_column) | set(existing_treatments)):
         findings = by_column.get(column, [])
         source_treatment = resolve_treatment(findings, config)
@@ -196,6 +212,16 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
         if treatment is None:
             continue
         if (
+            explicit_treatment
+            and source_treatment
+            and treatment_rank[explicit_treatment.value]
+            < treatment_rank[source_treatment.value]
+        ):
+            overrides_by_column[column] = {
+                "entity_name": column,
+                "treatment": explicit_treatment.value,
+            }
+        if (
             treatment.value not in _FREE_TEXT_ESCALATION_EXCLUDED
             and is_free_text_column(column, treatment.masking_function)
         ):
@@ -213,19 +239,6 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
         source_tags_by_catalog_treatment.setdefault(
             (catalog, treatment.value), []
         ).append(source_tags)
-        # Native-only certification re-derives from the source finding and does
-        # not carry a model-authored explicit treatment forward.  When the
-        # model deliberately selected a stricter treatment, retain a dormant
-        # policy for the native-derived treatment as an ACL-neutral fallback so
-        # the reviewed rulebook can still certify without widening access.
-        if (
-            explicit_treatment
-            and source_treatment
-            and source_treatment.value != treatment.value
-        ):
-            source_tags_by_catalog_treatment.setdefault(
-                (catalog, source_treatment.value), []
-            ).append(set(findings))
         derived.append({
             "entity_type": "columns", "entity_name": column,
             "tag_key": config.tag_key, "tag_value": treatment.value,
@@ -328,6 +341,10 @@ def derive_treatment_model(cfg: dict, config: TreatmentConfig) -> tuple[dict, in
     result["tag_policies"] = tag_policies
     result["tag_assignments"] = retained + derived
     result["fgac_policies"] = other_policies + new_masks
+    if overrides_by_column or "treatment_overrides" in cfg:
+        result["treatment_overrides"] = [
+            overrides_by_column[column] for column in sorted(overrides_by_column)
+        ]
     changes = len(derived) + len(column_masks) + len(new_masks)
     return result, changes
 

@@ -6,8 +6,8 @@ This document explains the layered state model, config files, and resource owner
 
 Everything below rests on four invariants of the dev-to-prod walkthrough:
 
-1. **Unity Catalog is the sensitivity source of truth.** Native Data Classification writes `class.*` tags on sensitive columns; GenieRails does not guess by default. When `enable_classification=true`, generation is fail-closed — unreadable/empty native results abort rather than fall back to LLM inference (unless the operator explicitly passes the `--allow-llm-sensitivity` escape hatch).
-2. **One `gr_treatment` per column.** GenieRails collapses a column's `class.*` findings deterministically to exactly one enforcement treatment (`gr_treatment`), so exactly one column mask ever resolves; masks are keyed to that treatment vocabulary.
+1. **Unity Catalog is the sensitivity source of truth.** Native Data Classification writes `class.*` tags on sensitive columns; GenieRails does not guess by default. When `enable_classification=true`, generation is fail-closed — unreadable/empty native results abort rather than fall back to LLM inference (unless the operator explicitly passes the `--allow-llm-sensitivity` escape hatch). A reviewed entry in `treatment_overrides` is a promoted protection rule, not a sensitivity fact: it may preserve stronger protection but can never downgrade the native result.
+2. **One `gr_treatment` per column.** GenieRails collapses a column's `class.*` findings and any reviewed override deterministically to exactly one enforcement treatment (`gr_treatment`), using the configured strictest-first precedence, so exactly one column mask ever resolves; masks are keyed to that treatment vocabulary.
 3. **A blocking coverage gate.** `make coverage-gate` is an offline check that reads the generated `abac.auto.tfvars` + `masking_functions.sql` and **exits non-zero** if a classification finding has no treatment mapping, a classified column has no covering column-mask policy, or a treatment's masking function is missing — and it never drops tags or policies to force a pass. It is a *separate* step (`make apply` does not run it), so run it as an explicit gate before applying.
 4. **The exposure gate controls release.** `business_access_enabled` withholds business `SELECT` and Genie `CAN_RUN` until set to `true`; enforcement resources can exist while access stays withheld. Prod re-derives its own facts (`derive-assignments`) before the gate opens. Business `SELECT` is **scoped per agent**: each table is granted only to the tier groups authorized to run the agent(s) that expose it (a table exposed by multiple agents gets the union of their groups); admin-authored top-level `uc_tables` grant to all tiers; and a discovered table with no resolvable agent falls back to all tiers, self-healing on the next `make generate`.
 
@@ -48,6 +48,10 @@ The layers are designed so that different teams can own different layers indepen
 | `envs/<env>/abac.auto.tfvars` | Workspace-owned config: group lookups and Genie config only | **Yes** |
 
 > **See also:** [Version Control & Standalone Terraform](version-control.md) for detailed guidance on what to commit, how to set up git tracking, version pinning, and running Terraform independently.
+
+### Rules versus facts
+
+`tag_assignments` are environment facts and are deliberately emptied during cross-environment promotion. `treatment_overrides` are reviewed rules keyed by fully-qualified column: promotion carries and catalog-remaps them, and production `derive-assignments` merges them with native findings using strictest-wins. An override still protects an untagged column inside the declared governed footprint; a stale override outside that footprint is warned and skipped. Overrides select an already-reviewed mask only—they never supply principals, grants, or ACLs—and the mask coverage gate remains mandatory.
 
 Examples:
 

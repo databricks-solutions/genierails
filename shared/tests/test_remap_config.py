@@ -81,6 +81,25 @@ fgac_policies = [
         assert 'catalog = "prod_fin"' in result
         assert 'function_catalog = "prod_fin"' in result
 
+    def test_treatment_override_is_promoted_and_catalog_remapped(self):
+        text = '''
+treatment_overrides = [
+  { entity_name = "dev_fin.finance.cards.number", treatment = "redact" },
+]
+tag_assignments = [
+  { entity_name = "dev_fin.finance.cards.number", tag_key = "gr_treatment" },
+]
+'''
+        result = remap_hcl(text, [("dev_fin", "prod_fin")])
+        assert 'entity_name = "prod_fin.finance.cards.number"' in result
+        assert 'treatment = "redact"' in result
+        assert "tag_assignments = []" in result
+        assert "dev_fin.finance.cards.number" not in result
+
+    def test_without_overrides_remap_output_is_unchanged_from_legacy_behavior(self):
+        text = 'groups = {}\ntag_assignments = []\n'
+        assert remap_hcl(text, [("dev", "prod")]) == text
+
     def test_overlapping_catalog_names_longest_first(self):
         """Ensure 'dev_fin_v2' is remapped before 'dev_fin'."""
         text = 'entity_name = "dev_fin_v2.schema.table"'

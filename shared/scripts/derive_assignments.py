@@ -21,6 +21,7 @@ from generate_abac import (  # noqa: E402
     _render_tag_assignment_block,
     _replace_bracket_section,
     discover_agent_footprint,
+    footprint_contains_column,
     footprint_table_refs,
     load_auth_config,
 )
@@ -93,7 +94,8 @@ def derive_assignments(config_path: Path, auth_path: Path, env_path: Path) -> in
     declared.extend(runtime.get("declared_footprint") or [])
     for space in runtime.get("genie_spaces") or []:
         declared.extend(space.get("declared_footprint") or space.get("uc_tables") or [])
-    table_refs = footprint_table_refs(discover_agent_footprint(declared_footprint=declared))
+    footprint = discover_agent_footprint(declared_footprint=declared)
+    table_refs = footprint_table_refs(footprint)
 
     native = _fetch_live_classification_source(table_refs, runtime, require_native=True)
     # require_native guarantees a non-empty source; retain this assertion as a
@@ -115,13 +117,36 @@ def derive_assignments(config_path: Path, auth_path: Path, env_path: Path) -> in
         for finding in native.findings_for(sorted(native.classified_columns()))
     ]
     native_assignments = collapse_sensitivity_assignments(native_assignments, config)
+    valid_treatments = set(config.values)
+    override_assignments = []
+    for override in promoted.get("treatment_overrides") or []:
+        column = str(override.get("entity_name") or "")
+        treatment = str(override.get("treatment") or "")
+        if treatment not in valid_treatments:
+            raise RuntimeError(
+                f"Promoted treatment override for {column or '<missing column>'} "
+                f"uses unknown treatment {treatment!r}"
+            )
+        if not footprint_contains_column(footprint, column):
+            print(
+                f"WARNING: Skipping treatment override for {column}: table/column "
+                "is no longer in the governed footprint",
+                file=sys.stderr,
+            )
+            continue
+        override_assignments.append({
+            "entity_type": "columns",
+            "entity_name": column,
+            "tag_key": config.tag_key,
+            "tag_value": treatment,
+        })
     retained = _retained_promoted_assignments(
         list(promoted.get("tag_assignments") or []), config
     )
     # Use the exact treatment transform used by generate. Only its assignments
     # are consumed; its rebuilt policy model is intentionally discarded.
     derived, _changes = derive_treatment_model(
-        {"tag_assignments": retained + native_assignments}, config
+        {"tag_assignments": retained + native_assignments + override_assignments}, config
     )
     sensitivity_keys = {
         key for treatment in config.treatments for key, _value in treatment.sources

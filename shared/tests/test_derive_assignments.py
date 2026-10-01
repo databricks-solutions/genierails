@@ -138,6 +138,95 @@ def test_refresh_fails_closed_when_promoted_mask_does_not_cover_treatment(tmp_pa
     assert config.read_bytes() == before
 
 
+def _add_override(config, column, treatment):
+    text = config.read_text()
+    config.write_text(
+        f'treatment_overrides = [{{ entity_name = "{column}", treatment = "{treatment}" }}]\n'
+        + text
+    )
+
+
+def test_stricter_card_override_survives_certification_and_is_idempotent(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    column = "prod.sales.customers.card_number"
+    _add_override(config, column, "redact")
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "card_number", "class.credit_card_number", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    assert MODULE.derive_assignments(config, auth, env) == 1
+    assignments = hcl2.loads(config.read_text())["tag_assignments"]
+    assert next(a for a in assignments if a.get("entity_name") == column)["tag_value"] == "redact"
+    once = config.read_bytes()
+    assert MODULE.derive_assignments(config, auth, env) == 0
+    assert config.read_bytes() == once
+
+
+def test_weaker_override_cannot_downgrade_native(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    column = "prod.sales.customers.card_number"
+    _add_override(config, column, "card_last4")
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "card_number", "class.card_security_code", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    MODULE.derive_assignments(config, auth, env)
+    assignments = hcl2.loads(config.read_text())["tag_assignments"]
+    assert next(a for a in assignments if a.get("entity_name") == column)["tag_value"] == "redact"
+
+
+def test_override_applies_without_native_tag_when_column_is_in_footprint(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    column = "prod.sales.customers.card_number"
+    _add_override(config, column, "redact")
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "email", "class.email_address", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    MODULE.derive_assignments(config, auth, env)
+    assignments = hcl2.loads(config.read_text())["tag_assignments"]
+    assert next(a for a in assignments if a.get("entity_name") == column)["tag_value"] == "redact"
+
+
+def test_override_for_removed_table_warns_and_skips(tmp_path, monkeypatch, capsys):
+    config, auth, env = _files(tmp_path)
+    column = "prod.sales.removed.card_number"
+    _add_override(config, column, "redact")
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "email", "class.email_address", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    MODULE.derive_assignments(config, auth, env)
+    assert "no longer in the governed footprint" in capsys.readouterr().err
+    assert not any(
+        a.get("entity_name") == column
+        for a in hcl2.loads(config.read_text())["tag_assignments"]
+    )
+
+
+def test_override_still_requires_promoted_mask_coverage(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    column = "prod.sales.customers.card_number"
+    _add_override(config, column, "redact")
+    config.write_text(config.read_text().replace(
+        "hasTagValue('gr_treatment', 'redact')",
+        "hasTagValue('gr_treatment', 'email_partial')",
+    ))
+    before = config.read_bytes()
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "card_number", "class.credit_card_number", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+
+    with pytest.raises(RuntimeError, match="no matching column-mask policy"):
+        MODULE.derive_assignments(config, auth, env)
+    assert config.read_bytes() == before
+
+
 def test_missing_promoted_config_says_run_promote_first(tmp_path):
     with pytest.raises(RuntimeError, match="Run `make promote` first"):
         MODULE.derive_assignments(

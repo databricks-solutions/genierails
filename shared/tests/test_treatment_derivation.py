@@ -61,6 +61,7 @@ def test_precedence_multi_tag_column_resolves_to_single_strictest_treatment():
 
 def test_single_tag_ssn_resolves_to_treatment():
     derived, _ = derive_treatment_model(_base_config(), load_treatment_config())
+    assert "treatment_overrides" not in derived
     treatments = [
         item for item in derived["tag_assignments"]
         if item["entity_name"] == "cat.sch.people.ssn"
@@ -367,7 +368,7 @@ def test_identifier_columns_keep_partial_treatment():
     ) == ["card_last4"]
 
 
-def test_stricter_explicit_treatment_keeps_native_fallback_acl_neutral():
+def test_stricter_explicit_treatment_becomes_reviewed_override():
     column = "cat.sch.p.card_number"
     cfg = {
         "tag_policies": [],
@@ -389,8 +390,44 @@ def test_stricter_explicit_treatment_keeps_native_fallback_acl_neutral():
     derived, _ = derive_treatment_model(cfg, load_treatment_config())
     assert _treatment_of(cfg, column) == ["redact"]
     masks = {p["match_alias"]: p for p in derived["fgac_policies"]}
-    assert masks["gr_treatment_card_last4"]["comment"] == ACL_NEUTRAL_FALLBACK_COMMENT
-    assert masks["gr_treatment_card_last4"]["to_principals"] == ["payments"]
+    assert set(masks) == {"gr_treatment_redact"}
+    assert derived["treatment_overrides"] == [{
+        "entity_name": column,
+        "treatment": "redact",
+    }]
+
+
+def test_weaker_explicit_treatment_is_not_recorded_as_override():
+    column = "cat.sch.p.card_number"
+    cfg = _single(column, "pci_level", "redacted_card_full")
+    cfg["tag_assignments"].append(
+        _single(column, "gr_treatment", "card_last4")["tag_assignments"][0]
+    )
+    derived, _ = derive_treatment_model(cfg, load_treatment_config())
+    assert _treatment_of(derived, column) == ["redact"]
+    assert "treatment_overrides" not in derived
+
+
+def test_file_derivation_persists_reviewed_override_as_rule(tmp_path):
+    path = tmp_path / "abac.auto.tfvars"
+    path.write_text('''
+tag_policies = []
+tag_assignments = [
+  { entity_type = "columns", entity_name = "dev.sales.cards.card_number", tag_key = "pci_level", tag_value = "masked_card_last4" },
+  { entity_type = "columns", entity_name = "dev.sales.cards.card_number", tag_key = "gr_treatment", tag_value = "redact" },
+]
+fgac_policies = [
+  { name = "redact", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "dev", to_principals = ["payments"], match_condition = "hasTagValue('gr_treatment', 'redact')", function_name = "mask_redact", function_schema = "security" },
+]
+''')
+    derive_enforcement_treatments(path)
+
+    import hcl2
+    parsed = hcl2.loads(path.read_text())
+    assert parsed["treatment_overrides"] == [{
+        "entity_name": "dev.sales.cards.card_number",
+        "treatment": "redact",
+    }]
 
 
 def test_numeric_and_date_treatments_are_not_escalated():

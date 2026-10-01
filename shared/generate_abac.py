@@ -2907,6 +2907,15 @@ def _render_tag_assignment_block(assignment: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_treatment_override_block(override: dict) -> str:
+    return "\n".join([
+        "  {",
+        f'    entity_name = "{override.get("entity_name", "")}"',
+        f'    treatment   = "{override.get("treatment", "")}"',
+        "  }",
+    ])
+
+
 def _render_fgac_policy_block(policy: dict) -> str:
     lines = ["  {"]
     ordered_keys = [
@@ -2961,6 +2970,16 @@ def derive_enforcement_treatments(tfvars_path: Path) -> int:
         text, "tag_assignments",
         [_render_tag_assignment_block(item) for item in derived.get("tag_assignments", [])],
     )
+    overrides = derived.get("treatment_overrides") or []
+    if overrides:
+        rendered = [
+            _render_treatment_override_block(item) for item in overrides
+        ]
+        if _find_bracket_section(text, "treatment_overrides") is None:
+            block = "treatment_overrides = [\n" + ",\n".join(rendered) + "\n]\n\n"
+            text = block + text
+        else:
+            text = _replace_bracket_section(text, "treatment_overrides", rendered)
     text = _replace_bracket_section(
         text, "fgac_policies",
         [_render_fgac_policy_block(item) for item in derived.get("fgac_policies", [])],
