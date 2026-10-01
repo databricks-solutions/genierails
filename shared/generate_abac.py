@@ -7153,6 +7153,12 @@ def main():
 
                     # Use the API title as the canonical name if no name was given
                     effective_name = space_name if space_name != space_id else (api_title or space_id)
+                    if not discovery_ok and effective_name == space_id:
+                        print(
+                            f"  WARNING: Genie API lookup failed for {space_id!r}; "
+                            "using the raw workspace-specific ID as its temporary canonical "
+                            "name. Re-run generate when the API is reachable before promoting."
+                        )
                     agent_name = effective_name
                     genie_space_id_to_name[space_id] = effective_name
 

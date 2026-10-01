@@ -248,6 +248,73 @@ genie_space_id_to_name = { s1 = "New Name" }
     assert "Dropped orphan genie_space_configs entry 'Old Name'" in result.stdout
 
 
+def test_per_space_merge_aborts_on_invalid_environment_without_writing(tmp_path):
+    generated = tmp_path / "generated"
+    per_space = generated / "spaces" / "pay"
+    per_space.mkdir(parents=True)
+    (tmp_path / "env.auto.tfvars").write_text("genie_spaces = [ broken\n")
+    assembled = generated / "abac.auto.tfvars"
+    original = 'genie_space_configs = { Existing = { acl_groups = ["safe"] } }\n'
+    assembled.write_text(original)
+    (per_space / "abac.auto.tfvars").write_text(
+        'genie_space_configs = { Pay = { acl_groups = ["pay"] } }\n'
+    )
+    result = subprocess.run(
+        [sys.executable, str(SHARED / "scripts/merge_space_configs.py"), str(generated), "pay"],
+        text=True, capture_output=True,
+    )
+    assert result.returncode != 0
+    assert "Cannot safely prune orphan Genie configs" in result.stderr
+    assert assembled.read_text() == original
+
+
+def test_unknown_id_only_space_keeps_all_configs_and_warns(tmp_path):
+    generated = tmp_path / "generated"
+    per_space = generated / "spaces" / "pay"
+    per_space.mkdir(parents=True)
+    (tmp_path / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ genie_space_id = "unknown-id", uc_tables = [] }]\n'
+    )
+    assembled = generated / "abac.auto.tfvars"
+    assembled.write_text(
+        'genie_space_configs = { Curated = { instructions = "keep", acl_groups = [] } }\n'
+    )
+    (per_space / "abac.auto.tfvars").write_text(
+        'genie_space_configs = { Pay = { acl_groups = [] } }\n'
+    )
+    result = subprocess.run(
+        [sys.executable, str(SHARED / "scripts/merge_space_configs.py"), str(generated), "pay"],
+        check=True, text=True, capture_output=True,
+    )
+    with assembled.open() as handle:
+        configs = hcl2.load(handle)["genie_space_configs"]
+    assert set(configs) == {"Curated", "Pay"}
+    assert "Keeping all configs" in result.stdout
+
+
+def test_just_merged_config_is_never_pruned_as_orphan(tmp_path):
+    generated = tmp_path / "generated"
+    per_space = generated / "spaces" / "new"
+    per_space.mkdir(parents=True)
+    (tmp_path / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "Active", uc_tables = [] }]\n'
+    )
+    assembled = generated / "abac.auto.tfvars"
+    assembled.write_text(
+        'genie_space_configs = { Active = { acl_groups = [] }, Old = { acl_groups = [] } }\n'
+    )
+    (per_space / "abac.auto.tfvars").write_text(
+        'genie_space_configs = { New = { acl_groups = [] } }\n'
+    )
+    subprocess.run(
+        [sys.executable, str(SHARED / "scripts/merge_space_configs.py"), str(generated), "new"],
+        check=True, text=True, capture_output=True,
+    )
+    with assembled.open() as handle:
+        configs = hcl2.load(handle)["genie_space_configs"]
+    assert set(configs) == {"Active", "New"}
+
+
 def test_per_space_failed_acl_derivation_preserves_assembled_file(tmp_path):
     generated = tmp_path / "generated"
     per_space = generated / "spaces" / "pay"

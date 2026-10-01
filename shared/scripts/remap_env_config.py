@@ -163,7 +163,7 @@ def main():
         remapped_tables = [remap_table(t) for t in uc_tables]
 
         lines.append("  {")
-        lines.append(f'    name             = "{name}"')
+        lines.append(f"    name             = {json.dumps(name)}")
         lines.append(f'    genie_space_id   = ""')
         lines.append(f'    uc_tables = [')
         for t in remapped_tables:

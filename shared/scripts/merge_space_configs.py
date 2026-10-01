@@ -439,19 +439,41 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
 
     env_path = generated_dir.parent / "env.auto.tfvars"
     if env_path.exists():
-        env_cfg = load_hcl_safe(env_path)
+        try:
+            with env_path.open() as handle:
+                env_cfg = hcl2.load(handle)
+        except Exception as exc:
+            raise ValueError(
+                f"Cannot safely prune orphan Genie configs because {env_path} "
+                f"is invalid: {exc}"
+            ) from exc
+        unknown_id_only = [
+            space.get("genie_space_id", "")
+            for space in (env_cfg.get("genie_spaces") or [])
+            if isinstance(space, dict)
+            and not space.get("name")
+            and not merged_id_to_name.get(space.get("genie_space_id", ""))
+        ]
         active_names = {
             (space.get("name") or merged_id_to_name.get(space.get("genie_space_id", ""), ""))
             for space in (env_cfg.get("genie_spaces") or [])
             if isinstance(space, dict)
         }
         active_names.discard("")
-        for orphan in sorted(set(merged_genie) - active_names):
-            del merged_genie[orphan]
+        if unknown_id_only:
             print(
-                f"  WARNING: Dropped orphan genie_space_configs entry {orphan!r}; "
-                "it has no matching genie_spaces entry."
+                "  WARNING: Cannot safely identify orphan Genie configs because "
+                "id-only space(s) lack canonical-name attribution: "
+                + ", ".join(repr(space_id) for space_id in unknown_id_only)
+                + ". Keeping all configs."
             )
+        else:
+            for orphan in sorted(set(merged_genie) - active_names - new_names):
+                del merged_genie[orphan]
+                print(
+                    f"  WARNING: Dropped orphan genie_space_configs entry {orphan!r}; "
+                    "it has no matching genie_spaces entry."
+                )
 
     # ── Merge tag_assignments (dedup by entity_name + tag_key) ───────────
     def _normalize_assignment(assignment: dict) -> dict:

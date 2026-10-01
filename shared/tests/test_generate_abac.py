@@ -405,6 +405,21 @@ def _run_main_until_footprint(monkeypatch, tmp_path, cli_args, env_text, fetch_r
     )
 
 
+def test_unreachable_api_warns_before_using_raw_space_id_as_name(
+    monkeypatch, tmp_path, capsys
+):
+    _run_main_until_footprint(
+        monkeypatch,
+        tmp_path,
+        [],
+        'genie_spaces = [{ genie_space_id = "dev-space-id", uc_tables = ["c.s.t"] }]\n',
+        fetch_result=([], {}, "", False),
+    )
+    output = capsys.readouterr().out
+    assert "Genie API lookup failed for 'dev-space-id'" in output
+    assert "raw workspace-specific ID" in output
+
+
 def test_main_incomplete_discovery_preserves_grants_and_remasks(monkeypatch, tmp_path):
     declared, persisted, auth_cfg = _run_main_until_footprint(
         monkeypatch,

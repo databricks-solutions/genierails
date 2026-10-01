@@ -105,3 +105,22 @@ def test_duplicate_resolved_titles_fail_loud(tmp_path, monkeypatch, capsys):
     assert exc.value.code == 1
     assert "same canonical name" in capsys.readouterr().out
     assert not (dest / "env.auto.tfvars").exists()
+
+
+def test_canonical_title_is_hcl_escaped(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    (source / "generated").mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ genie_space_id = "s1", uc_tables = ["a.s.t"] }]\n'
+    )
+    title = 'Finance "Quoted" \\ Analytics'
+    (source / "generated" / "abac.auto.tfvars").write_text(
+        "genie_space_id_to_name = { s1 = " + __import__("json").dumps(title) + " }\n"
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "a=pa"
+    ])
+    remap_env_config.main()
+    with (dest / "env.auto.tfvars").open() as handle:
+        assert hcl2.load(handle)["genie_spaces"][0]["name"] == title
