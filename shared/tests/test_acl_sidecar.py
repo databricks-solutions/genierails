@@ -198,6 +198,30 @@ genie_space_configs = { Pay = { acl_groups = ["model_group"] } }
         }
 
 
+def test_shared_catalog_policy_derivation_fails_closed_when_spaces_are_ambiguous(tmp_path):
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    abac.write_text('''
+groups = { gA = {}, gB = {} }
+fgac_policies = [
+  { name = "shared_mask" catalog = "shared" to_principals = ["gA", "gB"] }
+]
+genie_space_configs = { payments = {}, hr = {} }
+''')
+    env.write_text('''genie_spaces = [
+  { name = "payments", uc_tables = ["shared.payments.t"] },
+  { name = "hr", uc_tables = ["shared.hr.t"] },
+]
+''')
+
+    with pytest.raises(ValueError, match="Cannot safely derive distinct Genie ACLs"):
+        autofix_acl_groups(abac, env)
+
+    assert not (generated / "genie_space_derived_acl_groups.auto.tfvars").exists()
+
+
 def test_no_acl_path_reads_previous_workspace_output():
     generator = (SHARED / "generate_abac.py").read_text()
     cli = (SHARED / "scripts/derive_genie_acls.py").read_text()

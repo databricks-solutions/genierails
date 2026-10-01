@@ -3885,6 +3885,7 @@ def autofix_acl_groups(
     # including explicit []; otherwise derive fresh from current policies.
     # Model-written ACL fields in genie_space_configs are never consulted.
     derived: dict[str, list[str]] = {}
+    policy_derived_names: set[str] = set()
     candidate_names = set(genie_cfgs)
     if active_space_names is not None:
         candidate_names &= active_space_names
@@ -3918,6 +3919,26 @@ def autofix_acl_groups(
                 "in env.auto.tfvars."
             )
         derived[str(space_name)] = space_groups
+        policy_derived_names.add(str(space_name))
+
+    # Catalog-scoped policies cannot distinguish two Genie spaces that expose
+    # different tables from the same catalog.  Reusing the same derived group
+    # set for both spaces would silently broaden CAN_RUN and SELECT.  Require
+    # user-owned per-space ACLs for this ambiguous topology instead of guessing.
+    policy_names = sorted(policy_derived_names)
+    for index, left in enumerate(policy_names):
+        for right in policy_names[index + 1:]:
+            shared_catalogs = space_catalogs.get(left, set()) & space_catalogs.get(
+                right, set()
+            )
+            if shared_catalogs and derived[left] == derived[right]:
+                raise ValueError(
+                    "Cannot safely derive distinct Genie ACLs for spaces "
+                    f"{left!r} and {right!r}: they share catalog(s) "
+                    f"{sorted(shared_catalogs)!r} and resolve to the same policy "
+                    f"groups {derived[left]!r}. Set acl_groups on each ambiguous "
+                    "genie_spaces[] entry in env.auto.tfvars."
+                )
 
     derived_path = tfvars_path.with_name(
         "genie_space_derived_acl_groups.auto.tfvars"
