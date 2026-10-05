@@ -60,7 +60,8 @@ def _run_generate(monkeypatch, env_dir, *args, account_groups=None, idp=None):
     preflighted = []
     monkeypatch.chdir(env_dir)
     monkeypatch.setattr(
-        generate_abac, "load_groups_from_account_config", lambda: list(account_groups or [])
+        generate_abac, "load_groups_from_account_config",
+        lambda **k: list(account_groups or []),
     )
     monkeypatch.setattr(
         generate_abac, "list_account_group_names",
@@ -121,17 +122,73 @@ def test_persist_fills_the_template_line_in_place(tmp_path):
     )
 
 
-def test_persist_appends_when_absent_and_replaces_multiline(tmp_path):
+def _persist(tmp_path, text, groups=TIERS):
     path = tmp_path / "env.auto.tfvars"
-    path.write_text('# access_tier_groups = ["commented"]\ngenie_spaces = []')
-    persist_access_tier_groups(path, TIERS)
-    cfg = hcl2.loads(path.read_text())
-    assert cfg["access_tier_groups"] == TIERS
-    assert path.read_text().startswith('# access_tier_groups = ["commented"]\n')
+    path.write_text(text)
+    persist_access_tier_groups(path, groups)
+    return path.read_text()
 
-    path.write_text('access_tier_groups = [\n]\nsql_warehouse_id = ""\n')
-    persist_access_tier_groups(path, ["a"])
-    assert path.read_text() == 'access_tier_groups = ["a"]\nsql_warehouse_id = ""\n'
+
+def test_persist_appends_once_when_absent(tmp_path):
+    text = (
+        '# access_tier_groups = ["commented"]\n'
+        'genie_spaces = [{ name = "access_tier_groups = [x]" }]\n'
+        'notes = <<EOT\naccess_tier_groups = [\nEOT\n'
+    )
+    out = _persist(tmp_path, text)
+
+    assert out == text + (
+        "\n# Access-tier groups, most to least privileged (saved by make generate).\n"
+        'access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]\n'
+    )
+    assert hcl2.loads(out)["access_tier_groups"] == TIERS
+    assert out.count("\naccess_tier_groups = [\"") == 1
+    # Idempotent: saving the same groups again changes nothing.
+    persist_access_tier_groups(tmp_path / "env.auto.tfvars", TIERS)
+    assert (tmp_path / "env.auto.tfvars").read_text() == out
+
+
+def test_persist_multiline_list_keeps_a_hash_comment_containing_a_bracket(tmp_path):
+    text = 'a = 1\naccess_tier_groups = [\n  # old tiers ] were here\n]\nb = "x ]"\n'
+    out = _persist(tmp_path, text)
+
+    assert out == (
+        'a = 1\naccess_tier_groups = [\n  # old tiers ] were here\n'
+        '  "payments_ops", "regional_analysts", "viewers",\n]\nb = "x ]"\n'
+    )
+    assert hcl2.loads(out) == {"a": 1, "access_tier_groups": TIERS, "b": "x ]"}
+
+
+@pytest.mark.parametrize("text, kept", [
+    ('access_tier_groups = [] // trailing ] note\nc = 2\n', "// trailing ] note\nc = 2\n"),
+    ('access_tier_groups = [] /* block ] */\n/* ] */ c = 2\n', "/* block ] */\n/* ] */ c = 2\n"),
+    ('access_tier_groups = null # unset ]\nc = 2\n', "# unset ]\nc = 2\n"),
+])
+def test_persist_preserves_slash_and_block_comments(text, kept, tmp_path):
+    out = _persist(tmp_path, text)
+
+    assert out == 'access_tier_groups = ["payments_ops", "regional_analysts", "viewers"] ' + kept
+    assert hcl2.loads(out) == {"access_tier_groups": TIERS, "c": 2}
+
+
+def test_persist_handles_group_names_containing_brackets(tmp_path):
+    groups = ["ops]team", "[viewers]"]
+    path = tmp_path / "env.auto.tfvars"
+    path.write_text("access_tier_groups = []\nz = 1\n")
+    persist_access_tier_groups(path, groups)
+    persist_access_tier_groups(path, groups)  # idempotent
+
+    out = path.read_text()
+    assert out == 'access_tier_groups = ["ops]team", "[viewers]"]\nz = 1\n'
+    assert hcl2.loads(out) == {"access_tier_groups": groups, "z": 1}
+
+
+def test_persist_refuses_to_overwrite_a_different_saved_value(tmp_path):
+    path = tmp_path / "env.auto.tfvars"
+    path.write_text('access_tier_groups = ["payments_ops"]\n')
+    with pytest.raises(ValueError, match="already set"):
+        persist_access_tier_groups(path, ["viewers"])
+    assert path.read_text() == 'access_tier_groups = ["payments_ops"]\n'
 
 
 # ── generate precedence, every mode ──────────────────────────────────────────
@@ -164,6 +221,7 @@ def test_first_explicit_groups_are_saved_then_reused(mode_args, tmp_path, monkey
 
     assert code == 0, out
     assert preflighted == TIERS
+    assert "IdP preflight: all 3 referenced group(s) found" in out
     assert _saved(env_dir) == TIERS
     assert f"Saved --groups to {SETTING_LOCATION}; later runs can omit --groups." in out
 
@@ -218,12 +276,38 @@ def test_groups_failing_idp_preflight_are_not_saved(tmp_path, monkeypatch, capsy
     assert _saved(env_dir) == []
 
 
-def test_groups_are_saved_when_idp_preflight_is_skipped(tmp_path, monkeypatch, capsys):
+def test_groups_are_used_but_not_saved_when_idp_preflight_is_skipped(
+    tmp_path, monkeypatch, capsys
+):
     env_dir = _dev_env(tmp_path)
     code, _ = _run_generate(monkeypatch, env_dir, "--groups", ",".join(TIERS), idp=None)
+    out = capsys.readouterr().out
 
     assert code == 0
-    assert _saved(env_dir) == TIERS
+    assert f"Groups:   {', '.join(TIERS)} (--groups CLI)" in out
+    assert _saved(env_dir) == []
+    assert (
+        "--groups not saved to access_tier_groups — the groups couldn't be verified"
+        in out
+    )
+    assert "Saved --groups" not in out
+
+
+def test_unsafe_rewrite_is_reported_not_raised(tmp_path, monkeypatch, capsys):
+    env_dir = _dev_env(tmp_path)
+    before = (env_dir / "env.auto.tfvars").read_text()
+
+    def refuse(*a, **k):
+        raise ValueError("could not safely update access_tier_groups; set it by hand")
+
+    monkeypatch.setattr(generate_abac, "persist_access_tier_groups", refuse)
+    code, _ = _run_generate(monkeypatch, env_dir, "--groups", ",".join(TIERS), idp=TIERS)
+
+    assert code == 0
+    assert "--groups not saved: could not safely update access_tier_groups" in (
+        capsys.readouterr().out
+    )
+    assert (env_dir / "env.auto.tfvars").read_text() == before
 
 
 def test_dry_run_does_not_save_groups(tmp_path, monkeypatch, capsys):
@@ -248,6 +332,26 @@ def test_account_autoload_remains_the_fallback(mode_args, tmp_path, monkeypatch,
     assert code == 0
     assert preflighted == ["acct_a", "acct_b"]
     assert "(auto-loaded from account config)" in capsys.readouterr().out
+    assert _saved(env_dir) == []
+
+
+@pytest.mark.parametrize("mode", ["full", "governance"])
+def test_full_and_governance_never_auto_load_account_groups(mode, tmp_path, monkeypatch, capsys):
+    # The account config is these modes' own promoted output, not a declared
+    # tier order: refuse, and show it as a paste-ready setting instead.
+    env_dir = _dev_env(tmp_path)
+    code, preflighted = _run_generate(
+        monkeypatch, env_dir, *MODES[mode], account_groups=["acct_a", "acct_b"],
+        idp=["acct_a", "acct_b"],
+    )
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert preflighted is None
+    assert "consume-by-default requires a group->tier mapping" in out
+    assert f"{mode} mode does not auto-load them" in out
+    assert '    access_tier_groups = ["acct_a", "acct_b"]\n' in out
+    assert "Auto-loaded" not in out
     assert _saved(env_dir) == []
 
 
