@@ -304,14 +304,17 @@ rehearse: ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to
 # time and write the receipt from that snapshot only if the inputs are unchanged
 # after the governance apply; release refuses unless it is still current. All
 # three hold a per-env lock (envs/<env>/generated/.governance.lock) throughout.
-_RECEIPT = python3 "$(SHARED_ROOT)/scripts/certification_receipt.py"
+_RECEIPT = python3 "$(SHARED_ROOT)/scripts/certification_receipt.py" --account-dir "$(ACCOUNT_ENV_DIR)"
 _GUARD_WORKSPACE_ENV = if [ "$(ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
 		echo "This command is workspace-driven. Use ENV=<workspace> instead of ENV=$(ENV)." >&2; \
 		exit 1; \
 	fi
-# Lock owned by the recipe shell ($$); released on any exit.
-_ENV_LOCK = $(_RECEIPT) lock "$(ENV_DIR)" --pid $$$$ --owner $(1) --env "$(ENV)" || exit 1; \
-	trap '$(_RECEIPT) unlock "$(ENV_DIR)" --pid $$$$' EXIT
+# Lock owned by the recipe shell ($$). Cleanup traps are installed BEFORE the
+# lock is taken (unlock only removes a lock this shell owns), and HUP/INT/TERM
+# exit through the EXIT trap, so an interrupted run never strands the lock.
+_ENV_LOCK = trap '$(_RECEIPT) unlock "$(ENV_DIR)" --pid $$$$' EXIT; \
+	trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; \
+	$(_RECEIPT) lock "$(ENV_DIR)" --pid $$$$ --owner $(1) --env "$(ENV)" || exit 1
 
 certify: ## Certify coverage and deploy enforcement only; records the receipt make release requires
 	@$(_GUARD_WORKSPACE_ENV); \
@@ -334,12 +337,8 @@ release: ## Open business exposure after a current make certify: apply with the 
 		$(_RECEIPT) release-failed "$(ENV_DIR)" --env "$(ENV)" --reason "apply failed"; \
 		exit 1; \
 	fi; \
-	if ! $(_RECEIPT) check "$(ENV_DIR)" --env "$(ENV)" --prefix "release (post-apply)"; then \
-		$(_RECEIPT) release-failed "$(ENV_DIR)" --env "$(ENV)" --reason "certified inputs changed during the release apply; the gate was NOT persisted"; \
-		exit 1; \
-	fi; \
-	if ! $(_RECEIPT) open-gate "$(ENV_DIR)"; then \
-		$(_RECEIPT) release-failed "$(ENV_DIR)" --env "$(ENV)" --reason "could not persist business_access_enabled = true"; \
+	if ! $(_RECEIPT) open-gate "$(ENV_DIR)" --pid $$$$ --env "$(ENV)"; then \
+		$(_RECEIPT) release-failed "$(ENV_DIR)" --env "$(ENV)" --reason "certification no longer matches after the release apply, or business_access_enabled = true could not be persisted"; \
 		exit 1; \
 	fi; \
 	if ! $(MAKE) verify-access ENV="$(ENV)"$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \

@@ -3,10 +3,12 @@
 import json
 import os
 import shlex
+import signal
 import socket
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -65,7 +67,8 @@ def _env_dir(tmp_path, gate="false"):
 
 def _make(target, env_dir, stub, *extra):
     return subprocess.run(
-        ["make", target, "ENV=prod", f"ENV_DIR={env_dir}", f"MAKE={stub}", *extra],
+        ["make", target, "ENV=prod", f"ENV_DIR={env_dir}",
+         f"ACCOUNT_ENV_DIR={env_dir.parent / 'account'}", f"MAKE={stub}", *extra],
         cwd=CLOUD_ROOT,
         text=True,
         capture_output=True,
@@ -186,12 +189,10 @@ def test_receipt_records_git_commit_and_inputs(tmp_path):
     assert receipt["certified_by"] == "maintain"
     assert "git_commit" in receipt
     assert set(receipt["components"]) >= {
-        "generated/abac.auto.tfvars",
-        "generated/masking_functions.sql",
-        "ddl/_fetched.sql",
-        "data_access/discovered_uc_tables.auto.tfvars",
+        "env:generated/abac.auto.tfvars",
+        "env:generated/masking_functions.sql",
+        "env:env.auto.tfvars",
         "footprint",
-        "env.auto.tfvars",
         "repo:validate_abac.py",
     }
 
@@ -202,7 +203,7 @@ def test_receipt_records_git_commit_and_inputs(tmp_path):
         ("not json {", "malformed"),
         ("[1, 2]", "malformed"),
         ('{"version": 1, "fingerprint": "x", "components": {}}', "malformed"),
-        ('{"version": 2, "fingerprint": 5, "components": {}}', "malformed"),
+        ('{"version": 3, "fingerprint": 5, "components": {}}', "malformed"),
     ],
 )
 def test_malformed_receipt_is_rejected(tmp_path, content, expected):
@@ -393,9 +394,11 @@ def test_release_refuses_stale_receipt(tmp_path):
 
 def test_release_refuses_forged_receipt(tmp_path):
     env_dir = _env_dir(tmp_path)
-    _receipt(env_dir).write_text(json.dumps(
-        {"version": 2, "fingerprint": "0" * 64, "components": {}}
-    ))
+    _receipt(env_dir).write_text(json.dumps({
+        "version": cr.RECEIPT_VERSION, "env": "prod", "certified_by": "certify",
+        "gated_at": "2026-10-06T00:00:00+00:00", "certified_at": "2026-10-06T00:00:00+00:00",
+        "fingerprint": "0" * 64, "components": {},
+    }))
     stub, log = _stub(tmp_path)
     result = _make("release", env_dir, stub)
     assert result.returncode != 0
@@ -594,7 +597,7 @@ def test_apply_recipe_warns_on_uncertified_exposure(tmp_path):
         cwd=CLOUD_ROOT, text=True, capture_output=True, env=_clean_env(),
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count(f'certification_receipt.py" warn "{tmp_path}"') == 2
+    assert result.stdout.count(f'" warn "{tmp_path}" --env "prod"') == 2
 
 
 def test_generate_delta_help_is_marked_legacy():
@@ -603,3 +606,259 @@ def test_generate_delta_help_is_marked_legacy():
     )
     line = next(l for l in result.stdout.splitlines() if "generate-delta" in l)
     assert "[Legacy]" in line
+
+
+# ── follow-up review: input coverage ──────────────────────────────────────────
+
+
+def test_repo_inputs_follow_directory_symlinks_cycle_safely(tmp_path, monkeypatch):
+    repo = tmp_path / "shared"
+    real_overlays = tmp_path / "overlays-real"
+    (real_overlays / "anz").mkdir(parents=True)
+    (real_overlays / "anz" / "patterns.json").write_text('{"tfn": 1}\n')
+    repo.mkdir()
+    (repo / "validate_abac.py").write_text("# gate\n")
+    (repo / "countries").symlink_to(real_overlays, target_is_directory=True)
+    (real_overlays / "loop").symlink_to(real_overlays, target_is_directory=True)
+    monkeypatch.setattr(cr, "REPO_INPUT_ROOT", repo)
+
+    names = {p.relative_to(repo).as_posix() for p in cr.repo_input_files()}
+    assert "countries/anz/patterns.json" in names
+    assert not any("loop" in n for n in names)
+
+    env_dir = _env_dir(tmp_path)
+    cr.write_receipt(env_dir, "certify")
+    (real_overlays / "anz" / "patterns.json").write_text('{"tfn": 2}\n')
+    current, reason = cr.check_receipt(env_dir)
+    assert not current
+    assert "repo:countries/anz/patterns.json" in reason
+
+
+@pytest.mark.parametrize("rel", [
+    "extra.auto.tfvars",
+    "generated/spaces/finance.auto.tfvars",
+    "data_access/overrides.auto.tfvars.json",
+    "generated/space_config.yaml",
+    "override.tf",
+])
+def test_new_env_input_file_invalidates_receipt(tmp_path, rel):
+    env_dir = _env_dir(tmp_path)
+    cr.write_receipt(env_dir, "certify")
+    (env_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+    (env_dir / rel).write_text("x = 1\n")
+    current, reason = cr.check_receipt(env_dir)
+    assert not current
+    assert f"env:{rel}" in reason
+
+
+def test_account_layer_input_change_invalidates_receipt(tmp_path):
+    env_dir = _env_dir(tmp_path)
+    account = tmp_path / "account"
+    account.mkdir()
+    (account / "env.auto.tfvars").write_text("manage_groups = false\n")
+    cr.write_receipt(env_dir, "certify")
+    (account / "env.auto.tfvars").write_text("manage_groups = true\n")
+    current, reason = cr.check_receipt(env_dir)
+    assert not current
+    assert "account:env.auto.tfvars" in reason
+
+
+def test_volatile_and_derived_env_files_do_not_invalidate_receipt(tmp_path):
+    env_dir = _env_dir(tmp_path)
+    account = tmp_path / "account"
+    (env_dir / "data_access").mkdir()
+    account.mkdir()
+    cr.write_receipt(env_dir, "certify")
+
+    for path, text in {
+        env_dir / "terraform.tfstate": "{}",
+        env_dir / "terraform.tfstate.backup": "{}",
+        env_dir / "data_access" / "terraform.tfstate": "{}",
+        env_dir / ".terraform" / "providers.tf": "x",
+        env_dir / ".terraform.lock.hcl": "x",
+        env_dir / "data_access" / ".data_access.apply.sha": "x",
+        env_dir / "apply.log": "x",
+        env_dir / "generated" / "generated_response.md": "x",
+        # promote / _prepare-classification outputs, regenerated before every apply
+        env_dir / "abac.auto.tfvars": "x = 1",
+        env_dir / "data_access" / "abac.auto.tfvars": "x = 1",
+        env_dir / "data_access" / "masking_functions.sql": "-- x",
+        env_dir / "data_access" / "classification.auto.tfvars": "x = 1",
+        env_dir / "generated" / "genie_space_derived_acl_groups.auto.tfvars": "x = 1",
+        account / "abac.auto.tfvars": "x = 1",
+        account / "terraform.tfstate": "{}",
+    }.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    assert cr.check_receipt(env_dir)[0]
+
+
+def test_data_access_env_symlink_is_hashed_without_gate(tmp_path):
+    env_dir = _env_dir(tmp_path)
+    (env_dir / "data_access").mkdir()
+    (env_dir / "data_access" / "env.auto.tfvars").symlink_to("../env.auto.tfvars")
+    cr.write_receipt(env_dir, "certify")
+    cr.persist_gate_open(env_dir)
+    assert cr.check_receipt(env_dir)[0]
+    assert (env_dir / "data_access" / "env.auto.tfvars").is_symlink()
+
+
+def test_certify_tolerates_promote_rewriting_derived_files(tmp_path):
+    env_dir = _env_dir(tmp_path)
+    split = env_dir / "data_access" / "abac.auto.tfvars"
+    stub, _log = _stub(tmp_path, on={
+        "apply-governance": f"mkdir -p '{split.parent}'; echo 'x = 2' > '{split}'"
+    })
+    result = _make("certify", env_dir, stub)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert cr.check_receipt(env_dir)[0]
+
+
+# ── follow-up review: receipt metadata ────────────────────────────────────────
+
+
+@pytest.mark.parametrize("field, value, expected", [
+    ("env", "dev", "is for env 'dev', not 'prod'"),
+    ("certified_by", 7, "bad metadata"),
+    ("certified_by", "rehearse", "bad metadata"),
+    ("certified_at", "yesterday", "bad metadata"),
+    ("gated_at", None, "bad metadata"),
+])
+def test_receipt_metadata_is_validated(tmp_path, field, value, expected):
+    env_dir = _env_dir(tmp_path)
+    cr.write_receipt(env_dir, "certify")
+    receipt = json.loads(_receipt(env_dir).read_text())
+    receipt[field] = value
+    _receipt(env_dir).write_text(json.dumps(receipt))
+    current, reason = cr.check_receipt(env_dir, "prod")
+    assert not current
+    assert expected in reason
+
+
+# ── follow-up review: bound verify-then-write gate ────────────────────────────
+
+
+def test_open_gate_requires_lock_ownership(tmp_path):
+    env_dir = _env_dir(tmp_path)
+    cr.write_receipt(env_dir, "certify")
+    with pytest.raises(cr.ReceiptError, match="does not hold"):
+        cr.release_open_gate(env_dir, os.getpid(), "prod")
+    assert not cr.gate_open(env_dir)
+
+
+def test_open_gate_refuses_stale_receipt_without_writing(tmp_path):
+    env_dir = _env_dir(tmp_path)
+    cr.write_receipt(env_dir, "certify")
+    assert cr.acquire_lock(env_dir, os.getpid(), "release")[0]
+    (env_dir / "generated" / "abac.auto.tfvars").write_text("tag_assignments = [4]\n")
+    with pytest.raises(cr.ReceiptError, match="gate was NOT persisted"):
+        cr.release_open_gate(env_dir, os.getpid(), "prod")
+    assert not cr.gate_open(env_dir)
+
+
+def test_open_gate_reverifies_after_write(tmp_path, monkeypatch):
+    env_dir = _env_dir(tmp_path)
+    cr.write_receipt(env_dir, "certify")
+    assert cr.acquire_lock(env_dir, os.getpid(), "release")[0]
+    original = cr.persist_gate_open
+
+    def write_and_race(d):
+        original(d)
+        (d / "generated" / "abac.auto.tfvars").write_text("tag_assignments = [5]\n")
+
+    monkeypatch.setattr(cr, "persist_gate_open", write_and_race)
+    with pytest.raises(cr.ReceiptError, match="after persisting business_access_enabled"):
+        cr.release_open_gate(env_dir, os.getpid(), "prod")
+
+
+def test_open_gate_happy_path_under_lock(tmp_path):
+    env_dir = _env_dir(tmp_path)
+    cr.write_receipt(env_dir, "certify")
+    assert cr.acquire_lock(env_dir, os.getpid(), "release")[0]
+    cr.release_open_gate(env_dir, os.getpid(), "prod")
+    assert cr.gate_open(env_dir)
+    assert cr.check_receipt(env_dir)[0]
+
+
+# ── follow-up review: lock robustness ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("content", [
+    "",
+    "not json",
+    "[1]",
+    json.dumps({"host": socket.gethostname(), "owner": "certify"}),
+    json.dumps({"pid": "123", "host": socket.gethostname()}),
+    json.dumps({"pid": 123}),
+])
+def test_malformed_lock_is_treated_as_held(tmp_path, content):
+    env_dir = _env_dir(tmp_path)
+    cr.write_receipt(env_dir, "certify")
+    _lock(env_dir).write_text(content)
+    stub, log = _stub(tmp_path)
+    result = _make("release", env_dir, stub)
+    assert result.returncode != 0
+    assert _calls(log) == []
+    assert "cannot determine the owner" in result.stderr
+    assert str(_lock(env_dir)) in result.stderr
+    assert "delete" in result.stderr and "manually" in result.stderr
+    assert _lock(env_dir).read_text() == content
+
+
+def test_other_host_lock_is_held_even_with_dead_pid(tmp_path):
+    env_dir = _env_dir(tmp_path)
+    _lock(env_dir).write_text(json.dumps(
+        {"pid": _dead_pid(), "host": "some-other-host", "owner": "certify"}
+    ))
+    ok, message = cr.acquire_lock(env_dir, os.getpid(), "release")
+    assert not ok
+    assert "some-other-host" in message
+    assert _lock(env_dir).exists()
+
+
+def test_dry_run_creates_no_lock_or_env_dirs(tmp_path):
+    env_dir = tmp_path / "never"
+    for target in ("release", "maintain", "certify"):
+        result = subprocess.run(
+            ["make", "--dry-run", target, "ENV=prod", f"ENV_DIR={env_dir}",
+             f"ACCOUNT_ENV_DIR={tmp_path / 'account'}"],
+            cwd=CLOUD_ROOT, text=True, capture_output=True, env=_clean_env(),
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+    assert not env_dir.exists()
+
+
+_SLOW_STAGE = {"release": "apply", "certify": "derive-assignments", "maintain": "audit-schema"}
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
+@pytest.mark.parametrize("target", ["release", "certify", "maintain"])
+def test_signal_mid_run_releases_lock(tmp_path, target, sig):
+    env_dir = _env_dir(tmp_path)
+    cr.write_receipt(env_dir, "certify")
+    stub, log = _stub(tmp_path, on={_SLOW_STAGE[target]: "sleep 30"})
+    proc = subprocess.Popen(
+        ["make", target, "ENV=prod", f"ENV_DIR={env_dir}",
+         f"ACCOUNT_ENV_DIR={tmp_path / 'account'}", f"MAKE={stub}"],
+        cwd=CLOUD_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=_clean_env(), start_new_session=True,
+    )
+    try:
+        deadline = time.time() + 15
+        while not (log.exists() and _SLOW_STAGE[target] in log.read_text()):
+            assert time.time() < deadline, "slow stage never started"
+            assert proc.poll() is None, proc.communicate()
+            time.sleep(0.05)
+        assert _lock(env_dir).exists()
+        os.killpg(proc.pid, sig)
+        proc.communicate(timeout=15)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+    # The recipe shell's trap runs the unlock after make itself has gone.
+    deadline = time.time() + 10
+    while _lock(env_dir).exists() and time.time() < deadline:
+        time.sleep(0.05)
+    assert not _lock(env_dir).exists()
+    assert proc.returncode != 0
+    assert not cr.gate_open(env_dir)
