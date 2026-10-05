@@ -517,9 +517,24 @@ def bootstrap(
                 f"GRANTED workspace {workspace_id}: CREATE_CATALOG on metastore "
                 f"{metastore_id}"
             )
+        try:
+            endpoint = w.api_client.do(
+                "GET", f"/api/2.0/serving-endpoints/{cfg.model_endpoint}"
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"could not resolve serving endpoint {cfg.model_endpoint!r} in workspace "
+                f"{workspace_id} ({host}). Cause: {_error_details(exc)}"
+            ) from exc
+        endpoint_id = _value(endpoint, "id")
+        if not endpoint_id:
+            raise RuntimeError(
+                f"could not resolve serving endpoint {cfg.model_endpoint!r} in workspace "
+                f"{workspace_id} ({host}): the endpoint lookup returned no ID"
+            )
         w.api_client.do(
             "PATCH",
-            f"/api/2.0/permissions/serving-endpoints/{cfg.model_endpoint}",
+            f"/api/2.0/permissions/serving-endpoints/{endpoint_id}",
             body={"access_control_list": [{
                 "service_principal_name": client_id,
                 "permission_level": "CAN_QUERY",

@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 import requests
@@ -59,6 +59,7 @@ def _fake(*, existing=False, existing_secrets=True, roles=()):
         user_name="caller@example.com", display_name="Caller", groups=[]
     )
     workspace.grants.get_effective.return_value = SimpleNamespace(privilege_assignments=[])
+    workspace.api_client.do.return_value = {"id": "abcdef1234567890"}
     workspace_factory = MagicMock(return_value=workspace)
     return account, workspace, workspace_factory, lambda _cfg: (account, workspace_factory)
 
@@ -501,7 +502,8 @@ def test_plan_distinguishes_greenfield_and_brownfield_grants():
 
 def test_apply_uses_exact_scoped_grants():
     account, workspace, workspace_factory, factory = _fake()
-    assert bootstrap(_cfg(), client_factory=factory, emit=MagicMock()) == 0
+    output = []
+    assert bootstrap(_cfg(), client_factory=factory, emit=output.append) == 0
 
     account.service_principals.create.assert_called_once_with(display_name="deploy", active=True)
     account.service_principal_secrets.create.assert_called_once_with(service_principal_id=42)
@@ -536,13 +538,46 @@ def test_apply_uses_exact_scoped_grants():
         for call in workspace.grants.update.call_args_list
     )
 
-    workspace.api_client.do.assert_called_once_with(
-        "PATCH",
-        "/api/2.0/permissions/serving-endpoints/custom-model",
-        body={"access_control_list": [{
-            "service_principal_name": "client-123", "permission_level": "CAN_QUERY"
-        }]},
-    )
+    assert workspace.api_client.do.call_args_list == [
+        call(
+            "GET",
+            "/api/2.0/serving-endpoints/custom-model",
+        ),
+        call(
+            "PATCH",
+            "/api/2.0/permissions/serving-endpoints/abcdef1234567890",
+            body={"access_control_list": [{
+                "service_principal_name": "client-123", "permission_level": "CAN_QUERY"
+            }]},
+        ),
+    ]
+    assert "GRANTED workspace 123: CAN_QUERY on custom-model" in output
+
+
+@pytest.mark.parametrize(
+    ("lookup_result", "lookup_error", "expected"),
+    [
+        (None, NotFound("endpoint missing"), r"Cause: NotFound: endpoint missing"),
+        ({}, None, r"endpoint lookup returned no ID"),
+    ],
+)
+def test_serving_endpoint_lookup_failure_is_actionable(
+    lookup_result, lookup_error, expected
+):
+    _account, workspace, _workspace_factory, factory = _fake()
+    if lookup_error:
+        workspace.api_client.do.side_effect = lookup_error
+    else:
+        workspace.api_client.do.return_value = lookup_result
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            r"could not resolve serving endpoint 'custom-model' in workspace 123 "
+            r"\(https://dbc.example.com\).*" + expected
+        ),
+    ):
+        bootstrap(_cfg(), client_factory=factory, emit=MagicMock())
 
 
 def test_apply_grants_exact_account_tag_policy_roles():
@@ -595,7 +630,7 @@ def test_target_catalog_grants_brownfield_privileges():
         "USE_CATALOG + USE_SCHEMA + MANAGE + APPLY_TAG on catalog existing_catalog" in line
         for line in output
     )
-    workspace.api_client.do.assert_called_once()
+    assert workspace.api_client.do.call_count == 2
 
 
 def test_target_catalog_preflight_fails_before_sp_or_secret_creation():
