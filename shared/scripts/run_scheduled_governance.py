@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
-"""Scheduled steady-state governance wrapper.
+"""Scheduled governance wrapper.
 
-This is glue only — it invokes the EXISTING steady-state entrypoints from the
-target environment directory, exactly as the `make` targets do. It contains no
-classification / re-derive logic of its own:
+The default native-first flow delegates to ``make maintain ENV=<env>``. That
+keeps the scheduled job on the exact same ordered implementation, per-env lock,
+failure hints, governance-only apply, and certification-receipt lifecycle as
+the dev-to-prod walkthrough.
+
+The legacy flow remains available as ``--step all`` (or its individual steps):
 
   audit    -> scripts/audit_schema_drift.py            (== make audit-schema)
   delta    -> generate_abac.py --delta --auth-file ...  (== make generate-delta)
   coverage -> validate_abac.py <config the delta wrote> (== make validate-generated / validate)
 
-The steady-state scripts resolve config via relative paths from the environment
+The legacy scripts resolve config via relative paths from the environment
 directory (envs/<env>/), so this wrapper `chdir`s there once and shells out to
 them using the same interpreter. Running all three steps in a SINGLE process
-(``--step all``, the default) is what lets ``coverage`` see the file
+(``--step all``) is what lets ``coverage`` see the file
 ``delta`` just regenerated — they share one working tree.
 
-It is meant to be driven by the scheduled Databricks Job defined in
-roots/workspace/scheduled_governance.tf as a single ``--step all`` task, but the
-per-step modes also run standalone for local testing.
+The scheduled Databricks Job defined in roots/workspace/scheduled_governance.tf
+uses the default ``--step maintain`` mode. The legacy per-step modes remain
+available for existing callers.
 
 Exit codes:
+  - maintain returns the exact exit code from ``make maintain``; its output,
+    including native-classification remediation hints, is inherited unchanged.
   - A drift-only run (audit found drift, delta re-derived it, coverage passed)
     still returns non-zero: the last non-zero step code is remembered, so the
     scheduled run goes red and notifies the team to review + apply the delta.
@@ -38,7 +43,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 SHARED_ROOT = SCRIPTS_DIR.parent
 REPO_ROOT = SHARED_ROOT.parent
 
-STEPS = ("audit", "delta", "coverage")
+LEGACY_STEPS = ("audit", "delta", "coverage")
 
 
 def _resolve_env_dir(env_dir_arg: str) -> Path:
@@ -74,6 +79,12 @@ def _materialize_env_dir(config_source: str, env_dir: Path) -> None:
 def _run(cmd: list[str], cwd: Path) -> int:
     print(f"+ (cd {cwd} && {' '.join(cmd)})", flush=True)
     return subprocess.run(cmd, cwd=str(cwd)).returncode
+
+
+def _maintain(env_dir: Path) -> int:
+    """Run the canonical native-first flow from its cloud make root."""
+    cloud_root = env_dir.parent.parent
+    return _run(["make", "maintain", f"ENV={env_dir.name}"], cwd=cloud_root)
 
 
 def _audit(env_dir: Path) -> int:
@@ -128,9 +139,10 @@ def main() -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--env-dir", required=True,
                         help="Target environment directory (absolute, or repo-relative like 'aws/envs/prod').")
-    parser.add_argument("--step", choices=(*STEPS, "all"), default="all",
-                        help="Which steady-state step to run. Default 'all' runs audit -> delta -> coverage "
-                             "in ONE process so coverage sees the config delta just wrote.")
+    parser.add_argument("--step", choices=("maintain", *LEGACY_STEPS, "all"),
+                        default="maintain",
+                        help="Flow to run. Default 'maintain' delegates to make maintain (native-first). "
+                             "'all' is the legacy audit -> delta -> coverage flow.")
     parser.add_argument("--auth-file", default="auth.auto.tfvars",
                         help="Auth tfvars filename passed to generate_abac.py --delta (default: auth.auto.tfvars).")
     parser.add_argument("--catalog", default="",
@@ -158,7 +170,13 @@ def main() -> int:
               f"       the env config at runtime.", file=sys.stderr)
         return 2
 
-    steps = STEPS if args.step == "all" else (args.step,)
+    if args.step == "maintain":
+        print("=" * 60)
+        print(f"  Scheduled governance: native-first maintain  (env: {env_dir.name})")
+        print("=" * 60)
+        return _maintain(env_dir)
+
+    steps = LEGACY_STEPS if args.step == "all" else (args.step,)
     rc = 0
     for step in steps:
         print("=" * 60)

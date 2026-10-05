@@ -158,6 +158,28 @@ def test_delta_threads_catalog_when_set(tmp_path, monkeypatch):
     assert cmd[cmd.index("--catalog") + 1] == "prod_fin"
 
 
+def test_maintain_invokes_make_from_cloud_root_with_env(tmp_path, monkeypatch):
+    env_dir = tmp_path / "aws" / "envs" / "prod"
+    env_dir.mkdir(parents=True)
+    calls = {}
+    monkeypatch.setattr(rsg, "_run", lambda cmd, cwd: calls.update(cmd=cmd, cwd=cwd) or 0)
+    assert rsg._maintain(env_dir) == 0
+    assert calls == {"cmd": ["make", "maintain", "ENV=prod"], "cwd": tmp_path / "aws"}
+
+
+def test_default_step_is_maintain_and_propagates_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(rsg, "_maintain", lambda env_dir: 7)
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-dir", str(tmp_path)])
+    assert rsg.main() == 7
+
+
+def test_shipped_job_selects_maintain_not_legacy_all():
+    job = (REPO_ROOT / "shared" / "roots" / "workspace" /
+           "scheduled_governance.tf").read_text()
+    assert '["--env-dir", local.scheduled_governance_env_dir, "--step", "maintain"]' in job
+    assert '"--step", "all"' not in job
+
+
 def test_coverage_includes_masking_sql_when_present(tmp_path, monkeypatch):
     gen = tmp_path / "generated"
     gen.mkdir()
