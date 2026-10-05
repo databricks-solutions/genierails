@@ -95,11 +95,13 @@ DERIVED_ACCOUNT_FILES = {"abac.auto.tfvars"}
 # Set from --account-dir (the Makefile's ACCOUNT_ENV_DIR); default envs/account.
 ACCOUNT_DIR: Path | None = None
 
-# Repo inputs: everything under shared/ except docs, tests, examples and
-# non-executable text. Over-inclusion only costs a re-certify.
+# Repo inputs: everything under shared/ except docs, tests, examples,
+# non-executable text and run logs. Over-inclusion only costs a re-certify,
+# but logs (e.g. run_parallel_tests.py's scripts/logs/) are written while a
+# certify -> release is in flight and would make release refuse spuriously.
 REPO_INPUT_ROOT = SHARED_ROOT
-REPO_EXCLUDED_DIRS = {"tests", "docs", "examples", "__pycache__"}
-REPO_EXCLUDED_SUFFIXES = {".md", ".example", ".pyc"}
+REPO_EXCLUDED_DIRS = {"tests", "docs", "examples", "logs", "__pycache__"}
+REPO_EXCLUDED_SUFFIXES = {".md", ".example", ".pyc", ".log"}
 
 
 class ReceiptError(Exception):
