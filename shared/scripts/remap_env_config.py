@@ -72,6 +72,20 @@ def _discover_from_genie_api(space_id: str, auth_cfg: dict) -> tuple[str, list[s
     return title, tables
 
 
+def _promoted_access_tier_groups(cfg: dict, source_env_dir: str) -> list[str]:
+    """Carry the source's access_tier_groups so prod consumes the same tiers."""
+    shared_root = str(Path(__file__).resolve().parent.parent)
+    if shared_root not in sys.path:
+        sys.path.insert(0, shared_root)
+    from access_tier_groups import promoted_lines
+
+    try:
+        return promoted_lines(cfg, Path(source_env_dir) / "env.auto.tfvars")
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+
 def main():
     if len(sys.argv) < 4:
         print(f"Usage: {sys.argv[0]} <source_env_dir> <dest_env_dir> <catalog_map>")
@@ -198,6 +212,7 @@ def main():
     lines.append("enable_classification = true")
     lines.append("enable_auto_tagging = false")
     lines.append("business_access_enabled = false")
+    lines.extend(_promoted_access_tier_groups(cfg, source_env_dir))
 
     # Write
     os.makedirs(dest_env_dir, exist_ok=True)

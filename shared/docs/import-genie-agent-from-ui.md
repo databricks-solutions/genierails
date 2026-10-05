@@ -39,12 +39,18 @@ genie_spaces = [
 <details>
 <summary><strong>Step 2 — Import configuration and discover tables</strong></summary>
 
-Run Genie-only generation once to import the supported agent configuration and discover its tables. Supply your existing access-tier groups, most-privileged first:
+Run Genie-only generation once to import the supported agent configuration and discover its tables. It needs your existing access-tier groups, most-privileged first — set them once in the same file:
+
+```hcl
+# envs/dev/env.auto.tfvars
+access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
+```
 
 ```bash
-make generate ENV=dev MODE=genie \
-  GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'
+make generate ENV=dev MODE=genie
 ```
+
+Every mode of `make generate` (full, `MODE=genie`, `MODE=governance`, `SPACE=...`) reads `access_tier_groups`. Alternatively leave it unset and pass `GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'` once; the first explicit `--groups` is saved to `access_tier_groups`. A later `--groups` that differs is used for that run only, with a warning — it never rewrites the saved order.
 
 `MODE=genie` deliberately skips governance generation at this stage, so native
 classification does not need to have finished yet. Phase 1 later runs normal

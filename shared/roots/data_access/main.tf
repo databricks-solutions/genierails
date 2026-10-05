@@ -188,6 +188,12 @@ variable "classification_all_schemas" {
   description = "Catalog classification configs whose remote included_schemas is unset (all schemas)."
 }
 
+variable "access_tier_groups" {
+  type        = list(string)
+  default     = []
+  description = "Generate-time input only (read by make generate, carried by make promote): existing IdP-synced access-tier groups, most to least privileged. Declared so env.auto.tfvars loads cleanly; no resource reads it."
+}
+
 variable "manage_groups" {
   type    = bool
   default = false
