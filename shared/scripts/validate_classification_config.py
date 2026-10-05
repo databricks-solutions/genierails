@@ -6,11 +6,19 @@ from pathlib import Path
 
 import hcl2
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from genie_space_placeholder import placeholder_error  # noqa: E402
+
 
 def main() -> int:
     path = Path(sys.argv[1])
     with path.open() as handle:
         config = hcl2.load(handle)
+
+    placeholder = placeholder_error(config, path)
+    if placeholder:
+        print(f"ERROR: {placeholder}", file=sys.stderr)
+        return 1
 
     if config.get("enable_classification") is not True:
         print(f"ERROR: set enable_classification = true in {path}", file=sys.stderr)

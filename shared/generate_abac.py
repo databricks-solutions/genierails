@@ -51,6 +51,7 @@ import time
 from pathlib import Path
 
 from tag_vocabulary import REGISTRY
+from genie_space_placeholder import placeholder_error
 from sensitivity_source import (
     ClassificationSource,
     Finding,
@@ -330,6 +331,9 @@ def load_auth_config(
     if env_file is None:
         env_file = auth_file.parent / "env.auto.tfvars"
     env_cfg = _load_tfvars(env_file, "environment", strict=strict_env)
+    placeholder = placeholder_error(env_cfg, env_file)
+    if placeholder:
+        raise ValueError(placeholder)
     cfg.update(env_cfg)
 
     # Combine uc_catalog + relative uc_tables into full 3-part refs when the new

@@ -23,7 +23,7 @@ Finally, gather the inputs specific to this walkthrough:
 |---|---|
 | **Dev / prod catalog names** | Your Unity Catalog catalogs, e.g. `dev_finance` / `prod_finance`. |
 | **SQL warehouse id** (per Genie agent) | The serverless warehouse the Genie agent runs its SQL on — an existing warehouse's id, **or leave blank** to auto-create one. Set it on the agent's `genie_spaces` entry; agents can also share the environment-level warehouse as a fallback. |
-| **Curated Genie agent** | The agent you're shipping. In the Genie UI, open the agent, click **Configure**, and copy the **Agent ID** from **About this agent**. It is also in the URL (`.../genie/rooms/01ef7b3c2a4d5e6f`) and goes in `genie_spaces`. |
+| **Curated Genie agent** | The agent you're shipping. In the Genie UI, open the agent, click **Configure**, and copy the **Agent ID** from **About this agent**. It is also in the URL (`.../genie/rooms/01ef7b3c2a4d5e6f`) and goes in `genie_spaces`; its tables are discovered automatically. |
 | **Access-tier group names** | Choose the IdP-synced groups from the shared prerequisite check, ordered most- to least-privileged. Example: `payments_ops` = full/raw; `regional_analysts` = region-scoped + masked; `viewers` = least-privileged + all sensitive columns masked. The generated policies define the actual access, and each agent's tables are `SELECT`-granted only to the tiers authorized to run that agent (a table shared by several agents gets the union). |
 | **Row-pairing key** (`VERIFY_KEY_COLUMN`) | A stable, **non-sensitive** id column present on your masked tables (e.g. `customer_id`) — `verify-access` uses it to line up rows. [Details](../../docs/effective-access-verification.md). |
 
@@ -35,7 +35,7 @@ Finally, gather the inputs specific to this walkthrough:
 <details>
 <summary><strong>Phase 0 — Dev: Set up</strong></summary>
 
-**Goal —** create the local config folders, fill in credentials, and point dev at the Genie agent and tables you're shipping.
+**Goal —** create the local config folders, fill in credentials, and point dev at the Genie agent you're shipping.
 
 **1. Create the dev config** — from the `genierails/aws` (or `genierails/azure`) folder you cloned in **Before you start**:
 
@@ -46,12 +46,15 @@ cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfva
 
 **2. Fill in credentials** — edit **`envs/dev/auth.auto.tfvars`**: the deploying SP `client_id` / `client_secret` + workspace host & id. Step 3 calls Databricks with these.
 
-**3. Point dev at your agent and tables — choose one path.** Both edit `envs/dev/env.auto.tfvars`; keep the template's safety defaults unchanged.
+**3. Set your Genie agent ID and import it.** In `envs/dev/env.auto.tfvars`, replace `<your-genie-space-id>` with your **Agent ID** (keep the template's safety defaults), then [import the agent](../../docs/import-genie-agent-from-ui.md):
 
-- **Existing Genie agent** — follow [Import a Genie Agent from UI into Code](../../docs/import-genie-agent-from-ui.md) Steps 1–2: add the agent's `genie_space_id` to `genie_spaces`, then run `make generate ENV=dev MODE=genie` to import it. Its tables are discovered into `envs/dev/data_access/discovered_uc_tables.auto.tfvars` automatically, so you **don't** need to list them in `uc_tables`. Set `sql_warehouse_id` (or leave it blank to auto-create).
-- **No agent or tables yet** — run the optional [Sample Environment Setup](SAMPLE_ENV.md). It creates sample tables and an agent, then prints the `uc_tables`, `genie_spaces`, and `sql_warehouse_id` snippet to paste into `envs/dev/env.auto.tfvars`.
+```bash
+make generate ENV=dev MODE=genie GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'
+```
 
-**Done when —** `envs/dev/auth.auto.tfvars` is filled in and `envs/dev/env.auto.tfvars` has your `genie_spaces` entry — plus either a discovered table list (import path) or the pasted `uc_tables` (sample path).
+The import discovers the agent's tables into `envs/dev/data_access/discovered_uc_tables.auto.tfvars` — no `uc_tables` needed. *No agent yet?* Use the [Sample Environment Setup](SAMPLE_ENV.md).
+
+**Done when —** `envs/dev/auth.auto.tfvars` is filled in, `genie_space_id` is set, and `discovered_uc_tables.auto.tfvars` lists the agent's tables.
 
 </details>
 
