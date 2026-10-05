@@ -76,9 +76,9 @@ def test_rehearse_rejects_prod_before_any_recursive_make_call(tmp_path):
     assert not log.exists()
     output = result.stdout + result.stderr
     assert "rehearse: ENV=prod is not allowed" in output
-    assert "use make certify" in output
-    assert "business_access_enabled=true" in output
-    assert "Phase 5" in output
+    assert "make certify ENV=prod" in output
+    assert "make release ENV=prod" in output
+    assert "business_access_enabled" not in output
 
 
 def test_rehearse_with_key_opens_exposure_gate_for_its_apply_only(tmp_path):
