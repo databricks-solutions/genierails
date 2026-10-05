@@ -265,7 +265,7 @@ ENVS_DIR="$PWD/envs" ../shared/scripts/terraform_layer.sh workspace prod output 
 <details>
 <summary><strong>Phase 6 — Prod: Maintain coverage</strong></summary>
 
-**Goal —** catch sensitive data that arrives after go-live. Run this on a schedule (the repo ships a scheduled governance job):
+**Goal —** catch sensitive data that arrives after go-live. Run this on a schedule (cron or CI):
 
 ```bash
 make maintain ENV=prod   # audit-schema → derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook
