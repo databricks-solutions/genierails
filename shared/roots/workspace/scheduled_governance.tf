@@ -1,11 +1,10 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Scheduled steady-state governance job (roadmap: scheduled prod re-scan)
 # ─────────────────────────────────────────────────────────────────────────────
-# Opt-in Databricks Job that delegates to `make maintain ENV=<env>` on a cron.
-# This is the native-first dev-to-prod steady state, including its per-env lock,
-# gates, governance-only apply, audit, and certification receipt renewal. The
-# wrapper retains the old audit -> generate-delta -> coverage flow as an
-# explicitly selected legacy mode, but the shipped job does not use it.
+# Opt-in Databricks Job that runs read-only native-first schema and rulebook
+# audits on a cron. It never invokes make or Terraform and never writes to the
+# workspace. The old audit -> generate-delta -> coverage flow remains available
+# only through the explicit legacy mode.
 #
 # The job is DISABLED by default (enable_scheduled_governance = false) so adding
 # this file changes nothing about `terraform apply` for existing environments.
@@ -21,7 +20,18 @@
 variable "enable_scheduled_governance" {
   type        = bool
   default     = false
-  description = "Opt-in: when true, create a scheduled Databricks Job that runs the native-first make maintain flow on a cron. Default false keeps existing apply behavior unchanged."
+  description = "Opt-in: when true, create a scheduled Databricks Job that runs read-only native-first governance checks on a cron. Default false keeps existing apply behavior unchanged."
+}
+
+variable "scheduled_governance_mode" {
+  type        = string
+  default     = "check"
+  description = "Scheduled flow: check runs read-only schema/rulebook audits; legacy runs audit -> generate-delta -> coverage and may rewrite checkout files."
+
+  validation {
+    condition     = contains(["check", "legacy"], var.scheduled_governance_mode)
+    error_message = "scheduled_governance_mode must be \"check\" or \"legacy\"."
+  }
 }
 
 variable "scheduled_governance_env" {
@@ -44,13 +54,13 @@ variable "scheduled_governance_cloud" {
 variable "scheduled_governance_catalog" {
   type        = string
   default     = ""
-  description = "Legacy-only: optional catalog threaded to generate-delta when the wrapper is run with --step all. The shipped native-first job ignores it."
+  description = "Legacy-only: optional catalog threaded to generate-delta. Ignored in the default check mode."
 }
 
 variable "scheduled_governance_config_source" {
   type        = string
   default     = ""
-  description = "Runtime-visible path the job copies the env config from before scanning (a Unity Catalog Volume like /Volumes/<cat>/<schema>/<vol>/prod, workspace files, or a DBFS mount). Required when enabled: the repo's envs/ is .gitignore'd, so the Git checkout does NOT contain envs/<env>/. The source must hold that env's auth.auto.tfvars, env.auto.tfvars, data_access/ and (optionally) generated/."
+  description = "Runtime-visible envs root copied before scanning (for example /Volumes/<cat>/<schema>/<vol>/envs). The default check requires account/ and <env>/ beneath it; explicit legacy mode also accepts the old flat target-env source. Required when enabled because envs/ is gitignored."
 
   validation {
     condition     = !var.enable_scheduled_governance || var.scheduled_governance_config_source != ""
@@ -107,13 +117,13 @@ variable "scheduled_governance_dependencies" {
     "pyyaml",
     "requests",
   ]
-  description = "PyPI packages installed into the serverless environment so the native-first maintain steps can read config and query the workspace."
+  description = "PyPI packages installed into the serverless environment so the read-only checks can read config and query the workspace."
 }
 
 variable "scheduled_governance_notification_emails" {
   type        = list(string)
   default     = []
-  description = "Email addresses notified when the scheduled governance job fails (e.g. drift detected but delta could not resolve it). Empty = no email notifications."
+  description = "Email addresses notified when the job fails. Notifications link to the run output containing finding details. Empty = no email notifications."
 }
 
 variable "scheduled_governance_job_name" {
@@ -168,8 +178,8 @@ resource "databricks_job" "scheduled_governance" {
     }
   }
 
-  # One task delegates to make maintain. Its exit code and native-classification
-  # remediation hint pass through to the job output and failure notifications.
+  # The default check mode is serverless-safe and read-only. Legacy mode is
+  # retained for explicit compatibility and may rewrite files in its checkout.
   task {
     task_key        = "steady_state_governance"
     environment_key = "governance"
@@ -178,7 +188,8 @@ resource "databricks_job" "scheduled_governance" {
       python_file = "shared/scripts/run_scheduled_governance.py"
       source      = "GIT"
       parameters = concat(
-        ["--env-dir", local.scheduled_governance_env_dir, "--step", "maintain"],
+        ["--env-dir", local.scheduled_governance_env_dir, "--step", var.scheduled_governance_mode == "check" ? "check" : "all"],
+        var.scheduled_governance_catalog != "" ? ["--catalog", var.scheduled_governance_catalog] : [],
         var.scheduled_governance_config_source != "" ? ["--config-source", var.scheduled_governance_config_source] : [],
       )
     }

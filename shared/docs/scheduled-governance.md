@@ -1,48 +1,47 @@
-# Scheduled Steady-State Governance
+# Scheduled Governance Checks
 
-The opt-in scheduled job runs the native-first dev-to-prod steady state:
+The opt-in scheduled job is read-only by default. On serverless compute it runs
+the schema-drift audit (untagged sensitive-looking columns and stale
+assignments) and the rulebook audit (live production tags with no covering
+policy or mask):
 
 ```bash
 python shared/scripts/run_scheduled_governance.py \
-  --env-dir aws/envs/prod --step maintain \
-  --config-source /Volumes/main/governance/genierails/prod
+  --env-dir aws/envs/prod --step check \
+  --config-source /Volumes/main/governance/genierails/envs
 ```
 
-`maintain` is the wrapper's default and delegates directly to
-`make maintain ENV=prod`. It therefore uses the same per-environment lock and
-the same ordered flow: audit schema, derive assignments from native `class.*`
-tags, run the coverage gate, validate generated configuration, apply governance,
-audit the rulebook, and renew the certification receipt. It never changes
-`business_access_enabled` or applies Genie. A non-zero make exit fails the job
-and preserves maintain's remediation hint in the job output and failure
-notification context.
+The job does not run make, Terraform, derivation, or apply, and it does not
+write to the workspace. Existing serverless dependencies are sufficient. The
+config source is required because `envs/` is gitignored; it must be a
+runtime-visible envs root containing both `account/` and the target environment
+(for example `prod/`). This gives the rulebook audit the promoted account
+policies without relying on local Terraform state.
 
-## Enable the job
+On findings, the run fails and its output explains what was found. Open the run
+from the failure notification, then run this from the authoritative GenieRails
+checkout:
 
-The job in `roots/workspace/scheduled_governance.tf` is disabled by default.
-Set these workspace-layer variables and run `make apply ENV=prod`:
-
-```hcl
-enable_scheduled_governance = true
-scheduled_governance_env = "prod"
-scheduled_governance_cloud = "aws" # or "azure"
-scheduled_governance_git_url = "https://github.com/<org>/<repo>"
-scheduled_governance_config_source = "/Volumes/main/governance/genierails/prod"
-scheduled_governance_notification_emails = ["governance-team@example.com"]
+```bash
+make maintain ENV=prod
 ```
 
-The config source is required because `envs/` is gitignored. It must contain
-the target environment's configuration and be visible to the job runtime. The
-wrapper copies it into the Git checkout before invoking make. The service
-principal needs the same workspace, warehouse, and governance privileges as a
-manual `make maintain` run. Schedule, timezone, Git branch/provider, serverless
-dependencies, notifications, and job name remain configurable through the
-existing `scheduled_governance_*` variables.
+Enable the job with `enable_scheduled_governance = true`, its Git URL and config
+source, then `make apply ENV=prod`. Schedule, timezone, Git branch/provider,
+dependencies, notifications, and job name use the existing
+`scheduled_governance_*` variables.
 
 ## Legacy mode
 
-Existing callers can explicitly use `--step all` for the legacy
-`audit -> generate-delta -> coverage` flow, or select `audit`, `delta`, or
-`coverage` individually. This model-based `[Legacy]` path remains unchanged;
-`--auth-file` and `--catalog` apply only to its delta step. The shipped job uses
-`--step maintain`.
+Set `scheduled_governance_mode = "legacy"` to retain the explicit legacy
+`audit -> generate-delta -> coverage` flow. Its model-based delta step may
+rewrite files in the ephemeral checkout but never applies them. The runner also
+retains `--step all|audit|delta|coverage` for existing callers;
+`--auth-file` and `--catalog` are legacy-only.
+
+## Upgrading
+
+The mode defaults to `"check"`. Existing jobs therefore become less mutating:
+they stop running legacy `generate-delta` and perform only the two read-only
+audits. Set the legacy mode explicitly only if that old checkout-local rewrite
+is still required.
