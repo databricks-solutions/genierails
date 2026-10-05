@@ -18,7 +18,7 @@ Import an existing Databricks Genie agent's supported configuration and table fo
 <details>
 <summary><strong>Step 1 — Add the Agent ID to dev configuration</strong></summary>
 
-Add the agent ID to the development environment:
+Add the agent ID to the development environment (if you started from the walkthrough template, replace its `<your-genie-space-id>` placeholder):
 
 ```hcl
 # envs/dev/env.auto.tfvars

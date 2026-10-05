@@ -291,7 +291,7 @@ def setup(args: argparse.Namespace, client: Any) -> None:
         print(f"      Reusing tracked Genie agent {space_id} without re-importing its node graph.")
         state["warehouse_id"] = args.warehouse_id
         _save_states(states)
-    print("[4/4] Complete. Paste this exact snippet into env.auto.tfvars:\n")
+    print("[4/4] Complete. In envs/dev/env.auto.tfvars, REPLACE the genie_spaces and sql_warehouse_id lines with this snippet:\n")
     print(_tfvars(space_id, tables, args.warehouse_id))
     print(f"\nGenie agent ID: {space_id}\nOwnership state: {STATE_FILE}")
 

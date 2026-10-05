@@ -157,6 +157,7 @@ _guard-workspace-config:
 	@cd "$(ENV_DIR)" && if [ -f env.auto.tfvars ]; then \
 		python3 -c 'import sys,hcl2; cfg=hcl2.load(open("env.auto.tfvars")); ok = cfg.get("manage_groups", False) is False; ok or print("Workspace env.auto.tfvars must not set manage_groups = true. Manage groups in envs/account instead."); sys.exit(0 if ok else 1)'; \
 	fi
+	@python3 "$(SHARED_ROOT)/genie_space_placeholder.py" "$(ENV_DIR)/env.auto.tfvars"
 	@cd "$(ENV_DIR)" && if [ -f abac.auto.tfvars ]; then \
 		python3 -c 'import sys,hcl2; cfg=hcl2.load(open("abac.auto.tfvars")); bad=[name for name in ("group_members","tag_policies","tag_assignments","fgac_policies") if cfg.get(name)]; bad and (print("Workspace config still contains shared sections: " + ", ".join(bad)), print("Re-run '\''make promote$(if $(filter $(ENV),$(DEFAULT_ENV)),, ENV=$(ENV))'\'' to resplit the generated config."), sys.exit(1))'; \
 	fi
@@ -202,11 +203,9 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "  1. Start from the walkthrough template (first time only; keep its safety defaults):"; \
 		echo "       cp ../shared/examples/dev_to_prod/env.auto.tfvars.example $(_SETUP_ENV_REL)/env.auto.tfvars"; \
 		echo "  2. Edit $(_SETUP_ENV_REL)/auth.auto.tfvars — deploying SP client_id / client_secret + workspace host & id"; \
-		echo "  3. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — point it at your agent and tables (pick one):"; \
-		echo "       existing agent: add genie_space_id to genie_spaces, then run:"; \
-		echo "         make generate ENV=$(ENV) MODE=genie GENERATE_ARGS='--groups \"<most_privileged>,...,<least_privileged>\"'"; \
-		echo "         (tables auto-discovered; uc_tables not needed. sql_warehouse_id: your warehouse id, or \"\" to auto-create)"; \
-		echo "       no agent yet: run the sample env setup (../shared/examples/dev_to_prod/SAMPLE_ENV.md) and paste its snippet"; \
+		echo "  3. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — set genie_space_id to your Genie agent ID, then run:"; \
+		echo "       make generate ENV=$(ENV) MODE=genie GENERATE_ARGS='--groups \"<most_privileged>,...,<least_privileged>\"'"; \
+		echo "       (No agent yet? See ../shared/examples/dev_to_prod/SAMPLE_ENV.md)"; \
 		echo "  4. Enable classification on your catalog (Databricks UI, or: make enable-classification ENV=$(ENV)),"; \
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
 		echo "  5. Run: make generate ENV=$(ENV) GENERATE_ARGS='--groups \"<most_privileged>,...,<least_privileged>\"'"; \
