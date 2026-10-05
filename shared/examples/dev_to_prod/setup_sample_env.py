@@ -14,9 +14,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 try:
-    from databricks.sdk import WorkspaceClient
+    from databricks.sdk import AccountClient, WorkspaceClient
 except ImportError:  # Keep --help useful before dependencies are installed.
-    WorkspaceClient = None  # type: ignore[assignment,misc]
+    AccountClient = WorkspaceClient = None  # type: ignore[assignment,misc]
 
 DEFAULT_SCHEMA, DEFAULT_ROWS = "dev_to_prod_demo", 200
 STATE_FILE = Path(__file__).with_name(".dev_to_prod_sample_env.json")
@@ -28,6 +28,8 @@ TABLES = {
     "payments": "payment_id STRING, customer_id STRING, credit_card_number STRING, cvv STRING, amount DECIMAL(12,2), cardholder_name STRING",
     "notes": "note_id STRING, customer_id STRING, free_text STRING",
 }
+# Demo access tiers for --create-groups, most to least privileged.
+SAMPLE_GROUPS = ("dev_to_prod_payments_ops", "dev_to_prod_regional_analysts", "dev_to_prod_viewers")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -38,6 +40,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--schema", default=os.getenv("DEV_TO_PROD_SCHEMA", DEFAULT_SCHEMA), help=f"Sample schema (default: {DEFAULT_SCHEMA}; env: DEV_TO_PROD_SCHEMA).")
     p.add_argument("--warehouse-id", default=os.getenv("DATABRICKS_WAREHOUSE_ID"), help="Existing SQL warehouse ID (required; env: DATABRICKS_WAREHOUSE_ID).")
     p.add_argument("--rows", default=os.getenv("DEV_TO_PROD_ROWS", str(DEFAULT_ROWS)), help=f"Rows per table (default: {DEFAULT_ROWS}; env: DEV_TO_PROD_ROWS).")
+    p.add_argument("--create-groups", action="store_true", help=f"Also create the demo access-tier account groups ({', '.join(SAMPLE_GROUPS)}) for an account with no IdP-synced groups; requires --account-id.")
+    p.add_argument("--account-id", default=os.getenv("DATABRICKS_ACCOUNT_ID"), help="Databricks account ID, used only by --create-groups (env: DATABRICKS_ACCOUNT_ID).")
+    p.add_argument("--account-profile", default=os.getenv("DATABRICKS_ACCOUNT_PROFILE"), help="Account-level CLI profile for --create-groups; default: environment credentials (env: DATABRICKS_ACCOUNT_PROFILE).")
     p.add_argument("--teardown", action="store_true", help="Remove only resources recorded as created by this script.")
     return p
 
@@ -70,6 +75,42 @@ def _client(args: argparse.Namespace) -> Any:
     if args.host:
         kwargs["host"] = args.host
     return WorkspaceClient(**kwargs)
+
+
+def _account_host(workspace_host: str) -> str:
+    host = workspace_host.lower()
+    if "azuredatabricks.net" in host:
+        return "https://accounts.azuredatabricks.net"
+    if "gcp.databricks.com" in host:
+        return "https://accounts.gcp.databricks.com"
+    return "https://accounts.cloud.databricks.com"
+
+
+def _account_client(args: argparse.Namespace, client: Any) -> Any:
+    if AccountClient is None:
+        raise RuntimeError("databricks-sdk is not installed; run: pip install -r requirements.txt")
+    if not args.account_id:
+        raise RuntimeError("--create-groups needs --account-id (or DATABRICKS_ACCOUNT_ID)")
+    kwargs: dict[str, Any] = {"account_id": args.account_id, "product": "genierails-dev-to-prod", "product_version": "1.0"}
+    if args.account_profile:
+        kwargs["profile"] = args.account_profile
+    else:
+        kwargs["host"] = os.getenv("DATABRICKS_ACCOUNT_HOST") or _account_host(str(getattr(client.config, "host", "")))
+    return AccountClient(**kwargs)
+
+
+def _ensure_groups(account: Any, state: dict[str, Any]) -> None:
+    """Create missing SAMPLE_GROUPS; record only the ones this script created."""
+    created = list(state.get("groups_created", []))
+    for name in SAMPLE_GROUPS:
+        if any(g.display_name == name for g in account.groups.list(filter=f'displayName eq "{name}"')):
+            print(f"      Reusing existing account group {name}")
+            continue
+        account.groups.create(display_name=name)
+        print(f"      Created account group {name}")
+        if name not in created:
+            created.append(name)
+    state["groups_created"] = created
 
 
 def _run_sql(client: Any, warehouse_id: str, statement: str) -> None:
@@ -224,8 +265,10 @@ def _reconcile_existing_space(
         )
 
 
-def _tfvars(space_id: str, tables: list[str], warehouse_id: str) -> str:
+def _tfvars(space_id: str, tables: list[str], warehouse_id: str, groups: Iterable[str] = ()) -> str:
     lines = "\n".join(f'  "{table}",' for table in tables)
+    tiers = ", ".join(f'"{group}"' for group in groups)
+    groups_line = f"\n\naccess_tier_groups = [{tiers}]" if tiers else ""
     return f'''uc_tables = [
 {lines}
 ]
@@ -234,7 +277,7 @@ genie_spaces = [
   {{ genie_space_id = "{space_id}" }}
 ]
 
-sql_warehouse_id = "{warehouse_id}"'''
+sql_warehouse_id = "{warehouse_id}"{groups_line}'''
 
 
 def setup(args: argparse.Namespace, client: Any) -> None:
@@ -291,8 +334,15 @@ def setup(args: argparse.Namespace, client: Any) -> None:
         print(f"      Reusing tracked Genie agent {space_id} without re-importing its node graph.")
         state["warehouse_id"] = args.warehouse_id
         _save_states(states)
-    print("[4/4] Complete. In envs/dev/env.auto.tfvars, REPLACE the genie_spaces and sql_warehouse_id lines with this snippet:\n")
-    print(_tfvars(space_id, tables, args.warehouse_id))
+    groups: tuple[str, ...] = ()
+    if getattr(args, "create_groups", False):
+        print("      Creating or reusing the demo access-tier account groups ...")
+        _ensure_groups(_account_client(args, client), state)
+        _save_states(states)
+        groups = SAMPLE_GROUPS
+    replaced = "genie_spaces, sql_warehouse_id, and access_tier_groups" if groups else "genie_spaces and sql_warehouse_id"
+    print(f"[4/4] Complete. In envs/dev/env.auto.tfvars, REPLACE the {replaced} lines with this snippet:\n")
+    print(_tfvars(space_id, tables, args.warehouse_id, groups))
     print(f"\nGenie agent ID: {space_id}\nOwnership state: {STATE_FILE}")
 
 
@@ -312,6 +362,13 @@ def teardown(args: argparse.Namespace, client: Any) -> None:
         except Exception as exc:
             if not _missing(exc):
                 raise RuntimeError(f"could not remove Genie agent {space_id}: {exc}") from exc
+    if state.get("groups_created"):
+        account = _account_client(args, client)
+        for name in state["groups_created"]:
+            print(f"Removing tracked account group {name} ...")
+            for group in account.groups.list(filter=f'displayName eq "{name}"'):
+                if group.display_name == name:
+                    account.groups.delete(id=group.id)
     if state.get("schema_created"):
         warehouse_id = args.warehouse_id or state.get("warehouse_id", "")
         if not warehouse_id:
