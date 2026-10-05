@@ -6,6 +6,7 @@ import-discovered tables.
 """
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -115,15 +116,97 @@ def test_plan_apply_guard_fails_fast_on_placeholder(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_plan_and_apply_run_the_placeholder_guard():
-    source = MAKEFILE.read_text()
-    start = source.index("_guard-workspace-config:")
-    body = source[start : source.index("\n\n", start)]
-    assert 'genie_space_placeholder.py" "$(ENV_DIR)/env.auto.tfvars"' in body
-    for target in ("plan:", "apply:", "apply-governance:", "apply-genie:"):
-        target_start = source.index(f"\n{target}") + 1
-        target_body = source[target_start : source.index("\n\n", target_start)]
-        assert "_guard-workspace-config" in target_body, target
+REPO = SHARED.parent
+GUARDED_TARGETS = [
+    ("generate", "ENV=dev", "MODE=genie"),
+    ("generate", "ENV=dev"),
+    ("enable-classification", "ENV=dev"),
+    ("scaffold-treatments", "ENV=dev"),
+    ("derive-assignments", "ENV=dev"),
+    ("generate-delta", "ENV=dev"),
+    ("audit-schema", "ENV=dev"),
+    ("audit-rulebook", "ENV=dev"),
+    ("evidence", "ENV=dev"),
+    ("validate-generated", "ENV=dev"),
+    ("coverage-gate", "ENV=dev"),
+    ("validate", "ENV=dev"),
+    ("rehearse", "ENV=dev"),
+    ("certify", "ENV=dev"),
+    ("promote", "ENV=dev"),
+    ("promote", "SOURCE_ENV=dev", "DEST_ENV=prod", "DEST_CATALOG_MAP=dev_finance=prod_finance"),
+    ("plan", "ENV=dev"),
+    ("apply", "ENV=dev"),
+    ("apply-governance", "ENV=dev"),
+    ("apply-genie", "ENV=dev"),
+    ("import", "ENV=dev"),
+    ("verify-access-spec", "ENV=dev"),
+    ("verify-access", "ENV=dev"),
+]
+
+
+def _run_make(cloud_root, *args):
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("MAKEFLAGS", "MAKELEVEL", "ENV", "MODE", "SOURCE_ENV", "DEST_ENV")
+    }
+    return subprocess.run(
+        ["make", "--no-print-directory", *args,
+         f"CLOUD_ROOT={cloud_root}", f"SHARED_ROOT={SHARED}"],
+        cwd=REPO / "aws", text=True, capture_output=True, env=env, timeout=120,
+    )
+
+
+@pytest.fixture
+def placeholder_cloud(tmp_path):
+    cloud_root = tmp_path / "aws"
+    cloud_root.mkdir()
+    for env_name in ("dev", "prod"):
+        assert _run_make(cloud_root, "setup", f"ENV={env_name}").returncode == 0
+    (cloud_root / "envs/dev/env.auto.tfvars").write_text(TEMPLATE.read_text())
+    return cloud_root
+
+
+def _assert_fails_fast(result, env_name="dev"):
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert (
+        f"ERROR: replace {PLACEHOLDER} in envs/{env_name}/env.auto.tfvars "
+        "with your Genie agent ID"
+    ) in result.stderr, output
+    # Nothing ran past the guard: no target banner, Terraform, or Genie API call.
+    assert "===" not in result.stdout, output
+    assert "Querying Genie agent" not in output
+    assert "Terraform" not in output
+
+
+@pytest.mark.parametrize("target", GUARDED_TARGETS, ids=" ".join)
+def test_champion_targets_fail_fast_on_placeholder(placeholder_cloud, target):
+    _assert_fails_fast(_run_make(placeholder_cloud, *target))
+
+
+def test_promote_fails_fast_on_placeholder_in_existing_dest(placeholder_cloud):
+    (placeholder_cloud / "envs/dev/env.auto.tfvars").write_text(
+        TEMPLATE.read_text().replace(PLACEHOLDER, "01ef7b3c2a4d5e6f")
+    )
+    (placeholder_cloud / "envs/prod/env.auto.tfvars").write_text(TEMPLATE.read_text())
+
+    result = _run_make(
+        placeholder_cloud, "promote", "SOURCE_ENV=dev", "DEST_ENV=prod",
+        "DEST_CATALOG_MAP=dev_finance=prod_finance",
+    )
+
+    _assert_fails_fast(result, env_name="prod")
+
+
+def test_placeholder_guard_passes_once_agent_id_is_set(placeholder_cloud):
+    (placeholder_cloud / "envs/dev/env.auto.tfvars").write_text(
+        TEMPLATE.read_text().replace(PLACEHOLDER, "01ef7b3c2a4d5e6f")
+    )
+
+    result = _run_make(placeholder_cloud, "_guard-genie-placeholder", "ENV=dev")
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_enable_classification_footprint_uses_discovered_tables_without_uc_tables(

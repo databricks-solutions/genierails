@@ -6,7 +6,7 @@ Real Genie agent IDs never contain angle brackets, so any ``<...>`` value is an
 unfilled placeholder that would otherwise surface later as a confusing API error.
 
 Usage:
-    python genie_space_placeholder.py <path/to/env.auto.tfvars>
+    python genie_space_placeholder.py <path/to/env.auto.tfvars> [<more env files>...]
 """
 
 import sys
@@ -49,15 +49,16 @@ def placeholder_error(config: dict, path: Path) -> str | None:
 def main() -> int:
     import hcl2
 
-    path = Path(sys.argv[1])
-    if not path.exists():
-        return 0
-    with path.open() as handle:
-        config = hcl2.load(handle)
-    error = placeholder_error(config, path)
-    if error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        return 1
+    for arg in sys.argv[1:]:
+        path = Path(arg)
+        if not path.exists():
+            continue
+        with path.open() as handle:
+            config = hcl2.load(handle)
+        error = placeholder_error(config, path)
+        if error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 1
     return 0
 
 
