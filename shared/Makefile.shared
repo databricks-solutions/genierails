@@ -1,7 +1,7 @@
 .PHONY: help bootstrap-sp _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env enable-classification generate scaffold-treatments derive-assignments generate-delta audit-schema validate validate-generated coverage-gate promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _prepare-classification _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema evidence validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema audit-rulebook validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec _guard-account-admin-env
+.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec _guard-account-admin-env release maintain
 
 # ── Variables expected from the including Makefile ──────────────
 # SHARED_ROOT  — absolute path to shared/
@@ -275,7 +275,7 @@ audit-rulebook: _bootstrap _guard-workspace-target ## Report prod-applied tags (
 	@echo "=== Rulebook Drift Audit ($(ENV)) ==="
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/audit_schema_drift.py" --mode rulebook
 
-generate-delta: _bootstrap _guard-workspace-target ## Detect schema drift and generate incremental tag_assignments (constrained to existing governed keys/values)
+generate-delta: _bootstrap _guard-workspace-target ## [Legacy] LLM/name-regex incremental tag_assignments; prefer native class.* tags + make maintain
 	@echo "=== Generate Delta ($(ENV)) ==="
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/generate_abac.py" --delta --auth-file auth.auto.tfvars
 
@@ -300,12 +300,55 @@ rehearse: ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to
 		$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" && \
 		$(if $(strip $(VERIFY_KEY_COLUMN)),$(MAKE) verify-access ENV="$(ENV)" VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",echo "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> to prove masking live (recommended)")
 
-certify: ## Certify coverage and deploy enforcement only (agent comes in Phase 5)
-	@$(_DRY_RUN_GUARD); $(MAKE) derive-assignments ENV="$(ENV)" && \
+# Certification receipt: certify/maintain record a fingerprint of the inputs that
+# determine enforcement and exposure; release refuses unless it is still current.
+_RECEIPT = python3 "$(SHARED_ROOT)/scripts/certification_receipt.py"
+
+certify: ## Certify coverage and deploy enforcement only; records the receipt make release requires
+	@$(_DRY_RUN_GUARD); $(_RECEIPT) clear "$(ENV_DIR)" && \
+		$(MAKE) derive-assignments ENV="$(ENV)" && \
 		$(MAKE) coverage-gate ENV="$(ENV)" && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
 		$(MAKE) apply-governance ENV="$(ENV)" && \
-		$(MAKE) audit-rulebook ENV="$(ENV)"
+		$(MAKE) audit-rulebook ENV="$(ENV)" && \
+		$(_RECEIPT) write "$(ENV_DIR)" --by certify
+
+release: ## Open business exposure after a current make certify: apply with the gate open, persist it, verify-access
+	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
+		echo "This command is workspace-driven. Use ENV=<workspace> instead of ENV=$(ENV)." >&2; \
+		exit 1; \
+	fi; \
+	$(_DRY_RUN_GUARD); $(_RECEIPT) check "$(ENV_DIR)" --env "$(ENV)" || exit 1; \
+	$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" || exit 1; \
+	$(_RECEIPT) open-gate "$(ENV_DIR)" || exit 1; \
+	if ! $(MAKE) verify-access ENV="$(ENV)"$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \
+		echo "release: exposure is OPEN for $(ENV) but verify-access failed; investigate, or set business_access_enabled = false and run make apply ENV=$(ENV)" >&2; \
+		exit 1; \
+	fi; \
+	echo ""; \
+	echo "=== Release complete ($(ENV)) ==="; \
+	echo "  Certification: current (receipt $(ENV_DIR)/generated/.certified.json)"; \
+	echo "  Exposure gate: open (business_access_enabled = true persisted in env.auto.tfvars)"; \
+	echo "  Verification:  make verify-access ENV=$(ENV) passed"; \
+	echo "  Steady state:  make maintain ENV=$(ENV)"
+
+maintain: ## Native-first governance refresh: audit-schema -> derive-assignments -> gate -> apply-governance -> audit-rulebook (never touches exposure or Genie)
+	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
+		echo "This command is workspace-driven. Use ENV=<workspace> instead of ENV=$(ENV)." >&2; \
+		exit 1; \
+	fi; \
+	$(_DRY_RUN_GUARD); if ! $(MAKE) audit-schema ENV="$(ENV)"; then \
+		echo "maintain: audit-schema reported drift (output above). For sensitive-looking columns with no class.* tag," >&2; \
+		echo "  review native UC classification / auto-tagging (make enable-classification ENV=$(ENV)) or tag them in UC," >&2; \
+		echo "  then re-run make maintain ENV=$(ENV). maintain never LLM-tags columns." >&2; \
+		exit 1; \
+	fi; \
+	$(MAKE) derive-assignments ENV="$(ENV)" && \
+		$(MAKE) coverage-gate ENV="$(ENV)" && \
+		$(MAKE) validate-generated ENV="$(ENV)" && \
+		$(MAKE) apply-governance ENV="$(ENV)" APPLY_FLAGS= && \
+		$(MAKE) audit-rulebook ENV="$(ENV)" && \
+		$(_RECEIPT) write "$(ENV_DIR)" --by maintain
 
 validate: _bootstrap ## Validate split config in the selected environment
 	@echo "=== Validate ($(ENV)) ==="
@@ -491,6 +534,7 @@ apply: _bootstrap ## Apply the selected layer, or account -> data_access -> work
 		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 		$(MAKE) --no-print-directory wait-tag-policies; \
 	else \
+		$(_RECEIPT) warn "$(ENV_DIR)" --env "$(ENV)" || true; \
 		$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 		if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 			$(MAKE) --no-print-directory ENV="$(ENV)" promote; \
@@ -507,6 +551,7 @@ apply: _bootstrap ## Apply the selected layer, or account -> data_access -> work
 		echo "=== Waiting 30s for data_access resources to propagate before workspace apply ==="; \
 		sleep 30; \
 		$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"; \
+		$(_RECEIPT) warn "$(ENV_DIR)" --env "$(ENV)" || true; \
 	fi
 
 apply-governance: _bootstrap _guard-workspace-target ## [Governance team] Apply account + data_access layers only (no Genie agents)
