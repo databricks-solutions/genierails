@@ -103,7 +103,7 @@ def test_enable_classification_target_is_a_classification_only_apply():
     start = source.index("enable-classification:")
     body = source[start : source.index("\ngenerate:", start)]
 
-    assert "_bootstrap _guard-workspace-target" in body
+    assert "_guarded-bootstrap _guard-workspace-target" in body
     assert "validate_classification_config.py" in body
     assert "-target=module.data_access.databricks_data_classification_catalog_config.classification" in body
     assert "abac.auto.tfvars" not in body

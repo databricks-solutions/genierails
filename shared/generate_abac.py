@@ -51,6 +51,15 @@ import time
 from pathlib import Path
 
 from tag_vocabulary import REGISTRY
+from access_tier_groups import (
+    SETTING as ACCESS_TIER_GROUPS_SETTING,
+    display_path as _env_display_path,
+    parse_groups_arg,
+    persist_access_tier_groups,
+    persisted_access_tier_groups,
+    render as render_access_tier_groups,
+)
+from genie_space_placeholder import placeholder_error
 from sensitivity_source import (
     ClassificationSource,
     Finding,
@@ -330,6 +339,9 @@ def load_auth_config(
     if env_file is None:
         env_file = auth_file.parent / "env.auto.tfvars"
     env_cfg = _load_tfvars(env_file, "environment", strict=strict_env)
+    placeholder = placeholder_error(env_cfg, env_file)
+    if placeholder:
+        raise ValueError(placeholder)
     cfg.update(env_cfg)
 
     # Combine uc_catalog + relative uc_tables into full 3-part refs when the new
@@ -6380,7 +6392,7 @@ def sanitize_space_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
-def load_groups_from_account_config() -> list[str]:
+def load_groups_from_account_config(*, announce: bool = True) -> list[str]:
     """Load existing group names from the shared account abac.auto.tfvars.
 
     Returns an empty list if the file doesn't exist or has no groups.
@@ -6397,7 +6409,8 @@ def load_groups_from_account_config() -> list[str]:
         groups = cfg.get("groups") or {}
         if isinstance(groups, dict) and groups:
             names = list(groups.keys())
-            print(f"  Auto-loaded {len(names)} group(s) from account config.")
+            if announce:
+                print(f"  Auto-loaded {len(names)} group(s) from account config.")
             return names
     except Exception as e:
         print(f"  WARNING: Could not read account groups from {account_abac}: {e}")
@@ -7209,9 +7222,38 @@ def main():
     # after writing we merge the new content back into generated/abac.auto.tfvars.
     target_space_cfg: dict | None = None
     space_key: str = ""
-    # Track whether the consumed group names came from account-config auto-load
-    # (vs. the literal --groups CLI arg) so we can label them accurately below.
-    groups_auto_loaded = False
+    # ── Consumed group->tier mapping, in every mode ──────────────────────────
+    # Precedence: explicit --groups > persisted access_tier_groups in
+    # env.auto.tfvars > account-config auto-load (per-space / genie only, below)
+    # > the consume-by-default error. The first explicit --groups is saved to
+    # the setting; a differing --groups never rewrites an existing order.
+    env_file = auth_file.parent / "env.auto.tfvars"
+    try:
+        persisted_groups = persisted_access_tier_groups(auth_cfg, env_file)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+    groups_source = "--groups CLI"
+    persist_cli_groups = False
+    if args.create_groups:
+        if persisted_groups:
+            print(f"  NOTE: ignoring {ACCESS_TIER_GROUPS_SETTING} "
+                  "(--create-groups invents its own groups).")
+    elif args.groups:
+        cli_groups = parse_groups_arg(args.groups)
+        if not persisted_groups:
+            persist_cli_groups = bool(cli_groups)
+        elif cli_groups != persisted_groups:
+            print(
+                f"  WARNING: --groups ({', '.join(cli_groups)}) differs from "
+                f"{ACCESS_TIER_GROUPS_SETTING} ({', '.join(persisted_groups)}) in "
+                f"{_env_display_path(env_file)}; using --groups for this run only.\n"
+                f"    To change the saved tiers, edit {ACCESS_TIER_GROUPS_SETTING} "
+                "there (most to least privileged), then drop --groups."
+            )
+    elif persisted_groups:
+        args.groups = ",".join(persisted_groups)
+        groups_source = f"{ACCESS_TIER_GROUPS_SETTING} in {_env_display_path(env_file)}"
 
     if args.space:
         genie_spaces_cfg_all = auth_cfg.get("genie_spaces", [])
@@ -7243,15 +7285,22 @@ def main():
             existing_groups = load_groups_from_account_config()
             if existing_groups:
                 args.groups = ",".join(existing_groups)
-                groups_auto_loaded = True
+                groups_source = "auto-loaded from account config"
 
     # In genie mode, also auto-load groups from account config so the LLM knows
     # which pre-existing groups are available for space ACLs (consume path only).
+    #
+    # Full and governance runs deliberately do NOT auto-load: they author the
+    # tier policies, and envs/account/abac.auto.tfvars is their own promoted
+    # output (merged across every env that promotes into the account), not a
+    # user-declared, ordered tier list. Consuming it would silently freeze
+    # whatever groups/order a previous run produced. The error below shows
+    # those groups as a paste-ready access_tier_groups line instead.
     if args.mode == "genie" and not args.space and not args.groups and not args.create_groups:
         existing_groups = load_groups_from_account_config()
         if existing_groups:
             args.groups = ",".join(existing_groups)
-            groups_auto_loaded = True
+            groups_source = "auto-loaded from account config"
             print(f"  Auto-loaded {len(existing_groups)} group(s) from account config (genie mode)")
 
     # ── Resolve group-generation mode (consume-by-default) ───────────────────
@@ -7263,9 +7312,8 @@ def main():
     #     and the account layer creates them (manage_groups = true).
     group_names: list[str] | None = None
     if args.groups:
-        group_names = [g.strip() for g in args.groups.split(",") if g.strip()]
-        src = "auto-loaded from account config" if groups_auto_loaded else "--groups CLI"
-        print(f"  Groups:   {', '.join(group_names)} ({src})")
+        group_names = parse_groups_arg(args.groups)
+        print(f"  Groups:   {', '.join(group_names)} ({groups_source})")
 
     if args.create_groups:
         print("  Group mode: CREATE (opt-in demo/greenfield) — the LLM proposes "
@@ -7273,13 +7321,23 @@ def main():
               "manage_groups = true in envs/account.")
     elif not group_names:
         # Consume mode with no mapping: refuse rather than let the LLM invent.
+        account_groups = (
+            load_groups_from_account_config(announce=False)
+            if args.mode in ("full", "governance") and not args.space
+            else []
+        )
         print(
             "ERROR: consume-by-default requires a group->tier mapping.\n"
             "  GenieRails consumes existing IdP-synced groups by default and will "
             "not invent them.\n"
             "  Fix one of:\n"
-            "    - Pass the existing group names, one per access tier, via "
-            "--groups '<tier1>,<tier2>,...'\n"
+            f"    - Set {ACCESS_TIER_GROUPS_SETTING} in {_env_display_path(env_file)} "
+            "to the existing group names, one per access tier, most to least "
+            "privileged\n"
+            f"      (e.g. {ACCESS_TIER_GROUPS_SETTING} = "
+            "[\"Finance_Analyst\", \"Clinical_Staff\"]); or\n"
+            "    - Pass them once via --groups '<tier1>,<tier2>,...' (saved to "
+            f"{ACCESS_TIER_GROUPS_SETTING} for later runs)\n"
             "      (e.g. make generate GENERATE_ARGS='--groups "
             "\"Finance_Analyst,Clinical_Staff\"'); or\n"
             "    - For a demo/greenfield account with no IdP-synced groups, opt in "
@@ -7287,6 +7345,14 @@ def main():
             "      (e.g. make generate GENERATE_ARGS='--create-groups') and set "
             "manage_groups = true in envs/account."
         )
+        if account_groups:
+            print(
+                f"  envs/account/abac.auto.tfvars lists {len(account_groups)} group(s) "
+                f"from an earlier promote; {args.mode} mode does not auto-load them "
+                "(that file is this mode's own output, not a declared tier order).\n"
+                "  To adopt them, check the order (most to least privileged) and set:\n"
+                f"    {render_access_tier_groups(account_groups)}"
+            )
         sys.exit(1)
     else:
         # Consume mode with a mapping: verify every referenced access-tier group
@@ -7296,6 +7362,7 @@ def main():
         # Skipped with a note only when account creds are unavailable, so
         # offline / workspace-only generation still works.
         existing = list_account_group_names(auth_cfg)
+        preflight_passed = False
         if existing is None:
             print("  NOTE: skipping IdP group preflight — no account credentials "
                   "available; ensure these groups are IdP-synced before apply.")
@@ -7307,6 +7374,24 @@ def main():
                 sys.exit(1)
             print(f"  IdP preflight: all {len(group_names)} referenced group(s) "
                   "found in the account.")
+            preflight_passed = True
+        if persist_cli_groups:
+            if not preflight_passed:
+                print(f"  NOTE: --groups not saved to {ACCESS_TIER_GROUPS_SETTING} — "
+                      "the groups couldn't be verified (IdP preflight skipped).")
+            elif args.dry_run:
+                print(f"  NOTE: dry run — not saving --groups to {ACCESS_TIER_GROUPS_SETTING}.")
+            elif not env_file.exists():
+                print(f"  NOTE: {_env_display_path(env_file)} not found — "
+                      f"--groups not saved to {ACCESS_TIER_GROUPS_SETTING}.")
+            else:
+                try:
+                    persist_access_tier_groups(env_file, group_names)
+                except ValueError as e:
+                    print(f"  NOTE: --groups not saved: {e}.")
+                else:
+                    print(f"  Saved --groups to {ACCESS_TIER_GROUPS_SETTING} in "
+                          f"{_env_display_path(env_file)}; later runs can omit --groups.")
 
     catalog = args.catalog or ""
     schema = args.schema or ""
