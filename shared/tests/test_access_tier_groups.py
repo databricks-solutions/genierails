@@ -444,7 +444,9 @@ def test_promote_carries_access_tier_groups_and_prod_generate_uses_them(
 def test_promote_without_the_setting_writes_none(tmp_path, monkeypatch):
     source = tmp_path / "dev"
     source.mkdir()
-    (source / "env.auto.tfvars").write_text("genie_spaces = []\nuc_tables = []\n")
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = []\nuc_tables = ["dev_catalog.s.t"]\n'
+    )
     _promote(monkeypatch, source, tmp_path / "prod")
 
     text = (tmp_path / "prod" / "env.auto.tfvars").read_text()
@@ -457,7 +459,8 @@ def test_promote_overrides_differing_dest_tiers_with_the_reviewed_ones(tmp_path,
     source.mkdir()
     dest.mkdir()
     (source / "env.auto.tfvars").write_text(
-        'genie_spaces = []\nuc_tables = []\naccess_tier_groups = ["a", "b"]\n'
+        'genie_spaces = []\nuc_tables = ["dev_catalog.s.t"]\n'
+        'access_tier_groups = ["a", "b"]\n'
     )
     (dest / "env.auto.tfvars").write_text('access_tier_groups = ["stale"]\n')
     _promote(monkeypatch, source, dest)
@@ -469,7 +472,8 @@ def test_promote_rejects_a_malformed_source_setting(tmp_path, monkeypatch, capsy
     source = tmp_path / "dev"
     source.mkdir()
     (source / "env.auto.tfvars").write_text(
-        'genie_spaces = []\nuc_tables = []\naccess_tier_groups = "payments_ops"\n'
+        'genie_spaces = []\nuc_tables = ["dev_catalog.s.t"]\n'
+        'access_tier_groups = "payments_ops"\n'
     )
     with pytest.raises(SystemExit) as excinfo:
         _promote(monkeypatch, source, tmp_path / "prod")

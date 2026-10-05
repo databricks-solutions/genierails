@@ -9,6 +9,12 @@ import hcl2
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.errors import NotFound
 
+SHARED_ROOT = Path(__file__).resolve().parent.parent
+if str(SHARED_ROOT) not in sys.path:
+    sys.path.insert(0, str(SHARED_ROOT))
+
+from scripts.footprint import FootprintError, resolve_footprint
+
 
 def _load(path: Path) -> dict:
     with path.open() as handle:
@@ -35,13 +41,11 @@ def main() -> int:
         )
         return 0
 
-    tables = list(config.get("uc_tables") or [])
-    for space in config.get("genie_spaces") or []:
-        tables.extend(space.get("uc_tables") or [])
-    discovered_path = env_dir / "data_access" / "discovered_uc_tables.auto.tfvars"
-    if discovered_path.exists():
-        discovered = _load(discovered_path)
-        tables.extend(discovered.get("discovered_uc_tables") or [])
+    try:
+        tables = resolve_footprint(env_dir)
+    except FootprintError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     uc_catalog = _value(config, "uc_catalog")
     full_tables = [
         table if len(table.split(".")) >= 3 else f"{uc_catalog}.{table}"

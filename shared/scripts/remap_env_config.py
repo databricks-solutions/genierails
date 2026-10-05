@@ -18,6 +18,17 @@ import os
 import sys
 from pathlib import Path
 
+SHARED_ROOT = Path(__file__).resolve().parent.parent
+if str(SHARED_ROOT) not in sys.path:
+    sys.path.insert(0, str(SHARED_ROOT))
+
+from scripts.footprint import (
+    FootprintError,
+    load_discovered_footprint,
+    load_hcl,
+    resolve_footprint,
+)
+
 try:
     import hcl2
 except ImportError:
@@ -94,6 +105,7 @@ def main():
     source_env_dir = sys.argv[1]
     dest_env_dir = sys.argv[2]
     catalog_map_str = sys.argv[3]
+    source_env = Path(source_env_dir).name
 
     # Parse catalog map
     pairs = {}
@@ -109,9 +121,14 @@ def main():
         return table
 
     # Load source config
-    cfg = hcl2.load(open(os.path.join(source_env_dir, "env.auto.tfvars")))
-    spaces = cfg.get("genie_spaces", [])
-    top_level_tables = cfg.get("uc_tables") or []
+    try:
+        cfg = load_hcl(Path(source_env_dir) / "env.auto.tfvars")
+        spaces = cfg.get("genie_spaces", [])
+        effective_tables = resolve_footprint(source_env_dir)
+        discovered_tables, discovered_agents = load_discovered_footprint(source_env_dir)
+    except FootprintError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
     generated_path = os.path.join(source_env_dir, "generated", "abac.auto.tfvars")
     id_to_name = {}
     if os.path.exists(generated_path):
@@ -128,11 +145,35 @@ def main():
             auth_cfg = hcl2.load(open(auth_path))
             break
 
-    # Enrich spaces: discover name/tables from Genie API if missing
+    # Resolve canonical names before matching discovered table attribution.
+    for space in spaces:
+        space_id = _str(space.get("genie_space_id", ""))
+        if not _str(space.get("name", "")) and space_id:
+            canonical_name = _str(id_to_name.get(space_id, ""))
+            if canonical_name:
+                space["name"] = canonical_name
+
+    # Enrich spaces from persisted discovery first; query the API only as a
+    # last resort when a configured space still has no attributable tables.
+    api_resolved_tables: list[str] = []
     for space in spaces:
         space_id = _str(space.get("genie_space_id", ""))
         name = _str(space.get("name", ""))
         uc_tables = space.get("uc_tables") or []
+
+        if not uc_tables and name:
+            uc_tables = [
+                table for table, agents in discovered_agents.items()
+                if name in (agents or [])
+            ]
+            if uc_tables:
+                space["uc_tables"] = uc_tables
+                print(f"  Resolved {len(uc_tables)} persisted table(s) for {name}")
+
+        # Legacy single-agent discovery did not record attribution.
+        if not uc_tables and len(spaces) == 1 and not discovered_agents and discovered_tables:
+            uc_tables = list(discovered_tables)
+            space["uc_tables"] = uc_tables
 
         if space_id and (not name or not uc_tables):
             print(f"  Querying Genie agent {space_id} for name/tables...")
@@ -142,15 +183,66 @@ def main():
                 print(f"  Discovered name: {api_title}")
             if not uc_tables and api_tables:
                 space["uc_tables"] = api_tables
+                api_resolved_tables.extend(
+                    table for table in api_tables if table not in api_resolved_tables
+                )
+                effective_tables.extend(
+                    table for table in api_tables if table not in effective_tables
+                )
                 print(f"  Discovered {len(api_tables)} table(s)")
 
-        # Promotion clears source workspace IDs. Preserve the canonical key as
-        # the destination name so generated configs, ACLs, table attribution,
-        # and workspace lookup continue to identify the same logical space.
-        if not _str(space.get("name", "")) and space_id:
-            canonical_name = _str(id_to_name.get(space_id, ""))
-            if canonical_name:
-                space["name"] = canonical_name
+        if not (space.get("uc_tables") or []):
+            agent = space_id or name or "<unknown>"
+            print(
+                f"ERROR: no tables found for agent {agent}; run "
+                f"`make generate ENV={source_env} MODE=genie ...` first"
+            )
+            sys.exit(1)
+
+    if not effective_tables:
+        print(
+            "ERROR: no tables found for source environment; run "
+            f"`make generate ENV={source_env} MODE=genie ...` first"
+        )
+        sys.exit(1)
+
+    space_tables = list(dict.fromkeys(
+        table
+        for space in spaces
+        for table in (space.get("uc_tables") or [])
+        if table
+    ))
+    missing_from_top_level = [
+        table for table in space_tables if table not in effective_tables
+    ]
+    if missing_from_top_level:
+        print(
+            "ERROR: internal footprint invariant failed: space-level table(s) are "
+            "missing from the promoted top-level union: "
+            + ", ".join(missing_from_top_level)
+        )
+        sys.exit(1)
+
+    tables_to_write = list(dict.fromkeys(effective_tables + space_tables))
+    unmapped_catalogs = sorted({
+        table.split(".")[0]
+        for table in tables_to_write
+        if table.count(".") >= 2 and table.split(".")[0] not in pairs
+    })
+    if unmapped_catalogs:
+        print(
+            "ERROR: DEST_CATALOG_MAP is missing mappings for resolved catalog(s): "
+            + ", ".join(unmapped_catalogs)
+        )
+        if any(
+            table.count(".") >= 2 and table.split(".")[0] in unmapped_catalogs
+            for table in api_resolved_tables
+        ):
+            print(
+                f"       Run `make generate ENV={source_env} MODE=genie ...` first "
+                "to persist the API-discovered catalogs, then update DEST_CATALOG_MAP."
+            )
+        sys.exit(1)
 
     canonical_names = [_str(space.get("name", "")) for space in spaces]
     missing = [i for i, name in enumerate(canonical_names) if not name]
@@ -169,7 +261,48 @@ def main():
         )
         sys.exit(1)
 
-    # Build dest env.auto.tfvars
+    # Preserve destination-owned settings across remediation re-promotions.
+    dest_path = os.path.join(dest_env_dir, "env.auto.tfvars")
+    try:
+        dest_cfg = load_hcl(Path(dest_path))
+        dest_discovered, _dest_agents = load_discovered_footprint(dest_env_dir)
+    except FootprintError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
+    preserved_warehouse = _str(dest_cfg.get("sql_warehouse_id", ""))
+    preserved_auto_tagging = dest_cfg.get("enable_auto_tagging") is True
+
+    remapped_effective_tables = [remap_table(table) for table in tables_to_write]
+    stale_discovered = [
+        table for table in dest_discovered if table not in remapped_effective_tables
+    ]
+    if stale_discovered:
+        print(
+            "ERROR: destination discovered footprint contains table(s) outside the "
+            "promoted footprint: " + ", ".join(stale_discovered) + ". Remove the "
+            "stale tool-owned discovery file before promoting: "
+            + str(Path(dest_env_dir) / "data_access" / "discovered_uc_tables.auto.tfvars")
+        )
+        sys.exit(1)
+
+    if "sql_warehouse_id" in dest_cfg:
+        print(f"  Preserved destination sql_warehouse_id={preserved_warehouse!r}")
+    if "enable_auto_tagging" in dest_cfg:
+        print(
+            "  Preserved destination enable_auto_tagging="
+            f"{str(preserved_auto_tagging).lower()}"
+        )
+    if dest_cfg.get("business_access_enabled") is True:
+        print("  Reset destination business_access_enabled=true to false")
+
+    dest_spaces_by_name = {
+        _str(space.get("name", "")): space
+        for space in dest_cfg.get("genie_spaces", [])
+        if _str(space.get("name", ""))
+    }
+
+    # Build dest env.auto.tfvars. The complete promoted union is top-level so
+    # Terraform, classification, derive-assignments, and certify share it.
     lines = ["genie_spaces = ["]
     for space in spaces:
         name = _str(space.get("name", ""))
@@ -183,6 +316,14 @@ def main():
         for t in remapped_tables:
             lines.append(f'      "{t}",')
         lines.append(f'    ]')
+        dest_space = dest_spaces_by_name.get(name, {})
+        if "sql_warehouse_id" in dest_space:
+            space_warehouse = _str(dest_space.get("sql_warehouse_id", ""))
+            lines.append(f"    sql_warehouse_id = {json.dumps(space_warehouse)}")
+            print(
+                f"  Preserved destination Genie space {name!r} "
+                f"sql_warehouse_id={space_warehouse!r}"
+            )
         if "acl_groups" in space:
             acl_groups = space["acl_groups"]
             if acl_groups is not None and (
@@ -202,21 +343,23 @@ def main():
     lines.append("]")
     lines.append("")
     lines.append("uc_tables = [")
-    for table in top_level_tables:
-        lines.append(f'  "{remap_table(table)}",')
+    for table in remapped_effective_tables:
+        lines.append(f'  "{table}",')
     lines.append("]")
     lines.append("")
-    lines.append('sql_warehouse_id = ""  # auto-create in dest workspace')
+    lines.append(
+        f"sql_warehouse_id = {json.dumps(preserved_warehouse)}"
+        "  # empty means auto-create in dest workspace"
+    )
     lines.append("")
     lines.append("# Safe production defaults; use the UI workflow before opening access.")
     lines.append("enable_classification = true")
-    lines.append("enable_auto_tagging = false")
+    lines.append(f"enable_auto_tagging = {str(preserved_auto_tagging).lower()}")
     lines.append("business_access_enabled = false")
     lines.extend(_promoted_access_tier_groups(cfg, source_env_dir))
 
     # Write
     os.makedirs(dest_env_dir, exist_ok=True)
-    dest_path = os.path.join(dest_env_dir, "env.auto.tfvars")
     with open(dest_path, "w") as f:
         f.write("\n".join(lines) + "\n")
 

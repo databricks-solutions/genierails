@@ -30,6 +30,7 @@ from treatment_derivation import (  # noqa: E402
     derive_treatment_model,
     load_treatment_config,
 )
+from scripts.footprint import FootprintError, resolve_footprint  # noqa: E402
 
 
 def _retained_promoted_assignments(assignments: list[dict], config) -> list[dict]:
@@ -90,10 +91,16 @@ def derive_assignments(config_path: Path, auth_path: Path, env_path: Path) -> in
         raise RuntimeError(f"Promoted config {config_path} has no tag_assignments section")
 
     runtime = load_auth_config(auth_path, env_path)
-    declared = list(runtime.get("uc_tables") or [])
+    declared = resolve_footprint(env_path.parent, env_file=env_path)
+    uc_catalog = str(runtime.get("uc_catalog") or "").strip()
+    if uc_catalog:
+        declared = [
+            table if len(str(table).split(".")) >= 3 else f"{uc_catalog}.{table}"
+            for table in declared
+        ]
     declared.extend(runtime.get("declared_footprint") or [])
     for space in runtime.get("genie_spaces") or []:
-        declared.extend(space.get("declared_footprint") or space.get("uc_tables") or [])
+        declared.extend(space.get("declared_footprint") or [])
     footprint = discover_agent_footprint(declared_footprint=declared)
     table_refs = footprint_table_refs(footprint)
 
@@ -185,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         count = derive_assignments(Path(args.config), Path(args.auth_file), Path(args.env_file))
-    except (RuntimeError, NativeClassificationRequiredError) as exc:
+    except (RuntimeError, NativeClassificationRequiredError, FootprintError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     print(f"Derived {count} gr_treatment assignment(s); reviewed rules were not changed.")

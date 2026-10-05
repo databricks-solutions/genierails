@@ -1,6 +1,7 @@
 import importlib.util
 import re
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -380,3 +381,26 @@ def test_classification_validator_accepts_imported_genie_discovery(tmp_path):
         [sys.executable, VALIDATOR, config], capture_output=True, text=True
     )
     assert enabled.returncode == 0, enabled.stderr
+
+
+def test_prepare_classification_reports_malformed_discovery_cleanly(tmp_path, capsys):
+    spec = importlib.util.spec_from_file_location(
+        "prepare_classification_config_malformed",
+        SHARED / "scripts/prepare_classification_config.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    (tmp_path / "data_access").mkdir()
+    (tmp_path / "env.auto.tfvars").write_text("enable_classification = true\n")
+    (tmp_path / "auth.auto.tfvars").write_text("")
+    (tmp_path / "data_access/discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = "cat.schema.table"\n'
+    )
+    old_argv = sys.argv
+    try:
+        sys.argv = ["prepare_classification_config.py", str(tmp_path)]
+        assert module.main() == 1
+    finally:
+        sys.argv = old_argv
+    assert "ERROR: invalid discovered footprint" in capsys.readouterr().err

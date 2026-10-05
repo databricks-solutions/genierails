@@ -51,6 +51,8 @@ SHARED_ROOT = Path(__file__).resolve().parent.parent
 if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
 
+from scripts.footprint import FootprintError, resolve_footprint
+
 PII_COLUMN_PATTERN = re.compile(
     r"(?i)(ssn|social_sec|passport|dob|birth_?date|email|phone|"
     r"address|credit_?card|cvv|account_?num|diagnosis|medication|"
@@ -76,17 +78,8 @@ def _load_hcl(path: Path) -> dict:
 
 
 def extract_managed_tables(env_dir: Path) -> list[str]:
-    """Read managed table FQNs from env.auto.tfvars (both shapes)."""
-    cfg = _load_hcl(env_dir / "env.auto.tfvars")
-    tables: list[str] = []
-    for t in cfg.get("uc_tables", []):
-        if t and t not in tables:
-            tables.append(t)
-    for space in cfg.get("genie_spaces", []):
-        for t in space.get("uc_tables", []):
-            if t and t not in tables:
-                tables.append(t)
-    return tables
+    """Read the environment's effective managed table footprint."""
+    return resolve_footprint(env_dir)
 
 
 def resolve_governed_keys(env_dir: Path) -> list[str]:
@@ -513,9 +506,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Env dir: {env_dir}")
     print(f"  Mode: {args.mode}")
 
-    managed_tables = extract_managed_tables(env_dir)
+    try:
+        managed_tables = extract_managed_tables(env_dir)
+    except FootprintError as exc:
+        print(f"  ERROR: {exc}")
+        return 1
     if not managed_tables:
-        print("  No managed tables found in env.auto.tfvars — nothing to audit.")
+        print("  No managed tables found in the environment footprint — nothing to audit.")
         return 0
     print(f"  Managed tables: {len(managed_tables)}")
 
