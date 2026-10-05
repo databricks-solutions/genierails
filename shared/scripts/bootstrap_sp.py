@@ -228,6 +228,16 @@ def _is_not_found(exc: Exception) -> bool:
     }
 
 
+def _is_permission_denied(exc: Exception) -> bool:
+    from databricks.sdk.errors import PermissionDenied
+
+    return (
+        isinstance(exc, PermissionDenied)
+        or _status_code(exc) == 403
+        or _error_code(exc) in {"PERMISSION_DENIED", "FORBIDDEN"}
+    )
+
+
 def _authenticate_workspaces(
     cfg: Config,
     account: Any,
@@ -286,10 +296,26 @@ def _preflight_target_catalog(
                     ) if value
                 )
             caller_principals = {principal.casefold() for principal in caller_principals}
-            metastore = workspace.metastores.current()
+            catalog_owner = str(_value(catalog, "owner"))
+            assignment = workspace.metastores.current()
+            metastore_owner = "<unavailable>"
+            try:
+                metastore = workspace.metastores.get(
+                    str(_value(assignment, "metastore_id"))
+                )
+                metastore_owner = str(_value(metastore, "owner"))
+            except Exception as exc:
+                if not _is_permission_denied(exc):
+                    raise
+            workspace_admin_owner = (
+                catalog_owner.casefold()
+                == f"_workspace_admins_{cfg.target_catalog}_{workspace_id}".casefold()
+                and "admins" in caller_principals
+            )
             owns_scope = (
-                str(_value(catalog, "owner")).casefold() in caller_principals
-                or str(_value(metastore, "owner")).casefold() in caller_principals
+                catalog_owner.casefold() in caller_principals
+                or metastore_owner.casefold() in caller_principals
+                or workspace_admin_owner
             )
         except Exception as exc:
             if _is_auth_error(exc):
@@ -308,6 +334,14 @@ def _preflight_target_catalog(
 
         if owns_scope:
             continue
+
+        authority_message = (
+            f"preflight failed for catalog {cfg.target_catalog!r} in workspace "
+            f"{workspace_id}: caller {caller_name!r} is not the catalog owner "
+            f"({catalog_owner}), metastore owner ({metastore_owner}), and lacks MANAGE on "
+            f"{cfg.target_catalog!r}. Have the catalog owner run bootstrap or grant the "
+            "deployment service principal USE CATALOG, USE SCHEMA, MANAGE, and APPLY TAG."
+        )
 
         try:
             effective = workspace.grants.get_effective(
