@@ -1,17 +1,25 @@
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
+from databricks.sdk.config import Config as SdkConfig
+from databricks.sdk.errors import NotFound, PermissionDenied, Unauthenticated
+from databricks.sdk.errors.parser import _Parser
 from databricks.sdk.service.catalog import Privilege
 from databricks.sdk.service.iam import WorkspacePermission
 
 from scripts.bootstrap_sp import (
     Config,
+    _clients,
     _config_from_args,
+    _is_auth_error,
+    _is_not_found,
     _plan,
     _preflight_target_catalog,
-    _workspace_client,
+    _workspace_host,
     bootstrap,
+    main,
     parser,
 )
 
@@ -74,13 +82,9 @@ def test_workspace_client_derives_azure_host_from_deployment_name():
         deployment_name="adb-7405605806702166.6",
         cloud="azure",
     )
-    workspace_factory = MagicMock(return_value="workspace-client")
+    host = _workspace_host(account, 7405605806702166)
 
-    client, host = _workspace_client(account, workspace_factory, 7405605806702166)
-
-    assert client == "workspace-client"
     assert host == "https://adb-7405605806702166.6.azuredatabricks.net"
-    workspace_factory.assert_called_once_with(host)
 
 
 def test_workspace_client_derives_aws_host_from_deployment_name():
@@ -89,13 +93,9 @@ def test_workspace_client_derives_aws_host_from_deployment_name():
         deployment_name="dbc-b89659bd-e807",
         cloud="aws",
     )
-    workspace_factory = MagicMock(return_value="workspace-client")
+    host = _workspace_host(account, 123)
 
-    client, host = _workspace_client(account, workspace_factory, 123)
-
-    assert client == "workspace-client"
     assert host == "https://dbc-b89659bd-e807.cloud.databricks.com"
-    workspace_factory.assert_called_once_with(host)
 
 
 def test_workspace_client_treats_missing_cloud_as_aws():
@@ -103,9 +103,7 @@ def test_workspace_client_treats_missing_cloud_as_aws():
     account.workspaces.get.return_value = SimpleNamespace(
         deployment_name="dbc-b89659bd-e807",
     )
-    workspace_factory = MagicMock(return_value="workspace-client")
-
-    _, host = _workspace_client(account, workspace_factory, 123)
+    host = _workspace_host(account, 123)
 
     assert host == "https://dbc-b89659bd-e807.cloud.databricks.com"
 
@@ -116,9 +114,7 @@ def test_workspace_client_preserves_aws_deployment_domain():
         deployment_name="dbc-b89659bd-e807.cloud.databricks.com",
         cloud="aws",
     )
-    workspace_factory = MagicMock(return_value="workspace-client")
-
-    _, host = _workspace_client(account, workspace_factory, 123)
+    host = _workspace_host(account, 123)
 
     assert host == "https://dbc-b89659bd-e807.cloud.databricks.com"
 
@@ -126,9 +122,7 @@ def test_workspace_client_preserves_aws_deployment_domain():
 def test_workspace_client_falls_back_to_dbc_workspace_id():
     account = MagicMock()
     account.workspaces.get.return_value = SimpleNamespace()
-    workspace_factory = MagicMock(return_value="workspace-client")
-
-    _, host = _workspace_client(account, workspace_factory, 456)
+    host = _workspace_host(account, 456)
 
     assert host == "https://dbc-456.cloud.databricks.com"
 
@@ -226,6 +220,153 @@ def test_target_catalog_flows_from_parser_to_config():
 
     assert cfg.workspace_ids == (123, 456)
     assert cfg.target_catalog == "existing_catalog"
+
+
+def test_workspace_profile_flows_from_parser_to_config():
+    args = parser().parse_args([
+        "--account-id", "acct", "--workspace-id", "123,456",
+        "--workspace-profile", "dev,prod",
+    ])
+    cfg = _config_from_args(args)
+    assert cfg.workspace_profiles == ("dev", "prod")
+
+
+def test_multiple_workspaces_require_one_profile_each():
+    args = parser().parse_args([
+        "--account-id", "acct", "--workspace-id", "123,456",
+        "--workspace-profile", "dev",
+    ])
+    with pytest.raises(ValueError, match=r"1 profile\(s\).*2 workspace ID\(s\)"):
+        _config_from_args(args)
+
+
+def test_bad_workspace_profile_count_exits_cleanly(capsys):
+    result = main([
+        "--account-id", "acct",
+        "--workspace-id", "123",
+        "--workspace-profile", "dev,prod",
+    ])
+
+    assert result == 2
+    assert (
+        "ERROR: --workspace-profile supplied 2 profile(s) for 1 workspace ID(s); "
+        "supply exactly one profile per workspace"
+    ) in capsys.readouterr().err
+
+
+def test_clients_reuses_m2m_credentials_for_workspace():
+    sdk_config = SimpleNamespace(
+        auth_type="oauth-m2m", client_id="client-id", client_secret="client-secret"
+    )
+    with patch("databricks.sdk.AccountClient"), \
+         patch("databricks.sdk.WorkspaceClient") as workspace_client, \
+         patch("databricks.sdk.config.Config", return_value=sdk_config):
+        _account, factory = _clients(_cfg(profile="account"))
+        factory("https://dbc.example.com")
+    workspace_client.assert_called_once_with(
+        host="https://dbc.example.com",
+        client_id="client-id",
+        client_secret="client-secret",
+    )
+
+
+def test_clients_reuses_azure_sp_profile_with_workspace_host():
+    sdk_config = SimpleNamespace(
+        auth_type="azure-client-secret",
+        azure_client_id="azure-client",
+        azure_client_secret="azure-secret",
+        azure_tenant_id="azure-tenant",
+        azure_environment="PUBLIC",
+        azure_workspace_resource_id="/subscriptions/account-profile/workspaces/wrong",
+    )
+    with patch("databricks.sdk.AccountClient"), \
+         patch("databricks.sdk.WorkspaceClient") as workspace_client, \
+         patch("databricks.sdk.config.Config", return_value=sdk_config):
+        _account, factory = _clients(_cfg(profile="azure-account-sp"))
+        factory("https://adb-123.4.azuredatabricks.net")
+    workspace_client.assert_called_once_with(
+        host="https://adb-123.4.azuredatabricks.net",
+        azure_client_id="azure-client",
+        azure_client_secret="azure-secret",
+        azure_tenant_id="azure-tenant",
+        azure_environment="PUBLIC",
+    )
+    assert "azure_workspace_resource_id" not in workspace_client.call_args.kwargs
+
+
+def test_m2m_builds_fresh_workspace_auth_without_mutating_account_config():
+    account_host = "https://accounts.cloud.databricks.com"
+    workspace_host = "https://dbc.example.com"
+    discovered_urls = []
+
+    def oidc_response(_client, _method, url, **_kwargs):
+        discovered_urls.append(url)
+        token_host = workspace_host if url.startswith(workspace_host) else account_host
+        return {
+            "authorization_endpoint": f"{token_host}/oidc/v1/authorize",
+            "token_endpoint": f"{token_host}/oidc/v1/token",
+        }
+
+    token_response = MagicMock(ok=True)
+    token_response.json.return_value = {
+        "access_token": "workspace-token",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+    }
+    with patch("databricks.sdk.oauth._BaseClient.do", autospec=True,
+               side_effect=oidc_response), \
+         patch("databricks.sdk.oauth.requests.post", return_value=token_response) as post:
+        account_config = SdkConfig(
+            host=account_host,
+            account_id="acct",
+            client_id="client-id",
+            client_secret="client-secret",
+            auth_type="oauth-m2m",
+        )
+        account_header_factory = account_config._header_factory
+
+        with patch("databricks.sdk.AccountClient"), \
+             patch("databricks.sdk.config.Config", return_value=account_config):
+            _account, factory = _clients(_cfg(profile="account-m2m"))
+            workspace = factory(workspace_host)
+        headers = workspace.config.authenticate()
+
+    assert headers["Authorization"] == "Bearer workspace-token"
+    assert workspace.config._header_factory is not account_header_factory
+    assert account_config.host == account_host
+    assert account_config.account_id == "acct"
+    assert f"{workspace_host}/oidc/.well-known/oauth-authorization-server" in discovered_urls
+    assert post.call_args.args[0] == f"{workspace_host}/oidc/v1/token"
+
+
+@pytest.mark.parametrize("account_auth_type", ["databricks-cli", "pat", "external-browser"])
+def test_clients_uses_host_based_cli_auth_for_non_reusable_account_auth(account_auth_type):
+    sdk_config = SimpleNamespace(
+        host="https://accounts.cloud.databricks.com", auth_type=account_auth_type
+    )
+    with patch("databricks.sdk.AccountClient"), \
+         patch("databricks.sdk.WorkspaceClient") as workspace_client, \
+         patch("databricks.sdk.config.Config", return_value=sdk_config):
+        _account, factory = _clients(_cfg(profile="account"))
+        factory("https://dbc.example.com")
+    workspace_client.assert_called_once_with(
+        host="https://dbc.example.com", auth_type="databricks-cli"
+    )
+
+
+def test_clients_rejects_workspace_profile_for_another_host():
+    configs = {
+        "account": SimpleNamespace(auth_type="databricks-cli"),
+        "wrong": SimpleNamespace(host="https://other.example.com"),
+    }
+    with patch("databricks.sdk.AccountClient"), \
+         patch("databricks.sdk.WorkspaceClient"), \
+         patch("databricks.sdk.config.Config", side_effect=lambda profile: configs[profile]):
+        _account, factory = _clients(
+            _cfg(profile="account", workspace_profiles=("wrong",))
+        )
+        with pytest.raises(RuntimeError, match="not 'https://dbc.example.com'"):
+            factory("https://dbc.example.com")
 
 
 def test_plan_distinguishes_greenfield_and_brownfield_grants():
@@ -358,7 +499,127 @@ def test_target_catalog_preflight_fails_before_sp_or_secret_creation():
     account.service_principals.create.assert_not_called()
     account.service_principal_secrets.create.assert_not_called()
     account.workspace_assignment.update.assert_not_called()
+
+
+def test_missing_workspace_login_fails_before_sp_or_secret_creation():
+    account, workspace, _workspace_factory, factory = _fake()
+    workspace.current_user.me.side_effect = Unauthenticated("Invalid access token")
+
+    with pytest.raises(RuntimeError, match=(
+        r"cannot authenticate to workspace 123 .*databricks auth login --host "
+        r"https://dbc.example.com"
+    )):
+        bootstrap(_cfg(), client_factory=factory, emit=MagicMock())
+
+    account.service_principals.list.assert_not_called()
+    account.service_principals.create.assert_not_called()
+    account.service_principal_secrets.create.assert_not_called()
+
+
+def test_workspace_client_construction_auth_failure_is_actionable_and_exits_two(capsys):
+    account = MagicMock()
+    account.workspaces.get.return_value = SimpleNamespace(
+        workspace_url="dbc.example.com"
+    )
+    workspace_factory = MagicMock(side_effect=ValueError(
+        "default auth: cannot configure default credentials; "
+        "Config: host=https://dbc.example.com, auth_type=databricks-cli"
+    ))
+
+    with patch(
+        "scripts.bootstrap_sp._clients", return_value=(account, workspace_factory)
+    ):
+        result = main([
+            "--account-id", "acct",
+            "--workspace-id", "123",
+            "--sp-name", "deploy",
+            "--yes",
+        ])
+
+    assert result == 2
+    assert (
+        "cannot authenticate to workspace 123 (https://dbc.example.com). Run: "
+        "databricks auth login --host https://dbc.example.com"
+    ) in capsys.readouterr().err
+    account.service_principals.list.assert_not_called()
+    account.service_principals.create.assert_not_called()
+    account.service_principal_secrets.create.assert_not_called()
+
+
+def test_account_workspace_lookup_failure_is_not_reported_as_workspace_auth():
+    account = MagicMock()
+    account.workspaces.get.side_effect = RuntimeError("account lookup failed")
+
+    with pytest.raises(RuntimeError, match="account lookup failed"):
+        bootstrap(
+            _cfg(),
+            client_factory=lambda _cfg: (account, MagicMock()),
+            emit=MagicMock(),
+        )
+
+
+def test_workspace_auth_available_allows_preflight_to_proceed():
+    account, workspace, _workspace_factory, factory = _fake()
+    bootstrap(
+        _cfg(target_catalog="existing_catalog"),
+        client_factory=factory,
+        emit=MagicMock(),
+    )
+    account.service_principals.list.assert_called_once()
+    assert workspace.current_user.me.call_count >= 1
+
+
+def test_preflight_not_found_is_distinct_from_authority_failure():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.side_effect = NotFound(
+        "Catalog existing_catalog does not exist.",
+        error_code="CATALOG_DOES_NOT_EXIST",
+    )
+    with pytest.raises(RuntimeError, match=r"catalog 'existing_catalog' was not found.*Cause"):
+        _preflight(workspace)
+
+
+def test_preflight_authority_error_includes_cause():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.side_effect = PermissionDenied("grant denied")
+    with pytest.raises(RuntimeError, match=r"lacks grant authority.*Cause: PermissionDenied: grant denied"):
+        _preflight(workspace)
     workspace.catalogs.get.assert_called_once_with("existing_catalog")
+
+
+def test_effective_grants_permission_denied_is_authority_failure():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    workspace.grants.get_effective.side_effect = PermissionDenied("cannot inspect grants")
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"lacks grant authority.*Cause: PermissionDenied: cannot inspect grants",
+    ):
+        _preflight(workspace)
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "classifier", "expected_type"),
+    [
+        (401, b'{"error_code":"401","message":"Invalid access token"}',
+         _is_auth_error, Unauthenticated),
+        (404, b'{"error_code":"CATALOG_DOES_NOT_EXIST",'
+              b'"message":"Catalog c does not exist."}', _is_not_found, NotFound),
+    ],
+)
+def test_sdk_error_parser_classes_are_recognized(status, body, classifier, expected_type):
+    response = requests.Response()
+    response.status_code = status
+    response._content = body
+    response.headers["Content-Type"] = "application/json"
+    response.url = "https://dbc.example.com/api/2.1/test"
+    response.request = requests.Request("GET", response.url).prepare()
+
+    error = _Parser().get_api_error(response)
+
+    assert isinstance(error, expected_type)
+    assert classifier(error)
 
 
 def test_target_catalog_grant_fails_loudly_when_caller_lacks_authority():

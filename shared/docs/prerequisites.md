@@ -181,13 +181,23 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
      --profile genierails-bootstrap
    ```
 
+   The account login does not authenticate the caller to a workspace. Log in to each
+   target workspace as well (use the actual dev and prod workspace URLs):
+
    ```bash
-   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<id> SP_NAME=<name> TARGET_CATALOG=<catalog> PLAN=1
+   databricks auth login --host <dev-workspace-url>
+   databricks auth login --host <prod-workspace-url>
+   ```
+
+   ```bash
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<dev-workspace-id> SP_NAME=<name> TARGET_CATALOG=<dev-catalog> PLAN=1
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<prod-workspace-id> SP_NAME=<name> TARGET_CATALOG=<prod-catalog> PLAN=1
    ```
 
    | Parameter | Required | Value / where to find it |
    |-----------|----------|--------------------------|
    | `ACCOUNT_PROFILE` | No | Profile name in `~/.databrickscfg`; defaults to `DEFAULT`. Use the Account Admin profile created above. |
+   | `WORKSPACE_PROFILE` | No | Workspace profile whose host matches the target workspace. For multiple workspaces, pass a comma-separated profile per `WORKSPACE_ID`. If omitted, OAuth M2M or Azure client-secret SP credentials are used to create fresh workspace authentication; all other account auth types use host-based Databricks CLI login. |
    | `ACCOUNT_ID` | Yes | Databricks Account Console → top-right profile menu. |
    | `WORKSPACE_ID` | Yes | Numeric ID in Account Console → **Workspaces**, or the workspace URL's `?o=` value. Use commas for multiple workspaces. |
    | `SP_NAME` | No | Display name for the deployment SP; defaults to `genierails-deployer`. |
@@ -214,7 +224,17 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
 
 **Requirements:**
 
-You'll need these values for `auth.auto.tfvars`:
+You'll need these values in each `envs/<env>/auth.auto.tfvars`.
+
+**Used `make bootstrap-sp`?** It prints a ready-to-paste block for each workspace with `databricks_client_id`, `databricks_client_secret`, `databricks_workspace_host` and `databricks_workspace_id`. Paste it, then add:
+
+- `databricks_account_id` — the same `ACCOUNT_ID` you passed to `bootstrap-sp`.
+- `databricks_account_host` — **Azure only:** `https://accounts.azuredatabricks.net`. On AWS you can omit it (defaults to `https://accounts.cloud.databricks.com`).
+
+The OAuth secret is shown only on the run that creates it — save it then. A later run shows `<existing-secret-not-retrievable>`; use `ROTATE_SECRET=1` to mint a new one.
+
+<details>
+<summary><strong>Created the SP manually? Where to find each value</strong></summary>
 
 | Credential | Where to find |
 |-----------|---------------|
@@ -224,6 +244,8 @@ You'll need these values for `auth.auto.tfvars`:
 | `databricks_client_secret` | Same SP → OAuth Secrets → Generate Secret |
 | `databricks_workspace_id` | Account Console → Workspaces, or `?o=` parameter in workspace URL |
 | `databricks_workspace_host` | Your workspace URL (e.g., `https://dbc-xxx.cloud.databricks.com`) |
+
+</details>
 
 </details>
 
