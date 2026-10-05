@@ -105,13 +105,29 @@ def _clients(cfg: Config) -> tuple[Any, Callable[[str], Any]]:
                     f"not {host!r}"
                 )
             return WorkspaceClient(host=host, profile=profile)
-        if account_config.auth_type != "databricks-cli":
-            workspace_config = account_config.copy()
-            workspace_config.host = host
-            workspace_config.account_id = None
-            return WorkspaceClient(config=workspace_config)
+        if account_config.auth_type == "oauth-m2m":
+            return WorkspaceClient(
+                host=host,
+                client_id=account_config.client_id,
+                client_secret=account_config.client_secret,
+            )
+        if account_config.auth_type == "azure-client-secret":
+            azure_options = {
+                name: getattr(account_config, name, None)
+                for name in (
+                    "azure_client_id",
+                    "azure_client_secret",
+                    "azure_tenant_id",
+                    "azure_environment",
+                    "azure_workspace_resource_id",
+                )
+                if getattr(account_config, name, None)
+            }
+            return WorkspaceClient(host=host, **azure_options)
         # With no profile, the SDK's databricks-cli provider asks the CLI token cache
-        # for this workspace host instead of reusing the account profile's token.
+        # for this workspace host. Other account auth types must not leak an
+        # account-scoped token source to a workspace; callers can alternatively pass
+        # an explicit WORKSPACE_PROFILE.
         return WorkspaceClient(host=host, auth_type="databricks-cli")
 
     return account, workspace_client

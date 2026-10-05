@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
+from databricks.sdk.config import Config as SdkConfig
 from databricks.sdk.errors import NotFound, PermissionDenied, Unauthenticated
 from databricks.sdk.errors.parser import _Parser
 from databricks.sdk.service.catalog import Privilege
@@ -254,34 +255,96 @@ def test_bad_workspace_profile_count_exits_cleanly(capsys):
 
 
 def test_clients_reuses_m2m_credentials_for_workspace():
-    workspace_config = SimpleNamespace()
-    sdk_config = SimpleNamespace(auth_type="oauth-m2m", copy=lambda: workspace_config)
+    sdk_config = SimpleNamespace(
+        auth_type="oauth-m2m", client_id="client-id", client_secret="client-secret"
+    )
     with patch("databricks.sdk.AccountClient"), \
          patch("databricks.sdk.WorkspaceClient") as workspace_client, \
          patch("databricks.sdk.config.Config", return_value=sdk_config):
         _account, factory = _clients(_cfg(profile="account"))
         factory("https://dbc.example.com")
-    assert workspace_config.host == "https://dbc.example.com"
-    assert workspace_config.account_id is None
-    workspace_client.assert_called_once_with(config=workspace_config)
+    workspace_client.assert_called_once_with(
+        host="https://dbc.example.com",
+        client_id="client-id",
+        client_secret="client-secret",
+    )
 
 
 def test_clients_reuses_azure_sp_profile_with_workspace_host():
-    workspace_config = SimpleNamespace()
-    sdk_config = SimpleNamespace(auth_type="azure-client-secret", copy=lambda: workspace_config)
+    sdk_config = SimpleNamespace(
+        auth_type="azure-client-secret",
+        azure_client_id="azure-client",
+        azure_client_secret="azure-secret",
+        azure_tenant_id="azure-tenant",
+        azure_environment="PUBLIC",
+        azure_workspace_resource_id="/subscriptions/sub/resourceGroups/rg/providers/"
+        "Microsoft.Databricks/workspaces/ws",
+    )
     with patch("databricks.sdk.AccountClient"), \
          patch("databricks.sdk.WorkspaceClient") as workspace_client, \
          patch("databricks.sdk.config.Config", return_value=sdk_config):
         _account, factory = _clients(_cfg(profile="azure-account-sp"))
         factory("https://adb-123.4.azuredatabricks.net")
-    assert workspace_config.host == "https://adb-123.4.azuredatabricks.net"
-    assert workspace_config.account_id is None
-    workspace_client.assert_called_once_with(config=workspace_config)
+    workspace_client.assert_called_once_with(
+        host="https://adb-123.4.azuredatabricks.net",
+        azure_client_id="azure-client",
+        azure_client_secret="azure-secret",
+        azure_tenant_id="azure-tenant",
+        azure_environment="PUBLIC",
+        azure_workspace_resource_id="/subscriptions/sub/resourceGroups/rg/providers/"
+        "Microsoft.Databricks/workspaces/ws",
+    )
 
 
-def test_clients_uses_host_based_cli_auth_for_account_u2m_profile():
+def test_m2m_builds_fresh_workspace_auth_without_mutating_account_config():
+    account_host = "https://accounts.cloud.databricks.com"
+    workspace_host = "https://dbc.example.com"
+    discovered_urls = []
+
+    def oidc_response(_client, _method, url, **_kwargs):
+        discovered_urls.append(url)
+        token_host = workspace_host if url.startswith(workspace_host) else account_host
+        return {
+            "authorization_endpoint": f"{token_host}/oidc/v1/authorize",
+            "token_endpoint": f"{token_host}/oidc/v1/token",
+        }
+
+    token_response = MagicMock(ok=True)
+    token_response.json.return_value = {
+        "access_token": "workspace-token",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+    }
+    with patch("databricks.sdk.oauth._BaseClient.do", autospec=True,
+               side_effect=oidc_response), \
+         patch("databricks.sdk.oauth.requests.post", return_value=token_response) as post:
+        account_config = SdkConfig(
+            host=account_host,
+            account_id="acct",
+            client_id="client-id",
+            client_secret="client-secret",
+            auth_type="oauth-m2m",
+        )
+        account_header_factory = account_config._header_factory
+
+        with patch("databricks.sdk.AccountClient"), \
+             patch("databricks.sdk.config.Config", return_value=account_config):
+            _account, factory = _clients(_cfg(profile="account-m2m"))
+            workspace = factory(workspace_host)
+        headers = workspace.config.authenticate()
+
+    assert headers["Authorization"] == "Bearer workspace-token"
+    assert workspace.config._header_factory is not account_header_factory
+    assert account_config.host == account_host
+    assert account_config.account_id == "acct"
+    assert f"{workspace_host}/oidc/.well-known/oauth-authorization-server" in discovered_urls
+    assert post.call_args.args[0] == f"{workspace_host}/oidc/v1/token"
+
+
+@pytest.mark.parametrize("account_auth_type", ["databricks-cli", "pat", "external-browser"])
+def test_clients_uses_host_based_cli_auth_for_non_reusable_account_auth(account_auth_type):
     sdk_config = SimpleNamespace(
-        host="https://accounts.cloud.databricks.com", auth_type="databricks-cli"
+        host="https://accounts.cloud.databricks.com", auth_type=account_auth_type
     )
     with patch("databricks.sdk.AccountClient"), \
          patch("databricks.sdk.WorkspaceClient") as workspace_client, \

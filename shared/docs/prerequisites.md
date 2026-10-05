@@ -197,7 +197,7 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
    | Parameter | Required | Value / where to find it |
    |-----------|----------|--------------------------|
    | `ACCOUNT_PROFILE` | No | Profile name in `~/.databrickscfg`; defaults to `DEFAULT`. Use the Account Admin profile created above. |
-   | `WORKSPACE_PROFILE` | No | Workspace profile whose host matches the target workspace. For multiple workspaces, pass a comma-separated profile per `WORKSPACE_ID`. If omitted, M2M credentials are reused; otherwise bootstrap uses host-based Databricks CLI login. |
+   | `WORKSPACE_PROFILE` | No | Workspace profile whose host matches the target workspace. For multiple workspaces, pass a comma-separated profile per `WORKSPACE_ID`. If omitted, OAuth M2M or Azure client-secret SP credentials are used to create fresh workspace authentication; all other account auth types use host-based Databricks CLI login. |
    | `ACCOUNT_ID` | Yes | Databricks Account Console → top-right profile menu. |
    | `WORKSPACE_ID` | Yes | Numeric ID in Account Console → **Workspaces**, or the workspace URL's `?o=` value. Use commas for multiple workspaces. |
    | `SP_NAME` | No | Display name for the deployment SP; defaults to `genierails-deployer`. |
