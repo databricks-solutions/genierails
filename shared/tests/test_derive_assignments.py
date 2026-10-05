@@ -350,6 +350,31 @@ def test_missing_promoted_config_says_run_promote_first(tmp_path):
         )
 
 
+def test_nondefault_env_filename_supplies_footprint(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    custom_env = tmp_path / "prod.custom.tfvars"
+    env.rename(custom_env)
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "email", "class.email_address", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+    assert MODULE.derive_assignments(config, auth, custom_env) == 1
+
+
+def test_main_reports_malformed_discovery_without_traceback(tmp_path, capsys):
+    config, auth, env = _files(tmp_path)
+    data_access = tmp_path / "data_access"
+    data_access.mkdir()
+    (data_access / "discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = "prod.sales.customers"\n'
+    )
+    result = MODULE.main([
+        "--config", str(config), "--auth-file", str(auth), "--env-file", str(env)
+    ])
+    assert result == 1
+    assert "ERROR: invalid discovered footprint" in capsys.readouterr().err
+
+
 MODEL_SURFACES = (
     "call_with_retries", "call_databricks", "call_openai", "call_anthropic",
     "build_prompt", "serving_endpoints",
