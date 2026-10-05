@@ -135,6 +135,14 @@ sql_warehouse_id = ""
         tables = extract_managed_tables(tmp_path)
         assert tables == []
 
+    def test_discovered_only(self, tmp_path):
+        (tmp_path / "env.auto.tfvars").write_text("genie_spaces = []\n")
+        (tmp_path / "data_access").mkdir()
+        (tmp_path / "data_access/discovered_uc_tables.auto.tfvars").write_text(
+            'discovered_uc_tables = ["cat.discovered.table"]\n'
+        )
+        assert extract_managed_tables(tmp_path) == ["cat.discovered.table"]
+
 
 # ---------------------------------------------------------------------------
 # Governed key resolution (4-level fallback)

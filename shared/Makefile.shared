@@ -329,14 +329,7 @@ promote: _bootstrap _guard-workspace-target ## Split generated/ into layers (sam
 			exit 0; \
 		fi; \
 		if [ -z "$(DEST_CATALOG_MAP)" ]; then \
-			src_catalogs=$$(python3 -c " \
-import hcl2, sys; \
-cfg = hcl2.load(open('$(SOURCE_ENV_DIR)/env.auto.tfvars')); \
-spaces = cfg.get('genie_spaces', []); \
-tables = [t for s in spaces for t in (s.get('uc_tables') or [])]; \
-cats = sorted(set(t.split('.')[0] for t in tables if '.' in t)); \
-print(', '.join(cats) if cats else '(none detected)') \
-"); \
+		src_catalogs=$$(python3 "$(SHARED_ROOT)/scripts/footprint.py" "$(SOURCE_ENV_DIR)" --catalogs); \
 			echo "ERROR: DEST_CATALOG_MAP is required for cross-env promote."; \
 			echo "       Source catalogs detected in $(SOURCE_ENV)/env.auto.tfvars: $$src_catalogs"; \
 			echo ""; \

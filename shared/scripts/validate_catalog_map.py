@@ -10,6 +10,14 @@ Usage:
 import sys
 import os
 
+from pathlib import Path
+
+SHARED_ROOT = Path(__file__).resolve().parent.parent
+if str(SHARED_ROOT) not in sys.path:
+    sys.path.insert(0, str(SHARED_ROOT))
+
+from scripts.footprint import resolve_footprint
+
 try:
     import hcl2
 except ImportError:
@@ -25,11 +33,8 @@ def main():
     source_env_dir = sys.argv[1]
     dest_catalog_map = sys.argv[2]
 
-    # Extract catalogs from env.auto.tfvars uc_tables
-    env_path = os.path.join(source_env_dir, "env.auto.tfvars")
-    cfg = hcl2.load(open(env_path))
-    spaces = cfg.get("genie_spaces", [])
-    tables = [t for s in spaces for t in (s.get("uc_tables") or [])]
+    # Extract catalogs from the effective environment footprint.
+    tables = resolve_footprint(source_env_dir)
     src_cats = sorted(set(
         t.split(".")[0] for t in tables if t.count(".") >= 2
     ))

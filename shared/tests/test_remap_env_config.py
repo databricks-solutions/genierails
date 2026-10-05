@@ -146,3 +146,62 @@ def test_canonical_title_is_hcl_escaped(tmp_path, monkeypatch):
     remap_env_config.main()
     with (dest / "env.auto.tfvars").open() as handle:
         assert hcl2.load(handle)["genie_spaces"][0]["name"] == title
+
+
+def test_discovered_only_promotion_remaps_union(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    (source / "data_access").mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "Orders", genie_space_id = "s1" }]\n'
+    )
+    (source / "data_access/discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = ["dev.sales.orders"]\n'
+        'discovered_table_agents = { "dev.sales.orders" = ["Orders"] }\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    remap_env_config.main()
+    config = hcl2.load((dest / "env.auto.tfvars").open())
+    assert config["uc_tables"] == ["prod.sales.orders"]
+    assert config["genie_spaces"][0]["uc_tables"] == ["prod.sales.orders"]
+
+
+def test_promotion_fails_closed_without_tables(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "Empty", genie_space_id = "s1" }]\n'
+    )
+    monkeypatch.setattr(remap_env_config, "_discover_from_genie_api", lambda *_: ("", []))
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    with pytest.raises(SystemExit) as exc:
+        remap_env_config.main()
+    assert exc.value.code == 1
+    assert "no tables found for agent s1" in capsys.readouterr().out
+    assert not (dest / "env.auto.tfvars").exists()
+
+
+def test_repromotion_preserves_destination_settings_and_closes_gate(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    dest.mkdir()
+    (source / "env.auto.tfvars").write_text('uc_tables = ["dev.s.t"]\n')
+    (dest / "env.auto.tfvars").write_text(
+        'sql_warehouse_id = "warehouse-prod"\n'
+        'enable_auto_tagging = true\n'
+        'business_access_enabled = true\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    remap_env_config.main()
+    config = hcl2.load((dest / "env.auto.tfvars").open())
+    assert config["sql_warehouse_id"] == "warehouse-prod"
+    assert config["enable_auto_tagging"] is True
+    assert config["business_access_enabled"] is False
