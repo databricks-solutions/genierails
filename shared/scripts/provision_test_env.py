@@ -10,7 +10,7 @@ run a brand-new metastore (counter always starts at 0).  After the run, call
 
 Usage
 -----
-  # One-time: `make setup` creates scripts/account-admin.<cloud>.env automatically.
+  # One-time: the first `make test-ci` creates scripts/account-admin.<cloud>.env from the example.
   # Fill in your account-admin SP credentials, then provision:
   python scripts/provision_test_env.py provision
 

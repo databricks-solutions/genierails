@@ -27,7 +27,7 @@ Required Azure RBAC roles on the resource group:
 
 ### `account-admin.azure.env` (for integration tests)
 
-`make setup` creates this file automatically from the example template. Fill in:
+The first `make test-ci` run creates this file from the example template (`shared/scripts/account-admin.azure.env.example`) and stops. Fill in:
 
 ```env
 # Databricks

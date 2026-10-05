@@ -137,10 +137,10 @@ Ownership is split: the **IdP owns groups and membership**; **GenieRails owns gr
 
 **Requirements:**
 
-GenieRails runs **as a service principal (SP)**. Confirm both identities involved:
+GenieRails runs **as a service principal (SP)**. There are two separate jobs here — who sets the SP up, and who runs GenieRails with it:
 
-- **Setup actors** — an Account Admin creates the SP and assigns its account/workspace roles; the target catalog's owner grants catalog authority. One person can perform both parts when they hold both authorities; otherwise the two owners coordinate. The automated method requires a caller with both.
-- **Runtime identity** — `generate`, `apply`, `certify`, and `verify-access` authenticate as the SP using `auth.auto.tfvars`. The person invoking those commands needs the SP's OAuth secret (see [Credentials](#credentials)) and network access, but no additional personal Databricks roles.
+- **Setting it up (one time)** — an **Account Admin** creates the SP and gives it its roles, and the **owner of your catalog** gives it access to that catalog. If one person is both, they can do it all (including with `make bootstrap-sp`); otherwise the two of them each do their part.
+- **Running it (day to day)** — GenieRails commands log in *as the SP*, using its secret in `auth.auto.tfvars`. Whoever runs them just needs that secret (see [Credentials](#credentials)) and network access — no Databricks roles of their own.
 
 The SP needs:
 
@@ -151,6 +151,8 @@ The SP needs:
 | **Workspace Admin** | Target workspace | Deploy governance resources |
 | **Authority over the target catalog** | The catalog you govern | **Own it, or** be granted `MANAGE` + `APPLY TAG` (plus `ASSIGN` on the governed tags GenieRails applies). This lets it deploy tag assignments, masking functions, FGAC policies, and grants — and self-grant its own `USE CATALOG` / `USE SCHEMA` / `EXECUTE` / `CREATE FUNCTION`. |
 | **Query the model serving endpoint** | Workspace | `CAN QUERY` on `databricks-claude-sonnet-4-6` — generation calls a foundation model (an external Anthropic/OpenAI provider works too). |
+
+*Optional background — skip the two sections below unless you want the details. Everything you need to act on is in the table above and the steps that follow.*
 
 <details>
 <summary><strong>Details — Per-tier test service principals</strong></summary>
@@ -169,7 +171,12 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
 **Provision the SP — choose one method:**
 
 1. **Manually** — the Account Admin creates the SP in the Account Console and assigns the account and workspace roles in the table above. The target catalog's owner grants it `MANAGE` + `APPLY TAG`.
-2. **With `make bootstrap-sp`** — an already-authorized Account Admin runs the command below. It cannot elevate a non-admin caller.
+2. **With `make bootstrap-sp`** — an already-authorized Account Admin runs the command below. It cannot elevate a non-admin caller. Run it from your cloud's folder in a clone of the repo:
+
+   ```bash
+   git clone https://github.com/databricks-solutions/genierails.git
+   cd genierails/aws           # or: cd genierails/azure
+   ```
 
    `ACCOUNT_PROFILE` is the name of a Databricks CLI profile for the **bootstrap caller**, not the deployment SP. [Install the Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) if needed, then create the profile below (on Azure, use `https://accounts.azuredatabricks.net` as the host):
 
@@ -190,8 +197,11 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
    ```
 
    ```bash
-   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<dev-workspace-id> SP_NAME=<name> TARGET_CATALOG=<dev-catalog> PLAN=1
-   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<prod-workspace-id> SP_NAME=<name> TARGET_CATALOG=<prod-catalog> PLAN=1
+   # dev workspace + dev catalog
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<dev-workspace-id> SP_NAME=genierails-deployer TARGET_CATALOG=<dev-catalog> PLAN=1
+
+   # prod workspace + prod catalog (same SP_NAME, so the same SP is reused)
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<prod-workspace-id> SP_NAME=genierails-deployer TARGET_CATALOG=<prod-catalog> PLAN=1
    ```
 
    | Parameter | Required | Value / where to find it |
@@ -207,6 +217,8 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
 
    - A preflight confirms the catalog exists and the caller can grant access. It stops before making changes if either check fails.
    - On success, it grants the required catalog permissions and prints the `auth.auto.tfvars` values, including a new OAuth secret when one is created.
+   - Run it once per environment: dev and prod usually govern different catalogs, and `TARGET_CATALOG` applies to every workspace in `WORKSPACE_ID`. (If dev and prod use the *same* catalog name, one run with `WORKSPACE_ID=<dev-id>,<prod-id>` is enough.)
+   - The first run creates the SP and prints its OAuth secret; the second run reuses the SP and doesn't print a new secret. Use the same `client_id` / `client_secret` in both `envs/dev/auth.auto.tfvars` and `envs/prod/auth.auto.tfvars`.
 
    <details>
    <summary><strong>Alternative — Greenfield catalog creation</strong></summary>
