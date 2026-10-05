@@ -437,3 +437,31 @@ def test_preservation_messages_and_per_space_warehouse(tmp_path, monkeypatch, ca
     assert "Reset destination business_access_enabled=true to false" in output
     config = hcl2.load((dest / "env.auto.tfvars").open())
     assert config["genie_spaces"][0]["sql_warehouse_id"] == "space-wh"
+
+
+def test_space_title_naming_the_catalog_is_renamed_like_the_generated_config(
+    tmp_path, monkeypatch
+):
+    """The env name must match the genie_space_configs key remap_hcl rewrites."""
+    from scripts.remap_generated_config import remap_hcl
+
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    (source / "generated").mkdir(parents=True)
+    title = "Walkthrough (dev_cat.demo)"
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [\n  { genie_space_id = "s1", uc_tables = ["dev_cat.demo.t"] },\n]\n'
+    )
+    (source / "generated" / "abac.auto.tfvars").write_text(
+        f'genie_space_id_to_name = {{ s1 = "{title}" }}\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+    remap_env_config.main()
+
+    with (dest / "env.auto.tfvars").open() as handle:
+        name = hcl2.load(handle)["genie_spaces"][0]["name"]
+    generated_key = remap_hcl(f'"{title}" = {{}}', [("dev_cat", "prod_cat")])
+    assert name == "Walkthrough (prod_cat.demo)"
+    assert f'"{name}"' in generated_key

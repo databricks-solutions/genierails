@@ -28,6 +28,7 @@ from scripts.footprint import (
     load_hcl,
     resolve_footprint,
 )
+from scripts.remap_generated_config import remap_hcl
 
 try:
     import hcl2
@@ -113,6 +114,14 @@ def main():
         if "=" in pair:
             k, v = pair.split("=", 1)
             pairs[k.strip()] = v.strip()
+
+    # Space names key genie_space_configs and the ACL sidecar, which
+    # remap_generated_config.py rewrites with remap_hcl; rename spaces the
+    # same way (e.g. a title naming the dev catalog) so the keys still match.
+    sorted_pairs = sorted(pairs.items(), key=lambda p: len(p[0]), reverse=True)
+
+    def remap_name(name: str) -> str:
+        return json.loads(remap_hcl(json.dumps(name), sorted_pairs))
 
     def remap_table(table: str) -> str:
         parts = table.split(".", 1)
@@ -308,7 +317,7 @@ def main():
     # Terraform, classification, derive-assignments, and certify share it.
     lines = ["genie_spaces = ["]
     for space in spaces:
-        name = _str(space.get("name", ""))
+        name = remap_name(_str(space.get("name", "")))
         uc_tables = space.get("uc_tables") or []
         remapped_tables = [remap_table(t) for t in uc_tables]
 
