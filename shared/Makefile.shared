@@ -180,7 +180,7 @@ _guard-workspace-config:
 	fi
 
 # Next steps follow shared/examples/dev_to_prod/README.md. ENV=prod (the name the
-# walkthrough and `make rehearse` reserve for production) gets the Phase 2-5
+# walkthrough and `make rehearse` reserve for production) gets the Phase 2-6
 # promote/certify steps; every other workspace env gets the Phase 0-1 dev rehearsal.
 _SETUP_ENV_REL = $(patsubst $(CLOUD_ROOT)/%,%,$(ENV_DIR))
 _SETUP_WALKTHROUGH := ../shared/examples/dev_to_prod/README.md
@@ -199,7 +199,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "Environment governance ready:         $(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
 		echo "Workspace environment ready:          $(ENV_DIR)"; \
 		echo ""; \
-		echo "Next steps (production — walkthrough Phases 2-5; finish the dev rehearsal first):"; \
+		echo "Next steps (production — walkthrough Phases 2-6; finish the dev rehearsal first):"; \
 		echo "  1. Promote the reviewed dev rules (rewrites $(_SETUP_ENV_REL)/env.auto.tfvars with safe prod defaults):"; \
 		echo "       make promote SOURCE_ENV=$(DEFAULT_ENV) DEST_ENV=$(ENV) DEST_CATALOG_MAP=\"<dev_catalog>=<prod_catalog>\""; \
 		echo "  2. Edit $(_SETUP_ENV_REL)/auth.auto.tfvars — deployment SP client_id / client_secret + prod workspace host & id"; \

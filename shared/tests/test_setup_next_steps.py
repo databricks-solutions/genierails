@@ -106,6 +106,7 @@ def test_setup_prod_prints_promote_certify_release_maintain_steps(cloud, tmp_pat
     assert result.returncode == 0, result.stderr
     out = result.stdout
 
+    assert "Next steps (production — walkthrough Phases 2-6; finish the dev rehearsal first):" in out
     order = [
         "make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=",
         "envs/prod/auth.auto.tfvars",
