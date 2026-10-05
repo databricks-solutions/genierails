@@ -37,7 +37,7 @@ def _recorded_calls(log):
 def test_certify_is_ordered_and_enforcement_only(tmp_path):
     stub, log = _recording_stub(tmp_path)
     result = subprocess.run(
-        ["make", "certify", "ENV=prod", f"MAKE={stub}"],
+        ["make", "certify", "ENV=prod", f"ENV_DIR={tmp_path / 'prod'}", f"MAKE={stub}"],
         cwd=CLOUD_ROOT,
         text=True,
         capture_output=True,
@@ -70,7 +70,7 @@ def test_certify_stops_after_first_failing_stage(tmp_path):
     stub.chmod(0o755)
 
     result = subprocess.run(
-        ["make", "certify", "ENV=prod", f"MAKE={stub}"],
+        ["make", "certify", "ENV=prod", f"ENV_DIR={tmp_path / 'prod'}", f"MAKE={stub}"],
         cwd=CLOUD_ROOT,
         text=True,
         capture_output=True,
