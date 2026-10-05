@@ -122,7 +122,7 @@ writes all `auth.auto.tfvars` files so the test runner uses that environment.
 
 ### One-time setup
 
-Run `make setup` from the `aws/` or `azure/` directory — it automatically copies the matching example file to `scripts/account-admin.<cloud>.env` if it does not yet exist. Then fill in your credentials:
+Run `make test-ci` once from the `aws/` or `azure/` directory — if `scripts/account-admin.<cloud>.env` does not exist yet, it copies the matching example file there and stops so you can fill in your credentials (or copy `scripts/account-admin.<cloud>.env.example` yourself):
 
 ```bash
 # AWS
