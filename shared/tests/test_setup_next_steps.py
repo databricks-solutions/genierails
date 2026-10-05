@@ -66,7 +66,9 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "make generate ENV=dev GENERATE_ARGS='--groups " in out
     assert "make rehearse ENV=dev VERIFY_KEY_COLUMN=" in out
     assert "shared/examples/dev_to_prod/README.md" in out
-    assert 'country = "ANZ"' in out
+    # The champion flow relies on native Data Classification, not the country overlay.
+    assert "APJ" not in out
+    assert "country" not in out
     # Plain apply skips the coverage gate; setup must not suggest it for dev.
     assert "make apply" not in out
     assert out.index("enable-classification") < out.index("make generate") < out.index("make rehearse")
