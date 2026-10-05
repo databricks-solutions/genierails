@@ -277,8 +277,7 @@ def test_clients_reuses_azure_sp_profile_with_workspace_host():
         azure_client_secret="azure-secret",
         azure_tenant_id="azure-tenant",
         azure_environment="PUBLIC",
-        azure_workspace_resource_id="/subscriptions/sub/resourceGroups/rg/providers/"
-        "Microsoft.Databricks/workspaces/ws",
+        azure_workspace_resource_id="/subscriptions/account-profile/workspaces/wrong",
     )
     with patch("databricks.sdk.AccountClient"), \
          patch("databricks.sdk.WorkspaceClient") as workspace_client, \
@@ -291,9 +290,8 @@ def test_clients_reuses_azure_sp_profile_with_workspace_host():
         azure_client_secret="azure-secret",
         azure_tenant_id="azure-tenant",
         azure_environment="PUBLIC",
-        azure_workspace_resource_id="/subscriptions/sub/resourceGroups/rg/providers/"
-        "Microsoft.Databricks/workspaces/ws",
     )
+    assert "azure_workspace_resource_id" not in workspace_client.call_args.kwargs
 
 
 def test_m2m_builds_fresh_workspace_auth_without_mutating_account_config():

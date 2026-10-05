@@ -119,7 +119,6 @@ def _clients(cfg: Config) -> tuple[Any, Callable[[str], Any]]:
                     "azure_client_secret",
                     "azure_tenant_id",
                     "azure_environment",
-                    "azure_workspace_resource_id",
                 )
                 if getattr(account_config, name, None)
             }
