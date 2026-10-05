@@ -145,12 +145,7 @@ def _role_values(sp: Any) -> set[str]:
     return {str(_value(role, "value")) for role in roles}
 
 
-def _workspace_client(
-    account: Any,
-    workspace_client: Callable[..., Any],
-    workspace_id: int,
-    workspace_index: int = 0,
-) -> Any:
+def _workspace_host(account: Any, workspace_id: int) -> str:
     workspace = account.workspaces.get(workspace_id=workspace_id)
     host = (
         workspace.get("workspace_url")
@@ -176,9 +171,7 @@ def _workspace_client(
     host = str(host)
     if not host.startswith("http"):
         host = "https://" + host
-    if workspace_index:
-        return workspace_client(host, workspace_index), host
-    return workspace_client(host), host
+    return host
 
 
 def _error_details(exc: Exception) -> str:
@@ -202,7 +195,12 @@ def _status_code(exc: Exception) -> int | None:
 
 def _is_auth_error(exc: Exception) -> bool:
     code = _error_code(exc)
-    return _status_code(exc) == 401 or code in {"UNAUTHENTICATED", "UNAUTHORIZED"}
+    message = str(exc).casefold()
+    return (
+        _status_code(exc) == 401
+        or code in {"UNAUTHENTICATED", "UNAUTHORIZED"}
+        or "cannot configure default credentials" in message
+    )
 
 
 def _is_not_found(exc: Exception) -> bool:
@@ -218,15 +216,20 @@ def _authenticate_workspaces(
 ) -> dict[int, tuple[Any, str]]:
     resolved = {}
     for index, workspace_id in enumerate(cfg.workspace_ids):
-        workspace, host = _workspace_client(account, workspace_client, workspace_id, index)
+        # Account-side workspace discovery is deliberately outside this try: failures
+        # there are not workspace authentication failures.
+        host = _workspace_host(account, workspace_id)
         try:
+            workspace = workspace_client(host, index) if index else workspace_client(host)
             workspace.current_user.me()
         except Exception as exc:
-            raise RuntimeError(
-                f"cannot authenticate to workspace {workspace_id} ({host}). Run: "
-                f"databricks auth login --host {host} (or pass WORKSPACE_PROFILE). "
-                f"Cause: {_error_details(exc)}"
-            ) from exc
+            if _is_auth_error(exc):
+                raise RuntimeError(
+                    f"cannot authenticate to workspace {workspace_id} ({host}). Run: "
+                    f"databricks auth login --host {host} (or pass WORKSPACE_PROFILE). "
+                    f"Cause: {_error_details(exc)}"
+                ) from exc
+            raise
         resolved[workspace_id] = (workspace, host)
     return resolved
 
@@ -245,10 +248,13 @@ def _preflight_target_catalog(
             "grant authority. Have the catalog owner run bootstrap or grant the deployment "
             "service principal USE CATALOG, USE SCHEMA, MANAGE, and APPLY TAG."
         )
-        workspace, host = _workspace_client(
-            account, workspace_client, workspace_id, workspace_index
-        )
+        # Keep account lookup failures distinct from workspace client/auth failures.
+        host = _workspace_host(account, workspace_id)
         try:
+            workspace = (
+                workspace_client(host, workspace_index)
+                if workspace_index else workspace_client(host)
+            )
             catalog = workspace.catalogs.get(cfg.target_catalog)
             caller = workspace.current_user.me()
             caller_name = str(_value(caller, "user_name"))
@@ -336,7 +342,7 @@ def _grant_tag_policy_roles(account: Any, cfg: Config, client_id: str) -> bool:
 def bootstrap(
     cfg: Config,
     *,
-    client_factory: Callable[[Config], tuple[Any, Callable[[str], Any]]] = _clients,
+    client_factory: Callable[[Config], tuple[Any, Callable[[str], Any]]] | None = None,
     emit: Callable[[str], None] = print,
     ask: Callable[[str], str] = input,
 ) -> int:
@@ -348,7 +354,7 @@ def bootstrap(
         emit("Aborted; no changes were made.")
         return 1
 
-    account, workspace_client = client_factory(cfg)
+    account, workspace_client = (client_factory or _clients)(cfg)
     workspaces = _authenticate_workspaces(cfg, account, workspace_client)
 
     def authenticated_workspace(_host: str, index: int = 0) -> Any:

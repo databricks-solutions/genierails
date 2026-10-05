@@ -11,8 +11,9 @@ from scripts.bootstrap_sp import (
     _config_from_args,
     _plan,
     _preflight_target_catalog,
-    _workspace_client,
+    _workspace_host,
     bootstrap,
+    main,
     parser,
 )
 
@@ -75,13 +76,9 @@ def test_workspace_client_derives_azure_host_from_deployment_name():
         deployment_name="adb-7405605806702166.6",
         cloud="azure",
     )
-    workspace_factory = MagicMock(return_value="workspace-client")
+    host = _workspace_host(account, 7405605806702166)
 
-    client, host = _workspace_client(account, workspace_factory, 7405605806702166)
-
-    assert client == "workspace-client"
     assert host == "https://adb-7405605806702166.6.azuredatabricks.net"
-    workspace_factory.assert_called_once_with(host)
 
 
 def test_workspace_client_derives_aws_host_from_deployment_name():
@@ -90,13 +87,9 @@ def test_workspace_client_derives_aws_host_from_deployment_name():
         deployment_name="dbc-b89659bd-e807",
         cloud="aws",
     )
-    workspace_factory = MagicMock(return_value="workspace-client")
+    host = _workspace_host(account, 123)
 
-    client, host = _workspace_client(account, workspace_factory, 123)
-
-    assert client == "workspace-client"
     assert host == "https://dbc-b89659bd-e807.cloud.databricks.com"
-    workspace_factory.assert_called_once_with(host)
 
 
 def test_workspace_client_treats_missing_cloud_as_aws():
@@ -104,9 +97,7 @@ def test_workspace_client_treats_missing_cloud_as_aws():
     account.workspaces.get.return_value = SimpleNamespace(
         deployment_name="dbc-b89659bd-e807",
     )
-    workspace_factory = MagicMock(return_value="workspace-client")
-
-    _, host = _workspace_client(account, workspace_factory, 123)
+    host = _workspace_host(account, 123)
 
     assert host == "https://dbc-b89659bd-e807.cloud.databricks.com"
 
@@ -117,9 +108,7 @@ def test_workspace_client_preserves_aws_deployment_domain():
         deployment_name="dbc-b89659bd-e807.cloud.databricks.com",
         cloud="aws",
     )
-    workspace_factory = MagicMock(return_value="workspace-client")
-
-    _, host = _workspace_client(account, workspace_factory, 123)
+    host = _workspace_host(account, 123)
 
     assert host == "https://dbc-b89659bd-e807.cloud.databricks.com"
 
@@ -127,9 +116,7 @@ def test_workspace_client_preserves_aws_deployment_domain():
 def test_workspace_client_falls_back_to_dbc_workspace_id():
     account = MagicMock()
     account.workspaces.get.return_value = SimpleNamespace()
-    workspace_factory = MagicMock(return_value="workspace-client")
-
-    _, host = _workspace_client(account, workspace_factory, 456)
+    host = _workspace_host(account, 456)
 
     assert host == "https://dbc-456.cloud.databricks.com"
 
@@ -441,6 +428,48 @@ def test_missing_workspace_login_fails_before_sp_or_secret_creation():
     account.service_principals.list.assert_not_called()
     account.service_principals.create.assert_not_called()
     account.service_principal_secrets.create.assert_not_called()
+
+
+def test_workspace_client_construction_auth_failure_is_actionable_and_exits_two(capsys):
+    account = MagicMock()
+    account.workspaces.get.return_value = SimpleNamespace(
+        workspace_url="dbc.example.com"
+    )
+    workspace_factory = MagicMock(side_effect=ValueError(
+        "default auth: cannot configure default credentials; "
+        "Config: host=https://dbc.example.com, auth_type=databricks-cli"
+    ))
+
+    with patch(
+        "scripts.bootstrap_sp._clients", return_value=(account, workspace_factory)
+    ):
+        result = main([
+            "--account-id", "acct",
+            "--workspace-id", "123",
+            "--sp-name", "deploy",
+            "--yes",
+        ])
+
+    assert result == 2
+    assert (
+        "cannot authenticate to workspace 123 (https://dbc.example.com). Run: "
+        "databricks auth login --host https://dbc.example.com"
+    ) in capsys.readouterr().err
+    account.service_principals.list.assert_not_called()
+    account.service_principals.create.assert_not_called()
+    account.service_principal_secrets.create.assert_not_called()
+
+
+def test_account_workspace_lookup_failure_is_not_reported_as_workspace_auth():
+    account = MagicMock()
+    account.workspaces.get.side_effect = RuntimeError("account lookup failed")
+
+    with pytest.raises(RuntimeError, match="account lookup failed"):
+        bootstrap(
+            _cfg(),
+            client_factory=lambda _cfg: (account, MagicMock()),
+            emit=MagicMock(),
+        )
 
 
 def test_workspace_auth_available_allows_preflight_to_proceed():
