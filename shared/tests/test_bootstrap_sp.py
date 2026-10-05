@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from databricks.sdk.service.catalog import Privilege
@@ -7,6 +7,7 @@ from databricks.sdk.service.iam import WorkspacePermission
 
 from scripts.bootstrap_sp import (
     Config,
+    _clients,
     _config_from_args,
     _plan,
     _preflight_target_catalog,
@@ -228,6 +229,71 @@ def test_target_catalog_flows_from_parser_to_config():
     assert cfg.target_catalog == "existing_catalog"
 
 
+def test_workspace_profile_flows_from_parser_to_config():
+    args = parser().parse_args([
+        "--account-id", "acct", "--workspace-id", "123,456",
+        "--workspace-profile", "dev,prod",
+    ])
+    cfg = _config_from_args(args)
+    assert cfg.workspace_profiles == ("dev", "prod")
+
+
+def test_multiple_workspaces_require_one_profile_each():
+    args = parser().parse_args([
+        "--account-id", "acct", "--workspace-id", "123,456",
+        "--workspace-profile", "dev",
+    ])
+    with pytest.raises(ValueError, match="one profile per workspace"):
+        _config_from_args(args)
+
+
+def test_clients_reuses_m2m_credentials_for_workspace():
+    sdk_config = SimpleNamespace(
+        host="https://accounts.cloud.databricks.com",
+        client_id="client-id",
+        client_secret="client-secret",
+    )
+    with patch("databricks.sdk.AccountClient"), \
+         patch("databricks.sdk.WorkspaceClient") as workspace_client, \
+         patch("databricks.sdk.config.Config", return_value=sdk_config):
+        _account, factory = _clients(_cfg(profile="account"))
+        factory("https://dbc.example.com")
+    workspace_client.assert_called_once_with(
+        host="https://dbc.example.com",
+        client_id="client-id",
+        client_secret="client-secret",
+    )
+
+
+def test_clients_uses_host_based_cli_auth_for_account_u2m_profile():
+    sdk_config = SimpleNamespace(
+        host="https://accounts.cloud.databricks.com", client_id=None, client_secret=None
+    )
+    with patch("databricks.sdk.AccountClient"), \
+         patch("databricks.sdk.WorkspaceClient") as workspace_client, \
+         patch("databricks.sdk.config.Config", return_value=sdk_config):
+        _account, factory = _clients(_cfg(profile="account"))
+        factory("https://dbc.example.com")
+    workspace_client.assert_called_once_with(
+        host="https://dbc.example.com", auth_type="databricks-cli"
+    )
+
+
+def test_clients_rejects_workspace_profile_for_another_host():
+    configs = {
+        "account": SimpleNamespace(client_id=None, client_secret=None),
+        "wrong": SimpleNamespace(host="https://other.example.com"),
+    }
+    with patch("databricks.sdk.AccountClient"), \
+         patch("databricks.sdk.WorkspaceClient"), \
+         patch("databricks.sdk.config.Config", side_effect=lambda profile: configs[profile]):
+        _account, factory = _clients(
+            _cfg(profile="account", workspace_profiles=("wrong",))
+        )
+        with pytest.raises(RuntimeError, match="not 'https://dbc.example.com'"):
+            factory("https://dbc.example.com")
+
+
 def test_plan_distinguishes_greenfield_and_brownfield_grants():
     greenfield_output = []
     brownfield_output = []
@@ -358,6 +424,50 @@ def test_target_catalog_preflight_fails_before_sp_or_secret_creation():
     account.service_principals.create.assert_not_called()
     account.service_principal_secrets.create.assert_not_called()
     account.workspace_assignment.update.assert_not_called()
+
+
+def test_missing_workspace_login_fails_before_sp_or_secret_creation():
+    account, workspace, _workspace_factory, factory = _fake()
+    error = RuntimeError("401 Unauthorized")
+    error.status_code = 401
+    workspace.current_user.me.side_effect = error
+
+    with pytest.raises(RuntimeError, match=(
+        r"cannot authenticate to workspace 123 .*databricks auth login --host "
+        r"https://dbc.example.com"
+    )):
+        bootstrap(_cfg(), client_factory=factory, emit=MagicMock())
+
+    account.service_principals.list.assert_not_called()
+    account.service_principals.create.assert_not_called()
+    account.service_principal_secrets.create.assert_not_called()
+
+
+def test_workspace_auth_available_allows_preflight_to_proceed():
+    account, workspace, _workspace_factory, factory = _fake()
+    bootstrap(
+        _cfg(target_catalog="existing_catalog"),
+        client_factory=factory,
+        emit=MagicMock(),
+    )
+    account.service_principals.list.assert_called_once()
+    assert workspace.current_user.me.call_count >= 1
+
+
+def test_preflight_not_found_is_distinct_from_authority_failure():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    error = RuntimeError("catalog absent")
+    error.error_code = "NOT_FOUND"
+    workspace.catalogs.get.side_effect = error
+    with pytest.raises(RuntimeError, match=r"catalog 'existing_catalog' was not found.*Cause"):
+        _preflight(workspace)
+
+
+def test_preflight_authority_error_includes_cause():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.side_effect = RuntimeError("grant denied")
+    with pytest.raises(RuntimeError, match=r"lacks grant authority.*Cause: RuntimeError: grant denied"):
+        _preflight(workspace)
     workspace.catalogs.get.assert_called_once_with("existing_catalog")
 
 

@@ -181,13 +181,23 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
      --profile genierails-bootstrap
    ```
 
+   The account login does not authenticate the caller to a workspace. Log in to each
+   target workspace as well (use the actual dev and prod workspace URLs):
+
    ```bash
-   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<id> SP_NAME=<name> TARGET_CATALOG=<catalog> PLAN=1
+   databricks auth login --host <dev-workspace-url>
+   databricks auth login --host <prod-workspace-url>
+   ```
+
+   ```bash
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<dev-workspace-id> SP_NAME=<name> TARGET_CATALOG=<dev-catalog> PLAN=1
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<prod-workspace-id> SP_NAME=<name> TARGET_CATALOG=<prod-catalog> PLAN=1
    ```
 
    | Parameter | Required | Value / where to find it |
    |-----------|----------|--------------------------|
    | `ACCOUNT_PROFILE` | No | Profile name in `~/.databrickscfg`; defaults to `DEFAULT`. Use the Account Admin profile created above. |
+   | `WORKSPACE_PROFILE` | No | Workspace profile whose host matches the target workspace. For multiple workspaces, pass a comma-separated profile per `WORKSPACE_ID`. If omitted, M2M credentials are reused; otherwise bootstrap uses host-based Databricks CLI login. |
    | `ACCOUNT_ID` | Yes | Databricks Account Console → top-right profile menu. |
    | `WORKSPACE_ID` | Yes | Numeric ID in Account Console → **Workspaces**, or the workspace URL's `?o=` value. Use commas for multiple workspaces. |
    | `SP_NAME` | No | Display name for the deployment SP; defaults to `genierails-deployer`. |
