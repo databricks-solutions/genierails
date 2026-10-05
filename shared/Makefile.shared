@@ -207,8 +207,8 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "  4. Enable classification on the prod catalog (Databricks UI, or: make enable-classification ENV=$(ENV)),"; \
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
 		echo "  5. Run: make certify ENV=$(ENV)"; \
-		echo "  6. Set business_access_enabled = true in $(_SETUP_ENV_REL)/env.auto.tfvars, then run: make apply ENV=$(ENV)"; \
-		echo "  7. Run: make verify-access ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
+		echo "  6. Run: make release ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
+		echo "  7. Steady state (scheduled): make maintain ENV=$(ENV)"; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 2 onward)"; \
 	else \
@@ -312,7 +312,7 @@ coverage-gate: _guarded-bootstrap _guard-workspace-target ## Block on any sensit
 
 rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to prove masking live)
 	@if [ "$(ENV)" = "prod" ]; then \
-		echo "rehearse: ENV=prod is not allowed; use make certify, then deliberately commit business_access_enabled=true in Phase 5" >&2; \
+		echo "rehearse: ENV=prod is not allowed; use make certify ENV=prod, then make release ENV=prod" >&2; \
 		exit 1; \
 	fi; \
 	$(_DRY_RUN_GUARD); $(MAKE) coverage-gate ENV="$(ENV)" && \

@@ -101,7 +101,7 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
 
 
 @pytest.mark.parametrize("cloud", CLOUDS)
-def test_setup_prod_prints_promote_certify_apply_steps(cloud, tmp_path):
+def test_setup_prod_prints_promote_certify_release_maintain_steps(cloud, tmp_path):
     result = _make(cloud, tmp_path, "setup", "ENV=prod")
     assert result.returncode == 0, result.stderr
     out = result.stdout
@@ -111,14 +111,17 @@ def test_setup_prod_prints_promote_certify_apply_steps(cloud, tmp_path):
         "envs/prod/auth.auto.tfvars",
         "make enable-classification ENV=prod",
         "make certify ENV=prod",
-        "business_access_enabled = true",
-        "make apply ENV=prod",
-        "make verify-access ENV=prod VERIFY_KEY_COLUMN=",
+        "make release ENV=prod VERIFY_KEY_COLUMN=",
+        "make maintain ENV=prod",
     ]
     positions = [out.index(step) for step in order]
     assert positions == sorted(positions)
     assert "make rehearse" not in out
     assert "make generate" not in out
+    assert "Set business_access_enabled" not in out
+    assert "make apply ENV=prod" not in out
+    assert "make verify-access ENV=prod" not in out
+    assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == ["1", "2", "3", "4", "5", "6", "7"]
     assert "shared/examples/dev_to_prod/README.md" in out
 
 
