@@ -184,7 +184,11 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
    ```
 
    ```bash
-   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<id> SP_NAME=<name> TARGET_CATALOG=<catalog> PLAN=1
+   # dev workspace + dev catalog
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<dev-workspace-id> SP_NAME=genierails-deployer TARGET_CATALOG=dev_finance PLAN=1
+
+   # prod workspace + prod catalog (same SP_NAME, so the same SP is reused)
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<prod-workspace-id> SP_NAME=genierails-deployer TARGET_CATALOG=prod_finance PLAN=1
    ```
 
    | Parameter | Required | Value / where to find it |
@@ -199,6 +203,8 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
 
    - A preflight confirms the catalog exists and the caller can grant access. It stops before making changes if either check fails.
    - On success, it grants the required catalog permissions and prints the `auth.auto.tfvars` values, including a new OAuth secret when one is created.
+   - Run it once per environment: dev and prod usually govern different catalogs, and `TARGET_CATALOG` applies to every workspace in `WORKSPACE_ID`. (If dev and prod use the *same* catalog name, one run with `WORKSPACE_ID=<dev-id>,<prod-id>` is enough.)
+   - The first run creates the SP and prints its OAuth secret; the second run reuses the SP and doesn't print a new secret. Use the same `client_id` / `client_secret` in both `envs/dev/auth.auto.tfvars` and `envs/prod/auth.auto.tfvars`.
 
    <details>
    <summary><strong>Alternative — Greenfield catalog creation</strong></summary>
