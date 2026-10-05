@@ -224,7 +224,17 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
 
 **Requirements:**
 
-You'll need these values for `auth.auto.tfvars`:
+You'll need these values in each `envs/<env>/auth.auto.tfvars`.
+
+**Used `make bootstrap-sp`?** It prints a ready-to-paste block for each workspace with `databricks_client_id`, `databricks_client_secret`, `databricks_workspace_host` and `databricks_workspace_id`. Paste it, then add:
+
+- `databricks_account_id` — the same `ACCOUNT_ID` you passed to `bootstrap-sp`.
+- `databricks_account_host` — **Azure only:** `https://accounts.azuredatabricks.net`. On AWS you can omit it (defaults to `https://accounts.cloud.databricks.com`).
+
+The OAuth secret is shown only on the run that creates it — save it then. A later run shows `<existing-secret-not-retrievable>`; use `ROTATE_SECRET=1` to mint a new one.
+
+<details>
+<summary><strong>Created the SP manually? Where to find each value</strong></summary>
 
 | Credential | Where to find |
 |-----------|---------------|
@@ -234,6 +244,8 @@ You'll need these values for `auth.auto.tfvars`:
 | `databricks_client_secret` | Same SP → OAuth Secrets → Generate Secret |
 | `databricks_workspace_id` | Account Console → Workspaces, or `?o=` parameter in workspace URL |
 | `databricks_workspace_host` | Your workspace URL (e.g., `https://dbc-xxx.cloud.databricks.com`) |
+
+</details>
 
 </details>
 
