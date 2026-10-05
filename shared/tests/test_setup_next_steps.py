@@ -61,12 +61,8 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
 
     assert "cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars" in out
     assert "envs/dev/auth.auto.tfvars" in out
-    assert (
-        "Note: envs/account/env.auto.tfvars already has manage_groups = false"
-    ) in out
-    assert "Leave it unless this is a demo/greenfield account." in out
+    assert "manage_groups" not in out
     assert "Edit envs/account/env.auto.tfvars" not in out
-    assert not re.search(r"^\s+\d+\..*manage_groups", out, flags=re.MULTILINE)
     assert "  3. Edit envs/dev/env.auto.tfvars" in out
     assert "existing agent: add genie_space_id to genie_spaces" in out
     assert (
@@ -94,7 +90,6 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "make apply" not in out
     assert (
         out.index("envs/dev/auth.auto.tfvars")
-        < out.index("manage_groups = false")
         < out.index("existing agent:")
         < out.index("MODE=genie")
         < out.index("enable-classification")
