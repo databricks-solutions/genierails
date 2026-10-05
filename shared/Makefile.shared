@@ -1,4 +1,4 @@
-.PHONY: help bootstrap-sp _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config _guard-genie-placeholder setup init-env enable-classification generate scaffold-treatments derive-assignments generate-delta audit-schema validate validate-generated coverage-gate promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _prepare-classification _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
+.PHONY: help bootstrap-sp _guard-root _prepare-env _bootstrap _guarded-bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config _guard-genie-placeholder setup init-env enable-classification generate scaffold-treatments derive-assignments generate-delta audit-schema validate validate-generated coverage-gate promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _prepare-classification _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema evidence validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema audit-rulebook validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec _guard-account-admin-env
@@ -137,6 +137,14 @@ _bootstrap:
 	@$(MAKE) --no-print-directory _guard-root ENV="$(ENV)" ENV_ORIGIN="$(ENV_ORIGIN)"
 	@$(MAKE) --no-print-directory _prepare-env ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"
 
+# _bootstrap for targets that consume env config. The placeholder guard is the
+# first recipe line (not a sibling prerequisite), so it finishes before any
+# _prepare-env side effect, even under make -j. setup/destroy/clean keep _bootstrap.
+_guarded-bootstrap:
+	@$(_GENIE_PLACEHOLDER_GUARD)
+	@$(MAKE) --no-print-directory _guard-root ENV="$(ENV)" ENV_ORIGIN="$(ENV_ORIGIN)"
+	@$(MAKE) --no-print-directory _prepare-env ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"
+
 _guard-workspace-target:
 	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
 		echo "This command is workspace-driven. Use ENV=<workspace> instead of ENV=$(ENV)."; \
@@ -155,9 +163,12 @@ _guard-data-access-config:
 
 # Fail fast while env.auto.tfvars still holds the template's <your-genie-space-id>.
 # Promote also checks its source env and, if it already exists, its destination.
+# Missing files pass, so ENV=account and not-yet-created envs are unaffected.
+_GENIE_PLACEHOLDER_GUARD = python3 "$(SHARED_ROOT)/genie_space_placeholder.py" "$(ENV_DIR)/env.auto.tfvars" \
+	"$(SOURCE_ENV_DIR)/env.auto.tfvars" $(if $(DEST_ENV),"$(DEST_ENV_DIR)/env.auto.tfvars",)
+
 _guard-genie-placeholder:
-	@python3 "$(SHARED_ROOT)/genie_space_placeholder.py" "$(ENV_DIR)/env.auto.tfvars" \
-		"$(SOURCE_ENV_DIR)/env.auto.tfvars" $(if $(DEST_ENV),"$(DEST_ENV_DIR)/env.auto.tfvars",)
+	@$(_GENIE_PLACEHOLDER_GUARD)
 
 _guard-workspace-config:
 	@cd "$(ENV_DIR)" && if [ -f env.auto.tfvars ]; then \
@@ -223,7 +234,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 init-env: _bootstrap ## Prepare env directories and default config files
 	@echo "Environment bootstrap ready for $(ENV)."
 
-enable-classification: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Apply UC Data Classification scanning and the configured auto-tagging opt-in
+enable-classification: _guarded-bootstrap _guard-workspace-target ## Apply UC Data Classification scanning and the configured auto-tagging opt-in
 	@python3 "$(SHARED_ROOT)/scripts/validate_classification_config.py" "$(ENV_DIR)/env.auto.tfvars"
 	@existing_catalogs="$$(python3 "$(SHARED_ROOT)/scripts/prepare_classification_config.py" "$(ENV_DIR)")" || exit 1; \
 	for catalog in $$existing_catalogs; do \
@@ -239,7 +250,7 @@ enable-classification: _bootstrap _guard-workspace-target _guard-genie-placehold
 	@echo "Classification is enabled. Review system.data_classification.results / Review detections first."
 	@echo "To land class.* tags, set enable_auto_tagging=true, re-run this target, then wait before generate."
 
-generate: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Run generate_abac.py in the selected workspace environment (set SPACE="Name" to regenerate only one space; set MODE=governance|genie for self-service Genie deployments)
+generate: _guarded-bootstrap _guard-workspace-target ## Run generate_abac.py in the selected workspace environment (set SPACE="Name" to regenerate only one space; set MODE=governance|genie for self-service Genie deployments)
 	@echo "=== Generate ABAC Config ($(ENV)$(if $(SPACE), — space: $(SPACE),)$(if $(MODE), — mode: $(MODE),)) ==="
 	@if [ -n "$(SPACE)" ]; then \
 		if [ ! -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
@@ -253,7 +264,7 @@ generate: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Run gen
 		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
 
-scaffold-treatments: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Add fail-safe treatment stubs for unmapped native class.* tags
+scaffold-treatments: _guarded-bootstrap _guard-workspace-target ## Add fail-safe treatment stubs for unmapped native class.* tags
 	@python3 "$(SHARED_ROOT)/scripts/scaffold_treatments.py" \
 		--tfvars "$(ENV_DIR)/generated/abac.auto.tfvars" \
 		--sql "$(ENV_DIR)/generated/masking_functions.sql" \
@@ -262,26 +273,26 @@ scaffold-treatments: _bootstrap _guard-workspace-target _guard-genie-placeholder
 		--auth-file "$(ENV_DIR)/auth.auto.tfvars" \
 		--env-file "$(ENV_DIR)/env.auto.tfvars"
 
-derive-assignments: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Re-derive only tag_assignments from live native class.* tags (requires prior promote; never calls an LLM)
+derive-assignments: _guarded-bootstrap _guard-workspace-target ## Re-derive only tag_assignments from live native class.* tags (requires prior promote; never calls an LLM)
 	@echo "=== Derive Assignments ($(ENV)) ==="
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/derive_assignments.py" --auth-file auth.auto.tfvars --env-file env.auto.tfvars --config generated/abac.auto.tfvars
 
-audit-schema: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Report untagged sensitive columns and stale tag assignments in managed tables
+audit-schema: _guarded-bootstrap _guard-workspace-target ## Report untagged sensitive columns and stale tag assignments in managed tables
 	@echo "=== Schema Drift Audit ($(ENV)) ==="
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/audit_schema_drift.py"
 
-evidence: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Emit JSON and Markdown compliance evidence (set GENIERAILS_EVIDENCE_INTEGRATION=1 for live state)
+evidence: _guarded-bootstrap _guard-workspace-target ## Emit JSON and Markdown compliance evidence (set GENIERAILS_EVIDENCE_INTEGRATION=1 for live state)
 	@echo "=== Compliance Evidence ($(ENV)) ==="
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/evidence_report.py" $(if $(WAREHOUSE_ID),--warehouse-id "$(WAREHOUSE_ID)",)
-audit-rulebook: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Report prod-applied tags (class.* + governed keys) with no covering policy or mask
+audit-rulebook: _guarded-bootstrap _guard-workspace-target ## Report prod-applied tags (class.* + governed keys) with no covering policy or mask
 	@echo "=== Rulebook Drift Audit ($(ENV)) ==="
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/audit_schema_drift.py" --mode rulebook
 
-generate-delta: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Detect schema drift and generate incremental tag_assignments (constrained to existing governed keys/values)
+generate-delta: _guarded-bootstrap _guard-workspace-target ## Detect schema drift and generate incremental tag_assignments (constrained to existing governed keys/values)
 	@echo "=== Generate Delta ($(ENV)) ==="
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/generate_abac.py" --delta --auth-file auth.auto.tfvars
 
-validate-generated: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Validate generated/ files in the selected workspace environment
+validate-generated: _guarded-bootstrap _guard-workspace-target ## Validate generated/ files in the selected workspace environment
 	@echo "=== Validate (generated/) [$(ENV)] ==="
 	@cd "$(ENV_DIR)" && if [ -f generated/masking_functions.sql ]; then \
 		python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars generated/masking_functions.sql $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
@@ -289,7 +300,7 @@ validate-generated: _bootstrap _guard-workspace-target _guard-genie-placeholder 
 		python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
 
-coverage-gate: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Block on any sensitive-column coverage gap in generated config
+coverage-gate: _guarded-bootstrap _guard-workspace-target ## Block on any sensitive-column coverage gap in generated config
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" --coverage-gate generated/abac.auto.tfvars generated/masking_functions.sql
 
 rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to prove masking live)
@@ -309,7 +320,7 @@ certify: _guard-genie-placeholder ## Certify coverage and deploy enforcement onl
 		$(MAKE) apply-governance ENV="$(ENV)" && \
 		$(MAKE) audit-rulebook ENV="$(ENV)"
 
-validate: _bootstrap _guard-genie-placeholder ## Validate split config in the selected environment
+validate: _guarded-bootstrap ## Validate split config in the selected environment
 	@echo "=== Validate ($(ENV)) ==="
 	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); fi; \
@@ -318,7 +329,7 @@ validate: _bootstrap _guard-genie-placeholder ## Validate split config in the se
 		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
 
-promote: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Split generated/ into layers (same-env), or cross-env: make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_cat=prod_cat"
+promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into layers (same-env), or cross-env: make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_cat=prod_cat"
 	@set -e; $(_DRY_RUN_GUARD); if [ -n "$(DEST_ENV)" ]; then \
 		if [ "$(DEST_ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(DEST_ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
 			echo "ERROR: DEST_ENV cannot be '$(ACCOUNT_ENV)' or '$(DATA_ACCESS_SUBDIR)'."; exit 1; \
@@ -419,7 +430,7 @@ _plan-layer:
 	echo "=== Terraform Plan ($$layer:$$target_env) ==="; \
 	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan
 
-plan: _bootstrap _guard-genie-placeholder ## Run terraform plan for the selected layer or workspace env
+plan: _guarded-bootstrap ## Run terraform plan for the selected layer or workspace env
 	@set -e; $(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		$(MAKE) --no-print-directory _guard-account-config; \
 		$(MAKE) --no-print-directory _plan-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV); \
@@ -492,7 +503,7 @@ _apply-layer:
 	fi; \
 	printf "%s\n" "$$current_fingerprint" > "$$fingerprint_file"
 
-apply: _bootstrap _guard-genie-placeholder ## Apply the selected layer, or account -> data_access -> workspace for ENV=<workspace>
+apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access -> workspace for ENV=<workspace>
 	@set -e; $(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		$(MAKE) --no-print-directory _guard-account-config; \
 		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
@@ -516,7 +527,7 @@ apply: _bootstrap _guard-genie-placeholder ## Apply the selected layer, or accou
 		$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"; \
 	fi
 
-apply-governance: _bootstrap _guard-workspace-target _guard-genie-placeholder ## [Governance team] Apply account + data_access layers only (no Genie agents)
+apply-governance: _guarded-bootstrap _guard-workspace-target ## [Governance team] Apply account + data_access layers only (no Genie agents)
 	@set -e; $(_DRY_RUN_GUARD); \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
@@ -532,7 +543,7 @@ apply-governance: _bootstrap _guard-workspace-target _guard-genie-placeholder ##
 	sleep 30; \
 	$(MAKE) --no-print-directory _apply-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"
 
-apply-genie: _bootstrap _guard-workspace-target _guard-genie-placeholder ## [BU team] Apply workspace layer only — groups + Genie agents (assumes governance already applied)
+apply-genie: _guarded-bootstrap _guard-workspace-target ## [BU team] Apply workspace layer only — groups + Genie agents (assumes governance already applied)
 	@set -e; $(_DRY_RUN_GUARD); \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
@@ -556,7 +567,7 @@ destroy-governance: _bootstrap _guard-workspace-target ## [Governance team] Dest
 destroy-genie: _bootstrap _guard-workspace-target ## [BU team] Destroy workspace layer only (leaves data_access/ABAC untouched)
 	@$(MAKE) --no-print-directory _destroy-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"
 
-import: _bootstrap _guard-genie-placeholder ## Import existing resources into the selected layer state
+import: _guarded-bootstrap ## Import existing resources into the selected layer state
 	@echo "=== Import Existing Resources ($(ENV)) ==="
 	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		cd "$(ACCOUNT_ENV_DIR)" && "$(SHARED_ROOT)/scripts/import_existing.sh"; \
@@ -692,11 +703,11 @@ _VERIFY_WH_FLAG   = $(if $(WAREHOUSE_ID),--warehouse-id $(WAREHOUSE_ID),)
 _VERIFY_KEY_FLAG  = $(if $(VERIFY_KEY_COLUMN),--key-column "$(VERIFY_KEY_COLUMN)",)
 _VERIFY_KEEP_FLAG = $(if $(KEEP_PRINCIPALS),--keep-principals,)
 
-verify-access-spec: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Print the derived effective-access checks (no workspace/cluster needed)
+verify-access-spec: _guarded-bootstrap _guard-workspace-target ## Print the derived effective-access checks (no workspace/cluster needed)
 	cd "$(SHARED_ROOT)" && python3 verify_effective_access.py \
 		$(_VERIFY_SPEC_FLAG) $(_VERIFY_KEY_FLAG) --print-spec
 
-verify-access: _bootstrap _guard-workspace-target _guard-genie-placeholder ## Verify masking/row-filters take effect via per-tier test principals (LIVE workspace)
+verify-access: _guarded-bootstrap _guard-workspace-target ## Verify masking/row-filters take effect via per-tier test principals (LIVE workspace)
 	cd "$(SHARED_ROOT)" && GENIERAILS_LIVE_VERIFY=1 python3 verify_effective_access.py \
 		$(_VERIFY_SPEC_FLAG) $(_VERIFY_KEY_FLAG) $(_VERIFY_WH_FLAG) $(_VERIFY_KEEP_FLAG) \
 		--auth-file "$(ENV_DIR)/auth.auto.tfvars" --live

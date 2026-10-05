@@ -5,8 +5,10 @@ that a template with no uc_tables reaches classification through the
 import-discovered tables.
 """
 
+import hashlib
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -157,14 +159,37 @@ def _run_make(cloud_root, *args):
     )
 
 
-@pytest.fixture
-def placeholder_cloud(tmp_path):
-    cloud_root = tmp_path / "aws"
+@pytest.fixture(scope="module")
+def _prepared_cloud(tmp_path_factory):
+    """One `make setup` tree per module; each test gets a copy."""
+    cloud_root = tmp_path_factory.mktemp("prepared") / "aws"
     cloud_root.mkdir()
     for env_name in ("dev", "prod"):
         assert _run_make(cloud_root, "setup", f"ENV={env_name}").returncode == 0
     (cloud_root / "envs/dev/env.auto.tfvars").write_text(TEMPLATE.read_text())
     return cloud_root
+
+
+@pytest.fixture
+def placeholder_cloud(_prepared_cloud, tmp_path):
+    cloud_root = tmp_path / "aws"
+    shutil.copytree(_prepared_cloud, cloud_root, symlinks=True)
+    return cloud_root
+
+
+def _snapshot(root):
+    """Every path under root with its type, symlink target or content hash, and mtime."""
+    entries = {}
+    for path in sorted(root.rglob("*")):
+        stat = path.lstat()
+        if path.is_symlink():
+            detail = ("link", os.readlink(path))
+        elif path.is_dir():
+            detail = ("dir",)
+        else:
+            detail = ("file", hashlib.sha256(path.read_bytes()).hexdigest())
+        entries[str(path.relative_to(root))] = (*detail, stat.st_mtime_ns)
+    return entries
 
 
 def _assert_fails_fast(result, env_name="dev"):
@@ -197,6 +222,54 @@ def test_promote_fails_fast_on_placeholder_in_existing_dest(placeholder_cloud):
     )
 
     _assert_fails_fast(result, env_name="prod")
+
+
+@pytest.mark.parametrize("jobs", [[], ["-j4"]], ids=["serial", "j4"])
+@pytest.mark.parametrize(
+    "target",
+    [("generate", "ENV=dev", "MODE=genie"), ("enable-classification", "ENV=dev"),
+     ("plan", "ENV=dev"), ("apply", "ENV=dev"),
+     ("promote", "SOURCE_ENV=dev", "DEST_ENV=prod", "DEST_CATALOG_MAP=dev_finance=prod_finance")],
+    ids=" ".join,
+)
+def test_placeholder_guard_runs_before_any_bootstrap_side_effect(placeholder_cloud, target, jobs):
+    # Seed state that _prepare-env would change: it deletes *.tf/*.py and
+    # scripts/ in workspace envs, recreates the data_access symlinks, and
+    # recreates envs/account.
+    dev = placeholder_cloud / "envs/dev"
+    (dev / "legacy.tf").write_text("# stale\n")
+    (dev / "helper.py").write_text("# stale\n")
+    (dev / "scripts").mkdir()
+    (dev / "scripts/old.sh").write_text("# stale\n")
+    (dev / "data_access/env.auto.tfvars").unlink()
+    shutil.rmtree(placeholder_cloud / "envs/account")
+    before = _snapshot(placeholder_cloud)
+
+    _assert_fails_fast(_run_make(placeholder_cloud, *jobs, *target))
+
+    assert _snapshot(placeholder_cloud) == before
+
+
+def test_account_env_without_env_tfvars_passes_the_guard(tmp_path):
+    cloud_root = tmp_path / "aws"
+    cloud_root.mkdir()
+
+    guard = _run_make(cloud_root, "_guard-genie-placeholder", "ENV=account")
+    assert guard.returncode == 0, guard.stdout + guard.stderr
+    assert not (cloud_root / "envs").exists()
+
+    # A guarded target then bootstraps the account env as before.
+    result = _run_make(cloud_root, "validate", "ENV=account")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (cloud_root / "envs/account/env.auto.tfvars").exists()
+
+
+def test_setup_is_not_blocked_by_the_placeholder(placeholder_cloud):
+    result = _run_make(placeholder_cloud, "setup", "ENV=dev")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Next steps" in result.stdout
+    assert PLACEHOLDER in (placeholder_cloud / "envs/dev/env.auto.tfvars").read_text()
 
 
 def test_placeholder_guard_passes_once_agent_id_is_set(placeholder_cloud):
