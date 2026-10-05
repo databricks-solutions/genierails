@@ -33,6 +33,36 @@ def test_table_only_promotion_preserves_and_remaps_top_level_uc_tables(tmp_path,
     assert config["sql_warehouse_id"] == ""
 
 
+def test_promotion_carries_verify_key_column_from_source(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    (source / "env.auto.tfvars").write_text(
+        'uc_tables = ["dev.sales.customers"]\nverify_key_column = "customer_id"\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    remap_env_config.main()
+    config = hcl2.load((dest / "env.auto.tfvars").open())
+    assert config["verify_key_column"] == "customer_id"
+
+
+def test_promotion_preserves_destination_key_when_source_has_none(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    dest.mkdir()
+    (source / "env.auto.tfvars").write_text('uc_tables = ["dev.sales.customers"]\n')
+    (dest / "env.auto.tfvars").write_text('verify_key_column = "prod_customer_id"\n')
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    remap_env_config.main()
+    config = hcl2.load((dest / "env.auto.tfvars").open())
+    assert config["verify_key_column"] == "prod_customer_id"
+
+
 def test_promotion_does_not_copy_or_overwrite_environment_discovery(tmp_path, monkeypatch):
     source = tmp_path / "dev"
     dest = tmp_path / "prod"

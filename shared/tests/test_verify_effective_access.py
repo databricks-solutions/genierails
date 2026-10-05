@@ -37,8 +37,9 @@ from verify_effective_access import (  # noqa: E402
     evaluate_row_filter_check,
     evaluate_effective_access,
     load_spec_from_file,
-    verify_effective_access_live,
+    load_spec_from_tfvars,
     main,
+    verify_effective_access_live,
 )
 
 
@@ -503,6 +504,16 @@ class TestReport:
         assert "✓" in text and "✗" in text
         assert "NOT VERIFIED" in text
 
+    def test_summary_never_says_all_effective_when_masks_were_skipped(self):
+        report = EffectiveAccessReport(
+            results=[CheckResult("row-filter", "rows", PASS, "ok")],
+            not_verified=[CheckResult("column-mask", "mask", INCONCLUSIVE, "no key")],
+        )
+        text = report.summary()
+        assert "ROW FILTERS EFFECTIVE" in text
+        assert "1 mask check(s) NOT VERIFIED" in text
+        assert "ALL EFFECTIVE" not in text
+
     def test_inconclusive_does_not_pass(self):
         """A single inconclusive check must block the whole report."""
         report = EffectiveAccessReport()
@@ -548,6 +559,23 @@ class TestSpecLoading:
         assert len(spec.row_filters) == 1
         assert spec.row_filters[0].table == "c.s.t2"
 
+    def test_tfvars_rejects_case_insensitive_tagged_sensitive_key(self, tmp_path):
+        tfvars = tmp_path / "abac.auto.tfvars"
+        tfvars.write_text('''
+fgac_policies = [{
+  name = "mask_ssn"
+  policy_type = "POLICY_TYPE_COLUMN_MASK"
+  to_principals = ["Junior"]
+  match_condition = "hasTagValue('pii', 'ssn')"
+}]
+tag_assignments = [
+  { entity_type = "columns", entity_name = "c.s.t.ssn", tag_key = "pii", tag_value = "ssn" },
+  { entity_type = "columns", entity_name = "C.S.T.Customer_ID", tag_key = "class", tag_value = "identifier" },
+]
+''')
+        with pytest.raises(ValueError, match="itself classified sensitive/masked"):
+            load_spec_from_tfvars(tfvars, key_column="customer_id")
+
 
 # ---------------------------------------------------------------------------
 # CLI: empty spec must not report success
@@ -572,6 +600,29 @@ class TestCliEmptySpec:
         assert rc == 0
         out = capsys.readouterr().out
         assert "dry run" in out
+
+    def test_main_rejects_sensitive_key_column(self, tmp_path):
+        spec_file = tmp_path / "spec.json"
+        spec_file.write_text(
+            '{"column_masks": [{"table": "c.s.t", "column": "ssn", '
+            '"key_column": "ssn", "masked_principals": ["Jr"], '
+            '"unmasked_principals": ["Sr"]}], "row_filters": []}'
+        )
+        with pytest.raises(SystemExit, match="itself classified sensitive/masked"):
+            main(["--spec", str(spec_file)])
+
+    def test_main_keyless_skips_only_mask_comparisons(self, tmp_path, capsys):
+        spec_file = tmp_path / "spec.json"
+        spec_file.write_text(
+            '{"column_masks": [{"table": "c.s.t", "column": "ssn", '
+            '"masked_principals": ["Jr"], "unmasked_principals": ["Sr"]}], '
+            '"row_filters": []}'
+        )
+        assert main(["--spec", str(spec_file)]) == 0
+        out = capsys.readouterr().out
+        assert "skipping 1 mask comparison" in out
+        assert "skipped (no key column)" in out
+        assert "masking NOT verified" in out
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +655,33 @@ class TestLiveGuard:
         with pytest.raises(RuntimeError, match="Live verification is disabled"):
             verifier.provision_principal("Junior_Analyst")
         with pytest.raises(RuntimeError, match="Live verification is disabled"):
+            verifier.resolve_warehouse()
+
+    def test_missing_configured_key_column_has_clear_error(self, monkeypatch):
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        verifier = EffectiveAccessVerifier(
+            {"host": "h", "client_id": "c", "client_secret": "s"},
+            warehouse_id="warehouse-123",
+        )
+        monkeypatch.setattr(verifier, "_ws_for", lambda principal: object())
+        monkeypatch.setattr(
+            verifier, "run_query",
+            lambda ws, sql: (_ for _ in ()).throw(RuntimeError("UNRESOLVED_COLUMN")),
+        )
+        check = _mask_check()
+        principal = VerificationPrincipal("Junior", "test", "app", "secret")
+        with pytest.raises(
+            RuntimeError,
+            match="verification key column 'customer_id' is missing or inaccessible",
+        ):
+            verifier.collect_column_values(principal, check)
+
+    def test_verifier_does_not_pick_an_arbitrary_workspace_warehouse(self, monkeypatch):
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        verifier = EffectiveAccessVerifier(
+            {"host": "h", "client_id": "c", "client_secret": "s"}
+        )
+        with pytest.raises(RuntimeError, match="Arbitrary workspace warehouse selection is disabled"):
             verifier.resolve_warehouse()
 
 

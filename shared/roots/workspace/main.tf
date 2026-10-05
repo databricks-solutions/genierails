@@ -384,6 +384,12 @@ variable "enable_classification" {
   default = false
 }
 
+variable "verify_key_column" {
+  type        = string
+  default     = ""
+  description = "Non-sensitive stable row identifier used only by effective-access verification tooling."
+}
+
 # Shared env.auto.tfvars is consumed by both workspace and data-access roots.
 # Auto-tagging is implemented only in data_access; declare it here to avoid an
 # undeclared-variable warning during a full apply.

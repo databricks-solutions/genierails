@@ -227,6 +227,10 @@ def main():
         sys.exit(1)
     preserved_warehouse = _str(dest_cfg.get("sql_warehouse_id", ""))
     preserved_auto_tagging = dest_cfg.get("enable_auto_tagging") is True
+    promoted_verify_key = (
+        _str(cfg.get("verify_key_column", ""))
+        or _str(dest_cfg.get("verify_key_column", ""))
+    )
     if "sql_warehouse_id" in dest_cfg:
         print(f"  Preserved destination sql_warehouse_id={preserved_warehouse!r}")
     if "enable_auto_tagging" in dest_cfg:
@@ -306,6 +310,7 @@ def main():
         f"sql_warehouse_id = {json.dumps(preserved_warehouse)}"
         "  # empty means auto-create in dest workspace"
     )
+    lines.append(f"verify_key_column = {json.dumps(promoted_verify_key)}")
     lines.append("")
     lines.append("# Safe production defaults; use the UI workflow before opening access.")
     lines.append("enable_classification = true")
