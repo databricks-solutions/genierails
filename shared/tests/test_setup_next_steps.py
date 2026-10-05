@@ -61,7 +61,13 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
 
     assert "cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars" in out
     assert "envs/dev/auth.auto.tfvars" in out
-    assert "manage_groups = false" in out and "envs/account/env.auto.tfvars" in out
+    assert (
+        "Note: envs/account/env.auto.tfvars already has manage_groups = false"
+    ) in out
+    assert "Leave it unless this is a demo/greenfield account." in out
+    assert "Edit envs/account/env.auto.tfvars" not in out
+    assert not re.search(r"^\s+\d+\..*manage_groups", out, flags=re.MULTILINE)
+    assert "  3. Edit envs/dev/env.auto.tfvars" in out
     assert "existing agent: add genie_space_id to genie_spaces" in out
     assert (
         "make generate ENV=dev MODE=genie "
@@ -75,8 +81,11 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "../shared/examples/dev_to_prod/SAMPLE_ENV.md" in out
     assert "uc_tables, sql_warehouse_id (or blank), genie_spaces" not in out
     assert "make enable-classification ENV=dev" in out
+    assert "  4. Enable classification" in out
     assert "make generate ENV=dev GENERATE_ARGS='--groups " in out
+    assert "  5. Run: make generate" in out
     assert "make rehearse ENV=dev VERIFY_KEY_COLUMN=" in out
+    assert "  6. Run: make rehearse" in out
     assert "shared/examples/dev_to_prod/README.md" in out
     # The champion flow relies on native Data Classification, not the country overlay.
     assert "APJ" not in out

@@ -203,16 +203,17 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "  1. Start from the walkthrough template (first time only; keep its safety defaults):"; \
 		echo "       cp ../shared/examples/dev_to_prod/env.auto.tfvars.example $(_SETUP_ENV_REL)/env.auto.tfvars"; \
 		echo "  2. Edit $(_SETUP_ENV_REL)/auth.auto.tfvars — deploying SP client_id / client_secret + workspace host & id"; \
-		echo "  3. Edit $(_SETUP_ACCOUNT_REL)/env.auto.tfvars — make sure manage_groups = false (consume IdP groups; one file shared by dev and prod)"; \
-		echo "  4. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — point it at your agent and tables (pick one):"; \
+		echo "     Note: $(_SETUP_ACCOUNT_REL)/env.auto.tfvars already has manage_groups = false (consume IdP groups; shared by dev and prod)."; \
+		echo "           Leave it unless this is a demo/greenfield account."; \
+		echo "  3. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — point it at your agent and tables (pick one):"; \
 		echo "       existing agent: add genie_space_id to genie_spaces, then run:"; \
 		echo "         make generate ENV=$(ENV) MODE=genie GENERATE_ARGS='--groups \"<most_privileged>,...,<least_privileged>\"'"; \
 		echo "         (tables auto-discovered; uc_tables not needed. sql_warehouse_id: your warehouse id, or \"\" to auto-create)"; \
 		echo "       no agent yet: run the sample env setup (../shared/examples/dev_to_prod/SAMPLE_ENV.md) and paste its snippet"; \
-		echo "  5. Enable classification on your catalog (Databricks UI, or: make enable-classification ENV=$(ENV)),"; \
+		echo "  4. Enable classification on your catalog (Databricks UI, or: make enable-classification ENV=$(ENV)),"; \
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
-		echo "  6. Run: make generate ENV=$(ENV) GENERATE_ARGS='--groups \"<most_privileged>,...,<least_privileged>\"'"; \
-		echo "  7. Run: make rehearse ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
+		echo "  5. Run: make generate ENV=$(ENV) GENERATE_ARGS='--groups \"<most_privileged>,...,<least_privileged>\"'"; \
+		echo "  6. Run: make rehearse ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 0 and Phase 1)"; \
 	fi
