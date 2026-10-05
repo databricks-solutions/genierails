@@ -284,7 +284,13 @@ audit-schema: _guarded-bootstrap _guard-workspace-target ## Report untagged sens
 
 evidence: _guarded-bootstrap _guard-workspace-target ## Emit JSON and Markdown compliance evidence (set GENIERAILS_EVIDENCE_INTEGRATION=1 for live state)
 	@echo "=== Compliance Evidence ($(ENV)) ==="
-	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/evidence_report.py" $(if $(WAREHOUSE_ID),--warehouse-id "$(WAREHOUSE_ID)",)
+	@live="$$(printf '%s' "$$GENIERAILS_EVIDENCE_INTEGRATION" | tr '[:upper:]' '[:lower:]')"; \
+	if [ "$$live" = "1" ] || [ "$$live" = "true" ] || [ "$$live" = "yes" ]; then \
+		warehouse_id="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" warehouse --env-dir "$(ENV_DIR)" --explicit "$(WAREHOUSE_ID)" --terraform-runner "$(ROOT_RUNNER)" --env-name "$(ENV)")" && \
+		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/evidence_report.py" --warehouse-id "$$warehouse_id"; \
+	else \
+		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/evidence_report.py"; \
+	fi
 audit-rulebook: _guarded-bootstrap _guard-workspace-target ## Report prod-applied tags (class.* + governed keys) with no covering policy or mask
 	@echo "=== Rulebook Drift Audit ($(ENV)) ==="
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/audit_schema_drift.py" --mode rulebook
@@ -312,7 +318,7 @@ rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is
 	$(_DRY_RUN_GUARD); $(MAKE) coverage-gate ENV="$(ENV)" && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
 		$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" && \
-		$(if $(strip $(VERIFY_KEY_COLUMN)),$(MAKE) verify-access ENV="$(ENV)" VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",echo "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> to prove masking live (recommended)")
+		$(MAKE) verify-access ENV="$(ENV)" $(if $(strip $(VERIFY_KEY_COLUMN)),VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",)
 
 certify: _guard-genie-placeholder ## Certify coverage and deploy enforcement only (agent comes in Phase 5)
 	@$(_DRY_RUN_GUARD); $(MAKE) derive-assignments ENV="$(ENV)" && \
@@ -695,17 +701,18 @@ test-unit: ## Run fast unit tests (no Databricks/LLM/Terraform required) — use
 VERIFY_KEY_COLUMN ?=
 VERIFY_SPEC ?=
 _VERIFY_SPEC_FLAG = $(if $(VERIFY_SPEC),--spec "$(VERIFY_SPEC)",--from-tfvars "$(TARGET_DATA_ACCESS_ENV_DIR)/abac.auto.tfvars" --account-tfvars "$(ACCOUNT_ENV_DIR)/abac.auto.tfvars")
-_VERIFY_WH_FLAG   = $(if $(WAREHOUSE_ID),--warehouse-id $(WAREHOUSE_ID),)
-_VERIFY_KEY_FLAG  = $(if $(VERIFY_KEY_COLUMN),--key-column "$(VERIFY_KEY_COLUMN)",)
 _VERIFY_KEEP_FLAG = $(if $(KEEP_PRINCIPALS),--keep-principals,)
 
 verify-access-spec: _guarded-bootstrap _guard-workspace-target ## Print the derived effective-access checks (no workspace/cluster needed)
+	@key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" && \
 	cd "$(SHARED_ROOT)" && python3 verify_effective_access.py \
-		$(_VERIFY_SPEC_FLAG) $(_VERIFY_KEY_FLAG) --print-spec
+		$(_VERIFY_SPEC_FLAG) --key-column "$$key" --print-spec
 
 verify-access: _guarded-bootstrap _guard-workspace-target ## Verify masking/row-filters take effect via per-tier test principals (LIVE workspace)
+	@key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" && \
+	warehouse_id="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" warehouse --env-dir "$(ENV_DIR)" --explicit "$(WAREHOUSE_ID)" --terraform-runner "$(ROOT_RUNNER)" --env-name "$(ENV)")" && \
 	cd "$(SHARED_ROOT)" && GENIERAILS_LIVE_VERIFY=1 python3 verify_effective_access.py \
-		$(_VERIFY_SPEC_FLAG) $(_VERIFY_KEY_FLAG) $(_VERIFY_WH_FLAG) $(_VERIFY_KEEP_FLAG) \
+		$(_VERIFY_SPEC_FLAG) --key-column "$$key" --warehouse-id "$$warehouse_id" $(_VERIFY_KEEP_FLAG) \
 		--auth-file "$(ENV_DIR)/auth.auto.tfvars" --live
 
 test-quickstart: _bootstrap _guard-workspace-target ## Scenario: single space, single catalog (quickstart flow)

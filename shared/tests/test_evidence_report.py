@@ -85,6 +85,15 @@ tag_assignments = [{ entity_type = "columns", entity_name = "main.hr.people.ssn"
     ]
 
 
+def test_configured_tables_includes_discovered_only_footprint(tmp_path):
+    (tmp_path / "data_access").mkdir()
+    (tmp_path / "env.auto.tfvars").write_text("genie_spaces = []\n")
+    (tmp_path / "data_access/discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = ["main.discovered.orders"]\n'
+    )
+    assert configured_tables(tmp_path) == ["main.discovered.orders"]
+
+
 def test_live_collector_uses_information_schema_mask_and_filter_columns(monkeypatch):
     statements = []
 

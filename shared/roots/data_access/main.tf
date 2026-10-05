@@ -170,6 +170,12 @@ variable "enable_classification" {
   description = "Opt-in to enable UC Data Classification scanning, scoped to schemas in the combined classification footprint."
 }
 
+variable "verify_key_column" {
+  type        = string
+  default     = ""
+  description = "Non-sensitive stable row identifier used only by effective-access verification tooling."
+}
+
 variable "enable_auto_tagging" {
   type        = bool
   default     = false

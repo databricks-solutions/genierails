@@ -115,7 +115,7 @@ def test_rehearse_with_key_opens_exposure_gate_for_its_apply_only(tmp_path):
     )
 
 
-def test_rehearse_without_key_runs_apply_then_recommends_live_verification(tmp_path):
+def test_rehearse_without_key_runs_key_independent_live_verification(tmp_path):
     stub, log = _recording_stub(tmp_path)
     result = subprocess.run(
         ["make", "rehearse", "ENV=dev", f"MAKE={stub}"],
@@ -135,8 +135,6 @@ def test_rehearse_without_key_runs_apply_then_recommends_live_verification(tmp_p
             "ENV=dev",
             "APPLY_FLAGS=-var=business_access_enabled=true",
         ],
+        ["verify-access", "ENV=dev"],
     ]
-    assert (
-        "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> "
-        "to prove masking live (recommended)"
-    ) in output
+    assert "skipped verify-access" not in output

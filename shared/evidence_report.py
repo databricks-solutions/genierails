@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from scripts.footprint import resolve_footprint
+
 SCHEMA_VERSION = "1.0"
 INTEGRATION_ENV = "GENIERAILS_EVIDENCE_INTEGRATION"
 
@@ -168,10 +170,7 @@ def configured_tags(env_dir: Path) -> list[dict[str, str]]:
 
 def configured_tables(env_dir: Path) -> list[str]:
     """Return the tables managed by configured Genie agents."""
-    config = _load_hcl(env_dir / "env.auto.tfvars")
-    tables = set(str(table) for table in config.get("uc_tables", []))
-    for space in config.get("genie_spaces", []):
-        tables.update(str(table) for table in space.get("uc_tables", []))
+    tables = set(resolve_footprint(env_dir))
     # Tag assignments remain a useful fallback for governance-only environments.
     tables.update(".".join(_fqn(row).split(".")[:3]) for row in configured_columns(env_dir))
     return sorted(table for table in tables if len(table.split(".")) == 3)

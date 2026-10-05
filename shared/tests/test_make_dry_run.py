@@ -11,6 +11,14 @@ ROOT = Path(__file__).parents[2]
 CLOUD_ROOT = ROOT / "aws"
 
 
+def test_offline_evidence_does_not_resolve_a_terraform_warehouse():
+    makefile = (ROOT / "shared" / "Makefile.shared").read_text()
+    recipe = makefile[makefile.index("evidence:"):makefile.index("audit-rulebook:")]
+    assert "GENIERAILS_EVIDENCE_INTEGRATION" in recipe
+    assert 'python3 "$(SHARED_ROOT)/evidence_report.py";' in recipe
+    assert '--warehouse-id "$$warehouse_id"' in recipe
+
+
 def _clean_env():
     return {
         key: value

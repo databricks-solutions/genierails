@@ -164,6 +164,7 @@ class CheckResult:
 @dataclass
 class EffectiveAccessReport:
     results: list[CheckResult] = field(default_factory=list)
+    not_verified: list[CheckResult] = field(default_factory=list)
 
     def add(self, result: CheckResult) -> None:
         self.results.append(result)
@@ -198,11 +199,24 @@ class EffectiveAccessReport:
             lines.append(f"  {marker} [{r.status}] {r.target}")
             if r.status != PASS:
                 lines.append(f"        {r.detail}")
+        for r in self.not_verified:
+            lines.append(f"  ! [NOT VERIFIED] {r.target}")
+            lines.append(f"        {r.detail}")
         lines.append("-" * 60)
         total = sum(c.values())
         blocking = c[FAIL] + c[INCONCLUSIVE]
-        if self.passed:
+        if self.passed and self.not_verified:
+            lines.append(
+                f"  RESULT: ROW FILTERS EFFECTIVE — {len(self.not_verified)} mask "
+                f"check(s) NOT VERIFIED (no key column; {c[PASS]} passed / {total})"
+            )
+        elif self.passed:
             lines.append(f"  RESULT: ALL EFFECTIVE ({c[PASS]} passed / {total})")
+        elif not self.results and self.not_verified:
+            lines.append(
+                f"  RESULT: MASKING NOT VERIFIED — {len(self.not_verified)} mask "
+                "check(s) skipped (no key column)"
+            )
         else:
             lines.append(
                 f"  RESULT: NOT VERIFIED — {blocking} blocking "
@@ -741,15 +755,10 @@ class EffectiveAccessVerifier:
         self._guard()
         if self.warehouse_id:
             return self.warehouse_id
-        # Reuse the shared warehouse-selection heuristic used elsewhere.
-        sys.path.insert(0, str(Path(__file__).parent / "scripts"))
-        from warehouse_utils import select_warehouse  # noqa
-
-        wh = select_warehouse(list(self.admin_ws.warehouses.list()))
-        if not wh:
-            raise RuntimeError("No SQL warehouse available; pass --warehouse-id.")
-        self.warehouse_id = wh.id or ""
-        return self.warehouse_id
+        raise RuntimeError(
+            "No SQL warehouse was resolved; pass --warehouse-id or configure one "
+            "in env.auto.tfvars. Arbitrary workspace warehouse selection is disabled."
+        )
 
     # -- provisioning ------------------------------------------------------
     def provision_principal(self, tier: str) -> TestPrincipal:
@@ -906,7 +915,22 @@ class EffectiveAccessVerifier:
             f"SELECT `{check.key_column}`, `{check.column}` "
             f"FROM {check.table} ORDER BY `{check.key_column}` LIMIT {int(limit)}"
         )
-        rows = self.run_query(ws, sql)
+        try:
+            rows = self.run_query(ws, sql)
+        except Exception as exc:
+            detail = str(exc)
+            detail_lower = detail.lower()
+            key_is_named = check.key_column.lower() in detail_lower
+            missing_column_error = any(marker in detail_lower for marker in (
+                "unresolved_column", "unresolved column", "column not found",
+                "cannot be resolved", "cannot resolve column",
+            ))
+            if key_is_named and missing_column_error:
+                raise RuntimeError(
+                    f"verification key column {check.key_column!r} is missing or "
+                    f"inaccessible on {check.table}: {exc}"
+                ) from exc
+            raise
         return {r[0]: r[1] for r in rows if r}
 
     def collect_row_count(self, principal: TestPrincipal, table: str) -> int:
@@ -1060,10 +1084,28 @@ def load_spec_from_tfvars(
         groups.extend(_as_list(pol.get("to_principals")))
         groups.extend(_as_list(pol.get("except_principals")))
 
-    return derive_spec_from_config(
+    spec = derive_spec_from_config(
         fgac_policies, tag_assignments, groups,
         key_column=key_column, key_column_by_table=key_column_by_table,
     )
+    tagged_columns = {
+        _as_str(item.get("entity_name")).lower()
+        for item in tag_assignments
+        if _as_str(item.get("entity_type")) == "columns"
+    }
+    sensitive_keys = sorted({
+        f"{check.table}.{check.key_column}"
+        for check in spec.column_masks
+        if check.key_column
+        and f"{check.table}.{check.key_column}".lower() in tagged_columns
+    })
+    if sensitive_keys:
+        raise ValueError(
+            "ERROR: verify key column is itself classified sensitive/masked: "
+            + ", ".join(sensitive_keys)
+            + ". Configure a non-sensitive stable row identifier."
+        )
+    return spec
 
 
 # ---------------------------------------------------------------------------
@@ -1121,7 +1163,22 @@ def _load_spec_from_args(args) -> VerificationSpec:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
-    spec = _load_spec_from_args(args)
+    try:
+        spec = _load_spec_from_args(args)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    sensitive_keys = sorted(
+        f"{check.table}.{check.key_column}"
+        for check in spec.column_masks
+        if check.key_column and check.key_column.lower() == check.column.lower()
+    )
+    if sensitive_keys:
+        raise SystemExit(
+            "ERROR: verify key column is itself classified sensitive/masked: "
+            + ", ".join(sensitive_keys)
+            + ". Configure a non-sensitive stable row identifier."
+        )
 
     if spec.is_empty():
         # (issue 4) Deriving zero checks means we would verify nothing. That is
@@ -1135,17 +1192,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 2
 
+    missing_key_checks = [check for check in spec.column_masks if not check.key_column]
+    if missing_key_checks:
+        print(
+            "SKIP: no verification key column is configured; skipping "
+            f"{len(missing_key_checks)} mask comparison(s) that require row pairing. "
+            "Row-filter checks will still run. Configure verify_key_column in "
+            "env.auto.tfvars or pass VERIFY_KEY_COLUMN=<col> to enable them."
+        )
+
     if args.print_spec or not args.live:
         print("Resolved effective-access spec:")
         for c in spec.column_masks:
+            suffix = " — skipped (no key column)" if not c.key_column else ""
             print(f"  [column-mask] {c.table}.{c.column} key={c.key_column!r} "
-                  f"masked={list(c.masked_principals)} unmasked={list(c.unmasked_principals)}")
+                  f"masked={list(c.masked_principals)} "
+                  f"unmasked={list(c.unmasked_principals)}{suffix}")
         for r in spec.row_filters:
             print(f"  [row-filter]  {r.table} restricted={list(r.restricted_principals)} "
                   f"unrestricted={list(r.unrestricted_principals)}")
         if not args.live:
+            if missing_key_checks:
+                print(
+                    "\nWARNING: masking NOT verified for skipped checks; "
+                    "configure a key column to enable row pairing."
+                )
             print(f"\n(dry run — pass --live and set {LIVE_ENV_FLAG}=1 to execute against a workspace.)")
             return 0
+
+    skipped_results = [
+        CheckResult(
+            "column-mask", check.describe(), INCONCLUSIVE,
+            "masking NOT verified because no key column was configured for row pairing",
+        )
+        for check in missing_key_checks
+    ]
+    spec.column_masks = [check for check in spec.column_masks if check.key_column]
+    if spec.is_empty():
+        report = EffectiveAccessReport(not_verified=skipped_results)
+        print(report.summary())
+        return 0
 
     if not args.auth_file:
         raise SystemExit("--auth-file is required with --live.")
@@ -1154,6 +1240,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         spec, args.auth_file,
         warehouse_id=args.warehouse_id, keep_principals=args.keep_principals,
     )
+    report.not_verified.extend(skipped_results)
     print(report.summary())
     return 0 if report.passed else 1
 
