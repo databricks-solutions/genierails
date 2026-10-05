@@ -329,9 +329,11 @@ promote: _bootstrap _guard-workspace-target ## Split generated/ into layers (sam
 			exit 0; \
 		fi; \
 		if [ -z "$(DEST_CATALOG_MAP)" ]; then \
-		src_catalogs=$$(python3 "$(SHARED_ROOT)/scripts/footprint.py" "$(SOURCE_ENV_DIR)" --catalogs); \
+			if ! src_catalogs=$$(python3 "$(SHARED_ROOT)/scripts/footprint.py" "$(SOURCE_ENV_DIR)" --catalogs); then \
+				echo "$$src_catalogs"; exit 1; \
+			fi; \
 			echo "ERROR: DEST_CATALOG_MAP is required for cross-env promote."; \
-			echo "       Source catalogs detected in $(SOURCE_ENV)/env.auto.tfvars: $$src_catalogs"; \
+			echo "       Source catalogs detected in the $(SOURCE_ENV) footprint: $$src_catalogs"; \
 			echo ""; \
 			echo "  make promote SOURCE_ENV=$(SOURCE_ENV) DEST_ENV=$(DEST_ENV) \\"; \
 			echo '    DEST_CATALOG_MAP="<src_catalog>=<dest_catalog>[,<src2>=<dest2>...]"'; \

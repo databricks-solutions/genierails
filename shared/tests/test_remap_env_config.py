@@ -30,6 +30,7 @@ def test_table_only_promotion_preserves_and_remaps_top_level_uc_tables(tmp_path,
     assert config["enable_classification"] is True
     assert config["enable_auto_tagging"] is False
     assert config["business_access_enabled"] is False
+    assert config["sql_warehouse_id"] == ""
 
 
 def test_promotion_does_not_copy_or_overwrite_environment_discovery(tmp_path, monkeypatch):
@@ -186,6 +187,21 @@ def test_promotion_fails_closed_without_tables(tmp_path, monkeypatch, capsys):
     assert not (dest / "env.auto.tfvars").exists()
 
 
+def test_empty_environment_fails_closed(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    (source / "env.auto.tfvars").write_text("genie_spaces = []\nuc_tables = []\n")
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    with pytest.raises(SystemExit) as exc:
+        remap_env_config.main()
+    assert exc.value.code == 1
+    assert "no tables found for source environment" in capsys.readouterr().out
+    assert not (dest / "env.auto.tfvars").exists()
+
+
 def test_repromotion_preserves_destination_settings_and_closes_gate(tmp_path, monkeypatch):
     source = tmp_path / "dev"
     dest = tmp_path / "prod"
@@ -205,3 +221,155 @@ def test_repromotion_preserves_destination_settings_and_closes_gate(tmp_path, mo
     assert config["sql_warehouse_id"] == "warehouse-prod"
     assert config["enable_auto_tagging"] is True
     assert config["business_access_enabled"] is False
+
+
+def test_legacy_single_space_fallback_uses_only_discovered_tables(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    (source / "data_access").mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text(
+        'uc_tables = ["dev.admin.audit_log"]\n'
+        'genie_spaces = [{ name = "A", genie_space_id = "a" }]\n'
+    )
+    (source / "data_access/discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = ["dev.s.t1"]\n'
+    )
+    monkeypatch.setattr(
+        remap_env_config, "_discover_from_genie_api",
+        lambda *_: pytest.fail("legacy discovered fallback should avoid the API"),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    remap_env_config.main()
+    config = hcl2.load((dest / "env.auto.tfvars").open())
+    assert config["genie_spaces"][0]["uc_tables"] == ["prod.s.t1"]
+    assert config["uc_tables"] == ["prod.admin.audit_log", "prod.s.t1"]
+
+
+def test_renamed_attribution_uses_api_instead_of_widening(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    (source / "data_access").mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text(
+        'uc_tables = ["dev.admin.audit_log"]\n'
+        'genie_spaces = [{ name = "New Name", genie_space_id = "a" }]\n'
+    )
+    (source / "data_access/discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = ["dev.s.t1"]\n'
+        'discovered_table_agents = { "dev.s.t1" = ["Old Name"] }\n'
+    )
+    calls = []
+    monkeypatch.setattr(
+        remap_env_config, "_discover_from_genie_api",
+        lambda space_id, _auth: (calls.append(space_id) or ("New Name", ["dev.s.current"])),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    remap_env_config.main()
+    config = hcl2.load((dest / "env.auto.tfvars").open())
+    assert calls == ["a"]
+    assert config["genie_spaces"][0]["uc_tables"] == ["prod.s.current"]
+
+
+def test_api_discovered_catalog_must_be_mapped(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "A", genie_space_id = "a" }]\n'
+    )
+    monkeypatch.setattr(
+        remap_env_config, "_discover_from_genie_api",
+        lambda *_: ("A", ["other.s.t"]),
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    with pytest.raises(SystemExit) as exc:
+        remap_env_config.main()
+    assert exc.value.code == 1
+    assert "missing mappings for resolved catalog(s): other" in capsys.readouterr().out
+    assert not (dest / "env.auto.tfvars").exists()
+
+
+def test_unmapped_three_part_inline_table_fails(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    (source / "env.auto.tfvars").write_text(
+        'uc_tables = ["s.t", "other.s.t"]\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    with pytest.raises(SystemExit):
+        remap_env_config.main()
+    assert "other" in capsys.readouterr().out
+
+
+def test_two_spaces_use_discovered_agent_attribution(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    (source / "data_access").mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "A" }, { name = "B" }]\n'
+    )
+    (source / "data_access/discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = ["dev.s.t1", "dev.s.t2"]\n'
+        'discovered_table_agents = {\n'
+        '  "dev.s.t1" = ["A"]\n'
+        '  "dev.s.t2" = ["A", "B"]\n'
+        '}\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    remap_env_config.main()
+    config = hcl2.load((dest / "env.auto.tfvars").open())
+    assert config["genie_spaces"][0]["uc_tables"] == ["prod.s.t1", "prod.s.t2"]
+    assert config["genie_spaces"][1]["uc_tables"] == ["prod.s.t2"]
+
+
+def test_stale_destination_discovery_fails_before_write(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    (dest / "data_access").mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text('uc_tables = ["dev.s.current"]\n')
+    original = 'sql_warehouse_id = "prod-wh"\n'
+    (dest / "env.auto.tfvars").write_text(original)
+    (dest / "data_access/discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = ["prod.s.removed"]\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    with pytest.raises(SystemExit):
+        remap_env_config.main()
+    assert (dest / "env.auto.tfvars").read_text() == original
+
+
+def test_preservation_messages_and_per_space_warehouse(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    dest.mkdir()
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "A", uc_tables = ["dev.s.t"] }]\n'
+    )
+    (dest / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "A", sql_warehouse_id = "space-wh" }]\n'
+        'business_access_enabled = true\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    remap_env_config.main()
+    output = capsys.readouterr().out
+    assert "Preserved destination sql_warehouse_id" not in output
+    assert "Preserved destination enable_auto_tagging" not in output
+    assert "Reset destination business_access_enabled=true to false" in output
+    config = hcl2.load((dest / "env.auto.tfvars").open())
+    assert config["genie_spaces"][0]["sql_warehouse_id"] == "space-wh"

@@ -51,7 +51,7 @@ SHARED_ROOT = Path(__file__).resolve().parent.parent
 if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
 
-from scripts.footprint import resolve_footprint
+from scripts.footprint import FootprintError, resolve_footprint
 
 PII_COLUMN_PATTERN = re.compile(
     r"(?i)(ssn|social_sec|passport|dob|birth_?date|email|phone|"
@@ -506,7 +506,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Env dir: {env_dir}")
     print(f"  Mode: {args.mode}")
 
-    managed_tables = extract_managed_tables(env_dir)
+    try:
+        managed_tables = extract_managed_tables(env_dir)
+    except FootprintError as exc:
+        print(f"  ERROR: {exc}")
+        return 1
     if not managed_tables:
         print("  No managed tables found in the environment footprint — nothing to audit.")
         return 0

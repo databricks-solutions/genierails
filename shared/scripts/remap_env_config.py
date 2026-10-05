@@ -22,7 +22,12 @@ SHARED_ROOT = Path(__file__).resolve().parent.parent
 if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
 
-from scripts.footprint import load_hcl, resolve_footprint
+from scripts.footprint import (
+    FootprintError,
+    load_discovered_footprint,
+    load_hcl,
+    resolve_footprint,
+)
 
 try:
     import hcl2
@@ -86,6 +91,7 @@ def main():
     source_env_dir = sys.argv[1]
     dest_env_dir = sys.argv[2]
     catalog_map_str = sys.argv[3]
+    source_env = Path(source_env_dir).name
 
     # Parse catalog map
     pairs = {}
@@ -101,13 +107,14 @@ def main():
         return table
 
     # Load source config
-    cfg = load_hcl(Path(source_env_dir) / "env.auto.tfvars")
-    spaces = cfg.get("genie_spaces", [])
-    effective_tables = resolve_footprint(source_env_dir)
-    discovered_cfg = load_hcl(
-        Path(source_env_dir) / "data_access" / "discovered_uc_tables.auto.tfvars"
-    )
-    discovered_agents = discovered_cfg.get("discovered_table_agents") or {}
+    try:
+        cfg = load_hcl(Path(source_env_dir) / "env.auto.tfvars")
+        spaces = cfg.get("genie_spaces", [])
+        effective_tables = resolve_footprint(source_env_dir)
+        discovered_tables, discovered_agents = load_discovered_footprint(source_env_dir)
+    except FootprintError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
     generated_path = os.path.join(source_env_dir, "generated", "abac.auto.tfvars")
     id_to_name = {}
     if os.path.exists(generated_path):
@@ -149,8 +156,8 @@ def main():
                 print(f"  Resolved {len(uc_tables)} persisted table(s) for {name}")
 
         # Legacy single-agent discovery did not record attribution.
-        if not uc_tables and len(spaces) == 1 and effective_tables:
-            uc_tables = list(effective_tables)
+        if not uc_tables and len(spaces) == 1 and not discovered_agents and discovered_tables:
+            uc_tables = list(discovered_tables)
             space["uc_tables"] = uc_tables
 
         if space_id and (not name or not uc_tables):
@@ -170,14 +177,26 @@ def main():
             agent = space_id or name or "<unknown>"
             print(
                 f"ERROR: no tables found for agent {agent}; run "
-                "`make generate ENV=dev MODE=genie ...` first"
+                f"`make generate ENV={source_env} MODE=genie ...` first"
             )
             sys.exit(1)
 
     if not effective_tables:
         print(
             "ERROR: no tables found for source environment; run "
-            "`make generate ENV=dev MODE=genie ...` first"
+            f"`make generate ENV={source_env} MODE=genie ...` first"
+        )
+        sys.exit(1)
+
+    unmapped_catalogs = sorted({
+        table.split(".")[0]
+        for table in effective_tables
+        if table.count(".") >= 2 and table.split(".")[0] not in pairs
+    })
+    if unmapped_catalogs:
+        print(
+            "ERROR: DEST_CATALOG_MAP is missing mappings for resolved catalog(s): "
+            + ", ".join(unmapped_catalogs)
         )
         sys.exit(1)
 
@@ -200,14 +219,42 @@ def main():
 
     # Preserve destination-owned settings across remediation re-promotions.
     dest_path = os.path.join(dest_env_dir, "env.auto.tfvars")
-    dest_cfg = load_hcl(Path(dest_path))
+    try:
+        dest_cfg = load_hcl(Path(dest_path))
+        dest_discovered, _dest_agents = load_discovered_footprint(dest_env_dir)
+    except FootprintError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
     preserved_warehouse = _str(dest_cfg.get("sql_warehouse_id", ""))
-    preserved_auto_tagging = dest_cfg.get("enable_auto_tagging", False)
-    if dest_cfg:
+    preserved_auto_tagging = dest_cfg.get("enable_auto_tagging") is True
+    if "sql_warehouse_id" in dest_cfg:
+        print(f"  Preserved destination sql_warehouse_id={preserved_warehouse!r}")
+    if "enable_auto_tagging" in dest_cfg:
         print(
-            "  Preserved destination sql_warehouse_id and enable_auto_tagging "
-            f"({preserved_auto_tagging})"
+            "  Preserved destination enable_auto_tagging="
+            f"{str(preserved_auto_tagging).lower()}"
         )
+    if dest_cfg.get("business_access_enabled") is True:
+        print("  Reset destination business_access_enabled=true to false")
+
+    remapped_effective_tables = [remap_table(table) for table in effective_tables]
+    stale_discovered = [
+        table for table in dest_discovered if table not in remapped_effective_tables
+    ]
+    if stale_discovered:
+        print(
+            "ERROR: destination discovered footprint contains table(s) outside the "
+            "promoted footprint: " + ", ".join(stale_discovered) + ". Re-run "
+            f"`make generate ENV={Path(dest_env_dir).name} MODE=genie ...` or remove "
+            "the stale tool-owned discovery before promoting."
+        )
+        sys.exit(1)
+
+    dest_spaces_by_name = {
+        _str(space.get("name", "")): space
+        for space in dest_cfg.get("genie_spaces", [])
+        if _str(space.get("name", ""))
+    }
 
     # Build dest env.auto.tfvars. The complete promoted union is top-level so
     # Terraform, classification, derive-assignments, and certify share it.
@@ -224,6 +271,14 @@ def main():
         for t in remapped_tables:
             lines.append(f'      "{t}",')
         lines.append(f'    ]')
+        dest_space = dest_spaces_by_name.get(name, {})
+        if "sql_warehouse_id" in dest_space:
+            space_warehouse = _str(dest_space.get("sql_warehouse_id", ""))
+            lines.append(f"    sql_warehouse_id = {json.dumps(space_warehouse)}")
+            print(
+                f"  Preserved destination Genie space {name!r} "
+                f"sql_warehouse_id={space_warehouse!r}"
+            )
         if "acl_groups" in space:
             acl_groups = space["acl_groups"]
             if acl_groups is not None and (
@@ -243,15 +298,18 @@ def main():
     lines.append("]")
     lines.append("")
     lines.append("uc_tables = [")
-    for table in effective_tables:
-        lines.append(f'  "{remap_table(table)}",')
+    for table in remapped_effective_tables:
+        lines.append(f'  "{table}",')
     lines.append("]")
     lines.append("")
-    lines.append(f"sql_warehouse_id = {json.dumps(preserved_warehouse)}")
+    lines.append(
+        f"sql_warehouse_id = {json.dumps(preserved_warehouse)}"
+        "  # empty means auto-create in dest workspace"
+    )
     lines.append("")
     lines.append("# Safe production defaults; use the UI workflow before opening access.")
     lines.append("enable_classification = true")
-    lines.append(f"enable_auto_tagging = {str(bool(preserved_auto_tagging)).lower()}")
+    lines.append(f"enable_auto_tagging = {str(preserved_auto_tagging).lower()}")
     lines.append("business_access_enabled = false")
 
     # Write

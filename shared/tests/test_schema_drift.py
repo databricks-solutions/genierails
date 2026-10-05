@@ -143,6 +143,20 @@ sql_warehouse_id = ""
         )
         assert extract_managed_tables(tmp_path) == ["cat.discovered.table"]
 
+    def test_malformed_discovered_file_reports_actionable_error(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        (tmp_path / "env.auto.tfvars").write_text("uc_tables = []\n")
+        (tmp_path / "data_access").mkdir()
+        (tmp_path / "data_access/discovered_uc_tables.auto.tfvars").write_text(
+            'discovered_uc_tables = ["cat.bad.table"\n'
+        )
+        monkeypatch.chdir(tmp_path)
+        assert audit_mod.main([]) == 1
+        output = capsys.readouterr().out
+        assert "invalid discovered footprint" in output
+        assert "make generate" in output
+
 
 # ---------------------------------------------------------------------------
 # Governed key resolution (4-level fallback)

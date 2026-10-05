@@ -16,7 +16,7 @@ SHARED_ROOT = Path(__file__).resolve().parent.parent
 if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
 
-from scripts.footprint import resolve_footprint
+from scripts.footprint import FootprintError, resolve_footprint
 
 try:
     import hcl2
@@ -34,7 +34,11 @@ def main():
     dest_catalog_map = sys.argv[2]
 
     # Extract catalogs from the effective environment footprint.
-    tables = resolve_footprint(source_env_dir)
+    try:
+        tables = resolve_footprint(source_env_dir)
+    except FootprintError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
     src_cats = sorted(set(
         t.split(".")[0] for t in tables if t.count(".") >= 2
     ))
@@ -63,6 +67,13 @@ def main():
         if "=" in pair:
             k, v = pair.split("=", 1)
             pairs[k.strip()] = v.strip()
+
+    if not src_cats:
+        print(
+            "ERROR: no tables found for source environment; run "
+            f"`make generate ENV={Path(source_env_dir).name} MODE=genie ...` first"
+        )
+        sys.exit(1)
 
     # Validate
     missing = [c for c in src_cats if c not in pairs]

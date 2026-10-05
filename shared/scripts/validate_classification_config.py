@@ -6,6 +6,12 @@ from pathlib import Path
 
 import hcl2
 
+SHARED_ROOT = Path(__file__).resolve().parent.parent
+if str(SHARED_ROOT) not in sys.path:
+    sys.path.insert(0, str(SHARED_ROOT))
+
+from scripts.footprint import FootprintError, resolve_footprint
+
 
 def main() -> int:
     path = Path(sys.argv[1])
@@ -16,14 +22,11 @@ def main() -> int:
         print(f"ERROR: set enable_classification = true in {path}", file=sys.stderr)
         return 1
 
-    tables = list(config.get("uc_tables") or [])
-    for space in config.get("genie_spaces") or []:
-        tables.extend(space.get("uc_tables") or [])
-    discovered_path = path.parent / "data_access" / "discovered_uc_tables.auto.tfvars"
-    if discovered_path.exists():
-        with discovered_path.open() as handle:
-            discovered = hcl2.load(handle)
-        tables.extend(discovered.get("discovered_uc_tables") or [])
+    try:
+        tables = resolve_footprint(path.parent)
+    except FootprintError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     if not tables:
         print(
             "ERROR: define uc_tables (top-level or in genie_spaces), or import "
