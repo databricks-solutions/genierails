@@ -8,9 +8,16 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 <details>
 <summary><strong>Before you start — Complete checks and gather inputs</strong></summary>
 
-First complete the shared **[Prerequisites checklist](../../docs/prerequisites.md)**. It is the single source of truth for required software, network access, Databricks features, IdP group sync, Service Principal authority, credentials, and local tool checks.
+First clone the repo and move into your cloud's folder. Every `make` command in this walkthrough, including `make bootstrap-sp` in the prerequisites, runs from here:
 
-Then gather the inputs specific to this walkthrough:
+```bash
+git clone https://github.com/databricks-solutions/genierails.git
+cd genierails/aws           # or: cd genierails/azure
+```
+
+Then complete the shared **[Prerequisites checklist](../../docs/prerequisites.md)**. It is the single source of truth for required software, network access, Databricks features, IdP group sync, Service Principal authority, credentials, and local tool checks.
+
+Finally, gather the inputs specific to this walkthrough:
 
 | Value | What it is / where to find it |
 |---|---|
@@ -30,9 +37,9 @@ Then gather the inputs specific to this walkthrough:
 
 **Goal —** create the local config folders and fill in your creds + settings. Nothing here touches Databricks yet.
 
+From the `genierails/aws` (or `genierails/azure`) folder you cloned in **Before you start**:
+
 ```bash
-git clone https://github.com/databricks-solutions/genierails.git
-cd genierails/aws           # or: cd genierails/azure
 make setup ENV=dev          # creates envs/dev/ config templates (local only — no Databricks calls)
 cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars
 ```
