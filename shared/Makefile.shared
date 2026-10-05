@@ -300,29 +300,50 @@ rehearse: ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to
 		$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" && \
 		$(if $(strip $(VERIFY_KEY_COLUMN)),$(MAKE) verify-access ENV="$(ENV)" VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",echo "rehearse: skipped verify-access — pass VERIFY_KEY_COLUMN=<col> to prove masking live (recommended)")
 
-# Certification receipt: certify/maintain record a fingerprint of the inputs that
-# determine enforcement and exposure; release refuses unless it is still current.
+# Certification receipt: certify/maintain snapshot the enforcement inputs at gate
+# time and write the receipt from that snapshot only if the inputs are unchanged
+# after the governance apply; release refuses unless it is still current. All
+# three hold a per-env lock (envs/<env>/generated/.governance.lock) throughout.
 _RECEIPT = python3 "$(SHARED_ROOT)/scripts/certification_receipt.py"
-
-certify: ## Certify coverage and deploy enforcement only; records the receipt make release requires
-	@$(_DRY_RUN_GUARD); $(_RECEIPT) clear "$(ENV_DIR)" && \
-		$(MAKE) derive-assignments ENV="$(ENV)" && \
-		$(MAKE) coverage-gate ENV="$(ENV)" && \
-		$(MAKE) validate-generated ENV="$(ENV)" && \
-		$(MAKE) apply-governance ENV="$(ENV)" && \
-		$(MAKE) audit-rulebook ENV="$(ENV)" && \
-		$(_RECEIPT) write "$(ENV_DIR)" --by certify
-
-release: ## Open business exposure after a current make certify: apply with the gate open, persist it, verify-access
-	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
+_GUARD_WORKSPACE_ENV = if [ "$(ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
 		echo "This command is workspace-driven. Use ENV=<workspace> instead of ENV=$(ENV)." >&2; \
 		exit 1; \
+	fi
+# Lock owned by the recipe shell ($$); released on any exit.
+_ENV_LOCK = $(_RECEIPT) lock "$(ENV_DIR)" --pid $$$$ --owner $(1) --env "$(ENV)" || exit 1; \
+	trap '$(_RECEIPT) unlock "$(ENV_DIR)" --pid $$$$' EXIT
+
+certify: ## Certify coverage and deploy enforcement only; records the receipt make release requires
+	@$(_GUARD_WORKSPACE_ENV); \
+	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,certify); \
+	$(_RECEIPT) clear "$(ENV_DIR)" && \
+		$(MAKE) derive-assignments ENV="$(ENV)" && \
+		$(_RECEIPT) snapshot "$(ENV_DIR)" --by certify --env "$(ENV)" && \
+		$(MAKE) coverage-gate ENV="$(ENV)" && \
+		$(MAKE) validate-generated ENV="$(ENV)" && \
+		$(_RECEIPT) verify-snapshot "$(ENV_DIR)" --by certify --env "$(ENV)" && \
+		$(MAKE) apply-governance ENV="$(ENV)" && \
+		$(MAKE) audit-rulebook ENV="$(ENV)" && \
+		$(_RECEIPT) commit "$(ENV_DIR)" --by certify --env "$(ENV)"
+
+release: ## Open business exposure after a current make certify: apply with the gate open, persist it, verify-access
+	@$(_GUARD_WORKSPACE_ENV); \
+	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,release); \
+	$(_RECEIPT) check "$(ENV_DIR)" --env "$(ENV)" || exit 1; \
+	if ! $(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true"; then \
+		$(_RECEIPT) release-failed "$(ENV_DIR)" --env "$(ENV)" --reason "apply failed"; \
+		exit 1; \
 	fi; \
-	$(_DRY_RUN_GUARD); $(_RECEIPT) check "$(ENV_DIR)" --env "$(ENV)" || exit 1; \
-	$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" || exit 1; \
-	$(_RECEIPT) open-gate "$(ENV_DIR)" || exit 1; \
+	if ! $(_RECEIPT) check "$(ENV_DIR)" --env "$(ENV)" --prefix "release (post-apply)"; then \
+		$(_RECEIPT) release-failed "$(ENV_DIR)" --env "$(ENV)" --reason "certified inputs changed during the release apply; the gate was NOT persisted"; \
+		exit 1; \
+	fi; \
+	if ! $(_RECEIPT) open-gate "$(ENV_DIR)"; then \
+		$(_RECEIPT) release-failed "$(ENV_DIR)" --env "$(ENV)" --reason "could not persist business_access_enabled = true"; \
+		exit 1; \
+	fi; \
 	if ! $(MAKE) verify-access ENV="$(ENV)"$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \
-		echo "release: exposure is OPEN for $(ENV) but verify-access failed; investigate, or set business_access_enabled = false and run make apply ENV=$(ENV)" >&2; \
+		$(_RECEIPT) release-failed "$(ENV_DIR)" --env "$(ENV)" --reason "exposure is OPEN but verify-access failed"; \
 		exit 1; \
 	fi; \
 	echo ""; \
@@ -333,22 +354,23 @@ release: ## Open business exposure after a current make certify: apply with the 
 	echo "  Steady state:  make maintain ENV=$(ENV)"
 
 maintain: ## Native-first governance refresh: audit-schema -> derive-assignments -> gate -> apply-governance -> audit-rulebook (never touches exposure or Genie)
-	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
-		echo "This command is workspace-driven. Use ENV=<workspace> instead of ENV=$(ENV)." >&2; \
-		exit 1; \
-	fi; \
-	$(_DRY_RUN_GUARD); if ! $(MAKE) audit-schema ENV="$(ENV)"; then \
+	@$(_GUARD_WORKSPACE_ENV); \
+	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,maintain); \
+	$(_RECEIPT) clear "$(ENV_DIR)" || exit 1; \
+	if ! $(MAKE) audit-schema ENV="$(ENV)"; then \
 		echo "maintain: audit-schema reported drift (output above). For sensitive-looking columns with no class.* tag," >&2; \
 		echo "  review native UC classification / auto-tagging (make enable-classification ENV=$(ENV)) or tag them in UC," >&2; \
 		echo "  then re-run make maintain ENV=$(ENV). maintain never LLM-tags columns." >&2; \
 		exit 1; \
 	fi; \
 	$(MAKE) derive-assignments ENV="$(ENV)" && \
+		$(_RECEIPT) snapshot "$(ENV_DIR)" --by maintain --env "$(ENV)" && \
 		$(MAKE) coverage-gate ENV="$(ENV)" && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
+		$(_RECEIPT) verify-snapshot "$(ENV_DIR)" --by maintain --env "$(ENV)" && \
 		$(MAKE) apply-governance ENV="$(ENV)" APPLY_FLAGS= && \
 		$(MAKE) audit-rulebook ENV="$(ENV)" && \
-		$(_RECEIPT) write "$(ENV_DIR)" --by maintain
+		$(_RECEIPT) commit "$(ENV_DIR)" --by maintain --env "$(ENV)"
 
 validate: _bootstrap ## Validate split config in the selected environment
 	@echo "=== Validate ($(ENV)) ==="
