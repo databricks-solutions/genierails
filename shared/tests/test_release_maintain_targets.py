@@ -862,3 +862,35 @@ def test_signal_mid_run_releases_lock(tmp_path, target, sig):
     assert not _lock(env_dir).exists()
     assert proc.returncode != 0
     assert not cr.gate_open(env_dir)
+
+
+# ── merge with main: placeholder guard + access_tier_groups coverage ──────────
+
+
+def test_access_tier_groups_change_invalidates_receipt(tmp_path):
+    env_dir = _env_dir(tmp_path)
+    env_file = env_dir / "env.auto.tfvars"
+    env_file.write_text(env_file.read_text() + 'access_tier_groups = ["analysts"]\n')
+    cr.write_receipt(env_dir, "certify")
+    env_file.write_text(env_file.read_text().replace('["analysts"]', '["analysts", "admins"]'))
+    current, reason = cr.check_receipt(env_dir)
+    assert not current
+    assert "env:env.auto.tfvars" in reason
+
+
+@pytest.mark.parametrize("target", ["release", "certify", "maintain"])
+def test_placeholder_genie_space_id_refuses_before_lock(tmp_path, target):
+    env_dir = _env_dir(tmp_path)
+    cr.write_receipt(env_dir, "certify")
+    env_file = env_dir / "env.auto.tfvars"
+    env_file.write_text(
+        env_file.read_text()
+        + 'genie_spaces = [{ name = "Finance", genie_space_id = "<your-genie-space-id>" }]\n'
+    )
+    stub, log = _stub(tmp_path)
+    result = _make(target, env_dir, stub)
+    assert result.returncode != 0
+    assert "<your-genie-space-id>" in result.stdout + result.stderr
+    assert _calls(log) == []
+    assert not _lock(env_dir).exists()
+    assert "PARTIALLY OPENED" not in result.stderr

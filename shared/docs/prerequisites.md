@@ -197,12 +197,14 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
    ```
 
    ```bash
-   # dev workspace + dev catalog
-   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<dev-workspace-id> SP_NAME=genierails-deployer TARGET_CATALOG=<dev-catalog> PLAN=1
+   # dev workspace + dev catalog: creates the SP (or reuses an existing one); a new secret is printed once, so save it
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<dev-workspace-id> TARGET_CATALOG=<dev-catalog> YES=1
 
-   # prod workspace + prod catalog (same SP_NAME, so the same SP is reused)
-   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<prod-workspace-id> SP_NAME=genierails-deployer TARGET_CATALOG=<prod-catalog> PLAN=1
+   # prod workspace + prod catalog: reuses the same SP (same default SP_NAME)
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<prod-workspace-id> TARGET_CATALOG=<prod-catalog> YES=1
    ```
+
+   To preview the changes first, run the same command with `PLAN=1` instead of `YES=1`.
 
    | Parameter | Required | Value / where to find it |
    |-----------|----------|--------------------------|
@@ -213,7 +215,7 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
    | `SP_NAME` | No | Display name for the deployment SP; defaults to `genierails-deployer`. |
    | `TARGET_CATALOG` | Recommended | Exact name of the existing Unity Catalog catalog GenieRails will govern, from Catalog Explorer. Omit only for the greenfield alternative below. |
    | `MODEL_ENDPOINT` | No | Model serving endpoint to grant query access; bootstrap grants `CAN QUERY` on custom endpoints or Unity Catalog `EXECUTE` on the backing `system.ai` function for Foundation Model API endpoints. Defaults to `databricks-claude-sonnet-4-6`. |
-   | `PLAN=1` / `YES=1` | No | Use `PLAN=1` to preview, then rerun with `YES=1` to apply without an interactive confirmation. |
+   | `PLAN=1` / `YES=1` | No | `PLAN=1` previews without changing anything; `YES=1` applies without an interactive prompt. |
 
    - A preflight confirms the catalog exists and the caller can grant access. It stops before making changes if either check fails.
    - On success, it grants the required catalog permissions and prints the `auth.auto.tfvars` values, including a new OAuth secret when one is created.

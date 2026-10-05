@@ -44,6 +44,12 @@ def load_discovered_footprint(env_dir: str | Path) -> tuple[list[str], dict[str,
             raise FootprintError(
                 "discovered_table_agents must map table strings to lists of agent names"
             )
+        unknown_attribution = [table for table in agents if table not in tables]
+        if unknown_attribution:
+            raise FootprintError(
+                "discovered_table_agents contains table keys absent from "
+                "discovered_uc_tables: " + ", ".join(unknown_attribution)
+            )
     except FootprintError as exc:
         raise FootprintError(
             f"invalid discovered footprint {path}: {exc}; re-run "
@@ -52,10 +58,12 @@ def load_discovered_footprint(env_dir: str | Path) -> tuple[list[str], dict[str,
     return list(dict.fromkeys(tables)), agents
 
 
-def resolve_footprint(env_dir: str | Path) -> list[str]:
+def resolve_footprint(
+    env_dir: str | Path, env_file: str | Path | None = None
+) -> list[str]:
     """Return top-level, per-space, and discovered tables in stable order."""
     env_dir = Path(env_dir)
-    config = load_hcl(env_dir / "env.auto.tfvars")
+    config = load_hcl(Path(env_file) if env_file is not None else env_dir / "env.auto.tfvars")
     tables = list(config.get("uc_tables") or [])
     for space in config.get("genie_spaces") or []:
         tables.extend(space.get("uc_tables") or [])

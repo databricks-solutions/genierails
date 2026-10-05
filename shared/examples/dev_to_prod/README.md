@@ -23,8 +23,8 @@ Finally, gather the inputs specific to this walkthrough:
 |---|---|
 | **Dev / prod catalog names** | Your Unity Catalog catalogs, e.g. `dev_finance` / `prod_finance`. |
 | **SQL warehouse id** (per Genie agent) | The serverless warehouse the Genie agent runs its SQL on — an existing warehouse's id, **or leave blank** to auto-create one. Set it on the agent's `genie_spaces` entry; agents can also share the environment-level warehouse as a fallback. |
-| **Curated Genie agent** | The agent you're shipping. In the Genie UI, open the agent, click **Configure**, and copy the **Agent ID** from **About this agent**. It is also in the URL (`.../genie/rooms/01ef7b3c2a4d5e6f`) and goes in `genie_spaces`. |
-| **Access-tier group names** | Choose the IdP-synced groups from the shared prerequisite check, ordered most- to least-privileged. Example: `payments_ops` = full/raw; `regional_analysts` = region-scoped + masked; `viewers` = least-privileged + all sensitive columns masked. The generated policies define the actual access, and each agent's tables are `SELECT`-granted only to the tiers authorized to run that agent (a table shared by several agents gets the union). |
+| **Curated Genie agent** | The agent you're shipping. In the Genie UI, open the agent, click **Configure**, and copy the **Agent ID** from **About this agent**. It is also in the URL (`.../genie/rooms/01ef7b3c2a4d5e6f`) and goes in `genie_spaces`; its tables are discovered automatically. |
+| **Access-tier group names** | Choose the IdP-synced groups from the shared prerequisite check, ordered most- to least-privileged; you enter them once, as `access_tier_groups` (Phase 0). Example: `payments_ops` = full/raw; `regional_analysts` = region-scoped + masked; `viewers` = least-privileged + all sensitive columns masked. The generated policies define the actual access, and each agent's tables are `SELECT`-granted only to the tiers authorized to run that agent (a table shared by several agents gets the union). |
 | **Row-pairing key** (`VERIFY_KEY_COLUMN`) | A stable, **non-sensitive** id column present on your masked tables (e.g. `customer_id`) — `verify-access` uses it to line up rows. [Details](../../docs/effective-access-verification.md). |
 
 </details>
@@ -35,7 +35,7 @@ Finally, gather the inputs specific to this walkthrough:
 <details>
 <summary><strong>Phase 0 — Dev: Set up</strong></summary>
 
-**Goal —** create the local config folders, fill in credentials, and point dev at the Genie agent and tables you're shipping.
+**Goal —** create the local config folders, fill in credentials, and point dev at the Genie agent you're shipping.
 
 **1. Create the dev config** — from the `genierails/aws` (or `genierails/azure`) folder you cloned in **Before you start**:
 
@@ -46,14 +46,23 @@ cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfva
 
 **2. Fill in credentials** — edit **`envs/dev/auth.auto.tfvars`**: the deploying SP `client_id` / `client_secret` + workspace host & id. Step 3 calls Databricks with these.
 
-> **No group setting to change.** `make setup` already writes `manage_groups = false` into the shared **`envs/account/env.auto.tfvars`** (one file for both dev and prod), so GenieRails *consumes* your IdP-synced groups rather than creating them. Leave it as is; set it to `true` only for a demo/greenfield account with no IdP groups.
+**3. Set your Genie agent ID and access tiers, then import the agent.** In `envs/dev/env.auto.tfvars`, replace `<your-genie-space-id>` with your **Agent ID** and set your access-tier groups, most-privileged first (keep the template's safety defaults):
 
-**3. Point dev at your agent and tables — choose one path.** Both edit `envs/dev/env.auto.tfvars`; keep the template's safety defaults unchanged.
+```hcl
+access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
+```
 
-- **Existing Genie agent** — follow [Import a Genie Agent from UI into Code](../../docs/import-genie-agent-from-ui.md) Steps 1–2: add the agent's `genie_space_id` to `genie_spaces`, then run `make generate ENV=dev MODE=genie` to import it. Its tables are discovered into `envs/dev/data_access/discovered_uc_tables.auto.tfvars` automatically, so you **don't** need to list them in `uc_tables`. Set `sql_warehouse_id` (or leave it blank to auto-create).
-- **No agent or tables yet** — run the optional [Sample Environment Setup](SAMPLE_ENV.md). It creates sample tables and an agent, then prints the `uc_tables`, `genie_spaces`, and `sql_warehouse_id` snippet to paste into `envs/dev/env.auto.tfvars`.
+Then [import the agent](../../docs/import-genie-agent-from-ui.md):
 
-**Done when —** `envs/dev/auth.auto.tfvars` is filled in and `envs/dev/env.auto.tfvars` has your `genie_spaces` entry — plus either a discovered table list (import path) or the pasted `uc_tables` (sample path).
+```bash
+make generate ENV=dev MODE=genie
+```
+
+Every later `make generate` reads `access_tier_groups`, and `make promote` carries it to prod, so you never retype the groups. (Prefer the CLI? Leave it `[]` and pass `GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'` once — the first run saves it there. A later `--groups` that differs applies to that run only and prints how to update the setting.)
+
+The import discovers the agent's tables into `envs/dev/data_access/discovered_uc_tables.auto.tfvars` — no `uc_tables` needed. *No agent yet?* Use the [Sample Environment Setup](SAMPLE_ENV.md).
+
+**Done when —** `envs/dev/auth.auto.tfvars` is filled in, `genie_space_id` and `access_tier_groups` are set, and `discovered_uc_tables.auto.tfvars` lists the agent's tables.
 
 </details>
 
@@ -97,9 +106,9 @@ As code, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-r
 
 **1c. Draft the protection rules.**
 ```bash
-make generate ENV=dev GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'
+make generate ENV=dev
 ```
-`--groups` are **your own** IdP-synced groups, **one per access tier, most-privileged first** (`payments_ops`=full/raw → `regional_analysts`=region-scoped + masked → `viewers`=least-privileged, with all sensitive columns masked — placeholders; use your real names). GenieRails *consumes* them by exact name, never creates them; the generated policies define each tier's actual access.
+It uses the `access_tier_groups` you set in Phase 0 — **your own** IdP-synced groups, **one per access tier, most-privileged first** (`payments_ops`=full/raw → `regional_analysts`=region-scoped + masked → `viewers`=least-privileged, with all sensitive columns masked — placeholders; use your real names). GenieRails *consumes* them by exact name, never creates them; the generated policies define each tier's actual access.
 
 **1d. Prove coverage, apply, and verify — one command.**
 ```bash
@@ -199,7 +208,7 @@ It verifies coverage and deploys only the governance protections: masks and acce
 **If the gate fails or `audit-rulebook` reports drift** — prod surfaced a sensitive tag your promoted rules don't cover (a type the classifier found only in prod, or a rule dropped in promotion). This is a **rule change — made in dev, never hand-edited in prod**. Loop back:
 
 1. **Scaffold the missing mappings** — `make scaffold-treatments ENV=prod` adds a **safe default** (full redaction, marked `REVIEW`) for each tag prod surfaced, so you don't hand-edit anything. Then **review each** — keep the redaction, or set a type-appropriate mask. This changes the shared *rulebook* (not prod's live state), so you validate it in dev and re-promote below.
-2. **Re-validate in dev:** `make generate ENV=dev` → `make coverage-gate ENV=dev`.
+2. **Re-validate in dev:** `make generate ENV=dev` (reuses `access_tier_groups`) → `make coverage-gate ENV=dev`.
 3. **Re-promote:** `make promote …` (carries the updated rules to prod — same command as [Phase 2](#phase-2--prod-set-up-and-promote-rules)).
 4. **Re-run this phase:** `make certify ENV=prod`.
 

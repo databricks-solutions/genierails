@@ -13,7 +13,7 @@ SHARED_ROOT = Path(__file__).resolve().parent.parent
 if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
 
-from scripts.footprint import resolve_footprint
+from scripts.footprint import FootprintError, resolve_footprint
 
 
 def _load(path: Path) -> dict:
@@ -41,7 +41,11 @@ def main() -> int:
         )
         return 0
 
-    tables = resolve_footprint(env_dir)
+    try:
+        tables = resolve_footprint(env_dir)
+    except FootprintError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     uc_catalog = _value(config, "uc_catalog")
     full_tables = [
         table if len(table.split(".")) >= 3 else f"{uc_catalog}.{table}"
