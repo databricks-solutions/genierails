@@ -199,7 +199,7 @@ Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` and re-run `make
 make certify ENV=prod   # one command: derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook (stops at the first failure)
 ```
 
-On success, `certify` records what it checked in `envs/prod/generated/.certified.json`. Phase 5's `make release` requires that record to still match prod's rules and config, so any later change means re-running `certify`.
+On success, `certify` records what it checked in `envs/prod/generated/.certified.json`. Phase 5's `make release` requires that record to still match prod's rules and config, so any later change (to prod's config, the rules, or GenieRails itself, e.g. after a `git pull`) means re-running `certify`.
 
 `certify` reuses the exact rules you reviewed in dev — it re-derives *which prod columns* get which protection from prod's own tags, but never regenerates the rules (no model call, so nothing drifts from what you reviewed). A promoted per-column override is merged strictest-wins with the native result, so it can strengthen but never weaken native protection. It also remains active when that governed prod column has no native tag (fail-closed). If its table/column was removed from the declared governed footprint, certification warns and skips the stale rule rather than entering an error loop. Every resulting treatment must still have a promoted mask or certification fails closed. Overrides do not change mask principals, grants, or `SELECT` scope.
 
