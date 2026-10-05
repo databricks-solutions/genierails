@@ -121,22 +121,34 @@ def _rulebook(env_dir: Path) -> int:
 def _check(env_dir: Path) -> int:
     """Run both read-only native-first detection checks."""
     account_config = env_dir.parent / "account" / "abac.auto.tfvars"
-    if not account_config.is_file():
-        print("ERROR: read-only check requires promoted account config at "
-              f"{account_config}. Point --config-source at an envs root "
-              f"containing account/ and {env_dir.name}/.", file=sys.stderr)
-        return 2
     audit_rc = _audit(env_dir)
-    rulebook_rc = _rulebook(env_dir)
-    if audit_rc or rulebook_rc:
+    if account_config.is_file():
+        rulebook_rc = _rulebook(env_dir)
+    else:
+        rulebook_rc = 0
+        print("WARNING: skipping rulebook audit because promoted account config "
+              f"is missing at {account_config}. The old per-environment config "
+              "source still supports schema drift only. Repoint "
+              "scheduled_governance_config_source at the envs root containing "
+              f"account/ and {env_dir.name}/ to enable rulebook checks.",
+              file=sys.stderr)
+
+    errors = [rc for rc in (audit_rc, rulebook_rc) if rc not in (0, 1)]
+    if errors:
+        print("\nERROR: scheduled governance check could not complete. Review "
+              "the audit error above and fix the runtime configuration or "
+              "credentials; this is not a governance finding.", file=sys.stderr)
+        return errors[0]
+
+    if audit_rc == 1 or rulebook_rc == 1:
         env = env_dir.name
         print(f"\nRun `make maintain ENV={env}` from your GenieRails checkout.",
               file=sys.stderr)
-        if audit_rc:
+        if audit_rc == 1:
             print("For untagged sensitive-looking columns, review native UC "
                   "classification / auto-tagging or tag them in UC; maintain "
                   "never LLM-tags columns.", file=sys.stderr)
-        if rulebook_rc:
+        if rulebook_rc == 1:
             print(f"For rulebook gaps, add the rule in dev, re-promote, then "
                   f"run `make certify ENV={env}`.", file=sys.stderr)
     return rulebook_rc or audit_rc

@@ -13,10 +13,10 @@ python shared/scripts/run_scheduled_governance.py \
 
 The job does not run make, Terraform, derivation, or apply, and it does not
 write to the workspace. Existing serverless dependencies are sufficient. The
-config source is required because `envs/` is gitignored; it must be a
+config source is required because `envs/` is gitignored. Point it at a
 runtime-visible envs root containing both `account/` and the target environment
-(for example `prod/`). This gives the rulebook audit the promoted account
-policies without relying on local Terraform state.
+(for example `prod/`) to enable both audits. This gives the rulebook audit the
+promoted account policies without relying on local Terraform state.
 
 On findings, the run fails and its output explains what was found. Open the run
 from the failure notification, then run this from the authoritative GenieRails
@@ -41,7 +41,10 @@ retains `--step all|audit|delta|coverage` for existing callers;
 
 ## Upgrading
 
-The mode defaults to `"check"`. Existing jobs therefore become less mutating:
-they stop running legacy `generate-delta` and perform only the two read-only
-audits. Set the legacy mode explicitly only if that old checkout-local rewrite
-is still required.
+The mode defaults to `"check"`, so existing jobs stop running legacy
+`generate-delta`. If an existing config source still points directly at the old
+per-environment directory, the job continues to run schema drift, prints a
+warning, and skips rulebook drift because `account/abac.auto.tfvars` is not
+available. Repoint `scheduled_governance_config_source` at the parent envs root
+containing both `account/` and `<env>/` to enable rulebook drift. Set legacy
+mode explicitly only if the old checkout-local delta rewrite is still required.

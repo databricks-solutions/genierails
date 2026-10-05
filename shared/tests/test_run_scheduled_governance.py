@@ -213,22 +213,39 @@ def test_default_check_runs_both_audits_never_delta(tmp_path, monkeypatch):
     assert ran == ["audit", "rulebook"]
 
 
-def test_check_requires_promoted_account_config(tmp_path, capsys):
+def test_old_per_env_source_warns_and_runs_schema_drift_only(tmp_path, monkeypatch, capsys):
     env_dir = tmp_path / "aws" / "envs" / "prod"
     env_dir.mkdir(parents=True)
-    assert rsg._check(env_dir) == 2
-    assert "requires promoted account config" in capsys.readouterr().err
+    ran = []
+    monkeypatch.setattr(rsg, "_audit", lambda ed: ran.append("audit") or 0)
+    monkeypatch.setattr(rsg, "_rulebook", lambda ed: pytest.fail("rulebook should be skipped"))
+    assert rsg._check(env_dir) == 0
+    assert ran == ["audit"]
+    err = capsys.readouterr().err
+    assert "WARNING: skipping rulebook audit" in err
+    assert "Repoint scheduled_governance_config_source at the envs root" in err
 
 
-def test_default_check_propagates_nonzero_and_prints_actions(tmp_path, monkeypatch, capsys):
+def test_finding_propagates_nonzero_and_prints_maintain_action(tmp_path, monkeypatch, capsys):
     env_dir = _env_dir(tmp_path)
-    monkeypatch.setattr(rsg, "_audit", lambda ed: 7)
+    monkeypatch.setattr(rsg, "_audit", lambda ed: 1)
     monkeypatch.setattr(rsg, "_rulebook", lambda ed: 0)
     monkeypatch.setattr(sys, "argv", ["prog", "--env-dir", str(env_dir)])
-    assert rsg.main() == 7
+    assert rsg.main() == 1
     err = capsys.readouterr().err
     assert "make maintain ENV=prod" in err
     assert "native UC classification" in err
+
+
+def test_audit_error_propagates_without_maintain_action(tmp_path, monkeypatch, capsys):
+    env_dir = _env_dir(tmp_path)
+    monkeypatch.setattr(rsg, "_audit", lambda ed: 2)
+    monkeypatch.setattr(rsg, "_rulebook", lambda ed: 0)
+    assert rsg._check(env_dir) == 2
+    err = capsys.readouterr().err
+    assert "could not complete" in err
+    assert "not a governance finding" in err
+    assert "make maintain" not in err
 
 
 def test_rulebook_finding_prints_dev_promotion_action(tmp_path, monkeypatch, capsys):

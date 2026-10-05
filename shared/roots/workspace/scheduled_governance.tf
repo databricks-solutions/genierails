@@ -60,7 +60,7 @@ variable "scheduled_governance_catalog" {
 variable "scheduled_governance_config_source" {
   type        = string
   default     = ""
-  description = "Runtime-visible envs root copied before scanning (for example /Volumes/<cat>/<schema>/<vol>/envs). The default check requires account/ and <env>/ beneath it; explicit legacy mode also accepts the old flat target-env source. Required when enabled because envs/ is gitignored."
+  description = "Runtime-visible config source copied before scanning. Prefer an envs root with account/ and <env>/ to run both checks; an old flat target-env source remains compatible but check mode warns and skips rulebook audit. Required when enabled because envs/ is gitignored."
 
   validation {
     condition     = !var.enable_scheduled_governance || var.scheduled_governance_config_source != ""
