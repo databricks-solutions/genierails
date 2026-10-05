@@ -62,6 +62,15 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars" in out
     assert "envs/dev/auth.auto.tfvars" in out
     assert "manage_groups = false" in out and "envs/account/env.auto.tfvars" in out
+    assert "existing agent: add genie_space_id to genie_spaces" in out
+    assert (
+        "make generate ENV=dev MODE=genie "
+        "GENERATE_ARGS='--groups \"<most_privileged>,...,<least_privileged>\"'"
+    ) in out
+    assert "tables auto-discovered; uc_tables not needed" in out
+    assert "no agent yet: run the sample env setup" in out
+    assert "../shared/examples/dev_to_prod/SAMPLE_ENV.md" in out
+    assert "uc_tables, sql_warehouse_id (or blank), genie_spaces" not in out
     assert "make enable-classification ENV=dev" in out
     assert "make generate ENV=dev GENERATE_ARGS='--groups " in out
     assert "make rehearse ENV=dev VERIFY_KEY_COLUMN=" in out
@@ -71,7 +80,15 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "country" not in out
     # Plain apply skips the coverage gate; setup must not suggest it for dev.
     assert "make apply" not in out
-    assert out.index("enable-classification") < out.index("make generate") < out.index("make rehearse")
+    assert (
+        out.index("envs/dev/auth.auto.tfvars")
+        < out.index("manage_groups = false")
+        < out.index("existing agent:")
+        < out.index("MODE=genie")
+        < out.index("enable-classification")
+        < out.rindex("make generate")
+        < out.index("make rehearse")
+    )
 
 
 @pytest.mark.parametrize("cloud", CLOUDS)
