@@ -44,10 +44,9 @@ make setup ENV=dev          # creates envs/dev/ config templates (local only —
 cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars
 ```
 
-**2. Fill in credentials and account settings:**
+**2. Fill in credentials** — edit **`envs/dev/auth.auto.tfvars`**: the deploying SP `client_id` / `client_secret` + workspace host & id. Step 3 calls Databricks with these.
 
-- **`envs/dev/auth.auto.tfvars`** — the deploying SP `client_id` / `client_secret` + workspace host & id. Step 3 calls Databricks with these.
-- **`envs/account/env.auto.tfvars`** — set `manage_groups = false` (this flow *consumes* IdP groups; it doesn't create them). **There is one shared `envs/account/` config** used by both dev and prod — you edit it here, once.
+> **No group setting to change.** `make setup` already writes `manage_groups = false` into the shared **`envs/account/env.auto.tfvars`** (one file for both dev and prod), so GenieRails *consumes* your IdP-synced groups rather than creating them. Leave it as is; set it to `true` only for a demo/greenfield account with no IdP groups.
 
 **3. Point dev at your agent and tables — choose one path.** Both edit `envs/dev/env.auto.tfvars`; keep the template's safety defaults unchanged.
 
