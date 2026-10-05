@@ -45,10 +45,14 @@ So "expose last" isn't a policy you hope holds — there is simply no `SELECT` a
 | `make validate-generated ENV=<e>` | 1/4 | Static validation incl. the one-mask-per-column guard |
 | `make apply ENV=<e>` | 1/5 | Full stack (account → data_access → workspace; auto-promotes same-env first); creates the Genie agent; releases gated access when `business_access_enabled=true` |
 | `make apply-governance ENV=<e>` | 4 | Enforcement only (account + data_access); no Genie agent |
+| `make rehearse ENV=dev VERIFY_KEY_COLUMN=<pk>` | 1 | (dev) coverage-gate → validate-generated → apply → verify-access, stopping at the first failure |
+| `make certify ENV=prod` | 4 | (prod) derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook; records the certification `make release` requires |
+| `make release ENV=prod VERIFY_KEY_COLUMN=<pk>` | 5 | (prod) Refuses unless certification is current; creates the Genie agent, releases gated access, saves `business_access_enabled = true`, runs `verify-access` |
+| `make maintain ENV=prod` | 6 | (prod, scheduled) audit-schema → derive-assignments → gate → apply-governance → audit-rulebook; renews certification, never changes access or Genie |
 | `make promote SOURCE_ENV DEST_ENV DEST_CATALOG_MAP` | 2 | Promote **rules only** (leaves tag assignments behind); creates + writes prod `env.auto.tfvars` |
 | `make verify-access ENV=<e> VERIFY_KEY_COLUMN=<pk>` | 1/5 | Prove masking by querying as per-tier test principals (**needs the gate open**) |
 | `make audit-rulebook ENV=<e>` | 4/6 | Drift check — tags with no covering rule |
-| `make audit-schema ENV=<e>` / `make generate-delta ENV=<e>` | 6 | Untagged-column audit / incremental tag assignments after schema changes |
+| `make audit-schema ENV=<e>` | 6 | Untagged-column audit (also the first step of `make maintain`) |
 | `make evidence ENV=<e>` | 5 | Compliance evidence record (`GENIERAILS_EVIDENCE_INTEGRATION=1` + `WAREHOUSE_ID`) |
 
 Key config & code: [`treatment_config.json`](../../treatment_config.json) (the `gr_treatment` precedence rules — shared across envs), [`sensitivity_source.py`](../../sensitivity_source.py) (native `class.*` source), [`treatment_derivation.py`](../../treatment_derivation.py) (one treatment/column), [`verify_effective_access.py`](../../verify_effective_access.py) (masked-vs-raw), [`scripts/audit_schema_drift.py`](../../scripts/audit_schema_drift.py) (drift).

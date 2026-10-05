@@ -199,6 +199,8 @@ Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` and re-run `make
 make certify ENV=prod   # one command: derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook (stops at the first failure)
 ```
 
+On success, `certify` records what it checked in `envs/prod/generated/.certified.json`. Phase 5's `make release` requires that record to still match prod's rules and config, so any later change means re-running `certify`.
+
 `certify` reuses the exact rules you reviewed in dev — it re-derives *which prod columns* get which protection from prod's own tags, but never regenerates the rules (no model call, so nothing drifts from what you reviewed). A promoted per-column override is merged strictest-wins with the native result, so it can strengthen but never weaken native protection. It also remains active when that governed prod column has no native tag (fail-closed). If its table/column was removed from the declared governed footprint, certification warns and skips the stale rule rather than entering an error loop. Every resulting treatment must still have a promoted mask or certification fails closed. Overrides do not change mask principals, grants, or `SELECT` scope.
 
 It verifies coverage and deploys only the governance protections: masks and access policies. It does not deploy or update the Genie agent. If prod's tags cannot be read, or a detected data type has no protection rule, the command stops instead of applying incomplete protection.
@@ -224,19 +226,13 @@ Repeat until the gate passes and drift is clean. The agent stays uncreated and c
 
 **Goal —** with coverage proven, release access, create the agent, and confirm masking live.
 
-```hcl
-# envs/prod/env.auto.tfvars
-business_access_enabled = true
-```
 ```bash
-make apply ENV=prod    # creates the Genie agent + RELEASES the withheld business SELECT and Genie run access
+make release ENV=prod VERIFY_KEY_COLUMN=customer_id
 ```
 
-Confirm masking live. `verify-access` automatically grants its temporary per-tier test SPs `CAN_USE` on the selected warehouse; it does not change the tier groups' permanent warehouse ACLs.
+One command: it refuses unless the Phase 4 certification is still current, then creates the Genie agent, releases the withheld business `SELECT` and Genie run access, saves `business_access_enabled = true` in `envs/prod/env.auto.tfvars`, and runs `verify-access` (unprivileged tier = masked, authorized tier = raw). Don't edit `business_access_enabled` by hand.
 
-```bash
-make verify-access ENV=prod VERIFY_KEY_COLUMN=customer_id   # unprivileged = masked, authorized = raw (the gate is open now)
-```
+If `release` fails after it started applying, or you interrupt it, access may be partly open. Follow the rollback steps it prints; if it was interrupted, set `business_access_enabled = false` in `envs/prod/env.auto.tfvars` and run `make apply ENV=prod`.
 
 <details>
 <summary><strong>Optional — Capture compliance evidence</strong></summary>
@@ -269,11 +265,16 @@ ENVS_DIR="$PWD/envs" ../shared/scripts/terraform_layer.sh workspace prod output 
 <details>
 <summary><strong>Phase 6 — Prod: Maintain coverage</strong></summary>
 
-**Goal —** catch sensitive data that arrives after go-live. Run these on a schedule (the repo ships a scheduled governance job):
+**Goal —** catch sensitive data that arrives after go-live. Run this on a schedule (the repo ships a scheduled governance job):
 
-- **`make audit-schema ENV=prod`** — flags untagged sensitive-looking columns and stale assignments. A clean run prints `No drift detected.`; a finding lists the columns → classify them (usually via `generate-delta`) and re-apply.
-- **`make audit-rulebook ENV=prod`** — flags any prod tag with no covering policy/mask (a rule dropped in promotion, or a brand-new type). A finding means: add the rule in dev, re-generate/validate, re-promote, and re-certify.
-- **`make generate-delta ENV=prod`** — *mutating*: removes stale assignments and assigns newly-detected sensitive columns, **constrained to your existing governed tags** (it can't invent a new type). Review the merged assignments, then `make apply`.
+```bash
+make maintain ENV=prod   # audit-schema → derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook
+```
+
+It protects newly tagged columns using prod's own `class.*` tags and renews the certification. It never changes business access or the Genie agent.
+
+- **Stops at `audit-schema`** — a sensitive-looking column has no `class.*` tag yet. Review it in native classification (`make enable-classification ENV=prod`) or tag it in Unity Catalog, then re-run `make maintain ENV=prod`.
+- **Stops at `coverage-gate` or `audit-rulebook`** — prod has a tag your rules don't cover. That's a rule change: follow the [Phase 4 loop](#phase-4--prod-prove-coverage) (add the rule in dev, re-promote, `make certify ENV=prod`).
 
 A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog granted nothing you didn't ask for). For your most sensitive data, prefer "locked down until proven safe" over "open until tagged."
 
