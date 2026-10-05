@@ -46,8 +46,6 @@ cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfva
 
 **2. Fill in credentials** — edit **`envs/dev/auth.auto.tfvars`**: the deploying SP `client_id` / `client_secret` + workspace host & id. Step 3 calls Databricks with these.
 
-> **No group setting to change.** `make setup` already writes `manage_groups = false` into the shared **`envs/account/env.auto.tfvars`** (one file for both dev and prod), so GenieRails *consumes* your IdP-synced groups rather than creating them. Leave it as is; set it to `true` only for a demo/greenfield account with no IdP groups.
-
 **3. Point dev at your agent and tables — choose one path.** Both edit `envs/dev/env.auto.tfvars`; keep the template's safety defaults unchanged.
 
 - **Existing Genie agent** — follow [Import a Genie Agent from UI into Code](../../docs/import-genie-agent-from-ui.md) Steps 1–2: add the agent's `genie_space_id` to `genie_spaces`, then run `make generate ENV=dev MODE=genie` to import it. Its tables are discovered into `envs/dev/data_access/discovered_uc_tables.auto.tfvars` automatically, so you **don't** need to list them in `uc_tables`. Set `sql_warehouse_id` (or leave it blank to auto-create).
