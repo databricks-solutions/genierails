@@ -336,3 +336,22 @@ class TestCliGroupMode:
         assert preflight_calls == []
         assert build_calls.get("create_groups") is True
         assert build_calls.get("group_names") is None
+
+
+def test_idp_preflight_defaults_account_host_on_aws(monkeypatch):
+    """prerequisites.md lets AWS omit databricks_account_host; preflight must still run."""
+    import databricks.sdk
+
+    seen = {}
+
+    class FakeAccountClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            self.groups = type("G", (), {"list": lambda self: []})()
+
+    monkeypatch.setattr(databricks.sdk, "AccountClient", FakeAccountClient)
+    auth = {"databricks_account_id": "acct", "databricks_client_id": "id",
+            "databricks_client_secret": "s"}
+
+    assert generate_abac.list_account_group_names(auth) == []
+    assert seen["host"] == "https://accounts.cloud.databricks.com"

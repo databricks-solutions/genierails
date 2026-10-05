@@ -2119,3 +2119,9 @@ def test_required_native_classification_fails_on_successful_empty_scan(monkeypat
     assert "review detections" in str(exc_info.value)
     assert "enable_auto_tagging = true" in str(exc_info.value)
     assert "re-apply enable-classification" in str(exc_info.value)
+
+
+def test_auto_install_pins_python_hcl2_below_8():
+    import generate_abac
+
+    assert "python-hcl2<8" in generate_abac.REQUIRED_PACKAGES
