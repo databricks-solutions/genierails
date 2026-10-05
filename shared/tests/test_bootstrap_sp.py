@@ -554,6 +554,95 @@ def test_apply_uses_exact_scoped_grants():
     assert "GRANTED workspace 123: CAN_QUERY on custom-model" in output
 
 
+def _fmapi_endpoint():
+    return {
+        "endpoint_type": "FOUNDATION_MODEL_API",
+        "config": {"served_entities": [{
+            "foundation_model": {"name": "system.ai.databricks-claude-sonnet-4-6"}
+        }]},
+    }
+
+
+def test_fmapi_with_inherited_execute_is_unchanged_without_permissions_patch():
+    _account, workspace, _workspace_factory, factory = _fake()
+    workspace.api_client.do.return_value = _fmapi_endpoint()
+    workspace.grants.get_effective.return_value = SimpleNamespace(
+        privilege_assignments=[SimpleNamespace(
+            privileges=[SimpleNamespace(privilege=Privilege.EXECUTE)]
+        )]
+    )
+    output = []
+
+    bootstrap(_cfg(model_endpoint="databricks-claude-sonnet-4-6"),
+              client_factory=factory, emit=output.append)
+
+    workspace.grants.get_effective.assert_called_once_with(
+        securable_type="function",
+        full_name="system.ai.databricks-claude-sonnet-4-6",
+        principal="client-123",
+    )
+    assert workspace.api_client.do.call_args_list == [call(
+        "GET", "/api/2.0/serving-endpoints/databricks-claude-sonnet-4-6"
+    )]
+    assert any(line.startswith("UNCHANGED workspace 123: EXECUTE on system.ai.")
+               for line in output)
+
+
+def test_fmapi_without_execute_grants_execute_on_function():
+    _account, workspace, _workspace_factory, factory = _fake()
+    workspace.api_client.do.return_value = _fmapi_endpoint()
+
+    bootstrap(_cfg(model_endpoint="databricks-claude-sonnet-4-6"),
+              client_factory=factory, emit=MagicMock())
+
+    function_call = workspace.grants.update.call_args_list[-1].kwargs
+    assert function_call["securable_type"] == "function"
+    assert function_call["full_name"] == "system.ai.databricks-claude-sonnet-4-6"
+    assert function_call["changes"][0].principal == "client-123"
+    assert function_call["changes"][0].add == [Privilege.EXECUTE]
+    assert workspace.api_client.do.call_count == 1
+
+
+def test_fmapi_grant_failure_names_endpoint_securable_workspace_and_host():
+    _account, workspace, _workspace_factory, factory = _fake()
+    workspace.api_client.do.return_value = _fmapi_endpoint()
+    def fail_function_grant(*, securable_type, **_kwargs):
+        if securable_type == "function":
+            raise PermissionDenied("grant denied")
+
+    workspace.grants.update.side_effect = fail_function_grant
+
+    with pytest.raises(RuntimeError, match=(
+        r"Foundation Model API endpoint 'databricks-claude-sonnet-4-6'.*"
+        r"'system.ai.databricks-claude-sonnet-4-6'.*workspace 123 "
+        r"\(https://dbc.example.com\).*metastore admin grant EXECUTE"
+    )):
+        bootstrap(_cfg(model_endpoint="databricks-claude-sonnet-4-6"),
+                  client_factory=factory, emit=MagicMock())
+
+
+def test_fmapi_rerun_is_unchanged_after_execute_grant():
+    _account, workspace, _workspace_factory, factory = _fake(existing=True)
+    workspace.api_client.do.return_value = _fmapi_endpoint()
+    workspace.grants.get_effective.side_effect = [
+        SimpleNamespace(privilege_assignments=[]),
+        SimpleNamespace(privilege_assignments=[SimpleNamespace(
+            privileges=[SimpleNamespace(privilege=Privilege.EXECUTE)]
+        )]),
+    ]
+
+    bootstrap(_cfg(model_endpoint="databricks-claude-sonnet-4-6"),
+              client_factory=factory, emit=MagicMock())
+    output = []
+    bootstrap(_cfg(model_endpoint="databricks-claude-sonnet-4-6"),
+              client_factory=factory, emit=output.append)
+
+    function_updates = [item for item in workspace.grants.update.call_args_list
+                        if item.kwargs["securable_type"] == "function"]
+    assert len(function_updates) == 1
+    assert any(line.startswith("UNCHANGED workspace 123: EXECUTE") for line in output)
+
+
 @pytest.mark.parametrize(
     ("lookup_result", "lookup_error", "expected"),
     [
