@@ -207,7 +207,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "  4. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — point it at your agent and tables (pick one):"; \
 		echo "       existing agent: add genie_space_id to genie_spaces, then run:"; \
 		echo "         make generate ENV=$(ENV) MODE=genie GENERATE_ARGS='--groups \"<most_privileged>,...,<least_privileged>\"'"; \
-		echo "         (tables auto-discovered; uc_tables not needed)"; \
+		echo "         (tables auto-discovered; uc_tables not needed. sql_warehouse_id: your warehouse id, or \"\" to auto-create)"; \
 		echo "       no agent yet: run the sample env setup (../shared/examples/dev_to_prod/SAMPLE_ENV.md) and paste its snippet"; \
 		echo "  5. Enable classification on your catalog (Databricks UI, or: make enable-classification ENV=$(ENV)),"; \
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \

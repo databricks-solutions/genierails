@@ -67,7 +67,10 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
         "make generate ENV=dev MODE=genie "
         "GENERATE_ARGS='--groups \"<most_privileged>,...,<least_privileged>\"'"
     ) in out
-    assert "tables auto-discovered; uc_tables not needed" in out
+    assert (
+        'tables auto-discovered; uc_tables not needed. '
+        'sql_warehouse_id: your warehouse id, or "" to auto-create'
+    ) in out
     assert "no agent yet: run the sample env setup" in out
     assert "../shared/examples/dev_to_prod/SAMPLE_ENV.md" in out
     assert "uc_tables, sql_warehouse_id (or blank), genie_spaces" not in out
