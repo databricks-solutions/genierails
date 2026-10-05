@@ -105,3 +105,18 @@ def test_teardown_removes_tracked_groups(tmp_path, monkeypatch):
 
     account.groups.delete.assert_called_once_with(id=f"id-{name}")
     assert not state_file.exists()
+
+
+def test_skip_agent_seeds_tables_without_creating_a_genie_agent(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sample, "STATE_FILE", tmp_path / "state.json")
+    statements = []
+    monkeypatch.setattr(sample, "_run_sql", lambda client, wh, sql: statements.append(sql))
+    client = Mock()
+    client.config.host = "https://prod"
+    args = Namespace(catalog="prod_cat", schema="schema", warehouse_id="wh", rows=1, skip_agent=True)
+
+    sample.setup(args, client)
+
+    assert any(sql.startswith("CREATE TABLE IF NOT EXISTS") for sql in statements)
+    client.api_client.do.assert_not_called()
+    assert "Skipping the Genie agent" in capsys.readouterr().out

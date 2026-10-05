@@ -21,4 +21,10 @@ python teardown_sample_env.py --catalog dev_finance
 # Equivalent: add --teardown to the setup command.
 ```
 
+**Prod needs the same tables.** In [Phase 2](README.md#phase-2--prod-set-up-and-promote-rules), seed the prod catalog before scanning it — tables only, because `make promote` creates prod's agent:
+
+```bash
+python setup_sample_env.py --host <prod-workspace-url> --catalog prod_finance --warehouse-id <prod-warehouse-id> --skip-agent
+```
+
 Use `--help` for `--host`, `--schema`, `--rows`, and env-var alternatives. Then `cd ../../../aws` (or the azure path) and continue.

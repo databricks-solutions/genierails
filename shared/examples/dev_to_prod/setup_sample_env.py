@@ -43,6 +43,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--create-groups", action="store_true", help=f"Also create the demo access-tier account groups ({', '.join(SAMPLE_GROUPS)}) for an account with no IdP-synced groups; requires --account-id.")
     p.add_argument("--account-id", default=os.getenv("DATABRICKS_ACCOUNT_ID"), help="Databricks account ID, used only by --create-groups (env: DATABRICKS_ACCOUNT_ID).")
     p.add_argument("--account-profile", default=os.getenv("DATABRICKS_ACCOUNT_PROFILE"), help="Account-level CLI profile for --create-groups; default: environment credentials (env: DATABRICKS_ACCOUNT_PROFILE).")
+    p.add_argument("--skip-agent", action="store_true", help="Seed the tables only, without a Genie agent (e.g. the prod catalog: make promote creates prod's agent).")
     p.add_argument("--teardown", action="store_true", help="Remove only resources recorded as created by this script.")
     return p
 
@@ -319,6 +320,9 @@ def setup(args: argparse.Namespace, client: Any) -> None:
         for chunk in _chunks(generated[name]):
             values = ",\n".join("(" + ", ".join(_literal(v) for v in row) + ")" for row in chunk)
             _run_sql(client, args.warehouse_id, f"INSERT INTO {target} VALUES\n{values}")
+    if getattr(args, "skip_agent", False):
+        print(f"[3/4] Skipping the Genie agent (--skip-agent). Tables ready: {', '.join(tables)}")
+        return
     print("[3/4] Creating or reusing the tracked Genie agent ...")
     space_id = state.get("space_id", "")
     title = f"GenieRails Dev-to-Prod Walkthrough ({args.catalog}.{args.schema})"
