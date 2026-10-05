@@ -190,6 +190,23 @@ expand_tables() {
 }
 
 # ---------- Set ACLs on a Genie agent (CAN_RUN for configured groups) ----------
+# Print the agent's current table identifiers as CSV.
+current_space_tables() {
+  local workspace_url="$1" token="$2" space_id="$3"
+  local response
+  response=$(curl -sf -H "${UA_HEADER}" -H "Authorization: Bearer ${token}" \
+    "${workspace_url}/api/2.0/genie/spaces/${space_id}?include_serialized_space=true") || {
+    echo "ERROR: could not read Genie agent ${space_id} to reuse its tables." >&2
+    return 1
+  }
+  printf '%s' "$response" | python3 -c '
+import json, sys
+space = json.loads(json.load(sys.stdin).get("serialized_space") or "{}")
+tables = (space.get("data_sources") or {}).get("tables") or []
+print(",".join(t["identifier"] for t in tables if t.get("identifier")))
+'
+}
+
 set_genie_acls() {
   local workspace_url="$1"
   local token="$2"
@@ -352,8 +369,13 @@ update_genie_config() {
     exit 1
   fi
 
+  # An agent attached by genie_space_id alone keeps the tables it already has
+  # (its footprint was discovered from it); only an explicit list replaces them.
   if [[ -z "${GENIE_TABLES_CSV:-}" ]]; then
-    echo "ERROR: GENIE_TABLES_CSV not set." >&2
+    GENIE_TABLES_CSV=$(current_space_tables "$workspace_url" "$token" "$space_id") || exit 1
+  fi
+  if [[ -z "${GENIE_TABLES_CSV:-}" ]]; then
+    echo "ERROR: GENIE_TABLES_CSV not set and Genie agent ${space_id} has no tables." >&2
     exit 1
   fi
 
