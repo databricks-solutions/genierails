@@ -165,7 +165,6 @@ _guard-workspace-config:
 # walkthrough and `make rehearse` reserve for production) gets the Phase 2-5
 # promote/certify steps; every other workspace env gets the Phase 0-1 dev rehearsal.
 _SETUP_ENV_REL = $(patsubst $(CLOUD_ROOT)/%,%,$(ENV_DIR))
-_SETUP_ACCOUNT_REL = $(patsubst $(CLOUD_ROOT)/%,%,$(ACCOUNT_ENV_DIR))
 _SETUP_WALKTHROUGH := ../shared/examples/dev_to_prod/README.md
 
 setup: _bootstrap ## Prepare the selected environment(s) and show next steps
@@ -203,8 +202,6 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "  1. Start from the walkthrough template (first time only; keep its safety defaults):"; \
 		echo "       cp ../shared/examples/dev_to_prod/env.auto.tfvars.example $(_SETUP_ENV_REL)/env.auto.tfvars"; \
 		echo "  2. Edit $(_SETUP_ENV_REL)/auth.auto.tfvars — deploying SP client_id / client_secret + workspace host & id"; \
-		echo "     Note: $(_SETUP_ACCOUNT_REL)/env.auto.tfvars already has manage_groups = false (consume IdP groups; shared by dev and prod)."; \
-		echo "           Leave it unless this is a demo/greenfield account."; \
 		echo "  3. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — point it at your agent and tables (pick one):"; \
 		echo "       existing agent: add genie_space_id to genie_spaces, then run:"; \
 		echo "         make generate ENV=$(ENV) MODE=genie GENERATE_ARGS='--groups \"<most_privileged>,...,<least_privileged>\"'"; \
