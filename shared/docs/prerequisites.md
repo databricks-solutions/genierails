@@ -171,7 +171,12 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
 **Provision the SP — choose one method:**
 
 1. **Manually** — the Account Admin creates the SP in the Account Console and assigns the account and workspace roles in the table above. The target catalog's owner grants it `MANAGE` + `APPLY TAG`.
-2. **With `make bootstrap-sp`** — an already-authorized Account Admin runs the command below. It cannot elevate a non-admin caller.
+2. **With `make bootstrap-sp`** — an already-authorized Account Admin runs the command below. It cannot elevate a non-admin caller. Run it from your cloud's folder in a clone of the repo:
+
+   ```bash
+   git clone https://github.com/databricks-solutions/genierails.git
+   cd genierails/aws           # or: cd genierails/azure
+   ```
 
    `ACCOUNT_PROFILE` is the name of a Databricks CLI profile for the **bootstrap caller**, not the deployment SP. [Install the Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install) if needed, then create the profile below (on Azure, use `https://accounts.azuredatabricks.net` as the host):
 
