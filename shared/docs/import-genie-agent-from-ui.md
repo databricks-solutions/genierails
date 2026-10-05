@@ -7,7 +7,7 @@ Import an existing Databricks Genie agent's supported configuration and table fo
 <summary><strong>Before you start — Complete prerequisites and get the Agent ID</strong></summary>
 
 - Complete the shared [prerequisites checklist](prerequisites.md).
-- Complete [Phase 0 — Dev: Set up](../examples/dev_to_prod/README.md#phase-0--dev-set-up) so `envs/dev/` exists.
+- Complete steps 1–2 of [Phase 0 — Dev: Set up](../examples/dev_to_prod/README.md#phase-0--dev-set-up), so `envs/dev/` exists and `auth.auto.tfvars` is filled in. This guide is Phase 0's step 3 for an existing agent.
 - Find the agent ID in the Genie UI: open the agent, click **Configure**, and copy the **Agent ID** from the **About this agent** panel. (It's also in the agent's URL: `.../genie/rooms/01ef7b3c2a4d5e6f`.)
 
 </details>
