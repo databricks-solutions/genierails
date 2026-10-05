@@ -35,29 +35,26 @@ Finally, gather the inputs specific to this walkthrough:
 <details>
 <summary><strong>Phase 0 — Dev: Set up</strong></summary>
 
-**Goal —** create the local config folders and fill in your creds + settings. Nothing here touches Databricks yet.
+**Goal —** create the local config folders, fill in credentials, and point dev at the Genie agent and tables you're shipping.
 
-From the `genierails/aws` (or `genierails/azure`) folder you cloned in **Before you start**:
+**1. Create the dev config** — from the `genierails/aws` (or `genierails/azure`) folder you cloned in **Before you start**:
 
 ```bash
 make setup ENV=dev          # creates envs/dev/ config templates (local only — no Databricks calls)
 cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars
 ```
 
-Then edit three files:
+**2. Fill in credentials and account settings:**
 
-- **`envs/dev/auth.auto.tfvars`** — the deploying SP `client_id` / `client_secret` + workspace host & id.
-- **`envs/dev/env.auto.tfvars`** — `uc_tables`, `sql_warehouse_id` (or blank), and `genie_spaces`. Keep the template's safety defaults unchanged.
+- **`envs/dev/auth.auto.tfvars`** — the deploying SP `client_id` / `client_secret` + workspace host & id. Step 3 calls Databricks with these.
 - **`envs/account/env.auto.tfvars`** — set `manage_groups = false` (this flow *consumes* IdP groups; it doesn't create them). **There is one shared `envs/account/` config** used by both dev and prod — you edit it here, once.
 
-**Choose one source for `genie_spaces` and `uc_tables`:**
+**3. Point dev at your agent and tables — choose one path.** Both edit `envs/dev/env.auto.tfvars`; keep the template's safety defaults unchanged.
 
-- **Existing Genie agent** — follow [Import a Genie Agent from UI into Code](../../docs/import-genie-agent-from-ui.md) to import the agent and discover its tables.
-- **No agent or tables yet** — use the optional [Sample Environment Setup](SAMPLE_ENV.md) to create them.
+- **Existing Genie agent** — follow [Import a Genie Agent from UI into Code](../../docs/import-genie-agent-from-ui.md) Steps 1–2: add the agent's `genie_space_id` to `genie_spaces`, then run `make generate ENV=dev MODE=genie` to import it. Its tables are discovered into `envs/dev/data_access/discovered_uc_tables.auto.tfvars` automatically, so you **don't** need to list them in `uc_tables`. Set `sql_warehouse_id` (or leave it blank to auto-create).
+- **No agent or tables yet** — run the optional [Sample Environment Setup](SAMPLE_ENV.md). It creates sample tables and an agent, then prints the `uc_tables`, `genie_spaces`, and `sql_warehouse_id` snippet to paste into `envs/dev/env.auto.tfvars`.
 
-Either path provides the values to add to `envs/dev/env.auto.tfvars`.
-
-**Done when —** `ls envs/dev` shows `auth.auto.tfvars` and `env.auto.tfvars`, both filled in.
+**Done when —** `envs/dev/auth.auto.tfvars` is filled in and `envs/dev/env.auto.tfvars` has your `genie_spaces` entry — plus either a discovered table list (import path) or the pasted `uc_tables` (sample path).
 
 </details>
 
