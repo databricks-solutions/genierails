@@ -152,6 +152,8 @@ The SP needs:
 | **Authority over the target catalog** | The catalog you govern | **Own it, or** be granted `MANAGE` + `APPLY TAG` (plus `ASSIGN` on the governed tags GenieRails applies). This lets it deploy tag assignments, masking functions, FGAC policies, and grants — and self-grant its own `USE CATALOG` / `USE SCHEMA` / `EXECUTE` / `CREATE FUNCTION`. |
 | **Query the model serving endpoint** | Workspace | `CAN QUERY` on `databricks-claude-sonnet-4-6` — generation calls a foundation model (an external Anthropic/OpenAI provider works too). |
 
+*Optional background — skip the two sections below unless you want the details. Everything you need to act on is in the table above and the steps that follow.*
+
 <details>
 <summary><strong>Details — Per-tier test service principals</strong></summary>
 
