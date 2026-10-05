@@ -185,10 +185,10 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
 
    ```bash
    # dev workspace + dev catalog
-   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<dev-workspace-id> SP_NAME=genierails-deployer TARGET_CATALOG=dev_finance PLAN=1
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<dev-workspace-id> SP_NAME=genierails-deployer TARGET_CATALOG=<dev-catalog> PLAN=1
 
    # prod workspace + prod catalog (same SP_NAME, so the same SP is reused)
-   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<prod-workspace-id> SP_NAME=genierails-deployer TARGET_CATALOG=prod_finance PLAN=1
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<prod-workspace-id> SP_NAME=genierails-deployer TARGET_CATALOG=<prod-catalog> PLAN=1
    ```
 
    | Parameter | Required | Value / where to find it |
