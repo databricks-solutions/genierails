@@ -197,10 +197,10 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
    ```
 
    ```bash
-   # dev workspace + dev catalog: creates the SP and prints its secret once; save it now
+   # dev workspace + dev catalog: creates the SP (or reuses an existing one); a new secret is printed once, so save it
    make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<dev-workspace-id> TARGET_CATALOG=<dev-catalog> YES=1
 
-   # prod workspace + prod catalog: reuses the same SP
+   # prod workspace + prod catalog: reuses the same SP (same default SP_NAME)
    make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<prod-workspace-id> TARGET_CATALOG=<prod-catalog> YES=1
    ```
 
