@@ -918,10 +918,19 @@ class EffectiveAccessVerifier:
         try:
             rows = self.run_query(ws, sql)
         except Exception as exc:
-            raise RuntimeError(
-                f"verification key column {check.key_column!r} is missing or inaccessible "
-                f"on {check.table}: {exc}"
-            ) from exc
+            detail = str(exc)
+            detail_lower = detail.lower()
+            key_is_named = check.key_column.lower() in detail_lower
+            missing_column_error = any(marker in detail_lower for marker in (
+                "unresolved_column", "unresolved column", "column not found",
+                "cannot be resolved", "cannot resolve column",
+            ))
+            if key_is_named and missing_column_error:
+                raise RuntimeError(
+                    f"verification key column {check.key_column!r} is missing or "
+                    f"inaccessible on {check.table}: {exc}"
+                ) from exc
+            raise
         return {r[0]: r[1] for r in rows if r}
 
     def collect_row_count(self, principal: TestPrincipal, table: str) -> int:
@@ -1162,7 +1171,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sensitive_keys = sorted(
         f"{check.table}.{check.key_column}"
         for check in spec.column_masks
-        if check.key_column and check.key_column == check.column
+        if check.key_column and check.key_column.lower() == check.column.lower()
     )
     if sensitive_keys:
         raise SystemExit(

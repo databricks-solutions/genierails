@@ -1,4 +1,4 @@
-import subprocess
+import json
 from pathlib import Path
 
 import pytest
@@ -53,66 +53,77 @@ genie_spaces = [
         resolve_warehouse(tmp_path)
 
 
-def test_warehouse_falls_back_to_workspace_terraform_output(tmp_path, monkeypatch):
+def _write_state(env_dir, value, *, include_output=True):
+    outputs = {}
+    if include_output:
+        outputs["sql_warehouse_id"] = {"value": value, "type": "string"}
+    (env_dir / "terraform.tfstate").write_text(json.dumps({"version": 4, "outputs": outputs}))
+
+
+def test_warehouse_reads_workspace_output_directly_from_local_state(tmp_path):
     (tmp_path / "env.auto.tfvars").write_text('sql_warehouse_id = ""\n')
-    runner = tmp_path / "runner"
-    runner.write_text("#!/bin/sh\n")
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
-        a[0], 0, '+ terraform output\n"auto-wh"\n', ""
-    ))
-    assert resolve_warehouse(
-        tmp_path, terraform_runner=runner, env_name="dev"
-    ) == "auto-wh"
+    _write_state(tmp_path, "auto-wh")
+    assert resolve_warehouse(tmp_path) == "auto-wh"
 
 
-@pytest.mark.parametrize("stdout", [
-    "",
-    "Warning: No outputs found\n╵\n",
-    "null\n",
-    '""\n',
+@pytest.mark.parametrize("value,include_output", [
+    (None, True),
+    ("", True),
+    (None, False),
 ])
-def test_terraform_missing_or_empty_output_is_unresolved(tmp_path, monkeypatch, stdout):
+def test_local_state_missing_null_or_empty_output_is_unresolved(
+    tmp_path, value, include_output,
+):
     (tmp_path / "env.auto.tfvars").write_text("")
-    runner = tmp_path / "runner"
-    runner.write_text("#!/bin/sh\n")
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
-        a[0], 0, stdout, ""
-    ))
-    with pytest.raises(ValueError, match="no SQL warehouse|missing or invalid JSON"):
-        resolve_warehouse(tmp_path, terraform_runner=runner, env_name="dev")
+    _write_state(tmp_path, value, include_output=include_output)
+    with pytest.raises(ValueError, match="no SQL warehouse"):
+        resolve_warehouse(tmp_path)
 
 
-def test_terraform_nonzero_exit_reports_failure(tmp_path, monkeypatch):
+def test_missing_local_state_is_unresolved_even_with_missing_runner(tmp_path):
     (tmp_path / "env.auto.tfvars").write_text("")
-    runner = tmp_path / "runner"
-    runner.write_text("#!/bin/sh\n")
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
-        a[0], 1, "", "state unavailable"
-    ))
-    with pytest.raises(ValueError, match="Terraform warehouse output failed: state unavailable"):
-        resolve_warehouse(tmp_path, terraform_runner=runner, env_name="dev")
-
-
-def test_missing_terraform_runner_reports_clear_error(tmp_path):
-    (tmp_path / "env.auto.tfvars").write_text("")
-    with pytest.raises(ValueError, match="Terraform runner not found"):
+    with pytest.raises(ValueError, match="no SQL warehouse"):
         resolve_warehouse(
             tmp_path, terraform_runner=tmp_path / "missing-runner", env_name="dev"
         )
 
 
-def test_terraform_timeout_reports_clear_error(tmp_path, monkeypatch):
+def test_malformed_local_state_has_clear_error(tmp_path):
     (tmp_path / "env.auto.tfvars").write_text("")
+    (tmp_path / "terraform.tfstate").write_text("not-json")
+    with pytest.raises(ValueError, match="could not read Terraform state"):
+        resolve_warehouse(tmp_path)
+
+
+def test_resolver_never_executes_the_terraform_runner(tmp_path):
+    (tmp_path / "env.auto.tfvars").write_text("")
+    _write_state(tmp_path, "state-wh")
+    marker = tmp_path / "runner-was-called"
     runner = tmp_path / "runner"
-    runner.write_text("#!/bin/sh\n")
-    def timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
-    monkeypatch.setattr(subprocess, "run", timeout)
-    with pytest.raises(ValueError, match="timed out"):
-        resolve_warehouse(tmp_path, terraform_runner=runner, env_name="dev")
+    runner.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    runner.chmod(0o755)
+    assert resolve_warehouse(
+        tmp_path, terraform_runner=runner, env_name="dev"
+    ) == "state-wh"
+    assert not marker.exists()
+
+
+def test_repository_uses_only_per_environment_local_state_backends():
+    for root in ("workspace", "data_access", "account"):
+        text = (SHARED / "roots" / root / "main.tf").read_text()
+        assert 'backend "local"' in text
+    runner = (SHARED / "scripts" / "terraform_layer.sh").read_text()
+    assert '-backend-config="path=$ENV_DIR/terraform.tfstate"' in runner
 
 
 def test_invalid_warehouse_id_is_rejected(tmp_path):
     (tmp_path / "env.auto.tfvars").write_text('sql_warehouse_id = "Warning: nope"\n')
+    with pytest.raises(ValueError, match="invalid SQL warehouse ID"):
+        resolve_warehouse(tmp_path)
+
+
+def test_invalid_warehouse_id_in_local_state_is_rejected(tmp_path):
+    (tmp_path / "env.auto.tfvars").write_text("")
+    _write_state(tmp_path, "Warning: nope")
     with pytest.raises(ValueError, match="invalid SQL warehouse ID"):
         resolve_warehouse(tmp_path)

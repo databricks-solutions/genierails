@@ -5,9 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -18,7 +16,6 @@ if str(SHARED_ROOT) not in sys.path:
 from scripts.footprint import load_hcl
 
 WAREHOUSE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
-TERRAFORM_TIMEOUT_SECONDS = 30
 
 
 def _valid_warehouse_id(value: object) -> str:
@@ -28,6 +25,25 @@ def _valid_warehouse_id(value: object) -> str:
     if not WAREHOUSE_ID_RE.fullmatch(value):
         raise ValueError(f"invalid SQL warehouse ID returned: {value!r}")
     return value
+
+
+def _warehouse_from_local_state(env_dir: Path) -> str:
+    """Read the workspace output without Terraform init, subprocesses, or locks.
+
+    Every root in this repository declares the local backend, and
+    terraform_layer.sh pins workspace state to ``env_dir/terraform.tfstate``.
+    """
+    state_path = env_dir / "terraform.tfstate"
+    if not state_path.is_file():
+        return ""
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not read Terraform state {state_path}: {exc}") from exc
+    output = (state.get("outputs") or {}).get("sql_warehouse_id") or {}
+    if not isinstance(output, dict):
+        raise ValueError("Terraform sql_warehouse_id output has an invalid state shape")
+    return _valid_warehouse_id(output.get("value"))
 
 
 def resolve_verify_key(env_dir: Path, explicit: str = "") -> str:
@@ -65,38 +81,12 @@ def resolve_warehouse(
         )
     if per_space:
         return _valid_warehouse_id(next(iter(per_space)))
-    if terraform_runner and env_name:
-        if not terraform_runner.is_file():
-            raise ValueError(f"Terraform runner not found: {terraform_runner}")
-        try:
-            result = subprocess.run(
-                [str(terraform_runner), "workspace", env_name, "output", "-json", "sql_warehouse_id"],
-                env={**os.environ, "LAYER_ENV_DIR": str(env_dir)},
-                text=True,
-                capture_output=True,
-                timeout=TERRAFORM_TIMEOUT_SECONDS,
-            )
-        except FileNotFoundError as exc:
-            raise ValueError(f"Terraform runner not found: {terraform_runner}") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise ValueError(
-                f"Terraform warehouse output timed out after {TERRAFORM_TIMEOUT_SECONDS}s"
-            ) from exc
-        if result.returncode != 0:
-            detail = result.stderr.strip() or "no diagnostic output"
-            raise ValueError(f"Terraform warehouse output failed: {detail}")
-        terraform_value = None
-        for line in reversed(result.stdout.splitlines()):
-            try:
-                terraform_value = json.loads(line)
-                break
-            except json.JSONDecodeError:
-                continue
-        if terraform_value is None:
-            raise ValueError("Terraform warehouse output was missing or invalid JSON")
-        value = _valid_warehouse_id(terraform_value)
-        if value:
-            return value
+    # terraform_runner/env_name remain accepted for CLI compatibility, but no
+    # subprocess is used: invoking terraform_layer.sh would run init and take a
+    # lock that a timeout could strand.
+    value = _warehouse_from_local_state(env_dir)
+    if value:
+        return value
     raise ValueError(
         "no SQL warehouse could be resolved; set WAREHOUSE_ID, sql_warehouse_id, "
         "one unique genie_spaces[].sql_warehouse_id, or apply the workspace layer"

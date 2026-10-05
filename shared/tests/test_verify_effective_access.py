@@ -611,6 +611,16 @@ class TestCliEmptySpec:
         with pytest.raises(SystemExit, match="itself classified sensitive/masked"):
             main(["--spec", str(spec_file)])
 
+    def test_main_rejects_case_insensitive_sensitive_key_column(self, tmp_path):
+        spec_file = tmp_path / "spec.json"
+        spec_file.write_text(
+            '{"column_masks": [{"table": "c.s.t", "column": "SSN", '
+            '"key_column": "ssn", "masked_principals": ["Jr"], '
+            '"unmasked_principals": ["Sr"]}], "row_filters": []}'
+        )
+        with pytest.raises(SystemExit, match="itself classified sensitive/masked"):
+            main(["--spec", str(spec_file)])
+
     def test_main_keyless_skips_only_mask_comparisons(self, tmp_path, capsys):
         spec_file = tmp_path / "spec.json"
         spec_file.write_text(
@@ -666,7 +676,9 @@ class TestLiveGuard:
         monkeypatch.setattr(verifier, "_ws_for", lambda principal: object())
         monkeypatch.setattr(
             verifier, "run_query",
-            lambda ws, sql: (_ for _ in ()).throw(RuntimeError("UNRESOLVED_COLUMN")),
+            lambda ws, sql: (_ for _ in ()).throw(
+                RuntimeError("[UNRESOLVED_COLUMN] customer_id cannot be resolved")
+            ),
         )
         check = _mask_check()
         principal = VerificationPrincipal("Junior", "test", "app", "secret")
@@ -675,6 +687,25 @@ class TestLiveGuard:
             match="verification key column 'customer_id' is missing or inaccessible",
         ):
             verifier.collect_column_values(principal, check)
+
+    def test_non_column_query_error_keeps_accurate_message(self, monkeypatch):
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        verifier = EffectiveAccessVerifier(
+            {"host": "h", "client_id": "c", "client_secret": "s"},
+            warehouse_id="warehouse-123",
+        )
+        monkeypatch.setattr(verifier, "_ws_for", lambda principal: object())
+        original = RuntimeError("PERMISSION_DENIED: SELECT denied on table c.s.t")
+        monkeypatch.setattr(
+            verifier, "run_query",
+            lambda ws, sql: (_ for _ in ()).throw(original),
+        )
+        with pytest.raises(RuntimeError, match="PERMISSION_DENIED") as exc:
+            verifier.collect_column_values(
+                VerificationPrincipal("Junior", "test", "app", "secret"),
+                _mask_check(),
+            )
+        assert exc.value is original
 
     def test_verifier_does_not_pick_an_arbitrary_workspace_warehouse(self, monkeypatch):
         monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
