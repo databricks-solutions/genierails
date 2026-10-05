@@ -287,8 +287,9 @@ def _preflight_target_catalog(
             catalog = workspace.catalogs.get(cfg.target_catalog)
             caller = workspace.current_user.me()
             caller_name = str(_value(caller, "user_name"))
-            caller_principals = {caller_name, str(_value(caller, "display_name"))}
-            for group in _value(caller, "groups") or []:
+            caller_groups = _value(caller, "groups") or []
+            caller_principals = {caller_name}
+            for group in caller_groups:
                 caller_principals.update(
                     str(value) for value in (
                         _value(group, "display"),
@@ -299,21 +300,26 @@ def _preflight_target_catalog(
             catalog_owner = str(_value(catalog, "owner"))
             assignment = workspace.metastores.current()
             metastore_owner = "<unavailable>"
-            try:
-                metastore = workspace.metastores.get(
-                    str(_value(assignment, "metastore_id"))
-                )
-                metastore_owner = str(_value(metastore, "owner"))
-            except Exception as exc:
-                if not _is_permission_denied(exc):
-                    raise
+            metastore_id = _value(assignment, "metastore_id")
+            if metastore_id:
+                try:
+                    metastore = workspace.metastores.get(str(metastore_id))
+                    metastore_owner = str(_value(metastore, "owner"))
+                except Exception as exc:
+                    if not _is_permission_denied(exc):
+                        raise
+            normalized_catalog_owner = catalog_owner.casefold()
+            is_workspace_admin = any(
+                str(_value(group, "display")).casefold() == "admins"
+                for group in caller_groups
+            )
             workspace_admin_owner = (
-                catalog_owner.casefold()
-                == f"_workspace_admins_{cfg.target_catalog}_{workspace_id}".casefold()
-                and "admins" in caller_principals
+                normalized_catalog_owner.startswith("_workspace_admins_")
+                and normalized_catalog_owner.endswith(f"_{workspace_id}")
+                and is_workspace_admin
             )
             owns_scope = (
-                catalog_owner.casefold() in caller_principals
+                normalized_catalog_owner in caller_principals
                 or metastore_owner.casefold() in caller_principals
                 or workspace_admin_owner
             )

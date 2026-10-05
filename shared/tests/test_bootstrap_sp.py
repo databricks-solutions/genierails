@@ -174,6 +174,44 @@ def test_preflight_workspace_admin_owns_this_workspaces_default_catalog():
     workspace.grants.get_effective.assert_not_called()
 
 
+def test_preflight_workspace_admin_owner_name_can_differ_from_catalog_name():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = CatalogInfo(
+        owner="_workspace_admins_original_workspace_name_123"
+    )
+    workspace.current_user.me.return_value = User(
+        user_name="caller@example.com",
+        groups=[ComplexValue(display="admins")],
+    )
+
+    _preflight(workspace)
+
+    workspace.grants.get_effective.assert_not_called()
+
+
+def test_preflight_workspace_admin_owner_requires_admins_group_membership():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = CatalogInfo(
+        owner="_workspace_admins_existing_catalog_123"
+    )
+
+    with pytest.raises(RuntimeError, match="caller 'caller@example.com'.*catalog owner"):
+        _preflight(workspace)
+
+
+def test_preflight_display_name_admins_does_not_grant_workspace_admin_authority():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = CatalogInfo(
+        owner="_workspace_admins_existing_catalog_123"
+    )
+    workspace.current_user.me.return_value = User(
+        user_name="caller@example.com", display_name="Admins", groups=[]
+    )
+
+    with pytest.raises(RuntimeError, match="caller 'caller@example.com'.*catalog owner"):
+        _preflight(workspace)
+
+
 def test_preflight_workspace_admin_group_for_another_workspace_does_not_own_catalog():
     _account, workspace, _workspace_factory, _factory = _fake()
     workspace.catalogs.get.return_value = CatalogInfo(
@@ -200,6 +238,27 @@ def test_preflight_metastore_get_permission_error_falls_through_to_manage():
         _preflight(workspace)
 
     workspace.grants.get_effective.assert_called_once()
+
+
+def test_preflight_metastore_get_non_permission_error_is_not_swallowed():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.metastores.get.side_effect = RuntimeError("metastore lookup failed")
+
+    with pytest.raises(RuntimeError, match="Cause: RuntimeError: metastore lookup failed"):
+        _preflight(workspace)
+
+
+def test_preflight_missing_metastore_id_skips_metastore_lookup():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = CatalogInfo(owner="someone-else@example.com")
+    workspace.metastores.current.return_value = MetastoreAssignment(
+        workspace_id=123, metastore_id=None
+    )
+
+    with pytest.raises(RuntimeError, match=r"metastore owner \(<unavailable>\)"):
+        _preflight(workspace)
+
+    workspace.metastores.get.assert_not_called()
 
 
 def test_preflight_non_owner_with_effective_manage_passes():
