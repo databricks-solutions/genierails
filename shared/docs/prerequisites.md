@@ -137,7 +137,7 @@ Ownership is split: the **IdP owns groups and membership**; **GenieRails owns gr
 
 **Requirements:**
 
-GenieRails runs **as a service principal (SP)**. Confirm both identities involved:
+GenieRails runs **as a service principal (SP)**. There are two separate jobs here — who sets the SP up, and who runs GenieRails with it:
 
 - **Setting it up (one time)** — an **Account Admin** creates the SP and gives it its roles, and the **owner of your catalog** gives it access to that catalog. If one person is both, they can do it all (including with `make bootstrap-sp`); otherwise the two of them each do their part.
 - **Running it (day to day)** — GenieRails commands log in *as the SP*, using its secret in `auth.auto.tfvars`. Whoever runs them just needs that secret (see [Credentials](#credentials)) and network access — no Databricks roles of their own.
