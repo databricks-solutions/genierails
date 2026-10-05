@@ -2,6 +2,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
+from databricks.sdk.errors import NotFound, PermissionDenied, Unauthenticated
+from databricks.sdk.errors.parser import _Parser
 from databricks.sdk.service.catalog import Privilege
 from databricks.sdk.service.iam import WorkspacePermission
 
@@ -9,6 +12,8 @@ from scripts.bootstrap_sp import (
     Config,
     _clients,
     _config_from_args,
+    _is_auth_error,
+    _is_not_found,
     _plan,
     _preflight_target_catalog,
     _workspace_host,
@@ -230,31 +235,53 @@ def test_multiple_workspaces_require_one_profile_each():
         "--account-id", "acct", "--workspace-id", "123,456",
         "--workspace-profile", "dev",
     ])
-    with pytest.raises(ValueError, match="one profile per workspace"):
+    with pytest.raises(ValueError, match=r"1 profile\(s\).*2 workspace ID\(s\)"):
         _config_from_args(args)
 
 
+def test_bad_workspace_profile_count_exits_cleanly(capsys):
+    result = main([
+        "--account-id", "acct",
+        "--workspace-id", "123",
+        "--workspace-profile", "dev,prod",
+    ])
+
+    assert result == 2
+    assert (
+        "ERROR: --workspace-profile supplied 2 profile(s) for 1 workspace ID(s); "
+        "supply exactly one profile per workspace"
+    ) in capsys.readouterr().err
+
+
 def test_clients_reuses_m2m_credentials_for_workspace():
-    sdk_config = SimpleNamespace(
-        host="https://accounts.cloud.databricks.com",
-        client_id="client-id",
-        client_secret="client-secret",
-    )
+    workspace_config = SimpleNamespace()
+    sdk_config = SimpleNamespace(auth_type="oauth-m2m", copy=lambda: workspace_config)
     with patch("databricks.sdk.AccountClient"), \
          patch("databricks.sdk.WorkspaceClient") as workspace_client, \
          patch("databricks.sdk.config.Config", return_value=sdk_config):
         _account, factory = _clients(_cfg(profile="account"))
         factory("https://dbc.example.com")
-    workspace_client.assert_called_once_with(
-        host="https://dbc.example.com",
-        client_id="client-id",
-        client_secret="client-secret",
-    )
+    assert workspace_config.host == "https://dbc.example.com"
+    assert workspace_config.account_id is None
+    workspace_client.assert_called_once_with(config=workspace_config)
+
+
+def test_clients_reuses_azure_sp_profile_with_workspace_host():
+    workspace_config = SimpleNamespace()
+    sdk_config = SimpleNamespace(auth_type="azure-client-secret", copy=lambda: workspace_config)
+    with patch("databricks.sdk.AccountClient"), \
+         patch("databricks.sdk.WorkspaceClient") as workspace_client, \
+         patch("databricks.sdk.config.Config", return_value=sdk_config):
+        _account, factory = _clients(_cfg(profile="azure-account-sp"))
+        factory("https://adb-123.4.azuredatabricks.net")
+    assert workspace_config.host == "https://adb-123.4.azuredatabricks.net"
+    assert workspace_config.account_id is None
+    workspace_client.assert_called_once_with(config=workspace_config)
 
 
 def test_clients_uses_host_based_cli_auth_for_account_u2m_profile():
     sdk_config = SimpleNamespace(
-        host="https://accounts.cloud.databricks.com", client_id=None, client_secret=None
+        host="https://accounts.cloud.databricks.com", auth_type="databricks-cli"
     )
     with patch("databricks.sdk.AccountClient"), \
          patch("databricks.sdk.WorkspaceClient") as workspace_client, \
@@ -268,7 +295,7 @@ def test_clients_uses_host_based_cli_auth_for_account_u2m_profile():
 
 def test_clients_rejects_workspace_profile_for_another_host():
     configs = {
-        "account": SimpleNamespace(client_id=None, client_secret=None),
+        "account": SimpleNamespace(auth_type="databricks-cli"),
         "wrong": SimpleNamespace(host="https://other.example.com"),
     }
     with patch("databricks.sdk.AccountClient"), \
@@ -415,9 +442,7 @@ def test_target_catalog_preflight_fails_before_sp_or_secret_creation():
 
 def test_missing_workspace_login_fails_before_sp_or_secret_creation():
     account, workspace, _workspace_factory, factory = _fake()
-    error = RuntimeError("401 Unauthorized")
-    error.status_code = 401
-    workspace.current_user.me.side_effect = error
+    workspace.current_user.me.side_effect = Unauthenticated("Invalid access token")
 
     with pytest.raises(RuntimeError, match=(
         r"cannot authenticate to workspace 123 .*databricks auth login --host "
@@ -485,19 +510,55 @@ def test_workspace_auth_available_allows_preflight_to_proceed():
 
 def test_preflight_not_found_is_distinct_from_authority_failure():
     _account, workspace, _workspace_factory, _factory = _fake()
-    error = RuntimeError("catalog absent")
-    error.error_code = "NOT_FOUND"
-    workspace.catalogs.get.side_effect = error
+    workspace.catalogs.get.side_effect = NotFound(
+        "Catalog existing_catalog does not exist.",
+        error_code="CATALOG_DOES_NOT_EXIST",
+    )
     with pytest.raises(RuntimeError, match=r"catalog 'existing_catalog' was not found.*Cause"):
         _preflight(workspace)
 
 
 def test_preflight_authority_error_includes_cause():
     _account, workspace, _workspace_factory, _factory = _fake()
-    workspace.catalogs.get.side_effect = RuntimeError("grant denied")
-    with pytest.raises(RuntimeError, match=r"lacks grant authority.*Cause: RuntimeError: grant denied"):
+    workspace.catalogs.get.side_effect = PermissionDenied("grant denied")
+    with pytest.raises(RuntimeError, match=r"lacks grant authority.*Cause: PermissionDenied: grant denied"):
         _preflight(workspace)
     workspace.catalogs.get.assert_called_once_with("existing_catalog")
+
+
+def test_effective_grants_permission_denied_is_authority_failure():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    workspace.grants.get_effective.side_effect = PermissionDenied("cannot inspect grants")
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"lacks grant authority.*Cause: PermissionDenied: cannot inspect grants",
+    ):
+        _preflight(workspace)
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "classifier", "expected_type"),
+    [
+        (401, b'{"error_code":"401","message":"Invalid access token"}',
+         _is_auth_error, Unauthenticated),
+        (404, b'{"error_code":"CATALOG_DOES_NOT_EXIST",'
+              b'"message":"Catalog c does not exist."}', _is_not_found, NotFound),
+    ],
+)
+def test_sdk_error_parser_classes_are_recognized(status, body, classifier, expected_type):
+    response = requests.Response()
+    response.status_code = status
+    response._content = body
+    response.headers["Content-Type"] = "application/json"
+    response.url = "https://dbc.example.com/api/2.1/test"
+    response.request = requests.Request("GET", response.url).prepare()
+
+    error = _Parser().get_api_error(response)
+
+    assert isinstance(error, expected_type)
+    assert classifier(error)
 
 
 def test_target_catalog_grant_fails_loudly_when_caller_lacks_authority():

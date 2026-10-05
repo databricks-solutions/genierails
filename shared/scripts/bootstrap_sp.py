@@ -105,12 +105,11 @@ def _clients(cfg: Config) -> tuple[Any, Callable[[str], Any]]:
                     f"not {host!r}"
                 )
             return WorkspaceClient(host=host, profile=profile)
-        if account_config.client_id and account_config.client_secret:
-            return WorkspaceClient(
-                host=host,
-                client_id=account_config.client_id,
-                client_secret=account_config.client_secret,
-            )
+        if account_config.auth_type != "databricks-cli":
+            workspace_config = account_config.copy()
+            workspace_config.host = host
+            workspace_config.account_id = None
+            return WorkspaceClient(config=workspace_config)
         # With no profile, the SDK's databricks-cli provider asks the CLI token cache
         # for this workspace host instead of reusing the account profile's token.
         return WorkspaceClient(host=host, auth_type="databricks-cli")
@@ -130,8 +129,8 @@ def _workspace_profiles(value: str | None, workspace_count: int) -> tuple[str, .
         return profiles
     if len(profiles) != workspace_count:
         raise ValueError(
-            "--workspace-profile must contain one profile per workspace when multiple "
-            "workspace IDs are supplied"
+            f"--workspace-profile supplied {len(profiles)} profile(s) for "
+            f"{workspace_count} workspace ID(s); supply exactly one profile per workspace"
         )
     return profiles
 
@@ -194,17 +193,22 @@ def _status_code(exc: Exception) -> int | None:
 
 
 def _is_auth_error(exc: Exception) -> bool:
+    from databricks.sdk.errors import Unauthenticated
+
     code = _error_code(exc)
     message = str(exc).casefold()
     return (
-        _status_code(exc) == 401
+        isinstance(exc, Unauthenticated)
+        or _status_code(exc) == 401
         or code in {"UNAUTHENTICATED", "UNAUTHORIZED"}
         or "cannot configure default credentials" in message
     )
 
 
 def _is_not_found(exc: Exception) -> bool:
-    return _status_code(exc) == 404 or _error_code(exc) in {
+    from databricks.sdk.errors import NotFound
+
+    return isinstance(exc, NotFound) or _status_code(exc) == 404 or _error_code(exc) in {
         "NOT_FOUND", "RESOURCE_DOES_NOT_EXIST",
     }
 
@@ -499,8 +503,8 @@ def _config_from_args(args: argparse.Namespace) -> Config:
 
 
 def main(argv: list[str] | None = None) -> int:
-    cfg = _config_from_args(parser().parse_args(argv))
     try:
+        cfg = _config_from_args(parser().parse_args(argv))
         return bootstrap(cfg)
     except KeyboardInterrupt:
         print("\nAborted.", file=sys.stderr)
