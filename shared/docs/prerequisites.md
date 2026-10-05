@@ -202,7 +202,7 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
    | `WORKSPACE_ID` | Yes | Numeric ID in Account Console → **Workspaces**, or the workspace URL's `?o=` value. Use commas for multiple workspaces. |
    | `SP_NAME` | No | Display name for the deployment SP; defaults to `genierails-deployer`. |
    | `TARGET_CATALOG` | Recommended | Exact name of the existing Unity Catalog catalog GenieRails will govern, from Catalog Explorer. Omit only for the greenfield alternative below. |
-   | `MODEL_ENDPOINT` | No | Model serving endpoint to grant `CAN QUERY`; defaults to `databricks-claude-sonnet-4-6`. |
+   | `MODEL_ENDPOINT` | No | Model serving endpoint to grant query access; bootstrap grants `CAN QUERY` on custom endpoints or Unity Catalog `EXECUTE` on the backing `system.ai` function for Foundation Model API endpoints. Defaults to `databricks-claude-sonnet-4-6`. |
    | `PLAN=1` / `YES=1` | No | Use `PLAN=1` to preview, then rerun with `YES=1` to apply without an interactive confirmation. |
 
    - A preflight confirms the catalog exists and the caller can grant access. It stops before making changes if either check fails.

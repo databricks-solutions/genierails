@@ -58,7 +58,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--rotate-secret", action="store_true",
                    help="mint a new secret even when reusing an existing SP")
     p.add_argument("--model-endpoint", default=os.environ.get("MODEL_ENDPOINT", MODEL_ENDPOINT),
-                   help="serving endpoint to grant CAN_QUERY (env: MODEL_ENDPOINT)")
+                   help=("serving endpoint to grant query access (CAN_QUERY, or UC EXECUTE "
+                         "for Foundation Model API endpoints; env: MODEL_ENDPOINT)"))
     p.add_argument(
         "--target-catalog",
         help="existing catalog to grant USE_CATALOG, USE_SCHEMA, MANAGE, and APPLY_TAG",
@@ -81,7 +82,10 @@ def _plan(cfg: Config, emit: Callable[[str], None]) -> None:
             )
         else:
             emit(f"  workspace {workspace_id}: grant CREATE_CATALOG on its metastore")
-        emit(f"  workspace {workspace_id}: grant CAN_QUERY on {cfg.model_endpoint}")
+        emit(
+            f"  workspace {workspace_id}: grant query access on {cfg.model_endpoint} "
+            "(CAN_QUERY, or UC EXECUTE for Foundation Model API endpoints)"
+        )
     if cfg.rotate_secret:
         emit("  secret: mint/rotate OAuth M2M secret")
     else:
@@ -152,6 +156,24 @@ def _workspace_profiles(value: str | None, workspace_count: int) -> tuple[str, .
 
 def _value(obj: Any, name: str) -> Any:
     return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+
+
+def _foundation_model_name(endpoint: Any) -> str | None:
+    config = _value(endpoint, "config")
+    for entity in _value(config, "served_entities") or []:
+        model_name = _value(_value(entity, "foundation_model"), "name")
+        if model_name:
+            return str(model_name)
+    return None
+
+
+def _has_effective_privilege(effective: Any, privilege_name: str) -> bool:
+    return any(
+        str(getattr(_value(privilege, "privilege"), "value",
+                    _value(privilege, "privilege"))).upper() == privilege_name
+        for assignment in _value(effective, "privilege_assignments") or []
+        for privilege in _value(assignment, "privileges") or []
+    )
 
 
 def _role_values(sp: Any) -> set[str]:
@@ -527,6 +549,57 @@ def bootstrap(
                 f"{workspace_id} ({host}). Cause: {_error_details(exc)}"
             ) from exc
         endpoint_id = _value(endpoint, "id")
+        foundation_model = _foundation_model_name(endpoint)
+        is_foundation_model_api = (
+            str(_value(endpoint, "endpoint_type") or "").upper()
+            == "FOUNDATION_MODEL_API"
+            or (not endpoint_id and foundation_model is not None)
+        )
+        if is_foundation_model_api and not foundation_model:
+            if not endpoint_id:
+                raise RuntimeError(
+                    f"could not resolve serving endpoint {cfg.model_endpoint!r} in workspace "
+                    f"{workspace_id} ({host}): the endpoint lookup returned no ID"
+                )
+            raise RuntimeError(
+                f"could not resolve the Unity Catalog function backing Foundation Model "
+                f"API endpoint {cfg.model_endpoint!r} in workspace {workspace_id} ({host})"
+            )
+        if is_foundation_model_api:
+            try:
+                effective = w.grants.get_effective(
+                    securable_type="function",
+                    full_name=foundation_model,
+                    principal=client_id,
+                )
+                if _has_effective_privilege(effective, "EXECUTE"):
+                    emit(
+                        f"UNCHANGED workspace {workspace_id}: EXECUTE on {foundation_model} "
+                        f"(query access for {cfg.model_endpoint})"
+                    )
+                else:
+                    w.grants.update(
+                        securable_type="function",
+                        full_name=foundation_model,
+                        changes=[PermissionsChange(
+                            principal=client_id,
+                            add=[Privilege.EXECUTE],
+                        )],
+                    )
+                    emit(
+                        f"GRANTED workspace {workspace_id}: EXECUTE on {foundation_model} "
+                        f"(query access for {cfg.model_endpoint})"
+                    )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"could not grant query access for Foundation Model API endpoint "
+                    f"{cfg.model_endpoint!r} via EXECUTE on {foundation_model!r} in workspace "
+                    f"{workspace_id} ({host}). Have a metastore admin grant EXECUTE on "
+                    f"{foundation_model!r} to service principal {client_id!r}. "
+                    f"Cause: {_error_details(exc)}"
+                ) from exc
+            workspace_summaries.append((workspace_id, host))
+            continue
         if not endpoint_id:
             raise RuntimeError(
                 f"could not resolve serving endpoint {cfg.model_endpoint!r} in workspace "
