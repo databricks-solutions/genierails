@@ -6,8 +6,13 @@ import requests
 from databricks.sdk.config import Config as SdkConfig
 from databricks.sdk.errors import NotFound, PermissionDenied, Unauthenticated
 from databricks.sdk.errors.parser import _Parser
-from databricks.sdk.service.catalog import Privilege
-from databricks.sdk.service.iam import WorkspacePermission
+from databricks.sdk.service.catalog import (
+    CatalogInfo,
+    MetastoreAssignment,
+    MetastoreInfo,
+    Privilege,
+)
+from databricks.sdk.service.iam import ComplexValue, User, WorkspacePermission
 
 from scripts.bootstrap_sp import (
     Config,
@@ -43,11 +48,14 @@ def _fake(*, existing=False, existing_secrets=True, roles=()):
     )
     account.workspaces.get.return_value = SimpleNamespace(workspace_url="dbc.example.com")
     workspace = MagicMock()
-    workspace.metastores.current.return_value = SimpleNamespace(
+    workspace.metastores.current.return_value = MetastoreAssignment(
+        workspace_id=123, metastore_id="meta-1"
+    )
+    workspace.metastores.get.return_value = MetastoreInfo(
         metastore_id="meta-1", owner="metastore-owner@example.com"
     )
-    workspace.catalogs.get.return_value = SimpleNamespace(owner="caller@example.com")
-    workspace.current_user.me.return_value = SimpleNamespace(
+    workspace.catalogs.get.return_value = CatalogInfo(owner="caller@example.com")
+    workspace.current_user.me.return_value = User(
         user_name="caller@example.com", display_name="Caller", groups=[]
     )
     workspace.grants.get_effective.return_value = SimpleNamespace(privilege_assignments=[])
@@ -137,14 +145,120 @@ def test_preflight_catalog_owner_passes_without_effective_grant_lookup():
 
 def test_preflight_metastore_owner_passes():
     _account, workspace, _workspace_factory, _factory = _fake()
-    workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
-    workspace.metastores.current.return_value = SimpleNamespace(
+    workspace.catalogs.get.return_value = CatalogInfo(owner="someone-else@example.com")
+    workspace.metastores.current.return_value = MetastoreAssignment(
+        workspace_id=123, metastore_id="meta-1"
+    )
+    workspace.metastores.get.return_value = MetastoreInfo(
         metastore_id="meta-1", owner="caller@example.com"
     )
 
     _preflight(workspace)
 
     workspace.grants.get_effective.assert_not_called()
+    workspace.metastores.get.assert_called_once_with("meta-1")
+
+
+def test_preflight_workspace_admin_owns_this_workspaces_default_catalog():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = CatalogInfo(
+        owner="_workspace_admins_existing_catalog_123"
+    )
+    workspace.current_user.me.return_value = User(
+        user_name="caller@example.com",
+        groups=[ComplexValue(display="admins")],
+    )
+
+    _preflight(workspace)
+
+    workspace.grants.get_effective.assert_not_called()
+
+
+def test_preflight_workspace_admin_owner_name_can_differ_from_catalog_name():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = CatalogInfo(
+        owner="_workspace_admins_original_workspace_name_123"
+    )
+    workspace.current_user.me.return_value = User(
+        user_name="caller@example.com",
+        groups=[ComplexValue(display="admins")],
+    )
+
+    _preflight(workspace)
+
+    workspace.grants.get_effective.assert_not_called()
+
+
+def test_preflight_workspace_admin_owner_requires_admins_group_membership():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = CatalogInfo(
+        owner="_workspace_admins_existing_catalog_123"
+    )
+
+    with pytest.raises(RuntimeError, match="caller 'caller@example.com'.*catalog owner"):
+        _preflight(workspace)
+
+
+def test_preflight_display_name_admins_does_not_grant_workspace_admin_authority():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = CatalogInfo(
+        owner="_workspace_admins_existing_catalog_123"
+    )
+    workspace.current_user.me.return_value = User(
+        user_name="caller@example.com", display_name="Admins", groups=[]
+    )
+
+    with pytest.raises(RuntimeError, match="caller 'caller@example.com'.*catalog owner"):
+        _preflight(workspace)
+
+
+def test_preflight_workspace_admin_group_for_another_workspace_does_not_own_catalog():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = CatalogInfo(
+        owner="_workspace_admins_existing_catalog_456"
+    )
+    workspace.current_user.me.return_value = User(
+        user_name="caller@example.com",
+        groups=[ComplexValue(display="admins")],
+    )
+
+    with pytest.raises(RuntimeError, match="caller 'caller@example.com'.*catalog owner"):
+        _preflight(workspace)
+
+
+def test_preflight_metastore_get_permission_error_falls_through_to_manage():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = CatalogInfo(owner="someone-else@example.com")
+    workspace.metastores.get.side_effect = PermissionDenied("cannot read metastore")
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"metastore owner \(<unavailable>\).*lacks MANAGE",
+    ):
+        _preflight(workspace)
+
+    workspace.grants.get_effective.assert_called_once()
+
+
+def test_preflight_metastore_get_non_permission_error_is_not_swallowed():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.metastores.get.side_effect = RuntimeError("metastore lookup failed")
+
+    with pytest.raises(RuntimeError, match="Cause: RuntimeError: metastore lookup failed"):
+        _preflight(workspace)
+
+
+def test_preflight_missing_metastore_id_skips_metastore_lookup():
+    _account, workspace, _workspace_factory, _factory = _fake()
+    workspace.catalogs.get.return_value = CatalogInfo(owner="someone-else@example.com")
+    workspace.metastores.current.return_value = MetastoreAssignment(
+        workspace_id=123, metastore_id=None
+    )
+
+    with pytest.raises(RuntimeError, match=r"metastore owner \(<unavailable>\)"):
+        _preflight(workspace)
+
+    workspace.metastores.get.assert_not_called()
 
 
 def test_preflight_non_owner_with_effective_manage_passes():
@@ -594,7 +708,7 @@ def test_effective_grants_permission_denied_is_authority_failure():
 
     with pytest.raises(
         RuntimeError,
-        match=r"lacks grant authority.*Cause: PermissionDenied: cannot inspect grants",
+        match=r"lacks MANAGE.*Cause: PermissionDenied: cannot inspect grants",
     ):
         _preflight(workspace)
 

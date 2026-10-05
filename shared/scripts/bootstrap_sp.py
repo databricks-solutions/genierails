@@ -228,6 +228,16 @@ def _is_not_found(exc: Exception) -> bool:
     }
 
 
+def _is_permission_denied(exc: Exception) -> bool:
+    from databricks.sdk.errors import PermissionDenied
+
+    return (
+        isinstance(exc, PermissionDenied)
+        or _status_code(exc) == 403
+        or _error_code(exc) in {"PERMISSION_DENIED", "FORBIDDEN"}
+    )
+
+
 def _authenticate_workspaces(
     cfg: Config,
     account: Any,
@@ -277,8 +287,9 @@ def _preflight_target_catalog(
             catalog = workspace.catalogs.get(cfg.target_catalog)
             caller = workspace.current_user.me()
             caller_name = str(_value(caller, "user_name"))
-            caller_principals = {caller_name, str(_value(caller, "display_name"))}
-            for group in _value(caller, "groups") or []:
+            caller_groups = _value(caller, "groups") or []
+            caller_principals = {caller_name}
+            for group in caller_groups:
                 caller_principals.update(
                     str(value) for value in (
                         _value(group, "display"),
@@ -286,10 +297,31 @@ def _preflight_target_catalog(
                     ) if value
                 )
             caller_principals = {principal.casefold() for principal in caller_principals}
-            metastore = workspace.metastores.current()
+            catalog_owner = str(_value(catalog, "owner"))
+            assignment = workspace.metastores.current()
+            metastore_owner = "<unavailable>"
+            metastore_id = _value(assignment, "metastore_id")
+            if metastore_id:
+                try:
+                    metastore = workspace.metastores.get(str(metastore_id))
+                    metastore_owner = str(_value(metastore, "owner"))
+                except Exception as exc:
+                    if not _is_permission_denied(exc):
+                        raise
+            normalized_catalog_owner = catalog_owner.casefold()
+            is_workspace_admin = any(
+                str(_value(group, "display")).casefold() == "admins"
+                for group in caller_groups
+            )
+            workspace_admin_owner = (
+                normalized_catalog_owner.startswith("_workspace_admins_")
+                and normalized_catalog_owner.endswith(f"_{workspace_id}")
+                and is_workspace_admin
+            )
             owns_scope = (
-                str(_value(catalog, "owner")).casefold() in caller_principals
-                or str(_value(metastore, "owner")).casefold() in caller_principals
+                normalized_catalog_owner in caller_principals
+                or metastore_owner.casefold() in caller_principals
+                or workspace_admin_owner
             )
         except Exception as exc:
             if _is_auth_error(exc):
@@ -308,6 +340,14 @@ def _preflight_target_catalog(
 
         if owns_scope:
             continue
+
+        authority_message = (
+            f"preflight failed for catalog {cfg.target_catalog!r} in workspace "
+            f"{workspace_id}: caller {caller_name!r} is not the catalog owner "
+            f"({catalog_owner}), metastore owner ({metastore_owner}), and lacks MANAGE on "
+            f"{cfg.target_catalog!r}. Have the catalog owner run bootstrap or grant the "
+            "deployment service principal USE CATALOG, USE SCHEMA, MANAGE, and APPLY TAG."
+        )
 
         try:
             effective = workspace.grants.get_effective(
