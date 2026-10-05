@@ -51,6 +51,13 @@ import time
 from pathlib import Path
 
 from tag_vocabulary import REGISTRY
+from access_tier_groups import (
+    SETTING as ACCESS_TIER_GROUPS_SETTING,
+    display_path as _env_display_path,
+    parse_groups_arg,
+    persist_access_tier_groups,
+    persisted_access_tier_groups,
+)
 from genie_space_placeholder import placeholder_error
 from sensitivity_source import (
     ClassificationSource,
@@ -7213,9 +7220,38 @@ def main():
     # after writing we merge the new content back into generated/abac.auto.tfvars.
     target_space_cfg: dict | None = None
     space_key: str = ""
-    # Track whether the consumed group names came from account-config auto-load
-    # (vs. the literal --groups CLI arg) so we can label them accurately below.
-    groups_auto_loaded = False
+    # ── Consumed group->tier mapping, in every mode ──────────────────────────
+    # Precedence: explicit --groups > persisted access_tier_groups in
+    # env.auto.tfvars > account-config auto-load (per-space / genie only, below)
+    # > the consume-by-default error. The first explicit --groups is saved to
+    # the setting; a differing --groups never rewrites an existing order.
+    env_file = auth_file.parent / "env.auto.tfvars"
+    try:
+        persisted_groups = persisted_access_tier_groups(auth_cfg, env_file)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+    groups_source = "--groups CLI"
+    persist_cli_groups = False
+    if args.create_groups:
+        if persisted_groups:
+            print(f"  NOTE: ignoring {ACCESS_TIER_GROUPS_SETTING} "
+                  "(--create-groups invents its own groups).")
+    elif args.groups:
+        cli_groups = parse_groups_arg(args.groups)
+        if not persisted_groups:
+            persist_cli_groups = bool(cli_groups)
+        elif cli_groups != persisted_groups:
+            print(
+                f"  WARNING: --groups ({', '.join(cli_groups)}) differs from "
+                f"{ACCESS_TIER_GROUPS_SETTING} ({', '.join(persisted_groups)}) in "
+                f"{_env_display_path(env_file)}; using --groups for this run only.\n"
+                f"    To change the saved tiers, edit {ACCESS_TIER_GROUPS_SETTING} "
+                "there (most to least privileged), then drop --groups."
+            )
+    elif persisted_groups:
+        args.groups = ",".join(persisted_groups)
+        groups_source = f"{ACCESS_TIER_GROUPS_SETTING} in {_env_display_path(env_file)}"
 
     if args.space:
         genie_spaces_cfg_all = auth_cfg.get("genie_spaces", [])
@@ -7247,7 +7283,7 @@ def main():
             existing_groups = load_groups_from_account_config()
             if existing_groups:
                 args.groups = ",".join(existing_groups)
-                groups_auto_loaded = True
+                groups_source = "auto-loaded from account config"
 
     # In genie mode, also auto-load groups from account config so the LLM knows
     # which pre-existing groups are available for space ACLs (consume path only).
@@ -7255,7 +7291,7 @@ def main():
         existing_groups = load_groups_from_account_config()
         if existing_groups:
             args.groups = ",".join(existing_groups)
-            groups_auto_loaded = True
+            groups_source = "auto-loaded from account config"
             print(f"  Auto-loaded {len(existing_groups)} group(s) from account config (genie mode)")
 
     # ── Resolve group-generation mode (consume-by-default) ───────────────────
@@ -7267,9 +7303,8 @@ def main():
     #     and the account layer creates them (manage_groups = true).
     group_names: list[str] | None = None
     if args.groups:
-        group_names = [g.strip() for g in args.groups.split(",") if g.strip()]
-        src = "auto-loaded from account config" if groups_auto_loaded else "--groups CLI"
-        print(f"  Groups:   {', '.join(group_names)} ({src})")
+        group_names = parse_groups_arg(args.groups)
+        print(f"  Groups:   {', '.join(group_names)} ({groups_source})")
 
     if args.create_groups:
         print("  Group mode: CREATE (opt-in demo/greenfield) — the LLM proposes "
@@ -7282,8 +7317,13 @@ def main():
             "  GenieRails consumes existing IdP-synced groups by default and will "
             "not invent them.\n"
             "  Fix one of:\n"
-            "    - Pass the existing group names, one per access tier, via "
-            "--groups '<tier1>,<tier2>,...'\n"
+            f"    - Set {ACCESS_TIER_GROUPS_SETTING} in {_env_display_path(env_file)} "
+            "to the existing group names, one per access tier, most to least "
+            "privileged\n"
+            f"      (e.g. {ACCESS_TIER_GROUPS_SETTING} = "
+            "[\"Finance_Analyst\", \"Clinical_Staff\"]); or\n"
+            "    - Pass them once via --groups '<tier1>,<tier2>,...' (saved to "
+            f"{ACCESS_TIER_GROUPS_SETTING} for later runs)\n"
             "      (e.g. make generate GENERATE_ARGS='--groups "
             "\"Finance_Analyst,Clinical_Staff\"'); or\n"
             "    - For a demo/greenfield account with no IdP-synced groups, opt in "
@@ -7311,6 +7351,16 @@ def main():
                 sys.exit(1)
             print(f"  IdP preflight: all {len(group_names)} referenced group(s) "
                   "found in the account.")
+        if persist_cli_groups:
+            if args.dry_run:
+                print(f"  NOTE: dry run — not saving --groups to {ACCESS_TIER_GROUPS_SETTING}.")
+            elif not env_file.exists():
+                print(f"  NOTE: {_env_display_path(env_file)} not found — "
+                      f"--groups not saved to {ACCESS_TIER_GROUPS_SETTING}.")
+            else:
+                persist_access_tier_groups(env_file, group_names)
+                print(f"  Saved --groups to {ACCESS_TIER_GROUPS_SETTING} in "
+                      f"{_env_display_path(env_file)}; later runs can omit --groups.")
 
     catalog = args.catalog or ""
     schema = args.schema or ""

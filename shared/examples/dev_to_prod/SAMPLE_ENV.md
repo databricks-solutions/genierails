@@ -14,7 +14,7 @@ python setup_sample_env.py --catalog dev_finance --warehouse-id <your-warehouse-
 
 **Auth is optional to specify.** It uses a **Databricks CLI profile** — separate from the deploying Service Principal `make` uses (that lives in `auth.auto.tfvars`). No flag → your **default** CLI profile (or `DATABRICKS_HOST`/`DATABRICKS_TOKEN`); add `--profile <name>` only for a *named* profile.
 
-The script prints a `uc_tables`, `genie_spaces`, and `sql_warehouse_id` snippet — in `envs/dev/env.auto.tfvars`, **replace** the template's `genie_spaces` and `sql_warehouse_id` lines with it (each setting may appear only once). It does **not** create access-tier groups, so in Phase 1 pass `--groups` with existing names or use `--create-groups`. Re-runs are safe. To remove only what it created:
+The script prints a `uc_tables`, `genie_spaces`, and `sql_warehouse_id` snippet — in `envs/dev/env.auto.tfvars`, **replace** the template's `genie_spaces` and `sql_warehouse_id` lines with it (each setting may appear only once). It does **not** create access-tier groups, so set `access_tier_groups` to existing names (or use `--create-groups`). Re-runs are safe. To remove only what it created:
 
 ```bash
 python teardown_sample_env.py --catalog dev_finance
