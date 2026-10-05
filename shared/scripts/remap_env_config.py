@@ -83,6 +83,20 @@ def _discover_from_genie_api(space_id: str, auth_cfg: dict) -> tuple[str, list[s
     return title, tables
 
 
+def _promoted_access_tier_groups(cfg: dict, source_env_dir: str) -> list[str]:
+    """Carry the source's access_tier_groups so prod consumes the same tiers."""
+    shared_root = str(Path(__file__).resolve().parent.parent)
+    if shared_root not in sys.path:
+        sys.path.insert(0, shared_root)
+    from access_tier_groups import promoted_lines
+
+    try:
+        return promoted_lines(cfg, Path(source_env_dir) / "env.auto.tfvars")
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+
 def main():
     if len(sys.argv) < 4:
         print(f"Usage: {sys.argv[0]} <source_env_dir> <dest_env_dir> <catalog_map>")
@@ -141,6 +155,7 @@ def main():
 
     # Enrich spaces from persisted discovery first; query the API only as a
     # last resort when a configured space still has no attributable tables.
+    api_resolved_tables: list[str] = []
     for space in spaces:
         space_id = _str(space.get("genie_space_id", ""))
         name = _str(space.get("name", ""))
@@ -168,6 +183,9 @@ def main():
                 print(f"  Discovered name: {api_title}")
             if not uc_tables and api_tables:
                 space["uc_tables"] = api_tables
+                api_resolved_tables.extend(
+                    table for table in api_tables if table not in api_resolved_tables
+                )
                 effective_tables.extend(
                     table for table in api_tables if table not in effective_tables
                 )
@@ -188,9 +206,27 @@ def main():
         )
         sys.exit(1)
 
+    space_tables = list(dict.fromkeys(
+        table
+        for space in spaces
+        for table in (space.get("uc_tables") or [])
+        if table
+    ))
+    missing_from_top_level = [
+        table for table in space_tables if table not in effective_tables
+    ]
+    if missing_from_top_level:
+        print(
+            "ERROR: internal footprint invariant failed: space-level table(s) are "
+            "missing from the promoted top-level union: "
+            + ", ".join(missing_from_top_level)
+        )
+        sys.exit(1)
+
+    tables_to_write = list(dict.fromkeys(effective_tables + space_tables))
     unmapped_catalogs = sorted({
         table.split(".")[0]
-        for table in effective_tables
+        for table in tables_to_write
         if table.count(".") >= 2 and table.split(".")[0] not in pairs
     })
     if unmapped_catalogs:
@@ -198,6 +234,14 @@ def main():
             "ERROR: DEST_CATALOG_MAP is missing mappings for resolved catalog(s): "
             + ", ".join(unmapped_catalogs)
         )
+        if any(
+            table.count(".") >= 2 and table.split(".")[0] in unmapped_catalogs
+            for table in api_resolved_tables
+        ):
+            print(
+                f"       Run `make generate ENV={source_env} MODE=genie ...` first "
+                "to persist the API-discovered catalogs, then update DEST_CATALOG_MAP."
+            )
         sys.exit(1)
 
     canonical_names = [_str(space.get("name", "")) for space in spaces]
@@ -231,6 +275,19 @@ def main():
         _str(cfg.get("verify_key_column", ""))
         or _str(dest_cfg.get("verify_key_column", ""))
     )
+
+    remapped_effective_tables = [remap_table(table) for table in tables_to_write]
+    stale_discovered = [
+        table for table in dest_discovered if table not in remapped_effective_tables
+    ]
+    if stale_discovered:
+        print(
+            "ERROR: destination discovered footprint contains table(s) outside the "
+            "promoted footprint: " + ", ".join(stale_discovered) + ". Remove the "
+            "stale tool-owned discovery file before promoting: "
+            + str(Path(dest_env_dir) / "data_access" / "discovered_uc_tables.auto.tfvars")
+        )
+        sys.exit(1)
     if "sql_warehouse_id" in dest_cfg:
         print(f"  Preserved destination sql_warehouse_id={preserved_warehouse!r}")
     if "enable_auto_tagging" in dest_cfg:
@@ -240,19 +297,6 @@ def main():
         )
     if dest_cfg.get("business_access_enabled") is True:
         print("  Reset destination business_access_enabled=true to false")
-
-    remapped_effective_tables = [remap_table(table) for table in effective_tables]
-    stale_discovered = [
-        table for table in dest_discovered if table not in remapped_effective_tables
-    ]
-    if stale_discovered:
-        print(
-            "ERROR: destination discovered footprint contains table(s) outside the "
-            "promoted footprint: " + ", ".join(stale_discovered) + ". Re-run "
-            f"`make generate ENV={Path(dest_env_dir).name} MODE=genie ...` or remove "
-            "the stale tool-owned discovery before promoting."
-        )
-        sys.exit(1)
 
     dest_spaces_by_name = {
         _str(space.get("name", "")): space
@@ -316,6 +360,7 @@ def main():
     lines.append("enable_classification = true")
     lines.append(f"enable_auto_tagging = {str(preserved_auto_tagging).lower()}")
     lines.append("business_access_enabled = false")
+    lines.extend(_promoted_access_tier_groups(cfg, source_env_dir))
 
     # Write
     os.makedirs(dest_env_dir, exist_ok=True)

@@ -36,6 +36,8 @@ def test_promote_catalog_detection_reads_discovered_file(tmp_path, capsys):
         'discovered_uc_tables = "dev.s.t"\n',
         'discovered_uc_tables = ["dev.s.t"\n',
         'discovered_uc_tables = ["dev.s.t"]\ndiscovered_table_agents = []\n',
+        'discovered_uc_tables = ["dev.s.t"]\n'
+        'discovered_table_agents = { "other.s.x" = ["A"] }\n',
     ],
 )
 def test_malformed_or_mistyped_discovered_footprint_is_actionable(

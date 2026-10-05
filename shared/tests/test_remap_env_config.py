@@ -320,7 +320,34 @@ def test_api_discovered_catalog_must_be_mapped(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         remap_env_config.main()
     assert exc.value.code == 1
-    assert "missing mappings for resolved catalog(s): other" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "missing mappings for resolved catalog(s): other" in output
+    assert "make generate ENV=dev MODE=genie" in output
+    assert not (dest / "env.auto.tfvars").exists()
+
+
+def test_attribution_key_missing_from_discovered_union_fails_closed(
+    tmp_path, monkeypatch, capsys
+):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    (source / "data_access").mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "A", genie_space_id = "a" }]\n'
+    )
+    (source / "data_access/discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = ["dev.s.t1"]\n'
+        'discovered_table_agents = { "other.s.x" = ["A"] }\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod,other=prod_other"
+    ])
+    with pytest.raises(SystemExit) as exc:
+        remap_env_config.main()
+    assert exc.value.code == 1
+    output = capsys.readouterr().out
+    assert "table keys absent from discovered_uc_tables: other.s.x" in output
+    assert "make generate" in output
     assert not (dest / "env.auto.tfvars").exists()
 
 
@@ -362,7 +389,9 @@ def test_two_spaces_use_discovered_agent_attribution(tmp_path, monkeypatch):
     assert config["genie_spaces"][1]["uc_tables"] == ["prod.s.t2"]
 
 
-def test_stale_destination_discovery_fails_before_write(tmp_path, monkeypatch):
+def test_stale_destination_discovery_fails_before_write(
+    tmp_path, monkeypatch, capsys
+):
     source = tmp_path / "dev"
     dest = tmp_path / "prod"
     source.mkdir()
@@ -379,6 +408,11 @@ def test_stale_destination_discovery_fails_before_write(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         remap_env_config.main()
     assert (dest / "env.auto.tfvars").read_text() == original
+    output = capsys.readouterr().out
+    stale_path = dest / "data_access/discovered_uc_tables.auto.tfvars"
+    assert f"Remove the stale tool-owned discovery file before promoting: {stale_path}" in output
+    assert "Preserved destination" not in output
+    assert "Reset destination" not in output
 
 
 def test_preservation_messages_and_per_space_warehouse(tmp_path, monkeypatch, capsys):
