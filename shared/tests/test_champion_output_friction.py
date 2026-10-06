@@ -250,25 +250,90 @@ def test_two_agents_with_the_same_title_stop_naming_both_ids(tmp_path):
     assert 'name = "..."' in str(exc.value)
 
 
-def test_names_that_sanitize_alike_get_a_stable_id_suffix(tmp_path, capsys):
+COLLIDING = [
+    {"name": "Finance & HR", "genie_space_id": "01aaa"},
+    {"name": "Finance HR", "genie_space_id": "01bbb"},
+]
+
+
+def _colliding_generated(tmp_path):
     out_dir = tmp_path / "generated"
     out_dir.mkdir()
     (out_dir / "abac.auto.tfvars").write_text(
         'genie_space_configs = {\n  "Finance & HR" = { title = "Finance & HR" }\n'
         '  "Finance HR" = { title = "Finance HR" }\n}\n'
     )
-    auth_cfg = {"genie_spaces": [
-        {"name": "Finance & HR", "genie_space_id": "01aaa"},
-        {"name": "Finance HR", "genie_space_id": "01bbb"},
-    ]}
+    return out_dir
 
-    bootstrap_per_space_dirs(out_dir, auth_cfg, "")
-    bootstrap_per_space_dirs(out_dir, auth_cfg, "")  # stable across runs
 
+def _owners(spaces):
+    return {
+        p.name: re.search(r"# Per-space config for: (.*)", (p / "abac.auto.tfvars").read_text()).group(1)
+        for p in spaces.iterdir()
+    }
+
+
+def test_names_that_sanitize_alike_all_get_their_id_suffix(tmp_path):
+    out_dir = _colliding_generated(tmp_path)
+
+    bootstrap_per_space_dirs(out_dir, {"genie_spaces": COLLIDING}, "")
+
+    assert _owners(out_dir / "spaces") == {
+        "finance_hr--01aaa": "Finance & HR",
+        "finance_hr--01bbb": "Finance HR",
+    }
+
+
+def test_reordering_colliding_agents_keeps_each_agents_folder(tmp_path):
+    out_dir = _colliding_generated(tmp_path)
     spaces = out_dir / "spaces"
-    assert sorted(p.name for p in spaces.iterdir()) == ["finance_hr", "finance_hr--01bbb"]
-    assert "Finance & HR" in (spaces / "finance_hr/abac.auto.tfvars").read_text()
-    assert '"Finance HR"' in (spaces / "finance_hr--01bbb/abac.auto.tfvars").read_text()
+
+    bootstrap_per_space_dirs(out_dir, {"genie_spaces": COLLIDING}, "")
+    first = _owners(spaces)
+    (spaces / "finance_hr--01bbb/masking_functions.sql").write_text("-- Finance HR only\n")
+
+    bootstrap_per_space_dirs(out_dir, {"genie_spaces": list(reversed(COLLIDING))}, "")
+
+    assert _owners(spaces) == first
+    assert (spaces / "finance_hr--01bbb/masking_functions.sql").read_text() == "-- Finance HR only\n"
+    for order in (COLLIDING, list(reversed(COLLIDING))):
+        folders, _ = resolve_space_folders(order, {}, spaces)
+        assert {f.name: f.key for f in folders} == {
+            "Finance & HR": "finance_hr--01aaa", "Finance HR": "finance_hr--01bbb",
+        }
+
+
+def test_colliding_new_agents_get_name_hash_suffixes_independent_of_order(tmp_path):
+    new = [{"name": "Finance & HR", "genie_space_id": ""}, {"name": "Finance HR", "genie_space_id": ""}]
+
+    keys = [
+        {f.name: f.key for f in resolve_space_folders(order, {}, tmp_path / "spaces")[0]}
+        for order in (new, list(reversed(new)))
+    ]
+
+    assert keys[0] == keys[1]
+    assert len(set(keys[0].values())) == 2
+    assert all(re.fullmatch(r"finance_hr--new_[0-9a-f]{8}", key) for key in keys[0].values())
+
+
+def test_shared_bare_folder_stub_is_removed_but_real_content_stops(tmp_path, capsys):
+    out_dir = _colliding_generated(tmp_path)
+    spaces = out_dir / "spaces"
+    _stub(spaces / "finance_hr", "Finance & HR")  # what bde28b6 bootstrapped for the first agent
+
+    bootstrap_per_space_dirs(out_dir, {"genie_spaces": COLLIDING}, "")
+    assert sorted(p.name for p in spaces.iterdir()) == ["finance_hr--01aaa", "finance_hr--01bbb"]
+
+    _real(spaces / "finance_hr")
+    with pytest.raises(SystemExit):
+        bootstrap_per_space_dirs(out_dir, {"genie_spaces": COLLIDING}, "")
+    out = capsys.readouterr().out
+    assert (
+        "generated/spaces/finance_hr/ has per-agent content but is shared by "
+        "'Finance & HR' (01aaa), 'Finance HR' (01bbb). Each now gets its own folder "
+        "(generated/spaces/finance_hr--01aaa/, generated/spaces/finance_hr--01bbb/)."
+    ) in out
+    assert (spaces / "finance_hr/masking_functions.sql").exists()
 
 
 def test_space_folder_names_never_feed_terraform_keys():

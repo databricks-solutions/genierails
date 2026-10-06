@@ -40,6 +40,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -6613,7 +6614,7 @@ def bootstrap_per_space_dirs(out_dir: Path, auth_cfg: dict, hcl_text: str) -> No
         )
         space_abac.write_text(content)
 
-    for stale_dir in {spaces_dir / f.stale_key for f in folders if f.stale_key}:
+    for stale_dir in {spaces_dir / key for f in folders for key in f.stale_keys}:
         _remove_bootstrap_stub(stale_dir)
 
     base = out_dir.parent
@@ -6637,7 +6638,8 @@ class SpaceFolder:
         self.space_id = space_id
         self.key = key
         self.config = config
-        self.stale_key = stale_key  # sibling folder to drop if it is only a bootstrap stub
+        # Sibling folders to drop if they are only a bootstrap stub.
+        self.stale_keys = [stale_key] if stale_key else []
 
 
 def _is_bootstrap_stub(space_dir: Path) -> bool:
@@ -6677,10 +6679,12 @@ def resolve_space_folders(
     genie_space_id_to_name). An earlier version named an imported agent's
     folder after its raw ID; that folder is kept when it has real content and
     the title folder doesn't, and it is an error when both have real content.
-    Distinct names that sanitize to the same key get a "--<genie_space_id>"
-    (or "--<index>") suffix on the later one, the same disambiguation
-    Terraform uses. Folder names are local to generate/merge only: no
-    Terraform root reads generated/spaces/, so they never affect resource keys.
+    When distinct names sanitize to the same key, every agent in that group
+    gets "<key>--<genie_space_id>" (or "--new_<name hash>" for an agent not
+    created yet), so the choice depends only on identity, never list order; a
+    shared bare folder with real content is an error. Folder names are local
+    to generate/merge only: no Terraform root reads generated/spaces/, so they
+    never affect resource keys (Terraform's own "--" keys are separate).
     """
     folders: list[SpaceFolder] = []
     notes: list[str] = []
@@ -6723,12 +6727,34 @@ def resolve_space_folders(
             seen_ids[name] = ""
             folders.append(SpaceFolder(name, "", sanitize_space_key(name), None))
 
-    used: set[str] = set()
-    for idx, folder in enumerate(folders):
-        if folder.key in used:
-            folder.key = f"{folder.key}--{sanitize_space_key(folder.space_id) or idx}"
-        used.add(folder.key)
+    # Collisions: suffix EVERY member of the group with its stable identity, so
+    # reordering genie_spaces never swaps which agent owns which folder.
+    groups: dict[str, list[SpaceFolder]] = {}
+    for folder in folders:
+        groups.setdefault(folder.key, []).append(folder)
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        if _has_real_content(spaces_dir / key):
+            owners = ", ".join(f"{m.name!r} ({m.space_id or 'new'})" for m in members)
+            targets = ", ".join(f"generated/spaces/{key}--{_identity_suffix(m)}/" for m in members)
+            raise SpaceFolderError(
+                f"generated/spaces/{key}/ has per-agent content but is shared by {owners}. "
+                f"Each now gets its own folder ({targets}). Move the content into the folder "
+                f"of the agent it belongs to, delete generated/spaces/{key}/, then re-run make generate."
+            )
+        for member in members:
+            member.key = f"{key}--{_identity_suffix(member)}"
+            member.stale_keys.append(key)
     return folders, notes
+
+
+def _identity_suffix(folder: "SpaceFolder") -> str:
+    """Stable per-agent folder suffix: the genie_space_id, else a hash of the
+    (unique) canonical name for an agent that doesn't exist yet."""
+    if folder.space_id:
+        return sanitize_space_key(folder.space_id)
+    return "new_" + hashlib.sha256(folder.name.encode()).hexdigest()[:8]
 
 
 def canonical_space_name(space: dict, id_to_name: dict) -> str:
