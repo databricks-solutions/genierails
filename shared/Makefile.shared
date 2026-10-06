@@ -698,9 +698,15 @@ apply-governance: _guarded-bootstrap _guard-workspace-target ## [Governance team
 genie-adopt-preflight: _guard-workspace-target ## Read-only: check every legacy Genie agent can be adopted (ID file, host, GET 200) before migrating
 	@python3 "$(SHARED_ROOT)/scripts/genie_adopt_preflight.py" "$(ENV_DIR)"
 
+# CAN_RUN needs a current gate result resting on a recent live refresh (see
+# modules/coverage_gate_check), so like apply this re-reads live UC and re-runs
+# the data_access gate first; it never applies data_access. If the refreshed
+# inputs differ from the last governance apply, CAN_RUN stays blocked until
+# make apply / apply-governance applies them.
 apply-genie: _guarded-bootstrap _guard-workspace-target ## [BU team] Apply workspace layer only — groups + Genie agents (assumes governance already applied)
 	@set -e; $(_DRY_RUN_GUARD); \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
+	if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" _derive-before-exposure; fi; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 		echo "=== Extracting workspace config from genie draft ($(ENV)) ==="; \
 		python3 "$(SHARED_ROOT)/scripts/derive_genie_acls.py" \
@@ -714,6 +720,7 @@ apply-genie: _guarded-bootstrap _guard-workspace-target ## [BU team] Apply works
 	else \
 		echo "=== Skipping split (no $(ENV_DIR)/generated/abac.auto.tfvars) ==="; \
 	fi; \
+	$(_COVERAGE_GATE) run --env-dir "$(ENV_DIR)" --env-name "$(ENV)" --runner "$(ROOT_RUNNER)" --apply-flags="$(APPLY_FLAGS)" $(if $(filter 1,$(VERBOSE)),--verbose,); \
 	$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"
 
 destroy-governance: _bootstrap _guard-workspace-target ## [Governance team] Destroy data_access layer for the selected env (leaves workspace/Genie untouched)

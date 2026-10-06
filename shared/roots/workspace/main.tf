@@ -140,23 +140,24 @@ locals {
   # ── Cross-layer exposure check for Genie CAN_RUN ──────────────────────────
   # CAN_RUN is granted only after the data_access layer was applied with
   # business access open and a passing coverage gate, and only while the gate
-  # result on disk is still the one that apply used (otherwise the governance
-  # config moved on and hasn't been applied). Read from the local state the
-  # layer runner writes; anything missing or unreadable blocks.
+  # result on disk is still for the inputs that apply used (otherwise the
+  # governance config moved on and hasn't been applied) and rests on a live
+  # refresh no older than the max age that apply recorded. The result is
+  # judged by modules/coverage_gate_check, the same check data_access uses.
+  # Read from the local state the layer runner writes; anything missing or
+  # unreadable blocks.
   data_access_dir        = "${var.env_dir}/data_access"
   _data_access_state     = fileexists("${local.data_access_dir}/terraform.tfstate") ? try(jsondecode(file("${local.data_access_dir}/terraform.tfstate")), null) : null
   _applied_coverage_gate = try(local._data_access_state.outputs.coverage_gate.value, null)
-  _current_coverage_gate = fileexists("${local.data_access_dir}/.coverage_gate.json") ? try(jsondecode(file("${local.data_access_dir}/.coverage_gate.json")), null) : null
   genie_exposure_blocker = (
     local._data_access_state == null ? "the data_access layer has no readable state (${local.data_access_dir}/terraform.tfstate)" :
     local._applied_coverage_gate == null ? "the data_access state predates the coverage gate; re-apply the data_access layer" :
     try(local._applied_coverage_gate.business_access_enabled, false) != true ? "the data_access layer was last applied with business_access_enabled = false" :
     try(local._applied_coverage_gate.status, "") != "pass" ? "the data_access layer was last applied without a passing coverage gate" :
     try(local._applied_coverage_gate.table_grant_count, 0) < 1 ? "the data_access layer has no business table grants in place" :
-    local._current_coverage_gate == null ? "the coverage-gate result (${local.data_access_dir}/.coverage_gate.json) is missing or unreadable" :
-    try(local._current_coverage_gate.status, "") != "pass" ? "the last coverage gate FAILED" :
-    try(local._current_coverage_gate.fingerprint, "") != try(local._applied_coverage_gate.fingerprint, "") ? "the data_access config changed after its last gated apply" :
-    ""
+    try(local._applied_coverage_gate.max_age, null) == null ? "the data_access state predates the coverage-gate max age; re-apply the data_access layer" :
+    module.coverage_gate_check.status == "stale" ? "the data_access config changed after its last gated apply" :
+    module.coverage_gate_check.problem
   )
 
   # Per space: the SELECT grants its CAN_RUN groups need must be in the
@@ -457,6 +458,8 @@ variable "coverage_acknowledged_columns" {
   default = []
 }
 
+# Read by data_access, which binds it into the gate and records it in state;
+# the CAN_RUN check uses that recorded value, so it can't be overridden here.
 variable "coverage_gate_max_age" {
   type    = string
   default = "6h"
@@ -513,6 +516,16 @@ variable "fgac_policies" {
 }
 
 # ── Module call ───────────────────────────────────────────────────────────────
+
+# The current gate result must still be for the inputs (fingerprint, max age)
+# the last data_access apply used, and its live refresh must be recent.
+module "coverage_gate_check" {
+  source = "../../modules/coverage_gate_check"
+
+  gate_file            = "${local.data_access_dir}/.coverage_gate.json"
+  expected_fingerprint = try(local._applied_coverage_gate.fingerprint, "")
+  max_age              = try(local._applied_coverage_gate.max_age, "")
+}
 
 module "workspace" {
   source = "../../modules/workspace"

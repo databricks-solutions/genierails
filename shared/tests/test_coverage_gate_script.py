@@ -562,6 +562,7 @@ def test_ddl_change_reapplies_data_access_so_genie_sees_the_new_gate(env_dir, st
 @needs_terraform
 @pytest.mark.parametrize("config", [
     "roots/data_access", "roots/workspace", "modules/data_access", "modules/workspace",
+    "modules/coverage_gate_check",
 ])
 def test_terraform_test_suites_pass(config, tmp_path, plugin_cache):
     """The gate's Terraform-native tests (and the existing ones) stay green."""
@@ -685,7 +686,7 @@ def test_gate_run_without_a_refresh_for_the_current_ddl_fails_closed(live_like_e
 
 _WS_STATE = (
     'jsonencode({{ version = 4, outputs = {{ coverage_gate = {{ value = {{ business_access_enabled = true, '
-    'fingerprint = "applied", status = "pass", table_grant_count = {count} }} }}, '
+    'fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = {count} }} }}, '
     'table_grant_resource_keys = {{ value = {keys} }} }} }})'
 )
 
@@ -710,7 +711,7 @@ run "state" {{
   variables {{
     files = {{
       "{env}/data_access/terraform.tfstate"   = {state}
-      "{env}/data_access/.coverage_gate.json" = jsonencode({{ status = "pass", fingerprint = "applied" }})
+      "{env}/data_access/.coverage_gate.json" = jsonencode({{ status = "pass", fingerprint = "applied", refreshed_at = "{refreshed}" }})
     }}
   }}
 }}
@@ -736,18 +737,26 @@ run "can_run" {{
 
 @needs_terraform
 @pytest.mark.parametrize(
-    "count, keys, acl, refused",
+    "count, keys, acl, refused, refreshed",
     [
         # Matching pass, but the apply left zero table grants.
-        (0, "[]", '["analysts"]', "the data_access layer has no business table grants in place"),
-        (0, "[]", "[]", None),
+        (0, "[]", '["analysts"]', "the data_access layer has no business table grants in place", "@NOW@"),
+        (0, "[]", "[]", None, "@NOW@"),
         # Grants exist, but not for this space's table and group.
         (2, '["cat.sch.customers|auditors", "cat.sch.orders|analysts"]', '["analysts"]',
-         "lacks the SELECT grants its CAN_RUN groups need (cat.sch.customers|analysts)"),
-        (1, '["cat.sch.customers|analysts"]', '["analysts"]', None),
+         "lacks the SELECT grants its CAN_RUN groups need (cat.sch.customers|analysts)", "@NOW@"),
+        (1, '["cat.sch.customers|analysts"]', '["analysts"]', None, "@NOW@"),
+        # Everything in place, but the live refresh behind the pass is old
+        # (raw workspace terraform, or apply-genie without its refresh).
+        (1, '["cat.sch.customers|analysts"]', '["analysts"]',
+         "older than coverage_gate_max_age (6h)", "2000-01-01T00:00:00Z"),
+        (1, '["cat.sch.customers|analysts"]', "[]", None, "2000-01-01T00:00:00Z"),
+        (1, '["cat.sch.customers|analysts"]', '["analysts"]',
+         "records no live refresh", "2999-01-01T00:00:00Z"),
     ],
 )
-def test_workspace_root_refuses_can_run_without_the_spaces_grants(tmp_path, plugin_cache, count, keys, acl, refused):
+def test_workspace_root_refuses_can_run_without_the_spaces_grants(
+        tmp_path, plugin_cache, count, keys, acl, refused, refreshed):
     root = SHARED / "roots" / "workspace"
     name = f"refusal-{tmp_path.name}"
     test_dir = root / "tests" / ".tmp" / name
@@ -755,6 +764,7 @@ def test_workspace_root_refuses_can_run_without_the_spaces_grants(tmp_path, plug
     try:
         (test_dir / "can_run.tftest.hcl").write_text(_WS_TEST.format(
             env=f"tests/.tmp/{name}/env", state=_WS_STATE.format(count=count, keys=keys), acl=acl,
+            refreshed=refreshed,
         ))
         env = {**os.environ, "TF_DATA_DIR": str(tmp_path / ".terraform"),
                "TF_PLUGIN_CACHE_DIR": str(plugin_cache), "TF_IN_AUTOMATION": "1"}
@@ -774,3 +784,58 @@ def test_workspace_root_refuses_can_run_without_the_spaces_grants(tmp_path, plug
             assert result.returncode == 0, output
     finally:
         shutil.rmtree(test_dir, ignore_errors=True)
+
+
+def test_max_age_ceiling_is_the_same_everywhere():
+    """The shared check is the authority; the variable validation only fails early."""
+    check = (SHARED / "modules" / "coverage_gate_check" / "main.tf").read_text()
+    variables = (SHARED / "modules" / "data_access" / "variables.tf").read_text()
+    assert 'max_age_ceiling = "24h"' in check
+    validation = variables[variables.index('variable "coverage_gate_max_age"'):]
+    validation = validation[:validation.index("\n}\n")]
+    assert 'timeadd("2000-01-01T00:00:00Z", "24h")' in validation
+    assert "at most 24h" in validation
+    # Both layers judge results with the shared module, not their own copy.
+    for path in ("modules/data_access/main.tf", "roots/workspace/main.tf"):
+        source = (SHARED / path).read_text()
+        assert 'modules/coverage_gate_check"' in source or '"../coverage_gate_check"' in source, path
+        assert "plantimestamp()" not in source, path
+
+
+def test_apply_genie_refreshes_and_regates_before_the_workspace_apply():
+    source = (SHARED / "Makefile.shared").read_text()
+    body = source[source.index("\napply-genie:"):]
+    body = body[:body.index("\n\n")]
+    derive = body.index("_derive-before-exposure")
+    gate = body.index("$(_COVERAGE_GATE) run")
+    workspace = body.index("_apply-layer LAYER=workspace")
+    assert derive < gate < workspace
+    assert '--apply-flags="$(APPLY_FLAGS)"' in body
+    assert "LAYER=data_access" not in body
+
+
+def test_make_apply_genie_refreshes_and_never_opens_can_run_on_a_failed_gate(env_dir, stub_runner, tmp_path, monkeypatch):
+    (env_dir / "env.auto.tfvars").write_text(f'uc_tables = ["{TABLE}"]\nbusiness_access_enabled = true\n')
+    (env_dir / "abac.auto.tfvars").write_text("# workspace layer present\n")
+    fake = tmp_path / "fake_derive.py"
+    fake.write_text(FAKE_DERIVE.format(shared=str(SHARED)))
+    live_ddl = tmp_path / "live.sql"
+    live_ddl.write_text(DDL)
+    monkeypatch.setenv("LIVE_DDL", str(live_ddl))
+    monkeypatch.setenv("DERIVE_LOG", str(tmp_path / "derive.log"))
+    runner, log = stub_runner(_inputs())
+    env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MAKELEVEL", "APPLY_FLAGS")}
+    result = subprocess.run(
+        ["make", "--no-print-directory", "apply-genie", "ENV=prod", f"ENV_DIR={env_dir}",
+         f"ACCOUNT_ENV_DIR={tmp_path / 'account'}", f"ROOT_RUNNER={runner}",
+         f"DERIVE_ASSIGNMENTS_SCRIPT={fake}"],
+        cwd=SHARED.parent / "aws", text=True, capture_output=True, env=env,
+    )
+    assert result.returncode != 0
+    # The live refresh ran (DDL-only: no native classification here) ...
+    assert "--ddl-only" in (tmp_path / "derive.log").read_text()
+    # ... then the gate, which fails on the bare fixture config ...
+    assert "coverage gate FAILED for data_access:prod" in result.stderr
+    # ... so the workspace layer was never planned or applied.
+    calls = [call.split("|", 1)[1] for call in log.read_text().splitlines()]
+    assert calls and all(call.startswith("data_access prod console") for call in calls), calls

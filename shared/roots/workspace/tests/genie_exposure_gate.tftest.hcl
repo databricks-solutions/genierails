@@ -63,7 +63,7 @@ run "state_predating_the_gate" {
   variables {
     files = {
       "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = {} })
-      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied" })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
     }
   }
 }
@@ -82,8 +82,8 @@ run "closed_data_access" {
   }
   variables {
     files = {
-      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = false, fingerprint = "applied", status = "missing", table_grant_count = 0 } } } })
-      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied" })
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = false, fingerprint = "applied", status = "missing", max_age = "6h", table_grant_count = 0 } } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
     }
   }
 }
@@ -102,8 +102,8 @@ run "ungated_data_access" {
   }
   variables {
     files = {
-      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "stale", table_grant_count = 0 } } } })
-      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied" })
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "stale", max_age = "6h", table_grant_count = 0 } } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
     }
   }
 }
@@ -122,7 +122,7 @@ run "gate_result_missing" {
   }
   variables {
     files = {
-      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
       "tests/.tmp/exposure/data_access/.coverage_gate.json" = null
     }
   }
@@ -131,7 +131,7 @@ run "gate_result_missing" {
 run "missing_gate_result_blocks" {
   command = plan
   assert {
-    condition     = strcontains(output.genie_exposure_blocker, "missing or unreadable")
+    condition     = strcontains(output.genie_exposure_blocker, "no coverage-gate result exists")
     error_message = "a missing gate result must block CAN_RUN"
   }
 }
@@ -142,8 +142,8 @@ run "gate_failed_since" {
   }
   variables {
     files = {
-      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
-      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "fail", fingerprint = "applied" })
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "fail", fingerprint = "applied", refreshed_at = "@NOW@" })
     }
   }
 }
@@ -162,8 +162,8 @@ run "config_moved_on" {
   }
   variables {
     files = {
-      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
-      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "newer" })
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "newer", refreshed_at = "@NOW@" })
     }
   }
 }
@@ -182,8 +182,8 @@ run "data_access_ready" {
   }
   variables {
     files = {
-      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
-      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied" })
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
     }
   }
 }
@@ -209,8 +209,8 @@ run "matching_pass_but_no_grants" {
   }
   variables {
     files = {
-      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 0 } }, table_grant_resource_keys = { value = [] } } })
-      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied" })
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 0 } }, table_grant_resource_keys = { value = [] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
     }
   }
 }
@@ -233,8 +233,8 @@ run "grants_for_other_groups_and_tables" {
   }
   variables {
     files = {
-      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|auditors", "cat.sch.orders|analysts"] } } })
-      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied" })
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|auditors", "cat.sch.orders|analysts"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
     }
   }
 }
@@ -281,5 +281,127 @@ run "id_only_space_needs_a_grant_for_each_group" {
   assert {
     condition     = toset(output.genie_space_missing_grants["sales"]) == toset(["<any table>|viewers"])
     error_message = "a space known only by ID needs at least one grant per CAN_RUN group"
+  }
+}
+
+# The same freshness rules as data_access (modules/coverage_gate_check),
+# with the max age the gated data_access apply recorded in state.
+run "pass_from_an_old_refresh" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "2000-01-01T00:00:00Z" })
+    }
+  }
+}
+
+run "expired_refresh_blocks_can_run" {
+  command = plan
+  assert {
+    condition     = strcontains(output.genie_exposure_blocker, "older than coverage_gate_max_age")
+    error_message = "a pass whose live refresh is older than the recorded max age must block CAN_RUN"
+  }
+  assert {
+    condition     = output.genie_space_acls_groups["sales"] == ""
+    error_message = "the explicit empty ACL must still be planned while CAN_RUN is blocked"
+  }
+}
+
+run "pass_from_the_future" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "2999-01-01T00:00:00Z" })
+    }
+  }
+}
+
+run "future_refresh_blocks_can_run" {
+  command = plan
+  assert {
+    condition     = strcontains(output.genie_exposure_blocker, "no live refresh")
+    error_message = "a future refresh time is not a live refresh"
+  }
+  assert {
+    condition     = output.genie_space_acls_groups["sales"] == ""
+    error_message = "the explicit empty ACL must still be planned while CAN_RUN is blocked"
+  }
+}
+
+run "pass_without_a_refresh" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied" })
+    }
+  }
+}
+
+run "unrefreshed_pass_blocks_can_run" {
+  command = plan
+  assert {
+    condition     = strcontains(output.genie_exposure_blocker, "no live refresh")
+    error_message = "a pass with no refresh time must block CAN_RUN"
+  }
+  assert {
+    condition     = output.genie_space_acls_groups["sales"] == ""
+    error_message = "the explicit empty ACL must still be planned while CAN_RUN is blocked"
+  }
+}
+
+run "state_with_a_raised_max_age" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "876000h", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "2000-01-01T00:00:00Z" })
+    }
+  }
+}
+
+run "recorded_max_age_above_the_ceiling_blocks_can_run" {
+  command = plan
+  assert {
+    condition     = strcontains(output.genie_exposure_blocker, "at most 24h")
+    error_message = "a recorded max age above the ceiling must not be honoured"
+  }
+  assert {
+    condition     = output.genie_space_acls_groups["sales"] == ""
+    error_message = "the explicit empty ACL must still be planned while CAN_RUN is blocked"
+  }
+}
+
+run "state_predating_the_max_age" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
+    }
+  }
+}
+
+run "state_without_a_recorded_max_age_blocks_can_run" {
+  command = plan
+  assert {
+    condition     = strcontains(output.genie_exposure_blocker, "predates the coverage-gate max age")
+    error_message = "a data_access state without a recorded max age must block CAN_RUN"
+  }
+  assert {
+    condition     = output.genie_space_acls_groups["sales"] == ""
+    error_message = "the explicit empty ACL must still be planned while CAN_RUN is blocked"
   }
 }
