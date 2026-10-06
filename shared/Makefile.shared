@@ -42,6 +42,7 @@ SPACE ?=
 # Example: make generate MODE=governance   (central governance team)
 #          make generate MODE=genie        (BU team creating Genie agents)
 MODE ?=
+AUDIT_SCHEMA_SCRIPT ?= $(SHARED_ROOT)/scripts/audit_schema_drift.py
 # Optional: override the 'country' field in env.auto.tfvars for this invocation.
 # Comma-separated region codes. Normally set once in env.auto.tfvars.
 # Example: make generate COUNTRY=ANZ   (Australia & NZ)
@@ -280,7 +281,7 @@ derive-assignments: _guarded-bootstrap _guard-workspace-target ## Re-derive only
 
 audit-schema: _guarded-bootstrap _guard-workspace-target ## Report untagged sensitive columns and stale tag assignments in managed tables
 	@echo "=== Schema Drift Audit ($(ENV)) ==="
-	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/audit_schema_drift.py"
+	@cd "$(ENV_DIR)" && python3 "$(AUDIT_SCHEMA_SCRIPT)"
 
 evidence: _guarded-bootstrap _guard-workspace-target ## Emit JSON and Markdown compliance evidence (set GENIERAILS_EVIDENCE_INTEGRATION=1 for live state)
 	@echo "=== Compliance Evidence ($(ENV)) ==="
@@ -376,11 +377,18 @@ maintain: _guard-genie-placeholder ## Native-first governance refresh: audit-sch
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,maintain); \
 	$(_RECEIPT) clear "$(ENV_DIR)" || exit 1; \
-	if ! $(MAKE) audit-schema ENV="$(ENV)"; then \
-		echo "maintain: audit-schema reported drift (output above). For sensitive-looking columns with no class.* tag," >&2; \
-		echo "  review native UC classification / auto-tagging (make enable-classification ENV=$(ENV)) or tag them in UC," >&2; \
-		echo "  then re-run make maintain ENV=$(ENV). maintain never LLM-tags columns." >&2; \
-		exit 1; \
+	$(MAKE) --no-print-directory _guarded-bootstrap _guard-workspace-target ENV="$(ENV)" || exit 1; \
+	echo "=== Schema Drift Audit ($(ENV)) ==="; \
+	(cd "$(ENV_DIR)" && python3 "$(AUDIT_SCHEMA_SCRIPT)"); audit_rc=$$?; \
+	if [ $$audit_rc -ne 0 ]; then \
+		if [ $$audit_rc -eq 1 ]; then \
+			echo "maintain: audit-schema reported drift (output above). For sensitive-looking columns with no class.* tag," >&2; \
+			echo "  review native UC classification / auto-tagging (make enable-classification ENV=$(ENV)) or tag them in UC," >&2; \
+			echo "  then re-run make maintain ENV=$(ENV). maintain never LLM-tags columns." >&2; \
+		else \
+			echo "maintain: audit-schema failed (error, not drift); review the error output above." >&2; \
+		fi; \
+		exit $$audit_rc; \
 	fi; \
 	$(MAKE) derive-assignments ENV="$(ENV)" && \
 		$(_RECEIPT) snapshot "$(ENV_DIR)" --by maintain --env "$(ENV)" && \
