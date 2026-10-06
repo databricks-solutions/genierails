@@ -72,10 +72,18 @@ def _load_hcl(path: Path) -> dict:
         return {}
     try:
         import hcl2
-        with open(path) as f:
-            return hcl2.load(f)
-    except Exception:
-        return {}
+    except ImportError as exc:
+        raise RuntimeError(
+            f"cannot parse {path}: python-hcl2 is not installed"
+        ) from exc
+    try:
+        with path.open() as f:
+            value = hcl2.load(f)
+    except Exception as exc:
+        raise RuntimeError(f"cannot parse {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"cannot parse {path}: expected top-level object")
+    return value
 
 
 def extract_managed_tables(env_dir: Path) -> list[str]:

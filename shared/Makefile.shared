@@ -376,11 +376,16 @@ maintain: _guard-genie-placeholder ## Native-first governance refresh: audit-sch
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,maintain); \
 	$(_RECEIPT) clear "$(ENV_DIR)" || exit 1; \
-	if ! $(MAKE) audit-schema ENV="$(ENV)"; then \
-		echo "maintain: audit-schema reported drift (output above). For sensitive-looking columns with no class.* tag," >&2; \
-		echo "  review native UC classification / auto-tagging (make enable-classification ENV=$(ENV)) or tag them in UC," >&2; \
-		echo "  then re-run make maintain ENV=$(ENV). maintain never LLM-tags columns." >&2; \
-		exit 1; \
+	$(MAKE) audit-schema ENV="$(ENV)"; audit_rc=$$?; \
+	if [ $$audit_rc -ne 0 ]; then \
+		if [ $$audit_rc -eq 1 ]; then \
+			echo "maintain: audit-schema reported drift (output above). For sensitive-looking columns with no class.* tag," >&2; \
+			echo "  review native UC classification / auto-tagging (make enable-classification ENV=$(ENV)) or tag them in UC," >&2; \
+			echo "  then re-run make maintain ENV=$(ENV). maintain never LLM-tags columns." >&2; \
+		else \
+			echo "maintain: audit-schema failed (error, not drift); review the error output above." >&2; \
+		fi; \
+		exit $$audit_rc; \
 	fi; \
 	$(MAKE) derive-assignments ENV="$(ENV)" && \
 		$(_RECEIPT) snapshot "$(ENV_DIR)" --by maintain --env "$(ENV)" && \

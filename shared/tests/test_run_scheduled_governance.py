@@ -217,13 +217,30 @@ def test_old_per_env_source_warns_and_runs_schema_drift_only(tmp_path, monkeypat
     env_dir = tmp_path / "aws" / "envs" / "prod"
     env_dir.mkdir(parents=True)
     ran = []
-    monkeypatch.setattr(rsg, "_audit", lambda ed: ran.append("audit") or 0)
+    def audit(_env_dir):
+        print("audit started", file=sys.stderr)
+        ran.append("audit")
+        return 0
+
+    monkeypatch.setattr(rsg, "_audit", audit)
     monkeypatch.setattr(rsg, "_rulebook", lambda ed: pytest.fail("rulebook should be skipped"))
     assert rsg._check(env_dir) == 0
     assert ran == ["audit"]
     err = capsys.readouterr().err
     assert "WARNING: skipping rulebook audit" in err
     assert "Repoint scheduled_governance_config_source at the envs root" in err
+    assert err.index("WARNING: RULEBOOK AUDIT SKIPPED") < err.index("audit started")
+
+
+def test_error_and_drift_returns_error_and_keeps_drift_guidance(tmp_path, monkeypatch, capsys):
+    env_dir = _env_dir(tmp_path)
+    monkeypatch.setattr(rsg, "_audit", lambda ed: 2)
+    monkeypatch.setattr(rsg, "_rulebook", lambda ed: 1)
+    assert rsg._check(env_dir) == 2
+    err = capsys.readouterr().err
+    assert "could not complete" in err
+    assert "make maintain ENV=prod" in err
+    assert "add the rule in dev, re-promote" in err
 
 
 def test_finding_propagates_nonzero_and_prints_maintain_action(tmp_path, monkeypatch, capsys):

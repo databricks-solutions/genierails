@@ -629,6 +629,18 @@ def test_maintain_audit_drift_points_to_native_classification(tmp_path):
     assert "never LLM-tags" in result.stderr
 
 
+def test_maintain_audit_error_is_not_described_as_drift(tmp_path):
+    env_dir = _env_dir(tmp_path)
+    stub, log = _stub(tmp_path, on={"audit-schema": "exit 2"})
+    result = _make("maintain", env_dir, stub)
+    assert result.returncode == 2
+    assert [c[0] for c in _calls(log)] == ["audit-schema"]
+    assert "audit-schema failed (error, not drift)" in result.stderr
+    assert "reported drift" not in result.stderr
+    assert "native UC classification" not in result.stderr
+    assert "LLM-tags" not in result.stderr
+
+
 # ── make apply warning ────────────────────────────────────────────────────────
 
 

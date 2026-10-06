@@ -2,7 +2,9 @@
 
 All tests run without any Databricks, LLM, or Terraform dependency.
 """
+import builtins
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -23,8 +25,45 @@ from scripts.audit_schema_drift import (
     find_uncovered_tags,
     _parse_condition_tag_refs,
     _applied_tags_sql,
+    _load_hcl,
 )
 import scripts.audit_schema_drift as audit_mod
+
+
+def test_load_hcl_names_existing_file_when_python_hcl2_is_missing(tmp_path, monkeypatch):
+    path = tmp_path / "present.auto.tfvars"
+    path.write_text("value = true\n")
+    real_import = builtins.__import__
+
+    def missing_hcl2(name, *args, **kwargs):
+        if name == "hcl2":
+            raise ModuleNotFoundError("No module named 'hcl2'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_hcl2)
+    with pytest.raises(RuntimeError, match=r"present\.auto\.tfvars.*python-hcl2"):
+        _load_hcl(path)
+
+
+def test_load_hcl_keeps_absent_optional_file_empty(tmp_path):
+    assert _load_hcl(tmp_path / "absent.auto.tfvars") == {}
+
+
+def test_unparseable_existing_tfvars_exits_2_in_subprocess(tmp_path):
+    (tmp_path / "env.auto.tfvars").write_text(
+        'uc_tables = ["prod.finance.customers"]\nsql_warehouse_id = "warehouse"\n'
+    )
+    (tmp_path / "auth.auto.tfvars").write_text("this is not valid hcl = [\n")
+    script = Path(audit_mod.__file__)
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2
+    assert "auth.auto.tfvars" in result.stderr
+    assert "cannot parse" in result.stderr
 
 
 # ---------------------------------------------------------------------------
