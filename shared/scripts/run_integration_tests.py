@@ -6231,7 +6231,10 @@ genie_spaces = [
 # ---------------------------------------------------------------------------
 
 DEV_TO_PROD_TEMPLATE = MODULE_ROOT / "examples" / "dev_to_prod" / "env.auto.tfvars.example"
-CHAMPION_SPACE_TITLE = "Champion Finance Analytics"
+# Names the dev catalog like the walkthrough sample does, so promote must
+# rename the space ("(dev_fin.finance)" -> "(prod_fin.finance)") consistently
+# with the remapped genie_space_configs keys (the PR #59 regression).
+CHAMPION_SPACE_TITLE = f"Champion Finance Analytics ({DEV_FIN_CAT}.finance)"
 CHAMPION_KEY_COLUMN = "customer_id"
 CHAMPION_TABLES = ("customers", "transactions", "credit_cards")
 
@@ -6346,15 +6349,17 @@ def _account_client(auth_file: Path):
     )
 
 
-def _create_account_groups(auth_file: Path, names: list[str]) -> dict[str, str]:
-    """Create the access-tier groups (stand-ins for IdP-synced groups)."""
+def _create_account_groups(auth_file: Path, names: list[str], created: dict[str, str]) -> None:
+    """Create the access-tier groups (stand-ins for IdP-synced groups).
+
+    Each group is recorded in the caller-owned ``created`` as soon as it
+    exists, so a failure part-way through still leaves teardown an exact list.
+    """
     a = _account_client(auth_file)
-    created: dict[str, str] = {}
     for name in names:
         group = a.groups.create(display_name=name)
         created[name] = group.id
         print(f"  Created account group {name} (id={group.id})")
-    return created
 
 
 def _delete_account_groups(auth_file: Path, groups: dict[str, str]) -> None:
@@ -6371,6 +6376,49 @@ def _delete_account_groups(auth_file: Path, groups: dict[str, str]) -> None:
             print(f"  Deleted account group {name}")
         except Exception as exc:
             print(f"  {_yellow('WARN')} could not delete group {name} (id={group_id}): {exc}")
+
+
+def _list_tag_policy_keys(auth_file: Path) -> set[str] | None:
+    """Tag policy keys visible now, or None if they cannot be listed."""
+    try:
+        from databricks.sdk import WorkspaceClient
+
+        _configure_sdk_env(_load_auth_cfg(auth_file))
+        w = WorkspaceClient(product="genierails-test-runner", product_version="0.1.0")
+        return {tp.tag_key for tp in w.tag_policies.list_tag_policies() if tp.tag_key}
+    except Exception as exc:
+        print(f"  {_yellow('WARN')} could not list tag policies: {exc}")
+        return None
+
+
+def _account_state_tag_policy_keys() -> set[str]:
+    """Tag policy keys recorded in this run's account-layer Terraform state."""
+    state = ENVS_DIR / "account" / "terraform.tfstate"
+    if not state.exists():
+        return set()
+    try:
+        resources = json.loads(state.read_text()).get("resources", [])
+    except (OSError, ValueError):
+        return set()
+    return {
+        inst.get("attributes", {}).get("tag_key")
+        for res in resources if res.get("type") == "databricks_tag_policy"
+        for inst in res.get("instances", [])
+        if inst.get("attributes", {}).get("tag_key")
+    }
+
+
+def _delete_tag_policies(auth_file: Path, keys: set[str]) -> None:
+    from databricks.sdk import WorkspaceClient
+
+    _configure_sdk_env(_load_auth_cfg(auth_file))
+    w = WorkspaceClient(product="genierails-test-runner", product_version="0.1.0")
+    for key in sorted(keys):
+        try:
+            w.tag_policies.delete_tag_policy(tag_key=key)
+            print(f"  Deleted leftover tag policy {key}")
+        except Exception as exc:
+            print(f"  {_yellow('WARN')} could not delete tag policy {key}: {exc}")
 
 
 def _class_tag_rows(auth_file: Path, warehouse_id: str, catalog: str) -> list[list]:
@@ -6511,6 +6559,8 @@ def scenario_champion(
 
     _ensure_packages()
     created_groups: dict[str, str] = {}
+    # None until listed: then teardown never deletes a tag policy directly.
+    preexisting_tag_policies: set[str] | None = None
     dev_space_id = ""
     resolved_wh = warehouse_id
     try:
@@ -6524,12 +6574,14 @@ def scenario_champion(
             (env_dir / "data_access" / "discovered_uc_tables.auto.tfvars").unlink(missing_ok=True)
             (env_dir / "env.auto.tfvars").unlink(missing_ok=True)
 
+        preexisting_tag_policies = _list_tag_policy_keys(auth_file)
+
         _step("Creating dev_fin + prod_fin fixture catalogs (sensitive columns)")
         resolved_wh = _setup_data(auth_file, "--prod", warehouse_id=warehouse_id) or warehouse_id
         resolved_wh = _get_or_find_warehouse(auth_file, resolved_wh)
 
         _step(f"Creating access-tier account groups (IdP stand-ins): {tier_groups}")
-        created_groups = _create_account_groups(auth_file, tier_groups)
+        _create_account_groups(auth_file, tier_groups, created_groups)
 
         _step("Creating the curated dev Genie agent via the Genie API")
         dev_space_id = _create_genie_space_via_api(
@@ -6624,6 +6676,14 @@ def scenario_champion(
         if bad:
             raise AssertionError(f"promoted prod env.auto.tfvars is wrong ({bad}):\n{prod_env_file.read_text()}")
         print(f"  {_green('PASS')}  prod env.auto.tfvars: {', '.join(checks)}")
+        prod_names = [s.get("name") for s in prod_cfg.get("genie_spaces") or []]
+        expected_name = CHAMPION_SPACE_TITLE.replace(f"{DEV_FIN_CAT}.", f"{PROD_FIN_CAT}.")
+        if prod_names != [expected_name]:
+            raise AssertionError(
+                f"promoted Genie space name {prod_names!r} != {[expected_name]!r} "
+                "(must be renamed like the remapped genie_space_configs keys)"
+            )
+        print(f"  {_green('PASS')}  prod Genie space renamed to {expected_name!r}")
 
         _step("Filling prod auth (same workspace/SP) and sql_warehouse_id")
         _copy_auth(dev_env, prod_env)
@@ -6725,14 +6785,14 @@ def scenario_champion(
             print(f"  {_yellow('KEEP')}  --keep-data: leaving envs, catalogs, groups and "
                   f"Genie agent {dev_space_id or '(none)'} in place")
         else:
-            account_abac = ENVS_DIR / "account" / "abac.auto.tfvars"
-            try:
-                tag_policy_keys = {
-                    tp.get("key") for tp in (_load_tfvars(account_abac).get("tag_policies") or [])
-                    if tp.get("key")
-                } if account_abac.exists() else set()
-            except Exception:
-                tag_policy_keys = set()
+            # Tag policies are owned by this run's account-layer Terraform state;
+            # the destroy below removes them. Only a leftover that this state
+            # recorded AND that did not exist when the run started is deleted
+            # directly — never a pre-existing or concurrently created policy.
+            owned_tag_policies = (
+                _account_state_tag_policy_keys() - preexisting_tag_policies
+                if preexisting_tag_policies is not None else set()
+            )
             _try_destroy(prod_env)
             _try_destroy(dev_env)
             _try_destroy_account()
@@ -6741,16 +6801,10 @@ def scenario_champion(
             _delete_account_groups(auth_file, created_groups)
             _teardown_data("--teardown", "--teardown-prod", auth_file=auth_file,
                            warehouse_id=resolved_wh)
-            if tag_policy_keys:
-                from databricks.sdk import WorkspaceClient
-                _configure_sdk_env(_load_auth_cfg(auth_file))
-                w = WorkspaceClient(product="genierails-test-runner", product_version="0.1.0")
-                for key in sorted(tag_policy_keys):
-                    try:
-                        w.tag_policies.delete_tag_policy(tag_key=key)
-                        print(f"  Deleted leftover tag policy {key}")
-                    except Exception:
-                        pass  # already removed by the account-layer destroy
+            if owned_tag_policies:
+                leftover = owned_tag_policies & (_list_tag_policy_keys(auth_file) or set())
+                if leftover:
+                    _delete_tag_policies(auth_file, leftover)
 
 
 # ---------------------------------------------------------------------------

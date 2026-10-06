@@ -76,7 +76,7 @@ class FakeMake:
         if guarded.returncode:
             return guarded
         gen_args = _var(args, "GENERATE_ARGS")
-        title = "Champion Finance Analytics"
+        title = rit.CHAMPION_SPACE_TITLE
         if _var(args, "MODE") == "genie":
             groups = shlex.split(gen_args)[1].split(",")
             persist_access_tier_groups(env_dir / "env.auto.tfvars", groups)
@@ -153,12 +153,19 @@ def champion(tmp_path, monkeypatch):
     monkeypatch.setattr(rit, "_setup_data", lambda *a, **k: WAREHOUSE)
     monkeypatch.setattr(rit, "_get_or_find_warehouse", lambda _auth, wh: wh)
     monkeypatch.setattr(rit, "_create_account_groups",
-                        lambda _auth, names: {n: f"id-{n}" for n in names})
+                        lambda _auth, names, created: created.update({n: f"id-{n}" for n in names}))
+    # This branch's remap_env_config.py predates PR #59, which renames a space
+    # whose title names the dev catalog; the live run (after #59) covers that.
+    monkeypatch.setattr(rit, "CHAMPION_SPACE_TITLE", "Champion Finance Analytics")
+    monkeypatch.setattr(rit, "_list_tag_policy_keys", lambda _auth: set())
+    monkeypatch.setattr(rit, "_account_state_tag_policy_keys", lambda: set())
+    monkeypatch.setattr(rit, "_delete_tag_policies",
+                        lambda _auth, keys: teardown.append(("_delete_tag_policies", set(keys))))
     monkeypatch.setattr(rit, "_create_genie_space_via_api", lambda *a, **k: SPACE_ID)
     monkeypatch.setattr(rit, "_wait_for_class_tags", lambda _a, _w, catalog: waits.append(catalog))
     monkeypatch.setattr(rit, "_force_account_reapply", lambda *_: None)
     monkeypatch.setattr(rit, "_get_genie_space_via_api",
-                        lambda _a, sid: {"space_id": sid, "title": "Champion Finance Analytics"})
+                        lambda _a, sid: {"space_id": sid, "title": rit.CHAMPION_SPACE_TITLE})
     for name in ("_try_destroy", "_try_destroy_account", "_delete_genie_space_via_api",
                  "_delete_account_groups", "_teardown_data"):
         monkeypatch.setattr(rit, name, lambda *a, _n=name, **k: teardown.append(_n))
@@ -258,3 +265,55 @@ def test_seeding_is_opt_in_and_loud(monkeypatch, capsys):
     assert len(statements) == len(rit.CHAMPION_SEED_TAGS)
     assert all(s.startswith("ALTER TABLE prod_fin.finance.") for s in statements)
     assert "SEEDING class.* tags on prod_fin" in capsys.readouterr().out
+
+
+def test_fixture_title_names_the_dev_catalog():
+    # Exercises the promote rename fixed in PR #59 on the live run.
+    assert f"{rit.DEV_FIN_CAT}." in rit.CHAMPION_SPACE_TITLE
+
+
+def test_partial_group_creation_is_recorded_for_teardown(monkeypatch):
+    class Groups:
+        def create(self, display_name):
+            if display_name == "second":
+                raise RuntimeError("quota")
+            return type("G", (), {"id": f"id-{display_name}"})()
+
+    monkeypatch.setattr(rit, "_account_client", lambda _auth: type("A", (), {"groups": Groups()})())
+    created = {}
+    with pytest.raises(RuntimeError, match="quota"):
+        rit._create_account_groups(Path("auth"), ["first", "second"], created)
+    assert created == {"first": "id-first"}
+
+
+def test_teardown_deletes_only_tag_policies_this_run_created(champion, monkeypatch):
+    fake, envs, _waits, teardown = champion
+    listings = iter([
+        {"pre_existing"},                                      # at start
+        {"gr_treatment", "pre_existing", "concurrent_new"},    # after destroy
+    ])
+    monkeypatch.setattr(rit, "_list_tag_policy_keys", lambda _auth: next(listings))
+    # The account state recorded (created or imported) these two.
+    monkeypatch.setattr(rit, "_account_state_tag_policy_keys",
+                        lambda: {"gr_treatment", "pre_existing"})
+    rit.scenario_champion(envs / "dev" / "auth.auto.tfvars", "", keep_data=False)
+    assert ("_delete_tag_policies", {"gr_treatment"}) in teardown
+
+
+def test_teardown_never_deletes_tag_policies_when_start_listing_failed(champion, monkeypatch):
+    fake, envs, _waits, teardown = champion
+    monkeypatch.setattr(rit, "_list_tag_policy_keys", lambda _auth: None)
+    monkeypatch.setattr(rit, "_account_state_tag_policy_keys", lambda: {"gr_treatment"})
+    rit.scenario_champion(envs / "dev" / "auth.auto.tfvars", "", keep_data=False)
+    assert not [t for t in teardown if isinstance(t, tuple)]
+
+
+def test_account_state_tag_policy_keys_reads_only_tag_policies(tmp_path, monkeypatch):
+    monkeypatch.setattr(rit, "ENVS_DIR", tmp_path)
+    (tmp_path / "account").mkdir()
+    (tmp_path / "account" / "terraform.tfstate").write_text(json.dumps({"resources": [
+        {"type": "databricks_tag_policy", "instances": [
+            {"attributes": {"tag_key": "gr_treatment"}}]},
+        {"type": "databricks_group", "instances": [{"attributes": {"tag_key": "nope"}}]},
+    ]}))
+    assert rit._account_state_tag_policy_keys() == {"gr_treatment"}
