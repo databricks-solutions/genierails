@@ -263,6 +263,9 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
         "version": GATE_VERSION,
         "env": env_name,
         "fingerprint": inputs["fingerprint"],
+        # Informational: the max age is part of the fingerprint, and Terraform
+        # judges expiry with the value it is planning (or applied) with.
+        "max_age": inputs.get("max_age"),
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "first_exposure_tables": first,
         "granted_tables": sorted(granted),

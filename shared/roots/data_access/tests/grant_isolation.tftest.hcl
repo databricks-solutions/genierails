@@ -4,8 +4,8 @@ mock_provider "time" {}
 
 # Business SELECT needs a current coverage-gate pass (coverage_gate.tftest.hcl).
 # Before each grant-shape run, a closed-gate plan of the same inputs reads the
-# gate fingerprint and the file writer records a pass for it (with a fixed
-# refresh time; the century-long coverage_gate_max_age keeps it valid).
+# gate fingerprint and the file writer records a pass for it, refreshed at
+# plan time ("@NOW@").
 run "setup_masking_sql" {
   module {
     source = "./tests/file_writer"
@@ -56,7 +56,7 @@ run "per_agent_select_grants_are_isolated_and_shared_tables_union_acls__gate_pas
   variables {
     files = {
       "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
-      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.per_agent_select_grants_are_isolated_and_shared_tables_union_acls__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "2026-01-01T00:00:00Z" })
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.per_agent_select_grants_are_isolated_and_shared_tables_union_acls__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }
@@ -88,7 +88,6 @@ run "per_agent_select_grants_are_isolated_and_shared_tables_union_acls" {
       agent_b_group = {}
     }
     business_access_enabled = true
-    coverage_gate_max_age   = "876000h"
     enable_classification   = true
     sql_warehouse_id        = "warehouse"
   }
@@ -172,7 +171,7 @@ run "legacy_unattributed_discovery_falls_back_to_all_principals__gate_passes" {
   variables {
     files = {
       "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
-      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.legacy_unattributed_discovery_falls_back_to_all_principals__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "2026-01-01T00:00:00Z" })
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.legacy_unattributed_discovery_falls_back_to_all_principals__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }
@@ -192,7 +191,6 @@ run "legacy_unattributed_discovery_falls_back_to_all_principals" {
       agent_b_group = {}
     }
     business_access_enabled = true
-    coverage_gate_max_age   = "876000h"
     sql_warehouse_id        = "warehouse"
   }
 
@@ -235,7 +233,7 @@ run "id_only_space_uses_canonical_title_for_select__gate_passes" {
   variables {
     files = {
       "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
-      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.id_only_space_uses_canonical_title_for_select__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "2026-01-01T00:00:00Z" })
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.id_only_space_uses_canonical_title_for_select__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }
@@ -253,7 +251,6 @@ run "id_only_space_uses_canonical_title_for_select" {
     genie_space_acl_groups    = { Payments = ["pay_group"] }
     groups                    = { pay_group = {}, hr_group = {} }
     business_access_enabled   = true
-    coverage_gate_max_age     = "876000h"
     sql_warehouse_id          = "warehouse"
   }
   assert {
@@ -291,7 +288,7 @@ run "empty_agent_list_is_fail_closed__gate_passes" {
   variables {
     files = {
       "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
-      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.empty_agent_list_is_fail_closed__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "2026-01-01T00:00:00Z" })
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.empty_agent_list_is_fail_closed__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }
@@ -314,7 +311,6 @@ run "empty_agent_list_is_fail_closed" {
       agent_b_group = {}
     }
     business_access_enabled = true
-    coverage_gate_max_age   = "876000h"
     sql_warehouse_id        = "warehouse"
   }
 
@@ -355,7 +351,7 @@ run "explicit_empty_space_acl_means_no_select_grants__gate_passes" {
   variables {
     files = {
       "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
-      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.explicit_empty_space_acl_means_no_select_grants__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "2026-01-01T00:00:00Z" })
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.explicit_empty_space_acl_means_no_select_grants__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }
@@ -380,7 +376,6 @@ run "explicit_empty_space_acl_means_no_select_grants" {
       agent_b_group = {}
     }
     business_access_enabled = true
-    coverage_gate_max_age   = "876000h"
     sql_warehouse_id        = "warehouse"
   }
 
@@ -422,7 +417,7 @@ run "unknown_agent_does_not_widen_known_agent_scope__gate_passes" {
   variables {
     files = {
       "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
-      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.unknown_agent_does_not_widen_known_agent_scope__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "2026-01-01T00:00:00Z" })
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.unknown_agent_does_not_widen_known_agent_scope__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }
@@ -448,7 +443,6 @@ run "unknown_agent_does_not_widen_known_agent_scope" {
       agent_b_group = {}
     }
     business_access_enabled = true
-    coverage_gate_max_age   = "876000h"
     sql_warehouse_id        = "warehouse"
   }
 
@@ -490,7 +484,7 @@ run "top_level_admin_table_wins_over_agent_scope__gate_passes" {
   variables {
     files = {
       "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
-      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.top_level_admin_table_wins_over_agent_scope__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "2026-01-01T00:00:00Z" })
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.top_level_admin_table_wins_over_agent_scope__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }
@@ -516,7 +510,6 @@ run "top_level_admin_table_wins_over_agent_scope" {
       agent_b_group = {}
     }
     business_access_enabled = true
-    coverage_gate_max_age   = "876000h"
     sql_warehouse_id        = "warehouse"
   }
 
@@ -552,7 +545,7 @@ run "absent_discovery_preserves_legacy_user_table_behavior__gate_passes" {
   variables {
     files = {
       "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
-      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.absent_discovery_preserves_legacy_user_table_behavior__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "2026-01-01T00:00:00Z" })
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.absent_discovery_preserves_legacy_user_table_behavior__gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }
@@ -569,7 +562,6 @@ run "absent_discovery_preserves_legacy_user_table_behavior" {
     uc_tables                 = ["legacy_catalog.business.orders"]
     groups                    = { analysts = {} }
     business_access_enabled   = true
-    coverage_gate_max_age     = "876000h"
     sql_warehouse_id          = "warehouse"
   }
 

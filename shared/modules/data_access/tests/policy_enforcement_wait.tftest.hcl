@@ -55,9 +55,6 @@ variables {
     function_schema  = "sch"
   }]
   business_access_enabled = true
-  # Results below record a fixed refresh time; a century-long max age keeps
-  # them valid whatever the wall clock says (expiry has its own runs).
-  coverage_gate_max_age = "876000h"
 }
 
 run "setup_inputs" {
@@ -92,7 +89,7 @@ run "write_passing_gate" {
     files = {
       "tests/.tmp/wait/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
       "tests/.tmp/wait/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n"
-      "tests/.tmp/wait/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "2026-01-01T00:00:00Z" })
+      "tests/.tmp/wait/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.gate_inputs.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }

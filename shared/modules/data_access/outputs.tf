@@ -42,6 +42,7 @@ output "coverage_gate_inputs" {
     business_access_enabled = var.business_access_enabled
     grant_tables            = local.coverage_gate_grant_tables
     acknowledged_columns    = sort(distinct([for column in var.coverage_acknowledged_columns : lower(column)]))
+    max_age                 = var.coverage_gate_max_age
   }
 }
 
@@ -51,6 +52,7 @@ output "coverage_gate" {
     business_access_enabled = var.business_access_enabled
     fingerprint             = local.coverage_gate_fingerprint
     status                  = local.coverage_gate_status
+    max_age                 = var.coverage_gate_max_age
     table_grant_count       = length(databricks_grant.table_access)
   }
 }

@@ -83,11 +83,17 @@ variable "coverage_ddl_file" {
 variable "coverage_gate_max_age" {
   type        = string
   default     = "6h"
-  description = "Oldest live refresh (derive-assignments re-reading class.* tags and DDL from Unity Catalog) a passing coverage gate may rest on, as a Terraform duration. make refreshes right before every gated plan/apply; this bounds what a raw terraform run can rely on."
+  description = "Oldest live refresh (derive-assignments re-reading class.* tags and DDL from Unity Catalog) a passing coverage gate may rest on, as a Terraform duration of at most 24h. make refreshes right before every gated plan/apply; this bounds what a raw terraform run can rely on. It is part of the gate fingerprint, so changing it requires a new gate run."
 
+  # Same bounds as modules/coverage_gate_check (the authority, whose 24h
+  # ceiling no variable can raise); repeated here only to fail early.
   validation {
-    condition     = can(timeadd("2000-01-01T00:00:00Z", var.coverage_gate_max_age)) && !startswith(var.coverage_gate_max_age, "-")
-    error_message = "coverage_gate_max_age must be a positive Terraform duration such as \"6h\" or \"90m\"."
+    condition = try(
+      timecmp(timeadd("2000-01-01T00:00:00Z", var.coverage_gate_max_age), "2000-01-01T00:00:00Z") > 0
+      && timecmp(timeadd("2000-01-01T00:00:00Z", var.coverage_gate_max_age), timeadd("2000-01-01T00:00:00Z", "24h")) <= 0,
+      false
+    )
+    error_message = "coverage_gate_max_age must be a positive Terraform duration of at most 24h, such as \"6h\" or \"90m\"."
   }
 }
 

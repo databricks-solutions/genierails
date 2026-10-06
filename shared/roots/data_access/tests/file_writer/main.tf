@@ -1,6 +1,8 @@
 # Test helper: writes (or, for a null value, deletes) local files from a
 # terraform test run, so later runs can plan against a gate result, DDL or
-# state. Files are removed again when the test tears down.
+# state. Files are removed again when the test tears down. "@NOW@" in a
+# content is replaced with this run's plan time (RFC 3339, UTC), for gate
+# results whose live refresh must be recent without a fixed date going stale.
 
 # Declared only so the test files' mock "databricks"/"time" providers resolve
 # to the same provider types as in the root under test.
@@ -22,8 +24,15 @@ variable "files" {
   description = "Path (relative to the root under test) => content; null deletes the file."
 }
 
+locals {
+  now = formatdate("YYYY-MM-DD'T'hh:mm:ss'Z'", plantimestamp())
+  files = {
+    for path, content in var.files : path => content == null ? null : replace(content, "@NOW@", local.now)
+  }
+}
+
 resource "terraform_data" "file" {
-  for_each = var.files
+  for_each = local.files
 
   triggers_replace = { path = each.key, content = each.value }
   input            = each.key
