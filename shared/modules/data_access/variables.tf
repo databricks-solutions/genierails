@@ -103,6 +103,12 @@ variable "applied_table_grants" {
   description = "table_access keys (\"<table>|<principal>\") the last apply made, from this layer's state. With an unchanged protection fingerprint they stay plannable without a current gate pass."
 }
 
+variable "deployment_binding" {
+  type        = string
+  default     = ""
+  description = "Identity of this deployment (hash of workspace host and ID), recorded with the applied protection so a state from another deployment exempts nothing."
+}
+
 variable "applied_protection_fingerprint" {
   type        = string
   default     = ""

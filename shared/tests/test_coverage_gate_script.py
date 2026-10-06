@@ -834,7 +834,8 @@ _OFFLINE_STEPS = ["IMPORT_EXISTING_SCRIPT=true", f"GENIE_ADOPT_PREFLIGHT_SCRIPT=
 
 _GATE_OUTPUT_TYPE = ["object", {
     "business_access_enabled": "bool", "fingerprint": "string", "status": "string",
-    "max_age": "string", "protection_fingerprint": "string", "table_grant_count": "number",
+    "max_age": "string", "protection_fingerprint": "string", "deployment_binding": "string",
+    "table_grant_count": "number",
 }]
 
 
@@ -856,7 +857,8 @@ def genie_env(live_like_env, tmp_path, monkeypatch):
     (env / "data_access" / "terraform.tfstate").write_text(json.dumps({"version": 4, "outputs": {
         "coverage_gate": {"value": {"business_access_enabled": True, "fingerprint": "applied", "status": "pass",
                                     "max_age": "6h", "protection_fingerprint": "applied",
-                                    "table_grant_count": 2}, "type": _GATE_OUTPUT_TYPE},
+                                    "deployment_binding": "applied", "table_grant_count": 2},
+                          "type": _GATE_OUTPUT_TYPE},
         "table_grant_resource_keys": {"value": [f"{TABLE}|analysts", f"{TABLE}|auditors"],
                                       "type": ["list", "string"]},
     }, "resources": []}))
@@ -914,12 +916,13 @@ def test_apply_genie_refuses_to_widen_can_run_when_uc_is_down(genie_env):
     assert not applied
 
 
-def _data_access_state(env, keys, protection):
+def _data_access_state(env, keys, protection, binding):
     (env / "data_access" / "terraform.tfstate").write_text(json.dumps({
         "version": 4,
         "outputs": {"coverage_gate": {"value": {"business_access_enabled": True, "fingerprint": "applied",
                                                 "status": "pass", "max_age": "6h",
                                                 "protection_fingerprint": protection,
+                                                "deployment_binding": binding,
                                                 "table_grant_count": len(keys)}, "type": _GATE_OUTPUT_TYPE}},
         "resources": [{
             "module": "module.data_access", "mode": "managed", "type": "databricks_grant",
@@ -935,7 +938,8 @@ def test_data_access_apply_keeps_grants_when_uc_is_down_but_never_adds_one(live_
     env = live_like_env
     # What the last gated apply recorded: this grant, with today's protection.
     current = cg.query_inputs(RUNNER, "prod", env / "data_access", [])
-    _data_access_state(env, [f"{TABLE}|analysts"], current["protection_fingerprint"])
+    _data_access_state(env, [f"{TABLE}|analysts"], current["protection_fingerprint"],
+                       current["deployment_binding"])
     if widen:
         abac = env / "data_access" / "abac.auto.tfvars"
         abac.write_text(abac.read_text().replace("groups = { analysts = {} }", "groups = { analysts = {}, auditors = {} }"))

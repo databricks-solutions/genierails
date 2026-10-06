@@ -76,18 +76,28 @@ locals {
 
   # What the last apply of this layer left in place, read from its own state
   # (the layer runner's local backend), so keeping or revoking SELECT never
-  # needs a current coverage gate (see modules/data_access). Unreadable state
-  # means nothing is exempt.
-  _own_state = fileexists("${var.env_dir}/terraform.tfstate") ? try(jsondecode(file("${var.env_dir}/terraform.tfstate")), null) : null
-  applied_table_grants = flatten([
+  # needs a current coverage gate (see modules/data_access). Only current,
+  # successfully applied objects count: tainted instances and deposed ones
+  # (left by a failed or partial replacement) don't. The record must also be
+  # for this deployment (workspace host and ID); a state copied from another
+  # environment, or written before the binding existed, counts as nothing
+  # applied. Unreadable state means nothing is exempt.
+  deployment_binding = sha256(jsonencode({
+    workspace_host = lower(trimsuffix(trimspace(var.databricks_workspace_host), "/"))
+    workspace_id   = trimspace(var.databricks_workspace_id)
+  }))
+  _own_state       = fileexists("${var.env_dir}/terraform.tfstate") ? try(jsondecode(file("${var.env_dir}/terraform.tfstate")), null) : null
+  _applied_record  = try(local._own_state.outputs.coverage_gate.value, null)
+  _state_is_for_us = try(tostring(local._applied_record.deployment_binding), "") == local.deployment_binding
+  applied_table_grants = local._state_is_for_us ? flatten([
     for resource in try(local._own_state.resources, []) : [
       for instance in try(resource.instances, []) : tostring(instance.index_key)
-      if try(instance.status, "") != "tainted" && try(instance.index_key, null) != null
+      if try(instance.status, "") != "tainted" && try(instance.deposed, "") == "" && try(instance.index_key, null) != null
     ]
     if try(resource.module, "") == "module.data_access" && try(resource.mode, "") == "managed"
     && try(resource.type, "") == "databricks_grant" && try(resource.name, "") == "table_access"
-  ])
-  applied_protection_fingerprint = try(tostring(local._own_state.outputs.coverage_gate.value.protection_fingerprint), "")
+  ]) : []
+  applied_protection_fingerprint = local._state_is_for_us ? try(tostring(local._applied_record.protection_fingerprint), "") : ""
 }
 
 variable "env_dir" {
@@ -376,6 +386,7 @@ module "data_access" {
   coverage_gate_max_age           = var.coverage_gate_max_age
   applied_table_grants            = local.applied_table_grants
   applied_protection_fingerprint  = local.applied_protection_fingerprint
+  deployment_binding              = local.deployment_binding
   enable_classification           = var.enable_classification
   enable_auto_tagging             = var.enable_auto_tagging
   classification_existing_schemas = var.classification_existing_schemas

@@ -690,3 +690,56 @@ run "unchanged_created_acl_plans_after_the_gate_expires" {
     error_message = "the unchanged ACL on a created agent must still plan"
   }
 }
+
+# Deposed objects (left by a failed or partial replacement) aren't applied CAN_RUN.
+run "deposed_acl_on_record" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts", "cat.sch.customers|auditors"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
+      "tests/.tmp/exposure/terraform.tfstate"               = jsonencode({ version = 4, outputs = {}, resources = [{ module = "module.workspace", mode = "managed", type = "null_resource", name = "genie_space_acls", instances = [{ index_key = "sales", deposed = "00000001", attributes = { id = "0", triggers = { space_id = "space-1", groups = "analysts" } } }] }] })
+    }
+  }
+}
+
+run "deposed_acl_gets_no_credit" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = [] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = toset(output.genie_space_can_run_widening["sales"]) == toset(["analysts"])
+    error_message = "a deposed ACL object is not applied CAN_RUN"
+  }
+}
+
+run "current_and_wider_deposed_acl_on_record" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts", "cat.sch.customers|auditors"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
+      "tests/.tmp/exposure/terraform.tfstate"               = jsonencode({ version = 4, outputs = {}, resources = [{ module = "module.workspace", mode = "managed", type = "null_resource", name = "genie_space_acls", instances = [{ index_key = "sales", attributes = { id = "1", triggers = { space_id = "space-1", groups = "analysts" } } }, { index_key = "sales", deposed = "00000001", attributes = { id = "0", triggers = { space_id = "space-1", groups = "analysts,auditors" } } }] }] })
+    }
+  }
+}
+
+run "only_the_current_acl_counts" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = [] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts", "auditors"] } }
+  }
+  assert {
+    condition     = toset(output.genie_space_can_run_widening["sales"]) == toset(["auditors"])
+    error_message = "next to a deposed object only the current ACL counts (auditors stays an addition, no duplicate-key error)"
+  }
+}

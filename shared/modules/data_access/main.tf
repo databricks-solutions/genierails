@@ -167,6 +167,7 @@ locals {
   # tags re-derived), still need a current pass.
   coverage_gate_protection = sha256(jsonencode({
     version         = 1
+    deployment      = var.deployment_binding
     tag_assignments = sort(keys(local.tag_assignment_map))
     fgac_policies   = local.fgac_policy_map
     masking_sql     = filesha256(var.masking_sql_file)

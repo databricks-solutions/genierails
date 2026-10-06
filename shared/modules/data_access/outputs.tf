@@ -47,6 +47,7 @@ output "coverage_gate_inputs" {
     # the change only keeps or revokes SELECT, so a failing gate needn't stop it.
     needs_gate             = length(local.table_grants_needing_gate) > 0
     protection_fingerprint = local.coverage_gate_protection
+    deployment_binding     = var.deployment_binding
   }
 }
 
@@ -58,6 +59,7 @@ output "coverage_gate" {
     status                  = local.coverage_gate_status
     max_age                 = var.coverage_gate_max_age
     protection_fingerprint  = local.coverage_gate_protection
+    deployment_binding      = var.deployment_binding
     table_grant_count       = length(databricks_grant.table_access)
   }
 }

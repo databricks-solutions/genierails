@@ -175,11 +175,16 @@ locals {
         key   = try(tostring(instance.index_key), "")
         attrs = try(instance.attributes, {})
       }
-      if try(instance.status, "") != "tainted"
+      # Tainted and deposed (failed or partial replacement) objects aren't
+      # successfully applied CAN_RUN.
+      if try(instance.status, "") != "tainted" && try(instance.deposed, "") == ""
     ]
     if try(resource.module, "") == "module.workspace" && try(resource.mode, "") == "managed"
   ])
-  _applied = { for instance in local._state_instances : "${instance.name}|${instance.key}" => instance.attrs }
+  # Grouped so an unexpected duplicate can't fail the plan; anything but
+  # exactly one current object counts as nothing applied.
+  _applied_candidates = { for instance in local._state_instances : "${instance.name}|${instance.key}" => instance.attrs... }
+  _applied            = { for key, attrs in local._applied_candidates : key => attrs[0] if length(attrs) == 1 }
   applied_can_run_groups = {
     for key, space in local.merged_spaces : key => [
       for group in split(",", (
