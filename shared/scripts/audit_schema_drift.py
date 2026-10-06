@@ -29,6 +29,7 @@ auth.auto.tfvars, and data_access/abac.auto.tfvars are accessible via relative p
 Exit codes:
   0 — no drift detected
   1 — drift detected (forward, reverse, rulebook, or any combination)
+  2 — audit error (invalid config, authentication/query failure, or no warehouse)
 
 Known limitations:
   - Overwrite-style rewrites (overwriteSchema=true on direct Delta paths) may
@@ -510,7 +511,7 @@ def main(argv: list[str] | None = None) -> int:
         managed_tables = extract_managed_tables(env_dir)
     except FootprintError as exc:
         print(f"  ERROR: {exc}")
-        return 1
+        return 2
     if not managed_tables:
         print("  No managed tables found in the environment footprint — nothing to audit.")
         return 0
@@ -525,7 +526,7 @@ def main(argv: list[str] | None = None) -> int:
     warehouse_id = _get_warehouse_id(env_dir, w)
     if not warehouse_id:
         print("  ERROR: No SQL warehouse available.")
-        return 1
+        return 2
 
     drift_found = False
 
@@ -573,4 +574,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(f"  ERROR: audit could not complete: {exc}", file=sys.stderr)
+        sys.exit(2)

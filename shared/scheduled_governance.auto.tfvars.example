@@ -17,9 +17,13 @@ enable_scheduled_governance = true
 scheduled_governance_env   = "prod"
 scheduled_governance_cloud = "aws" # "aws" | "azure"
 
-# Optional catalog threaded to the generate-delta step (generate_abac.py
-# --catalog). Empty = auto-derive from the target env's uc_tables.
-scheduled_governance_catalog = "prod_fin"
+# Default: read-only schema + rulebook audits. Set "legacy" only to retain the
+# old audit -> generate-delta -> coverage checkout-local flow.
+scheduled_governance_mode = "check"
+
+# Legacy-only: used by run_scheduled_governance.py --step all for its
+# generate-delta step. The default read-only check warns and ignores it.
+# scheduled_governance_catalog = "prod_fin"
 
 # Cadence (Quartz cron) and timezone. Default: daily at 06:00 UTC.
 scheduled_governance_cron     = "0 0 6 * * ?"
@@ -31,21 +35,18 @@ scheduled_governance_git_url      = "https://github.com/<org>/<repo>"
 scheduled_governance_git_branch   = "main"
 scheduled_governance_git_provider = "gitHub" # gitHub | gitLab | bitbucketCloud | azureDevOpsServices | ...
 
-# Where the job reads the env config from at runtime. REQUIRED when enabled:
-# the repo's envs/ is .gitignore'd, so the checkout does NOT contain
-# envs/<env>/. Point this at a runtime-visible path (a Unity Catalog Volume,
-# workspace files, or a DBFS mount) holding this env's auth.auto.tfvars,
-# env.auto.tfvars, data_access/ and (optionally) generated/. The wrapper copies
-# it into the checkout's env dir before scanning.
-scheduled_governance_config_source = "/Volumes/main/governance/genierails/prod"
+# Runtime-visible envs root. REQUIRED when enabled because envs/ is gitignored.
+# For check mode it must contain account/abac.auto.tfvars plus prod/ (or the
+# selected env) with auth.auto.tfvars, env.auto.tfvars, data_access/, and
+# optionally generated/. The wrapper copies both into its ephemeral checkout.
+scheduled_governance_config_source = "/Volumes/main/governance/genierails/envs"
 
-# Optional: who to email when the job fails (e.g. drift found but not resolved).
+# Optional: who to email when the job fails. The notification links to the run;
+# the actionable finding details are in the run output.
 scheduled_governance_notification_emails = ["governance-team@example.com"]
 
-# Optional: PyPI packages installed into the serverless environment. The
-# defaults cover audit + coverage + the non-LLM delta path; append your LLM
-# provider package (e.g. "anthropic") if the delta step must classify new
-# columns.
+# Optional: PyPI packages installed into the serverless environment. Defaults
+# cover the read-only checks; legacy delta may need an LLM provider package.
 # scheduled_governance_dependencies = ["python-hcl2", "databricks-sdk", "pyyaml", "requests"]
 
 # Optional: override the generated job name.

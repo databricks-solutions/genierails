@@ -8,6 +8,7 @@ runs.
 import sys
 from pathlib import Path
 
+import hcl2
 import pytest
 
 SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
@@ -16,6 +17,18 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 import run_scheduled_governance as rsg  # noqa: E402
 
 REPO_ROOT = Path(rsg.REPO_ROOT)
+
+
+def _env_dir(tmp_path, env="prod"):
+    cloud = tmp_path / "aws"
+    cloud.mkdir(exist_ok=True)
+    (cloud / "Makefile").touch()
+    result = cloud / "envs" / env
+    result.mkdir(parents=True, exist_ok=True)
+    account = cloud / "envs" / "account"
+    account.mkdir(parents=True, exist_ok=True)
+    (account / "abac.auto.tfvars").touch()
+    return result
 
 
 def test_resolve_env_dir_relative_is_repo_relative():
@@ -33,6 +46,16 @@ def test_bad_env_dir_returns_2(monkeypatch, capsys):
                         ["prog", "--env-dir", "aws/envs/does-not-exist", "--step", "audit"])
     assert rsg.main() == 2
     assert "env directory not found" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("path, message", [
+    ("aws/prod", "must have an 'envs' parent"),
+    ("missing-cloud/envs/prod", "cloud root has no Makefile"),
+])
+def test_bad_env_layout_returns_2(path, message, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-dir", path])
+    assert rsg.main() == 2
+    assert message in capsys.readouterr().err
 
 
 def test_gitignored_envs_dir_absent_from_checkout():
@@ -62,40 +85,61 @@ def test_materialize_env_dir_copies_config_into_checkout(tmp_path):
     assert (env_dir / "data_access" / "abac.auto.tfvars").exists()
 
 
+def test_materialize_envs_root_copies_target_and_account(tmp_path):
+    source = tmp_path / "volume_envs"
+    (source / "prod").mkdir(parents=True)
+    (source / "prod" / "auth.auto.tfvars").write_text("# auth\n")
+    (source / "account").mkdir()
+    (source / "account" / "abac.auto.tfvars").write_text("# policies\n")
+    env_dir = tmp_path / "checkout" / "aws" / "envs" / "prod"
+
+    rsg._materialize_env_dir(str(source), env_dir)
+
+    assert (env_dir / "auth.auto.tfvars").exists()
+    assert (env_dir.parent / "account" / "abac.auto.tfvars").exists()
+
+
 def test_materialize_missing_source_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         rsg._materialize_env_dir(str(tmp_path / "nope"), tmp_path / "env")
 
 
-def test_main_materializes_env_dir_before_running_steps(tmp_path, monkeypatch):
+def test_main_materializes_env_dir_before_default_check(tmp_path, monkeypatch):
     # End-to-end: with --config-source, main() materializes the env dir (which
     # does not exist beforehand) and then runs the steps against it.
-    source = tmp_path / "volume_prod"
-    (source / "data_access").mkdir(parents=True)
-    (source / "data_access" / "abac.auto.tfvars").write_text("tag_assignments = [\n]\n")
+    source = tmp_path / "volume_envs"
+    (source / "prod" / "data_access").mkdir(parents=True)
+    (source / "prod" / "data_access" / "abac.auto.tfvars").write_text(
+        "tag_assignments = [\n]\n")
+    (source / "account").mkdir()
+    (source / "account" / "abac.auto.tfvars").write_text("# policies\n")
     env_dir = tmp_path / "checkout" / "aws" / "envs" / "prod"
+    env_dir.parent.parent.mkdir(parents=True)
+    (env_dir.parent.parent / "Makefile").touch()
 
     seen = {}
 
-    def fake_audit(ed):
-        seen["audit_exists"] = ed.is_dir()
+    def fake_check(ed):
+        seen["check_exists"] = ed.is_dir()
+        seen["account_exists"] = (ed.parent / "account" / "abac.auto.tfvars").is_file()
         return 0
 
-    monkeypatch.setattr(rsg, "_audit", fake_audit)
-    monkeypatch.setattr(rsg, "_delta", lambda ed, auth_file, catalog="": 0)
-    monkeypatch.setattr(rsg, "_coverage", lambda ed: 0)
+    monkeypatch.setattr(rsg, "_check", fake_check)
     monkeypatch.setattr(sys, "argv",
                         ["prog", "--env-dir", str(env_dir),
-                         "--config-source", str(source), "--step", "all"])
+                         "--config-source", str(source)])
 
     assert rsg.main() == 0
     assert env_dir.is_dir()               # materialized
-    assert seen["audit_exists"] is True   # existed before the first step ran
+    assert seen["check_exists"] is True   # existed before the check ran
+    assert seen["account_exists"] is True
 
 
 def test_main_missing_config_source_and_env_dir_returns_2(tmp_path, monkeypatch, capsys):
     # Nonexistent config source -> materialize fails -> exit 2 with guidance.
     env_dir = tmp_path / "checkout" / "aws" / "envs" / "prod"
+    env_dir.parent.parent.mkdir(parents=True)
+    (env_dir.parent.parent / "Makefile").touch()
     monkeypatch.setattr(sys, "argv",
                         ["prog", "--env-dir", str(env_dir),
                          "--config-source", str(tmp_path / "missing"), "--step", "all"])
@@ -158,6 +202,77 @@ def test_delta_threads_catalog_when_set(tmp_path, monkeypatch):
     assert cmd[cmd.index("--catalog") + 1] == "prod_fin"
 
 
+def test_default_check_runs_both_audits_never_delta(tmp_path, monkeypatch):
+    env_dir = _env_dir(tmp_path)
+    ran = []
+    monkeypatch.setattr(rsg, "_audit", lambda ed: ran.append("audit") or 0)
+    monkeypatch.setattr(rsg, "_rulebook", lambda ed: ran.append("rulebook") or 0)
+    monkeypatch.setattr(rsg, "_delta", lambda *args: pytest.fail("default called delta"))
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-dir", str(env_dir)])
+    assert rsg.main() == 0
+    assert ran == ["audit", "rulebook"]
+
+
+def test_old_per_env_source_warns_and_runs_schema_drift_only(tmp_path, monkeypatch, capsys):
+    env_dir = tmp_path / "aws" / "envs" / "prod"
+    env_dir.mkdir(parents=True)
+    ran = []
+    monkeypatch.setattr(rsg, "_audit", lambda ed: ran.append("audit") or 0)
+    monkeypatch.setattr(rsg, "_rulebook", lambda ed: pytest.fail("rulebook should be skipped"))
+    assert rsg._check(env_dir) == 0
+    assert ran == ["audit"]
+    err = capsys.readouterr().err
+    assert "WARNING: skipping rulebook audit" in err
+    assert "Repoint scheduled_governance_config_source at the envs root" in err
+
+
+def test_finding_propagates_nonzero_and_prints_maintain_action(tmp_path, monkeypatch, capsys):
+    env_dir = _env_dir(tmp_path)
+    monkeypatch.setattr(rsg, "_audit", lambda ed: 1)
+    monkeypatch.setattr(rsg, "_rulebook", lambda ed: 0)
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-dir", str(env_dir)])
+    assert rsg.main() == 1
+    err = capsys.readouterr().err
+    assert "make maintain ENV=prod" in err
+    assert "native UC classification" in err
+
+
+def test_audit_error_propagates_without_maintain_action(tmp_path, monkeypatch, capsys):
+    env_dir = _env_dir(tmp_path)
+    monkeypatch.setattr(rsg, "_audit", lambda ed: 2)
+    monkeypatch.setattr(rsg, "_rulebook", lambda ed: 0)
+    assert rsg._check(env_dir) == 2
+    err = capsys.readouterr().err
+    assert "could not complete" in err
+    assert "not a governance finding" in err
+    assert "make maintain" not in err
+
+
+def test_rulebook_finding_prints_dev_promotion_action(tmp_path, monkeypatch, capsys):
+    env_dir = _env_dir(tmp_path)
+    monkeypatch.setattr(rsg, "_audit", lambda ed: 0)
+    monkeypatch.setattr(rsg, "_rulebook", lambda ed: 1)
+    assert rsg._check(env_dir) == 1
+    assert "add the rule in dev, re-promote" in capsys.readouterr().err
+
+
+def test_scheduled_job_hcl_parses_with_read_only_default():
+    path = REPO_ROOT / "shared" / "roots" / "workspace" / "scheduled_governance.tf"
+    with path.open() as handle:
+        parsed = hcl2.load(handle)
+    variables = {name: body for item in parsed["variable"] for name, body in item.items()}
+    assert variables["scheduled_governance_mode"]["default"] == "check"
+
+
+def test_catalog_warns_when_unused_by_check(tmp_path, monkeypatch, capsys):
+    env_dir = _env_dir(tmp_path)
+    monkeypatch.setattr(rsg, "_check", lambda ed: 0)
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-dir", str(env_dir),
+                                     "--catalog", "prod_fin"])
+    assert rsg.main() == 0
+    assert "legacy-only" in capsys.readouterr().err
+
+
 def test_coverage_includes_masking_sql_when_present(tmp_path, monkeypatch):
     gen = tmp_path / "generated"
     gen.mkdir()
@@ -173,19 +288,21 @@ def test_coverage_includes_masking_sql_when_present(tmp_path, monkeypatch):
 
 
 def test_step_all_runs_all_three_steps(tmp_path, monkeypatch):
+    env_dir = _env_dir(tmp_path)
     ran = []
     monkeypatch.setattr(rsg, "_audit", lambda env_dir: ran.append("audit") or 0)
     monkeypatch.setattr(rsg, "_delta", lambda env_dir, auth_file, catalog="": ran.append("delta") or 0)
     monkeypatch.setattr(rsg, "_coverage", lambda env_dir: ran.append("coverage") or 0)
-    monkeypatch.setattr(sys, "argv", ["prog", "--env-dir", str(tmp_path), "--step", "all"])
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-dir", str(env_dir), "--step", "all"])
     assert rsg.main() == 0
     assert ran == ["audit", "delta", "coverage"]
 
 
 def test_step_all_remembers_last_nonzero_exit(tmp_path, monkeypatch):
+    env_dir = _env_dir(tmp_path)
     # A drift exit (1) from audit must not stop later steps, but is remembered.
     monkeypatch.setattr(rsg, "_audit", lambda env_dir: 1)
     monkeypatch.setattr(rsg, "_delta", lambda env_dir, auth_file, catalog="": 0)
     monkeypatch.setattr(rsg, "_coverage", lambda env_dir: 0)
-    monkeypatch.setattr(sys, "argv", ["prog", "--env-dir", str(tmp_path), "--step", "all"])
+    monkeypatch.setattr(sys, "argv", ["prog", "--env-dir", str(env_dir), "--step", "all"])
     assert rsg.main() == 1

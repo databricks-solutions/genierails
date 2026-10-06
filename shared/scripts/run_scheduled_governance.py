@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
-"""Scheduled steady-state governance wrapper.
+"""Scheduled read-only governance checks.
 
-This is glue only — it invokes the EXISTING steady-state entrypoints from the
-target environment directory, exactly as the `make` targets do. It contains no
-classification / re-derive logic of its own:
+The default ``check`` flow runs the detection halves of native-first maintain:
+schema drift and rulebook drift. It never invokes make, Terraform, assignment
+derivation, or an apply, and it does not write to the workspace.
+
+The legacy flow remains available as ``--step all`` (or its individual steps):
 
   audit    -> scripts/audit_schema_drift.py            (== make audit-schema)
   delta    -> generate_abac.py --delta --auth-file ...  (== make generate-delta)
   coverage -> validate_abac.py <config the delta wrote> (== make validate-generated / validate)
 
-The steady-state scripts resolve config via relative paths from the environment
+The legacy scripts resolve config via relative paths from the environment
 directory (envs/<env>/), so this wrapper `chdir`s there once and shells out to
 them using the same interpreter. Running all three steps in a SINGLE process
-(``--step all``, the default) is what lets ``coverage`` see the file
+(``--step all``) is what lets ``coverage`` see the file
 ``delta`` just regenerated — they share one working tree.
 
-It is meant to be driven by the scheduled Databricks Job defined in
-roots/workspace/scheduled_governance.tf as a single ``--step all`` task, but the
-per-step modes also run standalone for local testing.
+The scheduled Databricks Job defined in roots/workspace/scheduled_governance.tf
+uses ``--step check``. Legacy per-step modes remain available for existing
+callers.
 
 Exit codes:
+  - check returns non-zero when either read-only audit reports findings.
   - A drift-only run (audit found drift, delta re-derived it, coverage passed)
     still returns non-zero: the last non-zero step code is remembered, so the
     scheduled run goes red and notifies the team to review + apply the delta.
@@ -38,7 +41,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 SHARED_ROOT = SCRIPTS_DIR.parent
 REPO_ROOT = SHARED_ROOT.parent
 
-STEPS = ("audit", "delta", "coverage")
+LEGACY_STEPS = ("audit", "delta", "coverage")
 
 
 def _resolve_env_dir(env_dir_arg: str) -> Path:
@@ -48,6 +51,16 @@ def _resolve_env_dir(env_dir_arg: str) -> Path:
     if not p.is_absolute():
         p = (REPO_ROOT / p).resolve()
     return p
+
+
+def _validate_env_layout(env_dir: Path) -> str | None:
+    """Return an error when env_dir is not <cloud>/envs/<env>."""
+    if env_dir.parent.name != "envs":
+        return f"env directory must have an 'envs' parent: {env_dir}"
+    cloud_root = env_dir.parent.parent
+    if not (cloud_root / "Makefile").is_file():
+        return f"cloud root has no Makefile: {cloud_root}"
+    return None
 
 
 def _materialize_env_dir(config_source: str, env_dir: Path) -> None:
@@ -66,6 +79,20 @@ def _materialize_env_dir(config_source: str, env_dir: Path) -> None:
     if not src.is_dir():
         raise FileNotFoundError(
             f"config source not found or not a directory: {src}")
+    env_source = src / env_dir.name
+    account_source = src / "account"
+    if env_source.is_dir() and account_source.is_dir():
+        env_dir.mkdir(parents=True, exist_ok=True)
+        account_dir = env_dir.parent / "account"
+        account_dir.mkdir(parents=True, exist_ok=True)
+        print(f"+ materialize env config: {env_source} -> {env_dir}", flush=True)
+        shutil.copytree(env_source, env_dir, dirs_exist_ok=True, symlinks=True)
+        print(f"+ materialize account config: {account_source} -> {account_dir}",
+              flush=True)
+        shutil.copytree(account_source, account_dir, dirs_exist_ok=True,
+                        symlinks=True)
+        return
+
     env_dir.mkdir(parents=True, exist_ok=True)
     print(f"+ materialize env config: {src} -> {env_dir}", flush=True)
     shutil.copytree(src, env_dir, dirs_exist_ok=True, symlinks=True)
@@ -81,6 +108,50 @@ def _audit(env_dir: Path) -> int:
         [sys.executable, str(SCRIPTS_DIR / "audit_schema_drift.py")],
         cwd=env_dir,
     )
+
+
+def _rulebook(env_dir: Path) -> int:
+    return _run(
+        [sys.executable, str(SCRIPTS_DIR / "audit_schema_drift.py"),
+         "--mode", "rulebook"],
+        cwd=env_dir,
+    )
+
+
+def _check(env_dir: Path) -> int:
+    """Run both read-only native-first detection checks."""
+    account_config = env_dir.parent / "account" / "abac.auto.tfvars"
+    audit_rc = _audit(env_dir)
+    if account_config.is_file():
+        rulebook_rc = _rulebook(env_dir)
+    else:
+        rulebook_rc = 0
+        print("WARNING: skipping rulebook audit because promoted account config "
+              f"is missing at {account_config}. The old per-environment config "
+              "source still supports schema drift only. Repoint "
+              "scheduled_governance_config_source at the envs root containing "
+              f"account/ and {env_dir.name}/ to enable rulebook checks.",
+              file=sys.stderr)
+
+    errors = [rc for rc in (audit_rc, rulebook_rc) if rc not in (0, 1)]
+    if errors:
+        print("\nERROR: scheduled governance check could not complete. Review "
+              "the audit error above and fix the runtime configuration or "
+              "credentials; this is not a governance finding.", file=sys.stderr)
+        return errors[0]
+
+    if audit_rc == 1 or rulebook_rc == 1:
+        env = env_dir.name
+        print(f"\nRun `make maintain ENV={env}` from your GenieRails checkout.",
+              file=sys.stderr)
+        if audit_rc == 1:
+            print("For untagged sensitive-looking columns, review native UC "
+                  "classification / auto-tagging or tag them in UC; maintain "
+                  "never LLM-tags columns.", file=sys.stderr)
+        if rulebook_rc == 1:
+            print(f"For rulebook gaps, add the rule in dev, re-promote, then "
+                  f"run `make certify ENV={env}`.", file=sys.stderr)
+    return rulebook_rc or audit_rc
 
 
 def _delta(env_dir: Path, auth_file: str, catalog: str = "") -> int:
@@ -128,21 +199,26 @@ def main() -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--env-dir", required=True,
                         help="Target environment directory (absolute, or repo-relative like 'aws/envs/prod').")
-    parser.add_argument("--step", choices=(*STEPS, "all"), default="all",
-                        help="Which steady-state step to run. Default 'all' runs audit -> delta -> coverage "
-                             "in ONE process so coverage sees the config delta just wrote.")
+    parser.add_argument("--step", choices=("check", *LEGACY_STEPS, "all"),
+                        default="check",
+                        help="Flow to run. Default 'check' runs read-only schema and rulebook audits. "
+                             "'all' is the legacy audit -> delta -> coverage flow.")
     parser.add_argument("--auth-file", default="auth.auto.tfvars",
-                        help="Auth tfvars filename passed to generate_abac.py --delta (default: auth.auto.tfvars).")
+                        help="Legacy delta only: auth tfvars filename (default: auth.auto.tfvars).")
     parser.add_argument("--catalog", default="",
-                        help="Optional catalog threaded to generate_abac.py --delta (--catalog). "
+                        help="Legacy delta only: catalog passed to generate_abac.py --delta. "
                              "Empty = auto-derive from the env's uc_tables.")
     parser.add_argument("--config-source", default="",
                         help="Runtime-visible path (UC Volume / workspace files / DBFS mount) holding "
-                             "the env config to copy into --env-dir before scanning. Required when the "
-                             "Git checkout does not already contain the env dir (envs/ is .gitignore'd).")
+                             "account/ and <env>/ config to materialize before check. Legacy mode also "
+                             "accepts a flat target-env source. Required for a fresh Git checkout.")
     args = parser.parse_args()
 
     env_dir = _resolve_env_dir(args.env_dir)
+    layout_error = _validate_env_layout(env_dir)
+    if layout_error:
+        print(f"ERROR: {layout_error}", file=sys.stderr)
+        return 2
 
     if args.config_source:
         try:
@@ -158,7 +234,17 @@ def main() -> int:
               f"       the env config at runtime.", file=sys.stderr)
         return 2
 
-    steps = STEPS if args.step == "all" else (args.step,)
+    if args.catalog and args.step not in ("delta", "all"):
+        print("WARNING: --catalog is legacy-only and is ignored by the "
+              f"'{args.step}' step.", file=sys.stderr)
+
+    if args.step == "check":
+        print("=" * 60)
+        print(f"  Scheduled governance: read-only native check  (env: {env_dir.name})")
+        print("=" * 60)
+        return _check(env_dir)
+
+    steps = LEGACY_STEPS if args.step == "all" else (args.step,)
     rc = 0
     for step in steps:
         print("=" * 60)

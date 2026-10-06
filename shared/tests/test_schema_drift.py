@@ -152,7 +152,7 @@ sql_warehouse_id = ""
             'discovered_uc_tables = ["cat.bad.table"\n'
         )
         monkeypatch.chdir(tmp_path)
-        assert audit_mod.main([]) == 1
+        assert audit_mod.main([]) == 2
         output = capsys.readouterr().out
         assert "invalid discovered footprint" in output
         assert "make generate" in output
