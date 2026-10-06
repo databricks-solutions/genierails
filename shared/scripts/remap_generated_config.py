@@ -207,8 +207,9 @@ def remap_policy_names(
     is renamed only when a successful live listing of its destination catalog
     shows neither the old nor the new remote name, and the destination state
     doesn't hold the old key. A new remote name that already exists is fine only
-    when the state holds it under the new key (the same managed policy). Drafts
-    and config files are never evidence.
+    when the state holds it under the new key (the same managed policy);
+    otherwise this raises, since neither name can be applied safely. Drafts and
+    config files are never evidence.
     """
     import hcl2
 
@@ -243,10 +244,13 @@ def remap_policy_names(
                 )
                 new_name = name
             elif new_remote in live and (dest, new_name) not in managed:
-                notes.append(
-                    f"  kept policy name {old_remote} ({new_remote} already exists in {dest})"
+                # The old policy is absent, so keeping its name would create it
+                # beside the unmanaged one: two masks on the same columns.
+                raise ValueError(
+                    f"{dest} already has a policy named {new_remote} that GenieRails "
+                    "doesn't manage; remove it or import it into the prod data_access "
+                    "state, then re-run make promote"
                 )
-                new_name = name
         if new_name != name:
             renames[name] = new_name
         final_names.append(new_name)

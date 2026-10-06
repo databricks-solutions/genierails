@@ -188,22 +188,38 @@ def test_api_shows_old_and_new_names_absent_renames(tmp_path, monkeypatch, capsy
     assert "kept policy name" not in stdout
 
 
-def test_new_remote_name_already_existing_keeps_the_old_name(tmp_path, monkeypatch, capsys):
+def test_unmanaged_policy_under_the_new_name_aborts_promote(tmp_path, monkeypatch, capsys):
+    # The old policy is absent (state and listing agree), and an unmanaged
+    # policy already holds the new name. Keeping the old name would create a
+    # second mask beside it; taking the new name would collide.
+    new_remote = f"{PROD_1}_gr_mask_{PROD_1}_redact"
+    state = _state(tmp_path / "prod" / "data_access" / "terraform.tfstate", ["unrelated"])
+    code, stdout, out = _promote(
+        tmp_path, monkeypatch, capsys, _render(_dev_generated_config()), state=state,
+        live={PROD_1: {new_remote}, PROD_2: set()},
+    )
+    assert code == 1
+    assert (
+        f"{PROD_1} already has a policy named {new_remote} that GenieRails doesn't manage; "
+        "remove it or import it into the prod data_access state, then re-run make promote"
+    ) in stdout
+    assert not out.exists() and not out.with_name("masking_functions.sql").exists()
+    assert not list((tmp_path / "prod").rglob("*.tfvars"))
+
+
+def test_unmanaged_new_name_with_the_old_policy_deployed_keeps_the_old_name(
+    tmp_path, monkeypatch, capsys
+):
+    # Case 1 wins: the old policy is live, so keeping its name changes nothing.
     new_remote = f"{PROD_1}_gr_mask_{PROD_1}_redact"
     code, stdout, out = _promote(
         tmp_path, monkeypatch, capsys, _render(_dev_generated_config()),
-        live={PROD_1: {new_remote}, PROD_2: set()},
+        live={PROD_1: {LEGACY_REMOTE, new_remote}, PROD_2: set()},
     )
     assert code == 0, stdout
-    assert f"kept policy name {LEGACY_REMOTE} ({new_remote} already exists in {PROD_1})" in stdout
-    names = _names(out)
-    assert LEGACY in names
-    assert f"gr_mask_{PROD_1}_redact" not in names
-    assert f"gr_mask_{PROD_2}_redact" in names
-    changes = _policy_plan(tmp_path, out)
-    assert not [a for a, (actions, _b, after) in changes.items()
-                if "create" in actions and after == new_remote], "never plan a colliding create"
-    _assert_no_live_mask_dropped(tmp_path, out, changes)
+    assert f"kept policy name {LEGACY_REMOTE} (deployed in {PROD_1})" in stdout
+    assert LEGACY in _names(out)
+    _assert_no_live_mask_dropped(tmp_path, out)
 
 
 def test_existing_new_name_managed_under_the_new_key_is_reused(tmp_path, monkeypatch, capsys):
