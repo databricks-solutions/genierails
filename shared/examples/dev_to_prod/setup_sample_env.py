@@ -87,31 +87,70 @@ def _account_host(workspace_host: str) -> str:
     return "https://accounts.cloud.databricks.com"
 
 
-def _account_client(args: argparse.Namespace, client: Any) -> Any:
+def _account_client(args: argparse.Namespace, client: Any, state: dict[str, Any] | None = None) -> Any:
+    """Account client for --create-groups, or for teardown of the groups it created.
+
+    Teardown reuses the account ID and host recorded at creation, so it needs no
+    --account-id; an explicit --account-id / DATABRICKS_ACCOUNT_ID still wins.
+    """
     if AccountClient is None:
         raise RuntimeError("databricks-sdk is not installed; run: pip install -r requirements.txt")
-    if not args.account_id:
+    state = state or {}
+    account_id = args.account_id or state.get("account_id")
+    if not account_id:
         raise RuntimeError("--create-groups needs --account-id (or DATABRICKS_ACCOUNT_ID)")
-    kwargs: dict[str, Any] = {"account_id": args.account_id, "product": "genierails-dev-to-prod", "product_version": "1.0"}
+    kwargs: dict[str, Any] = {"account_id": account_id, "product": "genierails-dev-to-prod", "product_version": "1.0"}
     if args.account_profile:
         kwargs["profile"] = args.account_profile
     else:
-        kwargs["host"] = os.getenv("DATABRICKS_ACCOUNT_HOST") or _account_host(str(getattr(client.config, "host", "")))
+        kwargs["host"] = (
+            os.getenv("DATABRICKS_ACCOUNT_HOST") or state.get("account_host")
+            or _account_host(str(getattr(client.config, "host", "")))
+        )
     return AccountClient(**kwargs)
 
 
 def _ensure_groups(account: Any, state: dict[str, Any]) -> None:
-    """Create missing SAMPLE_GROUPS; record only the ones this script created."""
+    """Create missing SAMPLE_GROUPS; record the account and the ID of each group created."""
     created = list(state.get("groups_created", []))
+    group_ids = dict(state.get("group_ids", {}))
+    state["account_id"] = account.config.account_id
+    state["account_host"] = account.config.host
     for name in SAMPLE_GROUPS:
         if any(g.display_name == name for g in account.groups.list(filter=f'displayName eq "{name}"')):
             print(f"      Reusing existing account group {name}")
             continue
-        account.groups.create(display_name=name)
+        group = account.groups.create(display_name=name)
         print(f"      Created account group {name}")
         if name not in created:
             created.append(name)
+        group_ids[name] = group.id
     state["groups_created"] = created
+    state["group_ids"] = group_ids
+
+
+def _remove_groups(account: Any, state: dict[str, Any], save: Any) -> None:
+    """Delete exactly the groups this script created, by recorded ID.
+
+    State written before IDs were recorded lists names only; for those groups
+    (and only those) fall back to an exact display-name lookup.
+    """
+    group_ids = dict(state.get("group_ids", {}))
+    for name in list(state.get("groups_created", [])):
+        ids = [group_ids[name]] if group_ids.get(name) else [
+            g.id for g in account.groups.list(filter=f'displayName eq "{name}"') if g.display_name == name
+        ]
+        print(f"Removing tracked account group {name} ...")
+        for group_id in ids:
+            try:
+                account.groups.delete(id=group_id)
+            except Exception as exc:
+                if not _missing(exc):
+                    raise RuntimeError(f"could not remove account group {name} ({group_id}): {exc}") from exc
+        state["groups_created"].remove(name)
+        group_ids.pop(name, None)
+        state["group_ids"] = group_ids
+        save()
 
 
 def _run_sql(client: Any, warehouse_id: str, statement: str) -> None:
@@ -367,12 +406,7 @@ def teardown(args: argparse.Namespace, client: Any) -> None:
             if not _missing(exc):
                 raise RuntimeError(f"could not remove Genie agent {space_id}: {exc}") from exc
     if state.get("groups_created"):
-        account = _account_client(args, client)
-        for name in state["groups_created"]:
-            print(f"Removing tracked account group {name} ...")
-            for group in account.groups.list(filter=f'displayName eq "{name}"'):
-                if group.display_name == name:
-                    account.groups.delete(id=group.id)
+        _remove_groups(_account_client(args, client, state), state, lambda: _save_states(states))
     if state.get("schema_created"):
         warehouse_id = args.warehouse_id or state.get("warehouse_id", "")
         if not warehouse_id:
