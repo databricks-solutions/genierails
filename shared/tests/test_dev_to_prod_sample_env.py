@@ -217,20 +217,62 @@ def test_not_found_in_the_recorded_account_drops_the_record(teardown_env):
     assert not state_file.exists()
 
 
-def test_a_failed_recorded_delete_keeps_the_unconfirmed_records(teardown_env):
+def test_a_mid_teardown_group_failure_saves_state_and_reports_incomplete(
+    teardown_env, monkeypatch, capsys
+):
     state_file, install = teardown_env
+    monkeypatch.setattr(sample, "_client", lambda args: _workspace())
     first, second = sample.SAMPLE_GROUPS[:2]
     account = _account_with([])
-    account.groups.delete.side_effect = [None, RuntimeError("boom")]
+    account.groups.delete.side_effect = [None, RuntimeError("PERMISSION_DENIED: 403")]
     install(account)
-    _recorded_state(state_file, [first, second])
+    _recorded_state(state_file, [first, second], schema_created=True, warehouse_id="wh")
+    dropped = []
+    monkeypatch.setattr(sample, "_run_sql", lambda *args: dropped.append(args))
 
-    with pytest.raises(RuntimeError, match=second):
-        sample.teardown(_teardown_args(), _workspace())
+    assert sample.main(["--catalog", "catalog", "--schema", "schema", "--teardown"]) == 1
 
+    out = capsys.readouterr().out
+    assert "Teardown INCOMPLETE" in out
+    assert f"account group {second}" in out and "schema catalog.schema" in out
+    assert "Stopped because: could not remove account group" in out and "403" in out
+    assert dropped == []  # stopped at the failed step
     remaining = next(iter(json.loads(state_file.read_text()).values()))
+    assert remaining["space_id"] == ""
     assert remaining["groups_created"] == [second]
     assert remaining["group_ids"] == {second: f"recorded-{second}"}
+    assert remaining["schema_created"] is True
+
+
+def test_preflight_refuses_when_matching_config_cannot_read_the_account(teardown_env):
+    """config matches the recorded account, but the credentials cannot act on it."""
+    state_file, install = teardown_env
+    account = _account_with([])
+    account.groups.get.side_effect = RuntimeError("PERMISSION_DENIED: not an account admin")
+    install(account)
+    _recorded_state(state_file, [sample.SAMPLE_GROUPS[0]], schema_created=True, warehouse_id="wh")
+    before = state_file.read_text()
+    workspace = _workspace()
+
+    with pytest.raises(RuntimeError, match="Nothing was removed") as raised:
+        sample.teardown(_teardown_args(), workspace)
+
+    assert "not an account admin" in str(raised.value) and "acct-1" in str(raised.value)
+    workspace.api_client.do.assert_not_called()
+    account.groups.delete.assert_not_called()
+    assert state_file.read_text() == before
+
+
+def test_preflight_accepts_an_already_deleted_recorded_group(teardown_env):
+    state_file, install = teardown_env
+    account = _account_with([])
+    account.groups.get.side_effect = RuntimeError("RESOURCE_DOES_NOT_EXIST: 404")
+    account.groups.delete.side_effect = RuntimeError("RESOURCE_DOES_NOT_EXIST: 404")
+    install(account)
+    _recorded_state(state_file, [sample.SAMPLE_GROUPS[0]])
+
+    assert sample.teardown(_teardown_args(), _workspace()) is True
+    assert not state_file.exists()
 
 
 def _legacy_state(state_file, names):
@@ -305,3 +347,41 @@ def test_skip_agent_seeds_tables_without_creating_a_genie_agent(tmp_path, monkey
     assert any(sql.startswith("CREATE TABLE IF NOT EXISTS") for sql in statements)
     client.api_client.do.assert_not_called()
     assert "Skipping the Genie agent" in capsys.readouterr().out
+
+
+def test_legacy_opt_in_preflight_failure_removes_nothing(teardown_env, monkeypatch):
+    state_file, install = teardown_env
+    account = _account_with([])
+    account.groups.list.side_effect = RuntimeError("401 Unauthorized")
+    install(account)
+    _legacy_state(state_file, [sample.SAMPLE_GROUPS[0]])
+    before = state_file.read_text()
+    workspace = _workspace()
+
+    with pytest.raises(RuntimeError, match="Nothing was removed"):
+        sample.teardown(_teardown_args("--delete-legacy-groups-by-name", "--account-id", "acct-1"), workspace)
+
+    workspace.api_client.do.assert_not_called()
+    assert state_file.read_text() == before
+
+
+def test_legacy_opt_in_delete_failure_reports_incomplete(teardown_env, monkeypatch, capsys):
+    state_file, install = teardown_env
+    monkeypatch.setattr(sample, "_run_sql", lambda *args: None)
+    name = sample.SAMPLE_GROUPS[0]
+    account = _account_with([name])
+    account.groups.delete.side_effect = RuntimeError("PERMISSION_DENIED: 403")
+    install(account)
+    _legacy_state(state_file, [name])
+
+    complete = sample.teardown(
+        _teardown_args("--delete-legacy-groups-by-name", "--account-id", "acct-1"), _workspace()
+    )
+
+    out = capsys.readouterr().out
+    assert complete is False
+    assert "Teardown INCOMPLETE" in out and f"account group {name}" in out
+    assert "Stopped because:" in out and "403" in out
+    remaining = next(iter(json.loads(state_file.read_text()).values()))
+    assert remaining["groups_created"] == [name]
+    assert remaining["schema_created"] is True  # stopped before the schema step

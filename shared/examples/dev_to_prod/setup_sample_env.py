@@ -145,6 +145,30 @@ def _recorded_account_client(args: argparse.Namespace, state: dict[str, Any]) ->
     return account
 
 
+def _preflight_account(account: Any, group_id: str | None, group_name: str | None = None) -> None:
+    """Prove the credentials can act on the account with one read, before any deletion.
+
+    Reads a recorded group by ID (a 'not found' still proves access: that group
+    is already gone) or, for the legacy path, lists one recorded name.
+    """
+    if account is None:
+        return
+    try:
+        if group_id:
+            try:
+                account.groups.get(id=group_id)
+            except Exception as exc:
+                if not _missing(exc):
+                    raise
+        else:
+            list(account.groups.list(filter=f'displayName eq "{group_name}"'))
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not read account {account.config.account_id} with these credentials ({exc}); "
+            "check auth and Account Admin access. Nothing was removed."
+        ) from exc
+
+
 def _ensure_groups(account: Any, state: dict[str, Any]) -> None:
     """Create missing SAMPLE_GROUPS; record the account and the ID of each group created."""
     created = list(state.get("groups_created", []))
@@ -467,14 +491,19 @@ def teardown(args: argparse.Namespace, client: Any) -> bool:
     created = list(state.get("groups_created", []))
     recorded = [name for name in created if state.get("group_ids", {}).get(name)]
     legacy = [name for name in created if name not in recorded]
-    # Resolve the accounts first: a conflict must leave every resource in place.
+    # Resolve and prove the accounts first: a conflict or an account the
+    # credentials cannot act on must leave every resource in place.
     account = _recorded_account_client(args, state) if recorded else None
     legacy_account = None
     if legacy and getattr(args, "delete_legacy_groups_by_name", False):
         legacy_account = _recorded_account_client(args, state) if state.get("account_id") else _account_client(args, client)
+    _preflight_account(account, state["group_ids"][recorded[0]] if recorded else None)
+    _preflight_account(legacy_account, None, legacy[0] if legacy else None)
 
-    space_id = state.get("space_id", "")
-    if space_id:
+    def remove_space() -> None:
+        space_id = state.get("space_id", "")
+        if not space_id:
+            return
         print(f"Removing tracked Genie agent {space_id} ...")
         try:
             client.api_client.do("DELETE", f"/api/2.0/genie/spaces/{space_id}")
@@ -483,12 +512,10 @@ def teardown(args: argparse.Namespace, client: Any) -> bool:
                 raise RuntimeError(f"could not remove Genie agent {space_id}: {exc}") from exc
         state["space_id"] = ""
         save()
-    if recorded:
-        _remove_recorded_groups(account, state, recorded, save)
-    kept = legacy
-    if legacy and legacy_account is not None:
-        kept = _remove_legacy_groups(legacy_account, state, legacy, save)
-    if state.get("schema_created"):
+
+    def remove_schema() -> None:
+        if not state.get("schema_created"):
+            return
         warehouse_id = args.warehouse_id or state.get("warehouse_id", "")
         if not warehouse_id:
             raise RuntimeError("missing --warehouse-id and none was recorded; schema was not removed")
@@ -496,9 +523,30 @@ def teardown(args: argparse.Namespace, client: Any) -> bool:
         _run_sql(client, warehouse_id, f"DROP SCHEMA IF EXISTS {_ident(args.catalog)}.{_ident(args.schema)} CASCADE")
         state["schema_created"] = False
         save()
-    if state.get("groups_created"):
-        print("\nTeardown INCOMPLETE. Kept the ownership records for: " + ", ".join(state["groups_created"]) + ".")
-        if legacy_account is None and kept:
+
+    kept = legacy
+    failure = None
+    try:
+        remove_space()
+        if recorded:
+            _remove_recorded_groups(account, state, recorded, save)
+        if legacy and legacy_account is not None:
+            kept = _remove_legacy_groups(legacy_account, state, legacy, save)
+        remove_schema()
+    except Exception as exc:  # stop at the first failed step; its record stays
+        failure = exc
+        save()
+    remaining = (
+        ([f"Genie agent {state['space_id']}"] if state.get("space_id") else [])
+        + [f"account group {name}" for name in state.get("groups_created", [])]
+        + ([f"schema {args.catalog}.{args.schema}"] if state.get("schema_created") else [])
+    )
+    if failure is not None or remaining:
+        print("\nTeardown INCOMPLETE. Kept the ownership records for: " + ", ".join(remaining) + ".")
+        if failure is not None:
+            print(f"  Stopped because: {failure}")
+            print("  Fix the cause and re-run teardown; it resumes from the kept records.")
+        if legacy_account is None and kept and failure is None:
             print(_legacy_guidance(kept))
         return False
     states.pop(key, None)
