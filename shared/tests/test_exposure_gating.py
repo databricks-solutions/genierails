@@ -186,12 +186,16 @@ def _terraform_trigger_plan(tmp_path, changes):
                    cwd=module, env=env, check=True, capture_output=True, text=True)
     assert '"old"' not in (module / "terraform.tfstate").read_text()  # no credential in state
     args = {"host": "https://w1", "client_id": "old", "client_secret": "old", **changes}
-    plan = module / "plan.bin"
-    subprocess.run(["terraform", "plan", "-input=false", f"-out={plan}",
-                    *[f"-var={key}={value}" for key, value in args.items()]],
-                   cwd=module, env=env, check=True, capture_output=True, text=True)
-    shown = subprocess.run(["terraform", "show", "-json", str(plan)], cwd=module,
-                           env=env, check=True, capture_output=True, text=True)
+    plan = module / "plan.bin"  # embeds prior state: owner-only, then deleted
+    try:
+        subprocess.run(["terraform", "plan", "-input=false", f"-out={plan}",
+                        *[f"-var={key}={value}" for key, value in args.items()]],
+                       cwd=module, env=env, check=True, capture_output=True, text=True)
+        plan.chmod(0o600)
+        shown = subprocess.run(["terraform", "show", "-json", str(plan)], cwd=module,
+                               env=env, check=True, capture_output=True, text=True)
+    finally:
+        plan.unlink(missing_ok=True)
     return json.loads(shown.stdout)["resource_changes"][0]["change"]["actions"]
 
 

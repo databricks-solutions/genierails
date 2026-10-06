@@ -248,10 +248,15 @@ def _tf(root: Path, *args: str, env: dict) -> subprocess.CompletedProcess:
 
 def _plan_actions(root: Path, tfvars: dict, env: dict) -> dict:
     var_args = [f"-var={k}={v}" for k, v in tfvars.items()]
-    plan = _tf(root, "plan", "-input=false", "-out=plan.bin", *var_args, env=env)
-    assert plan.returncode == 0, plan.stdout + plan.stderr
-    shown = _tf(root, "show", "-json", "plan.bin", env=env)
-    assert shown.returncode == 0, shown.stderr
+    plan_file = root / "plan.bin"  # embeds prior state: owner-only, then deleted
+    try:
+        plan = _tf(root, "plan", "-input=false", f"-out={plan_file}", *var_args, env=env)
+        assert plan.returncode == 0, plan.stdout + plan.stderr
+        plan_file.chmod(0o600)
+        shown = _tf(root, "show", "-json", str(plan_file), env=env)
+        assert shown.returncode == 0, shown.stderr
+    finally:
+        plan_file.unlink(missing_ok=True)
     return {rc["address"]: rc["change"]["actions"]
             for rc in json.loads(shown.stdout).get("resource_changes", [])
             if rc["change"]["actions"] != ["no-op"]}
@@ -449,3 +454,205 @@ def test_existing_genie_state_migrates_without_trashing_the_agent(tmp_path):
     assert _plan_actions(root, {**tfvars, "databricks_workspace_host": "https://other"}, env) == {
         'terraform_data.genie_space["agent"]': ["delete", "create"],
     }
+
+
+# ── Adoption required during the migration (missing ID / 404 / auth) ────────
+
+from scripts import genie_adopt_preflight as gap  # noqa: E402
+
+KEY = "walkthrough_prod_cat_demo"
+
+
+def _legacy_env(tmp_path: Path, agent_id: str | None = "01live", host: str = HOST) -> Path:
+    """envs/prod as the pre-fix code left it: legacy state + ID file + auth."""
+    env_dir = tmp_path / "aws" / "envs" / "prod"
+    env_dir.mkdir(parents=True)
+    (env_dir / "auth.auto.tfvars").write_text(AUTH_TEXT)
+    state = json.loads(json.dumps(GENIE_OLD_STATE))
+    instance = state["resources"][0]["instances"][0]
+    instance["index_key"] = KEY
+    instance["attributes"]["triggers"]["host"] = host
+    instance["attributes"]["triggers"]["id_file"] = str(env_dir / f".genie_space_id_{KEY}")
+    state["resources"][0]["module"] = "module.workspace"
+    (env_dir / "terraform.tfstate").write_text(json.dumps(state))
+    if agent_id is not None:
+        (env_dir / f".genie_space_id_{KEY}").write_text(agent_id + "\n")
+    return env_dir
+
+
+def test_preflight_lists_each_legacy_agent_and_arms_adoption(tmp_path, monkeypatch, capsys):
+    env_dir = _legacy_env(tmp_path)
+    monkeypatch.setattr(gap, "get_status", lambda auth, agent_id: "200")
+
+    assert gap.main([str(env_dir), "--arm"]) == 0
+
+    out = capsys.readouterr().out
+    assert f"1 legacy agent(s) on {HOST}" in out
+    assert f"OK    {KEY}  id=01live  .genie_space_id_{KEY}  GET 200" in out
+    assert "current-secret" not in out
+    assert gap.marker_for(env_dir, KEY).exists()
+
+
+@pytest.mark.parametrize(
+    "agent_id, host, status, problem",
+    [
+        (None, HOST, "200", "ID file missing or empty"),
+        ("", HOST, "200", "ID file missing or empty"),
+        ("01live", "https://other.cloud.databricks.com", "200", "created on https://other"),
+        ("01live", HOST, "404", "GET returned 404"),
+        ("01live", HOST, "403", "GET returned 403"),
+        ("01live", HOST, "401", "GET returned 401"),
+    ],
+    ids=["no-id-file", "empty-id-file", "other-workspace", "404", "403", "401"],
+)
+def test_preflight_aborts_unless_every_agent_answers_200(
+    tmp_path, monkeypatch, capsys, agent_id, host, status, problem
+):
+    env_dir = _legacy_env(tmp_path, agent_id=agent_id, host=host)
+    monkeypatch.setattr(gap, "get_status", lambda auth, agent_id: status)
+
+    assert gap.main([str(env_dir), "--arm", "--quiet"]) == 1
+
+    out = capsys.readouterr().out
+    assert f"FAIL  {KEY}" in out and problem in out
+    assert "nothing was applied" in out
+    assert not gap.marker_for(env_dir, KEY).exists()
+
+
+def test_preflight_is_silent_without_legacy_agents(tmp_path, capsys):
+    env_dir = tmp_path / "envs" / "prod"
+    env_dir.mkdir(parents=True)
+    assert gap.main([str(env_dir), "--arm"]) == 0
+    assert gap.main([str(env_dir), "--arm", "--quiet"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def _run_strict_create(tmp_path: Path, get_code: str, *, write_id: bool = True,
+                       marker: bool = True, extra_env: dict | None = None):
+    env_dir = _legacy_env(tmp_path, agent_id="01live" if write_id else None)
+    if marker:
+        gap.marker_for(env_dir, KEY).write_text("adoption required\n")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "curl.log"
+    (bin_dir / "curl").write_text(f"""#!/bin/bash
+echo "$*" >> {calls}
+if [[ " $* " == *" POST "* ]]; then printf '{{"space_id":"01dupe"}}\\n200'; exit 0; fi
+if [[ " $* " == *"/api/2.0/genie/spaces/"* ]]; then printf '{get_code}'; exit 0; fi
+printf '{{}}\\n200'
+""")
+    (bin_dir / "curl").chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+           "DATABRICKS_HOST": HOST, "DATABRICKS_TOKEN": "t",
+           "GENIE_ID_FILE": str(env_dir / f".genie_space_id_{KEY}"),
+           "GENIE_TABLES_CSV": "cat.s.t", "GENIE_WAREHOUSE_ID": "wh", "GENIE_TITLE": "Agent",
+           **(extra_env or {})}
+    result = subprocess.run(["bash", str(GENIE_SCRIPT), "create"], env=env,
+                            capture_output=True, text=True, timeout=60)
+    log = calls.read_text().splitlines() if calls.exists() else []
+    return result, [c for c in log if " POST " in f" {c} "], env_dir
+
+
+@pytest.mark.parametrize("code", ["404", "401", "403", "500"])
+def test_adoption_required_accepts_only_200(tmp_path, code):
+    result, posts, env_dir = _run_strict_create(tmp_path, code)
+    assert result.returncode != 0
+    assert f"returned HTTP {code}" in result.stderr and "not creating a new agent" in result.stderr
+    assert posts == []
+    assert gap.marker_for(env_dir, KEY).exists()  # stays armed for the retry
+
+
+def test_adoption_required_with_missing_id_file_creates_nothing(tmp_path):
+    result, posts, _ = _run_strict_create(tmp_path, "200", write_id=False)
+    assert result.returncode != 0
+    assert "ID file" in result.stderr and "missing or empty" in result.stderr
+    assert posts == []
+
+
+def test_adoption_required_by_env_var_without_marker(tmp_path):
+    result, posts, _ = _run_strict_create(tmp_path, "404", marker=False,
+                                          extra_env={"GENIE_ADOPT_REQUIRED": "1"})
+    assert result.returncode != 0 and posts == []
+
+
+def test_successful_adoption_disarms_the_marker(tmp_path):
+    result, posts, env_dir = _run_strict_create(tmp_path, "200")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert posts == []
+    assert not gap.marker_for(env_dir, KEY).exists()
+    assert (env_dir / f".genie_space_id_{KEY}").read_text().strip() == "01live"
+
+
+def test_normal_create_still_replaces_a_deleted_agent(tmp_path):
+    result, posts, _ = _run_strict_create(tmp_path, "404", marker=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(posts) == 1
+
+
+def test_make_runs_the_preflight_before_any_layer_is_applied():
+    makefile = (SHARED / "Makefile.shared").read_text()
+    apply = makefile[makefile.index("\napply: "):]
+    apply = apply[: apply.index("\n\n")]
+    assert apply.index("genie_adopt_preflight.py\" \"$(ENV_DIR)\" --arm") < apply.index("LAYER=data_access")
+    layer = makefile[makefile.index("\n_apply-layer:"):]
+    workspace = layer[layer.index('if [ "$$layer" = "workspace" ]; then'):]
+    assert workspace.index("genie_adopt_preflight.py") < workspace.index("apply -parallelism=1")
+    assert "\ngenie-adopt-preflight: " in makefile
+
+
+def test_no_saved_plan_file_is_written_by_the_product():
+    # A saved plan embeds prior state, which may still hold the legacy secret.
+    for path in (SHARED / "Makefile.shared", SHARED / "scripts/terraform_layer.sh"):
+        assert not re.search(r"-out[= ]", path.read_text()), path
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_migration_with_missing_id_file_fails_and_creates_nothing(tmp_path):
+    """The real genie_space.sh under Terraform, as make apply runs it."""
+    env_dir = _legacy_env(tmp_path, agent_id=None)
+    # Step 1, as make apply runs it: the preflight refuses before any apply.
+    assert gap.main([str(env_dir), "--arm"]) == 1
+    assert not gap.marker_for(env_dir, KEY).exists()
+
+    # Defence in depth: armed, then the ID file vanished before the apply.
+    gap.marker_for(env_dir, KEY).write_text("adoption required\n")
+    tf = WORKSPACE_TF.read_text()
+    block = _resource_block(tf, 'resource "terraform_data" "genie_space" {')
+    block = re.sub(r"\n  depends_on = \[.*?\n  \]\n", "\n", block, flags=re.S)
+    block = block.replace('"bash ../../scripts/genie_space.sh trash"', '"echo TRASH >> trash.log"')
+    removed = re.search(r"removed \{\n  from = null_resource\.genie_space_create.*?\n\}\n", tf, re.S).group(0)
+    (env_dir / "main.tf").write_text(
+        'terraform {\n  required_providers {\n'
+        '    null = { source = "hashicorp/null", version = "~> 3.2" }\n  }\n}\n'
+        'variable "databricks_workspace_host" {}\nvariable "databricks_client_id" {}\n'
+        'variable "databricks_client_secret" { sensitive = true }\n'
+        'variable "genie_id_file_prefix" {}\nvariable "genie_script_path" {}\n'
+        'locals {\n  shared_warehouse_id = "wh"\n'
+        f'  new_spaces = {{ {KEY} = {{ uc_tables = ["c.s.t"], sql_warehouse_id = "", name = "Agent",'
+        ' config = { title = "" } } }\n}\n'
+        + block.replace("module.workspace.", "") + "\n" + removed
+    )
+    state = json.loads((env_dir / "terraform.tfstate").read_text())
+    state["resources"][0].pop("module")
+    (env_dir / "terraform.tfstate").write_text(json.dumps(state))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "curl.log"
+    (bin_dir / "curl").write_text(f'#!/bin/bash\necho "$*" >> {calls}\nprintf \'{{"space_id":"01dupe"}}\\n200\'\n')
+    (bin_dir / "curl").chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+           "DATABRICKS_TOKEN": "t", "TF_IN_AUTOMATION": "1"}
+    tfvars = [f"-var=databricks_workspace_host={HOST}", "-var=databricks_client_id=sp-client",
+              "-var=databricks_client_secret=current-secret",
+              f"-var=genie_id_file_prefix={env_dir}/.genie_space_id",
+              f"-var=genie_script_path=bash {GENIE_SCRIPT}"]
+    _skip_if_providers_unavailable(_tf(env_dir, "init", "-input=false", env=env))
+
+    for _attempt in (1, 2):  # the retry (tainted resource) must refuse too
+        apply = _tf(env_dir, "apply", "-input=false", "-auto-approve", *tfvars, env=env)
+        assert apply.returncode != 0
+        assert "Adoption required" in apply.stdout + apply.stderr
+    assert not calls.exists() or " POST " not in f" {calls.read_text()} "
+    assert not (env_dir / f".genie_space_id_{KEY}").exists()
+    assert not (env_dir / "trash.log").exists()
+    assert gap.marker_for(env_dir, KEY).exists()

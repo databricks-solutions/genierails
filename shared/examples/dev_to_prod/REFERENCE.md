@@ -45,6 +45,7 @@ So "expose last" isn't a policy you hope holds — there is simply no `SELECT` a
 | `make validate-generated ENV=<e>` | 1/4 | Static validation incl. the one-mask-per-column guard |
 | `make apply ENV=<e>` | 1/5 | Full stack (account → data_access → workspace; auto-promotes same-env first); creates the Genie agent; releases gated access when `business_access_enabled=true` |
 | `make apply-governance ENV=<e>` | 4 | Enforcement only (account + data_access); no Genie agent |
+| `make genie-adopt-preflight ENV=<e>` | — | Read-only. Before the one-time upgrade to secret-free Genie state, checks that every Genie agent created by an earlier version can be adopted with its current ID (ID file, workspace, GET 200). `make apply` runs it first and stops if any agent fails. |
 | `make rehearse ENV=dev VERIFY_KEY_COLUMN=<pk>` | 1 | (dev) coverage-gate → validate-generated → apply → verify-access, stopping at the first failure |
 | `make certify ENV=prod` | 4 | (prod) derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook; records the certification `make release` requires |
 | `make release ENV=prod VERIFY_KEY_COLUMN=<pk>` | 5 | (prod) Refuses unless certification is current; creates the Genie agent, releases gated access, saves `business_access_enabled = true`, runs `verify-access` |
