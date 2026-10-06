@@ -2227,6 +2227,9 @@ def _fetch_live_classification_source(
         return None
 
 
+_LIVE_POLICIES_REPORTED = False
+
+
 def autofix_tag_policies(tfvars_path: Path) -> int:
     """Add tag values used in assignments/policies but missing from tag_policies.
 
@@ -2237,8 +2240,10 @@ def autofix_tag_policies(tfvars_path: Path) -> int:
     text = tfvars_path.read_text()
 
     live_policies = _fetch_live_tag_policy_values()
-    if live_policies:
+    global _LIVE_POLICIES_REPORTED
+    if live_policies and (not _LIVE_POLICIES_REPORTED or os.environ.get("VERBOSE") == "1"):
         print(f"  [AUTOFIX] Loaded {len(live_policies)} live tag policy/ies from Databricks")
+        _LIVE_POLICIES_REPORTED = True
 
     # Map key → (list_of_values, raw_values_text) preserving the EXACT text
     # from the file so that the replacement uses the original formatting.
@@ -6874,6 +6879,11 @@ def run_validation(
     cmd = [sys.executable, str(validator), str(tfvars_path)]
     if sql_path.exists():
         cmd.append(str(sql_path))
+    # Keep both positional paths before options. Python <=3.11 argparse does
+    # not reliably resume an optional positional after parsing options.
+    cmd.extend(["--summary-label", "generate"])
+    if os.environ.get("VERBOSE") == "1":
+        cmd.append("--verbose")
     if countries:
         cmd.extend(["--country", ",".join(countries)])
     if industries:

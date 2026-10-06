@@ -6,6 +6,8 @@ so no file I/O, Databricks, or LLM access is needed.
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from validate_abac import (  # noqa: E402
@@ -29,6 +31,28 @@ from validate_abac import (  # noqa: E402
 
 def _result() -> ValidationResult:
     return ValidationResult()
+
+
+def test_clean_labelled_report_is_one_line_unless_verbose(capsys):
+    result = _result()
+    result.ok("first")
+    result.ok("second")
+    result.print_report("validate-generated")
+    assert capsys.readouterr().out == "validate-generated: PASS (2 checks)\n"
+
+    result.print_report("validate-generated", verbose=True)
+    assert "ABAC Configuration Validation Report" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("kind", ["warning", "error"])
+def test_labelled_report_keeps_full_non_clean_report(kind, capsys):
+    result = _result()
+    result.ok("good")
+    getattr(result, "warn" if kind == "warning" else "error")(kind)
+    result.print_report("validate-generated")
+    out = capsys.readouterr().out
+    assert "ABAC Configuration Validation Report" in out
+    assert f"[{ 'WARN' if kind == 'warning' else 'FAIL' }] {kind}" in out
 
 
 def _ok_cfg() -> dict:

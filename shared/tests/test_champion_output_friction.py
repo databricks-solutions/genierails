@@ -655,6 +655,33 @@ def test_filter_emits_an_unterminated_box_at_eof_verbatim():
     assert list(filter_lines(TARGETING[:-1])) == TARGETING[:-1]
 
 
+def test_classification_filter_hides_only_successful_outputs_block():
+    lines = ["Apply complete! Resources: 1 added.\n", "\n", "Outputs:\n",
+             "classification = { noisy = true }\n"]
+    assert list(filter_lines(lines, hide_outputs=True)) == lines[:2]
+    assert list(filter_lines(lines, hide_outputs=False)) == lines
+
+
+def test_generated_remap_can_suppress_duplicate_success_line(tmp_path):
+    source_abac = tmp_path / "source.tfvars"
+    source_sql = tmp_path / "source.sql"
+    out_abac = tmp_path / "out.tfvars"
+    out_sql = tmp_path / "out.sql"
+    source_abac.write_text('uc_tables = ["dev.sales.orders"]\ntag_assignments = []\n')
+    source_sql.write_text("USE CATALOG dev;\n")
+
+    result = subprocess.run(
+        [sys.executable, str(SHARED / "scripts/remap_generated_config.py"),
+         str(source_abac), str(source_sql), str(out_abac), str(out_sql),
+         "--map", "dev=prod", "--quiet-remaps"],
+        text=True, capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Catalog remap:" not in result.stdout
+    assert "prod.sales.orders" in out_abac.read_text()
+
+
 def test_filter_script_streams_unbuffered():
     source = FILTER.read_text()
     assert "sys.stdout.flush()" in source
