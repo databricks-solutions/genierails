@@ -104,9 +104,10 @@ def _deployed_space_keys(dest_env_dir: str) -> dict[str, list[str]]:
         sys.exit(1)
     keys: dict[str, list[str]] = {}
     for resource in state.get("resources", []):
-        if not resource.get("type") == "null_resource" or not resource.get("name", "").startswith("genie_space"):
+        rtype = resource.get("type")
+        if rtype not in ("null_resource", "terraform_data") or not resource.get("name", "").startswith("genie_space"):
             continue
-        prefix = (resource.get("module") + "." if resource.get("module") else "") + f"null_resource.{resource['name']}"
+        prefix = (resource.get("module") + "." if resource.get("module") else "") + f"{rtype}.{resource['name']}"
         for instance in resource.get("instances", []):
             key = instance.get("index_key")
             if isinstance(key, str):
@@ -303,7 +304,7 @@ def main():
     # Promotion renames spaces whose name references a source catalog. Two
     # names must not collapse into one (that would merge their configs, ACLs
     # and Terraform addresses), and a space already deployed in the destination
-    # must not change key: its genie_space_create would be destroyed, which
+    # must not change key: its genie_space resource would be destroyed, which
     # trashes the live Genie agent, and a new one created in its place.
     renamed: dict[str, list[str]] = {}
     for name in canonical_names:

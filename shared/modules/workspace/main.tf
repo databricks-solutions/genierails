@@ -163,27 +163,18 @@ resource "null_resource" "genie_space_config_existing" {
 
 # ── New spaces: create ────────────────────────────────────────────────────────
 
-resource "null_resource" "genie_space_create" {
+# Only the host forces a replacement: moving a space to another workspace must
+# trash it there before creating its replacement. No credential is kept here:
+# create gets them from variables, and trash reads the layer's auth file.
+resource "terraform_data" "genie_space" {
   for_each = local.new_spaces
 
-  # Paths and credentials are runtime execution details, never space identity.
-  # The host is deliberately not ignored: moving a space to another workspace
-  # must destroy it in its original workspace before creating its replacement.
-  lifecycle {
-    ignore_changes = [
-      triggers["id_file"],
-      triggers["script"],
-      triggers["client_id"],
-      triggers["client_secret"],
-    ]
+  triggers_replace = {
+    host = var.databricks_workspace_host
   }
 
-  triggers = {
-    id_file       = "${var.genie_id_file_prefix}_${each.key}"
-    script        = var.genie_script_path
-    host          = var.databricks_workspace_host
-    client_id     = var.databricks_client_id
-    client_secret = var.databricks_client_secret
+  input = {
+    id_file = "${var.genie_id_file_prefix}_${each.key}"
   }
 
   provisioner "local-exec" {
@@ -211,8 +202,8 @@ resource "null_resource" "genie_space_create" {
     command = "bash ../../scripts/genie_space.sh trash"
 
     environment = {
-      GENIE_ID_BASENAME   = basename(self.triggers.id_file)
-      GENIE_EXPECTED_HOST = self.triggers.host
+      GENIE_ID_BASENAME   = basename(self.input.id_file)
+      GENIE_EXPECTED_HOST = self.triggers_replace.host
     }
   }
 
@@ -220,6 +211,18 @@ resource "null_resource" "genie_space_create" {
     databricks_mws_permission_assignment.group_assignments,
     databricks_sql_endpoint.warehouse,
   ]
+}
+
+# Earlier versions created spaces with this null_resource, whose triggers kept
+# the SP secret in state. Forget it without running its destroy-time trash;
+# terraform_data.genie_space adopts the agent named in its ID file, so the
+# agent and its ID are unchanged.
+removed {
+  from = null_resource.genie_space_create
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 # ── New spaces: apply config ──────────────────────────────────────────────────
@@ -238,7 +241,7 @@ resource "null_resource" "genie_space_config" {
     sql_measures    = jsonencode(each.value.config.sql_measures)
     sql_expressions = jsonencode(each.value.config.sql_expressions)
     join_specs      = jsonencode(each.value.config.join_specs)
-    space_create_id = null_resource.genie_space_create[each.key].id
+    space_create_id = terraform_data.genie_space[each.key].id
   }
 
   provisioner "local-exec" {
@@ -267,7 +270,7 @@ resource "null_resource" "genie_space_config" {
     }
   }
 
-  depends_on = [null_resource.genie_space_create]
+  depends_on = [terraform_data.genie_space]
 }
 
 # ── New spaces: apply ACLs ────────────────────────────────────────────────────
@@ -282,7 +285,7 @@ resource "null_resource" "genie_space_acls_created" {
 
   triggers = {
     groups          = local.genie_space_groups[each.key]
-    space_create_id = null_resource.genie_space_create[each.key].id
+    space_create_id = terraform_data.genie_space[each.key].id
   }
 
   provisioner "local-exec" {
@@ -298,5 +301,5 @@ resource "null_resource" "genie_space_acls_created" {
     }
   }
 
-  depends_on = [null_resource.genie_space_create]
+  depends_on = [terraform_data.genie_space]
 }

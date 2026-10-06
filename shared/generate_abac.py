@@ -1923,8 +1923,11 @@ class Spinner:
 
     def __enter__(self):
         self._start_time = time.time()
-        self._thread = threading.Thread(target=self._spin, daemon=True)
-        self._thread.start()
+        # Animate only on a terminal; in CI or redirected logs the frames
+        # would pile up as thousands of characters on one line.
+        if sys.stderr.isatty():
+            self._thread = threading.Thread(target=self._spin, daemon=True)
+            self._thread.start()
         return self
 
     def __exit__(self, *_):
@@ -1932,7 +1935,8 @@ class Spinner:
         if self._thread:
             self._thread.join()
         elapsed = time.time() - self._start_time
-        sys.stderr.write(f"\r  {self._message} — done ({elapsed:.1f}s)\n")
+        prefix = "\r" if self._thread else ""
+        sys.stderr.write(f"{prefix}  {self._message} — done ({elapsed:.1f}s)\n")
         sys.stderr.flush()
 
     def _spin(self):

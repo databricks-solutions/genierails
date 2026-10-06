@@ -250,36 +250,28 @@ resource "databricks_sql_endpoint" "warehouse" {
   auto_stop_mins = 15
 }
 
-resource "null_resource" "deploy_masking_functions" {
-  triggers = {
-    sql_hash      = filemd5(var.masking_sql_file)
-    sql_file      = var.masking_sql_file
-    script        = var.deploy_masking_script
-    warehouse_id  = local.effective_warehouse_id
-    host          = var.databricks_workspace_host
-    client_id     = var.databricks_client_id
-    client_secret = var.databricks_client_secret
+# No secret goes into these triggers: state keeps them, and a destroy-time
+# provisioner can only read state, so a rotated secret would linger there and
+# break --drop. The script loads the current SP credentials from auth_file.
+# Every other input still forces a replacement.
+resource "terraform_data" "masking_functions" {
+  triggers_replace = {
+    sql_hash     = filemd5(var.masking_sql_file)
+    sql_file     = var.masking_sql_file
+    script       = var.deploy_masking_script
+    auth_file    = var.auth_file
+    warehouse_id = local.effective_warehouse_id
+    host         = var.databricks_workspace_host
+    client_id    = var.databricks_client_id
   }
 
   provisioner "local-exec" {
-    command = "python3 ${self.triggers.script} --sql-file ${self.triggers.sql_file} --warehouse-id ${self.triggers.warehouse_id}"
-
-    environment = {
-      DATABRICKS_HOST          = self.triggers.host
-      DATABRICKS_CLIENT_ID     = self.triggers.client_id
-      DATABRICKS_CLIENT_SECRET = self.triggers.client_secret
-    }
+    command = "python3 ${self.triggers_replace.script} --sql-file ${self.triggers_replace.sql_file} --warehouse-id ${self.triggers_replace.warehouse_id} --auth-file ${self.triggers_replace.auth_file} --host ${self.triggers_replace.host}"
   }
 
   provisioner "local-exec" {
     when    = destroy
-    command = "python3 ${self.triggers.script} --sql-file ${self.triggers.sql_file} --warehouse-id ${self.triggers.warehouse_id} --drop"
-
-    environment = {
-      DATABRICKS_HOST          = self.triggers.host
-      DATABRICKS_CLIENT_ID     = self.triggers.client_id
-      DATABRICKS_CLIENT_SECRET = self.triggers.client_secret
-    }
+    command = "python3 ${self.triggers_replace.script} --sql-file ${self.triggers_replace.sql_file} --warehouse-id ${self.triggers_replace.warehouse_id} --auth-file ${self.triggers_replace.auth_file} --host ${self.triggers_replace.host} --drop"
   }
 
   depends_on = [
@@ -288,6 +280,18 @@ resource "null_resource" "deploy_masking_functions" {
     databricks_grant.terraform_sp_manage_catalog,
     databricks_sql_endpoint.warehouse,
   ]
+}
+
+# Earlier versions managed the functions as this null_resource, with the SP
+# secret in its triggers. Forget it without running its destroy-time --drop;
+# terraform_data.masking_functions takes over with CREATE OR REPLACE, so no
+# function is dropped and the stale secret leaves state.
+removed {
+  from = null_resource.deploy_masking_functions
+
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "databricks_policy_info" "policies" {
@@ -335,6 +339,6 @@ resource "databricks_policy_info" "policies" {
     databricks_grant.schema_access,
     databricks_grant.table_access,
     databricks_grant.terraform_sp_manage_catalog,
-    null_resource.deploy_masking_functions,
+    terraform_data.masking_functions,
   ]
 }

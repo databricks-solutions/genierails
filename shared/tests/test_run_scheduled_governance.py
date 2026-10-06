@@ -111,6 +111,21 @@ def test_materialize_envs_root_copies_target_and_account(tmp_path):
     assert (env_dir.parent / "account" / "abac.auto.tfvars").exists()
 
 
+def test_materialize_local_envs_root_is_a_no_op(tmp_path, capsys):
+    # Local run: --config-source is the checkout's own envs root.
+    envs = tmp_path / "aws" / "envs"
+    (envs / "prod" / "generated").mkdir(parents=True)
+    (envs / "prod" / "generated" / "masking_functions.sql").write_text("-- sql\n")
+    (envs / "account").mkdir()
+    (envs / "account" / "abac.auto.tfvars").write_text("# policies\n")
+
+    rsg._materialize_env_dir(str(envs), envs / "prod")
+
+    assert (envs / "prod" / "generated" / "masking_functions.sql").read_text() == "-- sql\n"
+    assert (envs / "account" / "abac.auto.tfvars").read_text() == "# policies\n"
+    assert "already in place" in capsys.readouterr().out
+
+
 def test_materialize_missing_source_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         rsg._materialize_env_dir(str(tmp_path / "nope"), tmp_path / "env")

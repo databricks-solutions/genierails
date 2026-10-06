@@ -899,9 +899,9 @@ make destroy ENV=prod && make destroy ENV=dev && make destroy ENV=account
 ```
 
 > **Note:** Always run `make destroy` before dropping UC catalogs. If catalogs
-> are dropped first, the `deploy_masking_functions` destroy provisioner will
+> are dropped first, the `masking_functions` destroy provisioner will
 > fail with `Catalog not found`. If this happens, remove the stuck resource
-> with `terraform state rm module.data_access.null_resource.deploy_masking_functions`
+> with `terraform state rm module.data_access.terraform_data.masking_functions`
 > in the affected env's `data_access/` directory, then re-run `make destroy`.
 
 ---

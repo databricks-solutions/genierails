@@ -34,6 +34,8 @@
 #   GENIE_JOIN_SPECS     Optional. JSON array of {left_table, left_alias, right_table, right_alias, sql, comment, instruction}.
 #   GENIE_ID_FILE        Optional. File path to save the created space ID
 #                        (used by Terraform for lifecycle management).
+#   GENIE_ADOPT_REQUIRED Optional. 1 = create must adopt the agent in
+#                        GENIE_ID_FILE (HTTP 200 only) and never create one.
 #
 # Usage:
 #   ./genie_space.sh create [workspace_url] [token] [title] [warehouse_id]
@@ -41,7 +43,7 @@
 #   ./genie_space.sh trash
 #
 # Or set env and run: ./genie_space.sh create   or   ./genie_space.sh set-acls
-# Re-running create adds a new space each time (not idempotent).
+# Re-running create adopts the agent already named in GENIE_ID_FILE.
 # =============================================================================
 
 set -e
@@ -253,6 +255,47 @@ create_genie_space() {
   local title="${3:-${GENIE_TITLE:-ABAC Genie Space}}"
   local warehouse_id="$4"
   workspace_url="${workspace_url%/}"
+
+  # Adopt the agent this ID file already names (e.g. after its Terraform
+  # address changed) rather than creating a duplicate under a new ID. Only a
+  # confirmed 404 leads to a new agent; any other error stops here.
+  # Adoption required (GENIE_ADOPT_REQUIRED=1, or the marker that
+  # genie_adopt_preflight.py --arm writes during the migration) accepts only
+  # HTTP 200 and never creates.
+  local adopt_marker="" adopt_required=""
+  if [[ -n "${GENIE_ID_FILE:-}" ]]; then
+    adopt_marker="$(dirname "${GENIE_ID_FILE}")/.genie_adopt_required_$(basename "${GENIE_ID_FILE}" | sed 's/^\.genie_space_id_//')"
+  fi
+  if [[ "${GENIE_ADOPT_REQUIRED:-}" == "1" || ( -n "$adopt_marker" && -f "$adopt_marker" ) ]]; then
+    adopt_required=1
+    if [[ -z "${GENIE_ID_FILE:-}" || ! -s "${GENIE_ID_FILE}" ]]; then
+      echo "ERROR: Adoption required, but the Genie agent ID file ${GENIE_ID_FILE:-<unset>} is missing or empty; not creating a new agent." >&2
+      echo "  Write the existing agent ID (it is in the agent URL) into that file, then run make genie-adopt-preflight ENV=<env>." >&2
+      exit 1
+    fi
+  fi
+  if [[ -n "${GENIE_ID_FILE:-}" && -s "${GENIE_ID_FILE}" ]]; then
+    local existing_id existing_code
+    existing_id=$(tr -d '[:space:]' < "${GENIE_ID_FILE}")
+    existing_code=$(curl -s -o /dev/null -w "%{http_code}" \
+      -H "${UA_HEADER}" \
+      -H "Authorization: Bearer ${token}" \
+      "${workspace_url}/api/2.0/genie/spaces/${existing_id}")
+    if [[ "$existing_code" == "200" ]]; then
+      echo "Genie agent ${existing_id} (from ${GENIE_ID_FILE}) already exists; adopting it, no new agent created."
+      [[ -n "$adopt_marker" ]] && rm -f "$adopt_marker"
+      echo "Done. Genie agent ID: ${existing_id}"
+      return 0
+    elif [[ -n "$adopt_required" ]]; then
+      echo "ERROR: Adoption required, but Genie agent ${existing_id} from ${GENIE_ID_FILE} returned HTTP ${existing_code} on ${workspace_url}; not creating a new agent." >&2
+      echo "  Check the agent exists in this workspace and the SP can read it, then run make genie-adopt-preflight ENV=<env>." >&2
+      exit 1
+    elif [[ "$existing_code" != "404" ]]; then
+      echo "ERROR: Cannot check Genie agent ${existing_id} from ${GENIE_ID_FILE} (HTTP ${existing_code}); not creating a duplicate." >&2
+      exit 1
+    fi
+    echo "Genie agent ${existing_id} from ${GENIE_ID_FILE} no longer exists (HTTP 404); creating a new one."
+  fi
 
   if [[ -z "${GENIE_TABLES_CSV:-}" ]]; then
     echo "ERROR: GENIE_TABLES_CSV not set. Pass comma-separated fully-qualified table names." >&2
@@ -738,7 +781,7 @@ elif [[ "$COMMAND" == "set-acls" ]]; then
     if [[ ! -f "${GENIE_ID_FILE}" ]]; then
       echo "ERROR: Genie agent ID file not found at '${GENIE_ID_FILE}'." >&2
       echo "  The space may have been deleted outside Terraform." >&2
-      echo "  To recover: terraform taint 'null_resource.genie_space_create[0]'" >&2
+      echo "  To recover: terraform taint 'module.workspace.terraform_data.genie_space[\"<space key>\"]'" >&2
       exit 1
     fi
     SPACE_ID=$(cat "${GENIE_ID_FILE}" | tr -d '[:space:]')

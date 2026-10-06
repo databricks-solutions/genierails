@@ -13,7 +13,7 @@ terraform {
       version = "~> 0.12"
     }
   }
-  required_version = ">= 1.0"
+  required_version = ">= 1.7"
 
   backend "local" {}
 }
@@ -353,6 +353,7 @@ module "data_access" {
   warehouse_name                  = var.warehouse_name
   masking_sql_file                = "${var.env_dir}/masking_functions.sql"
   deploy_masking_script           = "${local.project_root}/deploy_masking_functions.py"
+  auth_file                       = "${var.env_dir}/auth.auto.tfvars"
 }
 
 output "sql_warehouse_id" {
