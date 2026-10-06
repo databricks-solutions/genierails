@@ -485,3 +485,26 @@ def test_reapplying_unchanged_inputs_keeps_the_wait_and_every_grant_mask_and_pol
         "time_sleep.wait_for_policy_enforcement",
     }
     assert not re.search(r"# databricks_\S+ (will be destroyed|must be replaced)", moved)
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+@pytest.mark.parametrize("module, test_file, run", [
+    # An existing grant after the gate expires (data_access) ...
+    ("data_access", "tests/retained_grants.tftest.hcl", "replan_unchanged_grant_after_expiry"),
+    # ... and an existing non-empty CAN_RUN ACL after it expires (workspace).
+    ("workspace", "tests/genie_exposure_precondition.tftest.hcl", "replan_unchanged_acl_after_the_gate_expires"),
+])
+def test_unchanged_access_replans_without_changes_after_the_gate_expires(tmp_path, module, test_file, run):
+    root = MAIN_TF.parents[1] / module
+    env = {**os.environ, "TF_DATA_DIR": str(tmp_path / ".terraform"), "TF_IN_AUTOMATION": "1"}
+    init = subprocess.run(["terraform", "init", "-backend=false", "-input=false"],
+                          cwd=root, env=env, text=True, capture_output=True)
+    assert init.returncode == 0, init.stdout + init.stderr
+    result = subprocess.run(["terraform", "test", "-no-color", "-verbose", f"-filter={test_file}"],
+                            cwd=root, env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    section = _verbose_runs(result.stdout)[run]
+    assert section.startswith("pass")
+    # No resource is created, changed, replaced or destroyed (outputs may change:
+    # the recorded gate status is now "expired").
+    assert not re.search(r"# \S+ (will be|must be)", section), section

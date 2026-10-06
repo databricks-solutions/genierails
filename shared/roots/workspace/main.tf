@@ -160,6 +160,54 @@ locals {
     module.coverage_gate_check.problem
   )
 
+  # What CAN_RUN the last apply left in place, per space, from this layer's
+  # own state (the layer runner's local backend): the groups recorded in the
+  # ACL resource's triggers, for the same Genie agent (same space ID, or the
+  # same created agent on the same host). The blocker and grant checks only
+  # bite for groups beyond that, so keeping, shrinking or clearing an ACL
+  # always plans, and an unchanged ACL never errors once the gate expires.
+  # Unreadable state means nothing is on record (fail closed).
+  _own_state = fileexists("${var.env_dir}/terraform.tfstate") ? try(jsondecode(file("${var.env_dir}/terraform.tfstate")), null) : null
+  _state_instances = flatten([
+    for resource in try(local._own_state.resources, []) : [
+      for instance in try(resource.instances, []) : {
+        name  = resource.name
+        key   = try(tostring(instance.index_key), "")
+        attrs = try(instance.attributes, {})
+      }
+      if try(instance.status, "") != "tainted"
+    ]
+    if try(resource.module, "") == "module.workspace" && try(resource.mode, "") == "managed"
+  ])
+  _applied = { for instance in local._state_instances : "${instance.name}|${instance.key}" => instance.attrs }
+  applied_can_run_groups = {
+    for key, space in local.merged_spaces : key => [
+      for group in split(",", (
+        space.genie_space_id != ""
+        ? (
+          try(local._applied["genie_space_acls|${key}"].triggers.space_id, "") == space.genie_space_id
+          ? try(local._applied["genie_space_acls|${key}"].triggers.groups, "")
+          : ""
+        )
+        : (
+          try(local._applied["genie_space_acls_created|${key}"].triggers.space_create_id, "") != ""
+          && try(local._applied["genie_space_acls_created|${key}"].triggers.space_create_id, "") == try(local._applied["genie_space|${key}"].id, "-")
+          && try(local._applied["genie_space|${key}"].triggers_replace.value.host, local._applied["genie_space|${key}"].triggers_replace.host, "") == var.databricks_workspace_host
+          ? try(local._applied["genie_space_acls_created|${key}"].triggers.groups, "")
+          : ""
+        )
+      )) : group if group != ""
+    ]
+  }
+  # Groups each space's desired CAN_RUN adds beyond what is applied.
+  genie_space_can_run_widening = {
+    for key, space in local.merged_spaces : key => (
+      length(var.groups) > 0
+      ? sort(tolist(setsubtract(toset(space.config.acl_groups), toset(local.applied_can_run_groups[key]))))
+      : []
+    )
+  }
+
   # Per space: the SELECT grants its CAN_RUN groups need must be in the
   # data_access state (table_grant_resource_keys, "<table>|<group>"). Spaces
   # that list tables need every table x group pair (a catalog.schema.* entry
@@ -535,22 +583,23 @@ module "workspace" {
     databricks.workspace = databricks.workspace
   }
 
-  databricks_account_id      = var.databricks_account_id
-  databricks_client_id       = var.databricks_client_id
-  databricks_client_secret   = var.databricks_client_secret
-  databricks_workspace_id    = var.databricks_workspace_id
-  databricks_workspace_host  = var.databricks_workspace_host
-  genie_only                 = var.genie_only
-  manage_groups              = var.manage_groups
-  groups                     = var.groups
-  business_access_enabled    = var.business_access_enabled
-  genie_exposure_blocker     = local.genie_exposure_blocker
-  genie_space_missing_grants = local.genie_space_missing_grants
-  sql_warehouse_id           = var.sql_warehouse_id
-  warehouse_name             = var.warehouse_name
-  genie_spaces               = local.merged_spaces
-  genie_id_file_prefix       = "${var.env_dir}/.genie_space_id"
-  genie_script_path          = "${local.project_root}/scripts/genie_space.sh"
+  databricks_account_id        = var.databricks_account_id
+  databricks_client_id         = var.databricks_client_id
+  databricks_client_secret     = var.databricks_client_secret
+  databricks_workspace_id      = var.databricks_workspace_id
+  databricks_workspace_host    = var.databricks_workspace_host
+  genie_only                   = var.genie_only
+  manage_groups                = var.manage_groups
+  groups                       = var.groups
+  business_access_enabled      = var.business_access_enabled
+  genie_exposure_blocker       = local.genie_exposure_blocker
+  genie_space_missing_grants   = local.genie_space_missing_grants
+  genie_space_can_run_widening = local.genie_space_can_run_widening
+  sql_warehouse_id             = var.sql_warehouse_id
+  warehouse_name               = var.warehouse_name
+  genie_spaces                 = local.merged_spaces
+  genie_id_file_prefix         = "${var.env_dir}/.genie_space_id"
+  genie_script_path            = "${local.project_root}/scripts/genie_space.sh"
 }
 
 # ── Outputs ───────────────────────────────────────────────────────────────────
@@ -586,6 +635,11 @@ output "genie_space_acls_groups" {
 output "genie_space_missing_grants" {
   description = "Per Genie agent: <table>|<group> SELECT grants its CAN_RUN groups need that the data_access state doesn't have. Any entry blocks that agent's non-empty CAN_RUN."
   value       = local.genie_space_missing_grants
+}
+
+output "genie_space_can_run_widening" {
+  description = "Per Genie agent: CAN_RUN groups its ACL adds beyond what the last apply left in place. Only these need the coverage gate and the agent's grants."
+  value       = local.genie_space_can_run_widening
 }
 
 output "genie_exposure_blocker" {

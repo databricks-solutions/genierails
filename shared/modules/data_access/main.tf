@@ -157,6 +157,31 @@ locals {
   }))
   coverage_gate_status  = module.coverage_gate.status
   coverage_gate_problem = module.coverage_gate.problem
+
+  # Keeping or revoking SELECT never needs the gate. A grant that the last
+  # apply already made (var.applied_table_grants, from this layer's state)
+  # stays plannable whatever the gate says, as long as everything that
+  # protects it (tags, policies, masks, DDL, acknowledgements, max age) is
+  # exactly what that apply recorded: then nothing about the exposure changed.
+  # New grants, or existing ones whose protection changed (a mask removed,
+  # tags re-derived), still need a current pass.
+  coverage_gate_protection = sha256(jsonencode({
+    version         = 1
+    tag_assignments = sort(keys(local.tag_assignment_map))
+    fgac_policies   = local.fgac_policy_map
+    masking_sql     = filesha256(var.masking_sql_file)
+    ddl             = fileexists(var.coverage_ddl_file) ? filesha256(var.coverage_ddl_file) : ""
+    acknowledged    = sort(distinct([for column in var.coverage_acknowledged_columns : lower(column)]))
+    max_age         = var.coverage_gate_max_age
+  }))
+  _protection_unchanged = (
+    var.applied_protection_fingerprint != ""
+    && var.applied_protection_fingerprint == local.coverage_gate_protection
+  )
+  table_grants_needing_gate = sort([
+    for pair in local.table_access_pairs : "${pair.table}|${pair.principal}"
+    if var.business_access_enabled && !(local._protection_unchanged && contains(var.applied_table_grants, "${pair.table}|${pair.principal}"))
+  ])
 }
 
 # Shared with the workspace layer's CAN_RUN check; no resources.
@@ -281,11 +306,12 @@ resource "databricks_grant" "table_access" {
     time_sleep.wait_for_policy_enforcement,
   ]
 
-  # Checked for every planned instance, new or existing, so neither a raw
-  # terraform run nor terraform_layer.sh can grant without a current pass.
+  # Checked for every planned instance, so neither a raw terraform run nor
+  # terraform_layer.sh can add a grant (or keep one whose protection changed)
+  # without a current pass. Removed grants are never checked.
   lifecycle {
     precondition {
-      condition     = local.coverage_gate_status == "pass"
+      condition     = local.coverage_gate_status == "pass" || !contains(local.table_grants_needing_gate, each.key)
       error_message = "Coverage gate ${local.coverage_gate_status}: ${local.coverage_gate_problem}. Business SELECT grants are blocked. Terraform can't re-read Unity Catalog, so run this layer through make (make apply, make plan, make release or make maintain ENV=${basename(dirname(dirname(var.coverage_gate_file)))}), which refreshes live tags and DDL, then runs the coverage gate."
     }
   }

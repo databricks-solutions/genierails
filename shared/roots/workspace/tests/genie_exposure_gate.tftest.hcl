@@ -405,3 +405,288 @@ run "state_without_a_recorded_max_age_blocks_can_run" {
     error_message = "the explicit empty ACL must still be planned while CAN_RUN is blocked"
   }
 }
+
+# Only CAN_RUN beyond what the last apply left in place needs the gate. The
+# root reads that from its own state (envs/<env>/terraform.tfstate), in the
+# shape Terraform writes it; these runs check the reading and that an
+# unchanged non-empty ACL plans after the gate expires.
+run "existing_space_acl_on_record" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts", "cat.sch.customers|auditors"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
+      "tests/.tmp/exposure/terraform.tfstate"               = jsonencode({ version = 4, outputs = {}, resources = [{ module = "module.workspace", mode = "managed", type = "null_resource", name = "genie_space_acls", instances = [{ index_key = "sales", attributes = { id = "1", triggers = { space_id = "space-1", groups = "analysts" } } }] }] })
+    }
+  }
+}
+
+run "unchanged_acl_adds_nothing" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = [] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = length(output.genie_space_can_run_widening["sales"]) == 0
+    error_message = "an unchanged ACL adds no CAN_RUN"
+  }
+}
+
+run "widened_acl_adds_only_the_new_group" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = [] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts", "auditors"] } }
+  }
+  assert {
+    condition     = toset(output.genie_space_can_run_widening["sales"]) == toset(["auditors"])
+    error_message = "only the added group needs the gate"
+  }
+}
+
+run "shrunk_acl_adds_nothing" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = [] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = [] } }
+  }
+  assert {
+    condition     = length(output.genie_space_can_run_widening["sales"]) == 0
+    error_message = "clearing an ACL never needs the gate"
+  }
+}
+
+run "acl_on_record_for_another_space" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts", "cat.sch.customers|auditors"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
+      "tests/.tmp/exposure/terraform.tfstate"               = jsonencode({ version = 4, outputs = {}, resources = [{ module = "module.workspace", mode = "managed", type = "null_resource", name = "genie_space_acls", instances = [{ index_key = "sales", attributes = { id = "1", triggers = { space_id = "space-0", groups = "analysts" } } }] }] })
+    }
+  }
+}
+
+run "other_space_id_gets_no_credit" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = [] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = toset(output.genie_space_can_run_widening["sales"]) == toset(["analysts"])
+    error_message = "an ACL applied to another agent is not this agent's"
+  }
+}
+
+run "tainted_acl_on_record" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts", "cat.sch.customers|auditors"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
+      "tests/.tmp/exposure/terraform.tfstate"               = jsonencode({ version = 4, outputs = {}, resources = [{ module = "module.workspace", mode = "managed", type = "null_resource", name = "genie_space_acls", instances = [{ index_key = "sales", status = "tainted", attributes = { id = "1", triggers = { space_id = "space-1", groups = "analysts" } } }] }] })
+    }
+  }
+}
+
+run "tainted_acl_gets_no_credit" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = [] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = toset(output.genie_space_can_run_widening["sales"]) == toset(["analysts"])
+    error_message = "a tainted (failed) ACL apply is not on record"
+  }
+}
+
+run "unreadable_own_state" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts", "cat.sch.customers|auditors"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
+      "tests/.tmp/exposure/terraform.tfstate"               = "{truncated"
+    }
+  }
+}
+
+run "unreadable_own_state_gets_no_credit" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = [] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = toset(output.genie_space_can_run_widening["sales"]) == toset(["analysts"])
+    error_message = "unreadable state means nothing is on record"
+  }
+}
+
+run "created_space_acl_on_record" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts", "cat.sch.customers|auditors"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
+      "tests/.tmp/exposure/terraform.tfstate"               = jsonencode({ version = 4, outputs = {}, resources = [{ module = "module.workspace", mode = "managed", type = "terraform_data", name = "genie_space", instances = [{ index_key = "sales", attributes = { id = "created-1", triggers_replace = { value = { host = "https://example.invalid" }, type = ["object", { host = "string" }] } } }] }, { module = "module.workspace", mode = "managed", type = "null_resource", name = "genie_space_acls_created", instances = [{ index_key = "sales", attributes = { id = "2", triggers = { space_create_id = "created-1", groups = "analysts" } } }] }] })
+    }
+  }
+}
+
+run "unchanged_created_space_acl_adds_nothing" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", uc_tables = ["cat.sch.customers"] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = length(output.genie_space_can_run_widening["sales"]) == 0
+    error_message = "an unchanged ACL on a created agent adds no CAN_RUN"
+  }
+}
+
+run "created_space_on_another_host" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts", "cat.sch.customers|auditors"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
+      "tests/.tmp/exposure/terraform.tfstate"               = jsonencode({ version = 4, outputs = {}, resources = [{ module = "module.workspace", mode = "managed", type = "terraform_data", name = "genie_space", instances = [{ index_key = "sales", attributes = { id = "created-1", triggers_replace = { value = { host = "https://old.invalid" }, type = ["object", { host = "string" }] } } }] }, { module = "module.workspace", mode = "managed", type = "null_resource", name = "genie_space_acls_created", instances = [{ index_key = "sales", attributes = { id = "2", triggers = { space_create_id = "created-1", groups = "analysts" } } }] }] })
+    }
+  }
+}
+
+run "moved_created_space_gets_no_credit" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", uc_tables = ["cat.sch.customers"] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = toset(output.genie_space_can_run_widening["sales"]) == toset(["analysts"])
+    error_message = "a created agent being moved to another host starts with no CAN_RUN"
+  }
+}
+
+run "created_space_acl_for_an_old_agent" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts", "cat.sch.customers|auditors"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
+      "tests/.tmp/exposure/terraform.tfstate"               = jsonencode({ version = 4, outputs = {}, resources = [{ module = "module.workspace", mode = "managed", type = "terraform_data", name = "genie_space", instances = [{ index_key = "sales", attributes = { id = "created-1", triggers_replace = { value = { host = "https://example.invalid" }, type = ["object", { host = "string" }] } } }] }, { module = "module.workspace", mode = "managed", type = "null_resource", name = "genie_space_acls_created", instances = [{ index_key = "sales", attributes = { id = "2", triggers = { space_create_id = "created-0", groups = "analysts" } } }] }] })
+    }
+  }
+}
+
+run "recreated_space_gets_no_credit" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", uc_tables = ["cat.sch.customers"] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = toset(output.genie_space_can_run_widening["sales"]) == toset(["analysts"])
+    error_message = "an ACL recorded for an earlier created agent is not this agent's"
+  }
+}
+
+run "gate_expires_with_acls_on_record" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts", "cat.sch.customers|auditors"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "2000-01-01T00:00:00Z" })
+      "tests/.tmp/exposure/terraform.tfstate"               = jsonencode({ version = 4, outputs = {}, resources = [{ module = "module.workspace", mode = "managed", type = "null_resource", name = "genie_space_acls", instances = [{ index_key = "sales", attributes = { id = "1", triggers = { space_id = "space-1", groups = "analysts" } } }] }] })
+    }
+  }
+}
+
+run "unchanged_acl_plans_after_the_gate_expires" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = [] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = strcontains(output.genie_exposure_blocker, "older than coverage_gate_max_age")
+    error_message = "the gate has expired"
+  }
+  assert {
+    condition     = output.genie_space_acls_groups["sales"] == "analysts" && output.genie_space_acls_applied
+    error_message = "the unchanged ACL must still plan"
+  }
+}
+
+run "shrunk_acl_plans_after_the_gate_expires" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = [] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = [] } }
+  }
+  assert {
+    condition     = output.genie_space_acls_groups["sales"] == ""
+    error_message = "clearing CAN_RUN must plan while exposure is blocked"
+  }
+}
+
+run "gate_expires_with_created_acl_on_record" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts", "cat.sch.customers|auditors"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "2000-01-01T00:00:00Z" })
+      "tests/.tmp/exposure/terraform.tfstate"               = jsonencode({ version = 4, outputs = {}, resources = [{ module = "module.workspace", mode = "managed", type = "terraform_data", name = "genie_space", instances = [{ index_key = "sales", attributes = { id = "created-1", triggers_replace = { value = { host = "https://example.invalid" }, type = ["object", { host = "string" }] } } }] }, { module = "module.workspace", mode = "managed", type = "null_resource", name = "genie_space_acls_created", instances = [{ index_key = "sales", attributes = { id = "2", triggers = { space_create_id = "created-1", groups = "analysts" } } }] }] })
+    }
+  }
+}
+
+run "unchanged_created_acl_plans_after_the_gate_expires" {
+  command = plan
+  variables {
+    genie_spaces        = [{ name = "Sales", uc_tables = ["cat.sch.customers"] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = strcontains(output.genie_exposure_blocker, "older than coverage_gate_max_age")
+    error_message = "the gate has expired"
+  }
+  assert {
+    condition     = output.genie_space_acls_groups["sales"] == "analysts"
+    error_message = "the unchanged ACL on a created agent must still plan"
+  }
+}

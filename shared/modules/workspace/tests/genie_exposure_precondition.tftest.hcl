@@ -36,11 +36,12 @@ run "blocked_exposure_refuses_can_run_on_existing_space" {
     }
   }
   variables {
-    genie_id_file_prefix       = "tests/.tmp/exposure/.genie_space_id"
-    genie_script_path          = "true"
-    genie_exposure_blocker     = "the data_access layer has no readable state"
-    genie_space_missing_grants = { sales = [] }
-    genie_spaces               = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+    genie_id_file_prefix         = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path            = "true"
+    genie_exposure_blocker       = "the data_access layer has no readable state"
+    genie_space_can_run_widening = { sales = ["analysts"] }
+    genie_space_missing_grants   = { sales = [] }
+    genie_spaces                 = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
   }
   expect_failures = [null_resource.genie_space_acls]
 }
@@ -59,11 +60,12 @@ run "blocked_exposure_refuses_can_run_on_new_space" {
     }
   }
   variables {
-    genie_id_file_prefix       = "tests/.tmp/exposure/.genie_space_id"
-    genie_script_path          = "true"
-    genie_exposure_blocker     = "the data_access layer has no readable state"
-    genie_space_missing_grants = { sales = [] }
-    genie_spaces               = { sales = { name = "Sales", genie_space_id = "", sql_warehouse_id = "warehouse", uc_tables = ["cat.sch.customers"], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+    genie_id_file_prefix         = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path            = "true"
+    genie_exposure_blocker       = "the data_access layer has no readable state"
+    genie_space_can_run_widening = { sales = ["analysts"] }
+    genie_space_missing_grants   = { sales = [] }
+    genie_spaces                 = { sales = { name = "Sales", genie_space_id = "", sql_warehouse_id = "warehouse", uc_tables = ["cat.sch.customers"], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
   }
   expect_failures = [null_resource.genie_space_acls_created]
 }
@@ -82,11 +84,12 @@ run "blocked_exposure_still_clears_can_run" {
     }
   }
   variables {
-    genie_id_file_prefix       = "tests/.tmp/exposure/.genie_space_id"
-    genie_script_path          = "true"
-    genie_exposure_blocker     = "the data_access layer has no readable state"
-    genie_space_missing_grants = { sales = [] }
-    genie_spaces               = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = [] } } }
+    genie_id_file_prefix         = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path            = "true"
+    genie_exposure_blocker       = "the data_access layer has no readable state"
+    genie_space_can_run_widening = { sales = [] }
+    genie_space_missing_grants   = { sales = [] }
+    genie_spaces                 = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = [] } } }
   }
   assert {
     condition     = output.genie_space_acls_applied
@@ -108,11 +111,12 @@ run "missing_space_grants_refuse_can_run" {
     }
   }
   variables {
-    genie_id_file_prefix       = "tests/.tmp/exposure/.genie_space_id"
-    genie_script_path          = "true"
-    genie_exposure_blocker     = ""
-    genie_space_missing_grants = { sales = ["cat.sch.customers|analysts"] }
-    genie_spaces               = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+    genie_id_file_prefix         = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path            = "true"
+    genie_exposure_blocker       = ""
+    genie_space_can_run_widening = { sales = ["analysts"] }
+    genie_space_missing_grants   = { sales = ["cat.sch.customers|analysts"] }
+    genie_spaces                 = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
   }
   expect_failures = [null_resource.genie_space_acls]
 }
@@ -131,11 +135,12 @@ run "space_absent_from_the_grant_check_refuses_can_run" {
     }
   }
   variables {
-    genie_id_file_prefix       = "tests/.tmp/exposure/.genie_space_id"
-    genie_script_path          = "true"
-    genie_exposure_blocker     = ""
-    genie_space_missing_grants = {}
-    genie_spaces               = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+    genie_id_file_prefix         = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path            = "true"
+    genie_exposure_blocker       = ""
+    genie_space_can_run_widening = { sales = ["analysts"] }
+    genie_space_missing_grants   = {}
+    genie_spaces                 = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
   }
   expect_failures = [null_resource.genie_space_acls]
 }
@@ -154,14 +159,142 @@ run "ready_layer_and_space_grants_allow_can_run" {
     }
   }
   variables {
-    genie_id_file_prefix       = "tests/.tmp/exposure/.genie_space_id"
-    genie_script_path          = "true"
-    genie_exposure_blocker     = ""
-    genie_space_missing_grants = { sales = [] }
-    genie_spaces               = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+    genie_id_file_prefix         = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path            = "true"
+    genie_exposure_blocker       = ""
+    genie_space_can_run_widening = { sales = ["analysts"] }
+    genie_space_missing_grants   = { sales = [] }
+    genie_spaces                 = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
   }
   assert {
     condition     = output.genie_space_acls_applied
     error_message = "with the layer ready and the space's grants in place, CAN_RUN must be planned"
   }
+}
+
+run "blocked_exposure_keeps_an_unchanged_acl" {
+  command = plan
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    null                 = null
+  }
+  override_data {
+    target = data.databricks_group.existing
+    values = {
+      id = 123
+    }
+  }
+  variables {
+    genie_id_file_prefix         = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path            = "true"
+    genie_exposure_blocker       = "the data_access layer has no readable state"
+    genie_space_can_run_widening = { sales = [] }
+    genie_space_missing_grants   = { sales = [] }
+    genie_spaces                 = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+  }
+  assert {
+    condition     = output.genie_space_acls_applied
+    error_message = "an ACL that adds nothing to what is applied must plan while exposure is blocked"
+  }
+}
+
+run "space_absent_from_the_widening_map_counts_as_widening" {
+  command = plan
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    null                 = null
+  }
+  override_data {
+    target = data.databricks_group.existing
+    values = {
+      id = 123
+    }
+  }
+  variables {
+    genie_id_file_prefix         = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path            = "true"
+    genie_exposure_blocker       = "the data_access layer has no readable state"
+    genie_space_can_run_widening = {}
+    genie_space_missing_grants   = { sales = [] }
+    genie_spaces                 = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+  }
+  expect_failures = [null_resource.genie_space_acls]
+}
+
+# Apply, let the gate expire, re-plan: the unchanged ACL plans (test_data_access_grants.py
+# checks it is a no-op); widening it is still refused.
+run "apply_while_exposure_is_ready" {
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    null                 = null
+  }
+  override_data {
+    target = data.databricks_group.existing
+    values = {
+      id = 123
+    }
+  }
+  variables {
+    genie_id_file_prefix         = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path            = "true"
+    genie_exposure_blocker       = ""
+    genie_space_can_run_widening = { sales = ["analysts"] }
+    genie_space_missing_grants   = { sales = [] }
+    genie_spaces                 = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+  }
+  assert {
+    condition     = output.genie_space_acls_applied
+    error_message = "with the layer ready and the space's grants in place, CAN_RUN must be planned"
+  }
+}
+
+run "replan_unchanged_acl_after_the_gate_expires" {
+  command = plan
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    null                 = null
+  }
+  override_data {
+    target = data.databricks_group.existing
+    values = {
+      id = 123
+    }
+  }
+  variables {
+    genie_id_file_prefix         = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path            = "true"
+    genie_exposure_blocker       = "the data_access layer has no readable state"
+    genie_space_can_run_widening = { sales = [] }
+    genie_space_missing_grants   = { sales = [] }
+    genie_spaces                 = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+  }
+}
+
+run "widened_acl_after_the_gate_expires_is_refused" {
+  command = plan
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    null                 = null
+  }
+  override_data {
+    target = data.databricks_group.existing
+    values = {
+      id = 123
+    }
+  }
+  variables {
+    genie_id_file_prefix         = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path            = "true"
+    genie_exposure_blocker       = "the data_access layer has no readable state"
+    groups                       = { analysts = {}, auditors = {} }
+    genie_space_can_run_widening = { sales = ["auditors"] }
+    genie_space_missing_grants   = { sales = [] }
+    genie_spaces                 = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts", "auditors"] } } }
+  }
+  expect_failures = [null_resource.genie_space_acls]
 }

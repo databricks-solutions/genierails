@@ -97,6 +97,18 @@ variable "coverage_gate_max_age" {
   }
 }
 
+variable "applied_table_grants" {
+  type        = list(string)
+  default     = []
+  description = "table_access keys (\"<table>|<principal>\") the last apply made, from this layer's state. With an unchanged protection fingerprint they stay plannable without a current gate pass."
+}
+
+variable "applied_protection_fingerprint" {
+  type        = string
+  default     = ""
+  description = "coverage_gate.protection_fingerprint the last apply recorded in this layer's state; \"\" when unknown (no exemption)."
+}
+
 variable "coverage_acknowledged_columns" {
   type        = list(string)
   default     = []

@@ -43,6 +43,10 @@ output "coverage_gate_inputs" {
     grant_tables            = local.coverage_gate_grant_tables
     acknowledged_columns    = sort(distinct([for column in var.coverage_acknowledged_columns : lower(column)]))
     max_age                 = var.coverage_gate_max_age
+    # false when every planned grant already exists with unchanged protection:
+    # the change only keeps or revokes SELECT, so a failing gate needn't stop it.
+    needs_gate             = length(local.table_grants_needing_gate) > 0
+    protection_fingerprint = local.coverage_gate_protection
   }
 }
 
@@ -53,6 +57,7 @@ output "coverage_gate" {
     fingerprint             = local.coverage_gate_fingerprint
     status                  = local.coverage_gate_status
     max_age                 = var.coverage_gate_max_age
+    protection_fingerprint  = local.coverage_gate_protection
     table_grant_count       = length(databricks_grant.table_access)
   }
 }

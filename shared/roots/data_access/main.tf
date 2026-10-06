@@ -73,6 +73,21 @@ locals {
     ))
   }
   full_effective_uc_tables = distinct(concat(local.full_uc_tables, local.full_discovered_uc_tables))
+
+  # What the last apply of this layer left in place, read from its own state
+  # (the layer runner's local backend), so keeping or revoking SELECT never
+  # needs a current coverage gate (see modules/data_access). Unreadable state
+  # means nothing is exempt.
+  _own_state = fileexists("${var.env_dir}/terraform.tfstate") ? try(jsondecode(file("${var.env_dir}/terraform.tfstate")), null) : null
+  applied_table_grants = flatten([
+    for resource in try(local._own_state.resources, []) : [
+      for instance in try(resource.instances, []) : tostring(instance.index_key)
+      if try(instance.status, "") != "tainted" && try(instance.index_key, null) != null
+    ]
+    if try(resource.module, "") == "module.data_access" && try(resource.mode, "") == "managed"
+    && try(resource.type, "") == "databricks_grant" && try(resource.name, "") == "table_access"
+  ])
+  applied_protection_fingerprint = try(tostring(local._own_state.outputs.coverage_gate.value.protection_fingerprint), "")
 }
 
 variable "env_dir" {
@@ -359,6 +374,8 @@ module "data_access" {
   coverage_ddl_file               = "${var.env_dir}/../ddl/_fetched.sql"
   coverage_acknowledged_columns   = var.coverage_acknowledged_columns
   coverage_gate_max_age           = var.coverage_gate_max_age
+  applied_table_grants            = local.applied_table_grants
+  applied_protection_fingerprint  = local.applied_protection_fingerprint
   enable_classification           = var.enable_classification
   enable_auto_tagging             = var.enable_auto_tagging
   classification_existing_schemas = var.classification_existing_schemas
