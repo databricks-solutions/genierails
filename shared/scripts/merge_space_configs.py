@@ -695,14 +695,99 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
 
 ALLOW_RULE_CHANGES_FLAG = "--allow-rule-changes"
 _RULE_SECTIONS = ("tag_assignments", "treatment_overrides", "fgac_policies")
+_ACCEPT_HINT = f"re-run with {ALLOW_RULE_CHANGES_FLAG} to accept"
+
+
+class SqlTokenizeError(ValueError):
+    """SQL that cannot be tokenized unambiguously (e.g. an unterminated literal)."""
+
+
+def sql_tokens(sql: str) -> list[str]:
+    """Tokenize SQL so two function bodies can be compared for meaning.
+
+    String literals ('...', "...", $$...$$) and back-quoted identifiers are
+    kept byte-exact; comments outside them are dropped; only unquoted words
+    (keywords and identifiers, which are case-insensitive) are lower-cased.
+    """
+    tokens: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch.isspace():
+            i += 1
+        elif sql.startswith("--", i):
+            end = sql.find("\n", i)
+            i = n if end < 0 else end + 1
+        elif sql.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if sql.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif sql.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            if depth:
+                raise SqlTokenizeError("unterminated /* comment")
+            i = j
+        elif sql.startswith("$$", i):
+            end = sql.find("$$", i + 2)
+            if end < 0:
+                raise SqlTokenizeError("unterminated $$ body")
+            tokens.append(sql[i:end + 2])
+            i = end + 2
+        elif ch in "'\"`":
+            # Backslash escapes apply to strings, but not to raw r'...' strings
+            # or to back-quoted identifiers; a doubled quote always escapes.
+            backslash = ch != "`" and not (i > 0 and sql[i - 1] in "rR" and tokens[-1:] == ["r"])
+            j = i + 1
+            while True:
+                if j >= n:
+                    raise SqlTokenizeError(f"unterminated {ch} literal")
+                if backslash and sql[j] == "\\":
+                    j += 2
+                elif sql[j] == ch and sql.startswith(ch * 2, j):
+                    j += 2
+                elif sql[j] == ch:
+                    break
+                else:
+                    j += 1
+            tokens.append(sql[i:j + 1])
+            i = j + 1
+        elif ch.isalnum() or ch == "_":
+            j = i
+            while j < n and (sql[j].isalnum() or sql[j] == "_"):
+                j += 1
+            tokens.append(sql[i:j].lower())
+            i = j
+        else:
+            tokens.append(ch)
+            i += 1
+    return tokens
+
+
+def _same_sql(a: str, b: str) -> bool:
+    """Equal token streams; anything that can't be tokenized counts as different."""
+    try:
+        return sql_tokens(a) == sql_tokens(b)
+    except SqlTokenizeError:
+        return False
+
+
+def _unreadable(path: Path, exc: Exception) -> str:
+    return (
+        f"cannot read the reviewed rules in {path}: {exc}. Fix the file, or re-run "
+        f"with {ALLOW_RULE_CHANGES_FLAG} to replace the reviewed rules with a new draft"
+    )
 
 
 def load_reviewed_rules(generated_dir: Path) -> tuple[dict, str] | None:
     """Return (abac config, masking SQL) of the reviewed draft, or None.
 
     None means there is no prior draft with rules (first-time generate, or a
-    genie-mode import only). An unparseable draft raises ValueError so a
-    re-run can never silently treat hand-reviewed rules as absent.
+    genie-mode import only). A draft that can't be read — including missing
+    masking SQL that its policies need — raises ValueError, so a re-run never
+    silently treats reviewed rules as absent.
     """
     abac_path = generated_dir / "abac.auto.tfvars"
     if not abac_path.exists():
@@ -710,14 +795,43 @@ def load_reviewed_rules(generated_dir: Path) -> tuple[dict, str] | None:
     try:
         cfg = hcl2.loads(abac_path.read_text())
     except Exception as exc:
-        raise ValueError(
-            f"cannot read the reviewed rules in {abac_path}: {exc}. Fix the file, "
-            f"or re-run with {ALLOW_RULE_CHANGES_FLAG} to replace it with a new draft"
-        ) from exc
+        raise ValueError(_unreadable(abac_path, exc)) from exc
     if not any(cfg.get(section) for section in _RULE_SECTIONS):
         return None
     sql_path = generated_dir / "masking_functions.sql"
-    return cfg, sql_path.read_text() if sql_path.exists() else ""
+    if not sql_path.exists():
+        if any(p.get("function_name") for p in cfg.get("fgac_policies") or []):
+            raise ValueError(_unreadable(
+                sql_path, "missing, but the reviewed policies use masking functions"
+            ))
+        return cfg, ""
+    try:
+        sql = sql_path.read_text()
+        for block in split_into_function_blocks(sql):
+            sql_tokens(block)
+    except (OSError, UnicodeDecodeError, SqlTokenizeError) as exc:
+        raise ValueError(_unreadable(sql_path, exc)) from exc
+    return cfg, sql
+
+
+def footprint_from_ddl(ddl_text: str) -> dict[str, set[str] | None] | None:
+    """Map each fetched table to its columns (lower-case); None if unknown.
+
+    A table whose columns could not be parsed maps to None, so its reviewed
+    column rules are never treated as stale on a parse miss.
+    """
+    from validate_abac import parse_ddl_columns
+
+    tables: dict[str, set[str] | None] = {
+        match.group(1).replace("`", "").lower(): None
+        for match in re.finditer(
+            r"CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+([\w.`]+)", ddl_text or "", re.IGNORECASE
+        )
+    }
+    for column in parse_ddl_columns(ddl_text or ""):
+        table, name = column.lower().rsplit(".", 1)
+        tables[table] = (tables.get(table) or set()) | {name}
+    return tables or None
 
 
 def _function_key(block: str) -> tuple[str, str, str] | None:
@@ -742,11 +856,24 @@ def _function_blocks_by_key(sql_text: str) -> dict[tuple[str, str, str], str]:
     return blocks
 
 
-def _normalized_sql(block: str) -> str:
-    text = re.sub(r"--[^\n]*", "", block)
-    text = re.sub(r"^\s*USE\s+(?:CATALOG|SCHEMA)\s+\S+\s*;", "", text,
-                  flags=re.IGNORECASE | re.MULTILINE)
-    return " ".join(text.split()).rstrip(";").strip().lower()
+def _policy_function(policy: dict) -> tuple[str, str, str] | None:
+    name = str(policy.get("function_name") or "").lower()
+    if not name:
+        return None
+    return (
+        str(policy.get("function_catalog") or "").lower(),
+        str(policy.get("function_schema") or "").lower(),
+        name,
+    )
+
+
+def _find_function(
+    blocks: dict[tuple[str, str, str], str], ref: tuple[str, str, str]
+) -> tuple[str, str, str] | None:
+    """The block defining ref: exact catalog.schema.name, else by name (as validation does)."""
+    if ref in blocks:
+        return ref
+    return next((key for key in blocks if key[2] == ref[2]), None)
 
 
 def _fingerprint(value) -> str:
@@ -757,120 +884,275 @@ def _tag_set(items: list[dict]) -> list[tuple[str, str]]:
     return sorted((i.get("tag_key", ""), i.get("tag_value", "")) for i in items)
 
 
+def _entity(item: dict) -> tuple[str, str]:
+    return item.get("entity_type", ""), item.get("entity_name", "")
+
+
+def _by_entity(assignments: list[dict]) -> dict[tuple[str, str], list[dict]]:
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for item in assignments:
+        grouped.setdefault(_entity(item), []).append(item)
+    return grouped
+
+
+def _policy_targets(policy: dict, by_entity: dict[tuple[str, str], list[dict]]) -> set[tuple[str, str]]:
+    """Entities a policy protects: columns for a mask, tables for a row filter."""
+    from validate_abac import _condition_matches_tags
+
+    def tags(entity: tuple[str, str]) -> dict[str, set[str]]:
+        result: dict[str, set[str]] = {}
+        for item in by_entity.get(entity, []):
+            result.setdefault(item.get("tag_key", ""), set()).add(item.get("tag_value", ""))
+        return result
+
+    kind = {
+        "POLICY_TYPE_COLUMN_MASK": "columns",
+        "POLICY_TYPE_ROW_FILTER": "tables",
+    }.get(policy.get("policy_type", ""))
+    catalog = policy.get("catalog", "") or policy.get("function_catalog", "")
+    targets: set[tuple[str, str]] = set()
+    for entity_type, name in by_entity:
+        if entity_type != kind or (catalog and name.split(".")[0] != catalog):
+            continue
+        if kind == "columns":
+            table = ("tables", name.rsplit(".", 1)[0])
+            if (_condition_matches_tags(policy.get("match_condition", ""), tags((entity_type, name)))
+                    and _condition_matches_tags(policy.get("when_condition", ""), tags(table))):
+                targets.add((entity_type, name))
+        elif _condition_matches_tags(policy.get("when_condition", ""), tags((entity_type, name))):
+            targets.add((entity_type, name))
+    return targets
+
+
+def _condition_tag_refs(policy: dict) -> set[tuple[str, str | None]]:
+    text = f"{policy.get('match_condition', '')} {policy.get('when_condition', '')}"
+    refs: set[tuple[str, str | None]] = set(
+        re.findall(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", text)
+    )
+    refs |= {(key, None) for key in re.findall(r"hasTag\(\s*'([^']+)'\s*\)", text)}
+    return refs
+
+
 def keep_reviewed_rules(
     reviewed: tuple[dict, str],
     abac_path: Path,
     sql_path: Path,
     *,
+    footprint: dict[str, set[str] | None] | None = None,
+    partial_footprint: bool = False,
     allow_changes: bool = False,
 ) -> list[str]:
     """Merge a new draft additively over the reviewed rules of the prior run.
 
-    Every reviewed rule — one entity's tag mapping, a treatment override, an
-    fgac_policy (by name) or a masking function (by catalog.schema.name) — is
-    kept exactly as reviewed; the new draft only adds rules for things not
-    yet covered. A rule the model dropped or altered is restored, unless
-    allow_changes, in which case the new draft is accepted as written.
-    Returns one message per affected rule.
+    The unit is the protected target — a column or table, together with its
+    tags, treatment override and the policies that match it. A target the
+    reviewed draft protects keeps exactly its reviewed protection: model
+    edits are reverted and model additions that would also land on it (a new
+    override, a differently named policy) are discarded. Targets the reviewed
+    draft did not cover take the model's rules. Reviewed policies (by name)
+    and masking functions (by catalog.schema.name, compared by SQL token
+    stream) are restored the same way.
+
+    Reviewed rules for objects no longer in ``footprint`` (table -> columns,
+    from the fetched DDL) are dropped as stale. With ``partial_footprint``
+    (SPACE= / --tables runs) only tables in the footprint are checked.
+
+    allow_changes accepts the new draft as written. Returns one message per
+    affected rule; raises ValueError if a kept policy's function is in
+    neither the reviewed nor the new SQL.
     """
     prior_cfg, prior_sql = reviewed
     new_cfg = load_hcl_safe(abac_path)
-    restored: list[tuple[str, str]] = []  # (label, "removing" | "changing")
+    stale: list[str] = []
+    changes: list[tuple[str, str]] = []  # (reviewed rule, what the model proposed)
 
-    def entity(item: dict) -> tuple[str, str]:
-        return item.get("entity_type", ""), item.get("entity_name", "")
+    def stale_reason(entity_type: str, name: str) -> str | None:
+        if footprint is None:
+            return None
+        parts = name.lower().split(".")
+        table = ".".join(parts[:3])
+        what = "table" if entity_type == "tables" else "column"
+        if table not in footprint:
+            return None if partial_footprint else f"{what} no longer exists"
+        columns = footprint[table]
+        if entity_type == "columns" and len(parts) == 4 and columns is not None and parts[3] not in columns:
+            return "column no longer exists"
+        return None
 
-    def entity_label(name: str, items: list[dict]) -> str:
+    def label(entity: tuple[str, str], items: list[dict]) -> str:
         tags = dict(_tag_set(items))
         if "gr_treatment" in tags:
-            return f"{name} → {tags['gr_treatment']}"
-        return f"{name} → " + ", ".join(f"{k}={v}" for k, v in tags.items())
+            return f"{entity[1]} → {tags['gr_treatment']}"
+        if tags:
+            return f"{entity[1]} → " + ", ".join(f"{k}={v}" for k, v in tags.items())
+        return entity[1]
 
-    # Tag mappings: the unit is one entity's full set of tags, so a column's
-    # source tags and its derived gr_treatment always stay consistent.
-    prior_by_entity: dict[tuple[str, str], list[dict]] = {}
-    for item in prior_cfg.get("tag_assignments") or []:
-        prior_by_entity.setdefault(entity(item), []).append(item)
+    # ── Tag mappings: one target's full tag set is one rule ──────────────
+    prior_by_entity = _by_entity(prior_cfg.get("tag_assignments") or [])
     new_assignments = list(new_cfg.get("tag_assignments") or [])
-    new_by_entity: dict[tuple[str, str], list[dict]] = {}
-    for item in new_assignments:
-        new_by_entity.setdefault(entity(item), []).append(item)
-    kept_entities: set[tuple[str, str]] = set()
-    for key, items in prior_by_entity.items():
-        proposed = new_by_entity.get(key)
-        if proposed is None or _tag_set(proposed) != _tag_set(items):
-            kept_entities.add(key)
-            restored.append((entity_label(key[1], items),
-                             "removing" if proposed is None else "changing"))
+    new_by_entity = _by_entity(new_assignments)
+    targets: dict[tuple[str, str], str] = {}  # reviewed target -> its label
+    for entity, items in prior_by_entity.items():
+        reason = stale_reason(*entity)
+        if reason:
+            stale.append(f"{label(entity, items)} ({reason})")
+            continue
+        targets[entity] = label(entity, items)
+        proposed = new_by_entity.get(entity)
+        if proposed is None:
+            changes.append((targets[entity], "model proposed removing it"))
+        elif _tag_set(proposed) != _tag_set(items):
+            changes.append((targets[entity], "model proposed changing it"))
     merged_assignments = [
-        item for item in new_assignments if entity(item) not in kept_entities
-    ] + [item for key in prior_by_entity if key in kept_entities for item in prior_by_entity[key]]
+        item for item in new_assignments if _entity(item) not in targets
+    ] + [item for entity in targets for item in prior_by_entity[entity]]
+    merged_by_entity = _by_entity(merged_assignments)
 
-    # Treatment overrides, by column.
+    # ── Treatment overrides belong to their column's target ──────────────
     prior_overrides = {o.get("entity_name", ""): o for o in prior_cfg.get("treatment_overrides") or []}
     new_overrides = list(new_cfg.get("treatment_overrides") or [])
     new_override_by_col = {o.get("entity_name", ""): o for o in new_overrides}
-    kept_overrides: set[str] = set()
+    kept_overrides: dict[str, dict] = {}
     for column, override in prior_overrides.items():
+        rule = f"override {column} → {override.get('treatment', '')}"
+        reason = stale_reason("columns", column)
+        if reason:
+            stale.append(f"{rule} ({reason})")
+            continue
+        kept_overrides[column] = override
         proposed = new_override_by_col.get(column)
-        if proposed is None or proposed.get("treatment") != override.get("treatment"):
-            kept_overrides.add(column)
-            restored.append((f"override {column} → {override.get('treatment', '')}",
-                             "removing" if proposed is None else "changing"))
+        if proposed is None:
+            changes.append((rule, "model proposed removing it"))
+        elif proposed.get("treatment") != override.get("treatment"):
+            changes.append((rule, "model proposed changing it"))
+    for column, override in new_override_by_col.items():
+        if column not in kept_overrides and ("columns", column) in targets:
+            changes.append((
+                targets[("columns", column)],
+                f"model proposed a conflicting override → {override.get('treatment', '')}",
+            ))
     merged_overrides = [
-        o for o in new_overrides if o.get("entity_name", "") not in kept_overrides
-    ] + [prior_overrides[c] for c in prior_overrides if c in kept_overrides]
+        o for o in new_overrides
+        if o.get("entity_name", "") not in kept_overrides
+        and ("columns", o.get("entity_name", "")) not in targets
+    ] + list(kept_overrides.values())
 
-    # FGAC policies, by name.
+    # ── FGAC policies: reviewed by name; model additions only off-target ──
     prior_policies = {p.get("name", ""): p for p in prior_cfg.get("fgac_policies") or []}
     new_policies = list(new_cfg.get("fgac_policies") or [])
-    new_policy_names = {p.get("name", "") for p in new_policies}
-    kept_policies: set[str] = set()
+    new_policy_by_name = {p.get("name", ""): p for p in new_policies}
+    kept_policies: dict[str, dict] = {}
+    stale_policy_functions: set[tuple[str, str, str]] = set()
     for name, policy in prior_policies.items():
-        proposed = next((p for p in new_policies if p.get("name", "") == name), None)
-        if proposed is None or _fingerprint(proposed) != _fingerprint(policy):
-            kept_policies.add(name)
-            restored.append((f"policy {name}", "removing" if proposed is None else "changing"))
+        before = _policy_targets(policy, prior_by_entity)
+        if (before and not _policy_targets(policy, merged_by_entity)
+                and all(stale_reason(*entity) for entity in before)):
+            what = "columns" if policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK" else "tables"
+            stale.append(f"policy {name} (its {what} no longer exist)")
+            if ref := _policy_function(policy):
+                stale_policy_functions.add(ref)
+            continue
+        kept_policies[name] = policy
+        proposed = new_policy_by_name.get(name)
+        if proposed is None:
+            changes.append((f"policy {name}", "model proposed removing it"))
+        elif _fingerprint(proposed) != _fingerprint(policy):
+            changes.append((f"policy {name}", "model proposed changing it"))
+    discarded_policies: set[str] = set()
+    for policy in new_policies:
+        name = policy.get("name", "")
+        if name in prior_policies:
+            continue
+        overlap = sorted(_policy_targets(policy, merged_by_entity) & set(targets))
+        if overlap:
+            discarded_policies.add(name)
+            more = f" and {len(overlap) - 1} more" if len(overlap) > 1 else ""
+            changes.append((
+                targets[overlap[0]] + more,
+                f"model proposed a conflicting policy {name}",
+            ))
     merged_policies = [
-        prior_policies[p.get("name", "")] if p.get("name", "") in kept_policies else p
-        for p in new_policies
-    ] + [prior_policies[n] for n in prior_policies if n in kept_policies and n not in new_policy_names]
+        kept_policies.get(p.get("name", ""), p) for p in new_policies
+        if p.get("name", "") not in discarded_policies
+    ] + [p for name, p in kept_policies.items() if name not in new_policy_by_name]
+    abac_changed = bool(changes)
 
-    # Masking functions, by catalog.schema.name.
+    # ── Masking functions, by catalog.schema.name ────────────────────────
     new_sql = sql_path.read_text() if sql_path.exists() else ""
     prior_fns = _function_blocks_by_key(prior_sql)
     new_fns = _function_blocks_by_key(new_sql)
+    used = {ref for p in merged_policies if (ref := _policy_function(p))}
+    footprint_catalogs = {table.split(".")[0] for table in footprint or {}}
     kept_fns: set[tuple[str, str, str]] = set()
     for key, block in prior_fns.items():
         proposed = new_fns.get(key)
-        if proposed is None or _normalized_sql(proposed) != _normalized_sql(block):
-            kept_fns.add(key)
-            restored.append((f"function {'.'.join(p for p in key if p)}",
-                             "removing" if proposed is None else "changing"))
+        if proposed is not None and _same_sql(proposed, block):
+            continue
+        if not any(_find_function({key: block}, ref) for ref in used):
+            # Unused by any remaining policy: stale if only stale policies used
+            # it, or if its catalog left the footprint.
+            if any(_find_function({key: block}, ref) for ref in stale_policy_functions):
+                stale.append(f"function {'.'.join(p for p in key if p)} (only stale policies used it)")
+                continue
+            if (footprint is not None and not partial_footprint
+                    and key[0] and key[0] not in footprint_catalogs):
+                stale.append(f"function {'.'.join(key)} (catalog no longer in the footprint)")
+                continue
+        kept_fns.add(key)
+        changes.append((
+            f"function {'.'.join(p for p in key if p)}",
+            "model proposed removing it" if proposed is None else "model proposed changing it",
+        ))
 
+    messages = [f"  dropped stale reviewed rule {rule}" for rule in stale]
     if allow_changes:
-        return [
-            f"  accepted model change to reviewed rule {label} ({ALLOW_RULE_CHANGES_FLAG})"
-            for label, _ in restored
+        return messages + [
+            f"  accepted model change to reviewed rule {rule} ({ALLOW_RULE_CHANGES_FLAG})"
+            for rule, _ in changes
         ]
-    if not restored:
-        return []
 
-    if kept_entities or kept_overrides or kept_policies:
-        # Restored rules must stay valid against the tag vocabulary: union the
-        # reviewed tag_policies (keys and values) into the new draft's.
+    # Every kept reviewed policy must still resolve to a masking function.
+    final_fns = {k: (prior_fns[k] if k in kept_fns else b) for k, b in new_fns.items()}
+    final_fns.update({k: prior_fns[k] for k in kept_fns})
+    for name, policy in kept_policies.items():
+        ref = _policy_function(policy)
+        if ref is None or _find_function(final_fns, ref):
+            continue
+        source = _find_function(prior_fns, ref)
+        if source is None:
+            raise ValueError(
+                f"reviewed policy {name} uses function {'.'.join(p for p in ref if p)}, which "
+                "neither the reviewed nor the new masking_functions.sql defines. Add it to "
+                f"generated/masking_functions.sql, or re-run with {ALLOW_RULE_CHANGES_FLAG}"
+            )
+        kept_fns.add(source)
+        final_fns[source] = prior_fns[source]
+        changes.append((f"function {'.'.join(p for p in source if p)}",
+                        f"policy {name} still uses it"))
+
+    if not changes:
+        return messages
+
+    if abac_changed:
+        # Restored rules must stay valid against the tag vocabulary: carry the
+        # reviewed tag_policies keys/values they reference into the new draft.
+        needed: set[tuple[str, str | None]] = {
+            (item.get("tag_key", ""), item.get("tag_value", ""))
+            for entity in targets for item in prior_by_entity[entity]
+        }
+        for policy in kept_policies.values():
+            needed |= _condition_tag_refs(policy)
         merged_tag_policies = [dict(p) for p in new_cfg.get("tag_policies") or []]
         by_key = {p.get("key", ""): p for p in merged_tag_policies}
-        for policy in prior_cfg.get("tag_policies") or []:
-            current = by_key.get(policy.get("key", ""))
-            if current is None:
-                by_key[policy.get("key", "")] = dict(policy)
-                merged_tag_policies.append(by_key[policy.get("key", "")])
-            else:
-                values = list(current.get("values") or [])
-                current["values"] = values + [
-                    v for v in policy.get("values") or [] if v not in values
-                ]
+        prior_tag_policies = {p.get("key", ""): p for p in prior_cfg.get("tag_policies") or []}
+        for key, value in sorted(needed, key=lambda ref: (ref[0], ref[1] or "")):
+            if key not in by_key and key in prior_tag_policies:
+                by_key[key] = dict(prior_tag_policies[key], values=[])
+                merged_tag_policies.append(by_key[key])
+            if key in by_key and value is not None:
+                values = list(by_key[key].get("values") or [])
+                if value not in values:
+                    by_key[key]["values"] = values + [value]
         text = abac_path.read_text()
         for section, items in (
             ("tag_policies", merged_tag_policies),
@@ -895,10 +1177,9 @@ def keep_reviewed_rules(
         blocks += [prior_fns[k] for k in prior_fns if k in kept_fns and k not in new_fns]
         sql_path.write_text(prefix.rstrip() + "\n\n" + "\n\n".join(blocks) + "\n")
 
-    return [
-        f"  kept reviewed rule {label} (model proposed {reason} it); "
-        f"re-run with {ALLOW_RULE_CHANGES_FLAG} to accept"
-        for label, reason in restored
+    return messages + [
+        f"  kept reviewed rule {rule} ({reason}); {_ACCEPT_HINT}"
+        for rule, reason in changes
     ]
 
 

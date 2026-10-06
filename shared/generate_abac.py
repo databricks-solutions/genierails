@@ -7995,7 +7995,9 @@ def main():
     # ── Reviewed rules from a prior run stick (additive merge after drafting) ──
     # The assembled generated/ draft is the reviewed rule set, also in --space
     # mode. Genie mode drafts no rules, so it has nothing to merge.
-    from scripts.merge_space_configs import keep_reviewed_rules, load_reviewed_rules
+    from scripts.merge_space_configs import (
+        footprint_from_ddl, keep_reviewed_rules, load_reviewed_rules,
+    )
     reviewed_rules = None
     if args.mode != "genie":
         try:
@@ -8810,10 +8812,19 @@ Before you apply, tune for your business roles, security requirements, and Genie
 
     if reviewed_rules is not None and hcl_block:
         rules_abac = validation_dir / "abac.auto.tfvars"
-        rule_messages = keep_reviewed_rules(
-            reviewed_rules, rules_abac, validation_dir / "masking_functions.sql",
-            allow_changes=args.allow_rule_changes,
-        )
+        try:
+            # Reviewed rules for tables/columns gone from this run's DDL are
+            # stale. SPACE= and --tables scan only part of the footprint, so
+            # there only the scanned tables are checked.
+            rule_messages = keep_reviewed_rules(
+                reviewed_rules, rules_abac, validation_dir / "masking_functions.sql",
+                footprint=footprint_from_ddl(ddl_text),
+                partial_footprint=bool(args.space or args.tables),
+                allow_changes=args.allow_rule_changes,
+            )
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
         for line in rule_messages:
             print(line)
         if rule_messages and not args.allow_rule_changes:
