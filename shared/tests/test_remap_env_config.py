@@ -552,3 +552,34 @@ def test_deployed_space_whose_key_is_unchanged_promotes_normally(tmp_path, monke
 
     with (dest / "env.auto.tfvars").open() as handle:
         assert hcl2.load(handle)["genie_spaces"][0]["name"] == "Walkthrough (prod_cat.demo)"
+
+
+def test_names_that_normalize_to_one_terraform_key_after_remap_fail(tmp_path, monkeypatch, capsys):
+    """Distinct names can share a for_each key once lowercased and punctuation-collapsed."""
+    source = _two_space_source(tmp_path, ["Agent (dev_cat.demo)", "agent prod_cat demo"])
+    dest = tmp_path / "prod"
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+
+    with pytest.raises(SystemExit):
+        remap_env_config.main()
+
+    out = capsys.readouterr().out
+    assert "'Agent (dev_cat.demo)', 'agent prod_cat demo'" in out
+    assert "Terraform key 'agent_prod_cat_demo'" in out
+    assert not (dest / "env.auto.tfvars").exists()
+
+
+def test_same_key_names_that_the_rename_does_not_merge_still_promote(tmp_path, monkeypatch):
+    """Pre-existing same-key names are disambiguated by roots/workspace, as before."""
+    source = _two_space_source(tmp_path, ["Pay Ops", "pay-ops"])
+    dest = tmp_path / "prod"
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+
+    remap_env_config.main()
+
+    with (dest / "env.auto.tfvars").open() as handle:
+        assert [s["name"] for s in hcl2.load(handle)["genie_spaces"]] == ["Pay Ops", "pay-ops"]

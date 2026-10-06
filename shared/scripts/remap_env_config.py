@@ -316,6 +316,23 @@ def main():
             )
         print("       Give them names that stay distinct after DEST_CATALOG_MAP, then re-promote.")
         sys.exit(1)
+    # Distinct names can still normalize to one Terraform for_each key
+    # (e.g. "x (prod.demo)" and "x prod demo"); refuse keys the rename merges.
+    by_key: dict[str, list[str]] = {}
+    for name in canonical_names:
+        by_key.setdefault(_space_key(remap_name(name)), []).append(name)
+    key_collisions = {
+        key: srcs for key, srcs in by_key.items()
+        if len(srcs) > 1 and len({_space_key(src) for src in srcs}) > 1
+    }
+    if key_collisions:
+        for key, srcs in sorted(key_collisions.items()):
+            print(
+                "ERROR: Genie spaces " + ", ".join(repr(src) for src in srcs)
+                + f" would all be promoted under Terraform key {key!r}."
+            )
+        print("       Give them names that stay distinct after DEST_CATALOG_MAP, then re-promote.")
+        sys.exit(1)
     deployed = _deployed_space_keys(dest_env_dir)
     for name in canonical_names:
         old_key, new_key = _space_key(name), _space_key(remap_name(name))
