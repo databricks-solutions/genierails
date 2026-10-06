@@ -110,6 +110,8 @@ make generate ENV=dev
 ```
 It uses the `access_tier_groups` you set in Phase 0 — **your own** IdP-synced groups, **one per access tier, most-privileged first** (`payments_ops`=full/raw → `regional_analysts`=region-scoped + masked → `viewers`=least-privileged, with all sensitive columns masked — placeholders; use your real names). GenieRails *consumes* them by exact name, never creates them; the generated policies define each tier's actual access.
 
+Re-running `make generate ENV=dev` keeps the reviewed rules in `envs/dev/generated/` and adds rules only for uncovered columns. It prints one `kept reviewed rule …` line for each rule the model tried to drop or change, and one `dropped stale reviewed rule …` line for each rule whose table or column no longer exists. To accept the model's changes, re-run with `GENERATE_ARGS='--allow-rule-changes'` (or edit the generated files by hand).
+
 **1d. Prove coverage, apply, and verify — one command.**
 ```bash
 make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id
@@ -212,7 +214,7 @@ It verifies coverage and deploys only the governance protections: masks and acce
 **If the gate fails or `audit-rulebook` reports drift** — prod surfaced a sensitive tag your promoted rules don't cover (a type the classifier found only in prod, or a rule dropped in promotion). This is a **rule change — made in dev, never hand-edited in prod**. Loop back:
 
 1. **Scaffold the missing mappings** — `make scaffold-treatments ENV=prod` adds a **safe default** (full redaction, marked `REVIEW`) for each tag prod surfaced, so you don't hand-edit anything. Then **review each** — keep the redaction, or set a type-appropriate mask. This changes the shared *rulebook* (not prod's live state), so you validate it in dev and re-promote below.
-2. **Re-validate in dev:** `make generate ENV=dev` (reuses `access_tier_groups`) → `make coverage-gate ENV=dev`.
+2. **Re-validate in dev:** `make generate ENV=dev` (reuses `access_tier_groups`; keeps reviewed rules; adds rules only for uncovered columns) → `make coverage-gate ENV=dev`.
 3. **Re-promote:** `make promote …` (carries the updated rules to prod — same command as [Phase 2](#phase-2--prod-set-up-and-promote-rules)).
 4. **Re-run this phase:** `make certify ENV=prod`.
 

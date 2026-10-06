@@ -7375,6 +7375,15 @@ def main():
         help="Auto-split validated output into account + env data_access + workspace configs")
     parser.add_argument("--dry-run", action="store_true", help="Build the prompt and print it without calling the LLM")
     parser.add_argument(
+        "--allow-rule-changes",
+        action="store_true",
+        help=(
+            "Accept the model's changes to rules already in the reviewed draft "
+            "(generated/). Without it, a re-run keeps every existing rule exactly "
+            "as reviewed and only adds rules for newly uncovered tags or columns."
+        ),
+    )
+    parser.add_argument(
         "--allow-llm-sensitivity",
         action="store_true",
         help=(
@@ -7986,6 +7995,21 @@ def main():
         print("=" * 60)
         print(prompt)
         sys.exit(0)
+
+    # ── Reviewed rules from a prior run stick (additive merge after drafting) ──
+    # The assembled generated/ draft is the reviewed rule set, also in --space
+    # mode. Genie mode drafts no rules, so it has nothing to merge.
+    from scripts.merge_space_configs import (
+        footprint_from_ddl, keep_reviewed_rules, load_reviewed_rules,
+    )
+    reviewed_rules = None
+    if args.mode != "genie":
+        try:
+            reviewed_rules = load_reviewed_rules(Path(args.out_dir).resolve())
+        except ValueError as e:
+            if not args.allow_rule_changes:
+                print(f"ERROR: {e}")
+                sys.exit(1)
 
     if args.provider == "databricks":
         configure_databricks_env(auth_cfg)
@@ -8789,6 +8813,30 @@ Before you apply, tune for your business roles, security requirements, and Genie
     # In per-space mode, validate the assembled generated/ dir (what apply uses),
     # not the per-space subdirectory.
     validation_dir = out_dir.parent.parent if (target_space_cfg is not None and space_key) else out_dir
+
+    if reviewed_rules is not None and hcl_block:
+        rules_abac = validation_dir / "abac.auto.tfvars"
+        try:
+            # Reviewed rules for tables/columns gone from this run's DDL are
+            # stale. SPACE= and --tables scan only part of the footprint, so
+            # there only the scanned tables are checked.
+            rule_messages = keep_reviewed_rules(
+                reviewed_rules, rules_abac, validation_dir / "masking_functions.sql",
+                footprint=footprint_from_ddl(ddl_text),
+                partial_footprint=bool(args.space or args.tables),
+                allow_changes=args.allow_rule_changes,
+            )
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
+        for line in rule_messages:
+            print(line)
+        if rule_messages and not args.allow_rule_changes:
+            fix_hcl_syntax(rules_abac)
+            if args.mode != "governance":
+                # Restored policies feed the derived Genie ACL sidecar.
+                rules_env = validation_dir.parent / "env.auto.tfvars"
+                autofix_acl_groups(rules_abac, rules_env if rules_env.exists() else None)
 
     # Genie mode: skip validation — the output intentionally has no groups/ABAC sections
     # and validate_abac.py would incorrectly report "groups is missing".
