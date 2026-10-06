@@ -21,6 +21,9 @@ The scheduled Databricks Job defined in roots/workspace/scheduled_governance.tf
 uses ``--step check``. Legacy per-step modes remain available for existing
 callers.
 
+Both ``--env-dir`` and ``--config-source`` interpret relative paths from the
+repository root. Absolute paths are used unchanged.
+
 Exit codes:
   - check returns non-zero when either read-only audit reports findings.
   - A drift-only run (audit found drift, delta re-derived it, coverage passed)
@@ -44,13 +47,17 @@ REPO_ROOT = SHARED_ROOT.parent
 LEGACY_STEPS = ("audit", "delta", "coverage")
 
 
-def _resolve_env_dir(env_dir_arg: str) -> Path:
-    """Resolve the target env directory (absolute, or repo-relative like
-    'aws/envs/prod') to an absolute path."""
-    p = Path(env_dir_arg)
+def _resolve_repo_path(path_arg: str) -> Path:
+    """Resolve an absolute path unchanged, or a relative path from the repo root."""
+    p = Path(path_arg)
     if not p.is_absolute():
         p = (REPO_ROOT / p).resolve()
     return p
+
+
+def _resolve_env_dir(env_dir_arg: str) -> Path:
+    """Resolve the target environment using the common repo-relative policy."""
+    return _resolve_repo_path(env_dir_arg)
 
 
 def _validate_env_layout(env_dir: Path) -> str | None:
@@ -86,7 +93,7 @@ def _materialize_env_dir(config_source: str, env_dir: Path) -> None:
 
     Overlays onto env_dir if it already exists (source wins).
     """
-    src = Path(config_source)
+    src = _resolve_repo_path(config_source)
     if not src.is_dir():
         raise FileNotFoundError(
             f"config source not found or not a directory: {src}")
@@ -218,7 +225,7 @@ def main() -> int:
                         help="Legacy delta only: catalog passed to generate_abac.py --delta. "
                              "Empty = auto-derive from the env's uc_tables.")
     parser.add_argument("--config-source", default="",
-                        help="Runtime-visible path (UC Volume / workspace files / DBFS mount) holding "
+                        help="Runtime-visible path (absolute, or repo-relative) holding "
                              "account/ and <env>/ config to materialize before check. Legacy mode also "
                              "accepts a flat target-env source. Required for a fresh Git checkout.")
     args = parser.parse_args()

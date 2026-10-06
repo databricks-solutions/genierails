@@ -60,10 +60,16 @@ def _is_benign(inner: list[str]) -> bool:
     return " ".join(words) in BENIGN_TARGET_WARNINGS
 
 
-def filter_lines(lines: Iterable[str]) -> Iterator[str]:
-    """Yield ``lines`` minus the benign ``-target`` warning boxes."""
+def filter_lines(lines: Iterable[str], hide_outputs: bool = False) -> Iterator[str]:
+    """Yield lines minus benign target warnings and, optionally, final outputs."""
     block: list[str] | None = None
+    in_outputs = False
     for line in lines:
+        if hide_outputs and _plain(line) == "Outputs:":
+            in_outputs = True
+            continue
+        if in_outputs:
+            continue
         plain = _plain(line)
         if block is None:
             if plain == _OPEN:
@@ -81,7 +87,7 @@ def filter_lines(lines: Iterable[str]) -> Iterator[str]:
 
 
 def main() -> int:
-    for line in filter_lines(sys.stdin):
+    for line in filter_lines(sys.stdin, hide_outputs="--verbose" not in sys.argv[1:]):
         sys.stdout.write(line)
         sys.stdout.flush()
     return 0

@@ -41,6 +41,18 @@ def test_resolve_env_dir_absolute_is_unchanged(tmp_path):
     assert resolved == tmp_path
 
 
+def test_config_source_relative_is_repo_relative(tmp_path, monkeypatch):
+    monkeypatch.setattr(rsg, "REPO_ROOT", tmp_path)
+    source = tmp_path / "runtime/config"
+    source.mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text("# env\n")
+    dest = tmp_path / "checkout/aws/envs/prod"
+
+    rsg._materialize_env_dir("runtime/config", dest)
+
+    assert (dest / "env.auto.tfvars").read_text() == "# env\n"
+
+
 def test_bad_env_dir_returns_2(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv",
                         ["prog", "--env-dir", "aws/envs/does-not-exist", "--step", "audit"])

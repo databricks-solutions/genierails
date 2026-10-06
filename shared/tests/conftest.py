@@ -2,9 +2,55 @@
 
 No Databricks connection, LLM call, or Terraform is required.
 """
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+
 import pytest
 import hcl2
 from pathlib import Path
+
+
+def _gnu_make_version(binary: str) -> tuple[int, ...] | None:
+    try:
+        out = subprocess.run([binary, "--version"], text=True, capture_output=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.match(r"GNU Make (\d+)\.(\d+)", out)
+    return tuple(int(part) for part in m.groups()) if m else None
+
+
+def _find_gnu_make() -> str | None:
+    """`make` if it is GNU Make 4+, else `gmake` (Homebrew on macOS), else None.
+
+    Apple's make is GNU Make 3.81, which rejects options such as -Oline.
+    """
+    for binary in ("make", "gmake"):
+        path = shutil.which(binary)
+        if path and (_gnu_make_version(path) or (0,)) >= (4,):
+            return path
+    return None
+
+
+GNU_MAKE = _find_gnu_make()
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "gnu_make: needs GNU Make 4+ options (e.g. -Oline) from `make`")
+    # Tests and recipes call plain `make`; when that is Apple's 3.81 but gmake
+    # is installed, put a `make` -> gmake shim first on PATH for the session.
+    if GNU_MAKE and Path(GNU_MAKE).name != "make":
+        shim = Path(tempfile.mkdtemp(prefix="genierails-gnu-make-"))
+        (shim / "make").symlink_to(GNU_MAKE)
+        os.environ["PATH"] = f"{shim}{os.pathsep}{os.environ.get('PATH', '')}"
+        config.add_cleanup(lambda: shutil.rmtree(shim, ignore_errors=True))
+
+
+def pytest_runtest_setup(item):
+    if item.get_closest_marker("gnu_make") and GNU_MAKE is None:
+        pytest.skip("needs GNU Make 4+ (`make --version`); on macOS: brew install make, which provides gmake")
 
 
 @pytest.fixture

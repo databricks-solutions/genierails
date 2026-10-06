@@ -101,6 +101,19 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
 
 
 @pytest.mark.parametrize("cloud", CLOUDS)
+def test_setup_omits_completed_walkthrough_copy_and_renumbers(cloud, tmp_path):
+    first = _make(cloud, tmp_path, "setup", "ENV=dev")
+    assert first.returncode == 0
+    env_file = tmp_path / cloud / "envs/dev/env.auto.tfvars"
+    env_file.write_text((SHARED_ROOT / "examples/dev_to_prod/env.auto.tfvars.example").read_text())
+
+    result = _make(cloud, tmp_path, "setup", "ENV=dev")
+    assert result.returncode == 0, result.stderr
+    assert "cp ../shared/examples/dev_to_prod/env.auto.tfvars.example" not in result.stdout
+    assert re.findall(r"^  (\d+)\. ", result.stdout, flags=re.MULTILINE) == ["1", "2", "3", "4", "5"]
+
+
+@pytest.mark.parametrize("cloud", CLOUDS)
 def test_setup_prod_prints_promote_certify_release_maintain_steps(cloud, tmp_path):
     result = _make(cloud, tmp_path, "setup", "ENV=prod")
     assert result.returncode == 0, result.stderr

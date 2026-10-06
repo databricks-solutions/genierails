@@ -336,6 +336,242 @@ def test_shared_bare_folder_stub_is_removed_but_real_content_stops(tmp_path, cap
     assert (spaces / "finance_hr/masking_functions.sql").exists()
 
 
+# An agent's collision folder name changes when it is created (--new_<hash>
+# -> --<id>) and when its group shrinks to one (--<id> -> bare key). The old
+# folder follows the same rules as the raw-ID folder of an imported agent.
+
+NEW_THEN_CREATED = (
+    [{"name": "Finance & HR", "genie_space_id": ""}, {"name": "Finance HR", "genie_space_id": "01bbb"}],
+    [{"name": "Finance & HR", "genie_space_id": "01aaa"}, {"name": "Finance HR", "genie_space_id": "01bbb"}],
+)
+GROUP_THEN_SINGLETON = (COLLIDING, COLLIDING[:1])
+
+
+def _new_key():
+    return "finance_hr--new_" + generate_abac._name_hash("Finance & HR")
+
+
+LIFECYCLE = {
+    # transition: (configs before/after, old folder, new folder)
+    "new_hash_to_id": (NEW_THEN_CREATED, _new_key(), "finance_hr--01aaa"),
+    "group_to_singleton": (GROUP_THEN_SINGLETON, "finance_hr--01aaa", "finance_hr"),
+}
+
+
+def _bootstrap_before(tmp_path, transition):
+    (before, after), old, _new = LIFECYCLE[transition]
+    out_dir = _colliding_generated(tmp_path)
+    bootstrap_per_space_dirs(out_dir, {"genie_spaces": before}, "")
+    assert (out_dir / "spaces" / old / "abac.auto.tfvars").exists()
+    # The next full generation only emits configs for the agents still listed.
+    (out_dir / "abac.auto.tfvars").write_text(
+        "genie_space_configs = {\n"
+        + "".join(f'  "{sp["name"]}" = {{ title = "{sp["name"]}" }}\n' for sp in after)
+        + "}\n"
+    )
+    return out_dir
+
+
+def _folder_of(spaces, name, spaces_dir):
+    folders, notes = resolve_space_folders(spaces, {}, spaces_dir)
+    return next(f.key for f in folders if f.name == name), notes
+
+
+@pytest.mark.parametrize("transition", LIFECYCLE)
+def test_placeholder_only_old_collision_folder_is_removed(tmp_path, transition):
+    (_before, after), old, new = LIFECYCLE[transition]
+    out_dir = _bootstrap_before(tmp_path, transition)
+    spaces = out_dir / "spaces"
+
+    bootstrap_per_space_dirs(out_dir, {"genie_spaces": after}, "")
+
+    assert not (spaces / old).exists()
+    assert _owners(spaces)[new] == "Finance & HR"
+    assert _folder_of(after, "Finance & HR", spaces) == (new, [])
+
+
+@pytest.mark.parametrize("transition", LIFECYCLE)
+def test_old_collision_folder_with_real_content_is_kept(tmp_path, transition, capsys):
+    (_before, after), old, new = LIFECYCLE[transition]
+    out_dir = _bootstrap_before(tmp_path, transition)
+    spaces = out_dir / "spaces"
+    _real(spaces / old)
+    capsys.readouterr()
+
+    bootstrap_per_space_dirs(out_dir, {"genie_spaces": after}, "")
+
+    assert not (spaces / new).exists()
+    assert (spaces / old / "masking_functions.sql").read_text() == "-- customized\n"
+    assert _owners(spaces)[old] == "Finance & HR"
+    note = f"keeping generated/spaces/{old}/ for 'Finance & HR' (it has per-agent content)."
+    assert f"NOTE: {note}" in capsys.readouterr().out
+    # make generate SPACE= picks the same folder.
+    assert _folder_of(after, "Finance & HR", spaces) == (old, [note])
+
+
+@pytest.mark.parametrize("transition", LIFECYCLE)
+def test_old_and_new_collision_folders_with_real_content_stop_writing_nothing(tmp_path, transition, capsys):
+    (_before, after), old, new = LIFECYCLE[transition]
+    out_dir = _bootstrap_before(tmp_path, transition)
+    spaces = out_dir / "spaces"
+    _real(spaces / old)
+    _real(spaces / new)
+    before = {p: p.read_text() for p in spaces.rglob("*") if p.is_file()}
+    expected = (
+        f"generated/spaces/{old}/ and generated/spaces/{new}/ both hold per-agent content for "
+        f"'Finance & HR' (01aaa). Keep generated/spaces/{new}/: move or merge anything you still "
+        f"need from generated/spaces/{old}/ into it, delete generated/spaces/{old}/, then re-run "
+        "make generate."
+    )
+
+    # The pre-model-call check in main() raises the same error...
+    with pytest.raises(SpaceFolderError) as exc:
+        resolve_space_folders(after, {}, spaces)
+    assert str(exc.value) == expected
+    # ...and the bootstrap writes and deletes nothing.
+    with pytest.raises(SystemExit):
+        bootstrap_per_space_dirs(out_dir, {"genie_spaces": after}, "")
+    assert expected in capsys.readouterr().out
+    assert {p: p.read_text() for p in spaces.rglob("*") if p.is_file()} == before
+
+
+# Ownership is global: a folder that more than one agent could claim (as its
+# current name or an earlier one) is never adopted or cleaned up by guesswork.
+
+def _snapshot(spaces):
+    return {p: p.read_text() for p in spaces.rglob("*") if p.is_file()}
+
+
+def _bootstrap(tmp_path, genie_spaces):
+    out_dir = tmp_path / "generated"
+    out_dir.mkdir(exist_ok=True)
+    (out_dir / "abac.auto.tfvars").write_text(
+        "genie_space_configs = {\n"
+        + "".join(f'  "{sp["name"]}" = {{ title = "{sp["name"]}" }}\n' for sp in genie_spaces)
+        + "}\n"
+    )
+    bootstrap_per_space_dirs(out_dir, {"genie_spaces": genie_spaces}, "")
+    return out_dir / "spaces"
+
+
+def test_real_content_in_a_shared_bare_folder_is_adopted_by_no_agent(tmp_path, capsys):
+    spaces = tmp_path / "generated" / "spaces"
+    _real(spaces / "finance_hr")
+    before = _snapshot(spaces)
+
+    with pytest.raises(SpaceFolderError) as exc:
+        resolve_space_folders(COLLIDING, {}, spaces)
+    assert "generated/spaces/finance_hr/ has per-agent content but is shared by" in str(exc.value)
+    with pytest.raises(SystemExit):
+        _bootstrap(tmp_path, COLLIDING)
+    assert _snapshot(spaces) == before
+
+
+# Agent A's raw ID sanitizes to B's current (bare) folder name.
+ID_IS_OTHER_NAME = [
+    {"name": "Finance", "genie_space_id": "01abc"},
+    {"name": "01abc", "genie_space_id": ""},
+]
+
+
+def test_raw_id_equal_to_another_agents_folder_with_real_content_stops(tmp_path, capsys):
+    spaces = tmp_path / "generated" / "spaces"
+    _real(spaces / "01abc")
+    before = _snapshot(spaces)
+
+    with pytest.raises(SpaceFolderError) as exc:
+        resolve_space_folders(ID_IS_OTHER_NAME, {}, spaces)
+    assert str(exc.value) == (
+        "generated/spaces/01abc/ has per-agent content and is the folder for '01abc' (new), "
+        "but it is also an earlier folder name for 'Finance' (01abc), so it is unclear whose "
+        "content it is. If it belongs to 'Finance', move it to generated/spaces/finance/. "
+        "If it belongs to '01abc', give that agent a distinct name (name = \"...\") in "
+        "env.auto.tfvars and rename the folder to match. Then re-run make generate."
+    )
+    with pytest.raises(SystemExit):
+        _bootstrap(tmp_path, ID_IS_OTHER_NAME)
+    assert _snapshot(spaces) == before
+
+
+def test_raw_id_stub_that_is_another_agents_folder_is_not_removed(tmp_path):
+    spaces = tmp_path / "generated" / "spaces"
+    _stub(spaces / "01abc", "01abc")   # A's pre-title raw-ID name, and B's folder
+
+    folders, _ = resolve_space_folders(ID_IS_OTHER_NAME, {}, spaces)
+    assert {f.name: f.key for f in folders} == {"Finance": "finance", "01abc": "01abc"}
+    assert all("01abc" not in f.stale_keys for f in folders)
+
+    _bootstrap(tmp_path, ID_IS_OTHER_NAME)
+    assert _owners(spaces) == {"finance": "Finance", "01abc": "01abc"}
+
+
+# Two genie_spaces entries with the same genie_space_id in a collision group
+# both resolve to "<key>--<id>".
+SAME_ID = [
+    {"name": "Finance & HR", "genie_space_id": "01aaa"},
+    {"name": "Finance HR", "genie_space_id": "01aaa"},
+]
+
+
+def test_id_suffixed_folder_claimed_by_two_agents_stops(tmp_path):
+    spaces = tmp_path / "generated" / "spaces"
+    with pytest.raises(SpaceFolderError) as exc:
+        resolve_space_folders(SAME_ID, {}, spaces)
+    assert str(exc.value).startswith(
+        "Genie agents 'Finance & HR' (01aaa) and 'Finance HR' (01aaa) would share "
+        "generated/spaces/finance_hr--01aaa/."
+    )
+
+    _real(spaces / "finance_hr--01aaa")
+    with pytest.raises(SpaceFolderError) as exc:
+        resolve_space_folders(SAME_ID, {}, spaces)
+    assert "generated/spaces/finance_hr--01aaa/ has per-agent content and is the folder for" in str(exc.value)
+
+
+def test_new_hash_folder_claimed_by_two_agents_stops(tmp_path, monkeypatch):
+    # Name hashes of distinct names collide only in theory; force it.
+    monkeypatch.setattr(generate_abac, "_name_hash", lambda name: "deadbeef")
+    new = [{"name": "Finance & HR", "genie_space_id": ""}, {"name": "Finance HR", "genie_space_id": ""}]
+
+    with pytest.raises(SpaceFolderError) as exc:
+        resolve_space_folders(new, {}, tmp_path / "spaces")
+    assert "would share generated/spaces/finance_hr--new_deadbeef/" in str(exc.value)
+
+
+def test_shared_stub_is_removed_only_for_the_agent_it_was_written_for(tmp_path):
+    spaces = tmp_path / "generated" / "spaces"
+    _stub(spaces / "finance_hr", "Someone Else")   # claimed by both, owned by neither
+
+    folders, _ = resolve_space_folders(COLLIDING, {}, spaces)
+    assert all("finance_hr" not in f.stale_keys for f in folders)
+    _bootstrap(tmp_path, COLLIDING)
+    assert (spaces / "finance_hr" / "abac.auto.tfvars").exists()
+
+    (spaces / "finance_hr" / "abac.auto.tfvars").unlink()
+    (spaces / "finance_hr").rmdir()
+    _stub(spaces / "finance_hr", "Finance HR")
+    folders, _ = resolve_space_folders(COLLIDING, {}, spaces)
+    assert {f.name: "finance_hr" in f.stale_keys for f in folders} == {
+        "Finance & HR": False, "Finance HR": True,
+    }
+    _bootstrap(tmp_path, COLLIDING)
+    assert not (spaces / "finance_hr").exists()
+
+
+def test_unrelated_agents_resolve_exactly_as_before(tmp_path):
+    spaces = tmp_path / "generated" / "spaces"
+    plain = [{"name": "Sales", "genie_space_id": "01s"}, {"name": "HR", "genie_space_id": ""}]
+    _stub(spaces / "01s", "01s")
+
+    folders, notes = resolve_space_folders(plain, {}, spaces)
+
+    assert {f.name: (f.key, f.stale_keys) for f in folders} == {
+        "Sales": ("sales", ["01s", "sales--new_" + generate_abac._name_hash("Sales"), "sales--01s"]),
+        "HR": ("hr", ["hr--new_" + generate_abac._name_hash("HR")]),
+    }
+    assert notes == []
+
+
 def test_space_folder_names_never_feed_terraform_keys():
     # Folder names are local to generate/merge; no Terraform root or module
     # reads generated/spaces/, so the folder choice can't move resource keys.
@@ -417,6 +653,33 @@ def test_filter_keeps_an_unknown_warning():
 
 def test_filter_emits_an_unterminated_box_at_eof_verbatim():
     assert list(filter_lines(TARGETING[:-1])) == TARGETING[:-1]
+
+
+def test_classification_filter_hides_only_successful_outputs_block():
+    lines = ["Apply complete! Resources: 1 added.\n", "\n", "Outputs:\n",
+             "classification = { noisy = true }\n"]
+    assert list(filter_lines(lines, hide_outputs=True)) == lines[:2]
+    assert list(filter_lines(lines, hide_outputs=False)) == lines
+
+
+def test_generated_remap_can_suppress_duplicate_success_line(tmp_path):
+    source_abac = tmp_path / "source.tfvars"
+    source_sql = tmp_path / "source.sql"
+    out_abac = tmp_path / "out.tfvars"
+    out_sql = tmp_path / "out.sql"
+    source_abac.write_text('uc_tables = ["dev.sales.orders"]\ntag_assignments = []\n')
+    source_sql.write_text("USE CATALOG dev;\n")
+
+    result = subprocess.run(
+        [sys.executable, str(SHARED / "scripts/remap_generated_config.py"),
+         str(source_abac), str(source_sql), str(out_abac), str(out_sql),
+         "--map", "dev=prod", "--quiet-remaps"],
+        text=True, capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Catalog remap:" not in result.stdout
+    assert "prod.sales.orders" in out_abac.read_text()
 
 
 def test_filter_script_streams_unbuffered():
