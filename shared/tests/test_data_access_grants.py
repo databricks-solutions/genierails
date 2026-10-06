@@ -20,6 +20,20 @@ def _resource_body(source: str, name: str) -> str:
     raise AssertionError(f"unterminated resource {name}")
 
 
+def _typed_resource_body(source: str, resource_type: str, name: str) -> str:
+    marker = f'resource "{resource_type}" "{name}" {{'
+    start = source.index(marker) + len(marker)
+    depth = 1
+    for index in range(start, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index]
+    raise AssertionError(f"unterminated resource {resource_type}.{name}")
+
+
 def test_group_grants_follow_catalog_schema_table_chain():
     source = MAIN_TF.read_text()
     catalog = _resource_body(source, "catalog_access")
@@ -81,6 +95,66 @@ def test_masking_functions_and_policies_wait_for_deployment_sp_grant():
         start = source.index(start_marker)
         end = source.index(end_marker, start) if end_marker else len(source)
         assert "databricks_grant.terraform_sp_manage_catalog" in source[start:end]
+
+
+def test_table_select_waits_for_complete_policy_enforcement_chain():
+    source = MAIN_TF.read_text()
+    table = _resource_body(source, "table_access")
+    policies = _typed_resource_body(source, "databricks_policy_info", "policies")
+    enforcement_wait = _typed_resource_body(
+        source, "time_sleep", "wait_for_policy_enforcement"
+    )
+
+    # Whole-resource dependencies make any failed mask or policy instance block
+    # every table grant, rather than only a matching for_each instance.
+    for prerequisite in (
+        "time_sleep.wait_for_tag_propagation",
+        "terraform_data.masking_functions",
+        "databricks_policy_info.policies",
+        "time_sleep.wait_for_policy_enforcement",
+    ):
+        assert prerequisite in table
+
+    assert "databricks_grant.table_access" not in policies
+    assert "depends_on      = [databricks_policy_info.policies]" in enforcement_wait
+    assert 'create_duration = "30s"' in enforcement_wait
+
+
+def test_policy_grant_dependency_graph_is_acyclic_and_fail_closed():
+    source = MAIN_TF.read_text()
+    bodies = {
+        "table": _resource_body(source, "table_access"),
+        "policies": _typed_resource_body(source, "databricks_policy_info", "policies"),
+        "policy_wait": _typed_resource_body(
+            source, "time_sleep", "wait_for_policy_enforcement"
+        ),
+    }
+    refs = {
+        node: set(re.findall(
+            r"(?:databricks_grant|databricks_policy_info|terraform_data|time_sleep)\.[A-Za-z0-9_]+",
+            body,
+        ))
+        for node, body in bodies.items()
+    }
+
+    # This is the relevant Terraform plan graph: grants have both failed-policy
+    # and failed-mask nodes as ancestors. Terraform reverses these edges during
+    # destroy, so table grants are removed before the wait and policies.
+    assert "databricks_policy_info.policies" in refs["table"]
+    assert "terraform_data.masking_functions" in refs["table"]
+    assert "databricks_policy_info.policies" in refs["policy_wait"]
+    assert "databricks_grant.table_access" not in refs["policies"]
+
+
+def test_existing_grant_and_policy_resource_addresses_and_keys_are_unchanged():
+    source = MAIN_TF.read_text()
+    table = _resource_body(source, "table_access")
+    policies = _typed_resource_body(source, "databricks_policy_info", "policies")
+
+    assert "for pair in local.table_access_pairs" in table
+    assert '"${pair.table}|${pair.principal}"' in table
+    assert "for_each = local.fgac_policy_map" in policies
+    assert 'name                  = "${each.value.catalog}_${each.key}"' in policies
 
 
 def test_business_select_is_fail_closed_while_structural_grants_remain():
