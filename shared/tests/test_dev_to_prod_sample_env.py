@@ -4,6 +4,8 @@ from argparse import Namespace
 from unittest.mock import Mock
 import json
 
+import pytest
+
 
 MODULE = Path(__file__).parents[1] / "examples" / "dev_to_prod" / "setup_sample_env.py"
 SPEC = importlib.util.spec_from_file_location("setup_sample_env", MODULE)
@@ -108,83 +110,186 @@ def test_account_host_follows_workspace_cloud():
     assert sample._account_host("https://dbc-1.cloud.databricks.com") == "https://accounts.cloud.databricks.com"
 
 
-def test_teardown_deletes_recorded_group_ids_without_account_id_flag(tmp_path, monkeypatch):
-    """The documented teardown command passes no --account-id."""
+RECORDED = {"account_id": "acct-1", "account_host": "https://accounts.gcp.databricks.com"}
+
+
+def _teardown_args(*extra):
+    return sample.parser().parse_args(["--catalog", "catalog", "--schema", "schema", "--teardown", *extra])
+
+
+@pytest.fixture
+def teardown_env(tmp_path, monkeypatch):
+    """Isolated state file, no ambient account settings, and a fake AccountClient."""
     state_file = tmp_path / "state.json"
     monkeypatch.setattr(sample, "STATE_FILE", state_file)
-    monkeypatch.delenv("DATABRICKS_ACCOUNT_ID", raising=False)
-    monkeypatch.delenv("DATABRICKS_ACCOUNT_HOST", raising=False)
-    name = sample.SAMPLE_GROUPS[0]
-    # A different group now holds the name: it must not be touched.
-    account = _account_with([name])
-    seen = {}
-    monkeypatch.setattr(sample, "AccountClient", lambda **kw: seen.update(kw) or account)
+    for var in ("DATABRICKS_ACCOUNT_ID", "DATABRICKS_ACCOUNT_HOST", "DATABRICKS_ACCOUNT_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    built = []
+
+    def install(account):
+        def factory(**kwargs):
+            built.append(kwargs)
+            if "profile" not in kwargs:
+                account.config.account_id = kwargs["account_id"]
+                account.config.host = kwargs["host"]
+            return account
+        monkeypatch.setattr(sample, "AccountClient", factory)
+        return built
+
+    return state_file, install
+
+
+def _recorded_state(state_file, names, **extra):
     _teardown_state(state_file, {
-        "groups_created": [name], "group_ids": {name: "recorded-id"},
-        "account_id": "acct-1", "account_host": "https://accounts.gcp.databricks.com",
+        "space_id": "space-1", "groups_created": list(names),
+        "group_ids": {name: f"recorded-{name}" for name in names}, **RECORDED, **extra,
     })
-    args = sample.parser().parse_args(["--catalog", "catalog", "--schema", "schema", "--teardown"])
 
-    sample.teardown(args, _workspace())
 
-    assert seen["account_id"] == "acct-1"
-    assert seen["host"] == "https://accounts.gcp.databricks.com"
-    account.groups.delete.assert_called_once_with(id="recorded-id")
+def test_teardown_deletes_recorded_group_ids_in_the_recorded_account(teardown_env):
+    """The documented teardown passes no --account-id; a group now holding the name is untouched."""
+    state_file, install = teardown_env
+    name = sample.SAMPLE_GROUPS[0]
+    account = _account_with([name])
+    built = install(account)
+    _recorded_state(state_file, [name])
+
+    assert sample.teardown(_teardown_args(), _workspace()) is True
+
+    assert built == [{"account_id": "acct-1", "host": "https://accounts.gcp.databricks.com",
+                      "product": "genierails-dev-to-prod", "product_version": "1.0"}]
+    account.groups.delete.assert_called_once_with(id=f"recorded-{name}")
     account.groups.list.assert_not_called()
     assert not state_file.exists()
 
 
-def test_teardown_of_legacy_names_only_state_looks_up_only_created_groups(tmp_path, monkeypatch):
-    """State from the first --create-groups release records names but no IDs."""
-    state_file = tmp_path / "state.json"
-    monkeypatch.setattr(sample, "STATE_FILE", state_file)
-    created, reused = sample.SAMPLE_GROUPS[0], sample.SAMPLE_GROUPS[1]
-    account = _account_with([created, reused])
-    monkeypatch.setattr(sample, "_account_client", lambda args, client, state: account)
-    _teardown_state(state_file, {"groups_created": [created]})
+@pytest.mark.parametrize(("flags", "env", "expected"), [
+    (["--account-id", "acct-OTHER"], {}, "account ID acct-OTHER"),
+    ([], {"DATABRICKS_ACCOUNT_ID": "acct-OTHER"}, "account ID acct-OTHER"),
+    ([], {"DATABRICKS_ACCOUNT_HOST": "https://accounts.cloud.databricks.com"}, "DATABRICKS_ACCOUNT_HOST"),
+])
+def test_teardown_refuses_a_conflicting_account_before_removing_anything(
+    teardown_env, monkeypatch, flags, env, expected
+):
+    state_file, install = teardown_env
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
+    account = _account_with([])
+    built = install(account)
+    _recorded_state(state_file, [sample.SAMPLE_GROUPS[0]], schema_created=True)
+    before = state_file.read_text()
+    workspace = _workspace()
 
-    sample.teardown(Namespace(catalog="catalog", schema="schema", warehouse_id=None,
-                              account_id="acct-1", account_profile=None), _workspace())
+    with pytest.raises(RuntimeError, match=expected) as raised:
+        sample.teardown(_teardown_args(*flags), workspace)
 
-    account.groups.delete.assert_called_once_with(id=f"id-{created}")
+    assert "acct-1" in str(raised.value) and "Nothing was removed" in str(raised.value)
+    assert built == []
+    account.groups.delete.assert_not_called()
+    workspace.api_client.do.assert_not_called()
+    assert state_file.read_text() == before
+
+
+def test_teardown_refuses_an_account_profile_for_another_account(teardown_env):
+    state_file, install = teardown_env
+    account = _account_with([])
+    account.config.account_id = "acct-OTHER"
+    account.config.host = "https://accounts.gcp.databricks.com"
+    install(account)
+    _recorded_state(state_file, [sample.SAMPLE_GROUPS[0]])
+    before = state_file.read_text()
+
+    with pytest.raises(RuntimeError, match="--account-profile other"):
+        sample.teardown(_teardown_args("--account-profile", "other"), _workspace())
+
+    account.groups.delete.assert_not_called()
+    assert state_file.read_text() == before
+
+
+def test_not_found_in_the_recorded_account_drops_the_record(teardown_env):
+    state_file, install = teardown_env
+    account = _account_with([])
+    account.groups.delete.side_effect = RuntimeError("RESOURCE_DOES_NOT_EXIST: 404")
+    install(account)
+    _recorded_state(state_file, [sample.SAMPLE_GROUPS[0]])
+
+    assert sample.teardown(_teardown_args(), _workspace()) is True
     assert not state_file.exists()
 
 
-def test_teardown_of_legacy_state_without_any_account_id_fails_and_keeps_state(tmp_path, monkeypatch):
-    import pytest
-
-    state_file = tmp_path / "state.json"
-    monkeypatch.setattr(sample, "STATE_FILE", state_file)
-    monkeypatch.setattr(sample, "AccountClient", Mock())
-    _teardown_state(state_file, {"groups_created": [sample.SAMPLE_GROUPS[0]]})
-
-    with pytest.raises(RuntimeError, match="--account-id"):
-        sample.teardown(Namespace(catalog="catalog", schema="schema", warehouse_id=None,
-                                  account_id=None, account_profile=None), _workspace())
-    assert json.loads(state_file.read_text())  # nothing forgotten
-
-
-def test_teardown_records_progress_so_a_failed_delete_can_be_retried(tmp_path, monkeypatch):
-    import pytest
-
-    state_file = tmp_path / "state.json"
-    monkeypatch.setattr(sample, "STATE_FILE", state_file)
+def test_a_failed_recorded_delete_keeps_the_unconfirmed_records(teardown_env):
+    state_file, install = teardown_env
     first, second = sample.SAMPLE_GROUPS[:2]
     account = _account_with([])
     account.groups.delete.side_effect = [None, RuntimeError("boom")]
-    monkeypatch.setattr(sample, "_account_client", lambda args, client, state: account)
-    _teardown_state(state_file, {
-        "groups_created": [first, second], "group_ids": {first: "id-1", second: "id-2"},
-        "account_id": "acct-1",
-    })
+    install(account)
+    _recorded_state(state_file, [first, second])
 
     with pytest.raises(RuntimeError, match=second):
-        sample.teardown(Namespace(catalog="catalog", schema="schema", warehouse_id=None,
-                                  account_id=None, account_profile=None), _workspace())
+        sample.teardown(_teardown_args(), _workspace())
 
     remaining = next(iter(json.loads(state_file.read_text()).values()))
     assert remaining["groups_created"] == [second]
-    assert remaining["group_ids"] == {second: "id-2"}
+    assert remaining["group_ids"] == {second: f"recorded-{second}"}
+
+
+def _legacy_state(state_file, names):
+    """What the first --create-groups release wrote (and the live sample run's state)."""
+    _teardown_state(state_file, {"space_id": "space-1", "schema_created": True,
+                                 "warehouse_id": "wh", "groups_created": list(names)})
+
+
+def test_legacy_names_are_never_deleted_without_the_opt_in(teardown_env, monkeypatch, capsys):
+    state_file, install = teardown_env
+    monkeypatch.setenv("DATABRICKS_ACCOUNT_ID", "acct-1")  # an account ID alone is not consent
+    monkeypatch.setattr(sample, "_run_sql", lambda *args: None)
+    monkeypatch.setattr(sample, "_client", lambda args: _workspace())
+    account = _account_with(list(sample.SAMPLE_GROUPS))
+    built = install(account)
+    _legacy_state(state_file, sample.SAMPLE_GROUPS)
+
+    assert sample.main(["--catalog", "catalog", "--schema", "schema", "--teardown"]) == 1
+
+    out = capsys.readouterr().out
+    assert "Teardown INCOMPLETE" in out
+    assert "known by name only: " + ", ".join(sample.SAMPLE_GROUPS) in out
+    assert "--delete-legacy-groups-by-name" in out and "Account Console" in out
+    assert built == []
+    account.groups.delete.assert_not_called()
+    remaining = next(iter(json.loads(state_file.read_text()).values()))
+    assert remaining["groups_created"] == list(sample.SAMPLE_GROUPS)
+    assert remaining["space_id"] == "" and remaining["schema_created"] is False
+
+
+def test_legacy_opt_in_warns_then_deletes_only_unambiguous_matches(teardown_env, monkeypatch, capsys):
+    state_file, install = teardown_env
+    monkeypatch.setattr(sample, "_run_sql", lambda *args: None)
+    present, missing = sample.SAMPLE_GROUPS[:2]
+    account = _account_with([present])
+    install(account)
+    _legacy_state(state_file, [present, missing])
+
+    complete = sample.teardown(
+        _teardown_args("--delete-legacy-groups-by-name", "--account-id", "acct-1"), _workspace()
+    )
+
+    out = capsys.readouterr().out
+    assert out.index("WARNING: --delete-legacy-groups-by-name") < out.index(f"Removing legacy account group {present}")
+    account.groups.delete.assert_called_once_with(id=f"id-{present}")
+    assert complete is False  # the missing one could not be confirmed, so its record is kept
+    remaining = next(iter(json.loads(state_file.read_text()).values()))
+    assert remaining["groups_created"] == [missing]
+
+
+def test_legacy_opt_in_still_needs_an_account_id(teardown_env):
+    state_file, install = teardown_env
+    install(_account_with([]))
+    _legacy_state(state_file, [sample.SAMPLE_GROUPS[0]])
+    before = state_file.read_text()
+
+    with pytest.raises(RuntimeError, match="--account-id"):
+        sample.teardown(_teardown_args("--delete-legacy-groups-by-name"), _workspace())
+    assert state_file.read_text() == before
 
 
 def test_skip_agent_seeds_tables_without_creating_a_genie_agent(tmp_path, monkeypatch, capsys):

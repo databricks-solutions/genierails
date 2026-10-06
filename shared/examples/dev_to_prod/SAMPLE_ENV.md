@@ -21,7 +21,9 @@ python teardown_sample_env.py --catalog dev_finance
 # Equivalent: add --teardown to the setup command.
 ```
 
-With `--create-groups`, teardown deletes exactly the groups it created (by their recorded IDs), using the account it recorded — no extra flags. Ownership state written before group IDs were recorded also needs `--account-id <account-id>`.
+With `--create-groups`, teardown deletes exactly the groups it created, by their recorded IDs and only in the account it recorded (it refuses a different `--account-id` / `DATABRICKS_ACCOUNT_*`). No extra flags are needed.
+
+State written before group IDs were recorded lists groups by name only; teardown keeps those groups and lists them — delete them in the Account Console, or opt in with `--delete-legacy-groups-by-name --account-id <account-id>` (exact-name match, so it can also remove a different group that reused the name).
 
 **Prod needs the same tables.** In [Phase 2](README.md#phase-2--prod-set-up-and-promote-rules), seed the prod catalog before scanning it — tables only, because `make promote` creates prod's agent:
 

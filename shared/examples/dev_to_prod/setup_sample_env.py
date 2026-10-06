@@ -41,10 +41,11 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--warehouse-id", default=os.getenv("DATABRICKS_WAREHOUSE_ID"), help="Existing SQL warehouse ID (required; env: DATABRICKS_WAREHOUSE_ID).")
     p.add_argument("--rows", default=os.getenv("DEV_TO_PROD_ROWS", str(DEFAULT_ROWS)), help=f"Rows per table (default: {DEFAULT_ROWS}; env: DEV_TO_PROD_ROWS).")
     p.add_argument("--create-groups", action="store_true", help=f"Also create the demo access-tier account groups ({', '.join(SAMPLE_GROUPS)}) for an account with no IdP-synced groups; requires --account-id.")
-    p.add_argument("--account-id", default=os.getenv("DATABRICKS_ACCOUNT_ID"), help="Databricks account ID, used only by --create-groups (env: DATABRICKS_ACCOUNT_ID).")
+    p.add_argument("--account-id", default=os.getenv("DATABRICKS_ACCOUNT_ID"), help="Databricks account ID for --create-groups (env: DATABRICKS_ACCOUNT_ID). Teardown uses the account recorded at creation and refuses a different one.")
     p.add_argument("--account-profile", default=os.getenv("DATABRICKS_ACCOUNT_PROFILE"), help="Account-level CLI profile for --create-groups; default: environment credentials (env: DATABRICKS_ACCOUNT_PROFILE).")
     p.add_argument("--skip-agent", action="store_true", help="Seed the tables only, without a Genie agent (e.g. the prod catalog: make promote creates prod's agent).")
     p.add_argument("--teardown", action="store_true", help="Remove only resources recorded as created by this script.")
+    p.add_argument("--delete-legacy-groups-by-name", action="store_true", help="Teardown only: also delete groups recorded by name alone (state written before group IDs were recorded), by exact display name. Can remove a different group that reused the name.")
     return p
 
 
@@ -87,27 +88,61 @@ def _account_host(workspace_host: str) -> str:
     return "https://accounts.cloud.databricks.com"
 
 
-def _account_client(args: argparse.Namespace, client: Any, state: dict[str, Any] | None = None) -> Any:
-    """Account client for --create-groups, or for teardown of the groups it created.
-
-    Teardown reuses the account ID and host recorded at creation, so it needs no
-    --account-id; an explicit --account-id / DATABRICKS_ACCOUNT_ID still wins.
-    """
+def _account_client(args: argparse.Namespace, client: Any) -> Any:
+    """Account client for --create-groups (and the opt-in legacy name cleanup)."""
     if AccountClient is None:
         raise RuntimeError("databricks-sdk is not installed; run: pip install -r requirements.txt")
-    state = state or {}
-    account_id = args.account_id or state.get("account_id")
-    if not account_id:
+    if not args.account_id:
         raise RuntimeError("--create-groups needs --account-id (or DATABRICKS_ACCOUNT_ID)")
-    kwargs: dict[str, Any] = {"account_id": account_id, "product": "genierails-dev-to-prod", "product_version": "1.0"}
+    kwargs: dict[str, Any] = {"account_id": args.account_id, "product": "genierails-dev-to-prod", "product_version": "1.0"}
     if args.account_profile:
         kwargs["profile"] = args.account_profile
     else:
-        kwargs["host"] = (
-            os.getenv("DATABRICKS_ACCOUNT_HOST") or state.get("account_host")
-            or _account_host(str(getattr(client.config, "host", "")))
-        )
+        kwargs["host"] = os.getenv("DATABRICKS_ACCOUNT_HOST") or _account_host(str(getattr(client.config, "host", "")))
     return AccountClient(**kwargs)
+
+
+def _same_host(a: str, b: str) -> bool:
+    return str(a).rstrip("/").lower() == str(b).rstrip("/").lower()
+
+
+def _recorded_account_client(args: argparse.Namespace, state: dict[str, Any]) -> Any:
+    """Account client for the account the groups were created in; nothing else.
+
+    The recorded account ID and host are authoritative. An --account-id,
+    DATABRICKS_ACCOUNT_ID, DATABRICKS_ACCOUNT_HOST or --account-profile that
+    points at a different account is refused rather than used to delete there.
+    """
+    if AccountClient is None:
+        raise RuntimeError("databricks-sdk is not installed; run: pip install -r requirements.txt")
+    recorded_id, recorded_host = state.get("account_id"), state.get("account_host")
+    if not recorded_id or not recorded_host:
+        raise RuntimeError("ownership state records group IDs but not their account; refusing to delete them")
+    conflicts = []
+    if args.account_id and args.account_id != recorded_id:
+        conflicts.append(f"account ID {args.account_id} (--account-id / DATABRICKS_ACCOUNT_ID)")
+    env_host = os.getenv("DATABRICKS_ACCOUNT_HOST")
+    if env_host and not _same_host(env_host, recorded_host):
+        conflicts.append(f"account host {env_host} (DATABRICKS_ACCOUNT_HOST)")
+    kwargs: dict[str, Any] = {"account_id": recorded_id, "product": "genierails-dev-to-prod", "product_version": "1.0"}
+    if args.account_profile:
+        kwargs["profile"] = args.account_profile
+    else:
+        kwargs["host"] = recorded_host
+    account = None if conflicts else AccountClient(**kwargs)
+    if account is not None and not (
+        account.config.account_id == recorded_id and _same_host(account.config.host, recorded_host)
+    ):
+        conflicts.append(
+            f"account {account.config.account_id} at {account.config.host} (--account-profile {args.account_profile})"
+        )
+    if conflicts:
+        raise RuntimeError(
+            f"the sample groups were created in account {recorded_id} at {recorded_host}, but you pointed teardown at "
+            + " and ".join(conflicts)
+            + "; refusing to delete groups under another account. Unset or correct that setting and re-run. Nothing was removed."
+        )
+    return account
 
 
 def _ensure_groups(account: Any, state: dict[str, Any]) -> None:
@@ -129,28 +164,55 @@ def _ensure_groups(account: Any, state: dict[str, Any]) -> None:
     state["group_ids"] = group_ids
 
 
-def _remove_groups(account: Any, state: dict[str, Any], save: Any) -> None:
-    """Delete exactly the groups this script created, by recorded ID.
+def _forget_group(state: dict[str, Any], name: str, save: Any) -> None:
+    state["groups_created"].remove(name)
+    state.get("group_ids", {}).pop(name, None)
+    save()
 
-    State written before IDs were recorded lists names only; for those groups
-    (and only those) fall back to an exact display-name lookup.
+
+def _remove_recorded_groups(account: Any, state: dict[str, Any], names: list[str], save: Any) -> None:
+    """Delete groups by recorded ID in the verified recorded account.
+
+    A 'not found' there means the group is already gone, so its record is dropped.
     """
-    group_ids = dict(state.get("group_ids", {}))
-    for name in list(state.get("groups_created", [])):
-        ids = [group_ids[name]] if group_ids.get(name) else [
-            g.id for g in account.groups.list(filter=f'displayName eq "{name}"') if g.display_name == name
-        ]
-        print(f"Removing tracked account group {name} ...")
-        for group_id in ids:
-            try:
-                account.groups.delete(id=group_id)
-            except Exception as exc:
-                if not _missing(exc):
-                    raise RuntimeError(f"could not remove account group {name} ({group_id}): {exc}") from exc
-        state["groups_created"].remove(name)
-        group_ids.pop(name, None)
-        state["group_ids"] = group_ids
-        save()
+    for name in names:
+        group_id = state["group_ids"][name]
+        print(f"Removing tracked account group {name} ({group_id}) ...")
+        try:
+            account.groups.delete(id=group_id)
+        except Exception as exc:
+            if not _missing(exc):
+                raise RuntimeError(f"could not remove account group {name} ({group_id}): {exc}") from exc
+            print(f"      Already gone: {name} ({group_id})")
+        _forget_group(state, name, save)
+
+
+def _remove_legacy_groups(account: Any, state: dict[str, Any], names: list[str], save: Any) -> list[str]:
+    """Opt-in: delete legacy (names-only) groups by exact display name; return the ones kept."""
+    print(
+        "WARNING: --delete-legacy-groups-by-name deletes any account group with these exact names, "
+        "even one created by someone else after this script ran: " + ", ".join(names)
+    )
+    kept = []
+    for name in names:
+        matches = [g for g in account.groups.list(filter=f'displayName eq "{name}"') if g.display_name == name]
+        if len(matches) != 1:
+            print(f"      Keeping the record for {name}: {len(matches)} group(s) have that name, so it could not be confirmed.")
+            kept.append(name)
+            continue
+        print(f"Removing legacy account group {name} ({matches[0].id}) by name ...")
+        account.groups.delete(id=matches[0].id)
+        _forget_group(state, name, save)
+    return kept
+
+
+def _legacy_guidance(names: list[str]) -> str:
+    return (
+        "This ownership state was written before group IDs were recorded, so these groups are known by name only: "
+        + ", ".join(names) + ". They were NOT deleted, because a different group may now use the same name. "
+        "Remove them by hand (Account Console > User management > Groups), or re-run teardown with "
+        "--delete-legacy-groups-by-name --account-id <account-id> to delete the exact-name matches."
+    )
 
 
 def _run_sql(client: Any, warehouse_id: str, statement: str) -> None:
@@ -389,14 +451,28 @@ def setup(args: argparse.Namespace, client: Any) -> None:
     print(f"\nGenie agent ID: {space_id}\nOwnership state: {STATE_FILE}")
 
 
-def teardown(args: argparse.Namespace, client: Any) -> None:
+def teardown(args: argparse.Namespace, client: Any) -> bool:
+    """Remove what this script recorded as its own; return False if records remain."""
     if not args.catalog:
         raise RuntimeError("teardown requires --catalog (or DEV_TO_PROD_CATALOG)")
     states, key = _load_states(), _state_key(client, args.catalog, args.schema)
     state = states.get(key)
     if not state:
         print("Nothing to remove: no resources owned by this script are recorded for that host/catalog/schema.")
-        return
+        return True
+
+    def save() -> None:
+        _save_states(states)
+
+    created = list(state.get("groups_created", []))
+    recorded = [name for name in created if state.get("group_ids", {}).get(name)]
+    legacy = [name for name in created if name not in recorded]
+    # Resolve the accounts first: a conflict must leave every resource in place.
+    account = _recorded_account_client(args, state) if recorded else None
+    legacy_account = None
+    if legacy and getattr(args, "delete_legacy_groups_by_name", False):
+        legacy_account = _recorded_account_client(args, state) if state.get("account_id") else _account_client(args, client)
+
     space_id = state.get("space_id", "")
     if space_id:
         print(f"Removing tracked Genie agent {space_id} ...")
@@ -405,17 +481,30 @@ def teardown(args: argparse.Namespace, client: Any) -> None:
         except Exception as exc:
             if not _missing(exc):
                 raise RuntimeError(f"could not remove Genie agent {space_id}: {exc}") from exc
-    if state.get("groups_created"):
-        _remove_groups(_account_client(args, client, state), state, lambda: _save_states(states))
+        state["space_id"] = ""
+        save()
+    if recorded:
+        _remove_recorded_groups(account, state, recorded, save)
+    kept = legacy
+    if legacy and legacy_account is not None:
+        kept = _remove_legacy_groups(legacy_account, state, legacy, save)
     if state.get("schema_created"):
         warehouse_id = args.warehouse_id or state.get("warehouse_id", "")
         if not warehouse_id:
             raise RuntimeError("missing --warehouse-id and none was recorded; schema was not removed")
         print(f"Dropping tracked schema {args.catalog}.{args.schema} ...")
         _run_sql(client, warehouse_id, f"DROP SCHEMA IF EXISTS {_ident(args.catalog)}.{_ident(args.schema)} CASCADE")
+        state["schema_created"] = False
+        save()
+    if state.get("groups_created"):
+        print("\nTeardown INCOMPLETE. Kept the ownership records for: " + ", ".join(state["groups_created"]) + ".")
+        if legacy_account is None and kept:
+            print(_legacy_guidance(kept))
+        return False
     states.pop(key, None)
     _save_states(states) if states else STATE_FILE.unlink(missing_ok=True)
     print("Teardown complete. Only resources recorded as owned by this script were removed.")
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -428,7 +517,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"--rows/DEV_TO_PROD_ROWS must be an integer, got {args.rows!r}"
             ) from exc
         client = _client(args)
-        teardown(args, client) if args.teardown else setup(args, client)
+        if args.teardown:
+            return 0 if teardown(args, client) else 1
+        setup(args, client)
         return 0
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
