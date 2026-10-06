@@ -10,6 +10,7 @@
 
 export ENVS_DIR := $(CLOUD_ROOT)/envs
 export CLOUD_ROOT
+export VERBOSE
 
 
 SHELL := /bin/bash
@@ -53,6 +54,8 @@ COUNTRY ?=
 # Example: make generate INDUSTRY=financial_services
 #          make generate INDUSTRY=healthcare,retail
 INDUSTRY ?=
+VERBOSE ?=0
+_VALIDATION_FLAGS = --summary-label $(1) $(if $(filter 1,$(VERBOSE)),--verbose,)
 ENV_ORIGIN := $(origin ENV)
 ENV_DIR ?= $(CLOUD_ROOT)/envs/$(ENV)
 SOURCE_ENV_DIR ?= $(CLOUD_ROOT)/envs/$(SOURCE_ENV)
@@ -218,17 +221,20 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "Workspace environment ready:          $(ENV_DIR)"; \
 		echo ""; \
 		echo "Next steps (dev rehearsal — walkthrough Phases 0-1):"; \
-		echo "  1. Start from the walkthrough template (first time only; keep its safety defaults):"; \
-		echo "       cp ../shared/examples/dev_to_prod/env.auto.tfvars.example $(_SETUP_ENV_REL)/env.auto.tfvars"; \
-		echo "  2. Edit $(_SETUP_ENV_REL)/auth.auto.tfvars — deploying SP client_id / client_secret + workspace host & id"; \
-		echo "  3. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — set genie_space_id to your Genie agent ID and"; \
+		step=1; \
+		if ! python3 -c 'import sys; sys.path.insert(0, "$(SHARED_ROOT)"); from pathlib import Path; from walkthrough_marker import follows_walkthrough; raise SystemExit(0 if follows_walkthrough(Path("$(ENV_DIR)/env.auto.tfvars")) else 1)'; then \
+			echo "  $$step. Start from the walkthrough template (first time only; keep its safety defaults):"; \
+			echo "       cp ../shared/examples/dev_to_prod/env.auto.tfvars.example $(_SETUP_ENV_REL)/env.auto.tfvars"; step=$$((step+1)); \
+		fi; \
+		echo "  $$step. Edit $(_SETUP_ENV_REL)/auth.auto.tfvars — deploying SP client_id / client_secret + workspace host & id"; step=$$((step+1)); \
+		echo "  $$step. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — set genie_space_id to your Genie agent ID and"; \
 		echo "     access_tier_groups to your IdP groups, most to least privileged, then run:"; \
 		echo "       make generate ENV=$(ENV) MODE=genie"; \
-		echo "       (No agent yet? See ../shared/examples/dev_to_prod/SAMPLE_ENV.md)"; \
-		echo "  4. Enable classification on your catalog (Databricks UI, or: make enable-classification ENV=$(ENV)),"; \
+		echo "       (No agent yet? See ../shared/examples/dev_to_prod/SAMPLE_ENV.md)"; step=$$((step+1)); \
+		echo "  $$step. Enable classification on your catalog (Databricks UI, or: make enable-classification ENV=$(ENV)),"; \
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
-		echo "  5. Run: make generate ENV=$(ENV)"; \
-		echo "  6. Run: make rehearse ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
+		step=$$((step+1)); echo "  $$step. Run: make generate ENV=$(ENV)"; \
+		step=$$((step+1)); echo "  $$step. Run: make rehearse ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 0 and Phase 1)"; \
 	fi
@@ -253,7 +259,7 @@ enable-classification: _guarded-bootstrap _guard-workspace-target ## Apply UC Da
 	@set -o pipefail; LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" "$(ROOT_RUNNER)" data_access "$(ENV)" apply \
 		-parallelism=1 -auto-approve \
 		-target=module.data_access.databricks_data_classification_catalog_config.classification \
-		2>&1 | python3 -u "$(SHARED_ROOT)/scripts/filter_target_warnings.py"
+		-compact-warnings 2>&1 | python3 -u "$(SHARED_ROOT)/scripts/filter_target_warnings.py" $(if $(filter 1,$(VERBOSE)),--verbose,)
 	@echo ""
 	@if grep -Eq '^[[:space:]]*enable_auto_tagging[[:space:]]*=[[:space:]]*true' "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null; then \
 		echo "Automatic tagging is on. Wait for class.* tags to appear in Catalog Explorer, then run:"; \
@@ -316,13 +322,13 @@ generate-delta: _guarded-bootstrap _guard-workspace-target ## [Legacy] LLM/name-
 validate-generated: _guarded-bootstrap _guard-workspace-target ## Validate generated/ files in the selected workspace environment
 	@echo "=== Validate (generated/) [$(ENV)] ==="
 	@cd "$(ENV_DIR)" && if [ -f generated/masking_functions.sql ]; then \
-		python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars generated/masking_functions.sql $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
+		python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars generated/masking_functions.sql $(call _VALIDATION_FLAGS,validate-generated) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	else \
-		python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
+		python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars $(call _VALIDATION_FLAGS,validate-generated) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
 
 coverage-gate: _guarded-bootstrap _guard-workspace-target ## Block on any sensitive-column coverage gap in generated config
-	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" --coverage-gate generated/abac.auto.tfvars generated/masking_functions.sql
+	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" --coverage-gate generated/abac.auto.tfvars generated/masking_functions.sql $(call _VALIDATION_FLAGS,coverage-gate)
 
 rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to prove masking live)
 	@if [ "$(ENV)" = "prod" ]; then \
@@ -415,10 +421,10 @@ maintain: _guard-genie-placeholder ## Native-first governance refresh: audit-sch
 validate: _guarded-bootstrap ## Validate split config in the selected environment
 	@echo "=== Validate ($(ENV)) ==="
 	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
-		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); fi; \
+		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(call _VALIDATION_FLAGS,validate-account) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); fi; \
 	else \
-		cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); fi; \
-		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
+		cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql $(call _VALIDATION_FLAGS,validate-data-access) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); fi; \
+		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(call _VALIDATION_FLAGS,validate-workspace) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
 
 promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into layers (same-env), or cross-env: make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_cat=prod_cat"
@@ -457,19 +463,21 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 			"$(SOURCE_ENV_DIR)/generated/masking_functions.sql" \
 			"$$dest_env_dir/generated/abac.auto.tfvars" \
 			"$$dest_env_dir/generated/masking_functions.sql" \
-			$$map_flags; \
+			$$map_flags $(if $(filter 1,$(VERBOSE)),,--quiet-remaps); \
 		python3 "$(SHARED_ROOT)/scripts/derive_genie_acls.py" \
 			"$$dest_env_dir/generated/abac.auto.tfvars" \
 			"$$dest_env_dir/env.auto.tfvars"; \
 		cd "$$dest_env_dir" && python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" generated/abac.auto.tfvars ../$(ACCOUNT_ENV)/abac.auto.tfvars $(DATA_ACCESS_SUBDIR)/abac.auto.tfvars abac.auto.tfvars; \
 		acl_ok=1; \
 		cp "$$dest_env_dir/generated/masking_functions.sql" "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/masking_functions.sql"; \
-		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; fi; \
-		cd "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql; fi; \
-		cd "$$dest_env_dir" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; \
+		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(call _VALIDATION_FLAGS,promote-account); fi; \
+		cd "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql $(call _VALIDATION_FLAGS,promote-data-access); fi; \
+		cd "$$dest_env_dir" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(call _VALIDATION_FLAGS,promote-workspace); \
 		echo ""; \
 		echo "=== Promote complete: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
-		echo "  Next: edit $$dest_env_dir/auth.auto.tfvars  ($(DEST_ENV) workspace credentials)"; \
+		if ! python3 "$(SHARED_ROOT)/scripts/auth_configured.py" "$$dest_env_dir/auth.auto.tfvars"; then \
+			echo "  Next: edit $$dest_env_dir/auth.auto.tfvars  ($(DEST_ENV) workspace credentials)"; \
+		fi; \
 		echo "  Then: scan $(DEST_ENV) (make enable-classification ENV=$(DEST_ENV)), wait for class.* tags,"; \
 		echo "        and run make certify ENV=$(DEST_ENV) (walkthrough Phases 3-4)"; \
 		trap - EXIT; \
@@ -487,18 +495,18 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 			"$(ENV_DIR)/generated/abac.auto.tfvars" \
 			"$(ENV_DIR)/env.auto.tfvars"; \
 		if [ -f "$(ENV_DIR)/generated/masking_functions.sql" ]; then \
-			cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars generated/masking_functions.sql; \
+			cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars generated/masking_functions.sql $(call _VALIDATION_FLAGS,promote-generated); \
 		else \
-			cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars; \
+			cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" generated/abac.auto.tfvars $(call _VALIDATION_FLAGS,promote-generated); \
 		fi; \
 		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" generated/abac.auto.tfvars ../$(ACCOUNT_ENV)/abac.auto.tfvars $(DATA_ACCESS_SUBDIR)/abac.auto.tfvars abac.auto.tfvars; \
 		acl_ok=1; \
 		if [ -f "$(ENV_DIR)/generated/masking_functions.sql" ]; then \
 			cp "$(ENV_DIR)/generated/masking_functions.sql" "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/masking_functions.sql"; \
 		fi; \
-		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; fi; \
-		cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql; fi; \
-		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; trap - EXIT; \
+		cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(call _VALIDATION_FLAGS,promote-account); fi; \
+		cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars masking_functions.sql $(call _VALIDATION_FLAGS,promote-data-access); fi; \
+		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars $(call _VALIDATION_FLAGS,promote-workspace); trap - EXIT; \
 	fi
 
 _prepare-classification:

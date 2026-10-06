@@ -81,6 +81,7 @@ def parse_args() -> argparse.Namespace:
         ns.out_abac = Path(sys.argv[5])
         ns.out_sql = Path(sys.argv[6])
         ns.map = [f"{sys.argv[3]}={sys.argv[4]}"]
+        ns.quiet_remaps = False
         return ns
 
     parser = argparse.ArgumentParser(
@@ -99,6 +100,8 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Catalog name mapping (repeatable). E.g. --map dev_cat=prod_cat",
     )
+    parser.add_argument("--quiet-remaps", action="store_true",
+                        help="Do not repeat successful catalog remap lines.")
     return parser.parse_args()
 
 
@@ -229,7 +232,7 @@ def main() -> None:
                 f"  WARNING: Source catalog '{src}' was not found in the generated files "
                 f"— the mapping '{src}={dest}' had no effect. Check for typos."
             )
-        else:
+        elif not args.quiet_remaps:
             print(f"  Catalog remap: {src} -> {dest}")
 
     args.out_abac.write_text(remapped_hcl)

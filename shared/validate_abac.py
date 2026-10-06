@@ -58,7 +58,10 @@ class ValidationResult:
     def passed(self) -> bool:
         return len(self.errors) == 0
 
-    def print_report(self):
+    def print_report(self, summary_label: str = "", verbose: bool = False):
+        if summary_label and self.passed and not self.warnings and not verbose:
+            print(f"{summary_label}: PASS ({len(self.info)} checks)")
+            return
         width = 60
         print("=" * width)
         print("  ABAC Configuration Validation Report")
@@ -1169,6 +1172,10 @@ def main():
              "detection with industry-specific identifier patterns. "
              "See shared/industries/.",
     )
+    parser.add_argument("--summary-label", default="",
+                        help="On a clean pass, print one labelled summary line instead of the full report.")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Always print the full validation report.")
     args = parser.parse_args()
 
     # ── Overlay: extend column inference with country/industry hints ────────
@@ -1214,7 +1221,7 @@ def main():
         cfg = parse_tfvars(tfvars_path)
     except Exception as e:
         result.error(f"Failed to parse {tfvars_path}: {e}")
-        result.print_report()
+        result.print_report(args.summary_label, args.verbose)
         sys.exit(1)
 
     # --- Parse SQL (optional) ---
@@ -1259,7 +1266,7 @@ def main():
             ddl_columns=ddl_columns,
         )
 
-    result.print_report()
+    result.print_report(args.summary_label, args.verbose)
     sys.exit(0 if result.passed else 1)
 
 

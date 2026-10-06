@@ -735,6 +735,15 @@ fgac_policies = []
         count = autofix_tag_policies(path)
         assert count == 0
 
+    def test_live_policy_count_is_reported_once_unless_verbose(self, tmp_tfvars, monkeypatch, capsys):
+        path = tmp_tfvars(self._base_hcl('"public"', "public"))
+        monkeypatch.setattr(generate_abac, "_LIVE_POLICIES_REPORTED", False)
+        monkeypatch.setattr(generate_abac, "_fetch_live_tag_policy_values",
+                            lambda: {"pii_level": {"public"}})
+        autofix_tag_policies(path)
+        autofix_tag_policies(path)
+        assert capsys.readouterr().out.count("[AUTOFIX] Loaded 1 live tag policy/ies") == 1
+
     def test_adds_missing_value_simple(self, tmp_tfvars):
         hcl = self._base_hcl('"public"', "Limited_PII")
         path = tmp_tfvars(hcl)
