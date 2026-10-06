@@ -84,8 +84,10 @@ PROMPT_TEMPLATE_PATH = SCRIPT_DIR / "ABAC_PROMPT.md"
 DEFAULT_AUTH_FILE = WORK_DIR / "auth.auto.tfvars"
 DEFAULT_ENV_FILE = WORK_DIR / "env.auto.tfvars"
 
+# Pip spec -> import name. python-hcl2 8.x changed its parse output and breaks
+# the access_tier_groups rewrite, so fresh installs stay on 7.x.
 REQUIRED_PACKAGES = {
-    "python-hcl2": "hcl2",
+    "python-hcl2<8": "hcl2",
     "databricks-sdk": "databricks.sdk",
     "pyyaml": "yaml",
 }
@@ -3871,11 +3873,18 @@ def autofix_acl_groups(
     env_tfvars_path: Path | None = None,
     *,
     reject_draft_acls: bool = False,
+    defer_unmapped: bool = False,
 ) -> int:
     """Resolve ACLs from user-owned env input or fresh policy derivation.
 
     ACL fields emitted by the model in the generated draft are deliberately
     ignored. Durable explicit intent belongs only in env.auto.tfvars.
+
+    A space configured only by genie_space_id takes its catalogs from the
+    agent attribution in data_access/discovered_uc_tables.auto.tfvars.
+    defer_unmapped (genie mode, whose draft carries no policies) leaves a
+    space with no policy groups out of the sidecar instead of failing; the
+    next full generate derives it.
     """
     import hcl2
 
@@ -3953,6 +3962,22 @@ def autofix_acl_groups(
                     + ". Set distinct names."
                 )
             active_space_names = set(resolved_names)
+            discovered_path = (
+                env_tfvars_path.parent / "data_access" / "discovered_uc_tables.auto.tfvars"
+            )
+            if discovered_path.exists():
+                table_agents = _validated_discovered_table_agents(
+                    hcl2.loads(discovered_path.read_text()), discovered_path
+                )
+                discovered_catalogs: dict[str, set[str]] = {}
+                for table, agents in table_agents.items():
+                    for agent in agents:
+                        if "." in table and agent in active_space_names:
+                            discovered_catalogs.setdefault(agent, set()).add(
+                                table.split(".")[0]
+                            )
+                for agent, cats in discovered_catalogs.items():
+                    space_catalogs.setdefault(agent, cats)
         except ValueError:
             raise
         except Exception as exc:
@@ -4036,6 +4061,12 @@ def autofix_acl_groups(
             if g_cats & cats and g in groups
         })
 
+        if not space_groups and defer_unmapped:
+            print(
+                f"  NOTE: Genie ACL for {space_name!r} not derived yet (this draft has "
+                "no access policies); the next full `make generate` derives it."
+            )
+            continue
         if not space_groups:
             raise ValueError(
                 f"Cannot derive ACL for Genie space {space_name!r}: no policy groups "
@@ -6491,7 +6522,8 @@ def list_account_group_names(auth_cfg: dict) -> list[str] | None:
     except Exception:
         return None
 
-    host = auth_cfg.get("databricks_account_host")
+    # Same default as the Terraform roots; Azure sets databricks_account_host.
+    host = auth_cfg.get("databricks_account_host") or "https://accounts.cloud.databricks.com"
     account_id = auth_cfg.get("databricks_account_id")
     client_id = auth_cfg.get("databricks_client_id")
     client_secret = auth_cfg.get("databricks_client_secret")
@@ -8030,6 +8062,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 n_acl = autofix_acl_groups(
                     tfvars_path,
                     env_tfvars if env_tfvars.exists() else None,
+                    defer_unmapped=args.mode == "genie",
                 )
                 if n_acl:
                     print(f"  Derived ACL sidecar for {n_acl} Genie agent(s)")

@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -437,3 +438,148 @@ def test_preservation_messages_and_per_space_warehouse(tmp_path, monkeypatch, ca
     assert "Reset destination business_access_enabled=true to false" in output
     config = hcl2.load((dest / "env.auto.tfvars").open())
     assert config["genie_spaces"][0]["sql_warehouse_id"] == "space-wh"
+
+
+def test_space_title_naming_the_catalog_is_renamed_like_the_generated_config(
+    tmp_path, monkeypatch
+):
+    """The env name must match the genie_space_configs key remap_hcl rewrites."""
+    from scripts.remap_generated_config import remap_hcl
+
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    (source / "generated").mkdir(parents=True)
+    title = "Walkthrough (dev_cat.demo)"
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [\n  { genie_space_id = "s1", uc_tables = ["dev_cat.demo.t"] },\n]\n'
+    )
+    (source / "generated" / "abac.auto.tfvars").write_text(
+        f'genie_space_id_to_name = {{ s1 = "{title}" }}\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+    remap_env_config.main()
+
+    with (dest / "env.auto.tfvars").open() as handle:
+        name = hcl2.load(handle)["genie_spaces"][0]["name"]
+    generated_key = remap_hcl(f'"{title}" = {{}}', [("dev_cat", "prod_cat")])
+    assert name == "Walkthrough (prod_cat.demo)"
+    assert f'"{name}"' in generated_key
+
+
+def _two_space_source(tmp_path, titles, catalog_map_src="dev_cat"):
+    source = tmp_path / "dev"
+    (source / "generated").mkdir(parents=True)
+    entries = "".join(
+        f'  {{ genie_space_id = "s{i}", uc_tables = ["{catalog_map_src}.demo.t{i}"] }},\n'
+        for i in range(len(titles))
+    )
+    (source / "env.auto.tfvars").write_text(f"genie_spaces = [\n{entries}]\n")
+    id_to_name = " ".join(f's{i} = "{t}"' for i, t in enumerate(titles))
+    (source / "generated" / "abac.auto.tfvars").write_text(
+        f"genie_space_id_to_name = {{ {id_to_name} }}\n"
+    )
+    return source
+
+
+def test_space_names_that_collide_after_remap_fail_with_both_sources(
+    tmp_path, monkeypatch, capsys
+):
+    source = _two_space_source(tmp_path, ["Agent (dev_cat.demo)", "Agent (prod_cat.demo)"])
+    dest = tmp_path / "prod"
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+
+    with pytest.raises(SystemExit):
+        remap_env_config.main()
+
+    out = capsys.readouterr().out
+    assert "'Agent (dev_cat.demo)', 'Agent (prod_cat.demo)'" in out
+    assert "'Agent (prod_cat.demo)'" in out
+    assert not (dest / "env.auto.tfvars").exists()
+
+
+def _deployed_state(dest, key):
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "terraform.tfstate").write_text(json.dumps({"resources": [
+        {"module": "module.workspace", "type": "null_resource", "name": name,
+         "instances": [{"index_key": key}]}
+        for name in ("genie_space_create", "genie_space_config")
+    ]}))
+    (dest / f".genie_space_id_{key}").write_text("01live\n")
+
+
+def test_rename_of_an_already_deployed_space_refuses_with_state_mv_guidance(
+    tmp_path, monkeypatch, capsys
+):
+    """A changed key would destroy genie_space_create, which trashes the live agent."""
+    title = "Walkthrough (dev_cat.demo)"
+    source = _two_space_source(tmp_path, [title])
+    dest = tmp_path / "prod"
+    old_key = "walkthrough_dev_cat_demo"
+    _deployed_state(dest, old_key)
+    (dest / "env.auto.tfvars").write_text("business_access_enabled = true\n")
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+
+    with pytest.raises(SystemExit):
+        remap_env_config.main()
+
+    out = capsys.readouterr().out
+    assert "would trash the deployed agent" in out
+    for name in ("genie_space_create", "genie_space_config"):
+        assert (
+            f"state-mv 'module.workspace.null_resource.{name}[\"{old_key}\"]' "
+            f"'module.workspace.null_resource.{name}[\"walkthrough_prod_cat_demo\"]'"
+        ) in out
+    assert ".genie_space_id_walkthrough_prod_cat_demo" in out
+    assert (dest / "env.auto.tfvars").read_text() == "business_access_enabled = true\n"
+
+
+def test_deployed_space_whose_key_is_unchanged_promotes_normally(tmp_path, monkeypatch):
+    title = "Walkthrough (dev_cat.demo)"
+    source = _two_space_source(tmp_path, [title])
+    dest = tmp_path / "prod"
+    _deployed_state(dest, "walkthrough_prod_cat_demo")  # earlier promote already renamed it
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+
+    remap_env_config.main()
+
+    with (dest / "env.auto.tfvars").open() as handle:
+        assert hcl2.load(handle)["genie_spaces"][0]["name"] == "Walkthrough (prod_cat.demo)"
+
+
+def test_names_that_normalize_to_one_terraform_key_after_remap_fail(tmp_path, monkeypatch, capsys):
+    """Distinct names can share a for_each key once lowercased and punctuation-collapsed."""
+    source = _two_space_source(tmp_path, ["Agent (dev_cat.demo)", "agent prod_cat demo"])
+    dest = tmp_path / "prod"
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+
+    with pytest.raises(SystemExit):
+        remap_env_config.main()
+
+    out = capsys.readouterr().out
+    assert "'Agent (dev_cat.demo)', 'agent prod_cat demo'" in out
+    assert "Terraform key 'agent_prod_cat_demo'" in out
+    assert not (dest / "env.auto.tfvars").exists()
+
+
+def test_same_key_names_that_the_rename_does_not_merge_still_promote(tmp_path, monkeypatch):
+    """Pre-existing same-key names are disambiguated by roots/workspace, as before."""
+    source = _two_space_source(tmp_path, ["Pay Ops", "pay-ops"])
+    dest = tmp_path / "prod"
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+
+    remap_env_config.main()
+
+    with (dest / "env.auto.tfvars").open() as handle:
+        assert [s["name"] for s in hcl2.load(handle)["genie_spaces"]] == ["Pay Ops", "pay-ops"]

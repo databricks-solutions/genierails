@@ -14,11 +14,21 @@ python setup_sample_env.py --catalog dev_finance --warehouse-id <your-warehouse-
 
 **Auth is optional to specify.** It uses a **Databricks CLI profile** — separate from the deploying Service Principal `make` uses (that lives in `auth.auto.tfvars`). No flag → your **default** CLI profile (or `DATABRICKS_HOST`/`DATABRICKS_TOKEN`); add `--profile <name>` only for a *named* profile.
 
-The script prints a `uc_tables`, `genie_spaces`, and `sql_warehouse_id` snippet — in `envs/dev/env.auto.tfvars`, **replace** the template's `genie_spaces` and `sql_warehouse_id` lines with it (each setting may appear only once). It does **not** create access-tier groups, so set `access_tier_groups` to existing names (or use `--create-groups`). Re-runs are safe. To remove only what it created:
+The script prints a `uc_tables`, `genie_spaces`, and `sql_warehouse_id` snippet — in `envs/dev/env.auto.tfvars`, **replace** the template's `genie_spaces` and `sql_warehouse_id` lines with it (each setting may appear only once). By default it does **not** create access-tier groups, so set `access_tier_groups` to existing names. No IdP groups (a demo account)? Add `--create-groups --account-id <account-id>`: it also creates three demo account groups (`dev_to_prod_payments_ops`, `dev_to_prod_regional_analysts`, `dev_to_prod_viewers`) and prints the matching `access_tier_groups` line (this needs Account Admin, via environment credentials or `--account-profile`). Re-runs are safe. To remove only what it created:
 
 ```bash
 python teardown_sample_env.py --catalog dev_finance
 # Equivalent: add --teardown to the setup command.
+```
+
+With `--create-groups`, teardown deletes exactly the groups it created, by their recorded IDs and only in the account it recorded (it refuses a different `--account-id` / `DATABRICKS_ACCOUNT_*`). No extra flags are needed.
+
+State written before group IDs were recorded lists groups by name only; teardown keeps those groups and lists them — delete them in the Account Console, or opt in with `--delete-legacy-groups-by-name --account-id <account-id>` (exact-name match, so it can also remove a different group that reused the name).
+
+**Prod needs the same tables.** In [Phase 2](README.md#phase-2--prod-set-up-and-promote-rules), seed the prod catalog before scanning it — tables only, because `make promote` creates prod's agent:
+
+```bash
+python setup_sample_env.py --host <prod-workspace-url> --catalog prod_finance --warehouse-id <prod-warehouse-id> --skip-agent
 ```
 
 Use `--help` for `--host`, `--schema`, `--rows`, and env-var alternatives. Then `cd ../../../aws` (or the azure path) and continue.

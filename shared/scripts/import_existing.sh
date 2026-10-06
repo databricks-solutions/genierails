@@ -712,6 +712,12 @@ if $IMPORT_GROUPS; then
     echo "--- Groups ---"
     echo "  Skipping group imports outside the shared account layer"
     echo ""
+  elif ! grep -Eq '^[[:space:]]*manage_groups[[:space:]]*=[[:space:]]*true' env.auto.tfvars 2>/dev/null; then
+    # Consume mode (default): groups are looked up, not managed, so there is
+    # no databricks_group.groups resource to import into.
+    echo "--- Groups ---"
+    echo "  Skipping group imports (manage_groups = false: IdP-owned groups are looked up)"
+    echo ""
   else
     echo "--- Groups ---"
     group_pairs=$(extract_group_name_id_pairs)

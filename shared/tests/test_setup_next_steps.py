@@ -166,3 +166,13 @@ def test_test_ci_guard_creates_default_account_admin_env_and_stops(tmp_path):
     assert f"Created {admin_env}" in result.stdout
     assert "CI Pipeline" not in result.stdout
     assert admin_env.read_text() == (SHARED_ROOT / "scripts" / "account-admin.aws.env.example").read_text()
+
+
+def test_cross_env_promote_points_to_certify_not_apply():
+    """Applying prod straight after promote would skip the Phase 3-4 scan + certify."""
+    makefile = (SHARED_ROOT / "Makefile.shared").read_text()
+    block = makefile[makefile.index("=== Promote complete:"):]
+    block = block[:block.index("trap - EXIT")]
+
+    assert "make certify ENV=$(DEST_ENV)" in block
+    assert "make apply ENV=$(DEST_ENV)" not in block

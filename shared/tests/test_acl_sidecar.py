@@ -793,3 +793,124 @@ genie_space_id_to_name = { s1 = "Payments", s2 = "HR" }
         name: cfg["acl_groups"]
         for name, cfg in workspace_cfg["genie_space_configs"].items()
     } == expected
+
+
+def _id_only_agent_env(tmp_path, abac_text):
+    """Champion layout: env names the agent by ID; tables come from discovery."""
+    env = tmp_path / "env.auto.tfvars"
+    env.write_text('genie_spaces = [\n  { genie_space_id = "01abc" }\n]\n')
+    (tmp_path / "data_access").mkdir()
+    (tmp_path / "data_access" / "discovered_uc_tables.auto.tfvars").write_text('''
+discovered_uc_tables = ["dev_cat.s.customers"]
+discovered_table_agents = {
+  "dev_cat.s.customers" = ["Sample Agent"]
+}
+''')
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    abac = generated / "abac.auto.tfvars"
+    abac.write_text(abac_text + '''
+genie_space_id_to_name = { "01abc" = "Sample Agent" }
+genie_space_configs = { "Sample Agent" = { title = "Sample Agent" } }
+''')
+    return abac, env
+
+
+def test_id_only_agent_takes_catalogs_from_discovered_tables(tmp_path):
+    abac, env = _id_only_agent_env(tmp_path, '''
+groups = { tier_a = {} tier_b = {} }
+fgac_policies = [
+  { name = "mask" catalog = "dev_cat" to_principals = ["tier_b"] except_principals = ["tier_a"] }
+]
+''')
+
+    assert autofix_acl_groups(abac, env) == 1
+
+    with open(abac.with_name("genie_space_derived_acl_groups.auto.tfvars")) as handle:
+        derived = hcl2.load(handle)["genie_space_derived_acl_groups"]
+    assert derived == {"Sample Agent": ["tier_a", "tier_b"]}
+
+
+def test_genie_mode_defers_acl_when_draft_has_no_policies(tmp_path, capsys):
+    abac, env = _id_only_agent_env(tmp_path, "")
+
+    with pytest.raises(ValueError, match="no policy groups"):
+        autofix_acl_groups(abac, env)
+    assert autofix_acl_groups(abac, env, defer_unmapped=True) == 0
+    assert "next full `make generate` derives it" in capsys.readouterr().out
+
+
+def _genie_mode_import(tmp_path):
+    """What `make generate MODE=genie` leaves for an agent-ID-only space: Genie
+    config, no access policies, and the ACL deferred (no sidecar entry)."""
+    cloud = tmp_path / "cloud"
+    env = cloud / "envs" / "dev"
+    (env / "generated").mkdir(parents=True)
+    (env / "data_access").mkdir()
+    (cloud / "envs" / "account").mkdir(parents=True)
+    (tmp_path / "Makefile").write_text(
+        f"SHARED_ROOT := {SHARED}\nCLOUD_ROOT := {cloud}\nCLOUD := aws\n"
+        f"include {SHARED / 'Makefile.shared'}\n"
+    )
+    (env / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ genie_space_id = "01abc" }]\n'
+        'access_tier_groups = ["tier_a", "tier_b"]\n'
+    )
+    (env / "data_access" / "discovered_uc_tables.auto.tfvars").write_text(
+        'discovered_uc_tables = ["dev_cat.s.t"]\n'
+        'discovered_table_agents = { "dev_cat.s.t" = ["Sample Agent"] }\n'
+    )
+    (env / "generated" / "abac.auto.tfvars").write_text(
+        'genie_space_id_to_name = { "01abc" = "Sample Agent" }\n'
+        'genie_space_configs = { "Sample Agent" = { title = "Sample Agent" } }\n'
+    )
+    (env / "generated" / "genie_space_derived_acl_groups.auto.tfvars").write_text(
+        "genie_space_legacy_mode = false\ngenie_space_derived_acl_groups = {}\n"
+    )
+    runner_log = tmp_path / "terraform.log"
+    runner = tmp_path / "runner.sh"
+    runner.write_text(f'#!/bin/sh\necho "$@" >> {runner_log}\n')
+    runner.chmod(0o755)
+    return env, runner, runner_log
+
+
+@pytest.mark.parametrize("target", ["apply", "apply-governance", "apply-genie"])
+def test_genie_mode_import_with_deferred_acl_cannot_be_applied(tmp_path, target):
+    """A deferred ACL must fail closed: no Terraform runs, so no SELECT or CAN_RUN."""
+    env, runner, runner_log = _genie_mode_import(tmp_path)
+
+    result = subprocess.run(
+        ["make", target, "ENV=dev", f"ROOT_RUNNER={runner}",
+         "APPLY_FLAGS=-var=business_access_enabled=true"],
+        cwd=tmp_path, text=True, capture_output=True,
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert "Cannot derive ACL" in output or "has no resolved ACL" in output, output
+    assert not runner_log.exists() or " apply" not in runner_log.read_text()
+    assert not (env / "abac.auto.tfvars").exists()
+    assert not (env / "data_access" / "abac.auto.tfvars").exists()
+
+
+def test_genie_mode_import_with_deferred_acl_cannot_be_released(tmp_path):
+    """release needs a certify receipt, and certify cannot pass on the deferred ACL."""
+    env, runner, runner_log = _genie_mode_import(tmp_path)
+
+    certify = subprocess.run(
+        ["make", "certify", "ENV=dev", f"ROOT_RUNNER={runner}"],
+        cwd=tmp_path, text=True, capture_output=True,
+    )
+    release = subprocess.run(
+        ["make", "release", "ENV=dev", f"ROOT_RUNNER={runner}"],
+        cwd=tmp_path, text=True, capture_output=True,
+    )
+
+    # A genie-mode draft carries no rules, so certify stops at its first stage.
+    assert certify.returncode != 0, certify.stdout + certify.stderr
+    assert "no tag_assignments section" in certify.stdout + certify.stderr
+    assert not (env / "generated" / ".certified.json").exists()
+    assert release.returncode != 0, release.stdout + release.stderr
+    assert "no certification receipt" in release.stderr
+    assert not runner_log.exists() or " apply" not in runner_log.read_text()
+    assert "business_access_enabled = true" not in (env / "env.auto.tfvars").read_text()

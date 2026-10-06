@@ -336,3 +336,31 @@ class TestCliGroupMode:
         assert preflight_calls == []
         assert build_calls.get("create_groups") is True
         assert build_calls.get("group_names") is None
+
+
+@pytest.mark.parametrize(("configured", "expected"), [
+    # prerequisites.md lets AWS omit databricks_account_host; preflight must still run.
+    (None, "https://accounts.cloud.databricks.com"),
+    ("", "https://accounts.cloud.databricks.com"),
+    # An explicit host (Azure, GCP, or a non-default AWS host) is never overridden.
+    ("https://accounts.azuredatabricks.net", "https://accounts.azuredatabricks.net"),
+    ("https://accounts.gcp.databricks.com", "https://accounts.gcp.databricks.com"),
+])
+def test_idp_preflight_account_host(monkeypatch, configured, expected):
+    import databricks.sdk
+
+    seen = {}
+
+    class FakeAccountClient:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            self.groups = type("G", (), {"list": lambda self: []})()
+
+    monkeypatch.setattr(databricks.sdk, "AccountClient", FakeAccountClient)
+    auth = {"databricks_account_id": "acct", "databricks_client_id": "id",
+            "databricks_client_secret": "s"}
+    if configured is not None:
+        auth["databricks_account_host"] = configured
+
+    assert generate_abac.list_account_group_names(auth) == []
+    assert seen["host"] == expected

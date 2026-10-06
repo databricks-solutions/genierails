@@ -449,7 +449,8 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 		echo ""; \
 		echo "=== Promote complete: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
 		echo "  Next: edit $$dest_env_dir/auth.auto.tfvars  ($(DEST_ENV) workspace credentials)"; \
-		echo "  Then: make apply ENV=$(DEST_ENV)"; \
+		echo "  Then: scan $(DEST_ENV) (make enable-classification ENV=$(DEST_ENV)), wait for class.* tags,"; \
+		echo "        and run make certify ENV=$(DEST_ENV) (walkthrough Phases 3-4)"; \
 		trap - EXIT; \
 	else \
 		if [ "$(SOURCE_ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(SOURCE_ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \

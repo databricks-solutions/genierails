@@ -144,3 +144,28 @@ def test_failed_optional_import_continues_and_surfaces_failure(tmp_path):
     log = (tmp_path / "runner.log").read_text()
     assert "first" in log
     assert "second" in log
+
+
+@pytest.mark.parametrize(("manage_groups", "imports"), [("false", False), ("true", True)])
+def test_account_group_import_runs_only_when_groups_are_managed(tmp_path, manage_groups, imports):
+    """Consume mode has no databricks_group.groups resource to import into."""
+    account = tmp_path / "account"
+    account.mkdir()
+    (account / "abac.auto.tfvars").write_text('groups = { tier_a = {} }\n')
+    (account / "env.auto.tfvars").write_text(f"manage_groups = {manage_groups}\n")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    # Stand-in for the group lookup: print one name:id pair.
+    (fake_bin / "python3").write_text("#!/usr/bin/env bash\ncat >/dev/null; echo tier_a:123\n")
+    (fake_bin / "python3").chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", SCRIPT, "--groups-only", "--dry-run"],
+        cwd=account,
+        env=os.environ | {"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert ('databricks_group.groups["tier_a"]' in result.stdout) is imports

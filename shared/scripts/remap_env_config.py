@@ -28,6 +28,7 @@ from scripts.footprint import (
     load_hcl,
     resolve_footprint,
 )
+from scripts.remap_generated_config import remap_hcl
 
 try:
     import hcl2
@@ -83,6 +84,35 @@ def _discover_from_genie_api(space_id: str, auth_cfg: dict) -> tuple[str, list[s
     return title, tables
 
 
+def _space_key(name: str) -> str:
+    """Terraform for_each key of a named space (roots/workspace merged_spaces)."""
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def _deployed_space_keys(dest_env_dir: str) -> dict[str, list[str]]:
+    """Map each Genie space key in the destination workspace state to its resource addresses (without the key)."""
+    state_path = Path(dest_env_dir) / "terraform.tfstate"
+    if not state_path.exists():
+        return {}
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"ERROR: cannot read {state_path} to check deployed Genie spaces: {exc}")
+        sys.exit(1)
+    keys: dict[str, list[str]] = {}
+    for resource in state.get("resources", []):
+        if not resource.get("type") == "null_resource" or not resource.get("name", "").startswith("genie_space"):
+            continue
+        prefix = (resource.get("module") + "." if resource.get("module") else "") + f"null_resource.{resource['name']}"
+        for instance in resource.get("instances", []):
+            key = instance.get("index_key")
+            if isinstance(key, str):
+                keys.setdefault(key, []).append(prefix)
+    return keys
+
+
 def _promoted_access_tier_groups(cfg: dict, source_env_dir: str) -> list[str]:
     """Carry the source's access_tier_groups so prod consumes the same tiers."""
     shared_root = str(Path(__file__).resolve().parent.parent)
@@ -113,6 +143,14 @@ def main():
         if "=" in pair:
             k, v = pair.split("=", 1)
             pairs[k.strip()] = v.strip()
+
+    # Space names key genie_space_configs and the ACL sidecar, which
+    # remap_generated_config.py rewrites with remap_hcl; rename spaces the
+    # same way (e.g. a title naming the dev catalog) so the keys still match.
+    sorted_pairs = sorted(pairs.items(), key=lambda p: len(p[0]), reverse=True)
+
+    def remap_name(name: str) -> str:
+        return json.loads(remap_hcl(json.dumps(name), sorted_pairs))
 
     def remap_table(table: str) -> str:
         parts = table.split(".", 1)
@@ -261,6 +299,62 @@ def main():
         )
         sys.exit(1)
 
+    # Promotion renames spaces whose name references a source catalog. Two
+    # names must not collapse into one (that would merge their configs, ACLs
+    # and Terraform addresses), and a space already deployed in the destination
+    # must not change key: its genie_space_create would be destroyed, which
+    # trashes the live Genie agent, and a new one created in its place.
+    renamed: dict[str, list[str]] = {}
+    for name in canonical_names:
+        renamed.setdefault(remap_name(name), []).append(name)
+    collisions = {dest: srcs for dest, srcs in renamed.items() if len(srcs) > 1}
+    if collisions:
+        for dest, srcs in sorted(collisions.items()):
+            print(
+                "ERROR: Genie spaces " + ", ".join(repr(src) for src in srcs)
+                + f" would all be promoted as {dest!r}."
+            )
+        print("       Give them names that stay distinct after DEST_CATALOG_MAP, then re-promote.")
+        sys.exit(1)
+    # Distinct names can still normalize to one Terraform for_each key
+    # (e.g. "x (prod.demo)" and "x prod demo"); refuse keys the rename merges.
+    by_key: dict[str, list[str]] = {}
+    for name in canonical_names:
+        by_key.setdefault(_space_key(remap_name(name)), []).append(name)
+    key_collisions = {
+        key: srcs for key, srcs in by_key.items()
+        if len(srcs) > 1 and len({_space_key(src) for src in srcs}) > 1
+    }
+    if key_collisions:
+        for key, srcs in sorted(key_collisions.items()):
+            print(
+                "ERROR: Genie spaces " + ", ".join(repr(src) for src in srcs)
+                + f" would all be promoted under Terraform key {key!r}."
+            )
+        print("       Give them names that stay distinct after DEST_CATALOG_MAP, then re-promote.")
+        sys.exit(1)
+    deployed = _deployed_space_keys(dest_env_dir)
+    for name in canonical_names:
+        old_key, new_key = _space_key(name), _space_key(remap_name(name))
+        if old_key == new_key or old_key not in deployed:
+            continue
+        print(
+            f"ERROR: Genie space {name!r} is already deployed in {Path(dest_env_dir).name} "
+            f"under key {old_key!r}; promotion now names it {remap_name(name)!r} "
+            f"(key {new_key!r}). Applying that would trash the deployed agent and create a new one."
+        )
+        print("       Nothing was written. To keep the deployed agent, move its state to the new key, then re-promote:")
+        env = Path(dest_env_dir).name
+        for address in deployed[old_key]:
+            print(
+                f"         ENVS_DIR=\"$PWD/envs\" ../shared/scripts/terraform_layer.sh workspace {env} "
+                f"state-mv '{address}[{json.dumps(old_key)}]' '{address}[{json.dumps(new_key)}]'"
+            )
+        id_file = Path(dest_env_dir) / f".genie_space_id_{old_key}"
+        if id_file.exists():
+            print(f"         mv '{id_file}' '{id_file.with_name(f'.genie_space_id_{new_key}')}'")
+        sys.exit(1)
+
     # Preserve destination-owned settings across remediation re-promotions.
     dest_path = os.path.join(dest_env_dir, "env.auto.tfvars")
     try:
@@ -308,7 +402,7 @@ def main():
     # Terraform, classification, derive-assignments, and certify share it.
     lines = ["genie_spaces = ["]
     for space in spaces:
-        name = _str(space.get("name", ""))
+        name = remap_name(_str(space.get("name", "")))
         uc_tables = space.get("uc_tables") or []
         remapped_tables = [remap_table(t) for t in uc_tables]
 
