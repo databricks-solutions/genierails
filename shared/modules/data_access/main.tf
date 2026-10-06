@@ -234,6 +234,15 @@ resource "databricks_grant" "table_access" {
   table      = each.value.table
   principal  = each.value.group
   privileges = ["SELECT"]
+
+  # Business SELECT must not become reachable until tags, masking functions,
+  # and every ABAC policy have been created and allowed to propagate.
+  depends_on = [
+    time_sleep.wait_for_tag_propagation,
+    terraform_data.masking_functions,
+    databricks_policy_info.policies,
+    time_sleep.wait_for_policy_enforcement,
+  ]
 }
 
 resource "databricks_sql_endpoint" "warehouse" {
@@ -337,8 +346,19 @@ resource "databricks_policy_info" "policies" {
     time_sleep.wait_for_tag_propagation,
     databricks_grant.catalog_access,
     databricks_grant.schema_access,
-    databricks_grant.table_access,
     databricks_grant.terraform_sp_manage_catalog,
     terraform_data.masking_functions,
   ]
+}
+
+# Unity Catalog policy creation can return before enforcement is observable.
+# Keep SELECT closed through that propagation window.
+resource "time_sleep" "wait_for_policy_enforcement" {
+  depends_on      = [databricks_policy_info.policies]
+  create_duration = "30s"
+
+  triggers = {
+    policy_hash      = sha256(jsonencode(local.fgac_policy_map))
+    masking_sql_hash = filemd5(var.masking_sql_file)
+  }
 }

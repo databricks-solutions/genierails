@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+import hcl2
+
 
 MAIN_TF = Path(__file__).parents[1] / "modules" / "data_access" / "main.tf"
 WORKSPACE_MAIN_TF = Path(__file__).parents[1] / "modules" / "workspace" / "main.tf"
@@ -18,6 +20,42 @@ def _resource_body(source: str, name: str) -> str:
             if depth == 0:
                 return source[start:index]
     raise AssertionError(f"unterminated resource {name}")
+
+
+def _typed_resource_body(source: str, resource_type: str, name: str) -> str:
+    marker = f'resource "{resource_type}" "{name}" {{'
+    start = source.index(marker) + len(marker)
+    depth = 1
+    for index in range(start, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index]
+    raise AssertionError(f"unterminated resource {resource_type}.{name}")
+
+
+def _parsed_depends_on(source: str, resource_type: str, name: str) -> set[str]:
+    """Parse a resource's real depends_on expression with python-hcl2.
+
+    python-hcl2 7.3 cannot parse some valid parenthesized expressions elsewhere
+    in this module, so isolate the resource's top-level depends_on attribute and
+    still let the HCL parser—not text matching—decide which references are live.
+    """
+    body = _typed_resource_body(source, resource_type, name)
+    match = re.search(r"(?ms)^  depends_on\s*=\s*(\[[^]]*\])", body)
+    if match is None:
+        return set()
+    parsed = hcl2.loads(f"depends_on = {match.group(1)}")
+    return {reference.removeprefix("${").removesuffix("}")
+            for reference in parsed["depends_on"]}
+
+
+def _parsed_resource(source: str, resource_type: str, name: str) -> dict:
+    body = _typed_resource_body(source, resource_type, name)
+    parsed = hcl2.loads(f'resource "{resource_type}" "{name}" {{{body}}}')
+    return parsed["resource"][0][resource_type][name]
 
 
 def test_group_grants_follow_catalog_schema_table_chain():
@@ -81,6 +119,75 @@ def test_masking_functions_and_policies_wait_for_deployment_sp_grant():
         start = source.index(start_marker)
         end = source.index(end_marker, start) if end_marker else len(source)
         assert "databricks_grant.terraform_sp_manage_catalog" in source[start:end]
+
+
+def test_table_select_waits_for_complete_policy_enforcement_chain():
+    source = MAIN_TF.read_text()
+    table_dependencies = _parsed_depends_on(
+        source, "databricks_grant", "table_access"
+    )
+    policy_dependencies = _parsed_depends_on(
+        source, "databricks_policy_info", "policies"
+    )
+    wait_dependencies = _parsed_depends_on(
+        source, "time_sleep", "wait_for_policy_enforcement"
+    )
+
+    # Whole-resource dependencies make any failed mask or policy instance block
+    # every table grant, rather than only a matching for_each instance.
+    assert table_dependencies == {
+        "time_sleep.wait_for_tag_propagation",
+        "terraform_data.masking_functions",
+        "databricks_policy_info.policies",
+        "time_sleep.wait_for_policy_enforcement",
+    }
+
+    assert wait_dependencies == {"databricks_policy_info.policies"}
+    assert "databricks_grant.table_access" not in policy_dependencies
+
+
+def test_policy_grant_dependency_graph_is_acyclic_and_fail_closed():
+    source = MAIN_TF.read_text()
+    dependencies = {
+        "table": _parsed_depends_on(source, "databricks_grant", "table_access"),
+        "policies": _parsed_depends_on(
+            source, "databricks_policy_info", "policies"
+        ),
+        "policy_wait": _parsed_depends_on(
+            source, "time_sleep", "wait_for_policy_enforcement"
+        ),
+    }
+
+    # This is the relevant Terraform plan graph: grants have both failed-policy
+    # and failed-mask nodes as ancestors. Terraform reverses these edges during
+    # destroy, so table grants are removed before the wait and policies.
+    assert "databricks_policy_info.policies" in dependencies["table"]
+    assert "terraform_data.masking_functions" in dependencies["table"]
+    assert "databricks_policy_info.policies" in dependencies["policy_wait"]
+    assert "databricks_grant.table_access" not in dependencies["policies"]
+
+
+def test_policy_enforcement_wait_restarts_only_when_enforcement_inputs_change():
+    wait = _parsed_resource(
+        MAIN_TF.read_text(), "time_sleep", "wait_for_policy_enforcement"
+    )
+
+    assert wait["create_duration"] == "30s"
+    assert wait["triggers"] == {
+        "policy_hash": "${sha256(jsonencode(local.fgac_policy_map))}",
+        "masking_sql_hash": "${filemd5(var.masking_sql_file)}",
+    }
+
+
+def test_existing_grant_and_policy_resource_addresses_and_keys_are_unchanged():
+    source = MAIN_TF.read_text()
+    table = _resource_body(source, "table_access")
+    policies = _typed_resource_body(source, "databricks_policy_info", "policies")
+
+    assert "for pair in local.table_access_pairs" in table
+    assert '"${pair.table}|${pair.principal}"' in table
+    assert "for_each = local.fgac_policy_map" in policies
+    assert 'name                  = "${each.value.catalog}_${each.key}"' in policies
 
 
 def test_business_select_is_fail_closed_while_structural_grants_remain():
