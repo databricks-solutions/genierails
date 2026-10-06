@@ -50,7 +50,7 @@ So "expose last" isn't a policy you hope holds — there is simply no `SELECT` a
 | `make certify ENV=prod` | 4 | (prod) derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook; records the certification `make release` requires |
 | `make release ENV=prod VERIFY_KEY_COLUMN=<pk>` | 5 | (prod) Refuses unless certification is current; creates the Genie agent, releases gated access, saves `business_access_enabled = true`, runs `verify-access` |
 | `make maintain ENV=prod` | 6 | (prod, scheduled) audit-schema → derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook; renews certification, never changes access or Genie |
-| `make promote SOURCE_ENV DEST_ENV DEST_CATALOG_MAP` | 2 | Promote **rules only** (leaves tag assignments behind); creates + writes prod `env.auto.tfvars` |
+| `make promote SOURCE_ENV DEST_ENV DEST_CATALOG_MAP` | 2 | Promote **rules only** (leaves tag assignments behind); creates + writes prod `env.auto.tfvars`. Policy names take the prod catalog (`gr_mask_<prod_catalog>_<treatment>`); a policy prod already has keeps its name, since renaming a live policy would drop and recreate it |
 | `make verify-access ENV=<e> VERIFY_KEY_COLUMN=<pk>` | 1/5 | Prove masking by querying as per-tier test principals (**needs the gate open**) |
 | `make audit-rulebook ENV=<e>` | 4/6 | Drift check — tags with no covering rule |
 | `make audit-schema ENV=<e>` | 6 | Untagged-column audit (also the first step of `make maintain`) |

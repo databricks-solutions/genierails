@@ -24,16 +24,11 @@ import sys
 from pathlib import Path
 
 
-def remove_tag_assignments(text: str) -> str:
-    """Empty the generated top-level tag_assignments list.
-
-    Assignments are environment-specific classification facts. Cross-environment
-    promotion carries governance rules, while the destination classifier derives
-    its own facts from the destination catalog.
-    """
-    match = re.search(r"(?m)^tag_assignments\s*=\s*\[", text)
+def _top_level_list_span(text: str, key: str) -> tuple[int, int, int] | None:
+    """Return (key_start, open_bracket, end_after_close) for a top-level list."""
+    match = re.search(rf"(?m)^{re.escape(key)}\s*=\s*\[", text)
     if not match:
-        return text
+        return None
 
     opening_bracket = text.find("[", match.start(), match.end())
     depth = 0
@@ -57,17 +52,142 @@ def remove_tag_assignments(text: str) -> str:
         elif char == "]":
             depth -= 1
             if depth == 0:
-                end = index + 1
-                while end < len(text) and text[end] in " \t":
-                    end += 1
-                if end < len(text) and text[end] == "\n":
-                    end += 1
-                # Keep an explicit empty section. The destination-side
-                # derive-assignments command atomically replaces this section.
-                return text[: match.start()] + "tag_assignments = []\n" + text[end:]
+                return match.start(), opening_bracket, index + 1
         index += 1
 
-    raise ValueError("Unterminated top-level tag_assignments list")
+    raise ValueError(f"Unterminated top-level {key} list")
+
+
+def remove_tag_assignments(text: str) -> str:
+    """Empty the generated top-level tag_assignments list.
+
+    Assignments are environment-specific classification facts. Cross-environment
+    promotion carries governance rules, while the destination classifier derives
+    its own facts from the destination catalog.
+    """
+    span = _top_level_list_span(text, "tag_assignments")
+    if span is None:
+        return text
+    start, _bracket, end = span
+    while end < len(text) and text[end] in " \t":
+        end += 1
+    if end < len(text) and text[end] == "\n":
+        end += 1
+    # Keep an explicit empty section. The destination-side
+    # derive-assignments command atomically replaces this section.
+    return text[:start] + "tag_assignments = []\n" + text[end:]
+
+
+def remap_policy_name(name: str, src: str, dest: str) -> str:
+    """Replace the policy's own catalog where it is a whole ``_``-delimited token.
+
+    Derived masks are named ``gr_mask_<catalog>_<treatment>``; the catalog keeps
+    the name unique across an env's catalogs (it is the Terraform for_each key).
+    """
+    if not src or src == dest:
+        return name
+    return re.sub(rf"(?<![A-Za-z0-9]){re.escape(src)}(?![A-Za-z0-9])", dest, name)
+
+
+def load_deployed_policy_names(paths: list[Path]) -> set[tuple[str, str]]:
+    """Return (catalog, name) of policies the destination env may already have.
+
+    Reads the destination's current abac.auto.tfvars files (data_access layer
+    and generated/) and its local Terraform state when present. Missing files
+    are skipped; a file that exists but cannot be read fails closed, because
+    guessing "not deployed" would rename a live policy.
+    """
+    import json
+
+    deployed: set[tuple[str, str]] = set()
+    for path in paths:
+        if not path.is_file():
+            continue
+        if path.name.endswith(".tfstate"):
+            try:
+                state = json.loads(path.read_text() or "{}")
+            except ValueError as exc:
+                raise RuntimeError(f"Cannot read Terraform state {path}: {exc}") from exc
+            for resource in state.get("resources") or []:
+                if resource.get("type") != "databricks_policy_info" or resource.get("mode") != "managed":
+                    continue
+                for instance in resource.get("instances") or []:
+                    key = instance.get("index_key")
+                    catalog = (instance.get("attributes") or {}).get("on_securable_fullname")
+                    if isinstance(key, str) and catalog:
+                        deployed.add((catalog, key))
+            continue
+        import hcl2
+
+        try:
+            cfg = hcl2.loads(path.read_text())
+        except Exception as exc:
+            raise RuntimeError(f"Cannot parse {path}: {exc}") from exc
+        for policy in cfg.get("fgac_policies") or []:
+            if policy.get("name") and policy.get("catalog"):
+                deployed.add((policy["catalog"], policy["name"]))
+    return deployed
+
+
+def remap_policy_names(
+    source_text: str,
+    remapped_text: str,
+    pairs: list[tuple[str, str]],
+    deployed: set[tuple[str, str]] | None = None,
+) -> tuple[str, list[str]]:
+    """Carry the destination catalog into fgac policy names.
+
+    The data_access module names the remote policy ``<catalog>_<name>`` and keys
+    it by ``name``. Renaming an applied policy is not safe: provider 1.111's
+    update sends the new name as the request path and omits ``name`` from the
+    update mask, and a new for_each key is a delete plus a create. So a policy the
+    destination already has under its source name keeps that name.
+    """
+    import hcl2
+
+    try:
+        policies = hcl2.loads(source_text).get("fgac_policies") or []
+    except Exception as exc:
+        raise ValueError(f"Cannot parse the source fgac_policies: {exc}") from exc
+    mapping = dict(pairs)
+    deployed = deployed or set()
+    renames: dict[str, str] = {}
+    notes: list[str] = []
+    final_names: list[str] = []
+    for policy in policies:
+        name = policy.get("name") or ""
+        src = policy.get("catalog") or ""
+        dest = mapping.get(src, src)
+        new_name = remap_policy_name(name, src, dest)
+        if new_name != name and (dest, name) in deployed:
+            notes.append(
+                f"  Keeping deployed policy name {dest}_{name} "
+                "(renaming a live ABAC policy is not safe)"
+            )
+            new_name = name
+        if new_name != name:
+            renames[name] = new_name
+        final_names.append(new_name)
+
+    duplicates = sorted({n for n in final_names if final_names.count(n) > 1})
+    if duplicates:
+        raise ValueError(
+            "Promoted fgac_policies would share a name: " + ", ".join(duplicates)
+        )
+    if not renames:
+        return remapped_text, notes
+
+    span = _top_level_list_span(remapped_text, "fgac_policies")
+    if span is None:
+        return remapped_text, notes
+    _start, bracket, end = span
+    section = remapped_text[bracket:end]
+    pattern = re.compile(r'(?m)^(\s*name\s*=\s*")([^"]*)(")')
+    section = pattern.sub(
+        lambda m: m.group(1) + renames.get(m.group(2), m.group(2)) + m.group(3),
+        section,
+    )
+    return remapped_text[:bracket] + section + remapped_text[end:], notes
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,6 +202,7 @@ def parse_args() -> argparse.Namespace:
         ns.out_sql = Path(sys.argv[6])
         ns.map = [f"{sys.argv[3]}={sys.argv[4]}"]
         ns.quiet_remaps = False
+        ns.deployed = []
         return ns
 
     parser = argparse.ArgumentParser(
@@ -102,6 +223,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--quiet-remaps", action="store_true",
                         help="Do not repeat successful catalog remap lines.")
+    parser.add_argument(
+        "--deployed",
+        metavar="PATH",
+        type=Path,
+        action="append",
+        default=[],
+        help="Destination abac.auto.tfvars or terraform.tfstate (repeatable). "
+             "Policies already there keep their name.",
+    )
     return parser.parse_args()
 
 
@@ -215,7 +345,20 @@ def main() -> None:
 
     args.out_abac.parent.mkdir(parents=True, exist_ok=True)
 
-    remapped_hcl = remap_hcl(args.source_abac.read_text(), pairs)
+    # Read the destination before out_abac overwrites it.
+    try:
+        deployed = load_deployed_policy_names(args.deployed)
+        remapped_hcl, name_notes = remap_policy_names(
+            args.source_abac.read_text(),
+            remap_hcl(args.source_abac.read_text(), pairs),
+            pairs,
+            deployed,
+        )
+    except (RuntimeError, ValueError) as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
+    for note in name_notes:
+        print(note)
     remapped_sql = remap_sql(args.source_sql.read_text(), pairs) if has_sql else None
 
     # Warn if any source catalog name was not found in either output file.
