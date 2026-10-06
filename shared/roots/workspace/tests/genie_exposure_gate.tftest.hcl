@@ -122,7 +122,7 @@ run "gate_result_missing" {
   }
   variables {
     files = {
-      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } } } })
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
       "tests/.tmp/exposure/data_access/.coverage_gate.json" = null
     }
   }
@@ -142,7 +142,7 @@ run "gate_failed_since" {
   }
   variables {
     files = {
-      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } } } })
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
       "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "fail", fingerprint = "applied" })
     }
   }
@@ -162,7 +162,7 @@ run "config_moved_on" {
   }
   variables {
     files = {
-      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } } } })
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
       "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "newer" })
     }
   }
@@ -182,7 +182,7 @@ run "data_access_ready" {
   }
   variables {
     files = {
-      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } } } })
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
       "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied" })
     }
   }
@@ -200,5 +200,86 @@ run "ready_data_access_allows_can_run" {
   assert {
     condition     = output.genie_space_acls_groups["sales"] == "analysts" && output.genie_space_acls_applied
     error_message = "with data_access ready, the CAN_RUN ACL must be planned"
+  }
+}
+
+run "matching_pass_but_no_grants" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 0 } }, table_grant_resource_keys = { value = [] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied" })
+    }
+  }
+}
+
+run "zero_grants_block_can_run_but_not_an_empty_acl" {
+  command = plan
+  assert {
+    condition     = strcontains(output.genie_exposure_blocker, "no business table grants")
+    error_message = "a gated apply that left zero table grants must block CAN_RUN"
+  }
+  assert {
+    condition     = output.genie_space_acls_groups["sales"] == ""
+    error_message = "the explicit empty ACL must still be planned (it only clears access)"
+  }
+}
+
+run "grants_for_other_groups_and_tables" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "applied", status = "pass", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|auditors", "cat.sch.orders|analysts"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied" })
+    }
+  }
+}
+
+# The gap runs plan with groups = {} (no ACL resources, so no precondition)
+# to read the computed gaps; test_coverage_gate_script.py shows the same
+# states refuse a real non-empty ACL end to end.
+run "listed_tables_need_every_table_and_group_grant" {
+  command = plan
+  variables {
+    groups              = {}
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = ["cat.sch.customers", "cat.sch.orders"] }]
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = output.genie_exposure_blocker == ""
+    error_message = "the layer-wide checks pass here; only the per-space grant check applies"
+  }
+  assert {
+    condition     = toset(output.genie_space_missing_grants["sales"]) == toset(["cat.sch.customers|analysts"])
+    error_message = "an unrelated grant (other group, other table) must not satisfy the space's CAN_RUN"
+  }
+}
+
+run "schema_wildcards_need_a_grant_in_that_schema" {
+  command = plan
+  variables {
+    groups              = {}
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = ["cat.sch.*", "cat.other.*"] }]
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = toset(output.genie_space_missing_grants["sales"]) == toset(["cat.other.*|analysts"])
+    error_message = "a catalog.schema.* space entry needs a grant for the group in that schema"
+  }
+}
+
+run "id_only_space_needs_a_grant_for_each_group" {
+  command = plan
+  variables {
+    genie_space_configs = { Sales = { acl_groups = ["analysts", "auditors", "viewers"] } }
+    groups              = {}
+  }
+  assert {
+    condition     = toset(output.genie_space_missing_grants["sales"]) == toset(["<any table>|viewers"])
+    error_message = "a space known only by ID needs at least one grant per CAN_RUN group"
   }
 }

@@ -14,7 +14,7 @@ run "data_access_is_gated" {
   }
   variables {
     files = {
-      "tests/.tmp/acl/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "f1", status = "pass", table_grant_count = 1 } } } })
+      "tests/.tmp/acl/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "f1", status = "pass", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["pay.agent.facts|pay_group"] } } })
       "tests/.tmp/acl/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "f1" })
     }
   }

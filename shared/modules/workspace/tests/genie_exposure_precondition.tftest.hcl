@@ -1,6 +1,7 @@
-# While the root reports a genie_exposure_blocker, the module refuses every
-# non-empty Genie CAN_RUN ACL (new or existing space) but still applies an
-# empty ACL, which only clears access.
+# While the root reports a genie_exposure_blocker, or a space's CAN_RUN groups
+# lack their SELECT grants (genie_space_missing_grants), the module refuses
+# that non-empty Genie CAN_RUN ACL (new or existing space) but still applies
+# an empty ACL, which only clears access.
 
 mock_provider "databricks" {
   alias = "account"
@@ -35,10 +36,11 @@ run "blocked_exposure_refuses_can_run_on_existing_space" {
     }
   }
   variables {
-    genie_id_file_prefix   = "tests/.tmp/exposure/.genie_space_id"
-    genie_script_path      = "true"
-    genie_exposure_blocker = "the data_access layer has no readable state"
-    genie_spaces           = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+    genie_id_file_prefix       = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path          = "true"
+    genie_exposure_blocker     = "the data_access layer has no readable state"
+    genie_space_missing_grants = { sales = [] }
+    genie_spaces               = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
   }
   expect_failures = [null_resource.genie_space_acls]
 }
@@ -57,10 +59,11 @@ run "blocked_exposure_refuses_can_run_on_new_space" {
     }
   }
   variables {
-    genie_id_file_prefix   = "tests/.tmp/exposure/.genie_space_id"
-    genie_script_path      = "true"
-    genie_exposure_blocker = "the data_access layer has no readable state"
-    genie_spaces           = { sales = { name = "Sales", genie_space_id = "", sql_warehouse_id = "warehouse", uc_tables = ["cat.sch.customers"], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+    genie_id_file_prefix       = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path          = "true"
+    genie_exposure_blocker     = "the data_access layer has no readable state"
+    genie_space_missing_grants = { sales = [] }
+    genie_spaces               = { sales = { name = "Sales", genie_space_id = "", sql_warehouse_id = "warehouse", uc_tables = ["cat.sch.customers"], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
   }
   expect_failures = [null_resource.genie_space_acls_created]
 }
@@ -79,13 +82,86 @@ run "blocked_exposure_still_clears_can_run" {
     }
   }
   variables {
-    genie_id_file_prefix   = "tests/.tmp/exposure/.genie_space_id"
-    genie_script_path      = "true"
-    genie_exposure_blocker = "the data_access layer has no readable state"
-    genie_spaces           = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = [] } } }
+    genie_id_file_prefix       = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path          = "true"
+    genie_exposure_blocker     = "the data_access layer has no readable state"
+    genie_space_missing_grants = { sales = [] }
+    genie_spaces               = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = [] } } }
   }
   assert {
     condition     = output.genie_space_acls_applied
     error_message = "an empty ACL must still be applied to clear CAN_RUN while exposure is blocked"
+  }
+}
+
+run "missing_space_grants_refuse_can_run" {
+  command = plan
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    null                 = null
+  }
+  override_data {
+    target = data.databricks_group.existing
+    values = {
+      id = 123
+    }
+  }
+  variables {
+    genie_id_file_prefix       = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path          = "true"
+    genie_exposure_blocker     = ""
+    genie_space_missing_grants = { sales = ["cat.sch.customers|analysts"] }
+    genie_spaces               = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+  }
+  expect_failures = [null_resource.genie_space_acls]
+}
+
+run "space_absent_from_the_grant_check_refuses_can_run" {
+  command = plan
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    null                 = null
+  }
+  override_data {
+    target = data.databricks_group.existing
+    values = {
+      id = 123
+    }
+  }
+  variables {
+    genie_id_file_prefix       = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path          = "true"
+    genie_exposure_blocker     = ""
+    genie_space_missing_grants = {}
+    genie_spaces               = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+  }
+  expect_failures = [null_resource.genie_space_acls]
+}
+
+run "ready_layer_and_space_grants_allow_can_run" {
+  command = plan
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    null                 = null
+  }
+  override_data {
+    target = data.databricks_group.existing
+    values = {
+      id = 123
+    }
+  }
+  variables {
+    genie_id_file_prefix       = "tests/.tmp/exposure/.genie_space_id"
+    genie_script_path          = "true"
+    genie_exposure_blocker     = ""
+    genie_space_missing_grants = { sales = [] }
+    genie_spaces               = { sales = { name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], config = { title = "", description = "", sample_questions = [], instructions = "", benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], acl_groups = ["analysts"] } } }
+  }
+  assert {
+    condition     = output.genie_space_acls_applied
+    error_message = "with the layer ready and the space's grants in place, CAN_RUN must be planned"
   }
 }
