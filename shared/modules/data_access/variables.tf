@@ -151,3 +151,8 @@ variable "deploy_masking_script" {
   type        = string
   description = "Path to deploy_masking_functions.py."
 }
+
+variable "auth_file" {
+  type        = string
+  description = "Path to the layer's auth.auto.tfvars; deploy_masking_functions.py reads the current SP credentials from it."
+}

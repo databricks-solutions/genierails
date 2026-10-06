@@ -74,7 +74,7 @@ def test_tag_assignments_wait_for_deployment_sp_grant():
 def test_masking_functions_and_policies_wait_for_deployment_sp_grant():
     source = MAIN_TF.read_text()
     for start_marker, end_marker in (
-        ('resource "null_resource" "deploy_masking_functions" {',
+        ('resource "terraform_data" "masking_functions" {',
          'resource "databricks_policy_info" "policies" {'),
         ('resource "databricks_policy_info" "policies" {', None),
     ):
@@ -141,5 +141,8 @@ def test_table_select_principals_are_derived_per_table():
 def test_masking_deployer_does_not_declassify_oauth_secret():
     source = MAIN_TF.read_text()
 
-    assert "client_secret = var.databricks_client_secret" in source
+    masking = source[source.index('resource "terraform_data" "masking_functions" {'):
+                     source.index('resource "databricks_policy_info" "policies" {')]
+    # The deployer reads the secret from auth.auto.tfvars; it never enters state.
+    assert "databricks_client_secret" not in masking
     assert "nonsensitive(var.databricks_client_secret)" not in source

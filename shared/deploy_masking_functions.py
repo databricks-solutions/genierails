@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """Deploy or drop masking functions via Databricks Statement Execution API.
 
-Called by Terraform (null_resource + local-exec) during apply and destroy.
-Auth is read from environment variables set by the provisioner:
-  DATABRICKS_HOST, DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET
+Called by Terraform (terraform_data + local-exec) during apply and destroy.
+The SP credentials are read from the layer's auth.auto.tfvars (--auth-file),
+never from Terraform state, so a rotated secret is always current.
 
 Usage:
-  python3 deploy_masking_functions.py \
-      --sql-file masking_functions.sql --warehouse-id <id>
-  python3 deploy_masking_functions.py \
-      --sql-file masking_functions.sql --warehouse-id <id> --drop
+  python3 deploy_masking_functions.py --sql-file masking_functions.sql \
+      --warehouse-id <id> --auth-file auth.auto.tfvars --host <workspace-url>
+  python3 deploy_masking_functions.py ... --drop
 """
 
 import argparse
@@ -425,40 +424,49 @@ def drop(sql_file: str, warehouse_id: str) -> None:
         print(f"  All {total} function(s) dropped successfully.")
 
 
-def refresh_credentials_from_auth_file(sql_file: str) -> bool:
-    """Prefer the current SP credentials over the ones Terraform stored.
+AUTH_KEYS = (
+    "databricks_workspace_host",
+    "databricks_client_id",
+    "databricks_client_secret",
+)
 
-    The destroy-time provisioner can only read credentials saved in state when
-    the resource was created, which are stale after an SP secret rotation. The
-    layer's auth.auto.tfvars sits next to the SQL file, so load the current
-    client ID/secret from it when it targets the same workspace host.
+
+def load_credentials(auth_file: str, host: str) -> None:
+    """Export the current SP credentials from auth_file, or exit.
+
+    The destroy-time provisioner can only read Terraform state, so state must
+    not be the source of credentials: a rotated secret would be stale there.
+    Any problem with auth_file stops the run before a statement executes.
     """
-    auth_file = os.path.join(
-        os.path.dirname(os.path.abspath(sql_file)), "auth.auto.tfvars"
-    )
+    def fail(problem: str) -> None:
+        sys.exit(
+            f"ERROR: {problem}\n"
+            f"  Masking functions need the current SP credentials from {auth_file}\n"
+            f"  ({', '.join(AUTH_KEYS)}). Fix that file and re-run the make target."
+        )
+
     if not os.path.isfile(auth_file):
-        return False
+        fail(f"credentials file not found: {auth_file}")
     try:
         import hcl2
 
         with open(auth_file) as f:
             auth = hcl2.load(f)
     except Exception as exc:
-        print(
-            f"  WARNING: could not read {auth_file} ({type(exc).__name__}); "
-            "using provisioner credentials."
+        fail(f"could not parse {auth_file} ({type(exc).__name__})")
+    values = {key: str(auth.get(key) or "").strip() for key in AUTH_KEYS}
+    for key, value in values.items():
+        if not value:
+            fail(f"{auth_file} has no value for {key}")
+    file_host = values["databricks_workspace_host"].rstrip("/")
+    if file_host != host.rstrip("/"):
+        fail(
+            f"{auth_file} sets databricks_workspace_host = {file_host}, but these "
+            f"masking functions belong to {host.rstrip('/')}"
         )
-        return False
-    host = str(auth.get("databricks_workspace_host", "")).rstrip("/")
-    client_id = str(auth.get("databricks_client_id", ""))
-    client_secret = str(auth.get("databricks_client_secret", ""))
-    if not (client_id and client_secret):
-        return False
-    if host != os.environ.get("DATABRICKS_HOST", "").rstrip("/"):
-        return False
-    os.environ["DATABRICKS_CLIENT_ID"] = client_id
-    os.environ["DATABRICKS_CLIENT_SECRET"] = client_secret
-    return True
+    os.environ["DATABRICKS_HOST"] = file_host
+    os.environ["DATABRICKS_CLIENT_ID"] = values["databricks_client_id"]
+    os.environ["DATABRICKS_CLIENT_SECRET"] = values["databricks_client_secret"]
 
 
 def main():
@@ -484,8 +492,18 @@ def main():
             "(used during terraform destroy)"
         ),
     )
+    parser.add_argument(
+        "--auth-file",
+        required=True,
+        help="The layer's auth.auto.tfvars holding the current SP credentials",
+    )
+    parser.add_argument(
+        "--host",
+        required=True,
+        help="Workspace URL the functions belong to; must match --auth-file",
+    )
     args = parser.parse_args()
-    refresh_credentials_from_auth_file(args.sql_file)
+    load_credentials(args.auth_file, args.host)
 
     if args.drop:
         drop(args.sql_file, args.warehouse_id)
