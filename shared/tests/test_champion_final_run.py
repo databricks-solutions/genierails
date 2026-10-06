@@ -233,6 +233,14 @@ def _fixture_root(tmp_path: Path) -> tuple[Path, Path, dict]:
     return root, env_dir, tfvars
 
 
+def _skip_if_providers_unavailable(init: subprocess.CompletedProcess) -> None:
+    if init.returncode == 0:
+        return
+    if "Failed to query available provider packages" in init.stderr or "could not connect" in init.stderr:
+        pytest.skip("hashicorp/null provider not downloadable (offline)")
+    raise AssertionError(init.stdout + init.stderr)
+
+
 def _tf(root: Path, *args: str, env: dict) -> subprocess.CompletedProcess:
     return subprocess.run(["terraform", *args], cwd=root, text=True,
                           capture_output=True, env=env, timeout=300)
@@ -255,8 +263,7 @@ def test_existing_state_migrates_without_dropping_and_sheds_the_secret(tmp_path)
     log = tmp_path / "stub.log"
     env = {**os.environ, "STUB_LOG": str(log), "TF_IN_AUTOMATION": "1"}
     init = _tf(root, "init", "-input=false", env=env)
-    if init.returncode != 0:
-        pytest.skip(f"terraform init failed (offline?): {init.stderr[-300:]}")
+    _skip_if_providers_unavailable(init)
 
     actions = _plan_actions(root, tfvars, env)
     assert actions == {
@@ -295,3 +302,150 @@ def test_spinner_writes_one_line_when_not_a_tty(monkeypatch):
     assert out.count("Calling LLM") == 1
     assert "\r" not in out
     assert not any(frame in out for frame in generate_abac.Spinner.FRAMES)
+
+
+# ── Genie agent: adopt instead of duplicating; secret-free migration ─────────
+
+GENIE_SCRIPT = SHARED / "scripts/genie_space.sh"
+WORKSPACE_TF = SHARED / "modules/workspace/main.tf"
+
+
+def _run_create(tmp_path: Path, get_code: str, id_text: str | None = "01live\n"):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "curl.log"
+    # GET /genie/spaces/<id> answers get_code; a POST would create a new agent.
+    (bin_dir / "curl").write_text(f"""#!/bin/bash
+echo "$*" >> {calls}
+if [[ " $* " == *" POST "* ]]; then printf '{{"space_id":"01new"}}\\n200'; exit 0; fi
+if [[ " $* " == *"/api/2.0/genie/spaces/"* ]]; then printf '{get_code}'; exit 0; fi
+printf '{{}}\\n200'
+""")
+    (bin_dir / "curl").chmod(0o755)
+    id_file = tmp_path / ".genie_space_id_agent"
+    if id_text is not None:
+        id_file.write_text(id_text)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+           "DATABRICKS_HOST": "https://ws", "DATABRICKS_TOKEN": "t",
+           "GENIE_ID_FILE": str(id_file), "GENIE_TABLES_CSV": "cat.s.t",
+           "GENIE_WAREHOUSE_ID": "wh", "GENIE_TITLE": "Agent"}
+    result = subprocess.run(["bash", str(GENIE_SCRIPT), "create"], env=env,
+                            capture_output=True, text=True, timeout=60)
+    posts = [c for c in calls.read_text().splitlines() if " POST " in f" {c} "] if calls.exists() else []
+    return result, posts, id_file
+
+
+def test_create_adopts_the_agent_named_in_its_id_file(tmp_path):
+    result, posts, id_file = _run_create(tmp_path, "200")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "adopting it, no new agent created" in result.stdout
+    assert posts == []
+    assert id_file.read_text().strip() == "01live"
+
+
+def test_create_makes_a_new_agent_only_after_a_confirmed_404(tmp_path):
+    result, posts, id_file = _run_create(tmp_path, "404")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(posts) == 1
+    assert id_file.read_text().strip() == "01new"
+
+
+def test_create_refuses_to_duplicate_when_the_check_fails(tmp_path):
+    result, posts, id_file = _run_create(tmp_path, "503")
+    assert result.returncode != 0
+    assert "not creating a duplicate" in result.stderr
+    assert posts == []
+    assert id_file.read_text().strip() == "01live"
+
+
+def test_create_without_an_id_file_creates_as_before(tmp_path):
+    result, posts, _ = _run_create(tmp_path, "200", id_text=None)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(posts) == 1
+
+
+def test_rename_safety_sees_the_migrated_genie_resource(tmp_path):
+    from scripts import remap_env_config
+
+    (tmp_path / "terraform.tfstate").write_text(json.dumps({"resources": [
+        {"module": "module.workspace", "type": "terraform_data", "name": "genie_space",
+         "instances": [{"index_key": "agent_prod"}]},
+        {"module": "module.workspace", "type": "null_resource", "name": "genie_space_config",
+         "instances": [{"index_key": "agent_prod"}]},
+    ]}))
+    assert remap_env_config._deployed_space_keys(str(tmp_path)) == {
+        "agent_prod": ["module.workspace.terraform_data.genie_space",
+                       "module.workspace.null_resource.genie_space_config"],
+    }
+
+
+GENIE_OLD_STATE = {
+    "version": 4, "terraform_version": "1.11.4", "serial": 1,
+    "lineage": "00000000-0000-0000-0000-000000000001", "outputs": {},
+    "resources": [{
+        "mode": "managed", "type": "null_resource", "name": "genie_space_create",
+        "provider": 'provider["registry.terraform.io/hashicorp/null"]',
+        "instances": [{
+            "index_key": "agent", "schema_version": 0,
+            "attributes": {"id": "6408157866410471460", "triggers": {
+                "client_id": "sp-client", "client_secret": "OLD-REVOKED-SECRET",
+                "host": HOST, "id_file": "ID_FILE", "script": "SCRIPT"}},
+            "sensitive_attributes": [],
+        }],
+    }],
+    "check_results": None,
+}
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_existing_genie_state_migrates_without_trashing_the_agent(tmp_path):
+    tf = WORKSPACE_TF.read_text()
+    block = _resource_block(tf, 'resource "terraform_data" "genie_space" {')
+    block = re.sub(r"\n  depends_on = \[.*?\n  \]\n", "\n", block, flags=re.S)
+    stub = tmp_path / "stub.py"
+    block = block.replace('"bash ../../scripts/genie_space.sh trash"', json.dumps(f"python3 {stub} trash"))
+    removed = re.search(r"removed \{\n  from = null_resource\.genie_space_create.*?\n\}\n", tf, re.S).group(0)
+    root = tmp_path / "root"
+    root.mkdir()
+    stub.write_text(STUB)
+    prefix = tmp_path / ".genie_space_id"
+    (tmp_path / ".genie_space_id_agent").write_text("01live\n")
+    (root / "main.tf").write_text(
+        'terraform {\n  required_providers {\n'
+        '    null = { source = "hashicorp/null", version = "~> 3.2" }\n  }\n}\n'
+        'variable "databricks_workspace_host" {}\nvariable "databricks_client_id" {}\n'
+        'variable "databricks_client_secret" { sensitive = true }\n'
+        'variable "genie_id_file_prefix" {}\nvariable "genie_script_path" {}\n'
+        'locals {\n  shared_warehouse_id = "wh"\n'
+        '  new_spaces = { agent = { uc_tables = ["c.s.t"], sql_warehouse_id = "", name = "Agent",'
+        ' config = { title = "" } } }\n}\n'
+        + block + "\n" + removed
+    )
+    state = json.dumps(GENIE_OLD_STATE).replace('"ID_FILE"', json.dumps(f"{prefix}_agent"))
+    (root / "terraform.tfstate").write_text(state.replace('"SCRIPT"', json.dumps(str(stub))))
+    tfvars = {"databricks_workspace_host": HOST, "databricks_client_id": "sp-client",
+              "databricks_client_secret": "current-secret", "genie_id_file_prefix": str(prefix),
+              "genie_script_path": f"python3 {stub}"}
+    log = tmp_path / "stub.log"
+    env = {**os.environ, "STUB_LOG": str(log), "TF_IN_AUTOMATION": "1"}
+    init = _tf(root, "init", "-input=false", env=env)
+    _skip_if_providers_unavailable(init)
+
+    assert _plan_actions(root, tfvars, env) == {
+        'null_resource.genie_space_create["agent"]': ["forget"],
+        'terraform_data.genie_space["agent"]': ["create"],
+    }
+    var_args = [f"-var={k}={v}" for k, v in tfvars.items()]
+    apply = _tf(root, "apply", "-input=false", "-auto-approve", *var_args, env=env)
+    assert apply.returncode == 0, apply.stdout + apply.stderr
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert calls == [["create"]]  # create ran once (it adopts; tested above); trash never ran
+    state_text = (root / "terraform.tfstate").read_text()
+    assert "OLD-REVOKED-SECRET" not in state_text and "current-secret" not in state_text
+    assert (tmp_path / ".genie_space_id_agent").read_text().strip() == "01live"
+
+    # Credential rotation is a no-op; a different workspace host replaces.
+    assert _plan_actions(root, {**tfvars, "databricks_client_secret": "rotated"}, env) == {}
+    assert _plan_actions(root, {**tfvars, "databricks_workspace_host": "https://other"}, env) == {
+        'terraform_data.genie_space["agent"]': ["delete", "create"],
+    }

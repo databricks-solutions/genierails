@@ -41,7 +41,7 @@ output "genie_space_acls_groups" {
 
 output "genie_spaces_created" {
   description = "Set of Genie agent keys that were auto-created (genie_space_id was empty)."
-  value       = keys(null_resource.genie_space_create)
+  value       = keys(terraform_data.genie_space)
 }
 
 output "genie_groups_csv" {

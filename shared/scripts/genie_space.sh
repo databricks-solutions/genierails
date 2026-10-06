@@ -254,6 +254,27 @@ create_genie_space() {
   local warehouse_id="$4"
   workspace_url="${workspace_url%/}"
 
+  # Adopt the agent this ID file already names (e.g. after its Terraform
+  # address changed) rather than creating a duplicate under a new ID. Only a
+  # confirmed 404 leads to a new agent; any other error stops here.
+  if [[ -n "${GENIE_ID_FILE:-}" && -s "${GENIE_ID_FILE}" ]]; then
+    local existing_id existing_code
+    existing_id=$(tr -d '[:space:]' < "${GENIE_ID_FILE}")
+    existing_code=$(curl -s -o /dev/null -w "%{http_code}" \
+      -H "${UA_HEADER}" \
+      -H "Authorization: Bearer ${token}" \
+      "${workspace_url}/api/2.0/genie/spaces/${existing_id}")
+    if [[ "$existing_code" == "200" ]]; then
+      echo "Genie agent ${existing_id} (from ${GENIE_ID_FILE}) already exists; adopting it, no new agent created."
+      echo "Done. Genie agent ID: ${existing_id}"
+      return 0
+    elif [[ "$existing_code" != "404" ]]; then
+      echo "ERROR: Cannot check Genie agent ${existing_id} from ${GENIE_ID_FILE} (HTTP ${existing_code}); not creating a duplicate." >&2
+      exit 1
+    fi
+    echo "Genie agent ${existing_id} from ${GENIE_ID_FILE} no longer exists (HTTP 404); creating a new one."
+  fi
+
   if [[ -z "${GENIE_TABLES_CSV:-}" ]]; then
     echo "ERROR: GENIE_TABLES_CSV not set. Pass comma-separated fully-qualified table names." >&2
     echo "  Example: GENIE_TABLES_CSV='cat.schema.t1,cat.schema.t2' $0 create" >&2
@@ -738,7 +759,7 @@ elif [[ "$COMMAND" == "set-acls" ]]; then
     if [[ ! -f "${GENIE_ID_FILE}" ]]; then
       echo "ERROR: Genie agent ID file not found at '${GENIE_ID_FILE}'." >&2
       echo "  The space may have been deleted outside Terraform." >&2
-      echo "  To recover: terraform taint 'null_resource.genie_space_create[0]'" >&2
+      echo "  To recover: terraform taint 'module.workspace.terraform_data.genie_space[\"<space key>\"]'" >&2
       exit 1
     fi
     SPACE_ID=$(cat "${GENIE_ID_FILE}" | tr -d '[:space:]')
