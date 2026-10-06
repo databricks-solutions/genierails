@@ -6378,19 +6378,6 @@ def _delete_account_groups(auth_file: Path, groups: dict[str, str]) -> None:
             print(f"  {_yellow('WARN')} could not delete group {name} (id={group_id}): {exc}")
 
 
-def _list_tag_policy_keys(auth_file: Path) -> set[str] | None:
-    """Tag policy keys visible now, or None if they cannot be listed."""
-    try:
-        from databricks.sdk import WorkspaceClient
-
-        _configure_sdk_env(_load_auth_cfg(auth_file))
-        w = WorkspaceClient(product="genierails-test-runner", product_version="0.1.0")
-        return {tp.tag_key for tp in w.tag_policies.list_tag_policies() if tp.tag_key}
-    except Exception as exc:
-        print(f"  {_yellow('WARN')} could not list tag policies: {exc}")
-        return None
-
-
 def _account_state_tag_policy_keys() -> set[str]:
     """Tag policy keys recorded in this run's account-layer Terraform state."""
     state = ENVS_DIR / "account" / "terraform.tfstate"
@@ -6408,17 +6395,20 @@ def _account_state_tag_policy_keys() -> set[str]:
     }
 
 
-def _delete_tag_policies(auth_file: Path, keys: set[str]) -> None:
-    from databricks.sdk import WorkspaceClient
+def _report_leftover_tag_policies() -> None:
+    """Loudly list tag policies the account destroy left in this run's state.
 
-    _configure_sdk_env(_load_auth_cfg(auth_file))
-    w = WorkspaceClient(product="genierails-test-runner", product_version="0.1.0")
-    for key in sorted(keys):
-        try:
-            w.tag_policies.delete_tag_policy(tag_key=key)
-            print(f"  Deleted leftover tag policy {key}")
-        except Exception as exc:
-            print(f"  {_yellow('WARN')} could not delete tag policy {key}: {exc}")
+    Never deletes them directly: only Terraform knows this run created them.
+    """
+    leftover = sorted(_account_state_tag_policy_keys())
+    if not leftover:
+        return
+    bar = "!" * 72
+    print(f"\n{bar}\n  {_red('LEFTOVER')}: the account-layer destroy did not remove "
+          f"{len(leftover)} tag policy/ies still in\n  {ENVS_DIR / 'account' / 'terraform.tfstate'}:\n"
+          + "".join(f"    - {key}\n" for key in leftover)
+          + f"  They were NOT deleted directly. Clean up manually, e.g. "
+          f"make destroy ENV=account.\n{bar}")
 
 
 def _class_tag_rows(auth_file: Path, warehouse_id: str, catalog: str) -> list[list]:
@@ -6559,8 +6549,6 @@ def scenario_champion(
 
     _ensure_packages()
     created_groups: dict[str, str] = {}
-    # None until listed: then teardown never deletes a tag policy directly.
-    preexisting_tag_policies: set[str] | None = None
     dev_space_id = ""
     resolved_wh = warehouse_id
     try:
@@ -6573,8 +6561,6 @@ def scenario_champion(
                 (env_dir / "generated" / rel).unlink(missing_ok=True)
             (env_dir / "data_access" / "discovered_uc_tables.auto.tfvars").unlink(missing_ok=True)
             (env_dir / "env.auto.tfvars").unlink(missing_ok=True)
-
-        preexisting_tag_policies = _list_tag_policy_keys(auth_file)
 
         _step("Creating dev_fin + prod_fin fixture catalogs (sensitive columns)")
         resolved_wh = _setup_data(auth_file, "--prod", warehouse_id=warehouse_id) or warehouse_id
@@ -6785,26 +6771,17 @@ def scenario_champion(
             print(f"  {_yellow('KEEP')}  --keep-data: leaving envs, catalogs, groups and "
                   f"Genie agent {dev_space_id or '(none)'} in place")
         else:
-            # Tag policies are owned by this run's account-layer Terraform state;
-            # the destroy below removes them. Only a leftover that this state
-            # recorded AND that did not exist when the run started is deleted
-            # directly — never a pre-existing or concurrently created policy.
-            owned_tag_policies = (
-                _account_state_tag_policy_keys() - preexisting_tag_policies
-                if preexisting_tag_policies is not None else set()
-            )
+            # Tag policies are removed only by destroying this run's own
+            # account-layer Terraform state; any it leaves behind are reported.
             _try_destroy(prod_env)
             _try_destroy(dev_env)
             _try_destroy_account()
+            _report_leftover_tag_policies()
             if dev_space_id:
                 _delete_genie_space_via_api(auth_file, dev_space_id)
             _delete_account_groups(auth_file, created_groups)
             _teardown_data("--teardown", "--teardown-prod", auth_file=auth_file,
                            warehouse_id=resolved_wh)
-            if owned_tag_policies:
-                leftover = owned_tag_policies & (_list_tag_policy_keys(auth_file) or set())
-                if leftover:
-                    _delete_tag_policies(auth_file, leftover)
 
 
 # ---------------------------------------------------------------------------

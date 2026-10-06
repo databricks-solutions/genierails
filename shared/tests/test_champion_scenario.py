@@ -157,10 +157,7 @@ def champion(tmp_path, monkeypatch):
     # This branch's remap_env_config.py predates PR #59, which renames a space
     # whose title names the dev catalog; the live run (after #59) covers that.
     monkeypatch.setattr(rit, "CHAMPION_SPACE_TITLE", "Champion Finance Analytics")
-    monkeypatch.setattr(rit, "_list_tag_policy_keys", lambda _auth: set())
     monkeypatch.setattr(rit, "_account_state_tag_policy_keys", lambda: set())
-    monkeypatch.setattr(rit, "_delete_tag_policies",
-                        lambda _auth, keys: teardown.append(("_delete_tag_policies", set(keys))))
     monkeypatch.setattr(rit, "_create_genie_space_via_api", lambda *a, **k: SPACE_ID)
     monkeypatch.setattr(rit, "_wait_for_class_tags", lambda _a, _w, catalog: waits.append(catalog))
     monkeypatch.setattr(rit, "_force_account_reapply", lambda *_: None)
@@ -286,26 +283,27 @@ def test_partial_group_creation_is_recorded_for_teardown(monkeypatch):
     assert created == {"first": "id-first"}
 
 
-def test_teardown_deletes_only_tag_policies_this_run_created(champion, monkeypatch):
+def test_teardown_reports_but_never_deletes_leftover_tag_policies(champion, monkeypatch, capsys):
     fake, envs, _waits, teardown = champion
-    listings = iter([
-        {"pre_existing"},                                      # at start
-        {"gr_treatment", "pre_existing", "concurrent_new"},    # after destroy
-    ])
-    monkeypatch.setattr(rit, "_list_tag_policy_keys", lambda _auth: next(listings))
-    # The account state recorded (created or imported) these two.
-    monkeypatch.setattr(rit, "_account_state_tag_policy_keys",
-                        lambda: {"gr_treatment", "pre_existing"})
-    rit.scenario_champion(envs / "dev" / "auth.auto.tfvars", "", keep_data=False)
-    assert ("_delete_tag_policies", {"gr_treatment"}) in teardown
-
-
-def test_teardown_never_deletes_tag_policies_when_start_listing_failed(champion, monkeypatch):
-    fake, envs, _waits, teardown = champion
-    monkeypatch.setattr(rit, "_list_tag_policy_keys", lambda _auth: None)
+    # The account destroy "failed": its state still lists a tag policy.
     monkeypatch.setattr(rit, "_account_state_tag_policy_keys", lambda: {"gr_treatment"})
+
+    class NoDirectDeletes:
+        def __init__(self, *a, **k):
+            raise AssertionError("teardown must not call the tag-policy API directly")
+
+    monkeypatch.setattr("databricks.sdk.WorkspaceClient", NoDirectDeletes)
     rit.scenario_champion(envs / "dev" / "auth.auto.tfvars", "", keep_data=False)
-    assert not [t for t in teardown if isinstance(t, tuple)]
+    out = capsys.readouterr().out
+    assert "LEFTOVER" in out and "- gr_treatment" in out and "NOT deleted directly" in out
+    assert not hasattr(rit, "_delete_tag_policies")
+    assert teardown.index("_try_destroy_account") < teardown.index("_delete_genie_space_via_api")
+
+
+def test_teardown_is_quiet_when_destroy_removed_the_tag_policies(champion, capsys):
+    fake, envs, _waits, _teardown = champion
+    rit.scenario_champion(envs / "dev" / "auth.auto.tfvars", "", keep_data=False)
+    assert "LEFTOVER" not in capsys.readouterr().out
 
 
 def test_account_state_tag_policy_keys_reads_only_tag_policies(tmp_path, monkeypatch):
@@ -317,3 +315,18 @@ def test_account_state_tag_policy_keys_reads_only_tag_policies(tmp_path, monkeyp
         {"type": "databricks_group", "instances": [{"attributes": {"tag_key": "nope"}}]},
     ]}))
     assert rit._account_state_tag_policy_keys() == {"gr_treatment"}
+
+
+def _remap_renames_spaces() -> bool:
+    import scripts.remap_env_config as remap
+    return hasattr(remap, "remap_hcl")  # added by PR #59
+
+
+@pytest.mark.skipif(not _remap_renames_spaces(),
+                    reason="needs PR #59's space rename in remap_env_config.py")
+def test_promote_renames_the_catalog_named_title(champion, monkeypatch, capsys):
+    fake, envs, _waits, _teardown = champion
+    monkeypatch.setattr(rit, "CHAMPION_SPACE_TITLE",
+                        f"Champion Finance Analytics ({rit.DEV_FIN_CAT}.finance)")
+    rit.scenario_champion(envs / "dev" / "auth.auto.tfvars", "", keep_data=False)
+    assert "renamed to 'Champion Finance Analytics (prod_fin.finance)'" in capsys.readouterr().out

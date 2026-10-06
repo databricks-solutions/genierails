@@ -95,13 +95,15 @@ DERIVED_ACCOUNT_FILES = {"abac.auto.tfvars"}
 # Set from --account-dir (the Makefile's ACCOUNT_ENV_DIR); default envs/account.
 ACCOUNT_DIR: Path | None = None
 
-# Repo inputs: everything under shared/ except docs, tests, examples,
-# non-executable text and run logs. Over-inclusion only costs a re-certify,
-# but logs (e.g. run_parallel_tests.py's scripts/logs/) are written while a
-# certify -> release is in flight and would make release refuse spuriously.
+# Repo inputs: everything under shared/ except docs, tests, examples and
+# non-executable text. Over-inclusion only costs a re-certify -- except for the
+# *.log files run_parallel_tests.py writes under shared/scripts/logs/ while a
+# certify -> release is in flight, which would make release refuse spuriously.
+# That one location is matched by path from the shared root, not by basename.
 REPO_INPUT_ROOT = SHARED_ROOT
-REPO_EXCLUDED_DIRS = {"tests", "docs", "examples", "logs", "__pycache__"}
-REPO_EXCLUDED_SUFFIXES = {".md", ".example", ".pyc", ".log"}
+REPO_EXCLUDED_DIRS = {"tests", "docs", "examples", "__pycache__"}
+REPO_EXCLUDED_SUFFIXES = {".md", ".example", ".pyc"}
+REPO_RUN_LOG_DIR = "scripts/logs/"
 
 
 class ReceiptError(Exception):
@@ -188,8 +190,9 @@ def _walk_files(root: Path, excluded_dirs: set[str] = frozenset()) -> list[tuple
 def repo_input_files(root: Path | None = None) -> list[Path]:
     root = root or REPO_INPUT_ROOT
     return [
-        path for _rel, path in _walk_files(root, REPO_EXCLUDED_DIRS)
+        path for rel, path in _walk_files(root, REPO_EXCLUDED_DIRS)
         if path.suffix not in REPO_EXCLUDED_SUFFIXES
+        and not (rel.startswith(REPO_RUN_LOG_DIR) and rel.endswith(".log"))
     ]
 
 
