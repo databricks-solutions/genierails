@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -465,3 +466,89 @@ def test_space_title_naming_the_catalog_is_renamed_like_the_generated_config(
     generated_key = remap_hcl(f'"{title}" = {{}}', [("dev_cat", "prod_cat")])
     assert name == "Walkthrough (prod_cat.demo)"
     assert f'"{name}"' in generated_key
+
+
+def _two_space_source(tmp_path, titles, catalog_map_src="dev_cat"):
+    source = tmp_path / "dev"
+    (source / "generated").mkdir(parents=True)
+    entries = "".join(
+        f'  {{ genie_space_id = "s{i}", uc_tables = ["{catalog_map_src}.demo.t{i}"] }},\n'
+        for i in range(len(titles))
+    )
+    (source / "env.auto.tfvars").write_text(f"genie_spaces = [\n{entries}]\n")
+    id_to_name = " ".join(f's{i} = "{t}"' for i, t in enumerate(titles))
+    (source / "generated" / "abac.auto.tfvars").write_text(
+        f"genie_space_id_to_name = {{ {id_to_name} }}\n"
+    )
+    return source
+
+
+def test_space_names_that_collide_after_remap_fail_with_both_sources(
+    tmp_path, monkeypatch, capsys
+):
+    source = _two_space_source(tmp_path, ["Agent (dev_cat.demo)", "Agent (prod_cat.demo)"])
+    dest = tmp_path / "prod"
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+
+    with pytest.raises(SystemExit):
+        remap_env_config.main()
+
+    out = capsys.readouterr().out
+    assert "'Agent (dev_cat.demo)', 'Agent (prod_cat.demo)'" in out
+    assert "'Agent (prod_cat.demo)'" in out
+    assert not (dest / "env.auto.tfvars").exists()
+
+
+def _deployed_state(dest, key):
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "terraform.tfstate").write_text(json.dumps({"resources": [
+        {"module": "module.workspace", "type": "null_resource", "name": name,
+         "instances": [{"index_key": key}]}
+        for name in ("genie_space_create", "genie_space_config")
+    ]}))
+    (dest / f".genie_space_id_{key}").write_text("01live\n")
+
+
+def test_rename_of_an_already_deployed_space_refuses_with_state_mv_guidance(
+    tmp_path, monkeypatch, capsys
+):
+    """A changed key would destroy genie_space_create, which trashes the live agent."""
+    title = "Walkthrough (dev_cat.demo)"
+    source = _two_space_source(tmp_path, [title])
+    dest = tmp_path / "prod"
+    old_key = "walkthrough_dev_cat_demo"
+    _deployed_state(dest, old_key)
+    (dest / "env.auto.tfvars").write_text("business_access_enabled = true\n")
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+
+    with pytest.raises(SystemExit):
+        remap_env_config.main()
+
+    out = capsys.readouterr().out
+    assert "would trash the deployed agent" in out
+    for name in ("genie_space_create", "genie_space_config"):
+        assert (
+            f"state-mv 'module.workspace.null_resource.{name}[\"{old_key}\"]' "
+            f"'module.workspace.null_resource.{name}[\"walkthrough_prod_cat_demo\"]'"
+        ) in out
+    assert ".genie_space_id_walkthrough_prod_cat_demo" in out
+    assert (dest / "env.auto.tfvars").read_text() == "business_access_enabled = true\n"
+
+
+def test_deployed_space_whose_key_is_unchanged_promotes_normally(tmp_path, monkeypatch):
+    title = "Walkthrough (dev_cat.demo)"
+    source = _two_space_source(tmp_path, [title])
+    dest = tmp_path / "prod"
+    _deployed_state(dest, "walkthrough_prod_cat_demo")  # earlier promote already renamed it
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+
+    remap_env_config.main()
+
+    with (dest / "env.auto.tfvars").open() as handle:
+        assert hcl2.load(handle)["genie_spaces"][0]["name"] == "Walkthrough (prod_cat.demo)"
