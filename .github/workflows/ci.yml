@@ -20,7 +20,8 @@ jobs:
       # The coverage-gate enforcement tests drive real `terraform plan` /
       # `terraform test` (mock providers, no credentials) and skip without it.
       # The wrapper must be off: tests parse terraform's own stdout/stderr.
-      - uses: hashicorp/setup-terraform@v3
+      # Pinned by commit (v3.1.2), not the mutable v3 tag.
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: "1.11.4"
           terraform_wrapper: false
