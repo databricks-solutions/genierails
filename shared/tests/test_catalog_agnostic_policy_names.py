@@ -3,9 +3,9 @@
 The data_access module keys ``databricks_policy_info.policies`` by the policy
 ``name`` and names the remote policy ``<catalog>_<name>``. Derived masks are
 named ``gr_mask_<catalog>_<treatment>`` at generate time; promote rewrites that
-catalog token. A policy the destination already has keeps its name, because a
-rename is a delete plus a create in Terraform (and provider 1.111 cannot rename
-in place).
+catalog token, but only when the destination's Terraform state or a live
+listing shows the policy isn't deployed: a rename is a delete plus a create in
+Terraform, and provider 1.111 cannot rename in place.
 """
 
 import json
@@ -22,15 +22,16 @@ sys.path.insert(0, str(SHARED))
 sys.path.insert(0, str(SHARED / "scripts"))
 
 from generate_abac import _render_fgac_policy_block  # noqa: E402
+import remap_generated_config  # noqa: E402
 from remap_generated_config import (  # noqa: E402
-    load_deployed_policy_names,
+    live_policy_lister,
+    read_state_policy_keys,
     remap_hcl,
     remap_policy_name,
     remap_policy_names,
 )
 from treatment_derivation import derive_treatment_model, load_treatment_config  # noqa: E402
 
-REMAP = SHARED / "scripts" / "remap_generated_config.py"
 SPLIT = SHARED / "scripts" / "split_abac_config.py"
 ROOT = SHARED / "roots" / "data_access"
 
@@ -73,22 +74,41 @@ def _render(cfg: dict) -> str:
     return "tag_assignments = []\n\nfgac_policies = [\n" + blocks + ",\n]\n"
 
 
-def _promote(tmp_path: Path, source_text: str, *deployed: Path) -> tuple[subprocess.CompletedProcess, Path]:
+LEGACY = f"gr_mask_{DEV_1}_redact"
+LEGACY_REMOTE = f"{PROD_1}_{LEGACY}"
+
+
+def _lister(live: dict[str, set[str]] | None):
+    """Stub of the SDK listing: None means the API is unavailable."""
+    return lambda _auth: (lambda catalog: None if live is None else live.get(catalog, set()))
+
+
+def _promote(tmp_path, monkeypatch, capsys, source_text, *, state=None, live=None):
     src = tmp_path / "dev" / "generated"
     src.mkdir(parents=True, exist_ok=True)
     (src / "abac.auto.tfvars").write_text(source_text)
     out = tmp_path / "prod" / "generated" / "abac.auto.tfvars"
-    flags = [arg for path in deployed for arg in ("--deployed", str(path))]
-    result = subprocess.run(
-        [sys.executable, str(REMAP), str(src / "abac.auto.tfvars"), str(src / "missing.sql"),
-         str(out), str(out.with_name("masking_functions.sql")), *MAPS, *flags],
-        text=True, capture_output=True,
-    )
-    return result, out
+    argv = ["remap_generated_config.py", str(src / "abac.auto.tfvars"), str(src / "missing.sql"),
+            str(out), str(out.with_name("masking_functions.sql")), *MAPS,
+            "--auth", str(tmp_path / "prod" / "auth.auto.tfvars")]
+    if state is not None:
+        argv += ["--state", str(state)]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(remap_generated_config, "live_policy_lister", _lister(live))
+    code = 0
+    try:
+        remap_generated_config.main()
+    except SystemExit as exc:
+        code = exc.code or 0
+    return code, capsys.readouterr().out, out
 
 
 def _policies(path: Path) -> list[dict]:
     return hcl2.loads(path.read_text())["fgac_policies"]
+
+
+def _names(path: Path) -> list[str]:
+    return [p["name"] for p in _policies(path)]
 
 
 def _remote_names(policies: list[dict]) -> list[str]:
@@ -96,32 +116,17 @@ def _remote_names(policies: list[dict]) -> list[str]:
     return [f"{p['catalog']}_{p['name']}" for p in policies]
 
 
-def _legacy_prod_config(path: Path, names: list[str]) -> Path:
-    """What a pre-fix promote left in prod: dev-catalog names on prod catalogs."""
+def _state(path: Path, keys: list[str]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    blocks = ",\n".join(
-        f'  {{\n    name = "{name}"\n    policy_type = "POLICY_TYPE_COLUMN_MASK"\n'
-        f'    catalog = "{PROD_1}"\n    to_principals = ["analysts"]\n'
-        f'    function_name = "mask_redact"\n    function_catalog = "{PROD_1}"\n'
-        f'    function_schema = "payments"\n  }}'
-        for name in names
-    )
-    path.write_text("fgac_policies = [\n" + blocks + "\n]\n")
+    path.write_text(json.dumps({"version": 4, "resources": [{
+        "module": "module.data_access", "mode": "managed",
+        "type": "databricks_policy_info", "name": "policies",
+        "instances": [{"index_key": k, "attributes": {"on_securable_fullname": PROD_1}} for k in keys],
+    }]}))
     return path
 
 
-def test_generate_keeps_catalog_scoped_derived_mask_names():
-    # Generate-time names are unchanged, so dev deployments and the reviewed-rule
-    # merge (matched by name) see no rename.
-    names = {p["name"] for p in _dev_generated_config()["fgac_policies"]}
-    assert f"gr_mask_{DEV_1}_redact" in names
-    assert f"gr_mask_{DEV_2}_redact" in names
-
-
-def test_generate_then_promote_names_carry_no_dev_catalog(tmp_path):
-    result, out = _promote(tmp_path, _render(_dev_generated_config()))
-    assert result.returncode == 0, result.stdout + result.stderr
-
+def _assert_all_renamed(out: Path) -> None:
     policies = _policies(out)
     names = [p["name"] for p in policies]
     remote = _remote_names(policies)
@@ -135,6 +140,28 @@ def test_generate_then_promote_names_carry_no_dev_catalog(tmp_path):
     assert len(set(remote)) == len(remote)
 
 
+def _assert_no_live_mask_dropped(tmp_path: Path, out: Path) -> None:
+    changes = _policy_plan(tmp_path, out)
+    live = _SEEDED_ADDRESS.format(key=LEGACY)
+    actions, before, after = changes[live]
+    # Principals may converge in place; the remote name must not move.
+    assert actions in (["no-op"], ["update"]), actions
+    assert before == after == LEGACY_REMOTE
+    for address, (actions, before, after) in changes.items():
+        assert "delete" not in actions, address
+        assert actions in (["no-op"], ["update"], ["create"]), (address, actions)
+        if actions == ["update"]:
+            assert before == after, (address, before, after)
+
+
+def test_generate_keeps_catalog_scoped_derived_mask_names():
+    # Generate-time names are unchanged, so dev deployments and the reviewed-rule
+    # merge (matched by name) see no rename.
+    names = {p["name"] for p in _dev_generated_config()["fgac_policies"]}
+    assert f"gr_mask_{DEV_1}_redact" in names
+    assert f"gr_mask_{DEV_2}_redact" in names
+
+
 def test_promote_renames_only_the_policys_own_catalog_token():
     assert remap_policy_name("gr_mask_cat_v2_redact", "cat_v2", "p2") == "gr_mask_p2_redact"
     assert remap_policy_name("gr_mask_xcat_redact", "cat", "prod") == "gr_mask_xcat_redact"
@@ -142,49 +169,155 @@ def test_promote_renames_only_the_policys_own_catalog_token():
     assert remap_policy_name("mask_pii", "cat", "prod") == "mask_pii"
 
 
-def test_policy_already_deployed_in_prod_keeps_its_name(tmp_path):
-    legacy = f"gr_mask_{DEV_1}_redact"
-    deployed = _legacy_prod_config(tmp_path / "prod" / "data_access" / "abac.auto.tfvars", [legacy])
+def test_state_without_the_policy_renames(tmp_path, monkeypatch, capsys):
+    state = _state(tmp_path / "prod" / "data_access" / "terraform.tfstate", ["unrelated"])
+    code, stdout, out = _promote(tmp_path, monkeypatch, capsys, _render(_dev_generated_config()), state=state)
+    assert code == 0, stdout
+    _assert_all_renamed(out)
+    assert "kept policy name" not in stdout
 
-    result, out = _promote(tmp_path, _render(_dev_generated_config()), deployed)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert f"Keeping deployed policy name {PROD_1}_{legacy}" in result.stdout
 
-    names = [p["name"] for p in _policies(out)]
-    assert legacy in names
+def test_state_absent_and_api_says_not_deployed_renames(tmp_path, monkeypatch, capsys):
+    code, stdout, out = _promote(
+        tmp_path, monkeypatch, capsys, _render(_dev_generated_config()), live={PROD_1: {"other"}}
+    )
+    assert code == 0, stdout
+    _assert_all_renamed(out)
+
+
+def test_draft_only_policy_is_renamed_when_confirmed_not_live(tmp_path, monkeypatch, capsys):
+    # An earlier, never-applied promote left the old name in prod's drafts.
+    draft = tmp_path / "prod" / "generated" / "abac.auto.tfvars"
+    da = tmp_path / "prod" / "data_access" / "abac.auto.tfvars"
+    for path in (draft, da):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'fgac_policies = [\n  {{\n    name = "{LEGACY}"\n    catalog = "{PROD_1}"\n  }}\n]\n')
+    code, stdout, out = _promote(
+        tmp_path, monkeypatch, capsys, _render(_dev_generated_config()), live={PROD_1: set()}
+    )
+    assert code == 0, stdout
+    _assert_all_renamed(out)
+
+
+def test_state_absent_and_api_unavailable_keeps_names(tmp_path, monkeypatch, capsys):
+    code, stdout, out = _promote(tmp_path, monkeypatch, capsys, _render(_dev_generated_config()))
+    assert code == 0, stdout
+    assert f"kept policy name {LEGACY_REMOTE} (couldn't confirm it isn't deployed in {PROD_1})" in stdout
+    names = _names(out)
+    # Pre-#68 names throughout: no key moves, so no delete is possible.
+    assert set(names) == {p["name"] for p in _dev_generated_config()["fgac_policies"]}
+    _assert_no_live_mask_dropped(tmp_path, out)
+
+
+def test_unreadable_state_and_api_unavailable_keeps_names(tmp_path, monkeypatch, capsys):
+    state = tmp_path / "prod" / "data_access" / "terraform.tfstate"
+    state.parent.mkdir(parents=True)
+    state.write_text("{ not json")
+    assert read_state_policy_keys(state) is None
+    assert read_state_policy_keys(tmp_path / "absent.tfstate") is None
+    code, stdout, out = _promote(tmp_path, monkeypatch, capsys, _render(_dev_generated_config()), state=state)
+    assert code == 0, stdout
+    assert LEGACY in _names(out)
+    assert "couldn't confirm" in stdout
+
+
+def test_api_says_deployed_keeps_name(tmp_path, monkeypatch, capsys):
+    code, stdout, out = _promote(
+        tmp_path, monkeypatch, capsys, _render(_dev_generated_config()),
+        live={PROD_1: {LEGACY_REMOTE}, PROD_2: set()},
+    )
+    assert code == 0, stdout
+    assert f"kept policy name {LEGACY_REMOTE} (deployed in {PROD_1})" in stdout
+    names = _names(out)
+    assert LEGACY in names
     assert f"gr_mask_{PROD_1}_redact" not in names, "kept and renamed copies must not both land"
-    # Policies prod does not have yet get the prod catalog.
     assert f"gr_mask_{PROD_2}_redact" in names
     assert f"region_filter_{PROD_1}" in names
-
-    # Stable across re-promotes: the kept name stays, renamed ones stay renamed.
-    again, out_again = _promote(tmp_path, _render(_dev_generated_config()), deployed, out)
-    assert again.returncode == 0, again.stdout + again.stderr
-    assert sorted(p["name"] for p in _policies(out_again)) == sorted(names)
+    _assert_no_live_mask_dropped(tmp_path, out)
 
 
-def test_terraform_state_alone_marks_a_policy_deployed(tmp_path):
-    legacy = f"gr_mask_{DEV_1}_redact"
-    state = tmp_path / "terraform.tfstate"
-    state.write_text(json.dumps({"version": 4, "resources": [{
-        "module": "module.data_access", "mode": "managed",
-        "type": "databricks_policy_info", "name": "policies",
-        "instances": [{"index_key": legacy, "attributes": {"on_securable_fullname": PROD_1}}],
-    }]}))
-    assert load_deployed_policy_names([state, tmp_path / "absent.tfvars"]) == {(PROD_1, legacy)}
+def test_state_says_deployed_overrides_an_api_miss(tmp_path, monkeypatch, capsys):
+    state = _state(tmp_path / "prod" / "data_access" / "terraform.tfstate", [LEGACY])
+    code, stdout, out = _promote(
+        tmp_path, monkeypatch, capsys, _render(_dev_generated_config()), state=state, live={PROD_1: set()}
+    )
+    assert code == 0, stdout
+    assert LEGACY in _names(out)
+    _assert_no_live_mask_dropped(tmp_path, out)
 
-    result, out = _promote(tmp_path, _render(_dev_generated_config()), state)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert legacy in [p["name"] for p in _policies(out)]
+    # Stable across re-promotes.
+    again_code, again_stdout, again = _promote(
+        tmp_path, monkeypatch, capsys, _render(_dev_generated_config()), state=state, live={PROD_1: set()}
+    )
+    assert again_code == 0, again_stdout
+    assert sorted(_names(again)) == sorted(_names(out))
 
 
-def test_unreadable_deployed_evidence_fails_closed(tmp_path):
-    bad = tmp_path / "abac.auto.tfvars"
-    bad.write_text("fgac_policies = [ {\n")
-    result, out = _promote(tmp_path, _render(_dev_generated_config()), bad)
-    assert result.returncode == 1
-    assert "Cannot parse" in result.stdout
-    assert not out.exists()
+def test_lister_is_unavailable_without_real_credentials(tmp_path, monkeypatch):
+    auth = tmp_path / "auth.auto.tfvars"
+    assert live_policy_lister(auth)(PROD_1) is None
+    auth.write_text('databricks_workspace_host = "<your_workspace_host>"\ndatabricks_client_id = "<your_client_id>"\n')
+    assert live_policy_lister(auth)(PROD_1) is None
+
+
+def test_lister_api_error_is_unavailable(tmp_path, monkeypatch):
+    import databricks.sdk
+    import databricks.sdk.core
+
+    auth = tmp_path / "auth.auto.tfvars"
+    auth.write_text(
+        'databricks_workspace_host = "https://example.invalid"\n'
+        'databricks_client_id = "sp"\ndatabricks_client_secret = "secret"\n'
+    )
+    listed = []
+
+    class Policies:
+        def list_policies(self, on_securable_type, on_securable_fullname):
+            listed.append((on_securable_type, on_securable_fullname))
+            if on_securable_fullname == "broken":
+                raise PermissionError("denied")
+            return [type("P", (), {"name": LEGACY_REMOTE})()]
+
+    class Config:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class Client:
+        def __init__(self, config):
+            assert config.kwargs["host"] == "https://example.invalid"
+            assert config.kwargs["client_secret"] == "secret"
+            self.policies = Policies()
+
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", Client)
+    monkeypatch.setattr(databricks.sdk.core, "Config", Config)
+    lister = live_policy_lister(auth)
+    assert lister(PROD_1) == {LEGACY_REMOTE}
+    assert listed == [("CATALOG", PROD_1)]
+    assert lister("broken") is None
+
+
+def test_lister_gives_up_on_a_hung_host(tmp_path, monkeypatch):
+    import threading
+    import databricks.sdk
+
+    auth = tmp_path / "auth.auto.tfvars"
+    auth.write_text(
+        'databricks_workspace_host = "https://example.invalid"\n'
+        'databricks_client_id = "sp"\ndatabricks_client_secret = "secret"\n'
+    )
+    release = threading.Event()
+
+    def hang(**_kwargs):
+        release.wait(30)
+        raise TimeoutError
+
+    monkeypatch.setattr(databricks.sdk, "WorkspaceClient", hang)
+    lister = live_policy_lister(auth, timeout=0.2)
+    try:
+        assert lister(PROD_1) is None
+        assert lister(PROD_2) is None, "a hung API stays unavailable for the run"
+    finally:
+        release.set()
 
 
 def test_promoted_names_must_stay_unique():
@@ -196,16 +329,16 @@ def test_promoted_names_must_stay_unique():
     )
     pairs = [(DEV_1, PROD_1)]
     with pytest.raises(ValueError, match="share a name"):
-        remap_policy_names(source, remap_hcl(source, pairs), pairs)
+        remap_policy_names(source, remap_hcl(source, pairs), pairs, set())
 
 
-def test_promote_passes_destination_evidence_to_the_remap():
+def test_promote_passes_destination_state_and_auth_only():
     makefile = (SHARED / "Makefile.shared").read_text()
     body = makefile[makefile.index("remap_generated_config.py\" \\"):]
     body = body[: body.index("derive_genie_acls.py")]
-    assert '--deployed "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars"' in body
-    assert '--deployed "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/terraform.tfstate"' in body
-    assert '--deployed "$$dest_env_dir/generated/abac.auto.tfvars"' in body
+    assert '--state "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/terraform.tfstate"' in body
+    assert '--auth "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/auth.auto.tfvars"' in body
+    assert "--deployed" not in body
 
 
 # ---------------------------------------------------------------------------
@@ -292,38 +425,3 @@ def _policy_plan(tmp_path: Path, generated: Path) -> dict[str, tuple[list[str], 
     }
 
 
-@pytest.fixture
-def legacy_prod(tmp_path):
-    legacy = f"gr_mask_{DEV_1}_redact"
-    deployed = _legacy_prod_config(tmp_path / "prod" / "data_access" / "abac.auto.tfvars", [legacy])
-    return legacy, deployed
-
-
-def test_migration_plan_never_deletes_or_renames_a_live_mask(tmp_path, legacy_prod):
-    legacy, deployed = legacy_prod
-    result, out = _promote(tmp_path, _render(_dev_generated_config()), deployed)
-    assert result.returncode == 0, result.stdout + result.stderr
-
-    changes = _policy_plan(tmp_path, out)
-    live = _SEEDED_ADDRESS.format(key=legacy)
-    actions, before, after = changes[live]
-    # Principals may converge in place; the remote name must not move.
-    assert actions in (["no-op"], ["update"]), actions
-    assert before == after == f"{PROD_1}_{legacy}"
-    for address, (actions, before, after) in changes.items():
-        assert "delete" not in actions, address
-        assert actions in (["no-op"], ["update"], ["create"]), (address, actions)
-        if actions == ["update"]:
-            assert before == after, (address, before, after)
-        if address != live:
-            assert "_dev_" not in after, after
-
-
-def test_without_destination_evidence_the_same_promote_would_drop_the_live_mask(tmp_path):
-    # Counterfactual: why promote reads the destination. A renamed key is a
-    # delete of the live mask plus a create, with no ordering guarantee.
-    result, out = _promote(tmp_path, _render(_dev_generated_config()))
-    assert result.returncode == 0, result.stdout + result.stderr
-
-    changes = _policy_plan(tmp_path, out)
-    assert changes[_SEEDED_ADDRESS.format(key=f"gr_mask_{DEV_1}_redact")][0] == ["delete"]

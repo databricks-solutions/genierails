@@ -463,9 +463,8 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 			"$(SOURCE_ENV_DIR)/generated/masking_functions.sql" \
 			"$$dest_env_dir/generated/abac.auto.tfvars" \
 			"$$dest_env_dir/generated/masking_functions.sql" \
-			--deployed "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars" \
-			--deployed "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/terraform.tfstate" \
-			--deployed "$$dest_env_dir/generated/abac.auto.tfvars" \
+			--state "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/terraform.tfstate" \
+			--auth "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/auth.auto.tfvars" \
 			$$map_flags $(if $(filter 1,$(VERBOSE)),,--quiet-remaps); \
 		python3 "$(SHARED_ROOT)/scripts/derive_genie_acls.py" \
 			"$$dest_env_dir/generated/abac.auto.tfvars" \

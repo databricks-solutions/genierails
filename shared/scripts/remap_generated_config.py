@@ -21,7 +21,9 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import threading
 from pathlib import Path
+from typing import Callable
 
 
 def _top_level_list_span(text: str, key: str) -> tuple[int, int, int] | None:
@@ -89,59 +91,114 @@ def remap_policy_name(name: str, src: str, dest: str) -> str:
     return re.sub(rf"(?<![A-Za-z0-9]){re.escape(src)}(?![A-Za-z0-9])", dest, name)
 
 
-def load_deployed_policy_names(paths: list[Path]) -> set[tuple[str, str]]:
-    """Return (catalog, name) of policies the destination env may already have.
+def read_state_policy_keys(path: Path | None) -> set[str] | None:
+    """Return the policy for_each keys in a Terraform state, or None if unknown.
 
-    Reads the destination's current abac.auto.tfvars files (data_access layer
-    and generated/) and its local Terraform state when present. Missing files
-    are skipped; a file that exists but cannot be read fails closed, because
-    guessing "not deployed" would rename a live policy.
+    A missing, empty or unreadable state proves nothing: the env may keep its
+    state remotely, or it may have been lost.
     """
     import json
 
-    deployed: set[tuple[str, str]] = set()
-    for path in paths:
-        if not path.is_file():
+    if path is None or not path.is_file():
+        return None
+    try:
+        state = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict) or "resources" not in state:
+        return None
+    keys: set[str] = set()
+    for resource in state.get("resources") or []:
+        if resource.get("type") != "databricks_policy_info" or resource.get("mode") != "managed":
             continue
-        if path.name.endswith(".tfstate"):
-            try:
-                state = json.loads(path.read_text() or "{}")
-            except ValueError as exc:
-                raise RuntimeError(f"Cannot read Terraform state {path}: {exc}") from exc
-            for resource in state.get("resources") or []:
-                if resource.get("type") != "databricks_policy_info" or resource.get("mode") != "managed":
-                    continue
-                for instance in resource.get("instances") or []:
-                    key = instance.get("index_key")
-                    catalog = (instance.get("attributes") or {}).get("on_securable_fullname")
-                    if isinstance(key, str) and catalog:
-                        deployed.add((catalog, key))
-            continue
-        import hcl2
+        for instance in resource.get("instances") or []:
+            if isinstance(instance.get("index_key"), str):
+                keys.add(instance["index_key"])
+    return keys
 
-        try:
-            cfg = hcl2.loads(path.read_text())
-        except Exception as exc:
-            raise RuntimeError(f"Cannot parse {path}: {exc}") from exc
-        for policy in cfg.get("fgac_policies") or []:
-            if policy.get("name") and policy.get("catalog"):
-                deployed.add((policy["catalog"], policy["name"]))
-    return deployed
+
+def live_policy_lister(
+    auth_path: Path | None, timeout: float = 90.0
+) -> Callable[[str], set[str] | None]:
+    """Return catalog -> remote policy names on it, read-only via the SDK.
+
+    The lister returns None when the listing can't be trusted: no or placeholder
+    credentials, SDK missing, any API/auth error, or no answer within timeout.
+    """
+    client = None
+    unavailable = auth_path is None or not auth_path.is_file()
+    if not unavailable:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from auth_configured import auth_configured
+
+        unavailable = not auth_configured(auth_path)
+
+    def fetch(catalog: str) -> set[str]:
+        nonlocal client
+        if client is None:
+            import hcl2
+            from databricks.sdk import WorkspaceClient
+            from databricks.sdk.core import Config
+
+            auth = hcl2.loads(auth_path.read_text())
+            client = WorkspaceClient(config=Config(
+                host=auth["databricks_workspace_host"],
+                client_id=auth["databricks_client_id"],
+                client_secret=auth.get("databricks_client_secret"),
+                http_timeout_seconds=30,
+                retry_timeout_seconds=60,
+                product="genierails",
+                product_version="0.1.0",
+            ))
+        return {
+            policy.name
+            for policy in client.policies.list_policies(
+                on_securable_type="CATALOG", on_securable_fullname=catalog
+            )
+            if policy.name
+        }
+
+    def list_names(catalog: str) -> set[str] | None:
+        nonlocal unavailable
+        if unavailable:
+            return None
+        # The SDK's own timeouts don't bound auth discovery against an
+        # unreachable host, so cap the whole call; promote must not hang.
+        result: dict[str, object] = {}
+
+        def run() -> None:
+            try:
+                result["names"] = fetch(catalog)
+            except Exception as exc:
+                result["error"] = exc
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(timeout)
+        if "names" not in result:
+            unavailable = True
+            return None
+        return result["names"]  # type: ignore[return-value]
+
+    return list_names
 
 
 def remap_policy_names(
     source_text: str,
     remapped_text: str,
     pairs: list[tuple[str, str]],
-    deployed: set[tuple[str, str]] | None = None,
+    state_keys: set[str] | None = None,
+    live_names: Callable[[str], set[str] | None] | None = None,
 ) -> tuple[str, list[str]]:
     """Carry the destination catalog into fgac policy names.
 
     The data_access module names the remote policy ``<catalog>_<name>`` and keys
     it by ``name``. Renaming an applied policy is not safe: provider 1.111's
     update sends the new name as the request path and omits ``name`` from the
-    update mask, and a new for_each key is a delete plus a create. So a policy the
-    destination already has under its source name keeps that name.
+    update mask, and a new for_each key is a delete plus a create. So a policy
+    is renamed only when the destination's Terraform state or a live listing of
+    its catalog shows it isn't deployed, and neither shows that it is. Drafts and
+    config files are never evidence.
     """
     import hcl2
 
@@ -150,7 +207,7 @@ def remap_policy_names(
     except Exception as exc:
         raise ValueError(f"Cannot parse the source fgac_policies: {exc}") from exc
     mapping = dict(pairs)
-    deployed = deployed or set()
+    live_cache: dict[str, set[str] | None] = {}
     renames: dict[str, str] = {}
     notes: list[str] = []
     final_names: list[str] = []
@@ -159,12 +216,22 @@ def remap_policy_names(
         src = policy.get("catalog") or ""
         dest = mapping.get(src, src)
         new_name = remap_policy_name(name, src, dest)
-        if new_name != name and (dest, name) in deployed:
-            notes.append(
-                f"  Keeping deployed policy name {dest}_{name} "
-                "(renaming a live ABAC policy is not safe)"
-            )
-            new_name = name
+        if new_name != name:
+            if dest not in live_cache:
+                live_cache[dest] = live_names(dest) if live_names else None
+            live = live_cache[dest]
+            old_remote = f"{dest}_{name}"
+            if (state_keys is not None and name in state_keys) or (
+                live is not None and old_remote in live
+            ):
+                notes.append(f"  kept policy name {old_remote} (deployed in {dest})")
+                new_name = name
+            elif state_keys is None and live is None:
+                notes.append(
+                    f"  kept policy name {old_remote} "
+                    f"(couldn't confirm it isn't deployed in {dest})"
+                )
+                new_name = name
         if new_name != name:
             renames[name] = new_name
         final_names.append(new_name)
@@ -202,7 +269,8 @@ def parse_args() -> argparse.Namespace:
         ns.out_sql = Path(sys.argv[6])
         ns.map = [f"{sys.argv[3]}={sys.argv[4]}"]
         ns.quiet_remaps = False
-        ns.deployed = []
+        ns.state = None
+        ns.auth = None
         return ns
 
     parser = argparse.ArgumentParser(
@@ -224,13 +292,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quiet-remaps", action="store_true",
                         help="Do not repeat successful catalog remap lines.")
     parser.add_argument(
-        "--deployed",
+        "--state",
         metavar="PATH",
         type=Path,
-        action="append",
-        default=[],
-        help="Destination abac.auto.tfvars or terraform.tfstate (repeatable). "
-             "Policies already there keep their name.",
+        help="Destination data_access terraform.tfstate.",
+    )
+    parser.add_argument(
+        "--auth",
+        metavar="PATH",
+        type=Path,
+        help="Destination auth.auto.tfvars, for a read-only listing of live policies.",
     )
     return parser.parse_args()
 
@@ -345,14 +416,13 @@ def main() -> None:
 
     args.out_abac.parent.mkdir(parents=True, exist_ok=True)
 
-    # Read the destination before out_abac overwrites it.
     try:
-        deployed = load_deployed_policy_names(args.deployed)
         remapped_hcl, name_notes = remap_policy_names(
             args.source_abac.read_text(),
             remap_hcl(args.source_abac.read_text(), pairs),
             pairs,
-            deployed,
+            read_state_policy_keys(args.state),
+            live_policy_lister(args.auth),
         )
     except (RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}")
