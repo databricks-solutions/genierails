@@ -1,6 +1,9 @@
 """Assignment-only native-classification refresh regression tests."""
 
+import hashlib
 import importlib.util
+import json
+import re
 from pathlib import Path
 
 import hcl2
@@ -15,6 +18,7 @@ from generate_abac import (
 from sensitivity_source import ClassificationSource
 from scripts.remap_generated_config import remap_hcl
 from scripts.merge_space_configs import merge_into_assembled
+from scripts.coverage_gate import tag_assignments_digest
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts/derive_assignments.py"
@@ -398,7 +402,8 @@ def test_command_has_no_model_call_surface():
 def test_make_target_exposes_assignment_only_command():
     source = MAKEFILE.read_text()
     body = source[source.index("derive-assignments:") : source.index("\naudit-schema:")]
-    assert "scripts/derive_assignments.py" in body
+    assert '"$(DERIVE_ASSIGNMENTS_SCRIPT)"' in body
+    assert "DERIVE_ASSIGNMENTS_SCRIPT ?= $(SHARED_ROOT)/scripts/derive_assignments.py" in source
     assert "generated/abac.auto.tfvars" in body
     assert "generate_abac.py" not in body
 
@@ -452,3 +457,71 @@ def test_derive_target_refreshes_fetched_ddl():
     source = MAKEFILE.read_text()
     body = source[source.index("derive-assignments:"):source.index("\naudit-schema:")]
     assert "--write-ddl ddl/_fetched.sql" in body
+
+
+def _fake_ddl(monkeypatch, text="CREATE TABLE prod.sales.customers (\n  email STRING\n);"):
+    monkeypatch.setattr(MODULE, "fetch_tables_from_databricks", lambda refs, runtime: (text, [("prod", "sales")]))
+
+
+def test_successful_refresh_records_what_it_read(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    _native_email(monkeypatch)
+    _fake_ddl(monkeypatch)
+    record = tmp_path / "generated" / ".live_refresh.json"
+    ddl = tmp_path / "ddl" / "_fetched.sql"
+    assert MODULE.main([
+        "--config", str(config), "--auth-file", str(auth), "--env-file", str(env),
+        "--write-ddl", str(ddl), "--refresh-record", str(record),
+    ]) == 0
+    written = json.loads(record.read_text())
+    assert written["mode"] == "full"
+    assert written["ddl_sha256"] == hashlib.sha256(ddl.read_bytes()).hexdigest()
+    assert written["tag_assignments_sha256"] == tag_assignments_digest(
+        hcl2.loads(config.read_text())["tag_assignments"]
+    )
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", written["refreshed_at"])
+
+
+def test_failed_refresh_removes_the_previous_record(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    record = tmp_path / "generated" / ".live_refresh.json"
+    record.write_text('{"mode": "full", "refreshed_at": "2026-01-01T00:00:00Z"}')
+
+    def unreadable(*args, **kwargs):
+        raise generate_abac.NativeClassificationRequiredError("Could not read required native classification")
+
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", unreadable)
+    assert MODULE.main([
+        "--config", str(config), "--auth-file", str(auth), "--env-file", str(env),
+        "--write-ddl", str(tmp_path / "ddl" / "_fetched.sql"), "--refresh-record", str(record),
+    ]) == 1
+    assert not record.exists()
+
+
+def test_ddl_only_refresh_leaves_tags_alone(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    _forbid_model_calls(monkeypatch)
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source",
+                        lambda *a, **k: pytest.fail("ddl-only must not read tags"))
+    _fake_ddl(monkeypatch)
+    before = config.read_text()
+    record = tmp_path / "generated" / ".live_refresh.json"
+    assert MODULE.main([
+        "--ddl-only", "--auth-file", str(auth), "--env-file", str(env),
+        "--write-ddl", str(tmp_path / "ddl" / "_fetched.sql"), "--refresh-record", str(record),
+    ]) == 0
+    assert config.read_text() == before
+    written = json.loads(record.read_text())
+    assert written["mode"] == "ddl" and "tag_assignments_sha256" not in written
+
+
+def test_live_refresh_refuses_ambient_credentials(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    auth.write_text('databricks_workspace_host = ""\n')
+    monkeypatch.setattr(MODULE, "fetch_tables_from_databricks",
+                        lambda *a, **k: pytest.fail("must not reach Databricks"))
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source",
+                        lambda *a, **k: pytest.fail("must not reach Databricks"))
+    for extra in ([], ["--ddl-only"]):
+        assert MODULE.main([*extra, "--config", str(config), "--auth-file", str(auth),
+                            "--env-file", str(env), "--write-ddl", str(tmp_path / "ddl.sql")]) == 1

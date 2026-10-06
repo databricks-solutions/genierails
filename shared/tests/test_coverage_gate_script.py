@@ -48,7 +48,17 @@ def env_dir(tmp_path):
     (env / "data_access" / "masking_functions.sql").write_text("-- masks\n")
     (env / "env.auto.tfvars").write_text(f'uc_tables = ["{TABLE}"]\n')
     (env / "auth.auto.tfvars").write_text('databricks_workspace_host = "https://example.invalid"\n')
+    _record_refresh(env)
     return env
+
+
+def _record_refresh(env, mode="ddl"):
+    """What derive_assignments.py writes after re-reading live UC."""
+    (env / "generated").mkdir(exist_ok=True)
+    cg.write_refresh_record(
+        env / cg.REFRESH_RELPATH, mode=mode, ddl_path=env / "ddl" / "_fetched.sql",
+        config_path=env / "data_access" / "abac.auto.tfvars" if mode == "full" else None,
+    )
 
 
 @pytest.fixture
@@ -115,23 +125,23 @@ def _state(env_dir, tables):
 @pytest.mark.parametrize(
     "env, flags, generated, expected",
     [
-        ("business_access_enabled = true\nenable_classification = true\n", "", True, True),
-        ("enable_classification = true\n", "-var=business_access_enabled=true", True, True),
-        ("enable_classification = true\n", "-var business_access_enabled=true", True, True),
+        ("business_access_enabled = true\nenable_classification = true\n", "", True, "full"),
+        ("enable_classification = true\n", "-var=business_access_enabled=true", True, "full"),
+        ("enable_classification = true\n", "-var business_access_enabled=true", True, "full"),
         ("business_access_enabled = true\nenable_classification = true\n",
-         "-var=business_access_enabled=false", True, False),
-        ("enable_classification = true\n", "", True, False),
-        ("business_access_enabled = true\n", "", True, False),
-        ("business_access_enabled = true\nenable_classification = true\n", "", False, False),
+         "-var=business_access_enabled=false", True, "none"),
+        ("enable_classification = true\n", "", True, "none"),
+        # Opening access without native classification still re-reads the DDL.
+        ("business_access_enabled = true\n", "", True, "ddl"),
+        ("business_access_enabled = true\nenable_classification = true\n", "", False, "ddl"),
     ],
 )
-def test_needs_derive_only_when_opening_access_with_native_classification(
-        tmp_path, env, flags, generated, expected):
+def test_live_refresh_mode_before_opening_access(tmp_path, env, flags, generated, expected):
     (tmp_path / "env.auto.tfvars").write_text(env)
     if generated:
         (tmp_path / "generated").mkdir()
         (tmp_path / "generated" / "abac.auto.tfvars").write_text("tag_assignments = []\n")
-    assert cg.needs_derive(tmp_path, flags)[0] is expected
+    assert cg.needs_derive(tmp_path, flags)[0] == expected
 
 
 def test_needs_derive_cli_accepts_the_flags_make_passes(tmp_path, capsys):
@@ -140,7 +150,7 @@ def test_needs_derive_cli_accepts_the_flags_make_passes(tmp_path, capsys):
     (tmp_path / "generated" / "abac.auto.tfvars").write_text("tag_assignments = []\n")
     assert cg.main(["needs-derive", "--env-dir", str(tmp_path),
                     "--apply-flags=-var=business_access_enabled=true"]) == 0
-    assert capsys.readouterr().out == "yes\n"
+    assert capsys.readouterr().out == "full\n"
 
 
 def test_needs_derive_fails_on_unparseable_env(tmp_path):
@@ -201,6 +211,8 @@ def test_pass_records_terraforms_fingerprint_and_first_exposure(env_dir, stub_ru
     gate = json.loads(_gate_file(env_dir).read_text())
     assert gate["status"] == "pass"
     assert gate["fingerprint"] == "fp-1"
+    refresh = json.loads((env_dir / cg.REFRESH_RELPATH).read_text())
+    assert gate["refreshed_at"] == refresh["refreshed_at"]
     assert gate["first_exposure_tables"] == [TABLE]
     assert gate["granted_tables"] == ["cat.sch.orders"]
     seen = json.loads(record.read_text())
@@ -230,6 +242,54 @@ def test_inputs_changing_during_the_gate_fail_it(env_dir, stub_runner, stub_vali
     gate = json.loads(_gate_file(env_dir).read_text())
     assert gate["status"] == "fail"
     assert gate["reason"] == "inputs changed while the gate ran"
+
+
+def test_pass_requires_a_live_refresh(env_dir, stub_runner, stub_validator):
+    (env_dir / cg.REFRESH_RELPATH).unlink()
+    runner, _log = stub_runner(_inputs())
+    stub_validator(0)
+    assert cg.run_gate(env_dir, "prod", runner, "", False) == 1
+    gate = json.loads(_gate_file(env_dir).read_text())
+    assert gate["status"] == "fail"
+    assert "no live refresh" in gate["reason"]
+    assert "refreshed_at" not in gate
+
+
+def test_refresh_must_match_the_ddl_being_gated(env_dir):
+    (env_dir / "ddl").mkdir()
+    (env_dir / "ddl" / "_fetched.sql").write_text("CREATE TABLE cat.sch.customers (\n  id BIGINT\n);\n")
+    _record_refresh(env_dir)
+    tfvars = env_dir / "data_access" / "abac.auto.tfvars"
+    assert cg.live_refresh(env_dir, tfvars)[0] is not None
+    # A DDL snapshot nobody re-read from UC (edited, copied, stale) is not live.
+    (env_dir / "ddl" / "_fetched.sql").write_text("CREATE TABLE cat.sch.customers (\n  ssn STRING\n);\n")
+    refreshed_at, reason = cg.live_refresh(env_dir, tfvars)
+    assert refreshed_at is None
+    assert "changed since the last live refresh" in reason
+
+
+def test_full_refresh_must_match_the_split_tags(env_dir):
+    tfvars = env_dir / "data_access" / "abac.auto.tfvars"
+    tfvars.write_text(
+        'tag_assignments = [{ entity_type = "columns", entity_name = "cat.sch.customers.email", '
+        'tag_key = "gr_treatment", tag_value = "email_partial" }]\n'
+    )
+    _record_refresh(env_dir, mode="full")
+    assert cg.live_refresh(env_dir, tfvars) == (
+        json.loads((env_dir / cg.REFRESH_RELPATH).read_text())["refreshed_at"], "full",
+    )
+    # A live class.* tag changed (or the split predates the refresh).
+    tfvars.write_text("tag_assignments = []\n")
+    refreshed_at, reason = cg.live_refresh(env_dir, tfvars)
+    assert refreshed_at is None
+    assert "tag_assignments don't match the last live refresh" in reason
+
+
+@pytest.mark.parametrize("record", ["{truncated", '{"mode": "full"}', '{"mode": "later", "refreshed_at": "2026-01-01T00:00:00Z"}',
+                                    '{"mode": "ddl", "refreshed_at": "yesterday"}'])
+def test_malformed_refresh_records_fail_closed(env_dir, record):
+    (env_dir / cg.REFRESH_RELPATH).write_text(record)
+    assert cg.live_refresh(env_dir, env_dir / "data_access" / "abac.auto.tfvars")[0] is None
 
 
 def test_console_errors_fail_the_gate(env_dir, tmp_path):
@@ -348,6 +408,7 @@ def live_like_env(tmp_path, plugin_cache, monkeypatch):
     )
     monkeypatch.setenv("TF_PLUGIN_CACHE_DIR", str(plugin_cache))
     monkeypatch.setenv("TF_IN_AUTOMATION", "1")
+    _record_refresh(env)
     return env
 
 
@@ -405,6 +466,7 @@ def test_raw_layer_plan_cannot_grant_without_a_current_pass(live_like_env):
 def test_first_exposure_failure_blocks_the_plan_until_acknowledged(live_like_env):
     env = live_like_env
     (env / "ddl" / "_fetched.sql").write_text(DDL.replace("email STRING", "email STRING,\n  ssn STRING"))
+    _record_refresh(env)  # the live refresh read the new column
     failed = _gate(env)
     assert failed.returncode == 1
     assert "first exposure blocked" in failed.stdout
@@ -428,6 +490,7 @@ def test_first_exposure_failure_blocks_the_plan_until_acknowledged(live_like_env
 def test_already_granted_table_keeps_the_warning(live_like_env):
     env = live_like_env
     (env / "ddl" / "_fetched.sql").write_text(DDL.replace("email STRING", "email STRING,\n  ssn STRING"))
+    _record_refresh(env)  # the live refresh read the new column
     _state(env, [TABLE])
     granted = _gate(env, "--verbose")
     assert granted.returncode == 0, granted.stdout + granted.stderr
@@ -512,3 +575,202 @@ def test_terraform_test_suites_pass(config, tmp_path, plugin_cache):
                             cwd=directory, env=env, text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "0 failed" in result.stdout
+
+
+# ── make plan re-reads live UC before it gates (review blocker 1) ────────────
+
+FAKE_DERIVE = '''\
+"""Stand-in for derive_assignments.py: "live UC" is the file $LIVE_DDL."""
+import argparse, os, shutil, sys
+from pathlib import Path
+sys.path.insert(0, {shared!r})
+from scripts.coverage_gate import write_refresh_record
+parser = argparse.ArgumentParser()
+for flag in ("--auth-file", "--env-file", "--config", "--write-ddl", "--refresh-record"):
+    parser.add_argument(flag)
+parser.add_argument("--ddl-only", action="store_true")
+args = parser.parse_args()
+with open(os.environ["DERIVE_LOG"], "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\\n")
+Path(args.refresh_record).unlink(missing_ok=True)
+if os.environ.get("LIVE_UC_DOWN"):
+    print("ERROR: Could not fetch DDL for the governed footprint", file=sys.stderr)
+    raise SystemExit(1)
+shutil.copy(os.environ["LIVE_DDL"], args.write_ddl)
+write_refresh_record(Path(args.refresh_record), mode="ddl" if args.ddl_only else "full",
+                     ddl_path=Path(args.write_ddl), config_path=None if args.ddl_only else Path(args.config))
+'''
+
+
+@pytest.fixture
+def live_uc(live_like_env, tmp_path, monkeypatch):
+    """make plan against live_like_env, with a scriptable live UC."""
+    fake = tmp_path / "fake_derive.py"
+    fake.write_text(FAKE_DERIVE.format(shared=str(SHARED)))
+    live_ddl = tmp_path / "live.sql"
+    live_ddl.write_text(DDL)
+    monkeypatch.setenv("LIVE_DDL", str(live_ddl))
+    monkeypatch.setenv("DERIVE_LOG", str(tmp_path / "derive.log"))
+    cloud_root = live_like_env.parents[1]
+
+    def plan():
+        env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MAKELEVEL", "APPLY_FLAGS")}
+        env["TF_CLI_ARGS_plan"] = "-no-color"
+        return subprocess.run(
+            ["make", "--no-print-directory", "plan", "ENV=prod", f"CLOUD_ROOT={cloud_root}",
+             f"SHARED_ROOT={SHARED}", f"DERIVE_ASSIGNMENTS_SCRIPT={fake}"],
+            cwd=SHARED.parent / "aws", text=True, capture_output=True, env=env,
+        )
+
+    return live_like_env, live_ddl, plan
+
+
+@needs_terraform
+def test_make_plan_refreshes_live_metadata_and_blocks_a_new_untagged_column(live_uc):
+    env, live_ddl, plan = live_uc
+    first = plan()
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert "=== Refresh Live DDL (prod) ===" in first.stdout
+    assert f'databricks_grant.table_access["{TABLE}|analysts"] will be created' in first.stdout
+    passed = json.loads(_gate_file(env).read_text())
+    assert passed["status"] == "pass" and passed["refreshed_at"]
+
+    # Someone adds an untagged ssn column in UC. The local snapshot still
+    # says email only, and it passed a moment ago.
+    live_ddl.write_text(DDL.replace("email STRING", "email STRING,\n  ssn STRING"))
+    second = plan()
+    assert second.returncode != 0
+    assert "first exposure blocked" in second.stdout
+    assert f"{TABLE}.ssn (looks like: ssn)" in second.stdout
+    assert "=== Terraform Plan (data_access:prod) ===" not in second.stdout
+    assert "ssn STRING" in (env / "ddl" / "_fetched.sql").read_text()
+    assert json.loads(_gate_file(env).read_text())["status"] == "fail"
+    # ... and raw Terraform can't fall back on the earlier pass.
+    raw = _raw_plan(env)
+    assert raw.returncode != 0
+    assert "Coverage gate failed" in raw.stderr
+
+
+@needs_terraform
+def test_failed_live_refresh_leaves_no_usable_pass(live_uc, monkeypatch):
+    env, _live_ddl, plan = live_uc
+    assert plan().returncode == 0
+    assert _raw_plan(env).returncode == 0
+
+    monkeypatch.setenv("LIVE_UC_DOWN", "1")
+    down = plan()
+    assert down.returncode != 0
+    assert "Could not fetch DDL" in down.stderr
+    assert "=== Terraform Plan (data_access:prod) ===" not in down.stdout
+    assert not (env / cg.REFRESH_RELPATH).exists()
+    result = json.loads(_gate_file(env).read_text())
+    assert result["status"] == "fail" and "refreshed_at" not in result
+    raw = _raw_plan(env)
+    assert raw.returncode != 0
+    assert "Coverage gate failed" in raw.stderr
+
+
+@needs_terraform
+def test_gate_run_without_a_refresh_for_the_current_ddl_fails_closed(live_like_env):
+    env = live_like_env
+    # The DDL snapshot changes without anyone re-reading UC.
+    (env / "ddl" / "_fetched.sql").write_text(DDL.replace("id BIGINT", "id BIGINT,\n  note STRING"))
+    gated = _gate(env)
+    assert gated.returncode == 1
+    assert "changed since the last live refresh" in gated.stderr
+    assert json.loads(_gate_file(env).read_text())["status"] == "fail"
+
+
+# ── Genie CAN_RUN needs the space's grants in data_access state (blocker 2) ──
+
+_WS_STATE = (
+    'jsonencode({{ version = 4, outputs = {{ coverage_gate = {{ value = {{ business_access_enabled = true, '
+    'fingerprint = "applied", status = "pass", table_grant_count = {count} }} }}, '
+    'table_grant_resource_keys = {{ value = {keys} }} }} }})'
+)
+
+_WS_TEST = '''
+mock_provider "databricks" {{
+  alias = "account"
+}}
+mock_provider "databricks" {{
+  alias = "workspace"
+}}
+mock_provider "null" {{}}
+
+override_data {{
+  target = module.workspace.data.databricks_group.existing
+  values = {{ id = 123 }}
+}}
+
+run "state" {{
+  module {{
+    source = "../data_access/tests/file_writer"
+  }}
+  variables {{
+    files = {{
+      "{env}/data_access/terraform.tfstate"   = {state}
+      "{env}/data_access/.coverage_gate.json" = jsonencode({{ status = "pass", fingerprint = "applied" }})
+    }}
+  }}
+}}
+
+run "can_run" {{
+  command = plan
+  variables {{
+    env_dir                   = "{env}"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_id   = "123"
+    databricks_workspace_host = "https://example.invalid"
+    sql_warehouse_id          = "warehouse"
+    business_access_enabled   = true
+    groups                    = {{ analysts = {{}} }}
+    genie_spaces              = [{{ name = "Sales", genie_space_id = "space-1", uc_tables = ["cat.sch.customers"] }}]
+    genie_space_configs       = {{ Sales = {{ acl_groups = {acl} }} }}
+  }}
+}}
+'''
+
+
+@needs_terraform
+@pytest.mark.parametrize(
+    "count, keys, acl, refused",
+    [
+        # Matching pass, but the apply left zero table grants.
+        (0, "[]", '["analysts"]', "the data_access layer has no business table grants in place"),
+        (0, "[]", "[]", None),
+        # Grants exist, but not for this space's table and group.
+        (2, '["cat.sch.customers|auditors", "cat.sch.orders|analysts"]', '["analysts"]',
+         "lacks the SELECT grants its CAN_RUN groups need (cat.sch.customers|analysts)"),
+        (1, '["cat.sch.customers|analysts"]', '["analysts"]', None),
+    ],
+)
+def test_workspace_root_refuses_can_run_without_the_spaces_grants(tmp_path, plugin_cache, count, keys, acl, refused):
+    root = SHARED / "roots" / "workspace"
+    name = f"refusal-{tmp_path.name}"
+    test_dir = root / "tests" / ".tmp" / name
+    test_dir.mkdir(parents=True)
+    try:
+        (test_dir / "can_run.tftest.hcl").write_text(_WS_TEST.format(
+            env=f"tests/.tmp/{name}/env", state=_WS_STATE.format(count=count, keys=keys), acl=acl,
+        ))
+        env = {**os.environ, "TF_DATA_DIR": str(tmp_path / ".terraform"),
+               "TF_PLUGIN_CACHE_DIR": str(plugin_cache), "TF_IN_AUTOMATION": "1"}
+        relative = f"tests/.tmp/{name}"
+        init = subprocess.run(["terraform", "init", "-backend=false", f"-test-directory={relative}"],
+                              cwd=root, env=env, text=True, capture_output=True)
+        assert init.returncode == 0, init.stdout + init.stderr
+        result = subprocess.run(["terraform", "test", "-no-color", f"-test-directory={relative}"],
+                                cwd=root, env=env, text=True, capture_output=True)
+        output = " ".join((result.stdout + result.stderr).split())
+        if refused:
+            assert result.returncode != 0
+            assert "Resource precondition failed" in output
+            assert "Genie CAN_RUN for Sales is blocked" in output
+            assert refused in output
+        else:
+            assert result.returncode == 0, output
+    finally:
+        shutil.rmtree(test_dir, ignore_errors=True)

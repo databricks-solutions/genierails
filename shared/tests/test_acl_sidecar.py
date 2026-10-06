@@ -874,6 +874,23 @@ def _genie_mode_import(tmp_path):
     return env, runner, runner_log
 
 
+def _live_refresh_stub(tmp_path):
+    """Opening access re-reads live UC first; stand in for a successful read."""
+    (tmp_path / "live_refresh_stub.py").write_text(
+        "import argparse, sys\nfrom pathlib import Path\n"
+        f"sys.path.insert(0, {str(SHARED)!r})\n"
+        "from scripts.coverage_gate import write_refresh_record\n"
+        "p = argparse.ArgumentParser()\n"
+        "for f in ('--auth-file', '--env-file', '--config', '--write-ddl', '--refresh-record'):\n"
+        "    p.add_argument(f)\n"
+        "p.add_argument('--ddl-only', action='store_true')\n"
+        "a = p.parse_args()\n"
+        "Path(a.write_ddl).write_text('CREATE TABLE dev_cat.s.t (\\n  id BIGINT\\n);\\n')\n"
+        "write_refresh_record(Path(a.refresh_record), mode='ddl', ddl_path=Path(a.write_ddl), config_path=None)\n"
+    )
+    return tmp_path / "live_refresh_stub.py"
+
+
 @pytest.mark.parametrize("target", ["apply", "apply-governance", "apply-genie"])
 def test_genie_mode_import_with_deferred_acl_cannot_be_applied(tmp_path, target):
     """A deferred ACL must fail closed: no Terraform runs, so no SELECT or CAN_RUN."""
@@ -881,7 +898,9 @@ def test_genie_mode_import_with_deferred_acl_cannot_be_applied(tmp_path, target)
 
     result = subprocess.run(
         ["make", target, "ENV=dev", f"ROOT_RUNNER={runner}",
-         "APPLY_FLAGS=-var=business_access_enabled=true"],
+         "APPLY_FLAGS=-var=business_access_enabled=true",
+         # ... so the deferred ACL, not the live read, is what stops it.
+         f"DERIVE_ASSIGNMENTS_SCRIPT={_live_refresh_stub(tmp_path)}"],
         cwd=tmp_path, text=True, capture_output=True,
     )
 

@@ -42,6 +42,9 @@ variables {
     function_schema  = "sch"
   }]
   business_access_enabled = true
+  # Results below record a fixed refresh time; a century-long max age keeps
+  # them valid whatever the wall clock says (expiry has its own runs).
+  coverage_gate_max_age = "876000h"
 }
 
 run "setup_inputs" {
@@ -95,7 +98,7 @@ run "write_passing_gate" {
     files = {
       "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
       "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n"
-      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint })
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint, refreshed_at = "2026-01-01T00:00:00Z" })
     }
   }
 }
@@ -181,7 +184,7 @@ run "changed_ddl_and_masks_make_the_gate_stale" {
     files = {
       "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
       "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING,\n  phone STRING\n);\n"
-      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint })
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint, refreshed_at = "2026-01-01T00:00:00Z" })
     }
   }
 }
@@ -204,7 +207,7 @@ run "write_failed_gate" {
     files = {
       "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
       "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n"
-      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "fail", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint })
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "fail", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint, refreshed_at = "2026-01-01T00:00:00Z" })
     }
   }
 }
@@ -240,4 +243,104 @@ run "unreadable_gate_blocks_select" {
     time                 = time
   }
   expect_failures = [databricks_grant.table_access]
+}
+
+# Terraform can't re-read Unity Catalog, so a pass must carry the time make
+# last refreshed live tags and DDL, and that refresh must be recent.
+run "write_pass_without_a_live_refresh" {
+  module {
+    source = "../../roots/data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
+      "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n"
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint })
+    }
+  }
+}
+
+run "never_refreshed_pass_blocks_select" {
+  command = plan
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    time                 = time
+  }
+  expect_failures = [databricks_grant.table_access]
+}
+
+run "write_pass_from_an_old_refresh" {
+  module {
+    source = "../../roots/data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
+      "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n"
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint, refreshed_at = "2000-01-01T00:00:00Z" })
+    }
+  }
+}
+
+run "pass_older_than_the_max_age_blocks_select" {
+  command = plan
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    time                 = time
+  }
+  variables {
+    coverage_gate_max_age = "6h"
+  }
+  expect_failures = [databricks_grant.table_access]
+}
+
+run "old_refresh_within_a_longer_max_age_allows_select" {
+  command = plan
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    time                 = time
+  }
+  assert {
+    condition     = length(databricks_grant.table_access) == 1 && output.coverage_gate.status == "pass"
+    error_message = "the max age is the only bound on the refresh time"
+  }
+}
+
+run "write_pass_with_a_future_refresh" {
+  module {
+    source = "../../roots/data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
+      "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n"
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint, refreshed_at = "2999-01-01T00:00:00Z" })
+    }
+  }
+}
+
+run "future_refresh_time_blocks_select" {
+  command = plan
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    time                 = time
+  }
+  expect_failures = [databricks_grant.table_access]
+}
+
+run "malformed_max_age_is_rejected" {
+  command = plan
+  providers = {
+    databricks.account   = databricks.account
+    databricks.workspace = databricks.workspace
+    time                 = time
+  }
+  variables {
+    coverage_gate_max_age = "six hours"
+  }
+  expect_failures = [var.coverage_gate_max_age]
 }

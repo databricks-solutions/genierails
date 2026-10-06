@@ -12,23 +12,32 @@
      coverage_acknowledged_columns. A missing state means nothing is granted
      yet, so every table is checked.
   3. Run validate_abac.py --coverage-gate on the data_access config.
-  4. Ask Terraform for the fingerprint again and write the result to
+  4. Check the live-refresh record derive-assignments writes after it re-read
+     Unity Catalog (generated/.live_refresh.json): it must match the DDL and
+     the tags being gated, else the gate fails. Its time becomes the result's
+     refreshed_at.
+  5. Ask Terraform for the fingerprint again and write the result to
      envs/<env>/data_access/.coverage_gate.json.
 
 modules/data_access plans business SELECT only while that file records a pass
-for the fingerprint Terraform computes at plan time, so a raw terraform or
-terraform_layer.sh run can't grant with a missing, failed or stale gate. Like
-the certification receipt, this catches drift and skipped steps; it is not a
-defence against someone who hand-forges the file.
+for the fingerprint Terraform computes at plan time AND a live refresh no
+older than coverage_gate_max_age. So a raw terraform or terraform_layer.sh run
+can't grant with a missing, failed, stale or old gate. Terraform can't re-read
+live UC itself: it can only verify that a recent refreshed pass exists for the
+current local inputs. Like the certification receipt, this catches drift and
+skipped steps; it is not a defence against someone who hand-forges the files.
 
-`needs-derive` prints yes when an apply would open business access in a
-native-classification env, so make runs derive-assignments first.
+`needs-derive` prints which live refresh make must run before a plan/apply
+that opens business access: "full" (derive-assignments: live class.* tags and
+DDL), "ddl" (live DDL only, for envs whose tags come from make generate), or
+"none" when access stays closed.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import shlex
@@ -45,6 +54,8 @@ RUNNER = SHARED_ROOT / "scripts" / "terraform_layer.sh"
 VALIDATOR = SHARED_ROOT / "validate_abac.py"
 DATA_ACCESS_SUBDIR = "data_access"
 GATE_FILENAME = ".coverage_gate.json"
+REFRESH_RELPATH = Path("generated") / ".live_refresh.json"
+REFRESH_VERSION = 1
 GATE_VERSION = 1
 GATE_FLAG = "business_access_enabled"
 TABLE_GRANT = ("module.data_access", "databricks_grant", "table_access")
@@ -95,18 +106,72 @@ def console_flags(apply_flags: str) -> list[str]:
     return kept
 
 
-def needs_derive(env_dir: Path, apply_flags: str) -> tuple[bool, str | None]:
+def needs_derive(env_dir: Path, apply_flags: str) -> tuple[str, str | None]:
+    """Which live refresh must precede a plan/apply: full, ddl or none."""
     env = _load_tfvars(env_dir / "env.auto.tfvars")
     requested = _flag_override(apply_flags)
     if requested is None:
         requested = env.get(GATE_FLAG) is True
     if not requested:
-        return False, None
+        return "none", None
     if env.get("enable_classification") is not True:
-        return False, "enable_classification is false; tags come from make generate"
+        return "ddl", "enable_classification is false; tags come from make generate, so only the DDL is re-read"
     if not (env_dir / "generated" / "abac.auto.tfvars").is_file():
-        return False, "no generated/abac.auto.tfvars to derive into"
-    return True, "business access is being opened in a native-classification env"
+        return "ddl", "no generated/abac.auto.tfvars to derive tags into, so only the DDL is re-read"
+    return "full", "business access is being opened in a native-classification env"
+
+
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+
+
+def tag_assignments_digest(assignments: list) -> str:
+    """Order-independent digest of tag assignments (generated vs. split config)."""
+    keys = sorted(
+        "|".join(str(item.get(field, "")) for field in ("entity_type", "entity_name", "tag_key", "tag_value"))
+        for item in assignments or []
+    )
+    return hashlib.sha256("\n".join(keys).encode()).hexdigest()
+
+
+def write_refresh_record(path: Path, *, mode: str, ddl_path: Path, config_path: Path | None) -> None:
+    """Record a successful live refresh (written by derive_assignments.py)."""
+    record = {
+        "version": REFRESH_VERSION,
+        "mode": mode,
+        "refreshed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ddl_sha256": file_sha256(ddl_path),
+    }
+    if config_path is not None:
+        record["tag_assignments_sha256"] = tag_assignments_digest(
+            _load_tfvars(config_path).get("tag_assignments") or []
+        )
+    write_result(path, record)
+
+
+def live_refresh(env_dir: Path, tfvars: Path) -> tuple[str | None, str]:
+    """The refreshed_at of a live refresh that matches the gated inputs, or why not."""
+    path = env_dir / REFRESH_RELPATH
+    hint = "make runs derive-assignments first; re-run the same make command"
+    if not path.is_file():
+        return None, f"no live refresh of tags/DDL recorded ({path}); {hint}"
+    try:
+        record = json.loads(path.read_text())
+        refreshed_at = str(record["refreshed_at"])
+        datetime.strptime(refreshed_at, "%Y-%m-%dT%H:%M:%SZ")
+        mode = record["mode"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return None, f"unreadable live-refresh record {path}: {exc}"
+    if mode not in ("full", "ddl"):
+        return None, f"unknown live-refresh mode {mode!r} in {path}"
+    if record.get("ddl_sha256") != file_sha256(env_dir / "ddl" / "_fetched.sql"):
+        return None, f"ddl/_fetched.sql changed since the last live refresh; {hint}"
+    if mode == "full" and record.get("tag_assignments_sha256") != tag_assignments_digest(
+        _load_tfvars(tfvars).get("tag_assignments") or []
+    ):
+        return None, ("the data_access tag_assignments don't match the last live refresh "
+                      f"(promote hasn't re-split it, or it was edited); {hint}")
+    return refreshed_at, mode
 
 
 def query_inputs(runner: Path, env_name: str, layer_dir: Path, flags: list[str]) -> dict:
@@ -237,9 +302,32 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
         print(f"coverage gate FAILED for data_access:{env_name}; business SELECT stays closed. "
               "Fix the errors above, then re-run the same make command.", file=sys.stderr)
         return 1
-    record.update(status="pass")
+    refreshed_at, detail = live_refresh(env_dir, tfvars)
+    if refreshed_at is None:
+        record.update(status="fail", reason=detail)
+        write_result(gate_path, record)
+        print(f"coverage gate FAILED for data_access:{env_name}: {detail}", file=sys.stderr)
+        return 1
+    print(f"  Live refresh ({detail}) at {refreshed_at}")
+    record.update(status="pass", refreshed_at=refreshed_at)
     write_result(gate_path, record)
     return 0
+
+
+def invalidate(env_dir: Path, reason: str) -> None:
+    """Mark the recorded result failed (a live refresh is starting or failed)."""
+    path = env_dir / DATA_ACCESS_SUBDIR / GATE_FILENAME
+    if not path.exists():
+        return
+    try:
+        record = json.loads(path.read_text())
+        if not isinstance(record, dict):
+            raise ValueError("not an object")
+    except (OSError, ValueError):
+        record = {}
+    record.update(status="fail", reason=reason)
+    record.pop("refreshed_at", None)
+    write_result(path, record)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -251,16 +339,21 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--runner", type=Path, default=RUNNER)
     run.add_argument("--apply-flags", default="")
     run.add_argument("--verbose", action="store_true")
-    derive = sub.add_parser("needs-derive", help="print yes if derive-assignments must run first")
+    derive = sub.add_parser("needs-derive", help="print the live refresh make must run first: full, ddl or none")
     derive.add_argument("--env-dir", required=True, type=Path)
     derive.add_argument("--apply-flags", default="")
+    stale = sub.add_parser("invalidate", help="mark the recorded result failed before a live refresh")
+    stale.add_argument("--env-dir", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.command == "invalidate":
+            invalidate(args.env_dir, "a live refresh of tags/DDL started and has not been gated since")
+            return 0
         if args.command == "needs-derive":
-            required, reason = needs_derive(args.env_dir, args.apply_flags)
-            print("yes" if required else "no")
+            mode, reason = needs_derive(args.env_dir, args.apply_flags)
+            print(mode)
             if reason:
-                print(f"derive-assignments {'runs first' if required else 'skipped'}: {reason}", file=sys.stderr)
+                print(f"live refresh before exposure ({mode}): {reason}", file=sys.stderr)
             return 0
         return run_gate(args.env_dir.resolve(), args.env_name, args.runner,
                         args.apply_flags, args.verbose)

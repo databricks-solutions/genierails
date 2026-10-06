@@ -80,6 +80,17 @@ variable "coverage_ddl_file" {
   description = "Path to the fetched DDL the coverage gate reads; its content is part of the gate fingerprint."
 }
 
+variable "coverage_gate_max_age" {
+  type        = string
+  default     = "6h"
+  description = "Oldest live refresh (derive-assignments re-reading class.* tags and DDL from Unity Catalog) a passing coverage gate may rest on, as a Terraform duration. make refreshes right before every gated plan/apply; this bounds what a raw terraform run can rely on."
+
+  validation {
+    condition     = can(timeadd("2000-01-01T00:00:00Z", var.coverage_gate_max_age)) && !startswith(var.coverage_gate_max_age, "-")
+    error_message = "coverage_gate_max_age must be a positive Terraform duration such as \"6h\" or \"90m\"."
+  }
+}
+
 variable "coverage_acknowledged_columns" {
   type        = list(string)
   default     = []

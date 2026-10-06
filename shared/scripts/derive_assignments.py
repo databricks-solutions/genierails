@@ -34,6 +34,7 @@ from treatment_derivation import (  # noqa: E402
     derive_treatment_model,
     load_treatment_config,
 )
+from scripts.coverage_gate import write_refresh_record  # noqa: E402
 from scripts.footprint import FootprintError, resolve_footprint  # noqa: E402
 
 
@@ -101,6 +102,36 @@ def refresh_fetched_ddl(table_refs: list[str], runtime: dict, footprint: list[di
         ddl_out.write_text(text)
 
 
+def _governed_footprint(auth_path: Path, env_path: Path) -> tuple[dict, list[dict], list[str]]:
+    runtime = load_auth_config(auth_path, env_path)
+    # The live read must target this env's workspace. Without a host the SDK
+    # falls back to ambient configuration (environment, ~/.databrickscfg),
+    # which may be another workspace or the account console.
+    if not str(runtime.get("databricks_workspace_host") or "").strip():
+        raise RuntimeError(
+            f"{auth_path} does not set databricks_workspace_host; refusing a live read of "
+            "Unity Catalog with ambient credentials"
+        )
+    declared = resolve_footprint(env_path.parent, env_file=env_path)
+    uc_catalog = str(runtime.get("uc_catalog") or "").strip()
+    if uc_catalog:
+        declared = [
+            table if len(str(table).split(".")) >= 3 else f"{uc_catalog}.{table}"
+            for table in declared
+        ]
+    declared.extend(runtime.get("declared_footprint") or [])
+    for space in runtime.get("genie_spaces") or []:
+        declared.extend(space.get("declared_footprint") or [])
+    footprint = discover_agent_footprint(declared_footprint=declared)
+    return runtime, footprint, footprint_table_refs(footprint)
+
+
+def refresh_ddl_only(auth_path: Path, env_path: Path, ddl_out: Path) -> None:
+    """Refresh only the live DDL, for envs whose tags come from make generate."""
+    runtime, footprint, table_refs = _governed_footprint(auth_path, env_path)
+    refresh_fetched_ddl(table_refs, runtime, footprint, ddl_out)
+
+
 def derive_assignments(
     config_path: Path, auth_path: Path, env_path: Path, ddl_out: Path | None = None,
 ) -> int:
@@ -121,19 +152,7 @@ def derive_assignments(
     if _find_bracket_section(original, "tag_assignments") is None:
         raise RuntimeError(f"Promoted config {config_path} has no tag_assignments section")
 
-    runtime = load_auth_config(auth_path, env_path)
-    declared = resolve_footprint(env_path.parent, env_file=env_path)
-    uc_catalog = str(runtime.get("uc_catalog") or "").strip()
-    if uc_catalog:
-        declared = [
-            table if len(str(table).split(".")) >= 3 else f"{uc_catalog}.{table}"
-            for table in declared
-        ]
-    declared.extend(runtime.get("declared_footprint") or [])
-    for space in runtime.get("genie_spaces") or []:
-        declared.extend(space.get("declared_footprint") or [])
-    footprint = discover_agent_footprint(declared_footprint=declared)
-    table_refs = footprint_table_refs(footprint)
+    runtime, footprint, table_refs = _governed_footprint(auth_path, env_path)
 
     native = _fetch_live_classification_source(table_refs, runtime, require_native=True)
     # require_native guarantees a non-empty source; retain this assertion as a
@@ -224,15 +243,37 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-file", default="env.auto.tfvars")
     parser.add_argument("--write-ddl", type=Path, metavar="PATH",
                         help="also write the footprint's live DDL here (ddl/_fetched.sql) for the coverage gate")
+    parser.add_argument("--refresh-record", type=Path, metavar="PATH",
+                        help="after a successful live refresh, record it here for the coverage gate "
+                             "(removed first, so a failed refresh leaves none)")
+    parser.add_argument("--ddl-only", action="store_true",
+                        help="refresh only the live DDL (envs without native classification); "
+                             "tag_assignments are left as make generate wrote them")
     args = parser.parse_args(argv)
+    if args.ddl_only and not args.write_ddl:
+        parser.error("--ddl-only requires --write-ddl")
+    if args.refresh_record:
+        args.refresh_record.unlink(missing_ok=True)
     try:
-        count = derive_assignments(
-            Path(args.config), Path(args.auth_file), Path(args.env_file), ddl_out=args.write_ddl,
-        )
+        if args.ddl_only:
+            refresh_ddl_only(Path(args.auth_file), Path(args.env_file), args.write_ddl)
+            message = f"Refreshed live DDL ({args.write_ddl}); tag_assignments were not changed."
+        else:
+            count = derive_assignments(
+                Path(args.config), Path(args.auth_file), Path(args.env_file), ddl_out=args.write_ddl,
+            )
+            message = f"Derived {count} gr_treatment assignment(s); reviewed rules were not changed."
+        if args.refresh_record:
+            write_refresh_record(
+                args.refresh_record,
+                mode="ddl" if args.ddl_only else "full",
+                ddl_path=args.write_ddl,
+                config_path=None if args.ddl_only else Path(args.config),
+            )
     except (RuntimeError, NativeClassificationRequiredError, FootprintError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-    print(f"Derived {count} gr_treatment assignment(s); reviewed rules were not changed.")
+    print(message)
     return 0
 
 

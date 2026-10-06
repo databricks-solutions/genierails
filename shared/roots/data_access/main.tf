@@ -170,6 +170,12 @@ variable "enable_classification" {
   description = "Opt-in to enable UC Data Classification scanning, scoped to schemas in the combined classification footprint."
 }
 
+variable "coverage_gate_max_age" {
+  type        = string
+  default     = "6h"
+  description = "Oldest live refresh of tags and DDL a passing coverage gate may rest on (Terraform duration). Set in env.auto.tfvars."
+}
+
 variable "coverage_acknowledged_columns" {
   type        = list(string)
   default     = []
@@ -352,6 +358,7 @@ module "data_access" {
   coverage_gate_file              = "${var.env_dir}/.coverage_gate.json"
   coverage_ddl_file               = "${var.env_dir}/../ddl/_fetched.sql"
   coverage_acknowledged_columns   = var.coverage_acknowledged_columns
+  coverage_gate_max_age           = var.coverage_gate_max_age
   enable_classification           = var.enable_classification
   enable_auto_tagging             = var.enable_auto_tagging
   classification_existing_schemas = var.classification_existing_schemas

@@ -137,6 +137,11 @@ locals {
   # the gate (or passing -var overrides to a raw terraform run) fails the plan.
   # It deliberately ignores business_access_enabled: opening the gate must not
   # invalidate the result it depends on.
+  #
+  # The inputs are local snapshots of live UC tags and DDL. Terraform can't
+  # re-read UC, so the pass must also carry the time make last refreshed them
+  # (refreshed_at, from derive-assignments) and that refresh must be no older
+  # than var.coverage_gate_max_age when this plan is made.
   coverage_gate_grant_tables = sort(distinct([for pair in local.table_access_pairs : pair.table]))
   coverage_gate_fingerprint = sha256(jsonencode({
     version         = 1
@@ -157,14 +162,20 @@ locals {
     local._coverage_gate_result == null ? "unreadable" :
     try(local._coverage_gate_result.fingerprint, "") != local.coverage_gate_fingerprint ? "stale" :
     try(local._coverage_gate_result.status, "") != "pass" ? "failed" :
+    # A missing or malformed refreshed_at, or one in the future (beyond clock
+    # skew), is not a live refresh.
+    try(timecmp(local._coverage_gate_result.refreshed_at, timeadd(plantimestamp(), "5m")) > 0, true) ? "unrefreshed" :
+    try(timecmp(timeadd(local._coverage_gate_result.refreshed_at, var.coverage_gate_max_age), plantimestamp()) < 0, true) ? "expired" :
     "pass"
   )
   coverage_gate_problem = {
-    missing    = "no coverage-gate result exists for this layer"
-    unreadable = "the coverage-gate result is not valid JSON"
-    failed     = "the last coverage gate FAILED (see its report)"
-    stale      = "the inputs changed after the coverage gate ran (config, tags, masks, DDL, grants or -var overrides)"
-    pass       = ""
+    missing     = "no coverage-gate result exists for this layer"
+    unreadable  = "the coverage-gate result is not valid JSON"
+    failed      = "the last coverage gate FAILED (see its report)"
+    stale       = "the inputs changed after the coverage gate ran (config, tags, masks, DDL, grants or -var overrides)"
+    unrefreshed = "the passing result records no live refresh of tags and DDL from Unity Catalog"
+    expired     = "the live refresh of tags and DDL behind the pass is older than coverage_gate_max_age (${var.coverage_gate_max_age})"
+    pass        = ""
   }
 }
 
@@ -286,7 +297,7 @@ resource "databricks_grant" "table_access" {
   lifecycle {
     precondition {
       condition     = local.coverage_gate_status == "pass"
-      error_message = "Coverage gate ${local.coverage_gate_status}: ${local.coverage_gate_problem[local.coverage_gate_status]} (${var.coverage_gate_file}). Business SELECT grants are blocked. Run this layer through make (make apply, make release or make maintain ENV=${basename(dirname(dirname(var.coverage_gate_file)))}), which runs derive-assignments and the coverage gate before it applies."
+      error_message = "Coverage gate ${local.coverage_gate_status}: ${local.coverage_gate_problem[local.coverage_gate_status]} (${var.coverage_gate_file}). Business SELECT grants are blocked. Terraform can't re-read Unity Catalog, so run this layer through make (make apply, make plan, make release or make maintain ENV=${basename(dirname(dirname(var.coverage_gate_file)))}), which refreshes live tags and DDL, then runs the coverage gate."
     }
   }
 }
