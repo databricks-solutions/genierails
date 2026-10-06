@@ -367,6 +367,11 @@ def main():
         sys.exit(1)
     preserved_warehouse = _str(dest_cfg.get("sql_warehouse_id", ""))
     preserved_auto_tagging = dest_cfg.get("enable_auto_tagging") is True
+    # Acknowledgements are reviewed per destination (they name its catalogs),
+    # so keep the destination's own list and never carry the source's.
+    preserved_acknowledged = [
+        _str(column) for column in dest_cfg.get("coverage_acknowledged_columns") or []
+    ]
     promoted_verify_key = (
         _str(cfg.get("verify_key_column", ""))
         or _str(dest_cfg.get("verify_key_column", ""))
@@ -393,6 +398,11 @@ def main():
         )
     if dest_cfg.get("business_access_enabled") is True:
         print("  Reset destination business_access_enabled=true to false")
+    if preserved_acknowledged:
+        print(
+            "  Preserved destination coverage_acknowledged_columns "
+            f"({len(preserved_acknowledged)} column(s))"
+        )
 
     dest_spaces_by_name = {
         _str(space.get("name", "")): space
@@ -459,6 +469,12 @@ def main():
     lines.append("enable_classification = true")
     lines.append(f"enable_auto_tagging = {str(preserved_auto_tagging).lower()}")
     lines.append("business_access_enabled = false")
+    if preserved_acknowledged:
+        lines.append("")
+        lines.append("# Reviewed as not sensitive; the coverage gate doesn't block first exposure on them.")
+        lines.append("coverage_acknowledged_columns = [")
+        lines.extend(f"  {json.dumps(column)}," for column in preserved_acknowledged)
+        lines.append("]")
     lines.extend(_promoted_access_tier_groups(cfg, source_env_dir))
 
     # Write

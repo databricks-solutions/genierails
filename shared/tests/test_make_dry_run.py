@@ -1,5 +1,7 @@
 """Regression tests for GNU Make dry-run safety in mixed recursive recipes."""
 
+import base64
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -181,9 +183,16 @@ def test_plan_real_target_runs_configured_workspace_layers(tmp_path):
     (data_access_dir / "abac.auto.tfvars").write_text("# present\n")
     runner_log = tmp_path / "runner.log"
     runner = tmp_path / "record-runner"
+    # The data_access plan first asks terraform console for the coverage-gate
+    # inputs; business access is closed here, so the gate is not required.
+    closed = base64.b64encode(json.dumps({
+        "fingerprint": "f", "business_access_enabled": False,
+        "grant_tables": [], "acknowledged_columns": [],
+    }).encode()).decode()
     runner.write_text(
         "#!/bin/sh\n"
         f"printf '%s|%s\\n' \"$LAYER_ENV_DIR\" \"$*\" >> \"{runner_log}\"\n"
+        f"if [ \"$3\" = console ]; then echo '\"{closed}\"'; fi\n"
     )
     runner.chmod(0o755)
 
@@ -205,9 +214,11 @@ def test_plan_real_target_runs_configured_workspace_layers(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert runner_log.read_text().splitlines() == [
+        f"{data_access_dir}|data_access dev console",
         f"{data_access_dir}|data_access dev plan",
         f"{env_dir}|workspace dev plan",
     ]
+    assert "Coverage gate (data_access:dev): not required" in result.stdout
 
 
 @pytest.mark.parametrize("configured", [False, True])

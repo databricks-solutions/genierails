@@ -90,7 +90,7 @@ if [ "$LAYER" != "account" ]; then
 fi
 
 case "$COMMAND" in
-  plan|apply|destroy|import)
+  plan|apply|destroy|import|console)
     CMD=(terraform "$COMMAND" "${VAR_ARGS[@]}" "$@")
     ;;
   state-list)

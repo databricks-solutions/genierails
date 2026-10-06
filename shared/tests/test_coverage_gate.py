@@ -214,3 +214,146 @@ def test_policy_cap_errors_without_dropping(tmp_path, monkeypatch):
     else:
         raise AssertionError("expected hard policy quota error")
     assert tfvars.read_text() == original
+
+
+# ── first-exposure check ──────────────────────────────────────────────────────
+
+_PEOPLE_DDL = [
+    "cat.sch.people.email",        # tagged by _covered_config
+    "cat.sch.people.ssn",          # untagged, sensitive-looking
+    "cat.sch.people.amount",       # untagged, monetary: never blocks
+    "cat.sch.people.customer_id",  # generic
+]
+
+
+def _gate(ddl_columns, first=(), acknowledged=(), cfg=None):
+    result = ValidationResult()
+    validate_coverage_gate(
+        cfg or _covered_config(), {"mask_email"}, "", result,
+        ddl_columns=ddl_columns,
+        exposure={
+            "first_exposure_tables": list(first),
+            "acknowledged_columns": list(acknowledged),
+            "acknowledge_file": "envs/prod/env.auto.tfvars",
+        },
+    )
+    return result
+
+
+def test_first_exposure_blocks_untagged_sensitive_column_and_says_how_to_fix():
+    result = _gate(_PEOPLE_DDL, first=["cat.sch.people"])
+    assert not result.passed
+    [error] = [e for e in result.errors if "first exposure blocked" in e]
+    assert "cat.sch.people.ssn (looks like: ssn)" in error
+    assert "people.amount" not in error and "people.email" not in error
+    # The message names every way out and the exact acknowledge syntax.
+    assert "Wait for the UC Data Classification scan" in error
+    assert "Tag the columns in Unity Catalog" in error
+    assert 'envs/prod/env.auto.tfvars:\n         coverage_acknowledged_columns = ["cat.sch.people.ssn"]' in error
+    assert "re-run the same make command" in error
+    # Monetary amounts stay a warning even on first exposure.
+    assert any("cat.sch.people.amount" in w for w in result.warnings)
+
+
+def test_first_exposure_passes_once_the_column_is_tagged():
+    cfg = _covered_config()
+    cfg["tag_assignments"].append({
+        "entity_type": "columns", "entity_name": "cat.sch.people.ssn",
+        "tag_key": "gr_treatment", "tag_value": "mask_email",
+    })
+    # Give the new treatment a covering policy so only the first-exposure
+    # check is under test.
+    result = _gate(_PEOPLE_DDL, first=["cat.sch.people"], cfg=cfg)
+    assert not any("first exposure" in e for e in result.errors)
+    assert not any("people.ssn" in w for w in result.warnings)
+
+
+def test_first_exposure_passes_once_the_column_is_acknowledged():
+    result = _gate(_PEOPLE_DDL, first=["cat.sch.people"], acknowledged=["CAT.sch.people.SSN"])
+    assert result.passed, result.errors
+    assert any("1 acknowledged column(s)" in line and "cat.sch.people.ssn" in line for line in result.info)
+    assert not any("people.ssn" in w for w in result.warnings)
+
+
+def test_already_granted_table_keeps_todays_warning():
+    result = _gate(_PEOPLE_DDL, first=[])
+    assert result.passed
+    [warning] = result.warnings
+    assert "COVERAGE GATE (non-blocking)" in warning
+    assert "cat.sch.people.ssn" in warning
+
+
+def test_only_the_new_table_blocks():
+    ddl = _PEOPLE_DDL + ["cat.sch.orders.card_number", "cat.sch.orders.order_id"]
+    result = _gate(ddl, first=["cat.sch.orders"])
+    [error] = [e for e in result.errors if "first exposure blocked" in e]
+    assert "cat.sch.orders.card_number" in error
+    assert "people.ssn" not in error
+    assert any("cat.sch.people.ssn" in w for w in result.warnings)
+
+
+def test_missing_ddl_fails_closed_for_first_exposure():
+    result = _gate(None, first=["cat.sch.people"])
+    assert not result.passed
+    assert any("no fetched DDL" in e and "cat.sch.people" in e for e in result.errors)
+
+
+def test_table_absent_from_ddl_fails_closed_for_first_exposure():
+    result = _gate(_PEOPLE_DDL, first=["cat.sch.people", "cat.sch.unfetched"])
+    [error] = [e for e in result.errors if "no fetched DDL" in e]
+    assert "cat.sch.unfetched" in error
+    assert "cat.sch.people\n" not in error + "\n"
+
+
+def test_missing_ddl_without_first_exposure_keeps_todays_behaviour():
+    assert _gate(None, first=[]).passed
+
+
+def _cli_env(tmp_path, ddl):
+    layer = tmp_path / "prod" / "data_access"
+    layer.mkdir(parents=True)
+    if ddl is not None:
+        (tmp_path / "prod" / "ddl").mkdir()
+        (tmp_path / "prod" / "ddl" / "_fetched.sql").write_text(ddl)
+    tfvars = layer / "abac.auto.tfvars"
+    tfvars.write_text('tag_assignments = []\nfgac_policies = []\n')
+    sql = layer / "masking_functions.sql"
+    sql.write_text("CREATE FUNCTION cat.sch.mask_email(x STRING) RETURNS STRING RETURN x;\n")
+    return tfvars, sql
+
+
+def _cli(tmp_path, tfvars, sql, context):
+    path = tmp_path / "exposure.json"
+    path.write_text(context)
+    script = Path(__file__).parents[1] / "validate_abac.py"
+    return subprocess.run(
+        [sys.executable, str(script), "--coverage-gate", str(tfvars), str(sql),
+         "--ddl", str(tfvars.parents[1] / "ddl" / "_fetched.sql"), "--exposure-context", str(path)],
+        text=True, capture_output=True,
+    )
+
+
+def test_cli_blocks_first_exposure_on_the_split_data_access_config(tmp_path):
+    tfvars, sql = _cli_env(tmp_path, "CREATE TABLE cat.sch.people (\n  email string,\n  ssn string\n);\n")
+    completed = _cli(tmp_path, tfvars, sql, '{"first_exposure_tables": ["cat.sch.people"]}')
+    assert completed.returncode == 1
+    assert "first exposure blocked" in completed.stdout
+    assert "cat.sch.people.email" in completed.stdout and "cat.sch.people.ssn" in completed.stdout
+    acknowledged = _cli(tmp_path, tfvars, sql, (
+        '{"first_exposure_tables": ["cat.sch.people"],'
+        ' "acknowledged_columns": ["cat.sch.people.email", "cat.sch.people.ssn"]}'
+    ))
+    # The bare fixture fails unrelated checks (no groups); only the
+    # first-exposure block must be gone.
+    assert "first exposure blocked" not in acknowledged.stdout
+    assert "2 acknowledged column(s)" in acknowledged.stdout
+
+
+def test_cli_fails_closed_without_ddl_or_with_a_bad_context(tmp_path):
+    tfvars, sql = _cli_env(tmp_path, None)
+    completed = _cli(tmp_path, tfvars, sql, '{"first_exposure_tables": ["cat.sch.people"]}')
+    assert completed.returncode == 1
+    assert "no fetched DDL" in completed.stdout
+    malformed = _cli(tmp_path, tfvars, sql, '{"first_exposure_tables": "cat.sch.people"}')
+    assert malformed.returncode == 1
+    assert "unreadable exposure context" in malformed.stdout

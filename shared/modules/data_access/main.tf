@@ -129,6 +129,43 @@ locals {
     local._fgac_catalogs,
     local._uc_catalogs,
   ))
+
+  # Coverage gate. scripts/coverage_gate.py reads this fingerprint (terraform
+  # console), runs the gate, and records the result in var.coverage_gate_file.
+  # Business SELECT is planned only while that file records a pass for exactly
+  # these inputs, so editing the config, the masks, the DDL or the grants after
+  # the gate (or passing -var overrides to a raw terraform run) fails the plan.
+  # It deliberately ignores business_access_enabled: opening the gate must not
+  # invalidate the result it depends on.
+  coverage_gate_grant_tables = sort(distinct([for pair in local.table_access_pairs : pair.table]))
+  coverage_gate_fingerprint = sha256(jsonencode({
+    version         = 1
+    tag_assignments = sort(keys(local.tag_assignment_map))
+    fgac_policies   = local.fgac_policy_map
+    table_grants    = sort([for pair in local.table_access_pairs : "${pair.table}|${pair.principal}"])
+    masking_sql     = filesha256(var.masking_sql_file)
+    ddl             = fileexists(var.coverage_ddl_file) ? filesha256(var.coverage_ddl_file) : ""
+    acknowledged    = sort(distinct([for column in var.coverage_acknowledged_columns : lower(column)]))
+  }))
+  _coverage_gate_result = (
+    fileexists(var.coverage_gate_file)
+    ? try(jsondecode(file(var.coverage_gate_file)), null)
+    : null
+  )
+  coverage_gate_status = (
+    !fileexists(var.coverage_gate_file) ? "missing" :
+    local._coverage_gate_result == null ? "unreadable" :
+    try(local._coverage_gate_result.fingerprint, "") != local.coverage_gate_fingerprint ? "stale" :
+    try(local._coverage_gate_result.status, "") != "pass" ? "failed" :
+    "pass"
+  )
+  coverage_gate_problem = {
+    missing    = "no coverage-gate result exists for this layer"
+    unreadable = "the coverage-gate result is not valid JSON"
+    failed     = "the last coverage gate FAILED (see its report)"
+    stale      = "the inputs changed after the coverage gate ran (config, tags, masks, DDL, grants or -var overrides)"
+    pass       = ""
+  }
 }
 
 # Data Classification is opt-in because deleting this resource disables scans
@@ -243,6 +280,15 @@ resource "databricks_grant" "table_access" {
     databricks_policy_info.policies,
     time_sleep.wait_for_policy_enforcement,
   ]
+
+  # Checked for every planned instance, new or existing, so neither a raw
+  # terraform run nor terraform_layer.sh can grant without a current pass.
+  lifecycle {
+    precondition {
+      condition     = local.coverage_gate_status == "pass"
+      error_message = "Coverage gate ${local.coverage_gate_status}: ${local.coverage_gate_problem[local.coverage_gate_status]} (${var.coverage_gate_file}). Business SELECT grants are blocked. Run this layer through make (make apply, make release or make maintain ENV=${basename(dirname(dirname(var.coverage_gate_file)))}), which runs derive-assignments and the coverage gate before it applies."
+    }
+  }
 }
 
 resource "databricks_sql_endpoint" "warehouse" {
@@ -352,13 +398,16 @@ resource "databricks_policy_info" "policies" {
 }
 
 # Unity Catalog policy creation can return before enforcement is observable.
-# Keep SELECT closed through that propagation window.
+# New table grants wait out that window. The wait restarts when the policies
+# change or the masking functions are redeployed (any terraform_data
+# replacement: SQL, warehouse, host, client ID), which delays grants created in
+# the same apply; SELECT grants that already exist stay in place throughout.
 resource "time_sleep" "wait_for_policy_enforcement" {
   depends_on      = [databricks_policy_info.policies]
   create_duration = "30s"
 
   triggers = {
-    policy_hash      = sha256(jsonencode(local.fgac_policy_map))
-    masking_sql_hash = filemd5(var.masking_sql_file)
+    policy_hash          = sha256(jsonencode(local.fgac_policy_map))
+    masking_functions_id = terraform_data.masking_functions.id
   }
 }

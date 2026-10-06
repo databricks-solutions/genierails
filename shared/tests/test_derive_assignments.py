@@ -401,3 +401,54 @@ def test_make_target_exposes_assignment_only_command():
     assert "scripts/derive_assignments.py" in body
     assert "generated/abac.auto.tfvars" in body
     assert "generate_abac.py" not in body
+
+
+def _native_email(monkeypatch):
+    native = ClassificationSource(tag_rows=[
+        ("prod", "sales", "customers", "email", "class.email_address", ""),
+    ])
+    monkeypatch.setattr(MODULE, "_fetch_live_classification_source", lambda *a, **k: native)
+    _forbid_model_calls(monkeypatch)
+
+
+def test_write_ddl_refreshes_the_footprint_ddl_the_coverage_gate_reads(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    _native_email(monkeypatch)
+    fetched = []
+
+    def fake_fetch(table_refs, runtime):
+        fetched.append(list(table_refs))
+        print("  Fetching: prod.sales.customers...")  # must not leak into derive's output
+        return "CREATE TABLE prod.sales.customers (\n  email STRING,\n  ssn STRING\n);", [("prod", "sales")]
+
+    monkeypatch.setattr(MODULE, "fetch_tables_from_databricks", fake_fetch)
+    ddl = tmp_path / "ddl" / "_fetched.sql"
+    MODULE.derive_assignments(config, auth, env, ddl_out=ddl)
+    assert fetched == [["prod.sales.customers"]]
+    assert ddl.read_text() == "CREATE TABLE prod.sales.customers (\n  email STRING,\n  ssn STRING\n);\n"
+    # Unchanged DDL is not rewritten.
+    mtime = ddl.stat().st_mtime_ns
+    MODULE.derive_assignments(config, auth, env, ddl_out=ddl)
+    assert ddl.stat().st_mtime_ns == mtime
+
+
+def test_write_ddl_failure_fails_derive(tmp_path, monkeypatch):
+    config, auth, env = _files(tmp_path)
+    _native_email(monkeypatch)
+
+    def no_tables(table_refs, runtime):
+        print("ERROR: No tables found for the given references.")
+        raise SystemExit(1)
+
+    monkeypatch.setattr(MODULE, "fetch_tables_from_databricks", no_tables)
+    before = config.read_text()
+    with pytest.raises(RuntimeError, match="No tables found"):
+        MODULE.derive_assignments(config, auth, env, ddl_out=tmp_path / "ddl" / "_fetched.sql")
+    assert config.read_text() == before
+    assert not (tmp_path / "ddl" / "_fetched.sql").exists()
+
+
+def test_derive_target_refreshes_fetched_ddl():
+    source = MAKEFILE.read_text()
+    body = source[source.index("derive-assignments:"):source.index("\naudit-schema:")]
+    assert "--write-ddl ddl/_fetched.sql" in body

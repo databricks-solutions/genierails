@@ -2,11 +2,69 @@ mock_provider "databricks" {}
 mock_provider "null" {}
 mock_provider "time" {}
 
+# Business SELECT needs a current coverage-gate pass (coverage_gate.tftest.hcl).
+# Before each grant-shape run, a closed-gate plan of the same inputs reads the
+# gate fingerprint and the file writer records a pass for it.
+run "setup_masking_sql" {
+  module {
+    source = "./tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
+    }
+  }
+}
+
+run "per_agent_select_grants_are_isolated_and_shared_tables_union_acls__gate_inputs" {
+  command = plan
+
+  variables {
+    env_dir                   = "tests/.tmp/grants/data_access"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_host = "https://example.invalid"
+    uc_tables                 = ["grants_catalog.business.orders"]
+    genie_spaces = [
+      { name = "Agent A", uc_tables = ["agent_catalog.space.a_only", "agent_catalog.space.shared"] },
+      { name = "Agent B", uc_tables = ["agent_catalog.space.b_only", "agent_catalog.space.shared"] },
+    ]
+    genie_space_acl_groups = {
+      "Agent A" = ["agent_a_group"]
+      "Agent B" = ["agent_b_group"]
+    }
+    discovered_uc_tables = ["discovered_catalog.agent.facts"]
+    discovered_table_agents = {
+      "discovered_catalog.agent.facts" = ["Agent A"]
+    }
+    groups = {
+      agent_a_group = {}
+      agent_b_group = {}
+    }
+    business_access_enabled = false
+    enable_classification   = true
+    sql_warehouse_id        = "warehouse"
+  }
+}
+
+run "per_agent_select_grants_are_isolated_and_shared_tables_union_acls__gate_passes" {
+  module {
+    source = "./tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.per_agent_select_grants_are_isolated_and_shared_tables_union_acls__gate_inputs.coverage_gate_inputs.fingerprint })
+    }
+  }
+}
+
 run "per_agent_select_grants_are_isolated_and_shared_tables_union_acls" {
   command = plan
 
   variables {
-    env_dir                   = "../../examples/healthcare"
+    env_dir                   = "tests/.tmp/grants/data_access"
     databricks_account_id     = "account"
     databricks_client_id      = "service-principal"
     databricks_client_secret  = "secret"
@@ -86,11 +144,42 @@ run "per_agent_select_grants_are_isolated_and_shared_tables_union_acls" {
   }
 }
 
+run "legacy_unattributed_discovery_falls_back_to_all_principals__gate_inputs" {
+  command = plan
+
+  variables {
+    env_dir                   = "tests/.tmp/grants/data_access"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_host = "https://example.invalid"
+    discovered_uc_tables      = ["legacy_catalog.agent.facts"]
+    groups = {
+      agent_a_group = {}
+      agent_b_group = {}
+    }
+    business_access_enabled = false
+    sql_warehouse_id        = "warehouse"
+  }
+}
+
+run "legacy_unattributed_discovery_falls_back_to_all_principals__gate_passes" {
+  module {
+    source = "./tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.legacy_unattributed_discovery_falls_back_to_all_principals__gate_inputs.coverage_gate_inputs.fingerprint })
+    }
+  }
+}
+
 run "legacy_unattributed_discovery_falls_back_to_all_principals" {
   command = plan
 
   variables {
-    env_dir                   = "../../examples/healthcare"
+    env_dir                   = "tests/.tmp/grants/data_access"
     databricks_account_id     = "account"
     databricks_client_id      = "service-principal"
     databricks_client_secret  = "secret"
@@ -118,24 +207,88 @@ run "legacy_unattributed_discovery_falls_back_to_all_principals" {
   }
 }
 
-run "id_only_space_uses_canonical_title_for_select" {
+run "id_only_space_uses_canonical_title_for_select__gate_inputs" {
   command = plan
+
   variables {
-    env_dir                   = "../../examples/healthcare"
+    env_dir                   = "tests/.tmp/grants/data_access"
     databricks_account_id     = "account"
     databricks_client_id      = "service-principal"
     databricks_client_secret  = "secret"
     databricks_workspace_host = "https://example.invalid"
-    genie_spaces = [{ genie_space_id = "space-1", uc_tables = ["pay.agent.facts"] }]
-    genie_space_id_to_name = { "space-1" = "Payments" }
-    genie_space_acl_groups = { Payments = ["pay_group"] }
-    groups = { pay_group = {}, hr_group = {} }
-    business_access_enabled = true
-    sql_warehouse_id = "warehouse"
+    genie_spaces              = [{ genie_space_id = "space-1", uc_tables = ["pay.agent.facts"] }]
+    genie_space_id_to_name    = { "space-1" = "Payments" }
+    genie_space_acl_groups    = { Payments = ["pay_group"] }
+    groups                    = { pay_group = {}, hr_group = {} }
+    business_access_enabled   = false
+    sql_warehouse_id          = "warehouse"
+  }
+}
+
+run "id_only_space_uses_canonical_title_for_select__gate_passes" {
+  module {
+    source = "./tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.id_only_space_uses_canonical_title_for_select__gate_inputs.coverage_gate_inputs.fingerprint })
+    }
+  }
+}
+
+run "id_only_space_uses_canonical_title_for_select" {
+  command = plan
+  variables {
+    env_dir                   = "tests/.tmp/grants/data_access"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_host = "https://example.invalid"
+    genie_spaces              = [{ genie_space_id = "space-1", uc_tables = ["pay.agent.facts"] }]
+    genie_space_id_to_name    = { "space-1" = "Payments" }
+    genie_space_acl_groups    = { Payments = ["pay_group"] }
+    groups                    = { pay_group = {}, hr_group = {} }
+    business_access_enabled   = true
+    sql_warehouse_id          = "warehouse"
   }
   assert {
-    condition = toset(output.table_grant_resource_keys) == toset(["pay.agent.facts|pay_group"])
+    condition     = toset(output.table_grant_resource_keys) == toset(["pay.agent.facts|pay_group"])
     error_message = "id-only spaces must scope SELECT via their canonical resolved title"
+  }
+}
+
+run "empty_agent_list_is_fail_closed__gate_inputs" {
+  command = plan
+
+  variables {
+    env_dir                   = "tests/.tmp/grants/data_access"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_host = "https://example.invalid"
+    discovered_uc_tables      = ["orphan_catalog.agent.facts"]
+    discovered_table_agents = {
+      "orphan_catalog.agent.facts" = []
+    }
+    groups = {
+      agent_a_group = {}
+      agent_b_group = {}
+    }
+    business_access_enabled = false
+    sql_warehouse_id        = "warehouse"
+  }
+}
+
+run "empty_agent_list_is_fail_closed__gate_passes" {
+  module {
+    source = "./tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.empty_agent_list_is_fail_closed__gate_inputs.coverage_gate_inputs.fingerprint })
+    }
   }
 }
 
@@ -143,7 +296,7 @@ run "empty_agent_list_is_fail_closed" {
   command = plan
 
   variables {
-    env_dir                   = "../../examples/healthcare"
+    env_dir                   = "tests/.tmp/grants/data_access"
     databricks_account_id     = "account"
     databricks_client_id      = "service-principal"
     databricks_client_secret  = "secret"
@@ -166,11 +319,47 @@ run "empty_agent_list_is_fail_closed" {
   }
 }
 
+run "explicit_empty_space_acl_means_no_select_grants__gate_inputs" {
+  command = plan
+
+  variables {
+    env_dir                   = "tests/.tmp/grants/data_access"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_host = "https://example.invalid"
+    genie_spaces = [
+      { name = "Nobody", uc_tables = ["closed_catalog.agent.facts"] },
+    ]
+    genie_space_acl_groups = {
+      Nobody = []
+    }
+    groups = {
+      agent_a_group = {}
+      agent_b_group = {}
+    }
+    business_access_enabled = false
+    sql_warehouse_id        = "warehouse"
+  }
+}
+
+run "explicit_empty_space_acl_means_no_select_grants__gate_passes" {
+  module {
+    source = "./tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.explicit_empty_space_acl_means_no_select_grants__gate_inputs.coverage_gate_inputs.fingerprint })
+    }
+  }
+}
+
 run "explicit_empty_space_acl_means_no_select_grants" {
   command = plan
 
   variables {
-    env_dir                   = "../../examples/healthcare"
+    env_dir                   = "tests/.tmp/grants/data_access"
     databricks_account_id     = "account"
     databricks_client_id      = "service-principal"
     databricks_client_secret  = "secret"
@@ -195,11 +384,48 @@ run "explicit_empty_space_acl_means_no_select_grants" {
   }
 }
 
+run "unknown_agent_does_not_widen_known_agent_scope__gate_inputs" {
+  command = plan
+
+  variables {
+    env_dir                   = "tests/.tmp/grants/data_access"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_host = "https://example.invalid"
+    discovered_uc_tables      = ["scoped_catalog.agent.facts"]
+    discovered_table_agents = {
+      "scoped_catalog.agent.facts" = ["Agent A", "Old A"]
+    }
+    genie_space_acl_groups = {
+      "Agent A" = ["agent_a_group"]
+    }
+    groups = {
+      agent_a_group = {}
+      agent_b_group = {}
+    }
+    business_access_enabled = false
+    sql_warehouse_id        = "warehouse"
+  }
+}
+
+run "unknown_agent_does_not_widen_known_agent_scope__gate_passes" {
+  module {
+    source = "./tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.unknown_agent_does_not_widen_known_agent_scope__gate_inputs.coverage_gate_inputs.fingerprint })
+    }
+  }
+}
+
 run "unknown_agent_does_not_widen_known_agent_scope" {
   command = plan
 
   variables {
-    env_dir                   = "../../examples/healthcare"
+    env_dir                   = "tests/.tmp/grants/data_access"
     databricks_account_id     = "account"
     databricks_client_id      = "service-principal"
     databricks_client_secret  = "secret"
@@ -225,11 +451,48 @@ run "unknown_agent_does_not_widen_known_agent_scope" {
   }
 }
 
+run "top_level_admin_table_wins_over_agent_scope__gate_inputs" {
+  command = plan
+
+  variables {
+    env_dir                   = "tests/.tmp/grants/data_access"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_host = "https://example.invalid"
+    uc_tables                 = ["admin_catalog.shared.facts"]
+    genie_spaces = [
+      { name = "Agent A", uc_tables = ["admin_catalog.shared.facts"] },
+    ]
+    genie_space_acl_groups = {
+      "Agent A" = ["agent_a_group"]
+    }
+    groups = {
+      agent_a_group = {}
+      agent_b_group = {}
+    }
+    business_access_enabled = false
+    sql_warehouse_id        = "warehouse"
+  }
+}
+
+run "top_level_admin_table_wins_over_agent_scope__gate_passes" {
+  module {
+    source = "./tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.top_level_admin_table_wins_over_agent_scope__gate_inputs.coverage_gate_inputs.fingerprint })
+    }
+  }
+}
+
 run "top_level_admin_table_wins_over_agent_scope" {
   command = plan
 
   variables {
-    env_dir                   = "../../examples/healthcare"
+    env_dir                   = "tests/.tmp/grants/data_access"
     databricks_account_id     = "account"
     databricks_client_id      = "service-principal"
     databricks_client_secret  = "secret"
@@ -258,11 +521,39 @@ run "top_level_admin_table_wins_over_agent_scope" {
   }
 }
 
+run "absent_discovery_preserves_legacy_user_table_behavior__gate_inputs" {
+  command = plan
+
+  variables {
+    env_dir                   = "tests/.tmp/grants/data_access"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_host = "https://example.invalid"
+    uc_tables                 = ["legacy_catalog.business.orders"]
+    groups                    = { analysts = {} }
+    business_access_enabled   = false
+    sql_warehouse_id          = "warehouse"
+  }
+}
+
+run "absent_discovery_preserves_legacy_user_table_behavior__gate_passes" {
+  module {
+    source = "./tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/grants/data_access/masking_functions.sql" = "SELECT 1;\n"
+      "tests/.tmp/grants/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.absent_discovery_preserves_legacy_user_table_behavior__gate_inputs.coverage_gate_inputs.fingerprint })
+    }
+  }
+}
+
 run "absent_discovery_preserves_legacy_user_table_behavior" {
   command = plan
 
   variables {
-    env_dir                   = "../../examples/healthcare"
+    env_dir                   = "tests/.tmp/grants/data_access"
     databricks_account_id     = "account"
     databricks_client_id      = "service-principal"
     databricks_client_secret  = "secret"

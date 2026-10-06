@@ -15,6 +15,7 @@ Usage:
 
 import sys
 import re
+import json
 import argparse
 from pathlib import Path
 
@@ -302,28 +303,106 @@ def find_fetched_ddl(tfvars_path: Path) -> Path | None:
     return None
 
 
-def _warn_unclassified_sensitive_columns(
+# Name-inferred categories that never block a first exposure. Monetary amounts
+# are business measures: the native classifier doesn't tag them and rulebooks
+# often leave them unmasked on purpose, so they stay a warning.
+FIRST_EXPOSURE_NONBLOCKING_CATEGORIES = {"generic", "amount"}
+
+
+def load_exposure_context(path: Path) -> dict:
+    """Read the --exposure-context JSON scripts/coverage_gate.py writes.
+
+    ``first_exposure_tables`` are tables about to be granted SELECT that the
+    data_access state doesn't grant yet; ``acknowledged_columns`` come from
+    ``coverage_acknowledged_columns``. Anything malformed raises ValueError.
+    """
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError("exposure context must be a JSON object")
+    context = {}
+    for key in ("first_exposure_tables", "acknowledged_columns"):
+        value = data.get(key, [])
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise ValueError(f"exposure context {key} must be a list of strings")
+        context[key] = value
+    context["acknowledge_file"] = str(data.get("acknowledge_file") or "env.auto.tfvars")
+    return context
+
+
+def _check_unclassified_sensitive_columns(
     ddl_columns: list[str] | None,
     covered_columns: set[str],
     result: ValidationResult,
+    exposure: dict | None = None,
 ) -> None:
-    """Non-blocking: surface the fail-open gap for untagged sensitive-looking columns.
+    """Surface the fail-open gap for untagged sensitive-looking columns.
 
     Masks bind only to columns that carry a sensitivity tag / ``gr_treatment``.
     A column whose name looks sensitive (any non-``generic`` category from
-    ``_infer_column_categories``) but that has neither is unmasked; the gate
-    cannot prove it is sensitive, so it warns instead of blocking.
+    ``_infer_column_categories``) but that has neither is unmasked. The name
+    can't prove it is sensitive, so this only warns, except on first exposure:
+    with ``exposure``, a table that is about to be granted SELECT for the first
+    time blocks until such columns are tagged or acknowledged, because an
+    unfinished classification scan looks exactly like this. Missing DDL for
+    such a table also blocks.
     """
+    exposure = exposure or {}
+    first = {t.lower() for t in exposure.get("first_exposure_tables", [])}
+    acknowledged = {c.lower() for c in exposure.get("acknowledged_columns", [])}
+    if first:
+        ddl_tables = {c.rsplit(".", 1)[0].lower() for c in ddl_columns or []}
+        unreadable = sorted(first - ddl_tables)
+        if unreadable:
+            result.error(
+                "COVERAGE GATE — first exposure blocked: no fetched DDL "
+                "(ddl/_fetched.sql) for these tables, so their columns can't be "
+                "checked before SELECT is granted:\n    - " + "\n    - ".join(unreadable)
+                + "\n  derive-assignments refreshes ddl/_fetched.sql from Unity Catalog; "
+                "re-run the same make command (or make derive-assignments) and check "
+                "that these tables exist and the deployment SP can read them."
+            )
     if not ddl_columns:
         return
     covered = {c.lower() for c in covered_columns}
-    gaps = []
+    gaps, blocked, reviewed = [], [], []
     for column in ddl_columns:
         if column.lower() in covered:
             continue
         categories = _infer_column_categories(column) - {"generic"}
-        if categories:
-            gaps.append(f"{column} (looks like: {', '.join(sorted(categories))})")
+        if not categories:
+            continue
+        if column.lower() in acknowledged:
+            reviewed.append(column)
+            continue
+        label = f"{column} (looks like: {', '.join(sorted(categories))})"
+        table = column.rsplit(".", 1)[0].lower()
+        if table in first and categories - FIRST_EXPOSURE_NONBLOCKING_CATEGORIES:
+            blocked.append((column, label))
+        else:
+            gaps.append(label)
+    if reviewed:
+        result.ok(
+            f"Coverage gate: {len(reviewed)} acknowledged column(s) not treated as "
+            f"sensitive (coverage_acknowledged_columns): {', '.join(reviewed)}"
+        )
+    if blocked:
+        names = ", ".join(json.dumps(column) for column, _ in blocked)
+        result.error(
+            "COVERAGE GATE — first exposure blocked: these tables are about to be "
+            "granted SELECT for the first time, and these sensitive-looking columns "
+            "have NO class.*/sensitivity tag and NO gr_treatment, so they would be "
+            "readable unmasked:\n    - " + "\n    - ".join(label for _, label in blocked)
+            + "\n  Do one of the following, then re-run the same make command (it "
+            "re-derives tags from Unity Catalog):"
+            "\n    1. Wait for the UC Data Classification scan to finish and tag these "
+            "columns (Catalog Explorer > catalog > Data classification; auto-tagging "
+            "writes the class.* tags)."
+            "\n    2. Tag the columns in Unity Catalog yourself with a class.* tag your "
+            "treatment rules map."
+            "\n    3. If a column is not sensitive, acknowledge it in "
+            f"{exposure.get('acknowledge_file', 'env.auto.tfvars')}:"
+            f"\n         coverage_acknowledged_columns = [{names}]"
+        )
     if gaps:
         result.warn(
             "COVERAGE GATE (non-blocking) — sensitive-looking columns with NO "
@@ -338,11 +417,14 @@ def validate_coverage_gate(
     raw_tfvars: str,
     result: ValidationResult,
     ddl_columns: list[str] | None = None,
+    exposure: dict | None = None,
 ) -> None:
     """Block every classification/treatment coverage gap in generated config.
 
-    When ``ddl_columns`` is supplied, additionally warn (never block) about
-    sensitive-looking columns that carry no sensitivity tag and no treatment.
+    When ``ddl_columns`` is supplied, additionally warn about sensitive-looking
+    columns that carry no sensitivity tag and no treatment. With ``exposure``
+    (see load_exposure_context), such columns block instead on tables that are
+    about to be granted SELECT for the first time.
     """
     treatment_cfg = load_treatment_config()
     mapped_sources = {source for item in treatment_cfg.treatments for source in item.sources}
@@ -419,8 +501,8 @@ def validate_coverage_gate(
             missing_functions.add(f"{expected_fn} (treatment {treatment}; used by {column})")
             unprotected.append(f"{column} (treatment {treatment}; masking function {expected_fn} missing)")
 
-    _warn_unclassified_sensitive_columns(
-        ddl_columns, set(source_columns) | set(treatments), result,
+    _check_unclassified_sensitive_columns(
+        ddl_columns, set(source_columns) | set(treatments), result, exposure,
     )
 
     groups = [
@@ -1158,6 +1240,13 @@ def main():
              "sensitive-looking columns (default: auto-detect ddl/_fetched.sql)",
     )
     parser.add_argument(
+        "--exposure-context",
+        metavar="PATH",
+        help="JSON from scripts/coverage_gate.py naming the tables about to be "
+             "granted SELECT for the first time and the acknowledged columns; "
+             "untagged sensitive-looking columns on those tables block",
+    )
+    parser.add_argument(
         "--country",
         metavar="CODE",
         help="Comma-separated region codes for country-specific column inference "
@@ -1261,9 +1350,15 @@ def main():
             ddl_columns = parse_ddl_columns(ddl_path.read_text())
         elif args.ddl:
             result.warn(f"COVERAGE GATE — DDL file {ddl_path} not found; untagged-column check skipped")
+        exposure = None
+        if args.exposure_context:
+            try:
+                exposure = load_exposure_context(Path(args.exposure_context))
+            except (OSError, ValueError) as exc:
+                result.error(f"COVERAGE GATE — unreadable exposure context {args.exposure_context}: {exc}")
         validate_coverage_gate(
             merged_cfg, sql_functions, tfvars_path.read_text(), result,
-            ddl_columns=ddl_columns,
+            ddl_columns=ddl_columns, exposure=exposure,
         )
 
     result.print_report(args.summary_label, args.verbose)

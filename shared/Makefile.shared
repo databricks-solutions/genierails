@@ -1,7 +1,7 @@
 .PHONY: help bootstrap-sp genie-adopt-preflight _guard-root _prepare-env _bootstrap _guarded-bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config _guard-genie-placeholder setup init-env enable-classification generate scaffold-treatments derive-assignments generate-delta audit-schema validate validate-generated coverage-gate promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _prepare-classification _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema evidence validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema audit-rulebook validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec _guard-account-admin-env release maintain test-champion
+.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec _guard-account-admin-env release maintain test-champion _derive-before-exposure
 
 # ── Variables expected from the including Makefile ──────────────
 # SHARED_ROOT  — absolute path to shared/
@@ -296,7 +296,7 @@ scaffold-treatments: _guarded-bootstrap _guard-workspace-target ## Add fail-safe
 
 derive-assignments: _guarded-bootstrap _guard-workspace-target ## Re-derive only tag_assignments from live native class.* tags (requires prior promote; never calls an LLM)
 	@echo "=== Derive Assignments ($(ENV)) ==="
-	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/derive_assignments.py" --auth-file auth.auto.tfvars --env-file env.auto.tfvars --config generated/abac.auto.tfvars
+	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/derive_assignments.py" --auth-file auth.auto.tfvars --env-file env.auto.tfvars --config generated/abac.auto.tfvars --write-ddl ddl/_fetched.sql
 
 audit-schema: _guarded-bootstrap _guard-workspace-target ## Report untagged sensitive columns and stale tag assignments in managed tables
 	@echo "=== Schema Drift Audit ($(ENV)) ==="
@@ -330,14 +330,27 @@ validate-generated: _guarded-bootstrap _guard-workspace-target ## Validate gener
 coverage-gate: _guarded-bootstrap _guard-workspace-target ## Block on any sensitive-column coverage gap in generated config
 	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" --coverage-gate generated/abac.auto.tfvars generated/masking_functions.sql $(call _VALIDATION_FLAGS,coverage-gate)
 
+# Terraform-enforced gate for the split data_access config (scripts/coverage_gate.py).
+# _apply-layer and _plan-layer run it before every data_access plan/apply; the
+# module refuses business SELECT unless its recorded result matches the inputs.
+_COVERAGE_GATE = python3 "$(SHARED_ROOT)/scripts/coverage_gate.py"
+
+# Before an apply that opens business access, refresh tag_assignments (and
+# ddl/_fetched.sql) from live UC so the gate sees current tags. Only in envs that
+# use native classification; callers that already derived pass _EXPOSURE_DERIVED=1.
+_derive-before-exposure:
+	@decision="$$($(_COVERAGE_GATE) needs-derive --env-dir "$(ENV_DIR)" --apply-flags="$(APPLY_FLAGS)")" || exit 1; \
+	if [ "$$decision" = yes ]; then $(MAKE) --no-print-directory derive-assignments ENV="$(ENV)"; fi
+
 rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to prove masking live)
 	@if [ "$(ENV)" = "prod" ]; then \
 		echo "rehearse: ENV=prod is not allowed; use make certify ENV=prod, then make release ENV=prod" >&2; \
 		exit 1; \
 	fi; \
-	$(_DRY_RUN_GUARD); $(MAKE) coverage-gate ENV="$(ENV)" && \
+	$(_DRY_RUN_GUARD); $(MAKE) _derive-before-exposure ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" && \
+		$(MAKE) coverage-gate ENV="$(ENV)" && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
-		$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" && \
+		$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" _EXPOSURE_DERIVED=1 && \
 		$(MAKE) verify-access ENV="$(ENV)" $(if $(strip $(VERIFY_KEY_COLUMN)),VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",)
 
 # Certification receipt: certify/maintain snapshot the enforcement inputs at gate
@@ -365,7 +378,7 @@ certify: _guard-genie-placeholder ## Certify coverage and deploy enforcement onl
 		$(MAKE) coverage-gate ENV="$(ENV)" && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
 		$(_RECEIPT) verify-snapshot "$(ENV_DIR)" --by certify --env "$(ENV)" && \
-		$(MAKE) apply-governance ENV="$(ENV)" && \
+		$(MAKE) apply-governance ENV="$(ENV)" _EXPOSURE_DERIVED=1 && \
 		$(MAKE) audit-rulebook ENV="$(ENV)" && \
 		$(_RECEIPT) commit "$(ENV_DIR)" --by certify --env "$(ENV)"
 
@@ -373,7 +386,9 @@ release: _guard-genie-placeholder ## Open business exposure after a current make
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,release); \
 	$(_RECEIPT) check "$(ENV_DIR)" --env "$(ENV)" || exit 1; \
-	if ! $(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true"; then \
+	$(MAKE) _derive-before-exposure ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" || exit 1; \
+	$(_RECEIPT) check "$(ENV_DIR)" --env "$(ENV)" || exit 1; \
+	if ! $(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" _EXPOSURE_DERIVED=1; then \
 		$(_RECEIPT) release-failed "$(ENV_DIR)" --env "$(ENV)" --reason "apply failed"; \
 		exit 1; \
 	fi; \
@@ -414,7 +429,7 @@ maintain: _guard-genie-placeholder ## Native-first governance refresh: audit-sch
 		$(MAKE) coverage-gate ENV="$(ENV)" && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
 		$(_RECEIPT) verify-snapshot "$(ENV_DIR)" --by maintain --env "$(ENV)" && \
-		$(MAKE) apply-governance ENV="$(ENV)" APPLY_FLAGS= && \
+		$(MAKE) apply-governance ENV="$(ENV)" APPLY_FLAGS= _EXPOSURE_DERIVED=1 && \
 		$(MAKE) audit-rulebook ENV="$(ENV)" && \
 		$(_RECEIPT) commit "$(ENV_DIR)" --by maintain --env "$(ENV)"
 
@@ -529,7 +544,10 @@ _plan-layer:
 		echo "=== Skipping terraform plan ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
 		exit 0; \
 	fi; \
-	if [ "$$layer" = "data_access" ]; then $(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$(LAYER_ENV_DIR)")"; fi; \
+	if [ "$$layer" = "data_access" ]; then \
+		$(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$(LAYER_ENV_DIR)")"; \
+		$(_COVERAGE_GATE) run --env-dir "$$(dirname "$$env_dir")" --env-name "$$target_env" --runner "$(ROOT_RUNNER)" $(if $(filter 1,$(VERBOSE)),--verbose,); \
+	fi; \
 	echo "=== Terraform Plan ($$layer:$$target_env) ==="; \
 	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan
 
@@ -563,11 +581,15 @@ _apply-layer:
 		echo "=== Skipping terraform apply ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
 		exit 0; \
 	fi; \
+	if [ "$$layer" = "data_access" ]; then \
+		$(_COVERAGE_GATE) run --env-dir "$$(dirname "$$env_dir")" --env-name "$$target_env" --runner "$(ROOT_RUNNER)" --apply-flags="$$apply_flags" $(if $(filter 1,$(VERBOSE)),--verbose,); \
+	fi; \
 	if [ "$$layer" = "account" ]; then \
 		$(MAKE) --no-print-directory sync-tags; \
 	fi; \
 	files="$$env_dir/auth.auto.tfvars $$env_dir/env.auto.tfvars $$env_dir/abac.auto.tfvars $$env_dir/classification.auto.tfvars $$env_dir/discovered_uc_tables.auto.tfvars"; \
 	if [ -f "$$env_dir/masking_functions.sql" ]; then files="$$files $$env_dir/masking_functions.sql"; fi; \
+	if [ "$$layer" = "data_access" ]; then files="$$files $$(dirname "$$env_dir")/ddl/_fetched.sql"; fi; \
 	fingerprint_file="$$env_dir/.$$layer.apply.sha"; \
 	current_fingerprint="$$( { for file in $$files; do [ -f "$$file" ] && shasum "$$file"; done; find "$(SHARED_ROOT)/roots/$$layer" "$(SHARED_ROOT)/modules/$$layer" -type f -name '*.tf' ! -path '*/tests/*' ! -path '*/.terraform/*' 2>/dev/null | LC_ALL=C sort | while IFS= read -r code_file; do shasum "$$code_file"; done; if [ "$$layer" = "workspace" ]; then shasum "$(SHARED_ROOT)/scripts/genie_space.sh"; elif [ "$$layer" = "data_access" ]; then shasum "$(SHARED_ROOT)/deploy_masking_functions.py"; fi; [ -z "$$apply_flags" ] || printf '%s\n' "$$apply_flags"; } | shasum | awk '{print $$1}')"; \
 	if [ -f "$$fingerprint_file" ] && [ "$$(cat "$$fingerprint_file")" = "$$current_fingerprint" ]; then \
@@ -616,6 +638,7 @@ apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access
 		$(_RECEIPT) warn "$(ENV_DIR)" --env "$(ENV)" || true; \
 		$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 		python3 "$(SHARED_ROOT)/scripts/genie_adopt_preflight.py" "$(ENV_DIR)" --arm; \
+		if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" _derive-before-exposure; fi; \
 		if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 			$(MAKE) --no-print-directory ENV="$(ENV)" promote; \
 		else \
@@ -637,6 +660,7 @@ apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access
 apply-governance: _guarded-bootstrap _guard-workspace-target ## [Governance team] Apply account + data_access layers only (no Genie agents)
 	@set -e; $(_DRY_RUN_GUARD); \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
+	if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" _derive-before-exposure; fi; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 		$(MAKE) --no-print-directory ENV="$(ENV)" promote; \
 	else \
@@ -750,7 +774,7 @@ clean: ## Remove generated files and Terraform state for the selected environmen
 	@echo "=== Clean ($(ENV)) ==="
 	@rm -rf "$(ENV_DIR)/generated/abac.auto.tfvars" "$(ENV_DIR)/generated/masking_functions.sql" "$(ENV_DIR)/generated/generated_response.md" "$(ENV_DIR)/generated/genie_space_derived_acl_groups.auto.tfvars"
 	@rm -rf "$(ENV_DIR)/.terraform" "$(ENV_DIR)"/*.tfstate "$(ENV_DIR)"/*.tfstate.backup "$(ENV_DIR)"/.terraform.lock.hcl "$(ENV_DIR)"/.*.apply.sha
-	@rm -rf "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/.terraform" "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/*.tfstate "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/*.tfstate.backup "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/.terraform.lock.hcl "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/.*.apply.sha
+	@rm -rf "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/.terraform" "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/*.tfstate "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/*.tfstate.backup "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/.terraform.lock.hcl "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/.*.apply.sha "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"/.coverage_gate.json
 	@echo "Cleaned generated files and Terraform state in $(ENV_DIR)."
 	@echo "NOTE: auth.auto.tfvars, env.auto.tfvars, abac.auto.tfvars, $(DATA_ACCESS_SUBDIR)/abac.auto.tfvars, $(DATA_ACCESS_SUBDIR)/masking_functions.sql, and .genie_space_id were NOT removed."
 

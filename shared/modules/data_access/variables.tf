@@ -70,6 +70,22 @@ variable "business_access_enabled" {
   description = "Fail-closed exposure gate. Set true only after the coverage gate and schema drift check pass; controls business-group SELECT grants."
 }
 
+variable "coverage_gate_file" {
+  type        = string
+  description = "Path to the coverage-gate result scripts/coverage_gate.py writes for this layer. Business SELECT grants are planned only while it records a pass for the current inputs."
+}
+
+variable "coverage_ddl_file" {
+  type        = string
+  description = "Path to the fetched DDL the coverage gate reads; its content is part of the gate fingerprint."
+}
+
+variable "coverage_acknowledged_columns" {
+  type        = list(string)
+  default     = []
+  description = "Fully qualified catalog.schema.table.column names reviewed as not sensitive. The coverage gate does not block first exposure on them."
+}
+
 variable "enable_classification" {
   type        = bool
   default     = false

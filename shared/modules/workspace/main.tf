@@ -118,6 +118,15 @@ resource "null_resource" "genie_space_acls" {
   }
 
   depends_on = [databricks_mws_permission_assignment.group_assignments]
+
+  # Opening CAN_RUN requires the data_access layer's gated grants (see
+  # genie_exposure_blocker in the root). An empty ACL only clears access.
+  lifecycle {
+    precondition {
+      condition     = local.genie_space_groups[each.key] == "" || var.genie_exposure_blocker == ""
+      error_message = "Genie CAN_RUN for ${each.value.name} is blocked: ${var.genie_exposure_blocker}. Apply governance first through make (make apply, make release or make apply-governance), which runs the coverage gate and applies data_access before Genie ACLs."
+    }
+  }
 }
 
 # ── Existing spaces: apply config (when genie_space_configs is defined) ───────
@@ -302,4 +311,13 @@ resource "null_resource" "genie_space_acls_created" {
   }
 
   depends_on = [terraform_data.genie_space]
+
+  # Opening CAN_RUN requires the data_access layer's gated grants (see
+  # genie_exposure_blocker in the root). An empty ACL only clears access.
+  lifecycle {
+    precondition {
+      condition     = local.genie_space_groups[each.key] == "" || var.genie_exposure_blocker == ""
+      error_message = "Genie CAN_RUN for ${each.value.name} is blocked: ${var.genie_exposure_blocker}. Apply governance first through make (make apply, make release or make apply-governance), which runs the coverage gate and applies data_access before Genie ACLs."
+    }
+  }
 }

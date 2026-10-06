@@ -471,7 +471,9 @@ def test_release_forces_gate_for_apply_then_persists_and_verifies(tmp_path):
     result = _make("release", env_dir, stub, "VERIFY_KEY_COLUMN= customer_id ")
     assert result.returncode == 0, result.stdout + result.stderr
     assert _calls(log) == [
-        ["apply", "ENV=prod", "APPLY_FLAGS=-var=business_access_enabled=true"],
+        ["_derive-before-exposure", "ENV=prod", "APPLY_FLAGS=-var=business_access_enabled=true"],
+        ["apply", "ENV=prod", "APPLY_FLAGS=-var=business_access_enabled=true",
+         "_EXPOSURE_DERIVED=1"],
         ["verify-access", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],
     ]
     assert cr.gate_open(env_dir)
@@ -496,7 +498,7 @@ def test_release_failed_apply_prints_rollback_and_does_not_persist(tmp_path):
     stub, log = _stub(tmp_path, fail_on="apply")
     result = _make("release", env_dir, stub)
     assert result.returncode != 0
-    assert [c[0] for c in _calls(log)] == ["apply"]
+    assert [c[0] for c in _calls(log)] == ["_derive-before-exposure", "apply"]
     assert not cr.gate_open(env_dir)
     assert "PARTIALLY OPENED" in result.stderr
     assert "still has business_access_enabled = false, so run: make apply ENV=prod" in result.stderr
@@ -508,7 +510,7 @@ def test_release_mutation_during_apply_is_not_persisted(tmp_path):
     stub, log = _stub(tmp_path, on={"apply": _mutate_abac(env_dir)})
     result = _make("release", env_dir, stub)
     assert result.returncode != 0
-    assert [c[0] for c in _calls(log)] == ["apply"]
+    assert [c[0] for c in _calls(log)] == ["_derive-before-exposure", "apply"]
     assert not cr.gate_open(env_dir)
     assert "config changed since certification" in result.stderr
     assert "PARTIALLY OPENED" in result.stderr
@@ -584,7 +586,7 @@ def test_parallel_make_maintain_release_serialises_on_lock(tmp_path):
     assert calls in (
         ["audit-schema", "derive-assignments", "coverage-gate", "validate-generated",
          "apply-governance", "audit-rulebook"],
-        ["apply", "verify-access"],
+        ["_derive-before-exposure", "apply", "verify-access"],
     )
     assert not _lock(env_dir).exists()
 
@@ -604,7 +606,7 @@ def test_maintain_is_ordered_governance_only_and_refreshes_receipt(tmp_path):
         ["derive-assignments", "ENV=prod"],
         ["coverage-gate", "ENV=prod"],
         ["validate-generated", "ENV=prod"],
-        ["apply-governance", "ENV=prod", "APPLY_FLAGS="],
+        ["apply-governance", "ENV=prod", "APPLY_FLAGS=", "_EXPOSURE_DERIVED=1"],
         ["audit-rulebook", "ENV=prod"],
     ]
     assert not any(c[0] in ("apply", "apply-genie", "generate-delta", "generate") for c in calls)

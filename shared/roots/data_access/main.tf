@@ -170,6 +170,12 @@ variable "enable_classification" {
   description = "Opt-in to enable UC Data Classification scanning, scoped to schemas in the combined classification footprint."
 }
 
+variable "coverage_acknowledged_columns" {
+  type        = list(string)
+  default     = []
+  description = "Fully qualified catalog.schema.table.column names reviewed as not sensitive; the coverage gate does not block first exposure on them. Set in env.auto.tfvars."
+}
+
 variable "verify_key_column" {
   type        = string
   default     = ""
@@ -343,6 +349,9 @@ module "data_access" {
   genie_space_acl_groups          = var.genie_space_acl_groups
   classification_uc_tables        = local.full_effective_uc_tables
   business_access_enabled         = var.business_access_enabled
+  coverage_gate_file              = "${var.env_dir}/.coverage_gate.json"
+  coverage_ddl_file               = "${var.env_dir}/../ddl/_fetched.sql"
+  coverage_acknowledged_columns   = var.coverage_acknowledged_columns
   enable_classification           = var.enable_classification
   enable_auto_tagging             = var.enable_auto_tagging
   classification_existing_schemas = var.classification_existing_schemas
@@ -388,6 +397,16 @@ output "schema_grant_resource_keys" {
 
 output "table_grant_resource_keys" {
   value = module.data_access.table_grant_resource_keys
+}
+
+output "coverage_gate_inputs" {
+  description = "Read by scripts/coverage_gate.py through terraform console."
+  value       = module.data_access.coverage_gate_inputs
+}
+
+output "coverage_gate" {
+  description = "Coverage-gate result this layer was applied with; the workspace layer reads it from state."
+  value       = module.data_access.coverage_gate
 }
 
 output "legacy_unattributed_discovered_tables" {

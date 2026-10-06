@@ -136,6 +136,27 @@ locals {
       config           = try(local.effective_genie_space_configs[local.canonical_space_names[idx]], local.empty_genie_config)
     }
   }
+
+  # ── Cross-layer exposure check for Genie CAN_RUN ──────────────────────────
+  # CAN_RUN is granted only after the data_access layer was applied with
+  # business access open and a passing coverage gate, and only while the gate
+  # result on disk is still the one that apply used (otherwise the governance
+  # config moved on and hasn't been applied). Read from the local state the
+  # layer runner writes; anything missing or unreadable blocks.
+  data_access_dir        = "${var.env_dir}/data_access"
+  _data_access_state     = fileexists("${local.data_access_dir}/terraform.tfstate") ? try(jsondecode(file("${local.data_access_dir}/terraform.tfstate")), null) : null
+  _applied_coverage_gate = try(local._data_access_state.outputs.coverage_gate.value, null)
+  _current_coverage_gate = fileexists("${local.data_access_dir}/.coverage_gate.json") ? try(jsondecode(file("${local.data_access_dir}/.coverage_gate.json")), null) : null
+  genie_exposure_blocker = (
+    local._data_access_state == null ? "the data_access layer has no readable state (${local.data_access_dir}/terraform.tfstate)" :
+    local._applied_coverage_gate == null ? "the data_access state predates the coverage gate; re-apply the data_access layer" :
+    try(local._applied_coverage_gate.business_access_enabled, false) != true ? "the data_access layer was last applied with business_access_enabled = false" :
+    try(local._applied_coverage_gate.status, "") != "pass" ? "the data_access layer was last applied without a passing coverage gate" :
+    local._current_coverage_gate == null ? "the coverage-gate result (${local.data_access_dir}/.coverage_gate.json) is missing or unreadable" :
+    try(local._current_coverage_gate.status, "") != "pass" ? "the last coverage gate FAILED" :
+    try(local._current_coverage_gate.fingerprint, "") != try(local._applied_coverage_gate.fingerprint, "") ? "the data_access config changed after its last gated apply" :
+    ""
+  )
 }
 
 # ── Variables ─────────────────────────────────────────────────────────────────
@@ -397,6 +418,14 @@ variable "verify_key_column" {
 }
 
 # Shared env.auto.tfvars is consumed by both workspace and data-access roots.
+# The coverage gate reads acknowledgements only in data_access; declare it
+# here to avoid an undeclared-variable warning during a full apply.
+variable "coverage_acknowledged_columns" {
+  type    = list(string)
+  default = []
+}
+
+# Shared env.auto.tfvars is consumed by both workspace and data-access roots.
 # Auto-tagging is implemented only in data_access; declare it here to avoid an
 # undeclared-variable warning during a full apply.
 variable "enable_auto_tagging" {
@@ -465,6 +494,7 @@ module "workspace" {
   manage_groups             = var.manage_groups
   groups                    = var.groups
   business_access_enabled   = var.business_access_enabled
+  genie_exposure_blocker    = local.genie_exposure_blocker
   sql_warehouse_id          = var.sql_warehouse_id
   warehouse_name            = var.warehouse_name
   genie_spaces              = local.merged_spaces
@@ -500,6 +530,11 @@ output "genie_space_acls_applied" {
 
 output "genie_space_acls_groups" {
   value = module.workspace.genie_space_acls_groups
+}
+
+output "genie_exposure_blocker" {
+  description = "Why Genie CAN_RUN grants are blocked (data_access layer not applied with a current passing coverage gate), or \"\" when they may be granted."
+  value       = local.genie_exposure_blocker
 }
 
 output "genie_spaces_created" {

@@ -254,6 +254,43 @@ def test_repromotion_preserves_destination_settings_and_closes_gate(tmp_path, mo
     assert config["business_access_enabled"] is False
 
 
+def test_repromotion_keeps_destination_coverage_acknowledgements_only(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    dest.mkdir()
+    (source / "env.auto.tfvars").write_text(
+        'uc_tables = ["dev.s.t"]\n'
+        'coverage_acknowledged_columns = ["dev.s.t.product_name"]\n'
+    )
+    (dest / "env.auto.tfvars").write_text(
+        'coverage_acknowledged_columns = ["prod.s.t.merchant_name"]\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    remap_env_config.main()
+    config = hcl2.load((dest / "env.auto.tfvars").open())
+    # A destination's reviewed false positives survive re-promotion; the
+    # source's are its own review and never become the destination's.
+    assert config["coverage_acknowledged_columns"] == ["prod.s.t.merchant_name"]
+
+
+def test_first_promotion_writes_no_coverage_acknowledgements(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    (source / "env.auto.tfvars").write_text(
+        'uc_tables = ["dev.s.t"]\n'
+        'coverage_acknowledged_columns = ["dev.s.t.product_name"]\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    remap_env_config.main()
+    assert "coverage_acknowledged_columns" not in hcl2.load((dest / "env.auto.tfvars").open())
+
+
 def test_legacy_single_space_fallback_uses_only_discovered_tables(tmp_path, monkeypatch):
     source = tmp_path / "dev"
     dest = tmp_path / "prod"

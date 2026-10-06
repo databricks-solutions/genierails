@@ -9,3 +9,7 @@ scripts/.test_env_state.*.json
 
 # Terraform lock files
 *.terraform.lock.hcl
+
+# Scratch files terraform tests write (gate results, DDL, state fixtures)
+roots/*/tests/.tmp/
+modules/*/tests/.tmp/

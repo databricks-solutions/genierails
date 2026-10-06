@@ -1,7 +1,11 @@
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import hcl2
+import pytest
 
 
 MAIN_TF = Path(__file__).parents[1] / "modules" / "data_access" / "main.tf"
@@ -36,20 +40,105 @@ def _typed_resource_body(source: str, resource_type: str, name: str) -> str:
     raise AssertionError(f"unterminated resource {resource_type}.{name}")
 
 
+_OPENERS = {"{": "}", "[": "]", "(": ")"}
+
+
+def _code_spans(source: str):
+    """Yield (index, char, depth) for HCL code outside strings and comments.
+
+    depth counts open brackets/braces/parens. String contents are skipped, but
+    ${...} interpolations inside them are scanned as code, so nested strings
+    and brackets in interpolations don't confuse the depth.
+    """
+    stack: list[str] = []  # closers for brackets, '"' for strings
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if stack and stack[-1] == '"':
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                stack.pop()
+            elif source.startswith("${", index) or source.startswith("%{", index):
+                stack.append("}")
+                index += 2
+                continue
+            index += 1
+            continue
+        if char == "#" or source.startswith("//", index):
+            newline = source.find("\n", index)
+            index = len(source) if newline == -1 else newline
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            assert end != -1, "unterminated block comment"
+            index = end + 2
+            continue
+        if char == '"':
+            stack.append('"')
+        elif char in _OPENERS:
+            yield index, char, len(stack)
+            stack.append(_OPENERS[char])
+            index += 1
+            continue
+        elif char in _OPENERS.values():
+            assert stack and stack[-1] == char, f"unbalanced {char!r} at offset {index}"
+            stack.pop()
+        yield index, char, len(stack)
+        index += 1
+    assert not stack, "unbalanced HCL: unclosed " + "".join(stack)
+
+
+def _top_level_expression(body: str, name: str) -> str:
+    """Return the expression text of the block body's top-level ``name =``.
+
+    Indentation and formatting don't matter. Raises AssertionError unless the
+    attribute appears exactly once at top level.
+    """
+    spans = list(_code_spans(body))
+    starts = [
+        position for position, (index, _char, depth) in enumerate(spans)
+        if depth == 0
+        and re.match(rf"{re.escape(name)}\s*=(?!=)", body[index:])
+        and (index == 0 or not re.match(r"[\w.-]", body[index - 1]))
+    ]
+    assert len(starts) == 1, f"expected exactly one top-level {name}, found {len(starts)}"
+    position = starts[0]
+    equals = body.index("=", spans[position][0])
+    expression_start = next(
+        index for index, char, _depth in spans[position:]
+        if index > equals and not char.isspace()
+    )
+    end = None
+    for index, char, depth in spans:
+        if index < expression_start:
+            continue
+        if depth == 0 and (char == "\n" or index == len(body) - 1):
+            end = index + 1
+            break
+    assert end is not None, f"unterminated {name} expression"
+    return body[expression_start:end].strip()
+
+
 def _parsed_depends_on(source: str, resource_type: str, name: str) -> set[str]:
     """Parse a resource's real depends_on expression with python-hcl2.
 
     python-hcl2 7.3 cannot parse some valid parenthesized expressions elsewhere
-    in this module, so isolate the resource's top-level depends_on attribute and
-    still let the HCL parser—not text matching—decide which references are live.
+    in this module, so isolate the resource's top-level depends_on attribute
+    structurally (any indentation; brackets inside strings, interpolations or
+    comments don't end it) and let the HCL parser decide which references are
+    live. A missing or unparseable depends_on raises, so assertions about it
+    can never pass vacuously.
     """
     body = _typed_resource_body(source, resource_type, name)
-    match = re.search(r"(?ms)^  depends_on\s*=\s*(\[[^]]*\])", body)
-    if match is None:
-        return set()
-    parsed = hcl2.loads(f"depends_on = {match.group(1)}")
+    expression = _top_level_expression(body, "depends_on")
+    assert expression.startswith("["), f"depends_on is not a list: {expression!r}"
+    parsed = hcl2.loads(f"depends_on = {expression}\n")
+    references = parsed["depends_on"]
+    assert isinstance(references, list) and references, f"empty depends_on: {expression!r}"
     return {reference.removeprefix("${").removesuffix("}")
-            for reference in parsed["depends_on"]}
+            for reference in references}
 
 
 def _parsed_resource(source: str, resource_type: str, name: str) -> dict:
@@ -173,10 +262,106 @@ def test_policy_enforcement_wait_restarts_only_when_enforcement_inputs_change():
     )
 
     assert wait["create_duration"] == "30s"
+    # Keyed on the deployment itself, so any masking_functions replacement
+    # (SQL, warehouse, host or client ID change) restarts the wait.
     assert wait["triggers"] == {
         "policy_hash": "${sha256(jsonencode(local.fgac_policy_map))}",
-        "masking_sql_hash": "${filemd5(var.masking_sql_file)}",
+        "masking_functions_id": "${terraform_data.masking_functions.id}",
     }
+
+
+def test_policy_enforcement_wait_comment_does_not_promise_to_protect_existing_grants():
+    source = MAIN_TF.read_text()
+    comment = source[:source.index('resource "time_sleep" "wait_for_policy_enforcement"')]
+    comment = comment[comment.rindex("\n\n"):]
+    assert "Keep SELECT closed" not in comment
+    assert "New table grants wait" in comment
+    assert "already exist stay in place" in comment
+
+
+def _with_policies_depending_on_table_access(source: str, indent: str) -> str:
+    """The PR #70 review mutation: re-add table_access to the policies' depends_on."""
+    body_start = source.index('resource "databricks_policy_info" "policies" {')
+    marker = "  depends_on = [\n"
+    at = source.index(marker, body_start)
+    mutated = source[:at] + f"{indent}depends_on = [\n{indent}  databricks_grant.table_access,\n" + source[at + len(marker):]
+    return mutated
+
+
+@pytest.mark.parametrize("indent", ["  ", "    ", "\t", "      "])
+def test_cycle_mutation_is_caught_at_any_indentation(indent):
+    mutated = _with_policies_depending_on_table_access(MAIN_TF.read_text(), indent)
+    assert "databricks_grant.table_access" in _parsed_depends_on(
+        mutated, "databricks_policy_info", "policies"
+    )
+
+
+def test_cycle_mutation_on_one_line_is_caught():
+    source = MAIN_TF.read_text()
+    start = source.index('resource "databricks_policy_info" "policies" {')
+    at = source.index("  depends_on = [\n", start)
+    end = source.index("  ]\n", at) + len("  ]\n")
+    mutated = source[:at] + "    depends_on = [databricks_grant.table_access, databricks_grant.catalog_access]\n" + source[end:]
+    assert _parsed_depends_on(mutated, "databricks_policy_info", "policies") == {
+        "databricks_grant.table_access", "databricks_grant.catalog_access",
+    }
+
+
+def test_depends_on_parser_raises_instead_of_returning_nothing():
+    source = MAIN_TF.read_text()
+    start = source.index('resource "databricks_policy_info" "policies" {')
+    at = source.index("  depends_on = [\n", start)
+    end = source.index("  ]\n", at) + len("  ]\n")
+    without = source[:at] + source[end:]
+    with pytest.raises(AssertionError, match="exactly one top-level depends_on"):
+        _parsed_depends_on(without, "databricks_policy_info", "policies")
+    garbled = source[:at] + "  depends_on = [databricks_grant.table_access,,]\n" + source[end:]
+    with pytest.raises(Exception):
+        _parsed_depends_on(garbled, "databricks_policy_info", "policies")
+
+
+def test_depends_on_parser_ignores_brackets_in_strings_comments_and_nested_blocks():
+    source = (
+        'resource "databricks_grant" "probe" {\n'
+        '  comment = "not ] the end ${lookup(var.m, "k]", "[")}"\n'
+        '  lifecycle {\n'
+        '    depends_on = [databricks_grant.nested_is_not_top_level]\n'
+        '  }\n'
+        '      depends_on = [ # closing ] in a comment\n'
+        '        databricks_grant.a, /* ] */\n'
+        '        databricks_grant.b,\n'
+        '      ]\n'
+        '}\n'
+    )
+    assert _parsed_depends_on(source, "databricks_grant", "probe") == {
+        "databricks_grant.a", "databricks_grant.b",
+    }
+
+
+def test_business_select_requires_a_current_coverage_gate_pass():
+    table = _resource_body(MAIN_TF.read_text(), "table_access")
+    precondition = table[table.index("lifecycle {"):]
+    assert 'condition     = local.coverage_gate_status == "pass"' in precondition
+    # Whole-resource dependencies stay as they were: the gate adds a
+    # precondition, not an edge, so no address or key changes.
+    assert '"${pair.table}|${pair.principal}"' in table
+
+
+def test_gate_fingerprint_covers_every_input_the_gate_judges():
+    source = MAIN_TF.read_text()
+    fingerprint = source[source.index("coverage_gate_fingerprint = sha256(jsonencode({"):]
+    fingerprint = fingerprint[:fingerprint.index("}))")]
+    for item in (
+        "tag_assignments = sort(keys(local.tag_assignment_map))",
+        "fgac_policies   = local.fgac_policy_map",
+        "table_grants    = sort([for pair in local.table_access_pairs",
+        "masking_sql     = filesha256(var.masking_sql_file)",
+        "ddl             = fileexists(var.coverage_ddl_file) ? filesha256(var.coverage_ddl_file)",
+        "acknowledged    = sort(distinct(",
+    ):
+        assert item in fingerprint, item
+    # Opening the gate must not invalidate the result it depends on.
+    assert "business_access_enabled" not in fingerprint
 
 
 def test_existing_grant_and_policy_resource_addresses_and_keys_are_unchanged():
@@ -253,3 +438,50 @@ def test_masking_deployer_does_not_declassify_oauth_secret():
     # The deployer reads the secret from auth.auto.tfvars; it never enters state.
     assert "databricks_client_secret" not in masking
     assert "nonsensitive(var.databricks_client_secret)" not in source
+
+
+def _verbose_runs(output: str) -> dict[str, str]:
+    """Split `terraform test -verbose` output into each run's section."""
+    sections: dict[str, str] = {}
+    current = None
+    for line in output.splitlines():
+        match = re.match(r'\s*run "([^"]+)"\.\.\. (\w+)', line)
+        if match:
+            current = match.group(1)
+            sections[current] = match.group(2) + "\n"
+        elif current:
+            sections[current] += line + "\n"
+    return sections
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_reapplying_unchanged_inputs_keeps_the_wait_and_every_grant_mask_and_policy(tmp_path):
+    root = MAIN_TF.parent
+    env = {**os.environ, "TF_DATA_DIR": str(tmp_path / ".terraform"), "TF_IN_AUTOMATION": "1"}
+    init = subprocess.run(["terraform", "init", "-backend=false", "-input=false"],
+                          cwd=root, env=env, text=True, capture_output=True)
+    assert init.returncode == 0, init.stdout + init.stderr
+    result = subprocess.run(
+        ["terraform", "test", "-no-color", "-verbose",
+         "-filter=tests/policy_enforcement_wait.tftest.hcl"],
+        cwd=root, env=env, text=True, capture_output=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    runs = _verbose_runs(result.stdout)
+
+    # A second apply with the same inputs plans nothing: the wait doesn't
+    # re-run and no grant, mask or policy is touched.
+    unchanged = runs["replan_unchanged_inputs"]
+    assert unchanged.startswith("pass")
+    assert "No changes. Your infrastructure matches the configuration." in unchanged
+
+    # Moving the masks to another warehouse redeploys them and restarts the
+    # wait (filemd5 alone missed this); grants and policies stay in place.
+    moved = runs["replan_after_warehouse_change"]
+    assert moved.startswith("pass")
+    replaced = set(re.findall(r"# (\S+) must be replaced", moved))
+    assert replaced == {
+        "terraform_data.masking_functions",
+        "time_sleep.wait_for_policy_enforcement",
+    }
+    assert not re.search(r"# databricks_\S+ (will be destroyed|must be replaced)", moved)
