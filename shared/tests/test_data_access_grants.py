@@ -52,6 +52,12 @@ def _parsed_depends_on(source: str, resource_type: str, name: str) -> set[str]:
             for reference in parsed["depends_on"]}
 
 
+def _parsed_resource(source: str, resource_type: str, name: str) -> dict:
+    body = _typed_resource_body(source, resource_type, name)
+    parsed = hcl2.loads(f'resource "{resource_type}" "{name}" {{{body}}}')
+    return parsed["resource"][0][resource_type][name]
+
+
 def test_group_grants_follow_catalog_schema_table_chain():
     source = MAIN_TF.read_text()
     catalog = _resource_body(source, "catalog_access")
@@ -159,6 +165,18 @@ def test_policy_grant_dependency_graph_is_acyclic_and_fail_closed():
     assert "terraform_data.masking_functions" in dependencies["table"]
     assert "databricks_policy_info.policies" in dependencies["policy_wait"]
     assert "databricks_grant.table_access" not in dependencies["policies"]
+
+
+def test_policy_enforcement_wait_restarts_only_when_enforcement_inputs_change():
+    wait = _parsed_resource(
+        MAIN_TF.read_text(), "time_sleep", "wait_for_policy_enforcement"
+    )
+
+    assert wait["create_duration"] == "30s"
+    assert wait["triggers"] == {
+        "policy_hash": "${sha256(jsonencode(local.fgac_policy_map))}",
+        "masking_sql_hash": "${filemd5(var.masking_sql_file)}",
+    }
 
 
 def test_existing_grant_and_policy_resource_addresses_and_keys_are_unchanged():

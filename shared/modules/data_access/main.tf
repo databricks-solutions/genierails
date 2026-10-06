@@ -356,4 +356,9 @@ resource "databricks_policy_info" "policies" {
 resource "time_sleep" "wait_for_policy_enforcement" {
   depends_on      = [databricks_policy_info.policies]
   create_duration = "30s"
+
+  triggers = {
+    policy_hash      = sha256(jsonencode(local.fgac_policy_map))
+    masking_sql_hash = filemd5(var.masking_sql_file)
+  }
 }
