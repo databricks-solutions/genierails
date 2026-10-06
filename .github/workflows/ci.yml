@@ -17,10 +17,20 @@ jobs:
         with:
           python-version: "3.11"
 
+      # The coverage-gate enforcement tests drive real `terraform plan` /
+      # `terraform test` (mock providers, no credentials) and skip without it.
+      # The wrapper must be off: tests parse terraform's own stdout/stderr.
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.11.4"
+          terraform_wrapper: false
+
       - name: Install dependencies
         run: pip install pytest python-hcl2
 
       - name: Run unit tests
+        env:
+          REQUIRE_TERRAFORM_TESTS: "1"
         run: pytest shared/tests/ -v
 
   validation:

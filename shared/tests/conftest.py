@@ -87,3 +87,13 @@ def assert_valid_hcl(path: Path) -> dict:
             f"  error: {exc}\n\n"
             f"Content:\n{path.read_text()}"
         ) from exc
+
+
+def pytest_collection_modifyitems(config, items):
+    """With REQUIRE_TERRAFORM_TESTS=1 (CI), a missing terraform fails instead of skipping.
+
+    The coverage-gate enforcement tests skip without terraform; CI installs it,
+    and must never pass because they quietly didn't run.
+    """
+    if os.environ.get("REQUIRE_TERRAFORM_TESTS") == "1" and shutil.which("terraform") is None:
+        raise pytest.UsageError("REQUIRE_TERRAFORM_TESTS=1 but terraform is not on PATH")
