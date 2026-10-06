@@ -273,25 +273,27 @@ def split_into_function_blocks(sql_text: str) -> list[str]:
         if not stripped:
             continue
 
-        # Update current context from USE directives in this segment.
-        # Strip any trailing semicolon so the catalog/schema name is clean.
-        for m in re.finditer(r"USE\s+CATALOG\s+(\S+)", stripped, re.IGNORECASE):
-            catalog = m.group(1).rstrip(";")
-        for m in re.finditer(r"USE\s+SCHEMA\s+(\S+)", stripped, re.IGNORECASE):
-            schema = m.group(1).rstrip(";")
-
-        # Only keep segments that contain a CREATE FUNCTION statement
-        if not re.search(r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE\s+)?FUNCTION\b",
-                         stripped, re.IGNORECASE):
-            continue
-
-        # Prepend the context so the function is deployed to the right catalog/schema
+        # The context in effect at this CREATE. A segment starts at its CREATE,
+        # so USE directives inside it come after the function and set the
+        # context for the next one.
         ctx_lines: list[str] = []
         if catalog:
             ctx_lines.append(f"USE CATALOG {catalog};")
         if schema:
             ctx_lines.append(f"USE SCHEMA {schema};")
         header = "\n".join(ctx_lines)
+
+        # Update the context from USE directives in this segment.
+        # Strip any trailing semicolon so the catalog/schema name is clean.
+        for m in re.finditer(r"^\s*USE\s+CATALOG\s+(\S+)", stripped, re.IGNORECASE | re.MULTILINE):
+            catalog = m.group(1).rstrip(";")
+        for m in re.finditer(r"^\s*USE\s+SCHEMA\s+(\S+)", stripped, re.IGNORECASE | re.MULTILINE):
+            schema = m.group(1).rstrip(";")
+
+        # Only keep segments that contain a CREATE FUNCTION statement
+        if not re.search(r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE\s+)?FUNCTION\b",
+                         stripped, re.IGNORECASE):
+            continue
 
         # Strip any trailing USE directives from the function body (they're
         # already captured above and will be prepended as the context header)
@@ -841,10 +843,15 @@ def _function_key(block: str) -> tuple[str, str, str] | None:
     catalog = re.search(r"USE\s+CATALOG\s+(\S+?);", block, re.IGNORECASE)
     schema = re.search(r"USE\s+SCHEMA\s+(\S+?);", block, re.IGNORECASE)
     return (
-        catalog.group(1).lower() if catalog else "",
-        schema.group(1).lower() if schema else "",
+        _uc_identifier(catalog.group(1)) if catalog else "",
+        _uc_identifier(schema.group(1)) if schema else "",
         names.pop(),
     )
+
+
+def _uc_identifier(value) -> str:
+    """UC identifiers are case-insensitive; compare them unquoted and lower-case."""
+    return str(value or "").strip().strip("`").lower()
 
 
 def _function_blocks_by_key(sql_text: str) -> dict[tuple[str, str, str], str]:
@@ -857,12 +864,12 @@ def _function_blocks_by_key(sql_text: str) -> dict[tuple[str, str, str], str]:
 
 
 def _policy_function(policy: dict) -> tuple[str, str, str] | None:
-    name = str(policy.get("function_name") or "").lower()
+    name = _uc_identifier(policy.get("function_name"))
     if not name:
         return None
     return (
-        str(policy.get("function_catalog") or "").lower(),
-        str(policy.get("function_schema") or "").lower(),
+        _uc_identifier(policy.get("function_catalog")),
+        _uc_identifier(policy.get("function_schema")),
         name,
     )
 
@@ -870,10 +877,19 @@ def _policy_function(policy: dict) -> tuple[str, str, str] | None:
 def _find_function(
     blocks: dict[tuple[str, str, str], str], ref: tuple[str, str, str]
 ) -> tuple[str, str, str] | None:
-    """The block defining ref: exact catalog.schema.name, else by name (as validation does)."""
-    if ref in blocks:
-        return ref
-    return next((key for key in blocks if key[2] == ref[2]), None)
+    """The block defining ref.
+
+    A qualified reference matches only the function in that catalog/schema
+    (a same-named function elsewhere would leave the policy dangling at
+    apply). Only a part the policy leaves empty matches any value.
+    """
+    catalog, schema, name = ref
+    return next((
+        key for key in blocks
+        if key[2] == name
+        and (not catalog or key[0] == catalog)
+        and (not schema or key[1] == schema)
+    ), None)
 
 
 def _fingerprint(value) -> str:
@@ -885,7 +901,8 @@ def _tag_set(items: list[dict]) -> list[tuple[str, str]]:
 
 
 def _entity(item: dict) -> tuple[str, str]:
-    return item.get("entity_type", ""), item.get("entity_name", "")
+    """A target's identity; UC names are case-insensitive."""
+    return item.get("entity_type", ""), _uc_identifier(item.get("entity_name"))
 
 
 def _by_entity(assignments: list[dict]) -> dict[tuple[str, str], list[dict]]:
@@ -909,7 +926,7 @@ def _policy_targets(policy: dict, by_entity: dict[tuple[str, str], list[dict]]) 
         "POLICY_TYPE_COLUMN_MASK": "columns",
         "POLICY_TYPE_ROW_FILTER": "tables",
     }.get(policy.get("policy_type", ""))
-    catalog = policy.get("catalog", "") or policy.get("function_catalog", "")
+    catalog = _uc_identifier(policy.get("catalog") or policy.get("function_catalog"))
     targets: set[tuple[str, str]] = set()
     for entity_type, name in by_entity:
         if entity_type != kind or (catalog and name.split(".")[0] != catalog):
@@ -981,11 +998,12 @@ def keep_reviewed_rules(
 
     def label(entity: tuple[str, str], items: list[dict]) -> str:
         tags = dict(_tag_set(items))
+        name = items[0].get("entity_name", "") if items else entity[1]
         if "gr_treatment" in tags:
-            return f"{entity[1]} → {tags['gr_treatment']}"
+            return f"{name} → {tags['gr_treatment']}"
         if tags:
-            return f"{entity[1]} → " + ", ".join(f"{k}={v}" for k, v in tags.items())
-        return entity[1]
+            return f"{name} → " + ", ".join(f"{k}={v}" for k, v in tags.items())
+        return name
 
     # ── Tag mappings: one target's full tag set is one rule ──────────────
     prior_by_entity = _by_entity(prior_cfg.get("tag_assignments") or [])
@@ -1009,12 +1027,14 @@ def keep_reviewed_rules(
     merged_by_entity = _by_entity(merged_assignments)
 
     # ── Treatment overrides belong to their column's target ──────────────
-    prior_overrides = {o.get("entity_name", ""): o for o in prior_cfg.get("treatment_overrides") or []}
+    prior_overrides = {
+        _uc_identifier(o.get("entity_name")): o for o in prior_cfg.get("treatment_overrides") or []
+    }
     new_overrides = list(new_cfg.get("treatment_overrides") or [])
-    new_override_by_col = {o.get("entity_name", ""): o for o in new_overrides}
+    new_override_by_col = {_uc_identifier(o.get("entity_name")): o for o in new_overrides}
     kept_overrides: dict[str, dict] = {}
     for column, override in prior_overrides.items():
-        rule = f"override {column} → {override.get('treatment', '')}"
+        rule = f"override {override.get('entity_name', '')} → {override.get('treatment', '')}"
         reason = stale_reason("columns", column)
         if reason:
             stale.append(f"{rule} ({reason})")
@@ -1033,8 +1053,8 @@ def keep_reviewed_rules(
             ))
     merged_overrides = [
         o for o in new_overrides
-        if o.get("entity_name", "") not in kept_overrides
-        and ("columns", o.get("entity_name", "")) not in targets
+        if _uc_identifier(o.get("entity_name")) not in kept_overrides
+        and ("columns", _uc_identifier(o.get("entity_name"))) not in targets
     ] + list(kept_overrides.values())
 
     # ── FGAC policies: reviewed by name; model additions only off-target ──

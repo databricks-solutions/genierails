@@ -275,6 +275,25 @@ def test_differently_named_model_mask_for_a_reviewed_column_is_discarded(tmp_pat
     ]
 
 
+def test_reviewed_targets_match_case_insensitively(tmp_path):
+    shouted = AMOUNT.upper()
+    custom = dict(_mask("mask_amounts_custom", "round_amount", "mask_amount_rounded"),
+                  catalog="DEV_FIN")
+    messages, cfg, _ = _rerun(
+        tmp_path, {EMAIL: "email_mask", shouted: "round_amount"},
+        policies=[_mask("gr_mask_dev_fin_email_mask", "email_mask", "mask_email"), custom],
+        overrides={shouted: "redact"},
+    )
+
+    assert _treatments(cfg) == REVIEWED
+    assert "treatment_overrides" not in cfg
+    assert _policy_names(cfg) == ["gr_mask_dev_fin_email_mask", "gr_mask_dev_fin_round_amount"]
+    assert (f"  kept reviewed rule {AMOUNT} → round_amount (model proposed a conflicting "
+            f"policy mask_amounts_custom); {HINT}") in messages
+    assert any("conflicting override → redact" in m for m in messages)
+    assert not any("model proposed removing it" in m and AMOUNT in m for m in messages)
+
+
 def test_model_mask_covering_only_new_columns_is_added(tmp_path):
     messages, cfg, _ = _rerun(
         tmp_path, {**REVIEWED, PHONE: "phone_mask"},
@@ -350,6 +369,105 @@ def test_function_missing_from_new_sql_is_restored_for_unchanged_policy(tmp_path
     messages, _, sql = _rerun(tmp_path, REVIEWED, functions=["mask_email"])
     assert "FUNCTION mask_amount_rounded" in sql
     assert any("mask_amount_rounded (model proposed removing it)" in m for m in messages)
+
+
+TWO_SCHEMA_SQL = """USE CATALOG {first_catalog};
+USE SCHEMA {first_schema};
+
+CREATE OR REPLACE FUNCTION mask_email(val STRING)
+RETURNS STRING
+RETURN CONCAT('***@', SPLIT(val, '@')[1]);
+
+CREATE OR REPLACE FUNCTION mask_amount_rounded(val STRING)
+RETURNS STRING
+RETURN ROUND(val, {first_digits});
+
+USE CATALOG other_fin;
+USE SCHEMA other_schema;
+
+CREATE OR REPLACE FUNCTION mask_amount_rounded(val STRING)
+RETURNS STRING
+RETURN ROUND(val, -5);
+"""
+
+
+def _rerun_with_sql(tmp_path, reviewed_sql, new_sql, *, reviewed_policies=None, new_policies=None):
+    _write_draft(tmp_path / "reviewed", REVIEWED, policies=reviewed_policies)
+    (tmp_path / "reviewed" / "masking_functions.sql").write_text(reviewed_sql)
+    reviewed = load_reviewed_rules(tmp_path / "reviewed")
+    generated = tmp_path / "generated"
+    _write_draft(generated, REVIEWED, policies=new_policies)
+    (generated / "masking_functions.sql").write_text(new_sql)
+    messages = keep_reviewed_rules(
+        reviewed, generated / "abac.auto.tfvars", generated / "masking_functions.sql",
+    )
+    return messages, (generated / "masking_functions.sql").read_text()
+
+
+def test_function_blocks_take_the_use_context_before_them_not_after():
+    sql = TWO_SCHEMA_SQL.format(first_catalog="dev_fin", first_schema="payments", first_digits=-2)
+    assert sorted(merge_space_configs._function_blocks_by_key(sql)) == [
+        ("dev_fin", "payments", "mask_amount_rounded"),
+        ("dev_fin", "payments", "mask_email"),
+        ("other_fin", "other_schema", "mask_amount_rounded"),
+    ]
+
+
+def test_same_function_name_in_another_schema_does_not_satisfy_a_qualified_reference(tmp_path):
+    reviewed_sql = TWO_SCHEMA_SQL.format(
+        first_catalog="dev_fin", first_schema="payments", first_digits=-2)
+    # The model keeps the policy but drops the dev_fin.payments copy of its function.
+    new_sql = reviewed_sql.replace(
+        "CREATE OR REPLACE FUNCTION mask_amount_rounded(val STRING)\nRETURNS STRING\n"
+        "RETURN ROUND(val, -2);\n\n", "")
+
+    messages, sql = _rerun_with_sql(tmp_path, reviewed_sql, new_sql)
+
+    assert "ROUND(val, -2)" in sql and "ROUND(val, -5)" in sql
+    assert messages == [
+        "  kept reviewed rule function dev_fin.payments.mask_amount_rounded "
+        f"(model proposed removing it); {HINT}"
+    ]
+
+
+def test_qualified_reference_defined_only_in_another_schema_fails_clearly(tmp_path):
+    # Reviewed SQL defines mask_amount_rounded only in other_fin.other_schema,
+    # but the policy calls dev_fin.payments.mask_amount_rounded.
+    reviewed_sql = TWO_SCHEMA_SQL.format(
+        first_catalog="dev_fin", first_schema="payments", first_digits=-2,
+    ).replace("CREATE OR REPLACE FUNCTION mask_amount_rounded(val STRING)\nRETURNS STRING\n"
+              "RETURN ROUND(val, -2);\n\n", "")
+    changed = [
+        _mask("gr_mask_dev_fin_email_mask", "email_mask", "mask_email"),
+        _mask("gr_mask_dev_fin_round_amount", "round_amount", "mask_amount_rounded",
+              principals=("viewers", "regional_analysts")),
+    ]
+    with pytest.raises(ValueError, match="dev_fin.payments.mask_amount_rounded"):
+        _rerun_with_sql(tmp_path, reviewed_sql, reviewed_sql, new_policies=changed)
+
+
+def test_unqualified_reference_matches_by_name_and_qualifiers_ignore_case(tmp_path):
+    unqualified = _mask("gr_mask_dev_fin_round_amount", "round_amount", "mask_amount_rounded")
+    unqualified.pop("function_catalog")
+    unqualified.pop("function_schema")
+    policies = [_mask("gr_mask_dev_fin_email_mask", "email_mask", "mask_email"), unqualified]
+    other_only = TWO_SCHEMA_SQL.format(
+        first_catalog="dev_fin", first_schema="payments", first_digits=-2,
+    ).replace("CREATE OR REPLACE FUNCTION mask_amount_rounded(val STRING)\nRETURNS STRING\n"
+              "RETURN ROUND(val, -2);\n\n", "")
+    changed = [policies[0], dict(unqualified, to_principals=["viewers", "regional_analysts"])]
+    messages, _ = _rerun_with_sql(
+        tmp_path, other_only, other_only, reviewed_policies=policies, new_policies=changed,
+    )
+    assert messages == [
+        f"  kept reviewed rule policy gr_mask_dev_fin_round_amount (model proposed changing it); {HINT}"
+    ]
+
+    # USE `DEV_FIN`.`Payments` defines the function dev_fin.payments references.
+    mixed_case = TWO_SCHEMA_SQL.format(
+        first_catalog="`DEV_FIN`", first_schema="Payments", first_digits=-2)
+    messages, _ = _rerun_with_sql(tmp_path / "case", mixed_case, mixed_case)
+    assert messages == []
 
 
 @pytest.mark.parametrize("reviewed_body,new_body", [
