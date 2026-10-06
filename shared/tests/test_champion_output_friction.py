@@ -7,6 +7,7 @@ benign -target warnings, and its review pointer is the Catalog Explorer UI.
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -15,18 +16,22 @@ import pytest
 
 import generate_abac
 from generate_abac import (
-    CHAMPION_TEMPLATE_MARKER,
+    SpaceFolderError,
     bootstrap_per_space_dirs,
     canonical_space_name,
-    follows_champion_flow,
     generate_next_steps,
     load_genie_space_id_to_name,
+    resolve_space_folders,
 )
+from scripts import remap_env_config
+from walkthrough_marker import MARKER, PROMOTED_HEADER, follows_walkthrough
 
 SHARED = Path(__file__).parents[1]
 TEMPLATE = SHARED / "examples/dev_to_prod/env.auto.tfvars.example"
 MAKEFILE = SHARED / "Makefile.shared"
 FILTER = SHARED / "scripts/filter_target_warnings.py"
+TF_CAPTURE = SHARED / "tests/fixtures/terraform_target_apply.txt"  # real Terraform 1.11 -target apply
+REPO = SHARED.parent
 
 sys.path.insert(0, str(SHARED / "scripts"))
 from filter_target_warnings import filter_lines  # noqa: E402
@@ -37,27 +42,41 @@ TITLE = "APJ Finance Agent"
 
 # ── 1. Genie-mode next steps ────────────────────────────────────────────────
 
-def test_template_carries_the_champion_marker():
-    assert CHAMPION_TEMPLATE_MARKER in TEMPLATE.read_text().splitlines()[1]
+def test_template_carries_the_walkthrough_marker():
+    assert MARKER in TEMPLATE.read_text().splitlines()[1]
 
 
 @pytest.mark.parametrize(
-    ("content", "groups_set", "expected"),
+    ("content", "expected"),
     [
-        ("sql_warehouse_id = \"\"\n", True, True),          # access_tier_groups set
-        (TEMPLATE.read_text(), False, True),                # copied from the template
-        ("genie_spaces = []\n", False, False),              # self-service BU env
+        (TEMPLATE.read_text(), True),                                   # copied template
+        (PROMOTED_HEADER + "\ngenie_spaces = []\n", True),              # promoted prod env
+        ('access_tier_groups = ["ops", "viewers"]\ngenie_spaces = []\n', False),  # self-service
+        (f'genie_spaces = [{{ name = "{MARKER}" }}]\n', False),          # marker only in a value
     ],
-    ids=["access-tier-groups", "template", "self-service"],
+    ids=["template", "promoted", "self-service-with-tiers", "not-a-comment"],
 )
-def test_follows_champion_flow(tmp_path, content, groups_set, expected):
+def test_follows_walkthrough_needs_the_explicit_marker(tmp_path, content, expected):
     env_file = tmp_path / "env.auto.tfvars"
     env_file.write_text(content)
-    assert follows_champion_flow(env_file, groups_set) is expected
+    assert follows_walkthrough(env_file) is expected
 
 
-def test_follows_champion_flow_without_env_file(tmp_path):
-    assert follows_champion_flow(tmp_path / "missing.tfvars", False) is False
+def test_follows_walkthrough_without_env_file(tmp_path):
+    assert follows_walkthrough(tmp_path / "missing.tfvars") is False
+
+
+@pytest.mark.parametrize("source_has_marker", [True, False])
+def test_promote_carries_the_marker_only_from_a_walkthrough_env(tmp_path, monkeypatch, source_has_marker):
+    source, dest = tmp_path / "dev", tmp_path / "prod"
+    source.mkdir()
+    header = TEMPLATE.read_text().splitlines()[1] + "\n" if source_has_marker else ""
+    (source / "env.auto.tfvars").write_text(header + 'uc_tables = ["dev.sales.customers"]\n')
+    monkeypatch.setattr(sys, "argv", ["remap_env_config.py", str(source), str(dest), "dev=prod"])
+
+    remap_env_config.main()
+
+    assert follows_walkthrough(dest / "env.auto.tfvars") is source_has_marker
 
 
 def test_champion_genie_next_steps_are_phase_1(tmp_path):
@@ -71,6 +90,17 @@ def test_champion_genie_next_steps_are_phase_1(tmp_path):
         "    3. make rehearse ENV=dev VERIFY_KEY_COLUMN=<key_column>"
     )
     assert "apply-genie" not in out
+
+
+def test_self_service_env_with_access_tier_groups_keeps_apply_genie(tmp_path):
+    env_file = tmp_path / "env.auto.tfvars"
+    env_file.write_text('access_tier_groups = ["ops", "viewers"]\ngenie_spaces = []\n')
+
+    lines = generate_next_steps(
+        tmp_path, "genie", "bu_fin", has_sql=False, champion_flow=follows_walkthrough(env_file)
+    )
+
+    assert lines[-1] == "    4. make apply-genie ENV=bu_fin   (applies workspace layer only)"
 
 
 def test_self_service_genie_next_steps_unchanged(tmp_path):
@@ -103,7 +133,8 @@ def test_main_wires_champion_flow_into_header_and_next_steps():
     source = Path(generate_abac.__file__).read_text()
     main_body = source[source.index("def main():"):source.index("def generate_next_steps(")]
 
-    assert "champion_flow = follows_champion_flow(env_file," in main_body
+    assert "champion_flow = follows_walkthrough(env_file)" in main_body
+    assert "access_tier_groups_set" not in source
     assert 'if args.mode == "genie" and champion_flow:' in main_body
     assert "champion_flow=champion_flow" in main_body
 
@@ -136,24 +167,117 @@ def test_imported_agent_bootstraps_exactly_one_folder(tmp_path, capsys):
     )
 
 
-def test_stale_id_folder_stub_is_removed_but_real_content_is_kept(tmp_path):
-    out_dir = _imported_generated(tmp_path)
-    stale = out_dir / "spaces" / SPACE_ID
-    stale.mkdir(parents=True)
-    (stale / "abac.auto.tfvars").write_text(
-        f"# Per-space config for: {SPACE_ID}\n"
-        f'# Bootstrapped by full generation. Re-run: make generate SPACE="{SPACE_ID}"\n'
+def _stub(space_dir, name):
+    space_dir.mkdir(parents=True)
+    (space_dir / "abac.auto.tfvars").write_text(
+        f"# Per-space config for: {name}\n"
+        f'# Bootstrapped by full generation. Re-run: make generate SPACE="{name}"\n'
     )
 
-    bootstrap_per_space_dirs(out_dir, {"genie_spaces": [{"genie_space_id": SPACE_ID}]}, "")
-    assert not stale.exists()
 
-    # A folder holding anything beyond the bootstrap stub is never deleted.
-    stale.mkdir()
-    (stale / "abac.auto.tfvars").write_text("# Bootstrapped by full generation.\n")
-    (stale / "masking_functions.sql").write_text("-- per-space draft\n")
-    bootstrap_per_space_dirs(out_dir, {"genie_spaces": [{"genie_space_id": SPACE_ID}]}, "")
-    assert (stale / "masking_functions.sql").exists()
+def _real(space_dir):
+    space_dir.mkdir(parents=True, exist_ok=True)
+    (space_dir / "abac.auto.tfvars").write_text("# per-space draft from make generate SPACE=\n")
+    (space_dir / "masking_functions.sql").write_text("-- customized\n")
+
+
+IMPORTED = {"genie_spaces": [{"genie_space_id": SPACE_ID}]}
+
+
+def test_stale_id_folder_stub_is_removed(tmp_path):
+    out_dir = _imported_generated(tmp_path)
+    _stub(out_dir / "spaces" / SPACE_ID, SPACE_ID)
+
+    bootstrap_per_space_dirs(out_dir, IMPORTED, "")
+
+    assert sorted(p.name for p in (out_dir / "spaces").iterdir()) == ["apj_finance_agent"]
+
+
+def test_id_folder_with_real_content_and_no_title_folder_is_kept(tmp_path, capsys):
+    out_dir = _imported_generated(tmp_path)
+    id_dir = out_dir / "spaces" / SPACE_ID
+    _real(id_dir)
+
+    bootstrap_per_space_dirs(out_dir, IMPORTED, "")
+
+    assert sorted(p.name for p in (out_dir / "spaces").iterdir()) == [SPACE_ID]
+    assert (id_dir / "masking_functions.sql").read_text() == "-- customized\n"
+    out = capsys.readouterr().out
+    assert f"NOTE: keeping generated/spaces/{SPACE_ID}/ for '{TITLE}' (it has per-agent content)." in out
+    assert f"Per-agent config: generated/spaces/{SPACE_ID}/abac.auto.tfvars" in out
+    # make generate SPACE= picks the same folder.
+    folders, _ = resolve_space_folders(IMPORTED["genie_spaces"], {SPACE_ID: TITLE}, out_dir / "spaces")
+    assert [f.key for f in folders] == [SPACE_ID]
+
+
+def test_id_folder_kept_over_a_title_stub(tmp_path):
+    out_dir = _imported_generated(tmp_path)
+    _real(out_dir / "spaces" / SPACE_ID)
+    _stub(out_dir / "spaces/apj_finance_agent", TITLE)
+
+    bootstrap_per_space_dirs(out_dir, IMPORTED, "")
+
+    assert sorted(p.name for p in (out_dir / "spaces").iterdir()) == [SPACE_ID]
+
+
+def test_both_folders_with_real_content_stop_with_instructions(tmp_path, capsys):
+    out_dir = _imported_generated(tmp_path)
+    _real(out_dir / "spaces" / SPACE_ID)
+    _real(out_dir / "spaces/apj_finance_agent")
+    before = {p: p.read_text() for p in (out_dir / "spaces").rglob("*") if p.is_file()}
+
+    with pytest.raises(SystemExit) as exc:
+        bootstrap_per_space_dirs(out_dir, IMPORTED, "")
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert (
+        f"generated/spaces/{SPACE_ID}/ and generated/spaces/apj_finance_agent/ both hold "
+        f"per-agent content for '{TITLE}' ({SPACE_ID}). Keep generated/spaces/apj_finance_agent/: "
+        f"move or merge anything you still need from generated/spaces/{SPACE_ID}/ into it, "
+        f"delete generated/spaces/{SPACE_ID}/, then re-run make generate."
+    ) in out
+    assert {p: p.read_text() for p in (out_dir / "spaces").rglob("*") if p.is_file()} == before
+
+
+def test_two_agents_with_the_same_title_stop_naming_both_ids(tmp_path):
+    spaces = [{"genie_space_id": "01aaa"}, {"genie_space_id": "01bbb"}]
+
+    with pytest.raises(SpaceFolderError) as exc:
+        resolve_space_folders(spaces, {"01aaa": TITLE, "01bbb": TITLE}, tmp_path / "spaces")
+
+    assert "Genie agents 01aaa and 01bbb are both named 'APJ Finance Agent'" in str(exc.value)
+    assert 'name = "..."' in str(exc.value)
+
+
+def test_names_that_sanitize_alike_get_a_stable_id_suffix(tmp_path, capsys):
+    out_dir = tmp_path / "generated"
+    out_dir.mkdir()
+    (out_dir / "abac.auto.tfvars").write_text(
+        'genie_space_configs = {\n  "Finance & HR" = { title = "Finance & HR" }\n'
+        '  "Finance HR" = { title = "Finance HR" }\n}\n'
+    )
+    auth_cfg = {"genie_spaces": [
+        {"name": "Finance & HR", "genie_space_id": "01aaa"},
+        {"name": "Finance HR", "genie_space_id": "01bbb"},
+    ]}
+
+    bootstrap_per_space_dirs(out_dir, auth_cfg, "")
+    bootstrap_per_space_dirs(out_dir, auth_cfg, "")  # stable across runs
+
+    spaces = out_dir / "spaces"
+    assert sorted(p.name for p in spaces.iterdir()) == ["finance_hr", "finance_hr--01bbb"]
+    assert "Finance & HR" in (spaces / "finance_hr/abac.auto.tfvars").read_text()
+    assert '"Finance HR"' in (spaces / "finance_hr--01bbb/abac.auto.tfvars").read_text()
+
+
+def test_space_folder_names_never_feed_terraform_keys():
+    # Folder names are local to generate/merge; no Terraform root or module
+    # reads generated/spaces/, so the folder choice can't move resource keys.
+    for tf in (SHARED / "roots").rglob("*.tf"):
+        assert "spaces/" not in tf.read_text().replace("genie/spaces/", ""), tf
+    for tf in (SHARED / "modules").rglob("*.tf"):
+        assert "generated/spaces" not in tf.read_text(), tf
 
 
 def test_canonical_space_name_mirrors_terraform_lookup(tmp_path):
@@ -173,103 +297,142 @@ def test_terraform_canonical_name_uses_the_same_lookup():
 
 # ── 3. -target warnings filtered, real errors kept ──────────────────────────
 
-def _diag(title, body, color=True):
-    if color:
-        y, r, b = "\x1b[33m", "\x1b[0m", "\x1b[1m"
-        return [
-            f"{y}╷{r}{r}\n",
-            f"{y}│{r} {r}{b}{y}Warning: {r}{r}{b}{title}{r}\n",
-            f"{y}│{r} {r}\n",
-            f"{y}│{r} {r}{r}{body}\n",
-            f"{y}╵{r}{r}\n",
-        ]
-    return ["╷\n", f"│ {title}\n", "│ \n", f"│ {body}\n", "╵\n"]
+CAPTURE = TF_CAPTURE.read_text().splitlines(keepends=True)
 
 
-TARGETING = _diag("Resource targeting is in effect", "You are creating a plan with the -target option")
-INCOMPLETE = _diag("Applied changes may be incomplete", "The plan was created with the -target option")
-ERROR = _diag("Error: Usage policy ID must not be empty", "with module.data_access...", color=False)
-OTHER_WARNING = _diag("Deprecated attribute", "use X instead")
+def _boxes(lines):
+    """Split the capture into (outside lines, [box line lists])."""
+    boxes, outside, box = [], [], None
+    for line in lines:
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+        if box is None and plain == "╷":
+            box = [line]
+        elif box is not None:
+            box.append(line)
+            if plain == "╵":
+                boxes.append(box)
+                box = None
+        else:
+            outside.append(line)
+    return outside, boxes
 
 
-def test_filter_drops_only_the_benign_target_warnings():
-    lines = (
-        ["Plan: 1 to add, 0 to change, 0 to destroy.\n"]
-        + TARGETING
-        + ["Apply complete! Resources: 1 added, 0 changed, 0 destroyed.\n"]
-        + INCOMPLETE
-        + OTHER_WARNING
-        + ERROR
-    )
-
-    out = "".join(filter_lines(lines))
-
-    assert "Resource targeting is in effect" not in out
-    assert "Applied changes may be incomplete" not in out
-    assert "Plan: 1 to add" in out and "Apply complete!" in out
-    assert "".join(OTHER_WARNING) in out
-    assert "".join(ERROR) in out
+OUTSIDE, (TARGETING, INCOMPLETE) = _boxes(CAPTURE)
+ERROR = ["╷\n", "│ Error: Usage policy ID must not be empty\n", "│ \n", "│   with module.data_access...\n", "╵\n"]
+OTHER_WARNING = ["╷\n", "│ Warning: Deprecated attribute\n", "│ \n", "│ use X instead\n", "╵\n"]
 
 
-def test_filter_drops_uncolored_target_warnings():
-    lines = (
-        _diag("Warning: Resource targeting is in effect", "-target", color=False)
-        + ["Apply complete!\n"]
-        + _diag("Warning: Applied changes may be incomplete", "-target", color=False)
-    )
-    assert list(filter_lines(lines)) == ["Apply complete!\n"]
+def test_filter_drops_only_the_real_target_warnings():
+    out = "".join(filter_lines(CAPTURE + OTHER_WARNING + ERROR))
+
+    assert out == "".join(OUTSIDE + OTHER_WARNING + ERROR)
+    assert "Apply complete! Resources: 1 added" in out
 
 
-def test_filter_never_swallows_an_unterminated_block():
+def test_filter_matches_uncolored_and_rewrapped_text():
+    plain = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in TARGETING]
+    words = " ".join(l.strip().lstrip("│").strip() for l in plain[1:-1]).split()
+    rewrapped = ["╷\n"] + [f"│ {' '.join(words[i:i + 7])}\n" for i in range(0, len(words), 7)] + ["╵\n"]
+    assert list(filter_lines(plain + rewrapped)) == []
+
+
+def test_filter_keeps_a_warning_box_with_an_interleaved_error():
+    box = TARGETING[:3] + ["Error: Usage policy ID must not be empty\n"] + TARGETING[3:]
+    assert list(filter_lines(box)) == box
+
+
+def test_filter_keeps_a_known_title_with_unknown_body():
+    box = TARGETING[:2] + ["│ Something else Terraform added.\n"] + TARGETING[-1:]
+    assert list(filter_lines(box)) == box
+
+
+def test_filter_keeps_an_unknown_warning():
+    assert list(filter_lines(OTHER_WARNING)) == OTHER_WARNING
+
+
+def test_filter_emits_an_unterminated_box_at_eof_verbatim():
     assert list(filter_lines(TARGETING[:-1])) == TARGETING[:-1]
 
 
-def _classification_recipe():
-    """The enable-classification apply + message lines, verbatim from Makefile.shared."""
+def test_filter_script_streams_unbuffered():
+    source = FILTER.read_text()
+    assert "sys.stdout.flush()" in source
+    assert 'python3 -u "$(SHARED_ROOT)/scripts/filter_target_warnings.py"' in MAKEFILE.read_text()
+
+
+def test_makefile_shared_runs_recipes_in_bash_with_pipefail():
     source = MAKEFILE.read_text()
-    start = source.index("enable-classification:")
-    body = source[start:source.index("\ngenerate:", start)]
-    lines = body.splitlines()
-    first = next(i for i, line in enumerate(lines) if "=== Enable UC Data Classification" in line)
-    return "\n".join(lines[first:]).rstrip() + "\n"
+    assert re.search(r"^SHELL := /bin/bash$", source, flags=re.MULTILINE)
+    body = source[source.index("enable-classification:"):source.index("\ngenerate:")]
+    assert "@set -o pipefail; LAYER_ENV_DIR=" in body
 
 
-def _run_recipe(tmp_path, runner_script, env_tfvars):
-    env_dir = tmp_path / "envs/dev"
-    (env_dir / "data_access").mkdir(parents=True)
-    (env_dir / "env.auto.tfvars").write_text(env_tfvars)
-    runner = tmp_path / "runner.sh"
-    runner.write_text("#!/usr/bin/env bash\n" + runner_script)
-    runner.chmod(0o755)
-    makefile = tmp_path / "Makefile"
-    makefile.write_text(
-        "SHELL := /bin/bash\n"
-        f"ENV := dev\nCLOUD_ROOT := {tmp_path}\nENV_DIR := {env_dir}\n"
-        f"DATA_ACCESS_SUBDIR := data_access\nROOT_RUNNER := {runner}\nSHARED_ROOT := {SHARED}\n"
-        "_SETUP_ENV_REL = $(patsubst $(CLOUD_ROOT)/%,%,$(ENV_DIR))\n"
-        "enable-classification:\n" + _classification_recipe()
+# The REAL target through the repo's aws/ Makefile -> Makefile.shared ->
+# terraform_layer.sh, with only `terraform` (on PATH) and the Databricks SDK
+# (on PYTHONPATH) faked.
+FAKE_TERRAFORM = """#!/usr/bin/env bash
+case "$1" in
+  init|state) exit 0 ;;
+  apply) cat "$FAKE_TF_STDOUT"; [ -z "$FAKE_TF_STDERR" ] || printf '%s\\n' "$FAKE_TF_STDERR" >&2
+         exit "${FAKE_TF_EXIT:-0}" ;;
+esac
+"""
+FAKE_SDK = """from .errors import NotFound
+class _Classification:
+    def get_catalog_config(self, name):
+        raise NotFound(name)
+class WorkspaceClient:
+    def __init__(self, **kwargs):
+        self.data_classification = _Classification()
+"""
+
+
+def _clean_env():
+    return {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MAKELEVEL", "ENV", "MODE")}
+
+
+@pytest.fixture
+def real_cloud(tmp_path):
+    if shutil.which("make") is None:
+        pytest.skip("make not installed")
+    cloud_root = tmp_path / "aws"
+    cloud_root.mkdir()
+    args = [f"CLOUD_ROOT={cloud_root}", f"SHARED_ROOT={SHARED}"]
+    setup = subprocess.run(["make", "--no-print-directory", "setup", "ENV=dev", *args],
+                           cwd=REPO / "aws", text=True, capture_output=True, env=_clean_env())
+    assert setup.returncode == 0, setup.stdout + setup.stderr
+    (cloud_root / "envs/dev/env.auto.tfvars").write_text(
+        TEMPLATE.read_text().replace("<your-genie-space-id>", SPACE_ID)
+        + '\nuc_tables = ["dev_finance.genierails_e2e.customers"]\n'
     )
-    env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MAKELEVEL", "ENV")}
-    return subprocess.run(
-        ["make", "--no-print-directory", "-f", str(makefile), "enable-classification"],
-        cwd=tmp_path, text=True, capture_output=True, env=env, timeout=60,
-    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "terraform").write_text(FAKE_TERRAFORM)
+    (fake_bin / "terraform").chmod(0o755)
+    sdk = tmp_path / "sdk/databricks/sdk"
+    sdk.mkdir(parents=True)
+    (sdk.parent / "__init__.py").write_text("")
+    (sdk / "__init__.py").write_text(FAKE_SDK)
+    (sdk / "errors.py").write_text("class NotFound(Exception):\n    pass\n")
+
+    def run(**fake):
+        env = _clean_env()
+        env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+        env["PYTHONPATH"] = str(tmp_path / "sdk")
+        env.update({"FAKE_TF_STDOUT": str(TF_CAPTURE), **fake})
+        return subprocess.run(
+            ["make", "--no-print-directory", "enable-classification", "ENV=dev", *args],
+            cwd=REPO / "aws", text=True, capture_output=True, env=env, timeout=120,
+        )
+    return run
 
 
-def _printf(lines):
-    return "printf '%s' " + " ".join("'" + line.replace("'", "'\\''") + "'" for line in lines) + "\n"
-
-
-def test_enable_classification_hides_target_warnings_and_points_to_ui(tmp_path):
-    result = _run_recipe(
-        tmp_path,
-        _printf(TARGETING + ["Apply complete! Resources: 1 added.\n"] + INCOMPLETE),
-        "enable_auto_tagging = false\n",
-    )
+def test_real_target_hides_target_warnings_and_points_to_catalog_explorer(real_cloud):
+    result = real_cloud()
     out = result.stdout + result.stderr
 
     assert result.returncode == 0, out
-    assert "Apply complete!" in out
+    assert "Apply complete! Resources: 1 added" in out
     assert "Resource targeting is in effect" not in out
     assert "Applied changes may be incomplete" not in out
     assert "system.data_classification" not in out
@@ -277,12 +440,8 @@ def test_enable_classification_hides_target_warnings_and_points_to_ui(tmp_path):
     assert "envs/dev/env.auto.tfvars and re-run: make enable-classification ENV=dev" in out
 
 
-def test_enable_classification_still_surfaces_real_errors_and_fails(tmp_path):
-    result = _run_recipe(
-        tmp_path,
-        _printf(TARGETING) + "{ " + _printf(ERROR) + "} >&2\nexit 1\n",
-        "enable_auto_tagging = false\n",
-    )
+def test_real_target_surfaces_terraform_errors_and_fails(real_cloud):
+    result = real_cloud(FAKE_TF_STDERR="Error: Usage policy ID must not be empty", FAKE_TF_EXIT="1")
     out = result.stdout + result.stderr
 
     assert result.returncode != 0, out
@@ -291,8 +450,11 @@ def test_enable_classification_still_surfaces_real_errors_and_fails(tmp_path):
     assert "Classification is enabled" not in out
 
 
-def test_enable_classification_with_auto_tagging_points_to_generate(tmp_path):
-    result = _run_recipe(tmp_path, "echo 'Apply complete!'\n", "enable_auto_tagging = true\n")
+def test_real_target_with_auto_tagging_points_to_generate(real_cloud, tmp_path):
+    env_file = tmp_path / "aws/envs/dev/env.auto.tfvars"
+    env_file.write_text(env_file.read_text().replace("enable_auto_tagging = false", "enable_auto_tagging = true"))
+
+    result = real_cloud()
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Wait for class.* tags to appear in Catalog Explorer, then run:\n  make generate ENV=dev" in result.stdout

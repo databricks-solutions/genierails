@@ -29,6 +29,7 @@ from scripts.footprint import (
     resolve_footprint,
 )
 from scripts.remap_generated_config import remap_hcl
+from walkthrough_marker import PROMOTED_HEADER, follows_walkthrough
 
 try:
     import hcl2
@@ -400,7 +401,10 @@ def main():
 
     # Build dest env.auto.tfvars. The complete promoted union is top-level so
     # Terraform, classification, derive-assignments, and certify share it.
-    lines = ["genie_spaces = ["]
+    lines = []
+    if follows_walkthrough(Path(source_env_dir) / "env.auto.tfvars"):
+        lines += [PROMOTED_HEADER, ""]
+    lines.append("genie_spaces = [")
     for space in spaces:
         name = remap_name(_str(space.get("name", "")))
         uc_tables = space.get("uc_tables") or []

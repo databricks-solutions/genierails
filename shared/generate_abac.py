@@ -60,6 +60,7 @@ from access_tier_groups import (
     render as render_access_tier_groups,
 )
 from genie_space_placeholder import placeholder_error
+from walkthrough_marker import follows_walkthrough
 from sensitivity_source import (
     ClassificationSource,
     Finding,
@@ -6577,38 +6578,26 @@ def bootstrap_per_space_dirs(out_dir: Path, auth_cfg: dict, hcl_text: str) -> No
         id_to_name = id_to_name[0] if id_to_name and isinstance(id_to_name[0], dict) else {}
 
     configured_spaces = auth_cfg.get("genie_spaces", []) or []
-    bootstrapped_cfgs: dict[str, dict] = {}
-    stale_id_keys: set[str] = set()
-    for sp in configured_spaces:
-        # An imported agent (genie_space_id only, no name) is keyed everywhere
-        # else by its canonical name from genie_space_id_to_name (the API
-        # title) — genie_space_configs, Terraform's canonical_space_names, and
-        # promote's remap. Using the raw ID here too wrote a second, stub-only
-        # spaces/<id>/ folder next to the real spaces/<title>/ one.
-        space_name = canonical_space_name(sp, id_to_name)
-        if not space_name:
-            continue
-        space_id = sp.get("genie_space_id") or ""
-        if space_id and space_name != space_id:
-            stale_id_keys.add(sanitize_space_key(space_id))
+    spaces_dir = out_dir / "spaces"
+    try:
+        folders, notes = resolve_space_folders(configured_spaces, id_to_name, spaces_dir, genie_cfgs)
+    except SpaceFolderError as e:
+        print(f"\nERROR: {e}")
+        print("  generated/abac.auto.tfvars was written; only the per-agent folders were not updated.")
+        sys.exit(1)
+    if not folders:
+        return
+    for note in notes:
+        print(f"  NOTE: {note}")
+
+    written: list[Path] = []
+    for folder in folders:
+        space_name = folder.name
         cfg = genie_cfgs.get(space_name)
         if not isinstance(cfg, dict):
-            cfg = dict(sp.get("config") or {})
+            cfg = dict(folder.config or {})
             cfg.setdefault("title", space_name)
-        bootstrapped_cfgs[space_name] = cfg
-
-    for space_name, cfg in genie_cfgs.items():
-        if isinstance(cfg, dict):
-            bootstrapped_cfgs.setdefault(space_name, cfg)
-
-    if not bootstrapped_cfgs:
-        return
-
-    spaces_dir = out_dir / "spaces"
-    written: list[Path] = []
-    for space_name, cfg in bootstrapped_cfgs.items():
-        key = sanitize_space_key(space_name)
-        space_dir = spaces_dir / key
+        space_dir = spaces_dir / folder.key
         space_dir.mkdir(parents=True, exist_ok=True)
 
         space_abac = space_dir / "abac.auto.tfvars"
@@ -6624,20 +6613,8 @@ def bootstrap_per_space_dirs(out_dir: Path, auth_cfg: dict, hcl_text: str) -> No
         )
         space_abac.write_text(content)
 
-    # Remove a spaces/<id>/ folder an earlier version bootstrapped for an
-    # imported agent, but only if it holds nothing except that bootstrap stub.
-    for stale_key in stale_id_keys - {sanitize_space_key(n) for n in bootstrapped_cfgs}:
-        stale_dir = spaces_dir / stale_key
-        stale_abac = stale_dir / "abac.auto.tfvars"
-        try:
-            if (
-                [p.name for p in stale_dir.iterdir()] == ["abac.auto.tfvars"]
-                and _BOOTSTRAP_MARKER in stale_abac.read_text()
-            ):
-                stale_abac.unlink()
-                stale_dir.rmdir()
-        except OSError:
-            pass
+    for stale_dir in {spaces_dir / f.stale_key for f in folders if f.stale_key}:
+        _remove_bootstrap_stub(stale_dir)
 
     base = out_dir.parent
     print("  Per-agent config: " + ", ".join(
@@ -6646,6 +6623,112 @@ def bootstrap_per_space_dirs(out_dir: Path, auth_cfg: dict, hcl_text: str) -> No
 
 
 _BOOTSTRAP_MARKER = "# Bootstrapped by full generation."
+
+
+class SpaceFolderError(Exception):
+    """The per-agent folders under generated/spaces/ can't be chosen safely."""
+
+
+class SpaceFolder:
+    """Where one agent's per-space draft lives: generated/spaces/<key>/."""
+
+    def __init__(self, name: str, space_id: str, key: str, config: dict | None, stale_key: str = ""):
+        self.name = name            # canonical name (genie_space_configs key)
+        self.space_id = space_id
+        self.key = key
+        self.config = config
+        self.stale_key = stale_key  # sibling folder to drop if it is only a bootstrap stub
+
+
+def _is_bootstrap_stub(space_dir: Path) -> bool:
+    """True if space_dir holds nothing but a bootstrap-written abac.auto.tfvars."""
+    try:
+        return (
+            [p.name for p in space_dir.iterdir()] == ["abac.auto.tfvars"]
+            and _BOOTSTRAP_MARKER in (space_dir / "abac.auto.tfvars").read_text()
+        )
+    except OSError:
+        return False
+
+
+def _has_real_content(space_dir: Path) -> bool:
+    """Anything beyond an empty folder or a bootstrap stub (e.g. a SPACE= draft)."""
+    try:
+        return space_dir.is_dir() and any(space_dir.iterdir()) and not _is_bootstrap_stub(space_dir)
+    except OSError:
+        return False
+
+
+def _remove_bootstrap_stub(space_dir: Path) -> None:
+    if _is_bootstrap_stub(space_dir):
+        try:
+            (space_dir / "abac.auto.tfvars").unlink()
+            space_dir.rmdir()
+        except OSError:
+            pass
+
+
+def resolve_space_folders(
+    configured_spaces: list, id_to_name: dict, spaces_dir: Path, extra_names=()
+) -> tuple[list[SpaceFolder], list[str]]:
+    """Pick one generated/spaces/<key>/ folder per agent, or raise SpaceFolderError.
+
+    The key is the sanitized canonical name (an imported agent's title, from
+    genie_space_id_to_name). An earlier version named an imported agent's
+    folder after its raw ID; that folder is kept when it has real content and
+    the title folder doesn't, and it is an error when both have real content.
+    Distinct names that sanitize to the same key get a "--<genie_space_id>"
+    (or "--<index>") suffix on the later one, the same disambiguation
+    Terraform uses. Folder names are local to generate/merge only: no
+    Terraform root reads generated/spaces/, so they never affect resource keys.
+    """
+    folders: list[SpaceFolder] = []
+    notes: list[str] = []
+    seen_ids: dict[str, str] = {}
+    for sp in configured_spaces:
+        name = canonical_space_name(sp, id_to_name)
+        if not name:
+            continue
+        space_id = sp.get("genie_space_id") or ""
+        if name in seen_ids:
+            raise SpaceFolderError(
+                f"Genie agents {seen_ids[name] or '(new)'} and {space_id or '(new)'} are both "
+                f"named {name!r}. Give one of them a distinct name in its genie_spaces entry "
+                "(name = \"...\") in env.auto.tfvars, then re-run make generate."
+            )
+        seen_ids[name] = space_id
+        key, stale_key = sanitize_space_key(name), ""
+        if space_id and name != space_id:
+            id_key = sanitize_space_key(space_id)
+            id_real = _has_real_content(spaces_dir / id_key)
+            title_real = _has_real_content(spaces_dir / key)
+            if id_real and title_real:
+                raise SpaceFolderError(
+                    f"generated/spaces/{id_key}/ and generated/spaces/{key}/ both hold per-agent "
+                    f"content for {name!r} ({space_id}). Keep generated/spaces/{key}/: move or merge "
+                    f"anything you still need from generated/spaces/{id_key}/ into it, delete "
+                    f"generated/spaces/{id_key}/, then re-run make generate."
+                )
+            if id_real:
+                notes.append(
+                    f"keeping generated/spaces/{id_key}/ for {name!r} (it has per-agent content)."
+                )
+                key, stale_key = id_key, key
+            else:
+                stale_key = id_key
+        folders.append(SpaceFolder(name, space_id, key, sp.get("config"), stale_key))
+
+    for name in extra_names:
+        if name not in seen_ids:
+            seen_ids[name] = ""
+            folders.append(SpaceFolder(name, "", sanitize_space_key(name), None))
+
+    used: set[str] = set()
+    for idx, folder in enumerate(folders):
+        if folder.key in used:
+            folder.key = f"{folder.key}--{sanitize_space_key(folder.space_id) or idx}"
+        used.add(folder.key)
+    return folders, notes
 
 
 def canonical_space_name(space: dict, id_to_name: dict) -> str:
@@ -7109,28 +7192,6 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict, mode: str = 
     return errors, warnings
 
 
-# First line of shared/examples/dev_to_prod/env.auto.tfvars.example, which the
-# walkthrough copies to envs/dev/env.auto.tfvars.
-CHAMPION_TEMPLATE_MARKER = "GenieRails Dev-to-Prod Walkthrough"
-
-
-def follows_champion_flow(env_file: Path, access_tier_groups_set: bool) -> bool:
-    """True when this env follows the dev-to-prod walkthrough (champion flow).
-
-    Either signal is enough: ``access_tier_groups`` is set (the walkthrough
-    sets it in Phase 0; the self-service BU flow in docs/self-service-genie.md
-    never does), or env.auto.tfvars was copied from the walkthrough template.
-    The champion flow continues with classification + ``make rehearse``, not
-    ``make apply-genie``.
-    """
-    if access_tier_groups_set:
-        return True
-    try:
-        return CHAMPION_TEMPLATE_MARKER in env_file.read_text()
-    except OSError:
-        return False
-
-
 def champion_genie_next_steps(env_name: str) -> list[str]:
     """Next steps after the Phase 0 import (`make generate MODE=genie`)."""
     return [
@@ -7373,7 +7434,20 @@ def main():
     elif persisted_groups:
         args.groups = ",".join(persisted_groups)
         groups_source = f"{ACCESS_TIER_GROUPS_SETTING} in {_env_display_path(env_file)}"
-    champion_flow = follows_champion_flow(env_file, bool(persisted_groups) or persist_cli_groups)
+    # Walkthrough advice only behind the explicit template/promote marker;
+    # access_tier_groups alone is a general setting, not a discriminator.
+    champion_flow = follows_walkthrough(env_file)
+    if not args.space:
+        # Fail on per-agent folder conflicts before any model call, not after.
+        try:
+            resolve_space_folders(
+                auth_cfg.get("genie_spaces", []) or [],
+                load_genie_space_id_to_name(Path(args.out_dir) / "abac.auto.tfvars"),
+                Path(args.out_dir) / "spaces",
+            )
+        except SpaceFolderError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
 
     if args.space:
         genie_spaces_cfg_all = auth_cfg.get("genie_spaces", [])
@@ -7395,8 +7469,18 @@ def main():
                 print(f"    - {canonical_space_name(sp, assembled_id_to_name) or '(unnamed)'}")
             sys.exit(1)
 
-        space_key = sanitize_space_key(
-            canonical_space_name(target_space_cfg, assembled_id_to_name) or args.space
+        # Same folder choice as the full-generation bootstrap.
+        try:
+            space_folders, _notes = resolve_space_folders(
+                genie_spaces_cfg_all, assembled_id_to_name, Path(args.out_dir) / "spaces"
+            )
+        except SpaceFolderError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
+        target_name = canonical_space_name(target_space_cfg, assembled_id_to_name)
+        space_key = next(
+            (f.key for f in space_folders if f.name == target_name),
+            sanitize_space_key(target_name or args.space),
         )
         # Redirect output to the per-space directory
         base_out_dir = Path(args.out_dir)
