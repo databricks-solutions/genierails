@@ -40,6 +40,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -60,6 +61,7 @@ from access_tier_groups import (
     render as render_access_tier_groups,
 )
 from genie_space_placeholder import placeholder_error
+from walkthrough_marker import follows_walkthrough
 from sensitivity_source import (
     ClassificationSource,
     Finding,
@@ -6572,36 +6574,39 @@ def bootstrap_per_space_dirs(out_dir: Path, auth_cfg: dict, hcl_text: str) -> No
     if not isinstance(genie_cfgs, dict):
         genie_cfgs = {}
 
+    id_to_name = parsed.get("genie_space_id_to_name") or {}
+    if isinstance(id_to_name, list):
+        id_to_name = id_to_name[0] if id_to_name and isinstance(id_to_name[0], dict) else {}
+
     configured_spaces = auth_cfg.get("genie_spaces", []) or []
-    bootstrapped_cfgs: dict[str, dict] = {}
-    for sp in configured_spaces:
-        space_name = sp.get("name") or sp.get("genie_space_id") or ""
-        if not space_name:
-            continue
+    spaces_dir = out_dir / "spaces"
+    try:
+        folders, notes = resolve_space_folders(configured_spaces, id_to_name, spaces_dir, genie_cfgs)
+    except SpaceFolderError as e:
+        print(f"\nERROR: {e}")
+        print("  generated/abac.auto.tfvars was written; only the per-agent folders were not updated.")
+        sys.exit(1)
+    if not folders:
+        return
+    for note in notes:
+        print(f"  NOTE: {note}")
+
+    written: list[Path] = []
+    for folder in folders:
+        space_name = folder.name
         cfg = genie_cfgs.get(space_name)
         if not isinstance(cfg, dict):
-            cfg = dict(sp.get("config") or {})
+            cfg = dict(folder.config or {})
             cfg.setdefault("title", space_name)
-        bootstrapped_cfgs[space_name] = cfg
-
-    for space_name, cfg in genie_cfgs.items():
-        if isinstance(cfg, dict):
-            bootstrapped_cfgs.setdefault(space_name, cfg)
-
-    if not bootstrapped_cfgs:
-        return
-
-    spaces_dir = out_dir / "spaces"
-    for space_name, cfg in bootstrapped_cfgs.items():
-        key = sanitize_space_key(space_name)
-        space_dir = spaces_dir / key
+        space_dir = spaces_dir / folder.key
         space_dir.mkdir(parents=True, exist_ok=True)
 
         space_abac = space_dir / "abac.auto.tfvars"
+        written.append(space_abac)
         content = (
             "# ============================================================================\n"
             f"# Per-space config for: {space_name}\n"
-            "# Bootstrapped by full generation. Re-run: make generate SPACE=\"" + space_name + "\"\n"
+            + _BOOTSTRAP_MARKER + " Re-run: make generate SPACE=\"" + space_name + "\"\n"
             "# to regenerate only this space without touching others.\n"
             "# ============================================================================\n\n"
             + format_genie_space_configs_hcl({space_name: cfg})
@@ -6609,9 +6614,167 @@ def bootstrap_per_space_dirs(out_dir: Path, auth_cfg: dict, hcl_text: str) -> No
         )
         space_abac.write_text(content)
 
-    print(
-        f"  Bootstrapped {len(bootstrapped_cfgs)} per-space dir(s) under {spaces_dir.relative_to(out_dir.parent) if out_dir.parent != out_dir else spaces_dir}"
-    )
+    for stale_dir in {spaces_dir / key for f in folders for key in f.stale_keys}:
+        _remove_bootstrap_stub(stale_dir)
+
+    base = out_dir.parent
+    print("  Per-agent config: " + ", ".join(
+        str(p.relative_to(base)) if p.is_relative_to(base) else str(p) for p in written
+    ))
+
+
+_BOOTSTRAP_MARKER = "# Bootstrapped by full generation."
+
+
+class SpaceFolderError(Exception):
+    """The per-agent folders under generated/spaces/ can't be chosen safely."""
+
+
+class SpaceFolder:
+    """Where one agent's per-space draft lives: generated/spaces/<key>/."""
+
+    def __init__(self, name: str, space_id: str, key: str, config: dict | None, stale_key: str = ""):
+        self.name = name            # canonical name (genie_space_configs key)
+        self.space_id = space_id
+        self.key = key
+        self.config = config
+        # Sibling folders to drop if they are only a bootstrap stub.
+        self.stale_keys = [stale_key] if stale_key else []
+
+
+def _is_bootstrap_stub(space_dir: Path) -> bool:
+    """True if space_dir holds nothing but a bootstrap-written abac.auto.tfvars."""
+    try:
+        return (
+            [p.name for p in space_dir.iterdir()] == ["abac.auto.tfvars"]
+            and _BOOTSTRAP_MARKER in (space_dir / "abac.auto.tfvars").read_text()
+        )
+    except OSError:
+        return False
+
+
+def _has_real_content(space_dir: Path) -> bool:
+    """Anything beyond an empty folder or a bootstrap stub (e.g. a SPACE= draft)."""
+    try:
+        return space_dir.is_dir() and any(space_dir.iterdir()) and not _is_bootstrap_stub(space_dir)
+    except OSError:
+        return False
+
+
+def _remove_bootstrap_stub(space_dir: Path) -> None:
+    if _is_bootstrap_stub(space_dir):
+        try:
+            (space_dir / "abac.auto.tfvars").unlink()
+            space_dir.rmdir()
+        except OSError:
+            pass
+
+
+def resolve_space_folders(
+    configured_spaces: list, id_to_name: dict, spaces_dir: Path, extra_names=()
+) -> tuple[list[SpaceFolder], list[str]]:
+    """Pick one generated/spaces/<key>/ folder per agent, or raise SpaceFolderError.
+
+    The key is the sanitized canonical name (an imported agent's title, from
+    genie_space_id_to_name). An earlier version named an imported agent's
+    folder after its raw ID; that folder is kept when it has real content and
+    the title folder doesn't, and it is an error when both have real content.
+    When distinct names sanitize to the same key, every agent in that group
+    gets "<key>--<genie_space_id>" (or "--new_<name hash>" for an agent not
+    created yet), so the choice depends only on identity, never list order; a
+    shared bare folder with real content is an error. Folder names are local
+    to generate/merge only: no Terraform root reads generated/spaces/, so they
+    never affect resource keys (Terraform's own "--" keys are separate).
+    """
+    folders: list[SpaceFolder] = []
+    notes: list[str] = []
+    seen_ids: dict[str, str] = {}
+    for sp in configured_spaces:
+        name = canonical_space_name(sp, id_to_name)
+        if not name:
+            continue
+        space_id = sp.get("genie_space_id") or ""
+        if name in seen_ids:
+            raise SpaceFolderError(
+                f"Genie agents {seen_ids[name] or '(new)'} and {space_id or '(new)'} are both "
+                f"named {name!r}. Give one of them a distinct name in its genie_spaces entry "
+                "(name = \"...\") in env.auto.tfvars, then re-run make generate."
+            )
+        seen_ids[name] = space_id
+        key, stale_key = sanitize_space_key(name), ""
+        if space_id and name != space_id:
+            id_key = sanitize_space_key(space_id)
+            id_real = _has_real_content(spaces_dir / id_key)
+            title_real = _has_real_content(spaces_dir / key)
+            if id_real and title_real:
+                raise SpaceFolderError(
+                    f"generated/spaces/{id_key}/ and generated/spaces/{key}/ both hold per-agent "
+                    f"content for {name!r} ({space_id}). Keep generated/spaces/{key}/: move or merge "
+                    f"anything you still need from generated/spaces/{id_key}/ into it, delete "
+                    f"generated/spaces/{id_key}/, then re-run make generate."
+                )
+            if id_real:
+                notes.append(
+                    f"keeping generated/spaces/{id_key}/ for {name!r} (it has per-agent content)."
+                )
+                key, stale_key = id_key, key
+            else:
+                stale_key = id_key
+        folders.append(SpaceFolder(name, space_id, key, sp.get("config"), stale_key))
+
+    for name in extra_names:
+        if name not in seen_ids:
+            seen_ids[name] = ""
+            folders.append(SpaceFolder(name, "", sanitize_space_key(name), None))
+
+    # Collisions: suffix EVERY member of the group with its stable identity, so
+    # reordering genie_spaces never swaps which agent owns which folder.
+    groups: dict[str, list[SpaceFolder]] = {}
+    for folder in folders:
+        groups.setdefault(folder.key, []).append(folder)
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        if _has_real_content(spaces_dir / key):
+            owners = ", ".join(f"{m.name!r} ({m.space_id or 'new'})" for m in members)
+            targets = ", ".join(f"generated/spaces/{key}--{_identity_suffix(m)}/" for m in members)
+            raise SpaceFolderError(
+                f"generated/spaces/{key}/ has per-agent content but is shared by {owners}. "
+                f"Each now gets its own folder ({targets}). Move the content into the folder "
+                f"of the agent it belongs to, delete generated/spaces/{key}/, then re-run make generate."
+            )
+        for member in members:
+            member.key = f"{key}--{_identity_suffix(member)}"
+            member.stale_keys.append(key)
+    return folders, notes
+
+
+def _identity_suffix(folder: "SpaceFolder") -> str:
+    """Stable per-agent folder suffix: the genie_space_id, else a hash of the
+    (unique) canonical name for an agent that doesn't exist yet."""
+    if folder.space_id:
+        return sanitize_space_key(folder.space_id)
+    return "new_" + hashlib.sha256(folder.name.encode()).hexdigest()[:8]
+
+
+def canonical_space_name(space: dict, id_to_name: dict) -> str:
+    """The name a genie_spaces entry is keyed by (mirrors Terraform's
+    canonical_space_names): its name, else the imported title recorded in
+    genie_space_id_to_name, else its raw genie_space_id."""
+    space_id = space.get("genie_space_id") or ""
+    return space.get("name") or (id_to_name.get(space_id) if space_id else "") or space_id
+
+
+def load_genie_space_id_to_name(tfvars_path: Path) -> dict:
+    """genie_space_id_to_name from a generated abac.auto.tfvars ({} if absent)."""
+    try:
+        import hcl2
+        id_to_name = hcl2.loads(tfvars_path.read_text()).get("genie_space_id_to_name") or {}
+    except Exception:
+        return {}
+    if isinstance(id_to_name, list):
+        id_to_name = id_to_name[0] if id_to_name and isinstance(id_to_name[0], dict) else {}
+    return id_to_name if isinstance(id_to_name, dict) else {}
 
 
 def run_validation(
@@ -7055,6 +7218,17 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict, mode: str = 
     return errors, warnings
 
 
+def champion_genie_next_steps(env_name: str) -> list[str]:
+    """Next steps after the Phase 0 import (`make generate MODE=genie`)."""
+    return [
+        "  Next steps (walkthrough Phase 1):",
+        f"    1. Enable classification on your catalog (Databricks UI, or: make enable-classification ENV={env_name}),",
+        "       review detections, then enable automatic tagging and wait for class.* tags",
+        f"    2. make generate ENV={env_name}",
+        f"    3. make rehearse ENV={env_name} VERIFY_KEY_COLUMN=<key_column>",
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate ABAC configuration from table DDL using AI",
@@ -7290,12 +7464,31 @@ def main():
     elif persisted_groups:
         args.groups = ",".join(persisted_groups)
         groups_source = f"{ACCESS_TIER_GROUPS_SETTING} in {_env_display_path(env_file)}"
+    # Walkthrough advice only behind the explicit template/promote marker;
+    # access_tier_groups alone is a general setting, not a discriminator.
+    champion_flow = follows_walkthrough(env_file)
+    if not args.space:
+        # Fail on per-agent folder conflicts before any model call, not after.
+        try:
+            resolve_space_folders(
+                auth_cfg.get("genie_spaces", []) or [],
+                load_genie_space_id_to_name(Path(args.out_dir) / "abac.auto.tfvars"),
+                Path(args.out_dir) / "spaces",
+            )
+        except SpaceFolderError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
 
     if args.space:
         genie_spaces_cfg_all = auth_cfg.get("genie_spaces", [])
+        assembled_id_to_name = load_genie_space_id_to_name(Path(args.out_dir) / "abac.auto.tfvars")
         for sp in genie_spaces_cfg_all:
-            sp_name = sp.get("name") or sp.get("genie_space_id") or ""
-            if sp_name == args.space or sanitize_space_key(sp_name) == sanitize_space_key(args.space):
+            # Match the configured name, the raw ID, or an imported agent's
+            # title (the key bootstrap_per_space_dirs used for its folder).
+            candidates = {sp.get("name") or "", sp.get("genie_space_id") or "",
+                          canonical_space_name(sp, assembled_id_to_name)} - {""}
+            if any(c == args.space or sanitize_space_key(c) == sanitize_space_key(args.space)
+                   for c in candidates):
                 target_space_cfg = sp
                 break
 
@@ -7303,11 +7496,21 @@ def main():
             print(f"ERROR: No Genie agent named '{args.space}' found in env.auto.tfvars.")
             print("  Available spaces:")
             for sp in genie_spaces_cfg_all:
-                print(f"    - {sp.get('name') or sp.get('genie_space_id') or '(unnamed)'}")
+                print(f"    - {canonical_space_name(sp, assembled_id_to_name) or '(unnamed)'}")
             sys.exit(1)
 
-        space_key = sanitize_space_key(
-            target_space_cfg.get("name") or target_space_cfg.get("genie_space_id") or args.space
+        # Same folder choice as the full-generation bootstrap.
+        try:
+            space_folders, _notes = resolve_space_folders(
+                genie_spaces_cfg_all, assembled_id_to_name, Path(args.out_dir) / "spaces"
+            )
+        except SpaceFolderError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
+        target_name = canonical_space_name(target_space_cfg, assembled_id_to_name)
+        space_key = next(
+            (f.key for f in space_folders if f.name == target_name),
+            sanitize_space_key(target_name or args.space),
         )
         # Redirect output to the per-space directory
         base_out_dir = Path(args.out_dir)
@@ -7805,7 +8008,16 @@ Before you apply, tune for your business roles, security requirements, and Genie
         print(f"    Target schemas: {targets}")
 
     if hcl_block:
-        if args.mode == "genie":
+        if args.mode == "genie" and champion_flow:
+            hcl_header = (
+                "# ============================================================================\n"
+                "# IMPORTED GENIE AGENT CONFIG (walkthrough Phase 0 — genie mode)\n"
+                "# ============================================================================\n"
+                "# Only genie_space_configs is produced in this mode. The protection rules\n"
+                "# are drafted in Phase 1 by: make generate ENV=" + WORK_DIR.name + "\n"
+                "# ============================================================================\n\n"
+            )
+        elif args.mode == "genie":
             hcl_header = (
                 "# ============================================================================\n"
                 "# GENERATED GENIE CONFIG (FIRST DRAFT — genie mode)\n"
@@ -8558,23 +8770,52 @@ Before you apply, tune for your business roles, security requirements, and Genie
             print(f"    3. make validate-generated{env_suffix}")
             print(f"    4. make apply{env_suffix}")
         else:
-            env_name = WORK_DIR.name
-            env_suffix = f" ENV={env_name}" if env_name != "dev" else ""
-            print("  Next steps:")
-            print(f"    1. Review the tuning checklist:")
-            print(f"       {out_dir.resolve()}/TUNING.md")
-            print(f"    2. Review and tune generated files:")
-            if sql_block:
-                print(f"       {out_dir.resolve()}/masking_functions.sql")
-            print(f"       {out_dir.resolve()}/abac.auto.tfvars")
-            print(f"    3. make validate-generated{env_suffix}   (check your changes anytime)")
-            if args.mode == "governance":
-                print(f"    4. make apply-governance{env_suffix}   (applies account + data_access layers only)")
-            elif args.mode == "genie":
-                print(f"    4. make apply-genie{env_suffix}   (applies workspace layer only)")
-            else:
-                print(f"    4. make apply{env_suffix}   (validates, splits shared account/workspace config, runs terraform apply)")
+            for line in generate_next_steps(
+                out_dir.resolve(), args.mode, WORK_DIR.name,
+                has_sql=bool(sql_block), champion_flow=champion_flow,
+            ):
+                print(line)
     print("=" * 60)
+
+
+def generate_next_steps(
+    out_dir: Path, mode: str, env_name: str, *, has_sql: bool, champion_flow: bool
+) -> list[str]:
+    """Next steps printed after a full (non --space, non --promote) generate."""
+    if champion_flow and mode == "genie":
+        return champion_genie_next_steps(env_name)
+    if champion_flow and mode == "full":
+        # Walkthrough Phase 1c -> 1d: rehearse already runs validate-generated +
+        # apply. Prod never rehearses (the Makefile refuses); it certifies.
+        next_cmd = (
+            f"make certify ENV={env_name}" if env_name == "prod"
+            else f"make rehearse ENV={env_name} VERIFY_KEY_COLUMN=<key_column>"
+        )
+        lines = ["  Next steps:", "    1. Review the draft:"]
+        if has_sql:
+            lines.append(f"       {out_dir}/masking_functions.sql")
+        lines += [f"       {out_dir}/abac.auto.tfvars", f"    2. {next_cmd}"]
+        return lines
+    env_suffix = f" ENV={env_name}" if env_name != "dev" else ""
+    lines = [
+        "  Next steps:",
+        "    1. Review the tuning checklist:",
+        f"       {out_dir}/TUNING.md",
+        "    2. Review and tune generated files:",
+    ]
+    if has_sql:
+        lines.append(f"       {out_dir}/masking_functions.sql")
+    lines += [
+        f"       {out_dir}/abac.auto.tfvars",
+        f"    3. make validate-generated{env_suffix}   (check your changes anytime)",
+    ]
+    if mode == "governance":
+        lines.append(f"    4. make apply-governance{env_suffix}   (applies account + data_access layers only)")
+    elif mode == "genie":
+        lines.append(f"    4. make apply-genie{env_suffix}   (applies workspace layer only)")
+    else:
+        lines.append(f"    4. make apply{env_suffix}   (validates, splits shared account/workspace config, runs terraform apply)")
+    return lines
 
 
 if __name__ == "__main__":
