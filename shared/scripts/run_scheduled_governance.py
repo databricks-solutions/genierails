@@ -63,6 +63,17 @@ def _validate_env_layout(env_dir: Path) -> str | None:
     return None
 
 
+def _overlay(src: Path, dst: Path, label: str) -> None:
+    """Copy src onto dst, skipping a source that already is the destination."""
+    dst.mkdir(parents=True, exist_ok=True)
+    if src.resolve() == dst.resolve():
+        # A local run can pass its own envs root as --config-source.
+        print(f"+ {label} config already in place: {dst}", flush=True)
+        return
+    print(f"+ materialize {label} config: {src} -> {dst}", flush=True)
+    shutil.copytree(src, dst, dirs_exist_ok=True, symlinks=True)
+
+
 def _materialize_env_dir(config_source: str, env_dir: Path) -> None:
     """Copy the env configuration from a runtime-visible source into env_dir.
 
@@ -82,20 +93,11 @@ def _materialize_env_dir(config_source: str, env_dir: Path) -> None:
     env_source = src / env_dir.name
     account_source = src / "account"
     if env_source.is_dir() and account_source.is_dir():
-        env_dir.mkdir(parents=True, exist_ok=True)
-        account_dir = env_dir.parent / "account"
-        account_dir.mkdir(parents=True, exist_ok=True)
-        print(f"+ materialize env config: {env_source} -> {env_dir}", flush=True)
-        shutil.copytree(env_source, env_dir, dirs_exist_ok=True, symlinks=True)
-        print(f"+ materialize account config: {account_source} -> {account_dir}",
-              flush=True)
-        shutil.copytree(account_source, account_dir, dirs_exist_ok=True,
-                        symlinks=True)
+        _overlay(env_source, env_dir, "env")
+        _overlay(account_source, env_dir.parent / "account", "account")
         return
 
-    env_dir.mkdir(parents=True, exist_ok=True)
-    print(f"+ materialize env config: {src} -> {env_dir}", flush=True)
-    shutil.copytree(src, env_dir, dirs_exist_ok=True, symlinks=True)
+    _overlay(src, env_dir, "env")
 
 
 def _run(cmd: list[str], cwd: Path) -> int:

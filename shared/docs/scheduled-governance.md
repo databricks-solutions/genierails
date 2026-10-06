@@ -16,7 +16,9 @@ write to the workspace. Existing serverless dependencies are sufficient. The
 config source is required because `envs/` is gitignored. Point it at a
 runtime-visible envs root containing both `account/` and the target environment
 (for example `prod/`) to enable both audits. This gives the rulebook audit the
-promoted account policies without relying on local Terraform state.
+promoted account policies without relying on local Terraform state. To run the
+check locally, run it from the repo root and point it at your own envs root:
+`python3 shared/scripts/run_scheduled_governance.py --env-dir aws/envs/prod --step check --config-source aws/envs`.
 
 On findings, the run fails and its output explains what was found. Open the run
 from the failure notification, then run this from the authoritative GenieRails
