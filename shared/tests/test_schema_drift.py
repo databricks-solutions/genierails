@@ -60,10 +60,15 @@ def test_missing_python_hcl2_exits_2_in_subprocess(tmp_path):
     ["data_access/abac.auto.tfvars", "generated/abac.auto.tfvars"],
 )
 def test_unparseable_existing_tfvars_exits_2_in_subprocess(tmp_path, relative_path):
-    pytest.importorskip(
-        "hcl2",
-        reason="python-hcl2 is required to exercise malformed HCL parsing",
+    clean_env = _clean_subprocess_env(tmp_path)
+    hcl2_probe = subprocess.run(
+        [sys.executable, "-c", "import hcl2"],
+        text=True,
+        capture_output=True,
+        env=clean_env,
     )
+    if hcl2_probe.returncode != 0:
+        pytest.skip("python-hcl2 is not importable in the audit subprocess environment")
     (tmp_path / "env.auto.tfvars").write_text(
         'uc_tables = ["prod.finance.customers"]\nsql_warehouse_id = "warehouse"\n'
     )
@@ -76,7 +81,7 @@ def test_unparseable_existing_tfvars_exits_2_in_subprocess(tmp_path, relative_pa
         cwd=tmp_path,
         text=True,
         capture_output=True,
-        env=_clean_subprocess_env(tmp_path),
+        env=clean_env,
     )
     assert result.returncode == 2
     assert relative_path in result.stderr
