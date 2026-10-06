@@ -706,6 +706,27 @@ tag_policies = [
 #  autofix_tag_policies
 # ===========================================================================
 
+def test_run_validation_real_cli_accepts_tfvars_and_sql_positionals(tmp_path, monkeypatch, capfd):
+    out_dir = tmp_path / "generated"
+    out_dir.mkdir()
+    (out_dir / "abac.auto.tfvars").write_text(
+        'groups = { analysts = { description = "Review regression" } }\n'
+        "tag_policies = []\n"
+        "tag_assignments = []\n"
+        "fgac_policies = []\n"
+        "group_members = {}\n"
+        "genie_space_configs = {}\n"
+    )
+    (out_dir / "masking_functions.sql").write_text(
+        "CREATE FUNCTION mask_review_regression(value STRING) RETURNS STRING RETURN value;\n"
+    )
+    monkeypatch.delenv("VERBOSE", raising=False)
+
+    assert generate_abac.run_validation(out_dir)
+    output = capfd.readouterr().out
+    assert "unrecognized arguments" not in output
+
+
 class TestAutofixTagPolicies:
 
     def _base_hcl(self, allowed_values: str, used_value: str) -> str:

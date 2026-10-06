@@ -16,7 +16,12 @@ def auth_configured(path: Path) -> bool:
 
     def configured(name: str) -> bool:
         value = str(config.get(name, "") or "").strip()
-        return bool(value) and "<" not in value
+        normalized = value.lower().replace("-", "_").replace(" ", "_")
+        placeholders = ("placeholder", "change_me", "changeme", "your_client_id",
+                        "your_workspace_host")
+        return bool(value) and "<" not in value and ">" not in value and not any(
+            marker in normalized for marker in placeholders
+        )
 
     return configured("databricks_client_id") and configured("databricks_workspace_host")
 

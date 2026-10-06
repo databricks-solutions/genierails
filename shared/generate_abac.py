@@ -6797,12 +6797,14 @@ def run_validation(
         print("\n  [SKIP] validate_abac.py not found — skipping validation")
         return True
 
-    cmd = [sys.executable, str(validator), str(tfvars_path),
-           "--summary-label", "generate"]
-    if os.environ.get("VERBOSE") == "1":
-        cmd.append("--verbose")
+    cmd = [sys.executable, str(validator), str(tfvars_path)]
     if sql_path.exists():
         cmd.append(str(sql_path))
+    # Keep both positional paths before options. Python <=3.11 argparse does
+    # not reliably resume an optional positional after parsing options.
+    cmd.extend(["--summary-label", "generate"])
+    if os.environ.get("VERBOSE") == "1":
+        cmd.append("--verbose")
     if countries:
         cmd.extend(["--country", ",".join(countries)])
     if industries:

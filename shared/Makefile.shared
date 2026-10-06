@@ -259,7 +259,7 @@ enable-classification: _guarded-bootstrap _guard-workspace-target ## Apply UC Da
 	@set -o pipefail; LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" "$(ROOT_RUNNER)" data_access "$(ENV)" apply \
 		-parallelism=1 -auto-approve \
 		-target=module.data_access.databricks_data_classification_catalog_config.classification \
-		-compact-warnings 2>&1 | python3 -u "$(SHARED_ROOT)/scripts/filter_target_warnings.py" $(if $(filter 1,$(VERBOSE)),--verbose,)
+		2>&1 | python3 -u "$(SHARED_ROOT)/scripts/filter_target_warnings.py" $(if $(filter 1,$(VERBOSE)),--verbose,)
 	@echo ""
 	@if grep -Eq '^[[:space:]]*enable_auto_tagging[[:space:]]*=[[:space:]]*true' "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null; then \
 		echo "Automatic tagging is on. Wait for class.* tags to appear in Catalog Explorer, then run:"; \
