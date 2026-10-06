@@ -29,6 +29,24 @@ output, the tool pairs each row (by a primary-key column) between a masked and a
 unmasked principal and asserts the masked tier's value differs from the **raw**
 value the unmasked tier sees.
 
+### Choosing the row-pairing key (`VERIFY_KEY_COLUMN`)
+
+The key is how the tool knows two result rows, one per tier, are the *same* row. Pick a column that is:
+
+- **Not sensitive and not masked.** It must read identically for every tier; a masked key can't pair rows. Never pick a column you want protected.
+- **Unique and stable per row**: an ID such as `customer_id`, `order_id` or `account_id`.
+- **Present on the tables you verify.** If your tables don't share one key column, use a [`VERIFY_SPEC`](#explicit-spec---spec) with a key per table.
+
+If you omit it, the column-mask check is **skipped** (row filters are still checked) and the run can still exit 0, so masking has not been proven. Always set it.
+
+Set it once in `envs/<env>/env.auto.tfvars` and `make rehearse` / `make release` / `make verify-access` use it without the flag; `make promote` carries it to prod:
+
+```hcl
+verify_key_column = "customer_id"
+```
+
+A `VERIFY_KEY_COLUMN=` on the command line overrides the saved value.
+
 ### Inconclusive never passes
 
 A verification gate must never report success for something it did not actually
