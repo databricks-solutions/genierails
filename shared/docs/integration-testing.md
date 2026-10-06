@@ -316,7 +316,7 @@ This deletes cloud-specific resources, the workspace, metastore (and all catalog
 
 ## Scenarios
 
-`scripts/run_integration_tests.py` runs 18 live scenarios end-to-end (data setup, generation/apply, assertions, teardown), each isolated. These exercise **topology, import, and promotion** mechanics; most predate the dev-to-prod invariants and do not by themselves prove native-classification / coverage-gate / exposure-gate / derive-assignments — the dev-to-prod **regression suite** above covers those deterministically. (In the dev-to-prod walkthrough, prod enforcement is `derive-assignments` with no LLM, not re-generation.)
+`scripts/run_integration_tests.py` runs 19 live scenarios end-to-end (data setup, generation/apply, assertions, teardown), each isolated. These exercise **topology, import, and promotion** mechanics; most predate the dev-to-prod invariants and do not by themselves prove native-classification / coverage-gate / exposure-gate / derive-assignments — the dev-to-prod **regression suite** above covers those deterministically, and **champion** exercises them live. (In the dev-to-prod walkthrough, prod enforcement is `derive-assignments` with no LLM, not re-generation.)
 
 | Scenario | playbook.md section | What it validates |
 |---|---|---|
@@ -338,6 +338,7 @@ This deletes cloud-specific resources, the workspace, metastore (and all catalog
 | **aus-bank-demo** | — | Australian bank demo — **legacy** LLM-overlay demo (ANZ + financial\_services, import + promote with `dev_bank`→`prod_bank` catalog remap) |
 | **india-bank-demo** | — | India bank demo — **legacy** LLM-overlay demo (IN + financial\_services, Aadhaar/PAN/GSTIN/UPI masking, import + promote with `dev_lakshmi`→`prod_lakshmi`) |
 | **asean-bank-demo** | — | ASEAN bank demo — **legacy** LLM-overlay demo (SEA + financial\_services, 6 nullable national ID columns, multi-currency, import + promote with `dev_asean_bank`→`prod_asean_bank`) |
+| **champion** | [dev\_to\_prod walkthrough](../examples/dev_to_prod/README.md) | The dev → prod champion flow run the way a user runs it, through the real `make` targets only. It imports a Genie agent by ID alone, passes `--groups` once, runs native classification, then `rehearse`, `promote`, `certify`, `release` and `maintain`. It also checks that the template placeholder and a stale certification are both refused. If native auto-tagging has not tagged the tables in time (`CHAMPION_CLASS_TAG_TIMEOUT`, default 1800s), the scenario fails, unless `CHAMPION_SEED_CLASS_TAGS=1` is set to seed the `class.*` tags directly (the run logs loudly when it does) |
 
 ---
 
@@ -408,6 +409,7 @@ make test-industry-overlay
 make test-aus-bank-demo
 make test-india-bank-demo
 make test-asean-bank-demo
+make test-champion
 
 # All targets accept WAREHOUSE_ID= and KEEP_DATA=1
 make test-promote WAREHOUSE_ID=abc123ef KEEP_DATA=1

@@ -61,6 +61,13 @@ Scenarios
                    MODE=genie generation, promotes to prod (graceful skip or remap),
                    applies workspace layer. Asserts no governance artifacts produced.
 
+  champion         The dev → prod CHAMPION flow from shared/examples/dev_to_prod/README.md,
+                   driven only through real make targets: placeholder guard, ID-only
+                   import with --groups once, enable-classification + class.* wait,
+                   generate, rehearse, promote, certify, a stale-certification
+                   release refusal, release, maintain. Set CHAMPION_SEED_CLASS_TAGS=1
+                   to seed class.* tags if native auto-tagging is too slow (logged loudly).
+
   all              Run all scenarios sequentially (default when no --scenario given).
 
 Usage
@@ -97,6 +104,7 @@ Makefile targets (added by this PR)
   make test-abac-only
   make test-multi-space-import
   make test-genie-import-no-abac
+  make test-champion
   make test-all
 """
 
@@ -104,6 +112,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
 import re
 import shutil
@@ -648,7 +657,8 @@ def _needs_account_ops_lock(items: tuple[str, ...]) -> bool:
     """Serialize account-affecting make targets across parallel scenarios."""
     return bool(
         _make_targets(items)
-        & {"apply", "apply-governance", "sync-tags", "wait-tag-policies", "import"}
+        & {"apply", "apply-governance", "sync-tags", "wait-tag-policies", "import",
+           "rehearse", "certify", "release", "maintain"}
     )
 
 
@@ -683,6 +693,8 @@ def _make(
     check: bool = True,
     retries: int = 0,
     retry_delay_seconds: int = 0,
+    capture: bool = False,
+    suffix_account_names: bool = True,
 ) -> subprocess.CompletedProcess:
     """Run make with the given targets/variables.
 
@@ -694,6 +706,12 @@ def _make(
     retry_delay_seconds: seconds to wait between retry attempts.  Useful for
     ``make apply`` retries where Databricks' eventually-consistent ABAC quota
     counter may briefly show a stale value even after cleanup.
+
+    capture: return the combined output in ``result.stdout`` (and echo it)
+    instead of only streaming it, so callers can assert on messages.
+
+    suffix_account_names: set False for flows that consume pre-existing,
+    already-unique groups and canonical tag keys (the champion scenario).
 
     When running against a provisioned test environment (ENVS_DIR != envs/),
     ENV_DIR / SOURCE_ENV_DIR / DEST_ENV_DIR overrides are injected automatically
@@ -729,11 +747,17 @@ def _make(
         # scenario start, NOT here. Running it before every apply would delete
         # tag policies that Phase 1 just created when Phase 2 calls apply.
 
-        run_make = lambda: _run(
-            ["make", "--no-print-directory", *targets_and_vars, *injected],
-            cwd=cwd,
-            check=False,
-        )
+        def run_make() -> subprocess.CompletedProcess:
+            res = _run(
+                ["make", "--no-print-directory", *targets_and_vars, *injected],
+                cwd=cwd,
+                check=False,
+                capture=capture,
+            )
+            if capture and res.stdout:
+                print(res.stdout, end="" if res.stdout.endswith("\n") else "\n")
+            return res
+
         if _needs_account_ops_lock(targets_and_vars):
             with _account_ops_lock(" ".join(_make_targets(targets_and_vars))):
                 result = run_make()
@@ -742,7 +766,7 @@ def _make(
         if result.returncode == 0:
             # After successful generate, suffix account-level names for test isolation
             is_generate = any(t == "generate" or t == "generate-delta" for t in targets_and_vars if "=" not in t)
-            if is_generate and _TEST_SUFFIX:
+            if is_generate and _TEST_SUFFIX and suffix_account_names:
                 env_vars = {v.split("=", 1)[0]: v.split("=", 1)[1]
                             for v in [*targets_and_vars, *injected] if "=" in v}
                 env_name = env_vars.get("ENV", "dev")
@@ -6202,6 +6226,565 @@ genie_spaces = [
 
 
 # ---------------------------------------------------------------------------
+# Scenario: champion — the dev → prod CHAMPION walkthrough, exactly as a user
+# runs it (shared/examples/dev_to_prod/README.md, Phases 0-6)
+# ---------------------------------------------------------------------------
+
+DEV_TO_PROD_TEMPLATE = MODULE_ROOT / "examples" / "dev_to_prod" / "env.auto.tfvars.example"
+# Names the dev catalog like the walkthrough sample does, so promote must
+# rename the space ("(dev_fin.finance)" -> "(prod_fin.finance)") consistently
+# with the remapped genie_space_configs keys (the PR #59 regression).
+CHAMPION_SPACE_TITLE = f"Champion Finance Analytics ({DEV_FIN_CAT}.finance)"
+CHAMPION_KEY_COLUMN = "customer_id"
+CHAMPION_TABLES = ("customers", "transactions", "credit_cards")
+
+# Opt-in only: seed class.* tags directly when native classification has not
+# tagged the footprint within CHAMPION_CLASS_TAG_TIMEOUT seconds. Without it,
+# a timeout fails the scenario — slow or absent native tagging is a finding.
+CHAMPION_SEED_ENV = "CHAMPION_SEED_CLASS_TAGS"
+CHAMPION_TIMEOUT_ENV = "CHAMPION_CLASS_TAG_TIMEOUT"
+CHAMPION_POLL_ENV = "CHAMPION_CLASS_TAG_POLL"
+# (table, column, native class.* tag) — every column audit-schema's PII
+# name pattern flags, so make maintain's forward-drift check can pass.
+CHAMPION_SEED_TAGS = (
+    ("customers", "ssn", "class.us_ssn"),
+    ("customers", "date_of_birth", "class.date_of_birth"),
+    ("customers", "email", "class.email_address"),
+    ("customers", "phone", "class.phone_number"),
+    ("customers", "address", "class.street_address"),
+    ("credit_cards", "card_number", "class.credit_card"),
+    ("credit_cards", "cvv", "class.card_security_code"),
+)
+
+
+def _champion_make(*targets_and_vars: str, **kwargs) -> subprocess.CompletedProcess:
+    """`make ...` from the cloud root with no test-only group/tag-key suffixing.
+
+    The champion flow consumes pre-existing groups whose names are already
+    unique, and its enforcement tag key (gr_treatment) must stay canonical so
+    `make certify`'s derive-assignments output matches the promoted masks.
+    """
+    return _make(*targets_and_vars, suffix_account_names=False, **kwargs)
+
+
+def _champion_phase(number: int, title: str) -> None:
+    _banner(f"champion — step {number}/11: {title}")
+
+
+def _load_tfvars(path: Path) -> dict:
+    _ensure_packages()
+    import hcl2
+    with open(path) as handle:
+        return hcl2.load(handle)
+
+
+def _set_tfvar(path: Path, key: str, hcl_value: str) -> None:
+    """Replace a single-line top-level `key = ...` (or append it), as a user edit."""
+    text = path.read_text()
+    pattern = re.compile(rf"^{re.escape(key)}\s*=.*$", re.MULTILINE)
+    line = f"{key} = {hcl_value}"
+    if pattern.search(text):
+        text = pattern.sub(lambda _m: line, text, count=1)
+    else:
+        text += ("" if text.endswith("\n") else "\n") + line + "\n"
+    path.write_text(text)
+    print(f"  Edited {path.parent.name}/{path.name}: {line}")
+
+
+def _assert_make_refused(
+    result: subprocess.CompletedProcess, needles: tuple[str, ...], label: str,
+) -> None:
+    output = result.stdout or ""
+    if result.returncode == 0:
+        raise AssertionError(f"{label}: expected make to fail, but it exited 0")
+    missing = [n for n in needles if n not in output]
+    if missing:
+        raise AssertionError(
+            f"{label}: make failed (exit {result.returncode}) but its output lacks "
+            f"{missing!r} — wrong failure reason?"
+        )
+    print(f"  {_green('PASS')}  {label}: refused (exit {result.returncode}) with {needles!r}")
+
+
+def _assert_output(result: subprocess.CompletedProcess, needle: str, label: str) -> None:
+    if needle not in (result.stdout or ""):
+        raise AssertionError(f"{label}: expected {needle!r} in make output")
+    print(f"  {_green('PASS')}  {label}: {needle!r}")
+
+
+def _sdk_query(auth_file: Path, sql: str, warehouse_id: str) -> list[list]:
+    """Run one SQL statement and return its rows (raises on failure)."""
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.sql import StatementState
+
+    cfg = _load_auth_cfg(auth_file)
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+    w = WorkspaceClient(
+        host=_s(cfg.get("databricks_workspace_host", "")),
+        client_id=_s(cfg.get("databricks_client_id", "")),
+        client_secret=_s(cfg.get("databricks_client_secret", "")),
+    )
+    r = w.statement_execution.execute_statement(
+        statement=sql, warehouse_id=warehouse_id, wait_timeout="50s",
+    )
+    while r.status and r.status.state in (StatementState.PENDING, StatementState.RUNNING):
+        time.sleep(2)
+        r = w.statement_execution.get_statement(r.statement_id)
+    if r.status and r.status.state != StatementState.SUCCEEDED:
+        err = getattr(r.status, "error", None)
+        raise RuntimeError(f"SQL failed: {getattr(err, 'message', err)}\n  SQL: {sql}")
+    return (r.result.data_array if r.result and r.result.data_array else []) or []
+
+
+def _account_client(auth_file: Path):
+    from databricks.sdk import AccountClient
+
+    cfg = _load_auth_cfg(auth_file)
+    _s = lambda v: (v[0] if isinstance(v, list) else (v or "")).strip()
+    return AccountClient(
+        host=_s(cfg.get("databricks_account_host", "https://accounts.cloud.databricks.com")),
+        account_id=_s(cfg.get("databricks_account_id", "")),
+        client_id=_s(cfg.get("databricks_client_id", "")),
+        client_secret=_s(cfg.get("databricks_client_secret", "")),
+    )
+
+
+def _create_account_groups(auth_file: Path, names: list[str], created: dict[str, str]) -> None:
+    """Create the access-tier groups (stand-ins for IdP-synced groups).
+
+    Each group is recorded in the caller-owned ``created`` as soon as it
+    exists, so a failure part-way through still leaves teardown an exact list.
+    """
+    a = _account_client(auth_file)
+    for name in names:
+        group = a.groups.create(display_name=name)
+        created[name] = group.id
+        print(f"  Created account group {name} (id={group.id})")
+
+
+def _delete_account_groups(auth_file: Path, groups: dict[str, str]) -> None:
+    if not groups:
+        return
+    try:
+        a = _account_client(auth_file)
+    except Exception as exc:
+        print(f"  {_yellow('WARN')} could not reach account to delete groups {sorted(groups)}: {exc}")
+        return
+    for name, group_id in groups.items():
+        try:
+            a.groups.delete(id=group_id)
+            print(f"  Deleted account group {name}")
+        except Exception as exc:
+            print(f"  {_yellow('WARN')} could not delete group {name} (id={group_id}): {exc}")
+
+
+def _account_state_tag_policy_keys() -> set[str]:
+    """Tag policy keys recorded in this run's account-layer Terraform state."""
+    state = ENVS_DIR / "account" / "terraform.tfstate"
+    if not state.exists():
+        return set()
+    try:
+        resources = json.loads(state.read_text()).get("resources", [])
+    except (OSError, ValueError):
+        return set()
+    return {
+        inst.get("attributes", {}).get("tag_key")
+        for res in resources if res.get("type") == "databricks_tag_policy"
+        for inst in res.get("instances", [])
+        if inst.get("attributes", {}).get("tag_key")
+    }
+
+
+def _report_leftover_tag_policies() -> None:
+    """Loudly list tag policies the account destroy left in this run's state.
+
+    Never deletes them directly: only Terraform knows this run created them.
+    """
+    leftover = sorted(_account_state_tag_policy_keys())
+    if not leftover:
+        return
+    bar = "!" * 72
+    print(f"\n{bar}\n  {_red('LEFTOVER')}: the account-layer destroy did not remove "
+          f"{len(leftover)} tag policy/ies still in\n  {ENVS_DIR / 'account' / 'terraform.tfstate'}:\n"
+          + "".join(f"    - {key}\n" for key in leftover)
+          + f"  They were NOT deleted directly. Clean up manually, e.g. "
+          f"make destroy ENV=account.\n{bar}")
+
+
+def _class_tag_rows(auth_file: Path, warehouse_id: str, catalog: str) -> list[list]:
+    tables = ", ".join(f"'{t}'" for t in CHAMPION_TABLES)
+    return _sdk_query(auth_file, f"""\
+SELECT table_name, column_name, tag_name
+FROM system.information_schema.column_tags
+WHERE catalog_name = '{catalog}' AND schema_name = 'finance'
+  AND table_name IN ({tables}) AND lower(tag_name) LIKE 'class.%'
+ORDER BY table_name, column_name, tag_name""", warehouse_id)
+
+
+def _seed_class_tags(auth_file: Path, warehouse_id: str, catalog: str) -> None:
+    bar = "!" * 72
+    print(f"\n{bar}\n  {_yellow(f'{CHAMPION_SEED_ENV}=1')}: SEEDING class.* tags on {catalog} "
+          f"DIRECTLY.\n  Native UC classification / auto-tagging is NOT what produced "
+          f"these tags;\n  this run does not prove the native classifier path.\n{bar}")
+    for table, column, tag in CHAMPION_SEED_TAGS:
+        _sdk_run_sql(
+            auth_file,
+            f"ALTER TABLE {catalog}.finance.{table} ALTER COLUMN {column} "
+            f"SET TAGS ('{tag}' = '')",
+            warehouse_id=warehouse_id,
+        )
+
+
+def _wait_for_class_tags(auth_file: Path, warehouse_id: str, catalog: str) -> None:
+    """Poll (bounded) until native auto-tagging lands class.* tags and settles."""
+    timeout = int(os.environ.get(CHAMPION_TIMEOUT_ENV, "1800"))
+    poll = max(10, int(os.environ.get(CHAMPION_POLL_ENV, "60")))
+    seed = os.environ.get(CHAMPION_SEED_ENV, "").strip().lower() in ("1", "true", "yes")
+    _step(f"Waiting up to {timeout}s for native class.* tags on {catalog}.finance "
+          f"(poll {poll}s; seeding {'opted in' if seed else 'off'})")
+    deadline = time.time() + timeout
+    last = -1
+    while True:
+        try:
+            rows = _class_tag_rows(auth_file, warehouse_id, catalog)
+        except Exception as exc:
+            print(f"  {_yellow('WARN')} class tag read failed (will retry): {exc}")
+            rows = []
+        count = len(rows)
+        print(f"  {count} class.* tag(s) on {catalog}.finance")
+        # Settled: tags present and unchanged across two consecutive polls.
+        if count and count == last:
+            for table, column, tag in rows:
+                print(f"    {catalog}.finance.{table}.{column}: {tag}")
+            return
+        last = count
+        if time.time() >= deadline:
+            break
+        time.sleep(poll)
+    if count:
+        # Still arriving at the deadline; proceed with what landed.
+        print(f"  {_yellow('WARN')} class.* tags still changing at the deadline; continuing with {count}")
+        return
+    if not seed:
+        raise AssertionError(
+            f"Native classification produced no class.* tags on {catalog}.finance within "
+            f"{timeout}s after make enable-classification with enable_auto_tagging = true. "
+            f"This is a real finding (scan not run, auto-tagging not effective, or the SP "
+            f"cannot read system.information_schema.column_tags). Raise "
+            f"{CHAMPION_TIMEOUT_ENV}, or set {CHAMPION_SEED_ENV}=1 to seed class.* tags "
+            f"and exercise the rest of the flow."
+        )
+    _seed_class_tags(auth_file, warehouse_id, catalog)
+    rows = _class_tag_rows(auth_file, warehouse_id, catalog)
+    if not rows:
+        raise AssertionError(f"Seeded class.* tags are not visible on {catalog}.finance")
+    print(f"  {len(rows)} seeded class.* tag(s) visible on {catalog}.finance")
+
+
+def _enable_classification_with_auto_tagging(env: str) -> None:
+    """README 1a/1b (as code): scan first, then opt in to auto-tagging and re-run."""
+    env_file = ENVS_DIR / env / "env.auto.tfvars"
+    _step(f"make enable-classification ENV={env}  (scan only; auto-tagging off)")
+    _champion_make("enable-classification", f"ENV={env}")
+    _set_tfvar(env_file, "enable_auto_tagging", "true")
+    _step(f"make enable-classification ENV={env}  (enable_auto_tagging = true)")
+    _champion_make("enable-classification", f"ENV={env}")
+
+
+def _get_genie_space_via_api(auth_file: Path, space_id: str) -> dict:
+    from databricks.sdk import WorkspaceClient
+
+    _configure_sdk_env(_load_auth_cfg(auth_file))
+    w = WorkspaceClient(product="genierails-test-runner", product_version="0.1.0")
+    return w.api_client.do("GET", f"/api/2.0/genie/spaces/{space_id}")
+
+
+def _snapshot_files(*paths: Path) -> dict[Path, bytes | None]:
+    return {p: (p.read_bytes() if p.exists() else None) for p in paths}
+
+
+def scenario_champion(
+    auth_file: Path,
+    warehouse_id: str,
+    keep_data: bool,
+    fresh_env: bool = False,
+) -> None:
+    """Dev → prod CHAMPION flow, driven only through the real make targets.
+
+    Follows shared/examples/dev_to_prod/README.md (Phases 0-4) and the
+    `make release` / `make maintain` Phases 5-6:
+
+       1. Setup: dev_fin + prod_fin fixtures, two access-tier account groups,
+          a curated dev Genie agent via the Genie API; make setup ENV=dev; copy
+          the walkthrough template; set only genie_space_id + sql_warehouse_id.
+       2. Negative: with the template placeholder still present, make generate
+          ENV=dev MODE=genie fails fast with the placeholder message.
+       3. make generate ENV=dev MODE=genie GENERATE_ARGS='--groups "..."' once;
+          tables discovered from the agent alone; access_tier_groups persisted.
+       4. make enable-classification ENV=dev (+ auto-tagging), wait for class.*.
+       5. make generate ENV=dev (no --groups); make rehearse ENV=dev
+          VERIFY_KEY_COLUMN=...; persist verify_key_column in dev.
+       6. make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=...;
+          assert the promoted prod env; fill prod auth + sql_warehouse_id.
+       7. make enable-classification ENV=prod (+ auto-tagging), wait; make
+          certify ENV=prod; receipt written, no lock left.
+       8. Negative: touch an enforcement input; make release ENV=prod refuses
+          as stale and applies nothing; revert; make certify ENV=prod again.
+       9. make release ENV=prod VERIFY_KEY_COLUMN=...; gate persisted open,
+          prod Genie agent exists, verify-access ALL EFFECTIVE.
+      10. make maintain ENV=prod; receipt renewed, gate stays open.
+      11. Teardown (always, unless --keep-data).
+    """
+    _banner("Scenario: champion — dev → prod CHAMPION flow (setup → certify → release → maintain)")
+    dev_env, prod_env = "dev", "prod"
+    dev_dir, prod_dir = ENVS_DIR / dev_env, ENVS_DIR / prod_env
+    token = _TEST_SUFFIX or os.urandom(3).hex()
+    # Most- to least-privileged. Lowercase so _force_delete_groups (Title_Case
+    # LLM names) never touches another run's champion groups.
+    tier_groups = [f"champion_full_{token}", f"champion_analyst_{token}"]
+    groups_arg = ",".join(tier_groups)
+    catalog_map = f"{DEV_FIN_CAT}={PROD_FIN_CAT}"
+    dev_tables = [f"{DEV_FIN_CAT}.finance.{t}" for t in CHAMPION_TABLES]
+    prod_tables = [f"{PROD_FIN_CAT}.finance.{t}" for t in CHAMPION_TABLES]
+
+    _ensure_packages()
+    created_groups: dict[str, str] = {}
+    dev_space_id = ""
+    resolved_wh = warehouse_id
+    try:
+        # ── 1. Setup ─────────────────────────────────────────────────────────
+        _champion_phase(1, "setup — fixtures, groups, curated dev Genie agent, make setup, template")
+        _preamble_cleanup(dev_env, prod_env, fresh_env=fresh_env)
+        # The receipt/lock live in generated/, which preamble cleanup keeps.
+        for env_dir in (dev_dir, prod_dir):
+            for rel in (".certified.json", ".certified.pending.json", ".governance.lock"):
+                (env_dir / "generated" / rel).unlink(missing_ok=True)
+            (env_dir / "data_access" / "discovered_uc_tables.auto.tfvars").unlink(missing_ok=True)
+            (env_dir / "env.auto.tfvars").unlink(missing_ok=True)
+
+        _step("Creating dev_fin + prod_fin fixture catalogs (sensitive columns)")
+        resolved_wh = _setup_data(auth_file, "--prod", warehouse_id=warehouse_id) or warehouse_id
+        resolved_wh = _get_or_find_warehouse(auth_file, resolved_wh)
+
+        _step(f"Creating access-tier account groups (IdP stand-ins): {tier_groups}")
+        _create_account_groups(auth_file, tier_groups, created_groups)
+
+        _step("Creating the curated dev Genie agent via the Genie API")
+        dev_space_id = _create_genie_space_via_api(
+            auth_file, title=CHAMPION_SPACE_TITLE, tables=dev_tables, warehouse_id=resolved_wh,
+        )
+
+        _step("make setup ENV=dev")
+        _champion_make("setup", f"ENV={dev_env}")
+        dev_env_file = dev_dir / "env.auto.tfvars"
+        shutil.copy2(DEV_TO_PROD_TEMPLATE, dev_env_file)
+        print(f"  Copied {DEV_TO_PROD_TEMPLATE.relative_to(MODULE_ROOT.parent)} -> envs/{dev_env}/env.auto.tfvars")
+
+        # ── 2. Negative: placeholder guard ───────────────────────────────────
+        _champion_phase(2, "negative — template placeholder must fail fast")
+        result = _champion_make(
+            "generate", f"ENV={dev_env}", "MODE=genie", check=False, capture=True,
+        )
+        _assert_make_refused(
+            result, ("<your-genie-space-id>", "with your Genie agent ID"),
+            "make generate ENV=dev MODE=genie with the template placeholder",
+        )
+        if (dev_dir / "data_access" / "discovered_uc_tables.auto.tfvars").exists():
+            raise AssertionError("placeholder run wrote discovered_uc_tables.auto.tfvars")
+
+        # Only the edits Phase 0 asks for: the agent ID and the warehouse.
+        text = dev_env_file.read_text()
+        if text.count('"<your-genie-space-id>"') != 1:
+            raise AssertionError("walkthrough template no longer has exactly one genie_space_id placeholder")
+        dev_env_file.write_text(text.replace('"<your-genie-space-id>"', f'"{dev_space_id}"'))
+        _set_tfvar(dev_env_file, "sql_warehouse_id", f'"{resolved_wh}"')
+        dev_cfg = _load_tfvars(dev_env_file)
+        if dev_cfg.get("uc_tables") or any(s.get("uc_tables") for s in dev_cfg.get("genie_spaces", [])):
+            raise AssertionError("dev env.auto.tfvars must not declare uc_tables (ID-only discovery)")
+
+        # ── 3. Import the agent; --groups once ───────────────────────────────
+        _champion_phase(3, "make generate ENV=dev MODE=genie --groups (once)")
+        _champion_make(
+            "generate", f"ENV={dev_env}", "MODE=genie",
+            f'GENERATE_ARGS=--groups "{groups_arg}"', retries=3,
+        )
+        discovered = dev_dir / "data_access" / "discovered_uc_tables.auto.tfvars"
+        _assert_file_exists(discovered, "tables discovered from the Genie agent alone")
+        found = set(_load_tfvars(discovered).get("discovered_uc_tables") or [])
+        if found != set(dev_tables):
+            raise AssertionError(f"discovered_uc_tables {sorted(found)} != agent tables {sorted(dev_tables)}")
+        print(f"  {_green('PASS')}  discovered_uc_tables == the agent's {len(dev_tables)} tables")
+        persisted = _load_tfvars(dev_env_file).get("access_tier_groups")
+        if persisted != tier_groups:
+            raise AssertionError(f"access_tier_groups not persisted in dev: {persisted!r} != {tier_groups!r}")
+        print(f"  {_green('PASS')}  access_tier_groups persisted in envs/{dev_env}/env.auto.tfvars")
+
+        # ── 4. Dev classification ────────────────────────────────────────────
+        _champion_phase(4, "make enable-classification ENV=dev + wait for class.* tags")
+        _enable_classification_with_auto_tagging(dev_env)
+        _wait_for_class_tags(auth_file, resolved_wh, DEV_FIN_CAT)
+
+        # ── 5. Draft rules + rehearse ────────────────────────────────────────
+        _champion_phase(5, "make generate ENV=dev (no --groups) + make rehearse ENV=dev")
+        _champion_make("generate", f"ENV={dev_env}", retries=3)
+        gen_abac = dev_dir / "generated" / "abac.auto.tfvars"
+        _assert_file_exists(gen_abac, "dev generated/abac.auto.tfvars")
+        for group in tier_groups:
+            _assert_contains(gen_abac, group, "persisted access tier used without --groups")
+        _assert_contains(gen_abac, "gr_treatment", "native-derived gr_treatment enforcement key")
+
+        result = _champion_make(
+            "rehearse", f"ENV={dev_env}", f"VERIFY_KEY_COLUMN={CHAMPION_KEY_COLUMN}",
+            capture=True, retries=1, retry_delay_seconds=120,
+        )
+        _assert_output(result, "RESULT: ALL EFFECTIVE", "dev rehearse verify-access")
+        _assert_output(result, "[PASS] column-mask", "dev masking proven by effect")
+        if _load_tfvars(dev_env_file).get("business_access_enabled") is not False:
+            raise AssertionError("rehearse must not persist business_access_enabled in dev")
+        _set_tfvar(dev_env_file, "verify_key_column", f'"{CHAMPION_KEY_COLUMN}"')
+
+        # ── 6. Promote ───────────────────────────────────────────────────────
+        _champion_phase(6, f"make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP={catalog_map}")
+        _champion_make(
+            "promote", f"SOURCE_ENV={dev_env}", f"DEST_ENV={prod_env}",
+            f"DEST_CATALOG_MAP={catalog_map}",
+        )
+        prod_env_file = prod_dir / "env.auto.tfvars"
+        prod_cfg = _load_tfvars(prod_env_file)
+        checks = {
+            "access_tier_groups": prod_cfg.get("access_tier_groups") == tier_groups,
+            "remapped catalog": set(prod_cfg.get("uc_tables") or []) == set(prod_tables),
+            "no dev catalog": DEV_FIN_CAT not in prod_env_file.read_text(),
+            "verify_key_column": prod_cfg.get("verify_key_column") == CHAMPION_KEY_COLUMN,
+            "business_access_enabled = false": prod_cfg.get("business_access_enabled") is False,
+        }
+        bad = [name for name, ok in checks.items() if not ok]
+        if bad:
+            raise AssertionError(f"promoted prod env.auto.tfvars is wrong ({bad}):\n{prod_env_file.read_text()}")
+        print(f"  {_green('PASS')}  prod env.auto.tfvars: {', '.join(checks)}")
+        prod_names = [s.get("name") for s in prod_cfg.get("genie_spaces") or []]
+        expected_name = CHAMPION_SPACE_TITLE.replace(f"{DEV_FIN_CAT}.", f"{PROD_FIN_CAT}.")
+        if prod_names != [expected_name]:
+            raise AssertionError(
+                f"promoted Genie space name {prod_names!r} != {[expected_name]!r} "
+                "(must be renamed like the remapped genie_space_configs keys)"
+            )
+        print(f"  {_green('PASS')}  prod Genie space renamed to {expected_name!r}")
+
+        _step("Filling prod auth (same workspace/SP) and sql_warehouse_id")
+        _copy_auth(dev_env, prod_env)
+        _set_tfvar(prod_env_file, "sql_warehouse_id", f'"{resolved_wh}"')
+
+        # ── 7. Prod classification + certify ─────────────────────────────────
+        _champion_phase(7, "make enable-classification ENV=prod + wait; make certify ENV=prod")
+        _enable_classification_with_auto_tagging(prod_env)
+        _wait_for_class_tags(auth_file, resolved_wh, PROD_FIN_CAT)
+        _force_account_reapply("champion prod certify")
+        _champion_make("certify", f"ENV={prod_env}", retries=1, retry_delay_seconds=120)
+        receipt = prod_dir / "generated" / ".certified.json"
+        lock = prod_dir / "generated" / ".governance.lock"
+        _assert_file_exists(receipt, "prod certification receipt")
+        certified = json.loads(receipt.read_text())
+        if certified.get("certified_by") != "certify" or certified.get("env") != prod_env:
+            raise AssertionError(f"unexpected receipt metadata: {certified}")
+        if lock.exists():
+            raise AssertionError(f"certify left {lock} behind")
+        print(f"  {_green('PASS')}  no governance lock left after certify")
+
+        # ── 8. Negative: stale certification ─────────────────────────────────
+        _champion_phase(8, "negative — make release ENV=prod refuses a stale certification")
+        # env.auto.tfvars is hashed semantically (a comment is not a change), so
+        # touch a byte-hashed enforcement input: the promoted masking SQL.
+        probe = prod_dir / "generated" / "masking_functions.sql"
+        original = probe.read_bytes()
+        guarded = _snapshot_files(
+            prod_env_file,
+            prod_dir / "terraform.tfstate",
+            prod_dir / "data_access" / "terraform.tfstate",
+            ENVS_DIR / "account" / "terraform.tfstate",
+        )
+        try:
+            probe.write_bytes(original + b"\n-- champion: post-certify edit\n")
+            result = _champion_make(
+                "release", f"ENV={prod_env}", f"VERIFY_KEY_COLUMN={CHAMPION_KEY_COLUMN}",
+                check=False, capture=True,
+            )
+        finally:
+            probe.write_bytes(original)
+        _assert_make_refused(
+            result,
+            ("config changed since certification", "generated/masking_functions.sql",
+             f"re-run make certify ENV={prod_env}"),
+            "make release ENV=prod after a post-certify edit",
+        )
+        changed = [str(p.relative_to(ENVS_DIR)) for p, before in guarded.items()
+                   if (p.read_bytes() if p.exists() else None) != before]
+        if changed or list(prod_dir.glob(".genie_space_id*")) or lock.exists():
+            raise AssertionError(f"refused release still changed state: {changed or 'genie id / lock'}")
+        print(f"  {_green('PASS')}  nothing applied: gate, Terraform state and Genie agent untouched")
+        _step("Re-certifying after reverting the edit")
+        _champion_make("certify", f"ENV={prod_env}", retries=1, retry_delay_seconds=120)
+        _assert_file_exists(receipt, "prod certification receipt (re-certified)")
+
+        # ── 9. Release ───────────────────────────────────────────────────────
+        _champion_phase(9, "make release ENV=prod VERIFY_KEY_COLUMN=...")
+        result = _champion_make(
+            "release", f"ENV={prod_env}", f"VERIFY_KEY_COLUMN={CHAMPION_KEY_COLUMN}", capture=True,
+        )
+        _assert_output(result, "=== Release complete (prod) ===", "release completed")
+        _assert_output(result, "RESULT: ALL EFFECTIVE", "prod verify-access")
+        _assert_output(result, "[PASS] column-mask", "prod masked for unprivileged, raw for authorized")
+        if _load_tfvars(prod_env_file).get("business_access_enabled") is not True:
+            raise AssertionError("release did not persist business_access_enabled = true")
+        print(f"  {_green('PASS')}  business_access_enabled = true persisted in prod")
+        prod_ids = sorted(prod_dir.glob(".genie_space_id*"))
+        if not prod_ids:
+            raise AssertionError("release created no prod Genie agent (.genie_space_id_* missing)")
+        prod_space_id = prod_ids[0].read_text().strip()
+        space = _get_genie_space_via_api(auth_file, prod_space_id)
+        if space.get("space_id") != prod_space_id or prod_space_id == dev_space_id:
+            raise AssertionError(f"prod Genie agent {prod_space_id} not found via the Genie API: {space}")
+        print(f"  {_green('PASS')}  prod Genie agent exists: {prod_space_id} ({space.get('title')})")
+        if lock.exists():
+            raise AssertionError(f"release left {lock} behind")
+
+        # ── 10. Maintain ─────────────────────────────────────────────────────
+        _champion_phase(10, "make maintain ENV=prod")
+        before = json.loads(receipt.read_text())["certified_at"]
+        _champion_make("maintain", f"ENV={prod_env}")
+        renewed = json.loads(receipt.read_text())
+        certified_at = renewed.get("certified_at")
+        if renewed.get("certified_by") != "maintain" or certified_at == before:
+            raise AssertionError(f"maintain did not renew the receipt: {renewed}")
+        print(f"  {_green('PASS')}  receipt renewed by maintain at {certified_at}")
+        if _load_tfvars(prod_env_file).get("business_access_enabled") is not True:
+            raise AssertionError("maintain changed business_access_enabled")
+        print(f"  {_green('PASS')}  business_access_enabled stays true after maintain")
+        if lock.exists():
+            raise AssertionError(f"maintain left {lock} behind")
+
+        print(f"\n  {_green(_bold('PASSED'))}  champion")
+    finally:
+        # ── 11. Teardown ─────────────────────────────────────────────────────
+        _champion_phase(11, "teardown")
+        if keep_data:
+            print(f"  {_yellow('KEEP')}  --keep-data: leaving envs, catalogs, groups and "
+                  f"Genie agent {dev_space_id or '(none)'} in place")
+        else:
+            # Tag policies are removed only by destroying this run's own
+            # account-layer Terraform state; any it leaves behind are reported.
+            _try_destroy(prod_env)
+            _try_destroy(dev_env)
+            _try_destroy_account()
+            _report_leftover_tag_policies()
+            if dev_space_id:
+                _delete_genie_space_via_api(auth_file, dev_space_id)
+            _delete_account_groups(auth_file, created_groups)
+            _teardown_data("--teardown", "--teardown-prod", auth_file=auth_file,
+                           warehouse_id=resolved_wh)
+
+
+# ---------------------------------------------------------------------------
 # Scenario registry
 # ---------------------------------------------------------------------------
 
@@ -6224,6 +6807,7 @@ SCENARIOS: dict[str, tuple[str, Callable]] = {
     "aus-bank-demo": ("Australian bank demo — dev-to-prod walkthrough (ANZ + financial_services, import + promote)", scenario_aus_bank_demo),
     "india-bank-demo": ("India bank demo — dev-to-prod walkthrough (IN + financial_services, import + promote)", scenario_india_bank_demo),
     "asean-bank-demo": ("ASEAN bank demo — dev-to-prod walkthrough (SEA + financial_services, import + promote)", scenario_asean_bank_demo),
+    "champion": ("Dev → prod CHAMPION flow via make: generate → rehearse → promote → certify → release → maintain", scenario_champion),
 }
 
 

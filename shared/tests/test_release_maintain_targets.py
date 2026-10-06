@@ -157,6 +157,48 @@ def test_dirty_repo_enforcement_input_makes_receipt_stale(tmp_path, monkeypatch)
     assert "repo:treatment_config.json" in reason
 
 
+def test_run_logs_written_after_certify_do_not_invalidate_receipt(tmp_path, monkeypatch):
+    # run_parallel_tests.py writes shared/scripts/logs/<suite>/<scenario>.log as
+    # each scenario finishes, i.e. during another scenario's certify -> release.
+    repo = tmp_path / "shared"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "validate_abac.py").write_text("# gate\n")
+    monkeypatch.setattr(cr, "REPO_INPUT_ROOT", repo)
+    env_dir = _env_dir(tmp_path)
+    cr.write_receipt(env_dir, "certify")
+
+    log_dir = repo / "scripts" / "logs" / "aws_20261006_101500"
+    log_dir.mkdir(parents=True)
+    (log_dir / "quickstart.abc123.log").write_text("# Scenario: quickstart\n")
+    (log_dir / "promote.provision.log").write_text("# Provision FAILED\n")
+    assert cr.check_receipt(env_dir)[0]
+
+
+@pytest.mark.parametrize("rel", [
+    "modules/x/logs/a.tf",            # an input under a differently located logs/
+    "modules/x/logs/policy.sql",
+    "logs/a.tf",
+    "scripts/debug.log",              # a .log outside scripts/logs/
+    "modules/x/apply.log",
+    "scripts/logs/aws_1/notes.tf",    # non-.log file inside the run-log dir
+])
+def test_only_run_log_files_under_scripts_logs_are_excluded(tmp_path, monkeypatch, rel):
+    repo = tmp_path / "shared"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "validate_abac.py").write_text("# gate\n")
+    target = repo / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("x = 1\n")
+    monkeypatch.setattr(cr, "REPO_INPUT_ROOT", repo)
+    env_dir = _env_dir(tmp_path)
+    cr.write_receipt(env_dir, "certify")
+
+    target.write_text("x = 2\n")
+    current, reason = cr.check_receipt(env_dir)
+    assert not current
+    assert f"repo:{rel}" in reason
+
+
 def test_real_repo_inputs_cover_gate_code_and_registries():
     names = {p.relative_to(cr.SHARED_ROOT).as_posix() for p in cr.repo_input_files()}
     assert {
