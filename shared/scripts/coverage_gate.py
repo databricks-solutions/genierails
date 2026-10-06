@@ -240,6 +240,87 @@ def write_result(path: Path, record: dict) -> None:
         raise
 
 
+def _failed(gate_path: Path, record: dict, inputs: dict, env_name: str, reason: str) -> int:
+    """Record a failed gate. Keeping or revoking SELECT may still proceed.
+
+    Terraform's own needs_gate (coverage_gate_inputs) is false when every
+    planned grant already exists with unchanged protection, which is exactly
+    when the table_access precondition doesn't need a pass. Then the change
+    can only keep or revoke SELECT, so a failing gate (e.g. Unity Catalog
+    unreachable) must not stop it. Anything else, or an older Terraform
+    output without needs_gate, stops here.
+    """
+    record.update(status="fail", reason=reason)
+    write_result(gate_path, record)
+    if inputs.get("needs_gate") is False:
+        print(f"WARNING: coverage gate FAILED for data_access:{env_name}: {reason}\n"
+              "  Proceeding only because this change adds no SELECT grant and changes no "
+              "protection (tags, policies, masks, DDL) of the grants already in place; it "
+              "can only keep or revoke access. Fix the gate before opening anything.",
+              file=sys.stderr)
+        return 0
+    print(f"coverage gate FAILED for data_access:{env_name}: {reason}\n"
+          "  Business SELECT stays closed. Fix the errors above, then re-run the same make command.",
+          file=sys.stderr)
+    return 1
+
+
+CAN_RUN_EXPRESSION = (
+    "base64encode(jsonencode({"
+    "enabled = var.business_access_enabled, "
+    "groups = module.workspace.genie_space_acls_groups, "
+    "blocker = local.genie_exposure_blocker, "
+    "widening = local.genie_space_can_run_widening, "
+    "missing = local.genie_space_missing_grants}))"
+)
+
+
+def can_run_check(env_dir: Path, env_name: str, runner: Path, apply_flags: str) -> int:
+    """Mirror the workspace CAN_RUN precondition before make applies the layer.
+
+    Asks Terraform (terraform console on the workspace root) which agents'
+    ACLs add CAN_RUN groups beyond what the last apply left in place. While
+    exposure is blocked, those are refused here; keeping, shrinking or
+    clearing ACLs proceeds, so revocation never waits on the gate.
+    """
+    result = subprocess.run(
+        [str(runner), "workspace", env_name, "console", *console_flags(apply_flags)],
+        input=CAN_RUN_EXPRESSION + "\n",
+        env={**os.environ, "LAYER_ENV_DIR": str(env_dir)},
+        text=True, capture_output=True,
+    )
+    if result.returncode != 0:
+        raise GateError("terraform console could not evaluate the workspace CAN_RUN check:\n"
+                        + (result.stderr or result.stdout).strip())
+    try:
+        line = [l.strip() for l in result.stdout.splitlines() if l.strip()][-1]
+        if not (line.startswith('"') and line.endswith('"')):
+            raise ValueError(line)
+        state = json.loads(base64.b64decode(line[1:-1], validate=True))
+        enabled, groups = state["enabled"], state["groups"]
+        blocker, widening, missing = state["blocker"], state["widening"], state["missing"]
+    except (IndexError, ValueError, KeyError, TypeError) as exc:
+        raise GateError(f"unexpected terraform console output: {exc}") from exc
+    if not enabled:
+        return 0
+    refused = {
+        key: widening.get(key, ["unknown"])
+        for key, csv in groups.items()
+        if csv and widening.get(key, ["unknown"]) and (blocker or missing.get(key, ["unknown"]))
+    }
+    if refused:
+        reason = blocker or "the data_access state lacks the SELECT grants those groups need"
+        details = "; ".join(f"{key}: +{', '.join(added)}" for key, added in sorted(refused.items()))
+        print(f"Genie CAN_RUN blocked for workspace:{env_name}: these ACLs add groups ({details}) "
+              f"while {reason}.\n  Removing or keeping CAN_RUN would apply; fix the coverage gate "
+              "(make apply / make apply-governance) before opening it.", file=sys.stderr)
+        return 1
+    if blocker:
+        print(f"WARNING: Genie exposure is blocked for workspace:{env_name} ({blocker}); applying "
+              "only ACLs that keep, shrink or clear the CAN_RUN already in place.", file=sys.stderr)
+    return 0
+
+
 def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbose: bool) -> int:
     layer_dir = env_dir / DATA_ACCESS_SUBDIR
     tfvars = layer_dir / "abac.auto.tfvars"
@@ -300,17 +381,11 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
               file=sys.stderr)
         return 1
     if validation.returncode != 0:
-        record.update(status="fail", reason="validate_abac.py --coverage-gate failed")
-        write_result(gate_path, record)
-        print(f"coverage gate FAILED for data_access:{env_name}; business SELECT stays closed. "
-              "Fix the errors above, then re-run the same make command.", file=sys.stderr)
-        return 1
+        return _failed(gate_path, record, inputs, env_name,
+                       "validate_abac.py --coverage-gate failed (see the report above)")
     refreshed_at, detail = live_refresh(env_dir, tfvars)
     if refreshed_at is None:
-        record.update(status="fail", reason=detail)
-        write_result(gate_path, record)
-        print(f"coverage gate FAILED for data_access:{env_name}: {detail}", file=sys.stderr)
-        return 1
+        return _failed(gate_path, record, inputs, env_name, detail)
     print(f"  Live refresh ({detail}) at {refreshed_at}")
     record.update(status="pass", refreshed_at=refreshed_at)
     write_result(gate_path, record)
@@ -321,6 +396,7 @@ def invalidate(env_dir: Path, reason: str) -> None:
     """Mark the recorded result failed (a live refresh is starting or failed)."""
     path = env_dir / DATA_ACCESS_SUBDIR / GATE_FILENAME
     if not path.exists():
+        (env_dir / REFRESH_RELPATH).unlink(missing_ok=True)
         return
     try:
         record = json.loads(path.read_text())
@@ -331,6 +407,7 @@ def invalidate(env_dir: Path, reason: str) -> None:
     record.update(status="fail", reason=reason)
     record.pop("refreshed_at", None)
     write_result(path, record)
+    (env_dir / REFRESH_RELPATH).unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -345,10 +422,17 @@ def main(argv: list[str] | None = None) -> int:
     derive = sub.add_parser("needs-derive", help="print the live refresh make must run first: full, ddl or none")
     derive.add_argument("--env-dir", required=True, type=Path)
     derive.add_argument("--apply-flags", default="")
-    stale = sub.add_parser("invalidate", help="mark the recorded result failed before a live refresh")
+    stale = sub.add_parser("invalidate", help="mark the recorded result failed (and drop the refresh record) before a live refresh")
     stale.add_argument("--env-dir", required=True, type=Path)
+    check = sub.add_parser("can-run-check", help="refuse a workspace apply that opens or widens CAN_RUN while exposure is blocked")
+    check.add_argument("--env-dir", required=True, type=Path)
+    check.add_argument("--env-name", required=True)
+    check.add_argument("--runner", type=Path, default=RUNNER)
+    check.add_argument("--apply-flags", default="")
     args = parser.parse_args(argv)
     try:
+        if args.command == "can-run-check":
+            return can_run_check(args.env_dir.resolve(), args.env_name, args.runner, args.apply_flags)
         if args.command == "invalidate":
             invalidate(args.env_dir, "a live refresh of tags/DDL started and has not been gated since")
             return 0

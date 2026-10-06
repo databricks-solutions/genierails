@@ -778,7 +778,7 @@ def test_workspace_root_refuses_can_run_without_the_spaces_grants(
         if refused:
             assert result.returncode != 0
             assert "Resource precondition failed" in output
-            assert "Genie CAN_RUN for Sales is blocked" in output
+            assert "Opening Genie CAN_RUN for Sales to analysts is blocked" in output
             assert refused in output
         else:
             assert result.returncode == 0, output
@@ -814,28 +814,211 @@ def test_apply_genie_refreshes_and_regates_before_the_workspace_apply():
     assert "LAYER=data_access" not in body
 
 
-def test_make_apply_genie_refreshes_and_never_opens_can_run_on_a_failed_gate(env_dir, stub_runner, tmp_path, monkeypatch):
-    (env_dir / "env.auto.tfvars").write_text(f'uc_tables = ["{TABLE}"]\nbusiness_access_enabled = true\n')
-    (env_dir / "abac.auto.tfvars").write_text("# workspace layer present\n")
+
+# ── Revocation never waits on the gate (review #3, blocker 1) ────────────────
+
+_APPLY_STUB = """#!/bin/sh
+# Real terraform for console (so Terraform's own expressions decide); the
+# workspace and data_access applies/plans/imports are recorded, not run.
+case "$1 $3" in
+  "workspace console"|"data_access console") exec {real} "$@" ;;
+esac
+echo "$1 $2 $3" >> {log}
+exit 0
+"""
+
+
+# The import and Genie-adopt steps of _apply-layer call live Databricks APIs;
+# stand them in with no-ops (the decision under test happens before them).
+_OFFLINE_STEPS = ["IMPORT_EXISTING_SCRIPT=true", f"GENIE_ADOPT_PREFLIGHT_SCRIPT={SHARED / 'tests' / '__init__.py'}"]
+
+_GATE_OUTPUT_TYPE = ["object", {
+    "business_access_enabled": "bool", "fingerprint": "string", "status": "string",
+    "max_age": "string", "protection_fingerprint": "string", "table_grant_count": "number",
+}]
+
+
+def _ws_state(groups):
+    return json.dumps({"version": 4, "outputs": {}, "resources": [{
+        "module": "module.workspace", "mode": "managed", "type": "null_resource",
+        "name": "genie_space_acls", "provider": 'provider["registry.terraform.io/hashicorp/null"]',
+        "instances": [{"index_key": "sales", "schema_version": 0,
+                       "attributes": {"id": "1", "triggers": {"space_id": "space-1", "groups": groups}}}],
+    }]})
+
+
+@pytest.fixture
+def genie_env(live_like_env, tmp_path, monkeypatch):
+    """A prod env whose Sales agent has CAN_RUN for analysts, with UC unreachable."""
+    env = live_like_env
+    with (env / "env.auto.tfvars").open("a") as handle:
+        handle.write(f'genie_spaces = [{{ name = "Sales", genie_space_id = "space-1", uc_tables = ["{TABLE}"] }}]\n')
+    (env / "data_access" / "terraform.tfstate").write_text(json.dumps({"version": 4, "outputs": {
+        "coverage_gate": {"value": {"business_access_enabled": True, "fingerprint": "applied", "status": "pass",
+                                    "max_age": "6h", "protection_fingerprint": "applied",
+                                    "table_grant_count": 2}, "type": _GATE_OUTPUT_TYPE},
+        "table_grant_resource_keys": {"value": [f"{TABLE}|analysts", f"{TABLE}|auditors"],
+                                      "type": ["list", "string"]},
+    }, "resources": []}))
+    (env / "terraform.tfstate").write_text(_ws_state("analysts"))
     fake = tmp_path / "fake_derive.py"
     fake.write_text(FAKE_DERIVE.format(shared=str(SHARED)))
-    live_ddl = tmp_path / "live.sql"
-    live_ddl.write_text(DDL)
-    monkeypatch.setenv("LIVE_DDL", str(live_ddl))
+    monkeypatch.setenv("LIVE_DDL", str(tmp_path / "live.sql"))
     monkeypatch.setenv("DERIVE_LOG", str(tmp_path / "derive.log"))
-    runner, log = stub_runner(_inputs())
-    env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MAKELEVEL", "APPLY_FLAGS")}
-    result = subprocess.run(
-        ["make", "--no-print-directory", "apply-genie", "ENV=prod", f"ENV_DIR={env_dir}",
-         f"ACCOUNT_ENV_DIR={tmp_path / 'account'}", f"ROOT_RUNNER={runner}",
-         f"DERIVE_ASSIGNMENTS_SCRIPT={fake}"],
-        cwd=SHARED.parent / "aws", text=True, capture_output=True, env=env,
-    )
+    monkeypatch.setenv("LIVE_UC_DOWN", "1")
+    log = tmp_path / "applies.log"
+    runner = tmp_path / "runner"
+    runner.write_text(_APPLY_STUB.format(real=RUNNER, log=log))
+    runner.chmod(0o755)
+
+    def apply_genie(acl):
+        (env / "abac.auto.tfvars").write_text(
+            "groups = { analysts = {}, auditors = {} }\n"
+            f"genie_space_configs = {{ Sales = {{ acl_groups = {acl} }} }}\n"
+        )
+        clean = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MAKELEVEL", "APPLY_FLAGS")}
+        result = subprocess.run(
+            ["make", "--no-print-directory", "apply-genie", "ENV=prod", f"CLOUD_ROOT={env.parents[1]}",
+             f"SHARED_ROOT={SHARED}", f"ROOT_RUNNER={runner}", f"DERIVE_ASSIGNMENTS_SCRIPT={fake}",
+             *_OFFLINE_STEPS],
+            cwd=SHARED.parent / "aws", text=True, capture_output=True, env=clean,
+        )
+        applied = log.exists() and "workspace prod apply" in log.read_text()
+        return result, applied
+
+    return env, apply_genie
+
+
+@needs_terraform
+@pytest.mark.parametrize("acl", ["[]", '["analysts"]'])
+def test_apply_genie_keeps_or_revokes_can_run_when_uc_is_down(genie_env, acl):
+    env, apply_genie = genie_env
+    result, applied = apply_genie(acl)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "live refresh of tags/DDL failed" in output
+    assert "coverage gate did not pass" in output
+    assert "applying only ACLs that keep, shrink or clear" in output
+    assert applied, output
+    assert json.loads(_gate_file(env).read_text())["status"] == "fail"
+
+
+@needs_terraform
+def test_apply_genie_refuses_to_widen_can_run_when_uc_is_down(genie_env):
+    _env, apply_genie = genie_env
+    result, applied = apply_genie('["analysts", "auditors"]')
+    output = result.stdout + result.stderr
     assert result.returncode != 0
-    # The live refresh ran (DDL-only: no native classification here) ...
-    assert "--ddl-only" in (tmp_path / "derive.log").read_text()
-    # ... then the gate, which fails on the bare fixture config ...
-    assert "coverage gate FAILED for data_access:prod" in result.stderr
-    # ... so the workspace layer was never planned or applied.
-    calls = [call.split("|", 1)[1] for call in log.read_text().splitlines()]
-    assert calls and all(call.startswith("data_access prod console") for call in calls), calls
+    assert "Genie CAN_RUN blocked for workspace:prod" in output
+    assert "sales: +auditors" in output
+    assert not applied
+
+
+def _data_access_state(env, keys, protection):
+    (env / "data_access" / "terraform.tfstate").write_text(json.dumps({
+        "version": 4,
+        "outputs": {"coverage_gate": {"value": {"business_access_enabled": True, "fingerprint": "applied",
+                                                "status": "pass", "max_age": "6h",
+                                                "protection_fingerprint": protection,
+                                                "table_grant_count": len(keys)}, "type": _GATE_OUTPUT_TYPE}},
+        "resources": [{
+            "module": "module.data_access", "mode": "managed", "type": "databricks_grant",
+            "name": "table_access", "provider": 'provider["registry.terraform.io/databricks/databricks"].workspace',
+            "instances": [{"index_key": key, "schema_version": 0, "attributes": {"id": key}} for key in keys],
+        }],
+    }))
+
+
+@needs_terraform
+@pytest.mark.parametrize("widen", [False, True])
+def test_data_access_apply_keeps_grants_when_uc_is_down_but_never_adds_one(live_like_env, tmp_path, widen):
+    env = live_like_env
+    # What the last gated apply recorded: this grant, with today's protection.
+    current = cg.query_inputs(RUNNER, "prod", env / "data_access", [])
+    _data_access_state(env, [f"{TABLE}|analysts"], current["protection_fingerprint"])
+    if widen:
+        abac = env / "data_access" / "abac.auto.tfvars"
+        abac.write_text(abac.read_text().replace("groups = { analysts = {} }", "groups = { analysts = {}, auditors = {} }"))
+    # UC unreachable: the refresh started (invalidating the gate) and failed.
+    cg.invalidate(env, "a live refresh of tags/DDL started and has not been gated since")
+    log = tmp_path / "applies.log"
+    runner = tmp_path / "runner"
+    runner.write_text(_APPLY_STUB.format(real=RUNNER, log=log))
+    runner.chmod(0o755)
+    clean = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MAKELEVEL", "APPLY_FLAGS")}
+    result = subprocess.run(
+        ["make", "--no-print-directory", "_apply-layer", "LAYER=data_access", "TARGET_ENV=prod",
+         f"LAYER_ENV_DIR={env / 'data_access'}", f"ROOT_RUNNER={runner}", *_OFFLINE_STEPS],
+        cwd=SHARED.parent / "aws", text=True, capture_output=True, env=clean,
+    )
+    output = result.stdout + result.stderr
+    applied = log.exists() and "data_access prod apply" in log.read_text()
+    if widen:
+        assert result.returncode != 0
+        assert "Business SELECT stays closed" in output
+        assert not applied
+    else:
+        assert result.returncode == 0, output
+        assert "can only keep or revoke access" in output
+        assert applied
+    # Terraform agrees: the same plan with the failed gate.
+    raw = _raw_plan(env)
+    if widen:
+        assert raw.returncode != 0 and "Resource precondition failed" in raw.stderr
+    else:
+        assert raw.returncode == 0, raw.stdout + raw.stderr
+
+
+def _console_runner(tmp_path, answer):
+    runner = tmp_path / "console-runner"
+    runner.write_text(f"#!/bin/sh\necho '+ terraform console'\necho '\"{_encoded(answer)}\"'\n")
+    runner.chmod(0o755)
+    return runner
+
+
+@pytest.mark.parametrize("answer, code, message", [
+    # Exposure blocked: an ACL adding a group is refused ...
+    ({"enabled": True, "groups": {"sales": "a,b"}, "blocker": "gate expired",
+      "widening": {"sales": ["b"]}, "missing": {"sales": []}}, 1, "sales: +b"),
+    # ... keeping, shrinking or clearing proceeds (with a warning).
+    ({"enabled": True, "groups": {"sales": "a"}, "blocker": "gate expired",
+      "widening": {"sales": []}, "missing": {"sales": []}}, 0, "keep, shrink or clear"),
+    ({"enabled": True, "groups": {"sales": ""}, "blocker": "gate expired",
+      "widening": {"sales": []}, "missing": {"sales": []}}, 0, "keep, shrink or clear"),
+    # The layer is ready but this agent lacks its grants: adding is refused.
+    ({"enabled": True, "groups": {"sales": "a,b"}, "blocker": "",
+      "widening": {"sales": ["b"]}, "missing": {"sales": ["t|b"]}}, 1, "lacks the SELECT grants"),
+    # An agent missing from the widening map counts as widening.
+    ({"enabled": True, "groups": {"sales": "a"}, "blocker": "gate expired",
+      "widening": {}, "missing": {}}, 1, "sales: +unknown"),
+    # Ready, or business access closed: nothing to check.
+    ({"enabled": True, "groups": {"sales": "a,b"}, "blocker": "",
+      "widening": {"sales": ["b"]}, "missing": {"sales": []}}, 0, ""),
+    ({"enabled": False, "groups": {"sales": "a,b"}, "blocker": "gate expired",
+      "widening": {"sales": ["b"]}, "missing": {}}, 0, ""),
+])
+def test_can_run_check_mirrors_the_workspace_precondition(tmp_path, capsys, answer, code, message):
+    runner = _console_runner(tmp_path, answer)
+    assert cg.can_run_check(tmp_path, "prod", runner, "") == code
+    assert message in capsys.readouterr().err
+
+
+def test_can_run_check_fails_closed_when_terraform_cant_answer(tmp_path):
+    runner = tmp_path / "broken"
+    runner.write_text("#!/bin/sh\necho 'Error acquiring the state lock' >&2\nexit 1\n")
+    runner.chmod(0o755)
+    assert cg.main(["can-run-check", "--env-dir", str(tmp_path), "--env-name", "prod",
+                    "--runner", str(runner)]) == 2
+
+
+@pytest.mark.parametrize("needs_gate, code", [(False, 0), (True, 1), (None, 1)])
+def test_failed_gate_lets_through_only_what_terraform_says_needs_no_gate(
+        env_dir, stub_runner, stub_validator, needs_gate, code):
+    inputs = _inputs()
+    if needs_gate is not None:
+        inputs["needs_gate"] = needs_gate
+    runner, _log = stub_runner(inputs)
+    stub_validator(1)
+    assert cg.run_gate(env_dir, "prod", runner, "", False) == code
+    # Either way the recorded result is a failure: nothing new can open.
+    assert json.loads(_gate_file(env_dir).read_text())["status"] == "fail"

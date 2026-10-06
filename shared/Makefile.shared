@@ -45,6 +45,9 @@ SPACE ?=
 MODE ?=
 AUDIT_SCHEMA_SCRIPT ?= $(SHARED_ROOT)/scripts/audit_schema_drift.py
 DERIVE_ASSIGNMENTS_SCRIPT ?= $(SHARED_ROOT)/scripts/derive_assignments.py
+# Live-API steps of _apply-layer; overridable so tests never reach Databricks.
+IMPORT_EXISTING_SCRIPT ?= $(SHARED_ROOT)/scripts/import_existing.sh
+GENIE_ADOPT_PREFLIGHT_SCRIPT ?= $(SHARED_ROOT)/scripts/genie_adopt_preflight.py
 # Optional: override the 'country' field in env.auto.tfvars for this invocation.
 # Comma-separated region codes. Normally set once in env.auto.tfvars.
 # Example: make generate COUNTRY=ANZ   (Australia & NZ)
@@ -344,15 +347,25 @@ _COVERAGE_GATE = python3 "$(SHARED_ROOT)/scripts/coverage_gate.py"
 # recorded gate result failed, so a failed or interrupted refresh leaves no
 # usable pass for make or raw Terraform. PROMOTE_AFTER=1 re-splits generated/
 # afterwards (plan; apply promotes itself). Callers that already refreshed
-# pass _EXPOSURE_DERIVED=1.
+# pass _EXPOSURE_DERIVED=1. With TOLERATE_REFRESH_FAILURE=1 (plan, apply,
+# apply-governance, apply-genie) a failed refresh doesn't stop the command:
+# the gate then fails closed, and Terraform only lets through changes that
+# keep or revoke SELECT / CAN_RUN, so revocation never waits on Unity Catalog.
 _derive-before-exposure:
 	@mode="$$($(_COVERAGE_GATE) needs-derive --env-dir "$(ENV_DIR)" --apply-flags="$(APPLY_FLAGS)")" || exit 1; \
+	refreshed=1; \
 	case "$$mode" in \
-		full) $(MAKE) --no-print-directory derive-assignments ENV="$(ENV)" || exit 1 ;; \
-		ddl) $(MAKE) --no-print-directory _refresh-live-ddl ENV="$(ENV)" || exit 1 ;; \
+		full) $(MAKE) --no-print-directory derive-assignments ENV="$(ENV)" || refreshed=0 ;; \
+		ddl) $(MAKE) --no-print-directory _refresh-live-ddl ENV="$(ENV)" || refreshed=0 ;; \
 		none) exit 0 ;; \
 		*) echo "unexpected live-refresh mode: $$mode" >&2; exit 1 ;; \
 	esac; \
+	if [ "$$refreshed" != 1 ]; then \
+		$(_COVERAGE_GATE) invalidate --env-dir "$(ENV_DIR)" || exit 1; \
+		if [ "$(TOLERATE_REFRESH_FAILURE)" != 1 ]; then exit 1; fi; \
+		echo "WARNING: the live refresh of tags/DDL failed; the coverage gate will fail closed, so only changes that keep or revoke access can apply." >&2; \
+		exit 0; \
+	fi; \
 	if [ "$(PROMOTE_AFTER)" = 1 ] && [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 		$(MAKE) --no-print-directory ENV="$(ENV)" promote; \
 	fi
@@ -568,6 +581,9 @@ _plan-layer:
 		$(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$(LAYER_ENV_DIR)")"; \
 		$(_COVERAGE_GATE) run --env-dir "$$(dirname "$$env_dir")" --env-name "$$target_env" --runner "$(ROOT_RUNNER)" $(if $(filter 1,$(VERBOSE)),--verbose,); \
 	fi; \
+	if [ "$$layer" = "workspace" ]; then \
+		$(_COVERAGE_GATE) can-run-check --env-dir "$$env_dir" --env-name "$$target_env" --runner "$(ROOT_RUNNER)"; \
+	fi; \
 	echo "=== Terraform Plan ($$layer:$$target_env) ==="; \
 	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan
 
@@ -577,7 +593,7 @@ plan: _guarded-bootstrap ## Run terraform plan for the selected layer or workspa
 		$(MAKE) --no-print-directory _plan-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 	else \
 		$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
-		if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" PROMOTE_AFTER=1 _derive-before-exposure; fi; \
+		if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" PROMOTE_AFTER=1 TOLERATE_REFRESH_FAILURE=1 _derive-before-exposure; fi; \
 		$(MAKE) --no-print-directory ENV="$(ENV)" TARGET_ENV="$(ENV)" _guard-data-access-config; \
 		$(MAKE) --no-print-directory _plan-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
 		$(MAKE) --no-print-directory _plan-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"; \
@@ -620,16 +636,17 @@ _apply-layer:
 	echo "=== Terraform Apply ($$layer:$$target_env) ==="; \
 	if [ "$$layer" = "account" ]; then \
 		echo "=== Auto-importing existing account resources (idempotent apply) ==="; \
-		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(SHARED_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
+		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(IMPORT_EXISTING_SCRIPT)" 2>&1) || true; \
 	fi; \
 	if [ "$$layer" = "data_access" ]; then \
 		echo "=== Auto-importing existing data_access resources (idempotent apply) ==="; \
-		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(SHARED_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
+		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(IMPORT_EXISTING_SCRIPT)" 2>&1) || true; \
 	fi; \
 	if [ "$$layer" = "workspace" ]; then \
-		python3 "$(SHARED_ROOT)/scripts/genie_adopt_preflight.py" "$$env_dir" --arm --quiet; \
+		$(_COVERAGE_GATE) can-run-check --env-dir "$$env_dir" --env-name "$$target_env" --runner "$(ROOT_RUNNER)" --apply-flags="$$apply_flags"; \
+		python3 "$(GENIE_ADOPT_PREFLIGHT_SCRIPT)" "$$env_dir" --arm --quiet; \
 		echo "=== Auto-importing existing workspace resources (idempotent apply) ==="; \
-		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(SHARED_ROOT)/scripts/import_existing.sh" 2>&1) || true; \
+		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(IMPORT_EXISTING_SCRIPT)" 2>&1) || true; \
 		for _retry in 1 2 3; do \
 			if LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve $$apply_flags; then \
 				break; \
@@ -659,7 +676,7 @@ apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access
 		$(_RECEIPT) warn "$(ENV_DIR)" --env "$(ENV)" || true; \
 		$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 		python3 "$(SHARED_ROOT)/scripts/genie_adopt_preflight.py" "$(ENV_DIR)" --arm; \
-		if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" _derive-before-exposure; fi; \
+		if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" TOLERATE_REFRESH_FAILURE=1 _derive-before-exposure; fi; \
 		if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 			$(MAKE) --no-print-directory ENV="$(ENV)" promote; \
 		else \
@@ -681,7 +698,7 @@ apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access
 apply-governance: _guarded-bootstrap _guard-workspace-target ## [Governance team] Apply account + data_access layers only (no Genie agents)
 	@set -e; $(_DRY_RUN_GUARD); \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
-	if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" _derive-before-exposure; fi; \
+	if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" TOLERATE_REFRESH_FAILURE=1 _derive-before-exposure; fi; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 		$(MAKE) --no-print-directory ENV="$(ENV)" promote; \
 	else \
@@ -698,15 +715,18 @@ apply-governance: _guarded-bootstrap _guard-workspace-target ## [Governance team
 genie-adopt-preflight: _guard-workspace-target ## Read-only: check every legacy Genie agent can be adopted (ID file, host, GET 200) before migrating
 	@python3 "$(SHARED_ROOT)/scripts/genie_adopt_preflight.py" "$(ENV_DIR)"
 
-# CAN_RUN needs a current gate result resting on a recent live refresh (see
-# modules/coverage_gate_check), so like apply this re-reads live UC and re-runs
-# the data_access gate first; it never applies data_access. If the refreshed
-# inputs differ from the last governance apply, CAN_RUN stays blocked until
-# make apply / apply-governance applies them.
+# Opening or widening CAN_RUN needs a current gate result resting on a recent
+# live refresh (see modules/coverage_gate_check), so like apply this re-reads
+# live UC and re-runs the data_access gate first; it never applies
+# data_access. If the refreshed inputs differ from the last governance apply,
+# new CAN_RUN stays blocked until make apply / apply-governance applies them.
+# A failing refresh or gate never stops keeping, shrinking or clearing ACLs:
+# the workspace layer's can-run-check (and its precondition) refuse only ACLs
+# that add groups beyond what is applied.
 apply-genie: _guarded-bootstrap _guard-workspace-target ## [BU team] Apply workspace layer only — groups + Genie agents (assumes governance already applied)
 	@set -e; $(_DRY_RUN_GUARD); \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
-	if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" _derive-before-exposure; fi; \
+	if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" TOLERATE_REFRESH_FAILURE=1 _derive-before-exposure; fi; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 		echo "=== Extracting workspace config from genie draft ($(ENV)) ==="; \
 		python3 "$(SHARED_ROOT)/scripts/derive_genie_acls.py" \
@@ -720,7 +740,8 @@ apply-genie: _guarded-bootstrap _guard-workspace-target ## [BU team] Apply works
 	else \
 		echo "=== Skipping split (no $(ENV_DIR)/generated/abac.auto.tfvars) ==="; \
 	fi; \
-	$(_COVERAGE_GATE) run --env-dir "$(ENV_DIR)" --env-name "$(ENV)" --runner "$(ROOT_RUNNER)" --apply-flags="$(APPLY_FLAGS)" $(if $(filter 1,$(VERBOSE)),--verbose,); \
+	$(_COVERAGE_GATE) run --env-dir "$(ENV_DIR)" --env-name "$(ENV)" --runner "$(ROOT_RUNNER)" --apply-flags="$(APPLY_FLAGS)" $(if $(filter 1,$(VERBOSE)),--verbose,) \
+		|| echo "WARNING: the coverage gate did not pass; only CAN_RUN changes that keep, shrink or clear what is applied can proceed." >&2; \
 	$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"
 
 destroy-governance: _bootstrap _guard-workspace-target ## [Governance team] Destroy data_access layer for the selected env (leaves workspace/Genie untouched)
