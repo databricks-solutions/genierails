@@ -134,6 +134,45 @@ def test_apply_layer_real_path_keeps_command_and_fingerprint_behavior(tmp_path):
     assert (env_dir / ".test.apply.sha").read_text().strip()
 
 
+def test_plan_real_target_skips_layers_with_missing_configs(tmp_path):
+    env_dir = tmp_path / "env"
+    account_dir = tmp_path / "account"
+    runner_log = tmp_path / "runner.log"
+    runner = tmp_path / "record-runner"
+    runner.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> \"{runner_log}\"\n"
+    )
+    runner.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            "plan",
+            "ENV=dev",
+            f"ENV_DIR={env_dir}",
+            f"ACCOUNT_ENV_DIR={account_dir}",
+            f"ROOT_RUNNER={runner}",
+        ],
+        cwd=CLOUD_ROOT,
+        text=True,
+        capture_output=True,
+        env=_clean_env(),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        f"=== Skipping terraform plan (data_access:dev): "
+        f"no {env_dir}/data_access/abac.auto.tfvars ==="
+    ) in result.stdout
+    assert (
+        f"=== Skipping terraform plan (workspace:dev): "
+        f"no {env_dir}/abac.auto.tfvars ==="
+    ) in result.stdout
+    assert not runner_log.exists()
+
+
 def test_discovered_agent_attribution_changes_apply_fingerprint(tmp_path):
     env_dir = tmp_path / "env"
     env_dir.mkdir()

@@ -524,6 +524,11 @@ _prepare-classification:
 
 _plan-layer:
 	@set -e; $(_DRY_RUN_GUARD); layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
+	env_dir="$(LAYER_ENV_DIR)"; \
+	if [ ! -f "$$env_dir/abac.auto.tfvars" ]; then \
+		echo "=== Skipping terraform plan ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
+		exit 0; \
+	fi; \
 	if [ "$$layer" = "data_access" ]; then $(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$(LAYER_ENV_DIR)")"; fi; \
 	echo "=== Terraform Plan ($$layer:$$target_env) ==="; \
 	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan
@@ -531,12 +536,12 @@ _plan-layer:
 plan: _guarded-bootstrap ## Run terraform plan for the selected layer or workspace env
 	@set -e; $(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		$(MAKE) --no-print-directory _guard-account-config; \
-		$(MAKE) --no-print-directory _plan-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV); \
+		$(MAKE) --no-print-directory _plan-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 	else \
 		$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 		$(MAKE) --no-print-directory ENV="$(ENV)" TARGET_ENV="$(ENV)" _guard-data-access-config; \
-		$(MAKE) --no-print-directory _plan-layer LAYER=data_access TARGET_ENV=$(ENV); \
-		$(MAKE) --no-print-directory _plan-layer LAYER=workspace TARGET_ENV=$(ENV); \
+		$(MAKE) --no-print-directory _plan-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
+		$(MAKE) --no-print-directory _plan-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"; \
 	fi
 
 sync-tags: _bootstrap ## Sync tag policy values in the shared account layer

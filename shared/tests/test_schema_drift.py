@@ -60,6 +60,10 @@ def test_missing_python_hcl2_exits_2_in_subprocess(tmp_path):
     ["data_access/abac.auto.tfvars", "generated/abac.auto.tfvars"],
 )
 def test_unparseable_existing_tfvars_exits_2_in_subprocess(tmp_path, relative_path):
+    pytest.importorskip(
+        "hcl2",
+        reason="python-hcl2 is required to exercise malformed HCL parsing",
+    )
     (tmp_path / "env.auto.tfvars").write_text(
         'uc_tables = ["prod.finance.customers"]\nsql_warehouse_id = "warehouse"\n'
     )
