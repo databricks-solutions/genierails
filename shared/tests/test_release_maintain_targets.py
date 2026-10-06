@@ -35,7 +35,11 @@ def _stub(tmp_path, fail_on=None, on=None, sleep=None):
     """
     log = tmp_path / "recursive-make.log"
     stub = tmp_path / "record-make"
-    body = ["#!/bin/sh", f"printf '%s\\n' \"$*\" >> \"{log}\""]
+    body = [
+        "#!/bin/sh",
+        'case "$*" in *"_guarded-bootstrap _guard-workspace-target"*) exit 0;; esac',
+        f"printf '%s\\n' \"$*\" >> \"{log}\"",
+    ]
     if sleep:
         body.append(f"sleep {sleep}")
     for target, action in (on or {}).items():
@@ -45,6 +49,17 @@ def _stub(tmp_path, fail_on=None, on=None, sleep=None):
     body.append("exit 0")
     stub.write_text("\n".join(body) + "\n")
     stub.chmod(0o755)
+    audit_rc = 1 if fail_on == "audit-schema" else 0
+    if "audit-schema" in (on or {}):
+        audit_rc = 2 if "exit 2" in on["audit-schema"] else audit_rc
+    audit = tmp_path / "fake-audit-schema.py"
+    audit.write_text(
+        "#!/usr/bin/env python3\n"
+        f"with open({str(log)!r}, 'a') as handle:\n"
+        "    handle.write('audit-schema ENV=prod\\n')\n"
+        f"raise SystemExit({audit_rc})\n"
+    )
+    audit.chmod(0o755)
     return stub, log
 
 
@@ -68,7 +83,8 @@ def _env_dir(tmp_path, gate="false"):
 def _make(target, env_dir, stub, *extra):
     return subprocess.run(
         ["make", target, "ENV=prod", f"ENV_DIR={env_dir}",
-         f"ACCOUNT_ENV_DIR={env_dir.parent / 'account'}", f"MAKE={stub}", *extra],
+         f"ACCOUNT_ENV_DIR={env_dir.parent / 'account'}", f"MAKE={stub}",
+         f"AUDIT_SCHEMA_SCRIPT={stub.parent / 'fake-audit-schema.py'}", *extra],
         cwd=CLOUD_ROOT,
         text=True,
         capture_output=True,
@@ -557,7 +573,8 @@ def test_parallel_make_maintain_release_serialises_on_lock(tmp_path):
     stub, log = _stub(tmp_path, sleep=1)
     result = subprocess.run(
         ["make", "-j2", "maintain", "release", "ENV=prod",
-         f"ENV_DIR={env_dir}", f"MAKE={stub}"],
+         f"ENV_DIR={env_dir}", f"MAKE={stub}",
+         f"AUDIT_SCHEMA_SCRIPT={stub.parent / 'fake-audit-schema.py'}"],
         cwd=CLOUD_ROOT, text=True, capture_output=True, env=_clean_env(),
     )
     assert result.returncode != 0
@@ -639,6 +656,35 @@ def test_maintain_audit_error_is_not_described_as_drift(tmp_path):
     assert "reported drift" not in result.stderr
     assert "native UC classification" not in result.stderr
     assert "LLM-tags" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "audit_rc, expected, unexpected",
+    [
+        (1, "audit-schema reported drift", "error, not drift"),
+        (2, "audit-schema failed (error, not drift)", "native UC classification"),
+    ],
+)
+def test_maintain_preserves_direct_audit_exit_code_with_real_nested_make(
+    tmp_path, audit_rc, expected, unexpected,
+):
+    env_dir = _env_dir(tmp_path)
+    audit = tmp_path / "direct-audit.py"
+    audit.write_text(f"raise SystemExit({audit_rc})\n")
+    result = subprocess.run(
+        [
+            "make", "maintain", "ENV=prod", f"ENV_DIR={env_dir}",
+            f"ACCOUNT_ENV_DIR={env_dir.parent / 'account'}",
+            f"AUDIT_SCHEMA_SCRIPT={audit}",
+        ],
+        cwd=CLOUD_ROOT,
+        text=True,
+        capture_output=True,
+        env=_clean_env(),
+    )
+    assert result.returncode != 0
+    assert expected in result.stderr
+    assert unexpected not in result.stderr
 
 
 # ── make apply warning ────────────────────────────────────────────────────────
@@ -893,7 +939,8 @@ def test_signal_mid_run_releases_lock(tmp_path, target, sig):
     stub, log = _stub(tmp_path, on={_SLOW_STAGE[target]: "sleep 30"})
     proc = subprocess.Popen(
         ["make", target, "ENV=prod", f"ENV_DIR={env_dir}",
-         f"ACCOUNT_ENV_DIR={tmp_path / 'account'}", f"MAKE={stub}"],
+         f"ACCOUNT_ENV_DIR={tmp_path / 'account'}", f"MAKE={stub}",
+         f"AUDIT_SCHEMA_SCRIPT={stub.parent / 'fake-audit-schema.py'}"],
         cwd=CLOUD_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=_clean_env(), start_new_session=True,
     )

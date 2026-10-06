@@ -7199,7 +7199,11 @@ def main():
 
     # ── Delta mode: incremental schema-drift classification ─────────────
     if args.delta:
-        _run_delta_mode(Path(args.auth_file))
+        try:
+            _run_delta_mode(Path(args.auth_file))
+        except Exception as exc:
+            print(f"ERROR: generate --delta could not complete: {exc}", file=sys.stderr)
+            sys.exit(2)
         return
 
     ddl_dir = Path(args.ddl_dir).resolve()

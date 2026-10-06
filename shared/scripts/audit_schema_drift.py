@@ -52,8 +52,6 @@ SHARED_ROOT = Path(__file__).resolve().parent.parent
 if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
 
-from scripts.footprint import FootprintError, resolve_footprint
-
 PII_COLUMN_PATTERN = re.compile(
     r"(?i)(ssn|social_sec|passport|dob|birth_?date|email|phone|"
     r"address|credit_?card|cvv|account_?num|diagnosis|medication|"
@@ -68,7 +66,7 @@ def _str(v):
 
 
 def _load_hcl(path: Path) -> dict:
-    if not path.exists():
+    if not path.is_file():
         return {}
     try:
         import hcl2
@@ -88,6 +86,7 @@ def _load_hcl(path: Path) -> dict:
 
 def extract_managed_tables(env_dir: Path) -> list[str]:
     """Read the environment's effective managed table footprint."""
+    from scripts.footprint import resolve_footprint
     return resolve_footprint(env_dir)
 
 
@@ -516,7 +515,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Mode: {args.mode}")
 
     try:
+        from scripts.footprint import FootprintError
         managed_tables = extract_managed_tables(env_dir)
+    except ImportError as exc:
+        print(
+            f"  ERROR: audit could not complete: python-hcl2 is not installed ({exc})",
+            file=sys.stderr,
+        )
+        return 2
     except FootprintError as exc:
         print(f"  ERROR: {exc}")
         return 2

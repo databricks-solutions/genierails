@@ -243,6 +243,17 @@ def test_error_and_drift_returns_error_and_keeps_drift_guidance(tmp_path, monkey
     assert "add the rule in dev, re-promote" in err
 
 
+def test_drift_and_error_returns_error_and_keeps_classification_guidance(tmp_path, monkeypatch, capsys):
+    env_dir = _env_dir(tmp_path)
+    monkeypatch.setattr(rsg, "_audit", lambda ed: 1)
+    monkeypatch.setattr(rsg, "_rulebook", lambda ed: 2)
+    assert rsg._check(env_dir) == 2
+    err = capsys.readouterr().err
+    assert "could not complete" in err
+    assert "make maintain ENV=prod" in err
+    assert "native UC classification" in err
+
+
 def test_finding_propagates_nonzero_and_prints_maintain_action(tmp_path, monkeypatch, capsys):
     env_dir = _env_dir(tmp_path)
     monkeypatch.setattr(rsg, "_audit", lambda ed: 1)

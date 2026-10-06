@@ -2,7 +2,7 @@
 
 All tests run without any Databricks, LLM, or Terraform dependency.
 """
-import builtins
+import os
 import re
 import subprocess
 import sys
@@ -25,44 +25,57 @@ from scripts.audit_schema_drift import (
     find_uncovered_tags,
     _parse_condition_tag_refs,
     _applied_tags_sql,
-    _load_hcl,
 )
 import scripts.audit_schema_drift as audit_mod
 
 
-def test_load_hcl_names_existing_file_when_python_hcl2_is_missing(tmp_path, monkeypatch):
-    path = tmp_path / "present.auto.tfvars"
-    path.write_text("value = true\n")
-    real_import = builtins.__import__
-
-    def missing_hcl2(name, *args, **kwargs):
-        if name == "hcl2":
-            raise ModuleNotFoundError("No module named 'hcl2'")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", missing_hcl2)
-    with pytest.raises(RuntimeError, match=r"present\.auto\.tfvars.*python-hcl2"):
-        _load_hcl(path)
+def _clean_subprocess_env(home: Path) -> dict[str, str]:
+    return {
+        "HOME": str(home),
+        "PATH": os.environ.get("PATH", ""),
+    }
 
 
-def test_load_hcl_keeps_absent_optional_file_empty(tmp_path):
-    assert _load_hcl(tmp_path / "absent.auto.tfvars") == {}
+def test_missing_python_hcl2_exits_2_in_subprocess(tmp_path):
+    script = Path(audit_mod.__file__)
+    code = (
+        "import runpy, sys; "
+        "sys.modules['hcl2'] = None; "
+        f"runpy.run_path({str(script)!r}, run_name='__main__')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        env=_clean_subprocess_env(tmp_path),
+    )
+    assert result.returncode == 2
+    assert "ERROR: audit could not complete" in result.stderr
+    assert "python-hcl2 is not installed" in result.stderr
 
 
-def test_unparseable_existing_tfvars_exits_2_in_subprocess(tmp_path):
+@pytest.mark.parametrize(
+    "relative_path",
+    ["data_access/abac.auto.tfvars", "generated/abac.auto.tfvars"],
+)
+def test_unparseable_existing_tfvars_exits_2_in_subprocess(tmp_path, relative_path):
     (tmp_path / "env.auto.tfvars").write_text(
         'uc_tables = ["prod.finance.customers"]\nsql_warehouse_id = "warehouse"\n'
     )
-    (tmp_path / "auth.auto.tfvars").write_text("this is not valid hcl = [\n")
+    target = tmp_path / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("this is not valid hcl = [\n")
     script = Path(audit_mod.__file__)
     result = subprocess.run(
         [sys.executable, str(script)],
         cwd=tmp_path,
         text=True,
         capture_output=True,
+        env=_clean_subprocess_env(tmp_path),
     )
     assert result.returncode == 2
-    assert "auth.auto.tfvars" in result.stderr
+    assert relative_path in result.stderr
     assert "cannot parse" in result.stderr
 
 
