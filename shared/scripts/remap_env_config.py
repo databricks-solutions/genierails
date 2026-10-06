@@ -28,6 +28,7 @@ from scripts.footprint import (
     load_hcl,
     resolve_footprint,
 )
+from scripts.certification_receipt import live_exposure, release_path
 from scripts.remap_generated_config import remap_hcl
 from walkthrough_marker import PROMOTED_HEADER, follows_walkthrough
 
@@ -390,8 +391,21 @@ def main():
             "  Preserved destination enable_auto_tagging="
             f"{str(preserved_auto_tagging).lower()}"
         )
-    if dest_cfg.get("business_access_enabled") is True:
-        print("  Reset destination business_access_enabled=true to false")
+    # A live, certified destination keeps its exposure open: closing it would
+    # revoke every business SELECT on the next certify. The receipt still goes
+    # stale (inputs changed), so make release refuses until certify passes, and
+    # the release record caps exposure at what was released until then.
+    dest_env = Path(dest_env_dir).name
+    keep_access, access_reason = live_exposure(Path(dest_env_dir), dest_env)
+    if keep_access:
+        print(f"  Kept destination business_access_enabled=true ({access_reason})")
+    else:
+        if dest_cfg.get("business_access_enabled") is True:
+            print(
+                "  Reset destination business_access_enabled=true to false "
+                f"(not live and certified: {access_reason})"
+            )
+        release_path(Path(dest_env_dir)).unlink(missing_ok=True)
 
     dest_spaces_by_name = {
         _str(space.get("name", "")): space
@@ -457,7 +471,7 @@ def main():
     lines.append("# Safe production defaults; use the UI workflow before opening access.")
     lines.append("enable_classification = true")
     lines.append(f"enable_auto_tagging = {str(preserved_auto_tagging).lower()}")
-    lines.append("business_access_enabled = false")
+    lines.append(f"business_access_enabled = {str(keep_access).lower()}")
     lines.extend(_promoted_access_tier_groups(cfg, source_env_dir))
 
     # Write

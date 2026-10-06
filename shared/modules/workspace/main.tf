@@ -32,8 +32,17 @@ locals {
 
   # ACL resolution is fail-closed before this module. Explicit [] means nobody.
   # When var.groups is empty (genie-only mode), ACLs are skipped entirely.
+  # released_genie_acls (set by the Makefile from the last make release) caps
+  # CAN_RUN at what that release opened: agents and groups new since then stay
+  # withheld until the next release; null means no cap.
   genie_space_groups = length(var.groups) > 0 ? {
-    for key, space in var.genie_spaces : key => join(",", space.config.acl_groups)
+    for key, space in var.genie_spaces : key => join(",", (
+      var.released_genie_acls == null ? space.config.acl_groups : [
+        for group in space.config.acl_groups : group
+        if contains(lookup(var.released_genie_acls, key, []), group)
+      ]
+    ))
+    if var.released_genie_acls == null ? true : contains(keys(var.released_genie_acls), key)
   } : {}
 
   # Spaces that already have an ID — apply ACLs, and config if defined.

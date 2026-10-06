@@ -96,7 +96,7 @@ def test_explicit_empty_agent_acl_is_fail_closed_in_both_layers():
     workspace = WORKSPACE_MAIN_TF.read_text()
 
     assert "length(local.scoped_table_access_principals[table]) == 0" not in data_access
-    assert 'join(",", space.config.acl_groups)' in workspace
+    assert 'var.released_genie_acls == null ? space.config.acl_groups' in workspace
     assert 'join(",", keys(var.groups))' not in workspace.split(
         "genie_space_groups =", 1
     )[1].split("existing_spaces =", 1)[0]

@@ -106,6 +106,7 @@ def test_rehearse_with_key_opens_exposure_gate_for_its_apply_only(tmp_path):
             "apply",
             "ENV=dev",
             "APPLY_FLAGS=-var=business_access_enabled=true",
+            "EXPOSURE_SCOPE=full",
         ],
         ["verify-access", "ENV=dev", "VERIFY_KEY_COLUMN=customer_id"],
     ]
@@ -134,6 +135,7 @@ def test_rehearse_without_key_runs_key_independent_live_verification(tmp_path):
             "apply",
             "ENV=dev",
             "APPLY_FLAGS=-var=business_access_enabled=true",
+            "EXPOSURE_SCOPE=full",
         ],
         ["verify-access", "ENV=dev"],
     ]

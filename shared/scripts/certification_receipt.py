@@ -9,6 +9,16 @@ receipt still matches the current inputs, before its apply and again (bound to
 the gate write) after it. All three hold an exclusive per-environment lock for
 their whole pipeline.
 
+Release record: after persisting the gate, `make release` writes
+envs/<env>/generated/.released.json -- the business SELECT grants
+("<table>|<principal>") and Genie CAN_RUN groups read back from Terraform state,
+i.e. exactly what that release opened. Every later data_access / workspace apply
+(certify, maintain, plain apply) caps exposure at that set, so tables, principals
+or agents new since the last release stay withheld until the next `make
+release` (which applies uncapped). A cross-env `make promote` keeps the
+destination's gate open only when the destination is live and certified -- see
+live_exposure().
+
 Fingerprinted inputs (symlinks resolved; content hashes, not mtimes):
   - env-local inputs: every file under envs/<env>/ and envs/account/ that the
     gate, promote, Terraform layers or audits read -- see env_input_files()
@@ -36,6 +46,8 @@ Commands (all take ENV_DIR):
   open-gate         verify the receipt, persist business_access_enabled = true
                     atomically, then re-verify (requires owning the env lock)
   release-failed    print exposure rollback guidance
+  released-vars     write the exposure cap for --layer as a tfvars.json and
+                    print its path (prints nothing when there is no release)
 """
 
 from __future__ import annotations
@@ -70,6 +82,12 @@ LOCK_RELPATH = Path("generated") / ".governance.lock"
 GATE_KEY = "business_access_enabled"
 GATE_LINE = re.compile(rf"^\s*{GATE_KEY}\s*=.*$", re.MULTILINE)
 CERTIFYING_TARGETS = ("certify", "maintain")
+RELEASE_VERSION = 1
+RELEASE_RELPATH = Path("generated") / ".released.json"
+# Local-backend state of the layers whose business access the record captures.
+DATA_ACCESS_STATE = Path("data_access") / "terraform.tfstate"
+WORKSPACE_STATE = Path("terraform.tfstate")
+RELEASED_VARS = {"data_access": "released_table_grants", "workspace": "released_genie_acls"}
 
 # Env-local inputs. A glob rather than a per-target list so a new input file
 # (another *.auto.tfvars, a space config) is covered without code changes:
@@ -443,6 +461,142 @@ def release_open_gate(env_dir: Path, pid: int, env: str | None = None) -> None:
             f"{reason if not current else 'gate write did not take effect'} "
             f"after persisting {GATE_KEY} = true"
         )
+    receipt = _load_trusted(receipt_path(env_dir), "certification receipt", env or env_dir.name)
+    write_release_record(env_dir, env or env_dir.name, receipt["fingerprint"])
+
+
+# ── release record (the footprint the last make release opened) ──────────────
+
+
+def release_path(env_dir: Path) -> Path:
+    return env_dir / RELEASE_RELPATH
+
+
+def _released_vars_path(env_dir: Path, layer: str) -> Path:
+    return env_dir / "generated" / f".released.{layer}.tfvars.json"
+
+
+def _state_instances(state: Path, module: str, type_: str, names: set[str]) -> list[dict]:
+    if not state.is_file():
+        return []
+    try:
+        data = json.loads(state.read_text())
+    except (OSError, ValueError) as exc:
+        raise ReceiptError(f"cannot read Terraform state {state}: {exc}") from exc
+    instances = []
+    for resource in data.get("resources", []):
+        if (
+            resource.get("mode") == "managed"
+            and resource.get("module") == module
+            and resource.get("type") == type_
+            and resource.get("name") in names
+        ):
+            instances.extend(resource.get("instances", []))
+    for instance in instances:
+        if not isinstance(instance.get("index_key"), str):
+            raise ReceiptError(f"unexpected {type_} instance key in {state}")
+    return instances
+
+
+def live_business_access(env_dir: Path) -> dict:
+    """Business SELECT grant keys and Genie CAN_RUN groups present in state."""
+    grants = sorted({
+        instance["index_key"] for instance in _state_instances(
+            env_dir / DATA_ACCESS_STATE, "module.data_access", "databricks_grant",
+            {"table_access"},
+        )
+    })
+    acls: dict[str, list[str]] = {}
+    for instance in _state_instances(
+        env_dir / WORKSPACE_STATE, "module.workspace", "null_resource",
+        {"genie_space_acls", "genie_space_acls_created"},
+    ):
+        groups = ((instance.get("attributes") or {}).get("triggers") or {}).get("groups") or ""
+        acls[instance["index_key"]] = sorted(g for g in str(groups).split(",") if g)
+    return {"table_grants": grants, "genie_acls": acls}
+
+
+def write_release_record(env_dir: Path, env: str, receipt_fingerprint: str) -> Path:
+    record = {
+        "version": RELEASE_VERSION,
+        "env": env,
+        "released_at": _now(),
+        "receipt_fingerprint": receipt_fingerprint,
+        **live_business_access(env_dir),
+    }
+    record["fingerprint"] = fingerprint(record)
+    path = release_path(env_dir)
+    atomic_write_text(path, json.dumps(record, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+def load_release_record(env_dir: Path, env: str) -> dict:
+    path = release_path(env_dir)
+    if not path.is_file():
+        raise ReceiptError(f"no release record at {path}")
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ReceiptError(f"malformed release record at {path}: {exc}") from exc
+    if (
+        not isinstance(record, dict)
+        or record.get("version") != RELEASE_VERSION
+        or record.get("env") != env
+        or not _valid_timestamp(record.get("released_at"))
+        or not isinstance(record.get("table_grants"), list)
+        or not all(isinstance(key, str) for key in record["table_grants"])
+        or not isinstance(record.get("genie_acls"), dict)
+        or not all(
+            isinstance(groups, list) and all(isinstance(g, str) for g in groups)
+            for groups in record["genie_acls"].values()
+        )
+    ):
+        raise ReceiptError(f"malformed release record at {path} (or not for env {env!r})")
+    payload = {key: value for key, value in record.items() if key != "fingerprint"}
+    if fingerprint(payload) != record.get("fingerprint"):
+        raise ReceiptError(f"release record at {path} is not self-consistent (edited or forged)")
+    return record
+
+
+def live_exposure(env_dir: Path, env: str) -> tuple[bool, str]:
+    """Is env_dir live AND certified, so a re-promote must keep its gate open?
+
+    True only when env.auto.tfvars has business_access_enabled = true AND either
+      - a valid release record for env exists (written by make release after it
+        verified the then-current receipt and persisted the gate), or
+      - for an env released before release records existed: the certification
+        receipt is still current; the record is then captured from live state.
+    The receipt itself is NOT required to stay current -- a promote, a failed
+    certify or a git pull makes it stale while prod stays released.
+    """
+    if not gate_open(env_dir):
+        return False, f"{GATE_KEY} is not true"
+    try:
+        record = load_release_record(env_dir, env)
+        return True, f"released {record['released_at']}"
+    except ReceiptError as exc:
+        record_error = str(exc)
+    current, reason = check_receipt(env_dir, env)
+    if not current:
+        return False, f"{record_error}, and {reason}"
+    try:
+        receipt = json.loads(receipt_path(env_dir).read_text())
+        write_release_record(env_dir, env, receipt["fingerprint"])
+    except (ReceiptError, OSError, ValueError, KeyError) as exc:
+        return False, f"{record_error}; cannot capture it from state: {exc}"
+    return True, "certified and open; release record captured from state"
+
+
+def write_released_vars(env_dir: Path, layer: str, env: str) -> Path | None:
+    """Render the exposure cap for a layer; None (and no file) when never released."""
+    path = _released_vars_path(env_dir, layer)
+    if not release_path(env_dir).exists():
+        path.unlink(missing_ok=True)
+        return None
+    record = load_release_record(env_dir, env)
+    value = record["table_grants"] if layer == "data_access" else record["genie_acls"]
+    atomic_write_text(path, json.dumps({RELEASED_VARS[layer]: value}, indent=2, sort_keys=True) + "\n")
+    return path
 
 
 # ── per-environment lock ──────────────────────────────────────────────────────
@@ -563,7 +717,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("command", choices=(
         "lock", "unlock", "clear", "snapshot", "verify-snapshot", "commit",
-        "write", "check", "warn", "open-gate", "release-failed",
+        "write", "check", "warn", "open-gate", "release-failed", "released-vars",
     ))
     parser.add_argument("env_dir", type=Path)
     parser.add_argument("--env", default="", help="Env name used in messages and the receipt")
@@ -574,6 +728,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pid", type=int, default=0, help="Lock-owning shell pid")
     parser.add_argument("--reason", default="the release apply failed")
     parser.add_argument("--prefix", default="release", help="Message prefix for check")
+    parser.add_argument("--layer", choices=tuple(RELEASED_VARS), default="data_access",
+                        help="Layer for released-vars")
     args = parser.parse_args(argv)
     env_dir = args.env_dir
     env = args.env or env_dir.name
@@ -627,6 +783,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "open-gate":
             release_open_gate(env_dir, pid, env)
             print(f"=== Persisted {GATE_KEY} = true in {env_dir / 'env.auto.tfvars'} ===")
+            print(f"=== Release record written: {release_path(env_dir)} ===")
+        elif args.command == "released-vars":
+            path = write_released_vars(env_dir, args.layer, env)
+            if path:
+                print(path)
         else:
             print(_release_failed_hint(env_dir, env, args.reason), file=sys.stderr)
     except ReceiptError as exc:

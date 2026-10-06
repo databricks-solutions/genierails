@@ -225,15 +225,23 @@ resource "databricks_grant" "schema_access" {
 }
 
 resource "databricks_grant" "table_access" {
+  # released_table_grants (set by the Makefile from the last make release) caps
+  # SELECT at what that release opened: grants new since then stay withheld
+  # until the next release; null means no cap.
   for_each = var.business_access_enabled ? {
     for pair in local.table_access_pairs :
     "${pair.table}|${pair.principal}" => { table = pair.table, group = pair.principal }
+    if var.released_table_grants == null ? true : contains(var.released_table_grants, "${pair.table}|${pair.principal}")
   } : {}
 
   provider   = databricks.workspace
   table      = each.value.table
   principal  = each.value.group
   privileges = ["SELECT"]
+
+  # Masks and row filters land before any new SELECT (and SELECT is revoked
+  # before they are removed).
+  depends_on = [databricks_policy_info.policies]
 }
 
 resource "databricks_sql_endpoint" "warehouse" {
@@ -333,7 +341,6 @@ resource "databricks_policy_info" "policies" {
     time_sleep.wait_for_tag_propagation,
     databricks_grant.catalog_access,
     databricks_grant.schema_access,
-    databricks_grant.table_access,
     databricks_grant.terraform_sp_manage_catalog,
     null_resource.deploy_masking_functions,
   ]

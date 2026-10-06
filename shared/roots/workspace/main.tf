@@ -385,6 +385,12 @@ variable "business_access_enabled" {
 # Shared env.auto.tfvars is consumed by both workspace and data-access roots.
 # Classification is implemented only in data_access, but declaring the switch
 # here avoids a misleading undeclared-variable warning during full apply.
+variable "released_genie_acls" {
+  type        = map(list(string))
+  default     = null
+  description = "Tool-owned exposure cap written from the last make release; null means no cap."
+}
+
 variable "enable_classification" {
   type    = bool
   default = false
@@ -465,6 +471,7 @@ module "workspace" {
   manage_groups             = var.manage_groups
   groups                    = var.groups
   business_access_enabled   = var.business_access_enabled
+  released_genie_acls       = var.released_genie_acls
   sql_warehouse_id          = var.sql_warehouse_id
   warehouse_name            = var.warehouse_name
   genie_spaces              = local.merged_spaces

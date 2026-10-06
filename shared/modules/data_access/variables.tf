@@ -70,6 +70,12 @@ variable "business_access_enabled" {
   description = "Fail-closed exposure gate. Set true only after the coverage gate and schema drift check pass; controls business-group SELECT grants."
 }
 
+variable "released_table_grants" {
+  type        = list(string)
+  default     = null
+  description = "Tool-owned exposure cap: the \"<table>|<principal>\" SELECT grants the last make release opened. When set, only these grants (still in the footprint) are kept; null means no cap."
+}
+
 variable "enable_classification" {
   type        = bool
   default     = false

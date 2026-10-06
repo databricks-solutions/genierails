@@ -164,6 +164,12 @@ variable "business_access_enabled" {
   description = "Fail-closed exposure gate. Enable only after coverage validation and the schema drift check pass."
 }
 
+variable "released_table_grants" {
+  type        = list(string)
+  default     = null
+  description = "Tool-owned exposure cap written from the last make release; null means no cap."
+}
+
 variable "enable_classification" {
   type        = bool
   default     = false
@@ -343,6 +349,7 @@ module "data_access" {
   genie_space_acl_groups          = var.genie_space_acl_groups
   classification_uc_tables        = local.full_effective_uc_tables
   business_access_enabled         = var.business_access_enabled
+  released_table_grants           = var.released_table_grants
   enable_classification           = var.enable_classification
   enable_auto_tagging             = var.enable_auto_tagging
   classification_existing_schemas = var.classification_existing_schemas

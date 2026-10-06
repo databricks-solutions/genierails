@@ -216,7 +216,9 @@ It verifies coverage and deploys only the governance protections: masks and acce
 3. **Re-promote:** `make promote …` (carries the updated rules to prod — same command as [Phase 2](#phase-2--prod-set-up-and-promote-rules)).
 4. **Re-run this phase:** `make certify ENV=prod`.
 
-Repeat until the gate passes and drift is clean. The agent stays uncreated and closed to users throughout — that's the point of exposing last.
+Repeat until the gate passes and drift is clean. Before the first release, the agent stays uncreated and closed to users throughout — that's the point of exposing last.
+
+**Already released (prod is live)?** The same loop applies to any later rule change. `make promote` keeps business access open, so users keep what the last release gave them. It prints `prod is live: business access stays open; run make certify ENV=prod, then make release ENV=prod to verify and expose any new tables.` `certify` applies the new masks and policies, but tables, groups and agents added since the last release stay withheld. If `certify` fails, it applies nothing, so prod keeps its old rules and access. When it passes, run `make release ENV=prod` to verify and expose the new tables.
 
 </details>
 

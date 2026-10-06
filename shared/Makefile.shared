@@ -331,7 +331,7 @@ rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is
 	fi; \
 	$(_DRY_RUN_GUARD); $(MAKE) coverage-gate ENV="$(ENV)" && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
-		$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" && \
+		$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" EXPOSURE_SCOPE=full && \
 		$(MAKE) verify-access ENV="$(ENV)" $(if $(strip $(VERIFY_KEY_COLUMN)),VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",)
 
 # Certification receipt: certify/maintain snapshot the enforcement inputs at gate
@@ -339,6 +339,21 @@ rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is
 # after the governance apply; release refuses unless it is still current. All
 # three hold a per-env lock (envs/<env>/generated/.governance.lock) throughout.
 _RECEIPT = python3 "$(SHARED_ROOT)/scripts/certification_receipt.py" --account-dir "$(ACCOUNT_ENV_DIR)"
+# Exposure cap: once make release has run, data_access / workspace applies keep
+# business SELECT and Genie CAN_RUN at what that release opened (recorded in
+# envs/<env>/generated/.released.json), so tables, principals or agents new
+# since then stay withheld until the next release. release and rehearse pass
+# EXPOSURE_SCOPE=full to apply uncapped. Sets released_vars and extends
+# apply_flags; expects layer, target_env and env_dir.
+_RELEASED_CAP = released_vars=""; \
+	if [ "$(EXPOSURE_SCOPE)" != "full" ] && { [ "$$layer" = "data_access" ] || [ "$$layer" = "workspace" ]; }; then \
+		if [ "$$layer" = "data_access" ]; then cap_env_dir="$$(dirname "$$env_dir")"; else cap_env_dir="$$env_dir"; fi; \
+		released_vars="$$($(_RECEIPT) released-vars "$$cap_env_dir" --layer "$$layer" --env "$$target_env" --prefix "$$layer")" || exit 1; \
+		if [ -n "$$released_vars" ]; then \
+			echo "=== Business access capped at the last make release ($$layer:$$target_env); new tables/agents stay withheld until make release ==="; \
+			apply_flags="$$apply_flags -var-file=$$released_vars"; \
+		fi; \
+	fi
 _GUARD_WORKSPACE_ENV = if [ "$(ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
 		echo "This command is workspace-driven. Use ENV=<workspace> instead of ENV=$(ENV)." >&2; \
 		exit 1; \
@@ -367,7 +382,7 @@ release: _guard-genie-placeholder ## Open business exposure after a current make
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,release); \
 	$(_RECEIPT) check "$(ENV_DIR)" --env "$(ENV)" || exit 1; \
-	if ! $(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true"; then \
+	if ! $(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" EXPOSURE_SCOPE=full; then \
 		$(_RECEIPT) release-failed "$(ENV_DIR)" --env "$(ENV)" --reason "apply failed"; \
 		exit 1; \
 	fi; \
@@ -469,9 +484,13 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 		cd "$$dest_env_dir" && python3 "$(SHARED_ROOT)/validate_abac.py" abac.auto.tfvars; \
 		echo ""; \
 		echo "=== Promote complete: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
-		echo "  Next: edit $$dest_env_dir/auth.auto.tfvars  ($(DEST_ENV) workspace credentials)"; \
-		echo "  Then: scan $(DEST_ENV) (make enable-classification ENV=$(DEST_ENV)), wait for class.* tags,"; \
-		echo "        and run make certify ENV=$(DEST_ENV) (walkthrough Phases 3-4)"; \
+		if grep -Eq '^[[:space:]]*business_access_enabled[[:space:]]*=[[:space:]]*true' "$$dest_env_dir/env.auto.tfvars"; then \
+			echo "$(DEST_ENV) is live: business access stays open; run make certify ENV=$(DEST_ENV), then make release ENV=$(DEST_ENV) to verify and expose any new tables."; \
+		else \
+			echo "  Next: edit $$dest_env_dir/auth.auto.tfvars  ($(DEST_ENV) workspace credentials)"; \
+			echo "  Then: scan $(DEST_ENV) (make enable-classification ENV=$(DEST_ENV)), wait for class.* tags,"; \
+			echo "        and run make certify ENV=$(DEST_ENV) (walkthrough Phases 3-4)"; \
+		fi; \
 		trap - EXIT; \
 	else \
 		if [ "$(SOURCE_ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(SOURCE_ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
@@ -514,9 +533,10 @@ _prepare-classification:
 
 _plan-layer:
 	@set -e; $(_DRY_RUN_GUARD); layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
+	env_dir="$(LAYER_ENV_DIR)"; apply_flags=""; $(_RELEASED_CAP); \
 	if [ "$$layer" = "data_access" ]; then $(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$(LAYER_ENV_DIR)")"; fi; \
 	echo "=== Terraform Plan ($$layer:$$target_env) ==="; \
-	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan
+	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan $$apply_flags
 
 plan: _guarded-bootstrap ## Run terraform plan for the selected layer or workspace env
 	@set -e; $(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
@@ -543,6 +563,7 @@ _apply-layer:
 	@set -e; $(_DRY_RUN_GUARD); layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	env_dir="$(LAYER_ENV_DIR)"; \
 	apply_flags="$(if $(filter data_access workspace,$(LAYER)),$(APPLY_FLAGS),)"; \
+	$(_RELEASED_CAP); \
 	if [ "$$layer" = "data_access" ]; then $(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$$env_dir")" IMPORT_CLASSIFICATION=1; fi; \
 	if [ ! -f "$$env_dir/abac.auto.tfvars" ]; then \
 		echo "=== Skipping terraform apply ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
@@ -553,6 +574,7 @@ _apply-layer:
 	fi; \
 	files="$$env_dir/auth.auto.tfvars $$env_dir/env.auto.tfvars $$env_dir/abac.auto.tfvars $$env_dir/classification.auto.tfvars $$env_dir/discovered_uc_tables.auto.tfvars"; \
 	if [ -f "$$env_dir/masking_functions.sql" ]; then files="$$files $$env_dir/masking_functions.sql"; fi; \
+	files="$$files $$released_vars"; \
 	fingerprint_file="$$env_dir/.$$layer.apply.sha"; \
 	current_fingerprint="$$( { for file in $$files; do [ -f "$$file" ] && shasum "$$file"; done; find "$(SHARED_ROOT)/roots/$$layer" "$(SHARED_ROOT)/modules/$$layer" -type f -name '*.tf' ! -path '*/tests/*' ! -path '*/.terraform/*' 2>/dev/null | LC_ALL=C sort | while IFS= read -r code_file; do shasum "$$code_file"; done; if [ "$$layer" = "workspace" ]; then shasum "$(SHARED_ROOT)/scripts/genie_space.sh"; elif [ "$$layer" = "data_access" ]; then shasum "$(SHARED_ROOT)/deploy_masking_functions.py"; fi; [ -z "$$apply_flags" ] || printf '%s\n' "$$apply_flags"; } | shasum | awk '{print $$1}')"; \
 	if [ -f "$$fingerprint_file" ] && [ "$$(cat "$$fingerprint_file")" = "$$current_fingerprint" ]; then \

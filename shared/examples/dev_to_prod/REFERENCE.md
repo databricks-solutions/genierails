@@ -17,6 +17,8 @@ Lookup companion to the **[Dev-to-Prod Walkthrough](README.md)**: the full comma
 
 So "expose last" isn't a policy you hope holds — there is simply no `SELECT` and no `CAN_RUN` until the gate is opened.
 
+**After the first release, exposure is capped.** `make release` records what it opened (`envs/prod/generated/.released.json`: each `SELECT` grant and each agent's `CAN_RUN` groups, read from Terraform state). Every later apply (`certify`, `maintain`, `apply`) keeps the gate open but grants nothing beyond that record. New tables, groups or agents wait for the next `make release`. Masks and row filters are applied before any `SELECT` grant. `make promote` keeps `business_access_enabled = true` only when prod is **live and certified**: the gate is `true` and a valid release record exists (or, for a prod released before records existed, the certification receipt is still current). Otherwise it writes `false`.
+
 **Three layers of governance, and the Terraform layers that build them:**
 
 | Governance layer (what it controls) | Built by Terraform layer | Contains |
@@ -47,9 +49,9 @@ So "expose last" isn't a policy you hope holds — there is simply no `SELECT` a
 | `make apply-governance ENV=<e>` | 4 | Enforcement only (account + data_access); no Genie agent |
 | `make rehearse ENV=dev VERIFY_KEY_COLUMN=<pk>` | 1 | (dev) coverage-gate → validate-generated → apply → verify-access, stopping at the first failure |
 | `make certify ENV=prod` | 4 | (prod) derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook; records the certification `make release` requires |
-| `make release ENV=prod VERIFY_KEY_COLUMN=<pk>` | 5 | (prod) Refuses unless certification is current; creates the Genie agent, releases gated access, saves `business_access_enabled = true`, runs `verify-access` |
+| `make release ENV=prod VERIFY_KEY_COLUMN=<pk>` | 5 | (prod) Refuses unless certification is current; creates the Genie agent, releases gated access (including tables new since the last release), saves `business_access_enabled = true` and the release record, runs `verify-access`. Safe to re-run on a live prod |
 | `make maintain ENV=prod` | 6 | (prod, scheduled) audit-schema → derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook; renews certification, never changes access or Genie |
-| `make promote SOURCE_ENV DEST_ENV DEST_CATALOG_MAP` | 2 | Promote **rules only** (leaves tag assignments behind); creates + writes prod `env.auto.tfvars` |
+| `make promote SOURCE_ENV DEST_ENV DEST_CATALOG_MAP` | 2 | Promote **rules only** (leaves tag assignments behind); creates + writes prod `env.auto.tfvars`; keeps `business_access_enabled = true` if prod is already live and certified |
 | `make verify-access ENV=<e> VERIFY_KEY_COLUMN=<pk>` | 1/5 | Prove masking by querying as per-tier test principals (**needs the gate open**) |
 | `make audit-rulebook ENV=<e>` | 4/6 | Drift check — tags with no covering rule |
 | `make audit-schema ENV=<e>` | 6 | Untagged-column audit (also the first step of `make maintain`) |

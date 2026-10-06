@@ -48,6 +48,12 @@ variable "business_access_enabled" {
   description = "Fail-closed exposure gate. Set true only after the coverage gate and schema drift check pass; controls business-group Genie ACLs."
 }
 
+variable "released_genie_acls" {
+  type        = map(list(string))
+  default     = null
+  description = "Tool-owned exposure cap: Genie agent key -> CAN_RUN groups the last make release opened. When set, ACLs are limited to these agents and groups; null means no cap."
+}
+
 variable "sql_warehouse_id" {
   type        = string
   default     = ""

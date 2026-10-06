@@ -471,7 +471,8 @@ def test_release_forces_gate_for_apply_then_persists_and_verifies(tmp_path):
     result = _make("release", env_dir, stub, "VERIFY_KEY_COLUMN= customer_id ")
     assert result.returncode == 0, result.stdout + result.stderr
     assert _calls(log) == [
-        ["apply", "ENV=prod", "APPLY_FLAGS=-var=business_access_enabled=true"],
+        ["apply", "ENV=prod", "APPLY_FLAGS=-var=business_access_enabled=true",
+         "EXPOSURE_SCOPE=full"],
         ["verify-access", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],
     ]
     assert cr.gate_open(env_dir)
