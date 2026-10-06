@@ -17,6 +17,8 @@ config source is required because `envs/` is gitignored. Point it at a
 runtime-visible envs root containing both `account/` and the target environment
 (for example `prod/`) to enable both audits. This gives the rulebook audit the
 promoted account policies without relying on local Terraform state.
+Relative values for both `--env-dir` and `--config-source` are resolved from
+the repository root; absolute paths are used unchanged.
 
 On findings, the run fails and its output explains what was found. Open the run
 from the failure notification, then run this from the authoritative GenieRails

@@ -2227,6 +2227,9 @@ def _fetch_live_classification_source(
         return None
 
 
+_LIVE_POLICIES_REPORTED = False
+
+
 def autofix_tag_policies(tfvars_path: Path) -> int:
     """Add tag values used in assignments/policies but missing from tag_policies.
 
@@ -2237,8 +2240,10 @@ def autofix_tag_policies(tfvars_path: Path) -> int:
     text = tfvars_path.read_text()
 
     live_policies = _fetch_live_tag_policy_values()
-    if live_policies:
+    global _LIVE_POLICIES_REPORTED
+    if live_policies and (not _LIVE_POLICIES_REPORTED or os.environ.get("VERBOSE") == "1"):
         print(f"  [AUTOFIX] Loaded {len(live_policies)} live tag policy/ies from Databricks")
+        _LIVE_POLICIES_REPORTED = True
 
     # Map key → (list_of_values, raw_values_text) preserving the EXACT text
     # from the file so that the replacement uses the original formatting.
@@ -6633,13 +6638,13 @@ class SpaceFolderError(Exception):
 class SpaceFolder:
     """Where one agent's per-space draft lives: generated/spaces/<key>/."""
 
-    def __init__(self, name: str, space_id: str, key: str, config: dict | None, stale_key: str = ""):
+    def __init__(self, name: str, space_id: str, key: str, config: dict | None):
         self.name = name            # canonical name (genie_space_configs key)
         self.space_id = space_id
         self.key = key
         self.config = config
         # Sibling folders to drop if they are only a bootstrap stub.
-        self.stale_keys = [stale_key] if stale_key else []
+        self.stale_keys: list[str] = []
 
 
 def _is_bootstrap_stub(space_dir: Path) -> bool:
@@ -6651,6 +6656,14 @@ def _is_bootstrap_stub(space_dir: Path) -> bool:
         )
     except OSError:
         return False
+
+
+def _bootstrap_stub_owner(space_dir: Path) -> str | None:
+    """The agent name a bootstrap stub was written for (None if not a stub)."""
+    if not _is_bootstrap_stub(space_dir):
+        return None
+    m = re.search(r"^# Per-space config for: (.*)$", (space_dir / "abac.auto.tfvars").read_text(), re.M)
+    return m.group(1) if m else None
 
 
 def _has_real_content(space_dir: Path) -> bool:
@@ -6676,15 +6689,24 @@ def resolve_space_folders(
     """Pick one generated/spaces/<key>/ folder per agent, or raise SpaceFolderError.
 
     The key is the sanitized canonical name (an imported agent's title, from
-    genie_space_id_to_name). An earlier version named an imported agent's
-    folder after its raw ID; that folder is kept when it has real content and
-    the title folder doesn't, and it is an error when both have real content.
-    When distinct names sanitize to the same key, every agent in that group
-    gets "<key>--<genie_space_id>" (or "--new_<name hash>" for an agent not
-    created yet), so the choice depends only on identity, never list order; a
-    shared bare folder with real content is an error. Folder names are local
-    to generate/merge only: no Terraform root reads generated/spaces/, so they
-    never affect resource keys (Terraform's own "--" keys are separate).
+    genie_space_id_to_name). When distinct names sanitize to the same key,
+    every agent in that group gets "<key>--<genie_space_id>" (or
+    "--new_<name hash>" for an agent not created yet), so the choice depends
+    only on identity, never list order; a shared bare folder with real
+    content is an error.
+
+    An agent's folder name can change between runs: an imported agent was
+    once named after its raw ID, a new agent's "--new_<hash>" becomes
+    "--<id>" once it is created, and a collision group can shrink back to a
+    bare key. Every name the agent's identity could have produced is a
+    candidate. A folder with real content claimed by more than one agent is
+    an error (ownership is never guessed). Otherwise, per agent: if exactly
+    one candidate has real content, keep using it (with a note); if none
+    does, use the current name; if two or more do, it is an error. Errors are
+    raised before anything is written. A bootstrap stub is removed only by
+    the agent that owns it, and never while any agent uses it. Folder names are local to generate/merge only: no Terraform root
+    reads generated/spaces/, so they never affect resource keys (Terraform's
+    own "--" keys are separate).
     """
     folders: list[SpaceFolder] = []
     notes: list[str] = []
@@ -6701,26 +6723,7 @@ def resolve_space_folders(
                 "(name = \"...\") in env.auto.tfvars, then re-run make generate."
             )
         seen_ids[name] = space_id
-        key, stale_key = sanitize_space_key(name), ""
-        if space_id and name != space_id:
-            id_key = sanitize_space_key(space_id)
-            id_real = _has_real_content(spaces_dir / id_key)
-            title_real = _has_real_content(spaces_dir / key)
-            if id_real and title_real:
-                raise SpaceFolderError(
-                    f"generated/spaces/{id_key}/ and generated/spaces/{key}/ both hold per-agent "
-                    f"content for {name!r} ({space_id}). Keep generated/spaces/{key}/: move or merge "
-                    f"anything you still need from generated/spaces/{id_key}/ into it, delete "
-                    f"generated/spaces/{id_key}/, then re-run make generate."
-                )
-            if id_real:
-                notes.append(
-                    f"keeping generated/spaces/{id_key}/ for {name!r} (it has per-agent content)."
-                )
-                key, stale_key = id_key, key
-            else:
-                stale_key = id_key
-        folders.append(SpaceFolder(name, space_id, key, sp.get("config"), stale_key))
+        folders.append(SpaceFolder(name, space_id, sanitize_space_key(name), sp.get("config")))
 
     for name in extra_names:
         if name not in seen_ids:
@@ -6733,20 +6736,97 @@ def resolve_space_folders(
     for folder in folders:
         groups.setdefault(folder.key, []).append(folder)
     for key, members in groups.items():
-        if len(members) < 2:
-            continue
-        if _has_real_content(spaces_dir / key):
-            owners = ", ".join(f"{m.name!r} ({m.space_id or 'new'})" for m in members)
-            targets = ", ".join(f"generated/spaces/{key}--{_identity_suffix(m)}/" for m in members)
+        if len(members) > 1:
+            for member in members:
+                member.key = f"{key}--{_identity_suffix(member)}"
+
+    # Every folder name each agent's identity could have produced, and which
+    # agents claim each name. All checks run before anything is written.
+    candidates = {id(f): _candidate_keys(f) for f in folders}
+    claims: dict[str, list[SpaceFolder]] = {}
+    for folder in folders:
+        for key in candidates[id(folder)]:
+            claims.setdefault(key, []).append(folder)
+    for key, owners in claims.items():
+        if len(owners) > 1 and _has_real_content(spaces_dir / key):
+            current = next((o for o in owners if o.key == key), None)
+            if current:
+                others = [o for o in owners if o is not current]
+                raise SpaceFolderError(
+                    f"generated/spaces/{key}/ has per-agent content and is the folder for "
+                    f"{_describe(current)}, but it is also an earlier folder name for "
+                    + ", ".join(_describe(o) for o in others)
+                    + ", so it is unclear whose content it is. If it belongs to "
+                    + " or ".join(f"{o.name!r}, move it to generated/spaces/{o.key}/" for o in others)
+                    + f". If it belongs to {current.name!r}, give that agent a distinct name "
+                    "(name = \"...\") in env.auto.tfvars and rename the folder to match. "
+                    "Then re-run make generate."
+                )
+            who = ", ".join(_describe(o) for o in owners)
+            targets = ", ".join(f"generated/spaces/{o.key}/" for o in owners)
             raise SpaceFolderError(
-                f"generated/spaces/{key}/ has per-agent content but is shared by {owners}. "
+                f"generated/spaces/{key}/ has per-agent content but is shared by {who}. "
                 f"Each now gets its own folder ({targets}). Move the content into the folder "
                 f"of the agent it belongs to, delete generated/spaces/{key}/, then re-run make generate."
             )
-        for member in members:
-            member.key = f"{key}--{_identity_suffix(member)}"
-            member.stale_keys.append(key)
+
+    for folder in folders:
+        earlier = [k for k in candidates[id(folder)] if k != folder.key]
+        real = [k for k in [folder.key, *earlier] if _has_real_content(spaces_dir / k)]
+        if len(real) > 1:
+            keep, others = real[0], real[1:]
+            listed = [f"generated/spaces/{k}/" for k in [*others, keep]]
+            listed = ", ".join(listed[:-1]) + f" and {listed[-1]} " + ("both" if len(listed) == 2 else "all")
+            others_text = ", ".join(f"generated/spaces/{k}/" for k in others)
+            raise SpaceFolderError(
+                f"{listed} hold per-agent content for {_describe(folder)}. Keep generated/spaces/{keep}/: "
+                f"move or merge anything you still need from {others_text} into it, "
+                f"delete {others_text}, then re-run make generate."
+            )
+        if real and real[0] != folder.key:
+            notes.append(
+                f"keeping generated/spaces/{real[0]}/ for {folder.name!r} (it has per-agent content)."
+            )
+            folder.key = real[0]
+
+    in_use: dict[str, SpaceFolder] = {}
+    for folder in folders:
+        if folder.key in in_use:
+            raise SpaceFolderError(
+                f"Genie agents {_describe(in_use[folder.key])} and {_describe(folder)} would share "
+                f"generated/spaces/{folder.key}/. Check their genie_space_id values in env.auto.tfvars, "
+                "or give one of them a distinct name (name = \"...\"), then re-run make generate."
+            )
+        in_use[folder.key] = folder
+
+    # A leftover name is cleaned up only by the one agent that owns it: its
+    # sole claimant, or the claimant its bootstrap stub was written for.
+    for key, owners in claims.items():
+        if key in in_use:
+            continue
+        if len(owners) > 1:
+            stub_for = _bootstrap_stub_owner(spaces_dir / key)
+            owners = [o for o in owners if o.name == stub_for]
+        if len(owners) == 1:
+            owners[0].stale_keys.append(key)
     return folders, notes
+
+
+def _candidate_keys(folder: "SpaceFolder") -> list[str]:
+    """The agent's current folder name, then names it may have had before:
+    its raw ID (before folders used titles), its "--new_<hash>" collision
+    name (before it was created), and its bare or "--<id>" name (before its
+    collision group grew or shrank)."""
+    base = sanitize_space_key(folder.name)
+    keys = [folder.key]
+    if folder.space_id:
+        keys += [sanitize_space_key(folder.space_id), f"{base}--new_{_name_hash(folder.name)}"]
+    keys.append(f"{base}--{_identity_suffix(folder)}" if folder.key == base else base)
+    return list(dict.fromkeys(keys))
+
+
+def _describe(folder: "SpaceFolder") -> str:
+    return f"{folder.name!r} ({folder.space_id or 'new'})"
 
 
 def _identity_suffix(folder: "SpaceFolder") -> str:
@@ -6754,7 +6834,11 @@ def _identity_suffix(folder: "SpaceFolder") -> str:
     (unique) canonical name for an agent that doesn't exist yet."""
     if folder.space_id:
         return sanitize_space_key(folder.space_id)
-    return "new_" + hashlib.sha256(folder.name.encode()).hexdigest()[:8]
+    return "new_" + _name_hash(folder.name)
+
+
+def _name_hash(name: str) -> str:
+    return hashlib.sha256(name.encode()).hexdigest()[:8]
 
 
 def canonical_space_name(space: dict, id_to_name: dict) -> str:
@@ -6795,6 +6879,11 @@ def run_validation(
     cmd = [sys.executable, str(validator), str(tfvars_path)]
     if sql_path.exists():
         cmd.append(str(sql_path))
+    # Keep both positional paths before options. Python <=3.11 argparse does
+    # not reliably resume an optional positional after parsing options.
+    cmd.extend(["--summary-label", "generate"])
+    if os.environ.get("VERBOSE") == "1":
+        cmd.append("--verbose")
     if countries:
         cmd.extend(["--country", ",".join(countries)])
     if industries:

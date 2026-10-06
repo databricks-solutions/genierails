@@ -936,7 +936,7 @@ _SLOW_STAGE = {"release": "apply", "certify": "derive-assignments", "maintain": 
 def test_signal_mid_run_releases_lock(tmp_path, target, sig):
     env_dir = _env_dir(tmp_path)
     cr.write_receipt(env_dir, "certify")
-    stub, log = _stub(tmp_path, on={_SLOW_STAGE[target]: "sleep 30"})
+    stub, log = _stub(tmp_path, on={_SLOW_STAGE[target]: "exec sleep 30"})
     proc = subprocess.Popen(
         ["make", target, "ENV=prod", f"ENV_DIR={env_dir}",
          f"ACCOUNT_ENV_DIR={tmp_path / 'account'}", f"MAKE={stub}",
@@ -952,10 +952,13 @@ def test_signal_mid_run_releases_lock(tmp_path, target, sig):
             time.sleep(0.05)
         assert _lock(env_dir).exists()
         os.killpg(proc.pid, sig)
-        proc.communicate(timeout=15)
     finally:
         if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=5)
     # The recipe shell's trap runs the unlock after make itself has gone.
     deadline = time.time() + 10
     while _lock(env_dir).exists() and time.time() < deadline:

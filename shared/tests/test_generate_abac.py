@@ -706,6 +706,27 @@ tag_policies = [
 #  autofix_tag_policies
 # ===========================================================================
 
+def test_run_validation_real_cli_accepts_tfvars_and_sql_positionals(tmp_path, monkeypatch, capfd):
+    out_dir = tmp_path / "generated"
+    out_dir.mkdir()
+    (out_dir / "abac.auto.tfvars").write_text(
+        'groups = { analysts = { description = "Review regression" } }\n'
+        "tag_policies = []\n"
+        "tag_assignments = []\n"
+        "fgac_policies = []\n"
+        "group_members = {}\n"
+        "genie_space_configs = {}\n"
+    )
+    (out_dir / "masking_functions.sql").write_text(
+        "CREATE FUNCTION mask_review_regression(value STRING) RETURNS STRING RETURN value;\n"
+    )
+    monkeypatch.delenv("VERBOSE", raising=False)
+
+    assert generate_abac.run_validation(out_dir)
+    output = capfd.readouterr().out
+    assert "unrecognized arguments" not in output
+
+
 class TestAutofixTagPolicies:
 
     def _base_hcl(self, allowed_values: str, used_value: str) -> str:
@@ -734,6 +755,15 @@ fgac_policies = []
         path = tmp_tfvars(hcl)
         count = autofix_tag_policies(path)
         assert count == 0
+
+    def test_live_policy_count_is_reported_once_unless_verbose(self, tmp_tfvars, monkeypatch, capsys):
+        path = tmp_tfvars(self._base_hcl('"public"', "public"))
+        monkeypatch.setattr(generate_abac, "_LIVE_POLICIES_REPORTED", False)
+        monkeypatch.setattr(generate_abac, "_fetch_live_tag_policy_values",
+                            lambda: {"pii_level": {"public"}})
+        autofix_tag_policies(path)
+        autofix_tag_policies(path)
+        assert capsys.readouterr().out.count("[AUTOFIX] Loaded 1 live tag policy/ies") == 1
 
     def test_adds_missing_value_simple(self, tmp_tfvars):
         hcl = self._base_hcl('"public"', "Limited_PII")

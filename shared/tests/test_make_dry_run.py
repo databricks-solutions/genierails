@@ -226,6 +226,9 @@ def test_rehearsal_apply_flag_follows_tfvars_and_changes_fingerprint(tmp_path):
     ]
 
 
+# -O/--output-sync (and GNUMAKEFLAGS) need GNU Make 4+; Apple's make is 3.81.
+# conftest.py runs these with gmake when `make` is older, else skips them.
+@pytest.mark.gnu_make
 def test_apply_layer_output_sync_is_not_mistaken_for_dry_run(tmp_path):
     env_dir = tmp_path / "env"
     env_dir.mkdir()
@@ -297,13 +300,13 @@ def _run_recorded_apply(tmp_path, make_args, extra_env=None):
     ("make_args", "extra_env"),
     [
         ([], {}),
-        (["-Oline"], {}),
-        (["-Onone"], {}),
-        (["--output-sync=line"], {}),
-        (["--no-print-directory", "-Oline"], {}),
+        pytest.param(["-Oline"], {}, marks=pytest.mark.gnu_make),
+        pytest.param(["-Onone"], {}, marks=pytest.mark.gnu_make),
+        pytest.param(["--output-sync=line"], {}, marks=pytest.mark.gnu_make),
+        pytest.param(["--no-print-directory", "-Oline"], {}, marks=pytest.mark.gnu_make),
         (["-I/tmp/nn"], {}),
         (["-j8", "-I/tmp/nn"], {}),
-        ([], {"GNUMAKEFLAGS": "-Oline"}),
+        pytest.param([], {"GNUMAKEFLAGS": "-Oline"}, marks=pytest.mark.gnu_make),
         (["ENV=dev"], {}),
         (["-j2"], {}),
         (["-B"], {}),
