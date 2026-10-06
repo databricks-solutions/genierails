@@ -336,6 +336,105 @@ def test_shared_bare_folder_stub_is_removed_but_real_content_stops(tmp_path, cap
     assert (spaces / "finance_hr/masking_functions.sql").exists()
 
 
+# An agent's collision folder name changes when it is created (--new_<hash>
+# -> --<id>) and when its group shrinks to one (--<id> -> bare key). The old
+# folder follows the same rules as the raw-ID folder of an imported agent.
+
+NEW_THEN_CREATED = (
+    [{"name": "Finance & HR", "genie_space_id": ""}, {"name": "Finance HR", "genie_space_id": "01bbb"}],
+    [{"name": "Finance & HR", "genie_space_id": "01aaa"}, {"name": "Finance HR", "genie_space_id": "01bbb"}],
+)
+GROUP_THEN_SINGLETON = (COLLIDING, COLLIDING[:1])
+
+
+def _new_key():
+    return "finance_hr--new_" + generate_abac._name_hash("Finance & HR")
+
+
+LIFECYCLE = {
+    # transition: (configs before/after, old folder, new folder)
+    "new_hash_to_id": (NEW_THEN_CREATED, _new_key(), "finance_hr--01aaa"),
+    "group_to_singleton": (GROUP_THEN_SINGLETON, "finance_hr--01aaa", "finance_hr"),
+}
+
+
+def _bootstrap_before(tmp_path, transition):
+    (before, after), old, _new = LIFECYCLE[transition]
+    out_dir = _colliding_generated(tmp_path)
+    bootstrap_per_space_dirs(out_dir, {"genie_spaces": before}, "")
+    assert (out_dir / "spaces" / old / "abac.auto.tfvars").exists()
+    # The next full generation only emits configs for the agents still listed.
+    (out_dir / "abac.auto.tfvars").write_text(
+        "genie_space_configs = {\n"
+        + "".join(f'  "{sp["name"]}" = {{ title = "{sp["name"]}" }}\n' for sp in after)
+        + "}\n"
+    )
+    return out_dir
+
+
+def _folder_of(spaces, name, spaces_dir):
+    folders, notes = resolve_space_folders(spaces, {}, spaces_dir)
+    return next(f.key for f in folders if f.name == name), notes
+
+
+@pytest.mark.parametrize("transition", LIFECYCLE)
+def test_placeholder_only_old_collision_folder_is_removed(tmp_path, transition):
+    (_before, after), old, new = LIFECYCLE[transition]
+    out_dir = _bootstrap_before(tmp_path, transition)
+    spaces = out_dir / "spaces"
+
+    bootstrap_per_space_dirs(out_dir, {"genie_spaces": after}, "")
+
+    assert not (spaces / old).exists()
+    assert _owners(spaces)[new] == "Finance & HR"
+    assert _folder_of(after, "Finance & HR", spaces) == (new, [])
+
+
+@pytest.mark.parametrize("transition", LIFECYCLE)
+def test_old_collision_folder_with_real_content_is_kept(tmp_path, transition, capsys):
+    (_before, after), old, new = LIFECYCLE[transition]
+    out_dir = _bootstrap_before(tmp_path, transition)
+    spaces = out_dir / "spaces"
+    _real(spaces / old)
+    capsys.readouterr()
+
+    bootstrap_per_space_dirs(out_dir, {"genie_spaces": after}, "")
+
+    assert not (spaces / new).exists()
+    assert (spaces / old / "masking_functions.sql").read_text() == "-- customized\n"
+    assert _owners(spaces)[old] == "Finance & HR"
+    note = f"keeping generated/spaces/{old}/ for 'Finance & HR' (it has per-agent content)."
+    assert f"NOTE: {note}" in capsys.readouterr().out
+    # make generate SPACE= picks the same folder.
+    assert _folder_of(after, "Finance & HR", spaces) == (old, [note])
+
+
+@pytest.mark.parametrize("transition", LIFECYCLE)
+def test_old_and_new_collision_folders_with_real_content_stop_writing_nothing(tmp_path, transition, capsys):
+    (_before, after), old, new = LIFECYCLE[transition]
+    out_dir = _bootstrap_before(tmp_path, transition)
+    spaces = out_dir / "spaces"
+    _real(spaces / old)
+    _real(spaces / new)
+    before = {p: p.read_text() for p in spaces.rglob("*") if p.is_file()}
+    expected = (
+        f"generated/spaces/{old}/ and generated/spaces/{new}/ both hold per-agent content for "
+        f"'Finance & HR' (01aaa). Keep generated/spaces/{new}/: move or merge anything you still "
+        f"need from generated/spaces/{old}/ into it, delete generated/spaces/{old}/, then re-run "
+        "make generate."
+    )
+
+    # The pre-model-call check in main() raises the same error...
+    with pytest.raises(SpaceFolderError) as exc:
+        resolve_space_folders(after, {}, spaces)
+    assert str(exc.value) == expected
+    # ...and the bootstrap writes and deletes nothing.
+    with pytest.raises(SystemExit):
+        bootstrap_per_space_dirs(out_dir, {"genie_spaces": after}, "")
+    assert expected in capsys.readouterr().out
+    assert {p: p.read_text() for p in spaces.rglob("*") if p.is_file()} == before
+
+
 def test_space_folder_names_never_feed_terraform_keys():
     # Folder names are local to generate/merge; no Terraform root or module
     # reads generated/spaces/, so the folder choice can't move resource keys.

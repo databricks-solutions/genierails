@@ -57,6 +57,8 @@ For integration testing (`make test-ci`), cloud-specific packages are also auto-
 | `azure-mgmt-databricks` | Azure | Workspace management |
 
 > **`make test-ci`** also needs **`pytest`** (and `python-hcl2`) present — these are *not* auto-installed. Run `pip install pytest python-hcl2` first.
+>
+> Contributors: a few unit tests exercise GNU Make 4+ options (`-Oline`, `--output-sync`). Apple's `make` is 3.81, so on macOS they run with `gmake` if present (`brew install make`) and are skipped otherwise. GenieRails itself works with either.
 
 **Terraform providers** — on first `terraform init`:
 
