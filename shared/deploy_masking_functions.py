@@ -425,6 +425,42 @@ def drop(sql_file: str, warehouse_id: str) -> None:
         print(f"  All {total} function(s) dropped successfully.")
 
 
+def refresh_credentials_from_auth_file(sql_file: str) -> bool:
+    """Prefer the current SP credentials over the ones Terraform stored.
+
+    The destroy-time provisioner can only read credentials saved in state when
+    the resource was created, which are stale after an SP secret rotation. The
+    layer's auth.auto.tfvars sits next to the SQL file, so load the current
+    client ID/secret from it when it targets the same workspace host.
+    """
+    auth_file = os.path.join(
+        os.path.dirname(os.path.abspath(sql_file)), "auth.auto.tfvars"
+    )
+    if not os.path.isfile(auth_file):
+        return False
+    try:
+        import hcl2
+
+        with open(auth_file) as f:
+            auth = hcl2.load(f)
+    except Exception as exc:
+        print(
+            f"  WARNING: could not read {auth_file} ({type(exc).__name__}); "
+            "using provisioner credentials."
+        )
+        return False
+    host = str(auth.get("databricks_workspace_host", "")).rstrip("/")
+    client_id = str(auth.get("databricks_client_id", ""))
+    client_secret = str(auth.get("databricks_client_secret", ""))
+    if not (client_id and client_secret):
+        return False
+    if host != os.environ.get("DATABRICKS_HOST", "").rstrip("/"):
+        return False
+    os.environ["DATABRICKS_CLIENT_ID"] = client_id
+    os.environ["DATABRICKS_CLIENT_SECRET"] = client_secret
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Deploy or drop masking functions via "
@@ -449,6 +485,7 @@ def main():
         ),
     )
     args = parser.parse_args()
+    refresh_credentials_from_auth_file(args.sql_file)
 
     if args.drop:
         drop(args.sql_file, args.warehouse_id)

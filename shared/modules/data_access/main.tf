@@ -251,6 +251,15 @@ resource "databricks_sql_endpoint" "warehouse" {
 }
 
 resource "null_resource" "deploy_masking_functions" {
+  # Rotating the SP secret must not drop and recreate every masking function.
+  # The script loads current credentials from the layer's auth.auto.tfvars.
+  lifecycle {
+    ignore_changes = [
+      triggers["client_id"],
+      triggers["client_secret"],
+    ]
+  }
+
   triggers = {
     sql_hash      = filemd5(var.masking_sql_file)
     sql_file      = var.masking_sql_file
