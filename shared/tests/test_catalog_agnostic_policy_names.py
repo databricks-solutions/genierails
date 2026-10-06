@@ -116,13 +116,13 @@ def _remote_names(policies: list[dict]) -> list[str]:
     return [f"{p['catalog']}_{p['name']}" for p in policies]
 
 
-def _state(path: Path, keys: list[str]) -> Path:
+def _state(path: Path, keys: list[str], catalog: str = PROD_1, extra: list[dict] = ()) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"version": 4, "resources": [{
         "module": "module.data_access", "mode": "managed",
         "type": "databricks_policy_info", "name": "policies",
-        "instances": [{"index_key": k, "attributes": {"on_securable_fullname": PROD_1}} for k in keys],
-    }]}))
+        "instances": [{"index_key": k, "attributes": {"on_securable_fullname": catalog}} for k in keys],
+    }, *extra]}))
     return path
 
 
@@ -140,8 +140,8 @@ def _assert_all_renamed(out: Path) -> None:
     assert len(set(remote)) == len(remote)
 
 
-def _assert_no_live_mask_dropped(tmp_path: Path, out: Path) -> None:
-    changes = _policy_plan(tmp_path, out)
+def _assert_no_live_mask_dropped(tmp_path: Path, out: Path, changes: dict | None = None) -> None:
+    changes = changes if changes is not None else _policy_plan(tmp_path, out)
     live = _SEEDED_ADDRESS.format(key=LEGACY)
     actions, before, after = changes[live]
     # Principals may converge in place; the remote name must not move.
@@ -169,17 +169,49 @@ def test_promote_renames_only_the_policys_own_catalog_token():
     assert remap_policy_name("mask_pii", "cat", "prod") == "mask_pii"
 
 
-def test_state_without_the_policy_renames(tmp_path, monkeypatch, capsys):
+def test_state_without_the_key_but_api_unavailable_keeps_names(tmp_path, monkeypatch, capsys):
+    # A state that doesn't manage the old policy can't prove it's absent remotely.
     state = _state(tmp_path / "prod" / "data_access" / "terraform.tfstate", ["unrelated"])
     code, stdout, out = _promote(tmp_path, monkeypatch, capsys, _render(_dev_generated_config()), state=state)
+    assert code == 0, stdout
+    assert f"kept policy name {LEGACY_REMOTE} (couldn't confirm it isn't deployed in {PROD_1})" in stdout
+    assert set(_names(out)) == {p["name"] for p in _dev_generated_config()["fgac_policies"]}
+    _assert_no_live_mask_dropped(tmp_path, out)
+
+
+def test_api_shows_old_and_new_names_absent_renames(tmp_path, monkeypatch, capsys):
+    code, stdout, out = _promote(
+        tmp_path, monkeypatch, capsys, _render(_dev_generated_config()), live={PROD_1: {"other"}}
+    )
     assert code == 0, stdout
     _assert_all_renamed(out)
     assert "kept policy name" not in stdout
 
 
-def test_state_absent_and_api_says_not_deployed_renames(tmp_path, monkeypatch, capsys):
+def test_new_remote_name_already_existing_keeps_the_old_name(tmp_path, monkeypatch, capsys):
+    new_remote = f"{PROD_1}_gr_mask_{PROD_1}_redact"
     code, stdout, out = _promote(
-        tmp_path, monkeypatch, capsys, _render(_dev_generated_config()), live={PROD_1: {"other"}}
+        tmp_path, monkeypatch, capsys, _render(_dev_generated_config()),
+        live={PROD_1: {new_remote}, PROD_2: set()},
+    )
+    assert code == 0, stdout
+    assert f"kept policy name {LEGACY_REMOTE} ({new_remote} already exists in {PROD_1})" in stdout
+    names = _names(out)
+    assert LEGACY in names
+    assert f"gr_mask_{PROD_1}_redact" not in names
+    assert f"gr_mask_{PROD_2}_redact" in names
+    changes = _policy_plan(tmp_path, out)
+    assert not [a for a, (actions, _b, after) in changes.items()
+                if "create" in actions and after == new_remote], "never plan a colliding create"
+    _assert_no_live_mask_dropped(tmp_path, out, changes)
+
+
+def test_existing_new_name_managed_under_the_new_key_is_reused(tmp_path, monkeypatch, capsys):
+    new_key = f"gr_mask_{PROD_1}_redact"
+    state = _state(tmp_path / "prod" / "data_access" / "terraform.tfstate", [new_key])
+    code, stdout, out = _promote(
+        tmp_path, monkeypatch, capsys, _render(_dev_generated_config()), state=state,
+        live={PROD_1: {f"{PROD_1}_{new_key}"}, PROD_2: set()},
     )
     assert code == 0, stdout
     _assert_all_renamed(out)
@@ -234,6 +266,21 @@ def test_api_says_deployed_keeps_name(tmp_path, monkeypatch, capsys):
     assert f"gr_mask_{PROD_2}_redact" in names
     assert f"region_filter_{PROD_1}" in names
     _assert_no_live_mask_dropped(tmp_path, out)
+
+
+def test_state_keys_are_qualified_by_catalog_and_resource(tmp_path, monkeypatch, capsys):
+    other = {"module": "module.other", "mode": "managed", "type": "databricks_policy_info",
+             "name": "policies", "instances": [{"index_key": LEGACY,
+                                                "attributes": {"on_securable_fullname": PROD_1}}]}
+    state = _state(tmp_path / "prod" / "data_access" / "terraform.tfstate", [LEGACY],
+                   catalog="some_other_catalog", extra=[other])
+    assert read_state_policy_keys(state) == {("some_other_catalog", LEGACY)}
+    code, stdout, out = _promote(
+        tmp_path, monkeypatch, capsys, _render(_dev_generated_config()), state=state,
+        live={PROD_1: set(), PROD_2: set()},
+    )
+    assert code == 0, stdout
+    _assert_all_renamed(out)
 
 
 def test_state_says_deployed_overrides_an_api_miss(tmp_path, monkeypatch, capsys):
@@ -329,7 +376,7 @@ def test_promoted_names_must_stay_unique():
     )
     pairs = [(DEV_1, PROD_1)]
     with pytest.raises(ValueError, match="share a name"):
-        remap_policy_names(source, remap_hcl(source, pairs), pairs, set())
+        remap_policy_names(source, remap_hcl(source, pairs), pairs, set(), lambda _c: set())
 
 
 def test_promote_passes_destination_state_and_auth_only():

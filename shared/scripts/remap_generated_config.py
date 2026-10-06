@@ -91,11 +91,13 @@ def remap_policy_name(name: str, src: str, dest: str) -> str:
     return re.sub(rf"(?<![A-Za-z0-9]){re.escape(src)}(?![A-Za-z0-9])", dest, name)
 
 
-def read_state_policy_keys(path: Path | None) -> set[str] | None:
-    """Return the policy for_each keys in a Terraform state, or None if unknown.
+def read_state_policy_keys(path: Path | None) -> set[tuple[str, str]] | None:
+    """Return (catalog, key) of the data_access policies in a Terraform state.
 
-    A missing, empty or unreadable state proves nothing: the env may keep its
-    state remotely, or it may have been lost.
+    Only ``module.data_access.databricks_policy_info.policies`` counts. The
+    result can only add reasons to keep a name: a state without a key doesn't
+    prove the remote policy is absent. None when the state is missing or
+    unreadable.
     """
     import json
 
@@ -107,13 +109,19 @@ def read_state_policy_keys(path: Path | None) -> set[str] | None:
         return None
     if not isinstance(state, dict) or "resources" not in state:
         return None
-    keys: set[str] = set()
+    keys: set[tuple[str, str]] = set()
     for resource in state.get("resources") or []:
-        if resource.get("type") != "databricks_policy_info" or resource.get("mode") != "managed":
+        if (
+            resource.get("module") != "module.data_access"
+            or resource.get("mode") != "managed"
+            or resource.get("type") != "databricks_policy_info"
+            or resource.get("name") != "policies"
+        ):
             continue
         for instance in resource.get("instances") or []:
-            if isinstance(instance.get("index_key"), str):
-                keys.add(instance["index_key"])
+            catalog = (instance.get("attributes") or {}).get("on_securable_fullname")
+            if isinstance(instance.get("index_key"), str) and catalog:
+                keys.add((catalog, instance["index_key"]))
     return keys
 
 
@@ -187,7 +195,7 @@ def remap_policy_names(
     source_text: str,
     remapped_text: str,
     pairs: list[tuple[str, str]],
-    state_keys: set[str] | None = None,
+    state_keys: set[tuple[str, str]] | None = None,
     live_names: Callable[[str], set[str] | None] | None = None,
 ) -> tuple[str, list[str]]:
     """Carry the destination catalog into fgac policy names.
@@ -196,9 +204,11 @@ def remap_policy_names(
     it by ``name``. Renaming an applied policy is not safe: provider 1.111's
     update sends the new name as the request path and omits ``name`` from the
     update mask, and a new for_each key is a delete plus a create. So a policy
-    is renamed only when the destination's Terraform state or a live listing of
-    its catalog shows it isn't deployed, and neither shows that it is. Drafts and
-    config files are never evidence.
+    is renamed only when a successful live listing of its destination catalog
+    shows neither the old nor the new remote name, and the destination state
+    doesn't hold the old key. A new remote name that already exists is fine only
+    when the state holds it under the new key (the same managed policy). Drafts
+    and config files are never evidence.
     """
     import hcl2
 
@@ -220,16 +230,21 @@ def remap_policy_names(
             if dest not in live_cache:
                 live_cache[dest] = live_names(dest) if live_names else None
             live = live_cache[dest]
+            managed = state_keys or set()
             old_remote = f"{dest}_{name}"
-            if (state_keys is not None and name in state_keys) or (
-                live is not None and old_remote in live
-            ):
+            new_remote = f"{dest}_{new_name}"
+            if (dest, name) in managed or (live is not None and old_remote in live):
                 notes.append(f"  kept policy name {old_remote} (deployed in {dest})")
                 new_name = name
-            elif state_keys is None and live is None:
+            elif live is None:
                 notes.append(
                     f"  kept policy name {old_remote} "
                     f"(couldn't confirm it isn't deployed in {dest})"
+                )
+                new_name = name
+            elif new_remote in live and (dest, new_name) not in managed:
+                notes.append(
+                    f"  kept policy name {old_remote} ({new_remote} already exists in {dest})"
                 )
                 new_name = name
         if new_name != name:
