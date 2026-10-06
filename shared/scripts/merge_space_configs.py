@@ -689,6 +689,219 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
     print(f"\n  Merge complete for space '{space_key}'.")
 
 
+# ---------------------------------------------------------------------------
+# Sticky reviewed rules (re-running generate over a reviewed draft)
+# ---------------------------------------------------------------------------
+
+ALLOW_RULE_CHANGES_FLAG = "--allow-rule-changes"
+_RULE_SECTIONS = ("tag_assignments", "treatment_overrides", "fgac_policies")
+
+
+def load_reviewed_rules(generated_dir: Path) -> tuple[dict, str] | None:
+    """Return (abac config, masking SQL) of the reviewed draft, or None.
+
+    None means there is no prior draft with rules (first-time generate, or a
+    genie-mode import only). An unparseable draft raises ValueError so a
+    re-run can never silently treat hand-reviewed rules as absent.
+    """
+    abac_path = generated_dir / "abac.auto.tfvars"
+    if not abac_path.exists():
+        return None
+    try:
+        cfg = hcl2.loads(abac_path.read_text())
+    except Exception as exc:
+        raise ValueError(
+            f"cannot read the reviewed rules in {abac_path}: {exc}. Fix the file, "
+            f"or re-run with {ALLOW_RULE_CHANGES_FLAG} to replace it with a new draft"
+        ) from exc
+    if not any(cfg.get(section) for section in _RULE_SECTIONS):
+        return None
+    sql_path = generated_dir / "masking_functions.sql"
+    return cfg, sql_path.read_text() if sql_path.exists() else ""
+
+
+def _function_key(block: str) -> tuple[str, str, str] | None:
+    names = extract_function_names(block)
+    if len(names) != 1:
+        return None
+    catalog = re.search(r"USE\s+CATALOG\s+(\S+?);", block, re.IGNORECASE)
+    schema = re.search(r"USE\s+SCHEMA\s+(\S+?);", block, re.IGNORECASE)
+    return (
+        catalog.group(1).lower() if catalog else "",
+        schema.group(1).lower() if schema else "",
+        names.pop(),
+    )
+
+
+def _function_blocks_by_key(sql_text: str) -> dict[tuple[str, str, str], str]:
+    blocks: dict[tuple[str, str, str], str] = {}
+    for block in split_into_function_blocks(sql_text):
+        key = _function_key(block)
+        if key:
+            blocks[key] = block
+    return blocks
+
+
+def _normalized_sql(block: str) -> str:
+    text = re.sub(r"--[^\n]*", "", block)
+    text = re.sub(r"^\s*USE\s+(?:CATALOG|SCHEMA)\s+\S+\s*;", "", text,
+                  flags=re.IGNORECASE | re.MULTILINE)
+    return " ".join(text.split()).rstrip(";").strip().lower()
+
+
+def _fingerprint(value) -> str:
+    return json.dumps(value, sort_keys=True)
+
+
+def _tag_set(items: list[dict]) -> list[tuple[str, str]]:
+    return sorted((i.get("tag_key", ""), i.get("tag_value", "")) for i in items)
+
+
+def keep_reviewed_rules(
+    reviewed: tuple[dict, str],
+    abac_path: Path,
+    sql_path: Path,
+    *,
+    allow_changes: bool = False,
+) -> list[str]:
+    """Merge a new draft additively over the reviewed rules of the prior run.
+
+    Every reviewed rule — one entity's tag mapping, a treatment override, an
+    fgac_policy (by name) or a masking function (by catalog.schema.name) — is
+    kept exactly as reviewed; the new draft only adds rules for things not
+    yet covered. A rule the model dropped or altered is restored, unless
+    allow_changes, in which case the new draft is accepted as written.
+    Returns one message per affected rule.
+    """
+    prior_cfg, prior_sql = reviewed
+    new_cfg = load_hcl_safe(abac_path)
+    restored: list[tuple[str, str]] = []  # (label, "removing" | "changing")
+
+    def entity(item: dict) -> tuple[str, str]:
+        return item.get("entity_type", ""), item.get("entity_name", "")
+
+    def entity_label(name: str, items: list[dict]) -> str:
+        tags = dict(_tag_set(items))
+        if "gr_treatment" in tags:
+            return f"{name} → {tags['gr_treatment']}"
+        return f"{name} → " + ", ".join(f"{k}={v}" for k, v in tags.items())
+
+    # Tag mappings: the unit is one entity's full set of tags, so a column's
+    # source tags and its derived gr_treatment always stay consistent.
+    prior_by_entity: dict[tuple[str, str], list[dict]] = {}
+    for item in prior_cfg.get("tag_assignments") or []:
+        prior_by_entity.setdefault(entity(item), []).append(item)
+    new_assignments = list(new_cfg.get("tag_assignments") or [])
+    new_by_entity: dict[tuple[str, str], list[dict]] = {}
+    for item in new_assignments:
+        new_by_entity.setdefault(entity(item), []).append(item)
+    kept_entities: set[tuple[str, str]] = set()
+    for key, items in prior_by_entity.items():
+        proposed = new_by_entity.get(key)
+        if proposed is None or _tag_set(proposed) != _tag_set(items):
+            kept_entities.add(key)
+            restored.append((entity_label(key[1], items),
+                             "removing" if proposed is None else "changing"))
+    merged_assignments = [
+        item for item in new_assignments if entity(item) not in kept_entities
+    ] + [item for key in prior_by_entity if key in kept_entities for item in prior_by_entity[key]]
+
+    # Treatment overrides, by column.
+    prior_overrides = {o.get("entity_name", ""): o for o in prior_cfg.get("treatment_overrides") or []}
+    new_overrides = list(new_cfg.get("treatment_overrides") or [])
+    new_override_by_col = {o.get("entity_name", ""): o for o in new_overrides}
+    kept_overrides: set[str] = set()
+    for column, override in prior_overrides.items():
+        proposed = new_override_by_col.get(column)
+        if proposed is None or proposed.get("treatment") != override.get("treatment"):
+            kept_overrides.add(column)
+            restored.append((f"override {column} → {override.get('treatment', '')}",
+                             "removing" if proposed is None else "changing"))
+    merged_overrides = [
+        o for o in new_overrides if o.get("entity_name", "") not in kept_overrides
+    ] + [prior_overrides[c] for c in prior_overrides if c in kept_overrides]
+
+    # FGAC policies, by name.
+    prior_policies = {p.get("name", ""): p for p in prior_cfg.get("fgac_policies") or []}
+    new_policies = list(new_cfg.get("fgac_policies") or [])
+    new_policy_names = {p.get("name", "") for p in new_policies}
+    kept_policies: set[str] = set()
+    for name, policy in prior_policies.items():
+        proposed = next((p for p in new_policies if p.get("name", "") == name), None)
+        if proposed is None or _fingerprint(proposed) != _fingerprint(policy):
+            kept_policies.add(name)
+            restored.append((f"policy {name}", "removing" if proposed is None else "changing"))
+    merged_policies = [
+        prior_policies[p.get("name", "")] if p.get("name", "") in kept_policies else p
+        for p in new_policies
+    ] + [prior_policies[n] for n in prior_policies if n in kept_policies and n not in new_policy_names]
+
+    # Masking functions, by catalog.schema.name.
+    new_sql = sql_path.read_text() if sql_path.exists() else ""
+    prior_fns = _function_blocks_by_key(prior_sql)
+    new_fns = _function_blocks_by_key(new_sql)
+    kept_fns: set[tuple[str, str, str]] = set()
+    for key, block in prior_fns.items():
+        proposed = new_fns.get(key)
+        if proposed is None or _normalized_sql(proposed) != _normalized_sql(block):
+            kept_fns.add(key)
+            restored.append((f"function {'.'.join(p for p in key if p)}",
+                             "removing" if proposed is None else "changing"))
+
+    if allow_changes:
+        return [
+            f"  accepted model change to reviewed rule {label} ({ALLOW_RULE_CHANGES_FLAG})"
+            for label, _ in restored
+        ]
+    if not restored:
+        return []
+
+    if kept_entities or kept_overrides or kept_policies:
+        # Restored rules must stay valid against the tag vocabulary: union the
+        # reviewed tag_policies (keys and values) into the new draft's.
+        merged_tag_policies = [dict(p) for p in new_cfg.get("tag_policies") or []]
+        by_key = {p.get("key", ""): p for p in merged_tag_policies}
+        for policy in prior_cfg.get("tag_policies") or []:
+            current = by_key.get(policy.get("key", ""))
+            if current is None:
+                by_key[policy.get("key", "")] = dict(policy)
+                merged_tag_policies.append(by_key[policy.get("key", "")])
+            else:
+                values = list(current.get("values") or [])
+                current["values"] = values + [
+                    v for v in policy.get("values") or [] if v not in values
+                ]
+        text = abac_path.read_text()
+        for section, items in (
+            ("tag_policies", merged_tag_policies),
+            ("tag_assignments", merged_assignments),
+            ("treatment_overrides", merged_overrides),
+            ("fgac_policies", merged_policies),
+        ):
+            text = remove_hcl_top_level_list(text, section)
+            if items:
+                text = text.rstrip() + f"\n\n{section} = " + _render_value(items) + "\n"
+        abac_path.write_text(re.sub(r"\n{3,}", "\n\n", text))
+
+    if kept_fns:
+        first_create = re.search(
+            r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE\s+)?FUNCTION\b", new_sql, re.IGNORECASE
+        )
+        prefix = new_sql[:first_create.start()] if first_create else new_sql
+        blocks = [
+            prior_fns[key] if (key := _function_key(b)) in kept_fns else b
+            for b in split_into_function_blocks(new_sql)
+        ]
+        blocks += [prior_fns[k] for k in prior_fns if k in kept_fns and k not in new_fns]
+        sql_path.write_text(prefix.rstrip() + "\n\n" + "\n\n".join(blocks) + "\n")
+
+    return [
+        f"  kept reviewed rule {label} (model proposed {reason} it); "
+        f"re-run with {ALLOW_RULE_CHANGES_FLAG} to accept"
+        for label, reason in restored
+    ]
+
+
 def main():
     if len(sys.argv) != 3:
         print(
