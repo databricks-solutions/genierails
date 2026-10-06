@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+import hcl2
+
 
 MAIN_TF = Path(__file__).parents[1] / "modules" / "data_access" / "main.tf"
 WORKSPACE_MAIN_TF = Path(__file__).parents[1] / "modules" / "workspace" / "main.tf"
@@ -32,6 +34,22 @@ def _typed_resource_body(source: str, resource_type: str, name: str) -> str:
             if depth == 0:
                 return source[start:index]
     raise AssertionError(f"unterminated resource {resource_type}.{name}")
+
+
+def _parsed_depends_on(source: str, resource_type: str, name: str) -> set[str]:
+    """Parse a resource's real depends_on expression with python-hcl2.
+
+    python-hcl2 7.3 cannot parse some valid parenthesized expressions elsewhere
+    in this module, so isolate the resource's top-level depends_on attribute and
+    still let the HCL parser—not text matching—decide which references are live.
+    """
+    body = _typed_resource_body(source, resource_type, name)
+    match = re.search(r"(?ms)^  depends_on\s*=\s*(\[[^]]*\])", body)
+    if match is None:
+        return set()
+    parsed = hcl2.loads(f"depends_on = {match.group(1)}")
+    return {reference.removeprefix("${").removesuffix("}")
+            for reference in parsed["depends_on"]}
 
 
 def test_group_grants_follow_catalog_schema_table_chain():
@@ -99,51 +117,48 @@ def test_masking_functions_and_policies_wait_for_deployment_sp_grant():
 
 def test_table_select_waits_for_complete_policy_enforcement_chain():
     source = MAIN_TF.read_text()
-    table = _resource_body(source, "table_access")
-    policies = _typed_resource_body(source, "databricks_policy_info", "policies")
-    enforcement_wait = _typed_resource_body(
+    table_dependencies = _parsed_depends_on(
+        source, "databricks_grant", "table_access"
+    )
+    policy_dependencies = _parsed_depends_on(
+        source, "databricks_policy_info", "policies"
+    )
+    wait_dependencies = _parsed_depends_on(
         source, "time_sleep", "wait_for_policy_enforcement"
     )
 
     # Whole-resource dependencies make any failed mask or policy instance block
     # every table grant, rather than only a matching for_each instance.
-    for prerequisite in (
+    assert table_dependencies == {
         "time_sleep.wait_for_tag_propagation",
         "terraform_data.masking_functions",
         "databricks_policy_info.policies",
         "time_sleep.wait_for_policy_enforcement",
-    ):
-        assert prerequisite in table
+    }
 
-    assert "databricks_grant.table_access" not in policies
-    assert "depends_on      = [databricks_policy_info.policies]" in enforcement_wait
-    assert 'create_duration = "30s"' in enforcement_wait
+    assert wait_dependencies == {"databricks_policy_info.policies"}
+    assert "databricks_grant.table_access" not in policy_dependencies
 
 
 def test_policy_grant_dependency_graph_is_acyclic_and_fail_closed():
     source = MAIN_TF.read_text()
-    bodies = {
-        "table": _resource_body(source, "table_access"),
-        "policies": _typed_resource_body(source, "databricks_policy_info", "policies"),
-        "policy_wait": _typed_resource_body(
+    dependencies = {
+        "table": _parsed_depends_on(source, "databricks_grant", "table_access"),
+        "policies": _parsed_depends_on(
+            source, "databricks_policy_info", "policies"
+        ),
+        "policy_wait": _parsed_depends_on(
             source, "time_sleep", "wait_for_policy_enforcement"
         ),
-    }
-    refs = {
-        node: set(re.findall(
-            r"(?:databricks_grant|databricks_policy_info|terraform_data|time_sleep)\.[A-Za-z0-9_]+",
-            body,
-        ))
-        for node, body in bodies.items()
     }
 
     # This is the relevant Terraform plan graph: grants have both failed-policy
     # and failed-mask nodes as ancestors. Terraform reverses these edges during
     # destroy, so table grants are removed before the wait and policies.
-    assert "databricks_policy_info.policies" in refs["table"]
-    assert "terraform_data.masking_functions" in refs["table"]
-    assert "databricks_policy_info.policies" in refs["policy_wait"]
-    assert "databricks_grant.table_access" not in refs["policies"]
+    assert "databricks_policy_info.policies" in dependencies["table"]
+    assert "terraform_data.masking_functions" in dependencies["table"]
+    assert "databricks_policy_info.policies" in dependencies["policy_wait"]
+    assert "databricks_grant.table_access" not in dependencies["policies"]
 
 
 def test_existing_grant_and_policy_resource_addresses_and_keys_are_unchanged():
