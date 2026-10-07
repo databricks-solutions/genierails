@@ -254,7 +254,7 @@ def test_every_in_recipe_same_env_promote_clears_cross_env_variables():
     ], raw
     to = makefile[makefile.index("\npromote-to:"):]
     to = to[:to.index("\n\n")]
-    assert 'DEST_ENV="$(ENV)" DEST_ENV_DIR="$(ENV_DIR)" DEST_CATALOG_MAP="$$map"' in to
+    assert 'DEST_ENV="$(ENV)" DEST_ENV_DIR="$$dest_dir" DEST_CATALOG_MAP="$$map"' in to
     assert makefile.count("$(_SAME_ENV_PROMOTE)") == 4
 
 

@@ -493,6 +493,54 @@ def test_promote_to_refuses_a_symlinked_source_env(promote_cloud):
     assert not (promote_cloud.envs / "prod").exists()
 
 
+def _snapshot(envs):
+    return {str(p.relative_to(envs)): (p.is_symlink(), p.read_bytes() if p.is_file() and not p.is_symlink() else b"")
+            for p in sorted(envs.rglob("*"))}
+
+
+def test_promote_to_refuses_an_env_dir_that_is_not_envs_env(promote_cloud):
+    stg = promote_cloud.envs / "stg"
+    stg.mkdir()
+    (stg / "env.auto.tfvars").write_text('promote_from = "dev"\ncatalog_map = "paycat=stgpay"\n')
+    before = _snapshot(promote_cloud.envs)
+
+    result = promote_cloud("promote-to", "ENV=prod", f"ENV_DIR={stg}", "FROM=dev", "CATALOG_MAP=paycat=ppay")
+
+    assert result.returncode != 0
+    assert f"ENV_DIR={stg} is not envs/prod for ENV=prod; drop ENV_DIR" in result.stderr
+    assert "Cross-env promote" not in result.stdout
+    assert _snapshot(promote_cloud.envs) == before
+
+
+def test_promote_to_refuses_a_symlinked_destination(promote_cloud):
+    stg = promote_cloud.envs / "stg"
+    stg.mkdir()
+    (stg / "env.auto.tfvars").write_text('promote_from = "dev"\ncatalog_map = "paycat=stgpay"\n')
+    (promote_cloud.envs / "prod").symlink_to(stg)
+    before = _snapshot(promote_cloud.envs)
+
+    result = promote_cloud("promote-to", "ENV=prod", "FROM=dev", "CATALOG_MAP=paycat=ppay")
+
+    assert result.returncode != 0
+    assert "envs/prod is a symlink; promote-to writes only a real envs/prod directory" in result.stderr
+    assert "Cross-env promote" not in result.stdout
+    assert _snapshot(promote_cloud.envs) == before
+
+
+def test_promote_to_refuses_a_destination_under_a_symlinked_parent(promote_cloud, tmp_path):
+    # envs/prod/ is a real dir, but ENV_DIR names it through another path.
+    alias = tmp_path / "alias"
+    alias.symlink_to(promote_cloud.envs)
+    before = _snapshot(promote_cloud.envs)
+
+    result = promote_cloud("promote-to", "ENV=prod", f"ENV_DIR={alias / 'prod'}", "FROM=dev",
+                           "CATALOG_MAP=paycat=ppay")
+
+    assert result.returncode != 0
+    assert "is not envs/prod for ENV=prod" in result.stderr
+    assert _snapshot(promote_cloud.envs) == before
+
+
 def test_promote_to_refuses_a_saved_promote_from_that_is_a_path(promote_cloud):
     prod = promote_cloud.envs / "prod"
     prod.mkdir()

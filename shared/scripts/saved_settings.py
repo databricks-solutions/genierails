@@ -176,9 +176,25 @@ def source_env_dir(envs_dir: Path, source: str) -> Path:
     return path
 
 
+def destination_env_dir(envs_dir: Path, env: str, env_dir: Path) -> Path:
+    """ENV_DIR must be exactly envs/<ENV> (lexically and resolved) and not a symlink."""
+    expected = Path(os.path.normpath(os.path.abspath(envs_dir / env)))
+    given = Path(os.path.normpath(os.path.abspath(env_dir)))
+    if given != expected:
+        raise ValueError(f"ENV_DIR={env_dir} is not envs/{env} for ENV={env}; drop ENV_DIR")
+    if given.is_symlink():
+        raise ValueError(f"envs/{env} is a symlink; promote-to writes only a real envs/{env} directory")
+    if given.exists() and (
+        not given.is_dir() or given.resolve() != envs_dir.resolve() / env
+    ):
+        raise ValueError(f"envs/{env} does not resolve to envs/{env} under {envs_dir}")
+    return given
+
+
 def resolve_promote(env: str, env_dir: Path, envs_dir: Path, source: str, catalog_map: str) -> str:
     """Return "<source> <catalog_map>" for promote-to, or raise ValueError."""
     _env_name("ENV", env)
+    env_dir = destination_env_dir(envs_dir, env, env_dir)
     env_file = env_dir / "env.auto.tfvars"
     saved = _load(env_file)
     saved_from = _saved(saved, "promote_from")

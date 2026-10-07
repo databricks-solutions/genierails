@@ -600,7 +600,9 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 # promote they are saved in the destination's env.auto.tfvars (promote_from /
 # catalog_map), so later runs need only ENV. Explicit values override and update
 # them. Only command-line FROM/CATALOG_MAP count, never ones leaked from the
-# shell, and every cross-env variable is passed explicitly to promote.
+# shell, and every cross-env variable is passed explicitly to promote. Both the
+# source and the destination must be real directories directly under envs/
+# (an overridden ENV_DIR or a symlinked env is refused before anything runs).
 _PROMOTE_TO_FROM = $(if $(filter command line,$(origin FROM)),$(FROM))
 _PROMOTE_TO_MAP = $(if $(filter command line,$(origin CATALOG_MAP)),$(CATALOG_MAP))
 
@@ -609,11 +611,11 @@ promote-to: ## Promote rules into ENV: make promote-to ENV=prod FROM=dev CATALOG
 	$(_DRY_RUN_GUARD); \
 	resolved="$$($(_SAVED_SETTINGS) promote-resolve --env "$(ENV)" --env-dir "$(ENV_DIR)" --envs-dir "$(CLOUD_ROOT)/envs" \
 		--from "$(_PROMOTE_TO_FROM)" --catalog-map "$(_PROMOTE_TO_MAP)")" || exit 1; \
-	src="$${resolved%% *}"; map="$${resolved#* }"; src_dir="$(CLOUD_ROOT)/envs/$$src"; \
+	src="$${resolved%% *}"; map="$${resolved#* }"; src_dir="$(CLOUD_ROOT)/envs/$$src"; dest_dir="$(CLOUD_ROOT)/envs/$(ENV)"; \
 	$(MAKE) --no-print-directory promote ENV="$$src" ENV_DIR="$$src_dir" SOURCE_ENV="$$src" SOURCE_ENV_DIR="$$src_dir" \
-		DEST_ENV="$(ENV)" DEST_ENV_DIR="$(ENV_DIR)" DEST_CATALOG_MAP="$$map" || exit 1; \
+		DEST_ENV="$(ENV)" DEST_ENV_DIR="$$dest_dir" DEST_CATALOG_MAP="$$map" || exit 1; \
 	if [ -f "$$src_dir/generated/abac.auto.tfvars" ]; then \
-		$(_SAVED_SETTINGS) promote-save --env-file "$(ENV_DIR)/env.auto.tfvars" --from "$$src" --catalog-map "$$map"; \
+		$(_SAVED_SETTINGS) promote-save --env-file "$$dest_dir/env.auto.tfvars" --from "$$src" --catalog-map "$$map"; \
 	fi
 
 _prepare-classification:
