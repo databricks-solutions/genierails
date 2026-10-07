@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -449,3 +450,92 @@ def test_old_receipts_are_removed_by_release_and_maintain(tmp_path):
 def test_generate_delta_help_is_marked_legacy():
     result = subprocess.run(["make", "help"], cwd=CLOUD_ROOT, text=True, capture_output=True, env=_env())
     assert "[Legacy]" in next(line for line in result.stdout.splitlines() if "generate-delta" in line)
+
+
+def _guarding_stub(tmp_path):
+    """MAKE stand-in: records every nested call and, where the real apply /
+    apply-governance would run _guard-workspace-config, runs exactly that real
+    target with the arguments the nested apply received (so APPLY_FLAGS= is
+    in force there). Everything else is a no-op, so nothing live runs."""
+    log = tmp_path / "calls"
+    stub = tmp_path / "guarding-make"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> '{log}'\n"
+        'case "$1" in apply|apply-governance) shift; '
+        f'exec {shutil.which("make")} --no-print-directory _guard-workspace-config "$@" ;; esac\n'
+        "exit 0\n"
+    )
+    stub.chmod(0o755)
+    audit = tmp_path / "audit.py"
+    audit.write_text("raise SystemExit(0)\n")
+    return stub, log, audit
+
+
+def _run_with_flags(tmp_path, target, env_name, apply_flags, env_file='sql_warehouse_id = ""\n'):
+    env_dir = tmp_path / env_name
+    (env_dir / "generated").mkdir(parents=True)
+    (env_dir / "env.auto.tfvars").write_text(env_file)
+    stub, log, audit = _guarding_stub(tmp_path)
+    result = subprocess.run(
+        ["make", target, f"ENV={env_name}", f"ENV_DIR={env_dir}", f"MAKE={stub}",
+         f"AUDIT_SCHEMA_SCRIPT={audit}", f"APPLY_FLAGS={apply_flags}"],
+        cwd=CLOUD_ROOT, text=True, capture_output=True, env=_env(),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    warnings = [line for line in (result.stdout + result.stderr).splitlines()
+                if line.startswith("WARNING: business_access_enabled")]
+    return _calls(log), warnings
+
+
+@pytest.mark.parametrize("flags", ["-var=business_access_enabled=false", "-var business_access_enabled=false",
+                                   "-var=business_access_enabled=true"])
+@pytest.mark.parametrize("target, env_name, nested", [
+    ("release", "prod", "apply"),
+    ("rehearse", "dev", "apply"),
+    ("maintain", "prod", "apply-governance"),
+])
+def test_retired_flag_in_caller_apply_flags_warns_once_though_nested_apply_clears_them(
+        tmp_path, flags, target, env_name, nested):
+    calls, warnings = _run_with_flags(tmp_path, target, env_name, flags)
+    assert len(warnings) == 1, warnings
+    assert "(APPLY_FLAGS)" in warnings[0]
+    # What reaches Terraform is unchanged: the nested apply still gets empty flags.
+    nested_calls = [call for call in calls if call[0] == nested]
+    assert nested_calls == [[nested, f"ENV={env_name}", "APPLY_FLAGS=", "_EXPOSURE_DERIVED=1"]]
+    assert not any(f"APPLY_FLAGS={flags}" in call for call in calls)
+
+
+@pytest.mark.parametrize("target, env_name", [("release", "prod"), ("rehearse", "dev")])
+def test_retired_flag_in_file_and_caller_flags_warns_exactly_once(tmp_path, target, env_name):
+    _calls_, warnings = _run_with_flags(tmp_path, target, env_name, "-var business_access_enabled=false",
+                                        env_file="business_access_enabled = true\n")
+    assert len(warnings) == 1, warnings
+    assert f"envs/{env_name}/env.auto.tfvars" in warnings[0] or "env.auto.tfvars" in warnings[0]
+    assert "APPLY_FLAGS" in warnings[0]
+
+
+@pytest.mark.parametrize("target, env_name", [("release", "prod"), ("rehearse", "dev"), ("maintain", "prod")])
+def test_no_retired_flag_means_no_warning_through_nested_apply(tmp_path, target, env_name):
+    _calls_, warnings = _run_with_flags(tmp_path, target, env_name, "-var=coverage_gate_max_age=6h")
+    assert warnings == []
+
+
+def test_certify_hands_the_caller_apply_flags_to_release_for_the_warning(tmp_path):
+    # certify re-enters make for release; the release (covered above) then
+    # warns from the inherited GENIERAILS_APPLY_FLAGS.
+    env_dir = tmp_path / "prod"
+    (env_dir / "generated").mkdir(parents=True)
+    (env_dir / "env.auto.tfvars").write_text('sql_warehouse_id = ""\n')
+    seen = tmp_path / "seen"
+    stub = tmp_path / "make-stub"
+    stub.write_text(f"#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"$GENIERAILS_APPLY_FLAGS\" >> '{seen}'\nexit 0\n")
+    stub.chmod(0o755)
+    result = subprocess.run(
+        ["make", "certify", "ENV=prod", f"ENV_DIR={env_dir}", f"MAKE={stub}",
+         "APPLY_FLAGS=-var business_access_enabled=false"],
+        cwd=CLOUD_ROOT, text=True, capture_output=True, env=_env(),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert seen.read_text().splitlines() == [
+        "--no-print-directory release ENV=prod|-var business_access_enabled=false"]

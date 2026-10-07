@@ -181,7 +181,12 @@ _guard-genie-placeholder:
 # business_access_enabled is deprecated and ignored (business access is granted
 # whenever the coverage gate allows it). One warning line per run, whether it
 # is set in env.auto.tfvars, in APPLY_FLAGS (-var), or as TF_VAR_; never fails.
-_guard-workspace-config: export GENIERAILS_APPLY_FLAGS = $(APPLY_FLAGS)
+# The guard reads the caller's original APPLY_FLAGS: the outermost make sets
+# GENIERAILS_APPLY_FLAGS once and nested makes inherit it from the environment,
+# so release, rehearse and maintain clearing APPLY_FLAGS for their nested
+# apply (which still gets empty flags) doesn't hide the setting.
+GENIERAILS_APPLY_FLAGS ?= $(APPLY_FLAGS)
+export GENIERAILS_APPLY_FLAGS
 _guard-workspace-config:
 	@$(_COVERAGE_GATE) warn-retired-flag --env-file "$(ENV_DIR)/env.auto.tfvars" --label "$(_SETUP_ENV_REL)/env.auto.tfvars" || true
 	@cd "$(ENV_DIR)" && if [ -f env.auto.tfvars ]; then \
