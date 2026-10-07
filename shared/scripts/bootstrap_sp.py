@@ -190,7 +190,9 @@ def _workspace_host(account: Any, workspace_id: int) -> str:
     )
     if not host:
         deployment_name = _value(workspace, "deployment_name")
+        account_host = _normalize_host(_value(_value(account, "config"), "host"))
         cloud = str(_value(workspace, "cloud") or "").lower()
+        is_azure = "azure" in cloud or account_host.endswith("accounts.azuredatabricks.net")
         if deployment_name:
             deployment_name = str(deployment_name)
             if (
@@ -198,10 +200,15 @@ def _workspace_host(account: Any, workspace_id: int) -> str:
                 or ".cloud.databricks.com" in deployment_name
             ):
                 host = deployment_name
-            elif "azure" in cloud:
+            elif is_azure:
                 host = f"{deployment_name}.azuredatabricks.net"
             else:
                 host = f"{deployment_name}.cloud.databricks.com"
+        elif is_azure:
+            raise ValueError(
+                f"workspace {workspace_id} metadata has no workspace_url or deployment_name; "
+                "an explicit Azure workspace host is required"
+            )
         else:
             host = f"dbc-{workspace_id}.cloud.databricks.com"
     host = str(host)

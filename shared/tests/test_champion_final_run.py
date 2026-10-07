@@ -690,6 +690,18 @@ def test_make_runs_the_preflight_before_any_layer_is_applied():
     assert "\ngenie-adopt-preflight: " in makefile
 
 
+def test_combined_apply_never_skips_data_access_before_workspace_can_run():
+    makefile = (SHARED / "Makefile.shared").read_text()
+    apply = makefile[makefile.index("\napply: "):]
+    apply = apply[: apply.index("\n\n")]
+    data_access = (
+        '_apply-layer LAYER=data_access TARGET_ENV=$(ENV) '
+        'LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" FORCE_APPLY=1'
+    )
+    assert data_access in apply
+    assert apply.index(data_access) < apply.index("LAYER=workspace")
+
+
 def test_no_saved_plan_file_is_written_by_the_product():
     # A saved plan embeds prior state, which may still hold the legacy secret.
     for path in (SHARED / "Makefile.shared", SHARED / "scripts/terraform_layer.sh"):
