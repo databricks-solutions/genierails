@@ -8,8 +8,8 @@ Everything below rests on four invariants of the dev-to-prod walkthrough:
 
 1. **Unity Catalog is the sensitivity source of truth.** Native Data Classification writes `class.*` tags on sensitive columns; GenieRails does not guess by default. When `enable_classification=true`, generation is fail-closed — unreadable/empty native results abort rather than fall back to LLM inference (unless the operator explicitly passes the `--allow-llm-sensitivity` escape hatch). A reviewed entry in `treatment_overrides` is a promoted protection rule, not a sensitivity fact: it may preserve stronger protection but can never downgrade the native result.
 2. **One `gr_treatment` per column.** GenieRails collapses a column's `class.*` findings and any reviewed override deterministically to exactly one enforcement treatment (`gr_treatment`), using the configured strictest-first precedence, so exactly one column mask ever resolves; masks are keyed to that treatment vocabulary.
-3. **A blocking coverage gate.** `make coverage-gate` is an offline check that reads the generated `abac.auto.tfvars` + `masking_functions.sql` and **exits non-zero** if a classification finding has no treatment mapping, a classified column has no covering column-mask policy, or a treatment's masking function is missing — and it never drops tags or policies to force a pass. It is a *separate* step (`make apply` does not run it), so run it as an explicit gate before applying.
-4. **The exposure gate controls release.** `business_access_enabled` withholds business `SELECT` and Genie `CAN_RUN` until set to `true`; enforcement resources can exist while access stays withheld. Prod re-derives its own facts (`derive-assignments`) before the gate opens. Business `SELECT` is **scoped per agent**: each table is granted only to the tier groups authorized to run the agent(s) that expose it (a table exposed by multiple agents gets the union of their groups); admin-authored top-level `uc_tables` grant to all tiers; and a discovered table with no resolvable agent falls back to all tiers, self-healing on the next `make generate`.
+3. **A blocking coverage gate.** `make coverage-gate` is an offline check that reads the generated `abac.auto.tfvars` + `masking_functions.sql` and **exits non-zero** if a classification finding has no treatment mapping, a classified column has no covering column-mask policy, or a treatment's masking function is missing — and it never drops tags or policies to force a pass. `make coverage-gate` is the explicit check on the generated config; `make apply`, `make rehearse` and `make release` separately refresh live tags and DDL and run the Terraform-enforced gate before any new or wider access is planned.
+4. **Coverage controls exposure.** There is no manual exposure switch. Every apply re-reads live tags and runs the coverage gate first, masks and policies are created before any grant, and Terraform refuses to plan new or wider business `SELECT` or Genie `CAN_RUN` without a recent passing coverage result. Removing or keeping existing access always works. Prod re-derives its own facts (`derive-assignments`) inside `make release`. Business `SELECT` is **scoped per agent**: each table is granted only to the tier groups authorized to run the agent(s) that expose it (a table exposed by multiple agents gets the union of their groups); admin-authored top-level `uc_tables` grant to all tiers; and a discovered table with no resolvable agent falls back to all tiers, self-healing on the next `make generate`.
 
 ## Layer Model
 
@@ -119,7 +119,6 @@ genie_spaces = [
 
 sql_warehouse_id        = ""     # shared fallback; empty = auto-create serverless
 enable_classification   = true   # turn on UC native Data Classification for the footprint
-business_access_enabled = false  # exposure gate: withholds SELECT + Genie CAN_RUN; open only after coverage-gate passes
 ```
 
 `manage_groups` defaults to `false` on every layer (account, `data_access`, workspace): groups are **consumed** — looked up by name from the IdP-synced account groups — not created. This is the normal path. Only for a demo/greenfield account with no IdP-synced groups should `envs/account/env.auto.tfvars` set `manage_groups = true` (opt-in group creation); workspace and `data_access` env files always stay on the lookup-only default. See [IdP-Synced Groups](advanced.md#idp-synced-groups-default).
@@ -150,7 +149,7 @@ Each entry in `genie_spaces` behaves based on whether `genie_space_id` is set:
 | Empty (default) | Creates a new Genie agent, configures it fully (title, instructions, benchmarks, ACLs), trashes it on `make destroy` |
 | Set | Attaches to the existing agent — never creates or deletes it; applies ACLs and pushes config changes back to the API |
 
-> **Exposure gate:** an agent can be *created and configured* while `business_access_enabled=false`, but its `CAN_RUN` ACLs (and business-user table `SELECT`) are withheld until the gate is opened — so an agent is never reachable by users before coverage is proven.
+> **Coverage gate:** an agent can be *created and configured* at any time, but its `CAN_RUN` ACLs (and business-user table `SELECT`) are only planned once the coverage gate has passed against live tags and the table grants exist — so an agent is never reachable by users before coverage is proven.
 
 When `make generate` creates the ABAC config, it also generates Genie agent config in `abac.auto.tfvars`:
 
@@ -177,14 +176,14 @@ All nine fields are included in the `serialized_space` when a new Genie agent is
 | `make generate` | (dev) Run `generate_abac.py`: read native `class.*`, derive one `gr_treatment`/column, draft rules + Genie content (LLM drafts rules/content; sensitivity is native) |
 | `make enable-classification` | Turn on UC native Data Classification (scanning) for the footprint — the as-code alternative to enabling it in the Databricks UI (recommended); auto-tagging is opt-in via `enable_auto_tagging` (default off), no generated files needed |
 | `make derive-assignments` | (prod) Re-derive **only** tag assignments from live `class.*`, reusing the promoted rules — no LLM |
-| `make coverage-gate` | **Block** the release if any classified sensitive column has no covering mask (separate step; not run by `apply`) |
+| `make coverage-gate` | **Block** the release if any classified sensitive column has no covering mask (explicit offline check; `apply`/`rehearse`/`release` also run the live, Terraform-enforced gate) |
 | `make verify-access` | Prove masking/row filters by querying as per-tier test principals |
 | `make validate-generated` | Validate `envs/<env>/generated/` files after tuning |
 | `make validate` | Validate the selected split config (`account`, `data_access`, or `workspace`) |
 | `make promote` | Split `generated/` into account + data_access + workspace configs (same-env) |
-| `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG=prod_catalog` | Cross-env promote: remap catalog references from dev to prod, then split |
+| `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_catalog=prod_catalog"` | Cross-env promote: remap catalog references from dev to prod, then split |
 | `make plan` | Run `terraform plan` in the selected layer root |
-| `make apply` | For `ENV=<workspace>`: promote (same-env split), then apply account -> data_access -> workspace; releases gated access only when `business_access_enabled=true` |
+| `make apply` | For `ENV=<workspace>`: promote (same-env split), then apply account -> data_access -> workspace; new or wider business access is granted only when a recent coverage gate passed |
 | `make apply-governance` | Apply account + data_access only (enforcement; no Genie agent) |
 | `make apply-genie` | Apply the workspace layer only (Genie agent + ACLs) |
 | `make audit-schema` / `make audit-rulebook` | Drift checks (untagged sensitive columns / applied tags with no covering rule) |

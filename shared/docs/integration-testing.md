@@ -107,7 +107,7 @@ Unit tests lock in the walkthrough's invariants (and the legacy autofix helpers)
 - Exactly one `gr_treatment` derived per column (strictest-wins) → `test_treatment_derivation.py`
 - The coverage gate BLOCKS unmapped / uncovered classified columns → `test_coverage_gate.py`
 - Prod `derive-assignments` makes **no** model call and only rewrites assignments → `test_derive_assignments.py`
-- Exposure defaults false and gates `SELECT` + Genie `CAN_RUN` → `test_exposure_gating.py`, `test_data_access_grants.py`
+- Business `SELECT` + Genie `CAN_RUN` are coverage-gated (no manual switch; `business_access_enabled` deprecated and ignored) → `test_exposure_gating.py`, `test_data_access_grants.py`
 - Setup scaffolds `manage_groups=false`; groups consumed from IdP → `test_idp_consume_default.py`
 
 Legacy generation helpers (HCL repair, tag-value autofix, FGAC count) remain covered by `test_generate_abac.py` / `test_validate_abac.py`.
@@ -316,7 +316,7 @@ This deletes cloud-specific resources, the workspace, metastore (and all catalog
 
 ## Scenarios
 
-`scripts/run_integration_tests.py` runs 19 live scenarios end-to-end (data setup, generation/apply, assertions, teardown), each isolated. These exercise **topology, import, and promotion** mechanics; most predate the dev-to-prod invariants and do not by themselves prove native-classification / coverage-gate / exposure-gate / derive-assignments — the dev-to-prod **regression suite** above covers those deterministically, and **champion** exercises them live. (In the dev-to-prod walkthrough, prod enforcement is `derive-assignments` with no LLM, not re-generation.)
+`scripts/run_integration_tests.py` runs 19 live scenarios end-to-end (data setup, generation/apply, assertions, teardown), each isolated. These exercise **topology, import, and promotion** mechanics; most predate the dev-to-prod invariants and do not by themselves prove native-classification / coverage-gate / coverage-gated exposure / derive-assignments — the dev-to-prod **regression suite** above covers those deterministically, and **champion** exercises them live. (In the dev-to-prod walkthrough, prod enforcement is `derive-assignments` with no LLM, not re-generation.)
 
 | Scenario | playbook.md section | What it validates |
 |---|---|---|
