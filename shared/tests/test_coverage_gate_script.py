@@ -52,6 +52,8 @@ def env_dir(tmp_path):
     (env / "data_access" / "masking_functions.sql").write_text("-- masks\n")
     (env / "env.auto.tfvars").write_text(f'uc_tables = ["{TABLE}"]\n')
     (env / "auth.auto.tfvars").write_text('databricks_workspace_host = "https://example.invalid"\n')
+    (env / "data_access" / "auth.auto.tfvars").symlink_to("../auth.auto.tfvars")
+    (env / "data_access" / "env.auto.tfvars").symlink_to("../env.auto.tfvars")
     _record_refresh(env)
     return env
 
@@ -113,8 +115,18 @@ def _gate_file(env_dir):
 
 
 def _state(env_dir, tables):
+    auth = cg._load_tfvars(env_dir / "data_access" / "auth.auto.tfvars")
+    binding = cg.hashlib.sha256(json.dumps({
+        "workspace_host": str(auth.get("databricks_workspace_host", "")).strip().rstrip("/").lower(),
+        "workspace_id": str(auth.get("databricks_workspace_id", "")).strip(),
+    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps({
         "version": 4,
+        "outputs": {"coverage_gate": {
+            "value": {"deployment_binding": binding},
+            "type": ["object", {"deployment_binding": "string"}],
+            "sensitive": False,
+        }},
         "resources": [{
             "module": "module.data_access", "mode": "managed",
             "type": "databricks_grant", "name": "table_access",
@@ -194,6 +206,32 @@ def test_granted_tables_come_from_table_access_instances(env_dir):
     assert cg.granted_tables(env_dir / "data_access") == {TABLE, "cat.sch.orders"}
 
 
+def test_granted_tables_excludes_tainted_deposed_and_foreign_binding(env_dir):
+    _state(env_dir, [TABLE])
+    path = env_dir / "data_access" / "terraform.tfstate"
+    state = json.loads(path.read_text())
+    instances = state["resources"][0]["instances"]
+    instances += [
+        {"index_key": "cat.sch.tainted|analysts", "status": "tainted"},
+        {"index_key": "cat.sch.deposed|analysts", "deposed": "deadbeef"},
+    ]
+    path.write_text(json.dumps(state))
+    assert cg.granted_tables(env_dir / "data_access") == {TABLE}
+
+    state["outputs"]["coverage_gate"]["value"]["deployment_binding"] = "copied-state"
+    path.write_text(json.dumps(state))
+    assert cg.granted_tables(env_dir / "data_access") == set()
+
+
+def test_granted_tables_requires_deployment_binding_for_legacy_state(env_dir):
+    _state(env_dir, [TABLE])
+    path = env_dir / "data_access" / "terraform.tfstate"
+    state = json.loads(path.read_text())
+    state.pop("outputs")
+    path.write_text(json.dumps(state))
+    assert cg.granted_tables(env_dir / "data_access") == set()
+
+
 def test_unreadable_state_fails_closed(env_dir):
     (env_dir / "data_access" / "terraform.tfstate").write_text("{truncated")
     with pytest.raises(cg.GateError, match="cannot read data_access state"):
@@ -262,6 +300,40 @@ def test_inputs_changing_during_the_gate_fail_it(env_dir, stub_runner, stub_vali
     gate = json.loads(_gate_file(env_dir).read_text())
     assert gate["status"] == "fail"
     assert gate["reason"] == "inputs changed while the coverage check ran"
+
+
+def test_console_timeout_kills_process_group_and_invalidates_gate(env_dir, tmp_path, monkeypatch):
+    child_pid = tmp_path / "child.pid"
+    runner = tmp_path / "slow-runner"
+    runner.write_text(
+        "#!/bin/sh\n"
+        f"sleep 30 & echo $! > {child_pid!s}\n"
+        "wait\n"
+    )
+    runner.chmod(0o755)
+    _gate_file(env_dir).write_text(json.dumps({"status": "pass", "refreshed_at": "now"}))
+    monkeypatch.setattr(cg, "SUBPROCESS_TIMEOUT", 1)
+    with pytest.raises(cg.CommandTimeout, match="process group was killed"):
+        cg.query_inputs(runner, "prod", env_dir / "data_access", [])
+    gate = json.loads(_gate_file(env_dir).read_text())
+    assert gate["status"] == "fail"
+    assert "refreshed_at" not in gate
+    pid = int(child_pid.read_text())
+    status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], text=True,
+                            capture_output=True).stdout.strip()
+    assert not status or status.startswith("Z")
+
+
+def test_validator_timeout_records_failed_gate(env_dir, stub_runner, tmp_path, monkeypatch):
+    runner, _log = stub_runner(_inputs())
+    validator = tmp_path / "slow-validator.py"
+    validator.write_text("import time\ntime.sleep(30)\n")
+    monkeypatch.setattr(cg, "VALIDATOR", validator)
+    monkeypatch.setattr(cg, "SUBPROCESS_TIMEOUT", 1)
+    assert cg.run_gate(env_dir, "prod", runner, "", False) == 1
+    gate = json.loads(_gate_file(env_dir).read_text())
+    assert gate["status"] == "fail"
+    assert "coverage validator timed out" in gate["reason"]
 
 
 def test_pass_requires_a_live_refresh(env_dir, stub_runner, stub_validator):
@@ -1147,7 +1219,9 @@ def test_can_run_check_mirrors_what_the_workspace_withholds(tmp_path, capsys, an
     ({"refreshed_at": "", "fresh_until": ""}, "a,b", ["b"], 1, "no live refresh"),
     ({"refreshed_at": None, "fresh_until": None}, "a,b", ["b"], 1, "no live refresh"),
     (_refresh(timedelta(hours=7)), "a", [], 0, "refresh too old"),
-    (_refresh(timedelta(hours=5, minutes=50)), "a,b", ["b"], 0, ""),
+    # Leave enough margin for the full Terraform-required suite (which can
+    # take well over ten minutes) before this parametrized case executes.
+    (_refresh(timedelta(hours=5, minutes=30)), "a,b", ["b"], 0, ""),
 ])
 def test_can_run_check_applies_the_refresh_time_checks(tmp_path, capsys, refresh, groups, widening, withheld, message):
     runner = _console_runner(tmp_path, {"groups": {"sales": groups}, "blocker": "",

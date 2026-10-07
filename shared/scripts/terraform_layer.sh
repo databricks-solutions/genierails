@@ -71,9 +71,51 @@ fi
 # working directory corrupt provider resolution even with isolated TF_DATA_DIR.
 # Use mkdir as a portable lock (atomic on all POSIX systems including macOS).
 INIT_LOCK="$ROOT_DIR/.terraform-init.lock.d"
-_unlock_init() { rmdir "$INIT_LOCK" 2>/dev/null || true; }
-while ! mkdir "$INIT_LOCK" 2>/dev/null; do sleep 0.2; done
-trap _unlock_init EXIT
+INIT_LOCK_OWNER="$INIT_LOCK/owner"
+INIT_LOCK_HOST="$(hostname)"
+INIT_LOCK_TIMEOUT_SECONDS="${INIT_LOCK_TIMEOUT_SECONDS:-600}"
+case "$INIT_LOCK_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*) echo "INIT_LOCK_TIMEOUT_SECONDS must be a non-negative integer" >&2; exit 2 ;;
+esac
+_unlock_init() {
+  if [ -f "$INIT_LOCK_OWNER" ]; then
+    owner_pid="$(sed -n 's/^pid=//p' "$INIT_LOCK_OWNER" 2>/dev/null || true)"
+    owner_host="$(sed -n 's/^host=//p' "$INIT_LOCK_OWNER" 2>/dev/null || true)"
+    if [ "$owner_pid" = "$$" ] && [ "$owner_host" = "$INIT_LOCK_HOST" ]; then
+      rm -f "$INIT_LOCK_OWNER"
+      rmdir "$INIT_LOCK" 2>/dev/null || true
+    fi
+  fi
+}
+_lock_interrupted() { echo "Interrupted while waiting for Terraform init lock $INIT_LOCK" >&2; exit "$1"; }
+trap '_unlock_init' EXIT
+trap '_lock_interrupted 130' INT
+trap '_lock_interrupted 143' TERM
+lock_wait_started="$(date +%s)"
+while ! mkdir "$INIT_LOCK" 2>/dev/null; do
+  if [ -f "$INIT_LOCK_OWNER" ]; then
+    owner_pid="$(sed -n 's/^pid=//p' "$INIT_LOCK_OWNER" 2>/dev/null || true)"
+    owner_host="$(sed -n 's/^host=//p' "$INIT_LOCK_OWNER" 2>/dev/null || true)"
+    if [ "$owner_host" = "$INIT_LOCK_HOST" ] && [ -n "$owner_pid" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+      echo "+ reclaiming stale Terraform init lock $INIT_LOCK (dead local PID $owner_pid)" >&2
+      rm -f "$INIT_LOCK_OWNER"
+      rmdir "$INIT_LOCK" 2>/dev/null || true
+      continue
+    fi
+  fi
+  lock_now="$(date +%s)"
+  if [ $((lock_now - lock_wait_started)) -ge "$INIT_LOCK_TIMEOUT_SECONDS" ]; then
+    echo "Timed out after ${INIT_LOCK_TIMEOUT_SECONDS}s waiting for Terraform init lock $INIT_LOCK." >&2
+    echo "  If its recorded owner is no longer running, clear it with: rm -rf '$INIT_LOCK'" >&2
+    exit 1
+  fi
+  sleep 0.2
+done
+{
+  printf 'pid=%s\n' "$$"
+  printf 'host=%s\n' "$INIT_LOCK_HOST"
+  printf 'started_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$INIT_LOCK_OWNER"
 echo "+ ${INIT_CMD[*]}"
 # The lock file is generated locally (gitignored), so an upgrade that adds a
 # provider (even one only a tests/ module declares) leaves it stale and the
@@ -99,7 +141,7 @@ if ! init_output="$("${INIT_CMD[@]}" 2>&1)"; then
   done
 fi
 _unlock_init
-trap - EXIT
+trap - EXIT INT TERM
 
 VAR_ARGS=()
 for tfvars in auth.auto.tfvars env.auto.tfvars abac.auto.tfvars classification.auto.tfvars discovered_uc_tables.auto.tfvars; do

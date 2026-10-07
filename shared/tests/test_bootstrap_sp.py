@@ -136,6 +136,25 @@ def test_workspace_client_falls_back_to_dbc_workspace_id():
     assert host == "https://dbc-456.cloud.databricks.com"
 
 
+def test_workspace_client_uses_azure_account_host_when_cloud_is_missing():
+    account = MagicMock()
+    account.config.host = "https://accounts.azuredatabricks.net"
+    account.workspaces.get.return_value = SimpleNamespace(
+        deployment_name="adb-7405605806702166.6",
+    )
+    assert _workspace_host(account, 7405605806702166) == (
+        "https://adb-7405605806702166.6.azuredatabricks.net"
+    )
+
+
+def test_workspace_client_never_guesses_aws_host_for_azure_account():
+    account = MagicMock()
+    account.config.host = "https://accounts.azuredatabricks.net"
+    account.workspaces.get.return_value = SimpleNamespace()
+    with pytest.raises(ValueError, match="explicit Azure workspace host is required"):
+        _workspace_host(account, 456)
+
+
 def test_preflight_catalog_owner_passes_without_effective_grant_lookup():
     _account, workspace, _workspace_factory, _factory = _fake()
 

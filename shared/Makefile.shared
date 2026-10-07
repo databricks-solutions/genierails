@@ -469,7 +469,7 @@ release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, ap
 	echo "  Verification:  make verify-access ENV=$(ENV) passed"; \
 	echo "  Steady state:  make maintain ENV=$(ENV)"
 
-maintain: _guard-genie-placeholder ## Native-first governance refresh: audit-schema -> derive-assignments -> coverage check -> validate -> audit-rulebook -> apply-governance (never touches Genie)
+maintain: _guard-genie-placeholder ## Reconcile governance (including existing covered SELECT): audit-schema -> derive-assignments -> coverage check -> validate -> audit-rulebook -> apply-governance; never widen past coverage or touch Genie
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,maintain); \
 	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
@@ -667,7 +667,7 @@ _apply-layer:
 	skip_key=""; \
 	if [ "$$layer" = "data_access" ] || [ "$$layer" = "workspace" ]; then skip_key="$$($(_COVERAGE_GATE) skip-key --layer "$$layer" --layer-dir "$$env_dir")"; fi; \
 	current_fingerprint="$$( { printf '%s\n' "$$skip_key"; for file in $$files; do [ -f "$$file" ] && shasum "$$file"; done; find "$(SHARED_ROOT)/roots/$$layer" "$(SHARED_ROOT)/modules/$$layer" -type f -name '*.tf' ! -path '*/tests/*' ! -path '*/.terraform/*' 2>/dev/null | LC_ALL=C sort | while IFS= read -r code_file; do shasum "$$code_file"; done; if [ "$$layer" = "workspace" ]; then shasum "$(SHARED_ROOT)/scripts/genie_space.sh"; elif [ "$$layer" = "data_access" ]; then shasum "$(SHARED_ROOT)/deploy_masking_functions.py"; fi; [ -z "$$apply_flags" ] || printf '%s\n' "$$apply_flags"; } | shasum | awk '{print $$1}')"; \
-	if [ "$$skip_key" != "noskip" ] && [ -f "$$fingerprint_file" ] && [ "$$(cat "$$fingerprint_file")" = "$$current_fingerprint" ]; then \
+	if [ "$(FORCE_APPLY)" != "1" ] && [ "$$skip_key" != "noskip" ] && [ -f "$$fingerprint_file" ] && [ "$$(cat "$$fingerprint_file")" = "$$current_fingerprint" ]; then \
 		echo "=== Skipping terraform apply ($$layer:$$target_env): inputs unchanged ==="; \
 		exit 0; \
 	fi; \
@@ -736,7 +736,7 @@ apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access
 		$(MAKE) --no-print-directory wait-tag-policies REQUIRED_VALUES_TFVARS="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars"; \
 		echo "=== Waiting 30s for account-level groups to propagate before data_access apply ==="; \
 		sleep 30; \
-		$(MAKE) --no-print-directory _apply-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" DEFER_WITHHELD=1; \
+		$(MAKE) --no-print-directory _apply-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" DEFER_WITHHELD=1 FORCE_APPLY=1; \
 		echo "=== Waiting 30s for data_access resources to propagate before workspace apply ==="; \
 		sleep 30; \
 		$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)" DEFER_WITHHELD=1; \

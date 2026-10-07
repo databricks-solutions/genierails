@@ -43,6 +43,7 @@ import base64
 import hashlib
 import json
 import os
+import signal
 import shlex
 import subprocess
 import sys
@@ -62,12 +63,35 @@ ACL_RESOURCES = ("genie_space_acls", "genie_space_acls_created")
 REFRESH_RELPATH = Path("generated") / ".live_refresh.json"
 REFRESH_VERSION = 1
 GATE_VERSION = 1
+SUBPROCESS_TIMEOUT = int(os.environ.get("COVERAGE_GATE_TIMEOUT_SECONDS", "300"))
 TABLE_GRANT = ("module.data_access", "databricks_grant", "table_access")
 INPUTS_EXPRESSION = "base64encode(jsonencode(module.data_access.coverage_gate_inputs))"
 
 
 class GateError(Exception):
     """The gate can't establish its inputs; callers treat this as a failure."""
+
+
+class CommandTimeout(GateError):
+    """A coverage subprocess exceeded its bounded runtime."""
+
+
+def _run_bounded(command: list[str], *, label: str, **kwargs) -> subprocess.CompletedProcess:
+    """Run a child in its own process group and kill the whole group on timeout."""
+    input_value = kwargs.pop("input", None)
+    if input_value is not None:
+        kwargs["stdin"] = subprocess.PIPE
+    process = subprocess.Popen(command, start_new_session=True, **kwargs)
+    try:
+        stdout, stderr = process.communicate(input=input_value, timeout=SUBPROCESS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = process.communicate()
+        raise CommandTimeout(
+            f"{label} timed out after {SUBPROCESS_TIMEOUT}s; its process group was killed "
+            "and the coverage result was invalidated"
+        )
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _load_tfvars(path: Path) -> dict:
@@ -195,13 +219,16 @@ def live_refresh(env_dir: Path, tfvars: Path) -> tuple[str | None, str]:
 
 def query_inputs(runner: Path, env_name: str, layer_dir: Path, flags: list[str]) -> dict:
     """Evaluate output.coverage_gate_inputs with the apply's var files and flags."""
-    result = subprocess.run(
-        [str(runner), "data_access", env_name, "console", *flags],
-        input=INPUTS_EXPRESSION + "\n",
-        env={**os.environ, "LAYER_ENV_DIR": str(layer_dir)},
-        text=True,
-        capture_output=True,
-    )
+    try:
+        result = _run_bounded(
+            [str(runner), "data_access", env_name, "console", *flags],
+            label="terraform console (data_access)", input=INPUTS_EXPRESSION + "\n",
+            env={**os.environ, "LAYER_ENV_DIR": str(layer_dir)},
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except CommandTimeout:
+        invalidate(layer_dir.parent, "terraform console timed out")
+        raise
     if result.returncode != 0:
         raise GateError(
             "terraform console could not evaluate the data_access gate inputs:\n"
@@ -233,6 +260,16 @@ def granted_tables(layer_dir: Path) -> set[str]:
         return set()
     try:
         state = json.loads(state_path.read_text())
+        variables = {}
+        for path in (layer_dir / "auth.auto.tfvars", layer_dir / "env.auto.tfvars"):
+            variables.update(_load_tfvars(path))
+        binding = hashlib.sha256(json.dumps({
+            "workspace_host": str(variables.get("databricks_workspace_host", "")).strip().rstrip("/").lower(),
+            "workspace_id": str(variables.get("databricks_workspace_id", "")).strip(),
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        applied = state.get("outputs", {}).get("coverage_gate", {}).get("value") or {}
+        if str(applied.get("deployment_binding", "")) != binding:
+            return set()
         tables = set()
         for resource in state.get("resources", []):
             if (resource.get("module"), resource.get("type"), resource.get("name")) != TABLE_GRANT:
@@ -240,6 +277,8 @@ def granted_tables(layer_dir: Path) -> set[str]:
             if resource.get("mode", "managed") != "managed":
                 continue
             for instance in resource.get("instances", []):
+                if instance.get("status", "") == "tainted" or instance.get("deposed", "") != "":
+                    continue
                 tables.add(str(instance["index_key"]).split("|", 1)[0].lower())
         return tables
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
@@ -328,12 +367,16 @@ def can_run_check(env_dir: Path, env_name: str, runner: Path, apply_flags: str) 
     revocation never waits on the gate. Records the desired groups for
     `withheld`.
     """
-    result = subprocess.run(
-        [str(runner), "workspace", env_name, "console", *console_flags(apply_flags)],
-        input=CAN_RUN_EXPRESSION + "\n",
-        env={**os.environ, "LAYER_ENV_DIR": str(env_dir)},
-        text=True, capture_output=True,
-    )
+    try:
+        result = _run_bounded(
+            [str(runner), "workspace", env_name, "console", *console_flags(apply_flags)],
+            label="terraform console (workspace CAN_RUN)", input=CAN_RUN_EXPRESSION + "\n",
+            env={**os.environ, "LAYER_ENV_DIR": str(env_dir)}, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except CommandTimeout:
+        invalidate(env_dir, "workspace CAN_RUN terraform console timed out")
+        raise
     if result.returncode != 0:
         raise GateError("terraform console could not evaluate the workspace CAN_RUN check:\n"
                         + (result.stderr or result.stdout).strip())
@@ -434,7 +477,10 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
         if verbose:
             command.append("--verbose")
         sys.stdout.flush()
-        validation = subprocess.run(command, cwd=layer_dir)
+        try:
+            validation = _run_bounded(command, label="coverage validator", cwd=layer_dir)
+        except CommandTimeout as exc:
+            return _failed(gate_path, record, inputs, env_name, str(exc))
     finally:
         context.unlink(missing_ok=True)
 
