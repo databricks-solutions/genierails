@@ -45,9 +45,15 @@ def test_signal_during_apply_lets_terraform_finish_writing(tmp_path, sig):
            "LAYER_ENV_DIR": str(env_dir), "MARK": str(mark), "SIG": sig.name}
 
     # Its own process group, signalled as a whole, like a terminal's Ctrl-C.
+    # Default dispositions, as in a terminal: under nohup or `&` the suite may
+    # inherit INT/HUP ignored, and a shell can't trap a signal ignored on entry.
+    def default_signals():
+        for name in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(name, signal.SIG_DFL)
+
     process = subprocess.Popen([str(RUNNER), "data_access", "dev", "apply", "-auto-approve"],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                               env=env, start_new_session=True)
+                               env=env, start_new_session=True, preexec_fn=default_signals)
     try:
         deadline = time.monotonic() + 30
         while not (mark.exists() and "ready" in mark.read_text()):

@@ -699,9 +699,11 @@ def test_ddl_change_reapplies_data_access_so_genie_sees_the_new_gate(env_dir, st
         assert result.returncode == 0, result.stdout + result.stderr
         return "inputs unchanged" not in result.stdout
 
-    # An apply is only skipped once the state records a passing check.
+    # An apply is only skipped once this deployment's state records a pass.
+    binding = cg.deployment_binding(env_dir / "data_access")
     (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(
-        {"version": 4, "outputs": {"coverage_gate": {"value": {"status": "pass"}}}, "resources": []}))
+        {"version": 4, "outputs": {"coverage_gate": {"value": {"status": "pass", "deployment_binding": binding}}},
+         "resources": []}))
     assert applies()
     assert not applies()
     ddl.write_text("CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n")
