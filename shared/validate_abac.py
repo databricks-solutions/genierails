@@ -206,15 +206,10 @@ def _entity_table_name(entity_type: str, entity_name: str) -> str:
     return ""
 
 
-def validate_policy_overlaps(cfg: dict, result: ValidationResult):
-    """Fail when multiple FGAC policies resolve for one securable object."""
-    assignments = cfg.get("tag_assignments", [])
-    policies = cfg.get("fgac_policies", [])
-    if not isinstance(assignments, list) or not isinstance(policies, list):
-        return
-
+def _entity_tags(assignments) -> dict[tuple[str, str], dict[str, set[str]]]:
+    """(entity_type, entity_name) -> {tag_key: {values}} from tag_assignments."""
     entity_tags: dict[tuple[str, str], dict[str, set[str]]] = {}
-    for assignment in assignments:
+    for assignment in assignments if isinstance(assignments, list) else []:
         if not isinstance(assignment, dict):
             continue
         entity_type = assignment.get("entity_type", "")
@@ -224,25 +219,58 @@ def validate_policy_overlaps(cfg: dict, result: ValidationResult):
         if entity_type and entity_name and tag_key and tag_value:
             tags = entity_tags.setdefault((entity_type, entity_name), {})
             tags.setdefault(tag_key, set()).add(tag_value)
+    return entity_tags
 
-    def catalog_matches(policy: dict, entity_name: str) -> bool:
-        policy_catalog = policy.get("catalog", "") or policy.get("function_catalog", "")
-        entity_catalog = entity_name.split(".")[0] if entity_name else ""
-        return not policy_catalog or not entity_catalog or policy_catalog == entity_catalog
+
+def _catalog_matches(policy: dict, entity_name: str) -> bool:
+    policy_catalog = policy.get("catalog", "") or policy.get("function_catalog", "")
+    entity_catalog = entity_name.split(".")[0] if entity_name else ""
+    return not policy_catalog or not entity_catalog or policy_catalog == entity_catalog
+
+
+def column_mask_matches(cfg: dict) -> dict[str, list[str]]:
+    """Column -> names of the column-mask policies that resolve for it.
+
+    As Unity Catalog resolves them: the policy's catalog, the column's own
+    tags against the full match_condition (hasTagValue, hasTag, AND, OR,
+    parentheses), and its table's tags against when_condition.
+    """
+    policies = cfg.get("fgac_policies", [])
+    if not isinstance(policies, list):
+        return {}
+    entity_tags = _entity_tags(cfg.get("tag_assignments", []))
+    matches: dict[str, list[str]] = {}
+    for (entity_type, entity_name), tags in sorted(entity_tags.items()):
+        if entity_type != "columns":
+            continue
+        table_tags = entity_tags.get(("tables", _entity_table_name(entity_type, entity_name)), {})
+        names = [
+            policy.get("name", "<unnamed>")
+            for policy in policies
+            if isinstance(policy, dict)
+            and policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
+            and _catalog_matches(policy, entity_name)
+            and _condition_matches_tags(policy.get("match_condition", ""), tags)
+            and _condition_matches_tags(policy.get("when_condition", ""), table_tags)
+        ]
+        if names:
+            matches[entity_name] = names
+    return matches
+
+
+def validate_policy_overlaps(cfg: dict, result: ValidationResult):
+    """Fail when multiple FGAC policies resolve for one securable object."""
+    assignments = cfg.get("tag_assignments", [])
+    policies = cfg.get("fgac_policies", [])
+    if not isinstance(assignments, list) or not isinstance(policies, list):
+        return
+
+    entity_tags = _entity_tags(assignments)
+    mask_matches = column_mask_matches(cfg)
 
     for (entity_type, entity_name), tags in sorted(entity_tags.items()):
         if entity_type == "columns":
-            table_name = _entity_table_name(entity_type, entity_name)
-            table_tags = entity_tags.get(("tables", table_name), {})
-            matches = [
-                policy.get("name", "<unnamed>")
-                for policy in policies
-                if isinstance(policy, dict)
-                and policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
-                and catalog_matches(policy, entity_name)
-                and _condition_matches_tags(policy.get("match_condition", ""), tags)
-                and _condition_matches_tags(policy.get("when_condition", ""), table_tags)
-            ]
+            matches = mask_matches.get(entity_name, [])
             if len(set(matches)) > 1:
                 result.error(
                     f"Column '{entity_name}' matches multiple column-mask policies: "
@@ -257,7 +285,7 @@ def validate_policy_overlaps(cfg: dict, result: ValidationResult):
                 for policy in policies
                 if isinstance(policy, dict)
                 and policy.get("policy_type") == "POLICY_TYPE_ROW_FILTER"
-                and catalog_matches(policy, entity_name)
+                and _catalog_matches(policy, entity_name)
                 and _condition_matches_tags(policy.get("when_condition", ""), tags)
             ]
             if len(set(matches)) > 1:

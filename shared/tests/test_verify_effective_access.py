@@ -886,3 +886,57 @@ class TestTemporaryWarehouseAccess:
             )
 
         assert deleted == ["456"]
+
+
+# ---------------------------------------------------------------------------
+# required_mask_columns: the columns Terraform actually masks
+# ---------------------------------------------------------------------------
+class TestRequiredMaskColumns:
+    @staticmethod
+    def _cols(policy_overrides, assignments):
+        from verify_effective_access import required_mask_columns
+        policy = {"name": "m", "policy_type": "POLICY_TYPE_COLUMN_MASK", "catalog": "cat",
+                  "to_principals": ["analysts"], "match_condition": "hasTagValue('pii', 'ssn')"}
+        policy.update(policy_overrides)
+        return required_mask_columns([policy], [
+            {"entity_type": t, "entity_name": n, "tag_key": k, "tag_value": v} for t, n, k, v in assignments])
+
+    def test_tagged_column_in_the_policy_catalog(self):
+        assert self._cols({}, [("columns", "cat.sch.t.ssn", "pii", "ssn")]) == {("cat.sch.t", "ssn")}
+
+    def test_other_catalog_is_not_masked(self):
+        assert self._cols({}, [("columns", "cat2.sch.t.ssn", "pii", "ssn")]) == set()
+
+    def test_fully_excepted_targets_mask_nobody(self):
+        assert self._cols({"except_principals": ["analysts"]}, [("columns", "cat.sch.t.ssn", "pii", "ssn")]) == set()
+
+    def test_account_users_with_exceptions_still_masks_the_rest(self):
+        assert self._cols({"to_principals": ["account users"], "except_principals": ["admins"]},
+                          [("columns", "cat.sch.t.ssn", "pii", "ssn")]) == {("cat.sch.t", "ssn")}
+
+    def test_and_needs_every_clause_on_the_same_column(self):
+        cond = "hasTagValue('pii', 'ssn') AND hasTagValue('region', 'us')"
+        assert self._cols({"match_condition": cond}, [
+            ("columns", "cat.sch.t.ssn", "pii", "ssn"),
+            ("columns", "cat.sch.t.ssn", "region", "us"),
+            ("columns", "cat.sch.t.other", "pii", "ssn"),   # only one clause
+            ("columns", "cat.sch.u.x", "region", "us"),
+        ]) == {("cat.sch.t", "ssn")}
+
+    def test_or_with_parentheses(self):
+        cond = "(hasTagValue('pii', 'ssn') OR hasTagValue('pii', 'tfn')) AND hasTag('region')"
+        assert self._cols({"match_condition": cond}, [
+            ("columns", "cat.sch.t.ssn", "pii", "ssn"), ("columns", "cat.sch.t.ssn", "region", "us"),
+            ("columns", "cat.sch.t.tfn", "pii", "tfn"), ("columns", "cat.sch.t.tfn", "region", "au"),
+            ("columns", "cat.sch.t.bare", "pii", "tfn"),
+        ]) == {("cat.sch.t", "ssn"), ("cat.sch.t", "tfn")}
+
+    def test_has_tag_matches_any_value(self):
+        assert self._cols({"match_condition": "hasTag('pii')"}, [
+            ("columns", "cat.sch.t.ssn", "pii", "ssn"), ("columns", "cat.sch.t.name", "other", "x"),
+        ]) == {("cat.sch.t", "ssn")}
+
+    def test_when_condition_is_judged_on_the_table_tags(self):
+        assignments = [("columns", "cat.sch.t.ssn", "pii", "ssn"), ("columns", "cat.sch.u.ssn", "pii", "ssn"),
+                       ("tables", "cat.sch.t", "domain", "hr")]
+        assert self._cols({"when_condition": "hasTagValue('domain', 'hr')"}, assignments) == {("cat.sch.t", "ssn")}

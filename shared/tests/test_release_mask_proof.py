@@ -254,3 +254,36 @@ def test_account_users_mask_with_account_groups_and_a_key_passes(tmp_path):
     account.parent.mkdir()
     account.write_text('groups = { analysts = {}, viewers = {} }\n')
     assert rh.require_mask_proof(env, "prod", "customer_id", "", account) == 0
+
+
+# ── required coverage follows what Terraform masks ──────────────────────────
+
+HAS_TAG = MASK_POLICY.replace("hasTagValue('gr_treatment', 'redact')", "hasTag('gr_treatment')") + '''tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.customers.ssn", tag_key = "gr_treatment", tag_value = "redact" },
+  { entity_type = "columns", entity_name = "cat.sch.notes.free_text", tag_key = "gr_treatment", tag_value = "ssn_last4" },
+]
+'''
+NARROW = MASK_POLICY.replace(
+    "hasTagValue('gr_treatment', 'redact')",
+    "hasTagValue('gr_treatment', 'redact') AND hasTagValue('region', 'us')") + '''tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.customers.ssn", tag_key = "gr_treatment", tag_value = "redact" },
+  { entity_type = "columns", entity_name = "cat.sch.customers.ssn", tag_key = "region", tag_value = "us" },
+  { entity_type = "columns", entity_name = "cat.sch.notes.free_text", tag_key = "gr_treatment", tag_value = "redact" },
+  { entity_type = "columns", entity_name = "cat2.sch.t.ssn", tag_key = "gr_treatment", tag_value = "redact" },
+  { entity_type = "columns", entity_name = "cat2.sch.t.ssn", tag_key = "region", tag_value = "us" },
+]
+'''
+
+
+def test_a_has_tag_mask_must_be_in_the_spec(tmp_path, capsys):
+    env = _env(tmp_path, policies=HAS_TAG)
+    only_ssn = _spec(tmp_path, {"column_masks": [_mask("cat.sch.customers", "ssn")]})
+    assert rh.require_mask_proof(env, "prod", "", only_ssn) == 1
+    assert "does not check masked column(s): cat.sch.notes.free_text" in capsys.readouterr().err
+
+
+def test_only_columns_terraform_masks_are_required(tmp_path):
+    # AND needs both tags on the column, and cat2 is outside the policy catalog.
+    env = _env(tmp_path, policies=NARROW)
+    only_ssn = _spec(tmp_path, {"column_masks": [_mask("cat.sch.customers", "ssn")]})
+    assert rh.require_mask_proof(env, "prod", "", only_ssn) == 0

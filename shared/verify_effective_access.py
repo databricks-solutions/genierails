@@ -295,19 +295,28 @@ def required_mask_columns(
     fgac_policies: Sequence[Mapping[str, Any]],
     tag_assignments: Sequence[Mapping[str, Any]],
 ) -> set[tuple[str, str]]:
-    """Every (table, column) a column-mask policy's match_condition tags (pure).
+    """Every (table, column) a column mask actually applies to (pure).
 
     The coverage a verification must prove, whatever principals a check could
-    use: derive_spec_from_config drops a mask whose masked tier set comes out
-    empty (e.g. "account users" with no concrete groups), so it can't be the
-    measure of what must be checked.
+    use (derive_spec_from_config drops a mask whose masked tier set comes out
+    empty, e.g. "account users" with no concrete groups, so it can't be the
+    measure). Resolved as Terraform/Unity Catalog applies the policies, with
+    validate_abac's evaluator: policies that target someone once the
+    exceptions are removed, scoped to the policy's catalog, the full
+    match_condition against each column's tags (hasTagValue, hasTag, AND, OR,
+    parentheses) and when_condition against its table's tags.
     """
-    return {
-        (c["table"].lower(), c["column"].lower())
-        for pol in fgac_policies
+    from validate_abac import column_mask_matches
+
+    effective = [
+        pol for pol in fgac_policies
         if _as_str(pol.get("policy_type")) == "POLICY_TYPE_COLUMN_MASK"
-        for c in resolve_columns_for_condition(
-            _as_str(pol.get("match_condition")), tag_assignments, entity_type="columns")
+        and set(_as_list(pol.get("to_principals"))) - set(_as_list(pol.get("except_principals")))
+    ]
+    columns = column_mask_matches({"fgac_policies": list(effective), "tag_assignments": list(tag_assignments)})
+    return {
+        (table.lower(), column.lower())
+        for table, _, column in (name.rpartition(".") for name in columns)
     }
 
 
