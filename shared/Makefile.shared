@@ -410,6 +410,11 @@ rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is
 # (envs/<env>/generated/.governance.lock) throughout.
 _ENV_LOCK_HELPER = python3 "$(SHARED_ROOT)/scripts/environment_lock.py"
 _RELEASE_HELPER = python3 "$(SHARED_ROOT)/scripts/release_helpers.py"
+# release refuses, before its lock, to run when verify-access could not prove
+# every mask (no key, or a VERIFY_SPEC without keyed mask checks for them), and
+# re-checks after promoting the live-derived config, before it applies.
+_REQUIRE_MASK_PROOF = $(_RELEASE_HELPER) require-mask-proof "$(ENV_DIR)" --env "$(ENV)" --key "$$key" \
+	--spec "$(VERIFY_SPEC)" --account-tfvars "$(ACCOUNT_ENV_DIR)/abac.auto.tfvars"
 # Same-env promote for release, apply, apply-governance and plan. Command-line
 # values beat the environment and MAKEFLAGS, so a SOURCE_ENV/DEST_ENV exported
 # in the shell (or passed to the outer make) can't turn it into a cross-env
@@ -437,14 +442,16 @@ certify: _guard-genie-placeholder
 
 release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify access
 	@$(_GUARD_WORKSPACE_ENV); \
-	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,release); \
-	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
+	$(_DRY_RUN_GUARD); \
 	key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" || exit 1; \
-	$(_RELEASE_HELPER) require-mask-proof "$(ENV_DIR)" --env "$(ENV)" --key "$$key" --spec "$(VERIFY_SPEC)" || exit 1; \
+	$(_REQUIRE_MASK_PROOF) || exit 1; \
+	$(call _ENV_LOCK,release); \
+	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
 	$(MAKE) derive-assignments ENV="$(ENV)" || exit 1; \
 	$(MAKE) validate-generated ENV="$(ENV)" || exit 1; \
 	$(MAKE) coverage-gate ENV="$(ENV)" || exit 1; \
 	$(_SAME_ENV_PROMOTE) || exit 1; \
+	$(_REQUIRE_MASK_PROOF) || exit 1; \
 	$(MAKE) audit-rulebook ENV="$(ENV)"; audit_rc=$$?; \
 	if [ $$audit_rc -ne 0 ]; then \
 		if [ $$audit_rc -eq 1 ]; then \
