@@ -14,6 +14,20 @@ This guide covers Azure-specific setup required before deploying GenieRails on A
 - Must have **Account Admin** role in the Databricks account
 - Configured with OAuth M2M credentials (client_id + client_secret)
 
+From the `azure/` directory, `make bootstrap-sp` accepts multiple Azure workspaces and
+positionally aligned catalogs, for example:
+
+```bash
+make bootstrap-sp ACCOUNT_ID=<id> \
+  WORKSPACE_ID=<dev-workspace-id>,<prod-workspace-id> \
+  TARGET_CATALOG=<dev-catalog>,<prod-catalog> PLAN=1
+```
+
+One `TARGET_CATALOG` value applies to all workspace IDs; otherwise its comma-separated
+count must match `WORKSPACE_ID`. `PLAN=1` makes only read-only preflight calls and reports
+the resolved Azure host, authentication, catalog/metastore grant authority, and whether
+model access uses `CAN_QUERY` or Unity Catalog `EXECUTE`.
+
 ### Azure Service Principal (for `provision_test_env.py`)
 Required Azure RBAC roles on the resource group:
 - `Contributor` — create/delete storage accounts, access connectors
