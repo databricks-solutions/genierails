@@ -18,10 +18,10 @@ Guidelines for deploying GenieRails governance at scale.
 
 > **What actually scales.** In the dev-to-prod walkthrough, *sensitivity* comes from native classification and *enforcement* is derived deterministically — neither depends on LLM prompt size. The LLM only drafts the **rulebook and Genie content** in dev `generate`. Two cost models:
 >
-> - **Governance scaling (the important one):** classification **scan latency** (async, eventual-consistency before `derive-assignments`); deterministic **derivation** (scales with classified columns × catalog/treatment combinations, not tokens); **coverage-gate** cost (classified columns × relevant mask policies/functions); and **exposure rollout** (a passing `make release` grants `SELECT` + Genie `CAN_RUN`, so stage releases per env/BU). Prod uses `derive-assignments` — **no LLM**.
+> - **Governance scaling (the important one):** classification **scan latency** (async, eventual-consistency before `derive-assignments`); deterministic **derivation** (scales with classified columns × catalog/treatment combinations, not tokens); **coverage-check** cost (classified columns × relevant mask policies/functions); and **exposure rollout** (a passing `make release` grants `SELECT` + Genie `CAN_RUN`, so stage releases per env/BU). Prod uses `derive-assignments` — **no LLM**.
 > - **Generation scaling (dev only):** the LLM prompt-size table below governs *dev rule/Genie-content drafting quality*, not production enforcement.
 >
-> No defensible numeric benchmarks exist for scan latency or derive/gate throughput — measure in your own environment rather than assuming fixed timings.
+> No defensible numeric benchmarks exist for scan latency or derive/check throughput — measure in your own environment rather than assuming fixed timings.
 
 ### LLM Prompt Size vs. Quality (dev generation only)
 
@@ -134,7 +134,7 @@ Use `MODE=governance` for the central team and `MODE=genie` for BU teams. See [S
 | Full parallel CI (18 scenarios) | ~4 hours | ~5 hours | All scenarios concurrently; includes the legacy bank/overlay demos |
 | Country overlay (6 phases) | ~3 hours | ~3-4 hours | Longest single scenario |
 
-> A live **dev-to-prod** run has phases these older scenarios don't isolate — chiefly the **async classification scan wait** (minutes to ~24h; not compressible) before `derive-assignments`, plus the coverage-gate and staged exposure. Budget the scan wait as wall-clock, separate from generate/apply time.
+> A live **dev-to-prod** run has phases these older scenarios don't isolate — chiefly the **async classification scan wait** (minutes to ~24h; not compressible) before `derive-assignments`, plus the coverage check and staged exposure. Budget the scan wait as wall-clock, separate from generate/apply time.
 
 ### Optimizing CI Time
 

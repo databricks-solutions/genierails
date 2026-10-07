@@ -131,7 +131,7 @@ That moves root working files into `envs/dev/` and rewrites any legacy top-level
 ## Examples
 
 Pre-built examples with 3-layer configs (account, data access, workspace):
-- `examples/dev_to_prod/` — **the canonical end-to-end walkthrough** (native classification → coverage gate → safe dev→prod promotion) ([README](../examples/dev_to_prod/README.md))
+- `examples/dev_to_prod/` — **the canonical end-to-end walkthrough** (native classification → coverage check → safe dev→prod promotion) ([README](../examples/dev_to_prod/README.md))
 - `examples/finance/` — finance validation fixture: PII, PCI, and AML governance
 - `examples/healthcare/` — healthcare fixture: PHI, PII, and regional row filters ([walkthrough](../examples/healthcare/healthcare_walkthrough.md))
 - `examples/legacy/{aus,india,asean}_bank_demo/` — **older LLM-overlay demos** (region-specific: ANZ/TFN, India/Aadhaar-PAN-GSTIN-UPI, ASEAN 6-country IDs). Superseded by the dev-to-prod walkthrough; kept for reference.

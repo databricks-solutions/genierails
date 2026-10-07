@@ -10,7 +10,7 @@ Two adoptions to keep straight:
 - **Brownfield adoption** (this guide) = pull existing *governance resources* + Terraform state under management.
 - **[Import a Genie Agent from UI into Code](import-genie-agent-from-ui.md)** = import an existing Genie *agent's content*. They're complementary; neither replaces the other.
 
-Going forward, sensitivity comes from **native UC classification** (`class.*`), GenieRails derives one `gr_treatment` per column, and the coverage gate must pass before any business access is granted — adopting brownfield state does not bypass those gates.
+Going forward, sensitivity comes from **native UC classification** (`class.*`), GenieRails derives one `gr_treatment` per column, and the coverage check must pass before any business access is granted — adopting brownfield state does not bypass those gates.
 
 ## Before You Start
 
