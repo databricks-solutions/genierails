@@ -397,9 +397,13 @@ _GUARD_WORKSPACE_ENV = if [ "$(ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(ENV)" = "$(DAT
 	fi
 # Lock owned by the recipe shell ($$). Cleanup traps are installed BEFORE the
 # lock is taken (unlock only removes a lock this shell owns), and HUP/INT/TERM
-# exit through the EXIT trap, so an interrupted run never strands the lock.
-_ENV_LOCK = trap '$(_RECEIPT) unlock "$(ENV_DIR)" --pid $$$$' EXIT; \
-	trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; \
+# exit through the EXIT trap, so an interrupted run never strands the lock. Every
+# trap ignores HUP/INT/TERM first: make re-sends SIGTERM to the recipe shell after
+# the group-wide one, and a second signal must not re-run `exit` (skipping the
+# unlock) or kill the unlock helper.
+_NO_SIGNALS = trap "" HUP INT TERM
+_ENV_LOCK = trap '$(_NO_SIGNALS); $(_RECEIPT) unlock "$(ENV_DIR)" --pid $$$$' EXIT; \
+	trap '$(_NO_SIGNALS); exit 129' HUP; trap '$(_NO_SIGNALS); exit 130' INT; trap '$(_NO_SIGNALS); exit 143' TERM; \
 	$(_RECEIPT) lock "$(ENV_DIR)" --pid $$$$ --owner $(1) --env "$(ENV)" || exit 1
 
 certify: _guard-genie-placeholder ## Certify coverage and deploy enforcement only; records the receipt make release requires

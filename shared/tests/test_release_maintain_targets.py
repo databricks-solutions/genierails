@@ -930,7 +930,17 @@ def test_dry_run_creates_no_lock_or_env_dirs(tmp_path):
     assert not env_dir.exists()
 
 
-_SLOW_STAGE = {"release": "apply", "certify": "derive-assignments", "maintain": "audit-schema"}
+# maintain runs the audit script directly (not via $(MAKE)), so its first stub
+# stage after the lock is derive-assignments.
+_SLOW_STAGE = {"release": "apply", "certify": "derive-assignments", "maintain": "derive-assignments"}
+
+
+def _default_signals():
+    # A suite launched in the background (INT ignored) or under nohup (HUP
+    # ignored) passes SIG_IGN down, and a shell cannot trap a signal ignored
+    # on entry, so the signal would never land. Model an interactive terminal.
+    for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, signal.SIG_DFL)
 
 
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
@@ -944,7 +954,7 @@ def test_signal_mid_run_releases_lock(tmp_path, target, sig):
          f"ACCOUNT_ENV_DIR={tmp_path / 'account'}", f"MAKE={stub}",
          f"AUDIT_SCHEMA_SCRIPT={stub.parent / 'fake-audit-schema.py'}"],
         cwd=CLOUD_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=_clean_env(), start_new_session=True,
+        env=_clean_env(), start_new_session=True, preexec_fn=_default_signals,
     )
     try:
         deadline = time.time() + 15
