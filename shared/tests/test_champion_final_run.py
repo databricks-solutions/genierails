@@ -146,7 +146,19 @@ def test_masking_resource_keeps_no_secret_and_ignores_nothing():
     assert keys == {"sql_hash", "sql_file", "script", "auth_file", "warehouse_id", "host", "client_id"}
     assert "secret" not in block
     assert "ignore_changes" not in block
-    assert block.count("--auth-file ${self.triggers_replace.auth_file}") == 2
+    assert block.count("--auth-file ${self.triggers_replace.auth_file}") == 1
+    # Replacing it (any SQL change) must never drop the functions live policies use.
+    assert "when    = destroy" not in block and "--drop" not in block
+
+
+def test_functions_are_dropped_only_by_a_resource_that_never_replaces():
+    block = _resource_block(MODULE_TF.read_text(), 'resource "terraform_data" "masking_functions_drop" {')
+    assert "triggers_replace" not in block and "filemd5" not in block
+    assert "secret" not in block
+    assert block.count("--drop") == 1 and "when    = destroy" in block
+    assert "--auth-file ${self.input.auth_file}" in block
+    deploy = _resource_block(MODULE_TF.read_text(), 'resource "terraform_data" "masking_functions" {')
+    assert "terraform_data.masking_functions_drop" in deploy  # destroyed after the deploy
 
 
 def test_old_null_resource_is_forgotten_not_destroyed():
@@ -199,30 +211,39 @@ OLD_STATE = {
 }
 
 
-def _fixture_root(tmp_path: Path) -> tuple[Path, Path, dict]:
-    """A root holding the module's real masking blocks, fed fixture values."""
-    tf = MODULE_TF.read_text()
-    block = _resource_block(tf, 'resource "terraform_data" "masking_functions" {')
-    block = re.sub(r"\n  depends_on = \[.*?\n  \]\n", "\n", block, flags=re.S)
+def _masking_root(tf: str) -> str:
+    """A root holding the masking blocks of module source `tf`, fed fixture values."""
+    blocks = "\n".join(
+        re.sub(r"\n  depends_on = \[.*?\n  \]\n", "\n", _resource_block(tf, header), flags=re.S)
+        for header in ('resource "terraform_data" "masking_functions" {',
+                       'resource "terraform_data" "masking_functions_drop" {')
+        if header in tf)  # the drop resource only exists from PR #76 on
     removed = re.search(r"removed \{.*?\n\}\n", tf, re.S).group(0)
-    root = tmp_path / "root"
-    root.mkdir()
-    env_dir = _real_layout(tmp_path)
-    stub = tmp_path / "stub.py"
-    stub.write_text(STUB)
-    (root / "main.tf").write_text(
+    return (
         'terraform {\n  required_providers {\n'
         '    null = { source = "hashicorp/null", version = "~> 3.2" }\n  }\n}\n'
         'variable "masking_sql_file" {}\nvariable "deploy_masking_script" {}\n'
         'variable "auth_file" {}\nvariable "databricks_workspace_host" {}\n'
         'variable "databricks_client_id" {}\n'
         'locals {\n  effective_warehouse_id = "wh"\n}\n'
-        + block + "\n" + removed
+        + blocks + "\n" + removed
     )
+
+
+def _fixture_root(tmp_path: Path, tf: str | None = None, old_state: bool = True) -> tuple[Path, Path, dict]:
+    """A root holding the masking blocks (the current module's unless `tf` is
+    given), with the pre-terraform_data state unless old_state is False."""
+    root = tmp_path / "root"
+    root.mkdir()
+    env_dir = _real_layout(tmp_path)
+    stub = tmp_path / "stub.py"
+    stub.write_text(STUB)
+    (root / "main.tf").write_text(_masking_root(MODULE_TF.read_text() if tf is None else tf))
     sql_file = env_dir / "masking_functions.sql"
-    state = json.loads(json.dumps(OLD_STATE).replace('"SCRIPT"', json.dumps(str(stub)))
-                       .replace('"SQL"', json.dumps(str(sql_file))))
-    (root / "terraform.tfstate").write_text(json.dumps(state))
+    if old_state:
+        state = json.loads(json.dumps(OLD_STATE).replace('"SCRIPT"', json.dumps(str(stub)))
+                           .replace('"SQL"', json.dumps(str(sql_file))))
+        (root / "terraform.tfstate").write_text(json.dumps(state))
     tfvars = {
         "masking_sql_file": str(sql_file),
         "deploy_masking_script": str(stub),
@@ -233,10 +254,29 @@ def _fixture_root(tmp_path: Path) -> tuple[Path, Path, dict]:
     return root, env_dir, tfvars
 
 
+# The last main before PR #76: masking_functions itself drops on destroy, so a
+# SQL change (a replacement) dropped every live mask function.
+PRE_DROP_SPLIT_COMMIT = "0c08fb2de41213a260699f95667434216a5dcab9"
+
+
+def _pre_drop_split_module() -> str:
+    """modules/data_access/main.tf as of PRE_DROP_SPLIT_COMMIT, from git history."""
+    show = subprocess.run(["git", "show", f"{PRE_DROP_SPLIT_COMMIT}:shared/modules/data_access/main.tf"],
+                          cwd=SHARED.parent, text=True, capture_output=True)
+    if show.returncode != 0:
+        message = (f"commit {PRE_DROP_SPLIT_COMMIT} is not in this clone (shallow checkout?); "
+                   "fetch full history to run the upgrade proof")
+        if os.environ.get("REQUIRE_TERRAFORM_TESTS") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
+    return show.stdout
+
+
 def _skip_if_providers_unavailable(init: subprocess.CompletedProcess) -> None:
     if init.returncode == 0:
         return
-    if "Failed to query available provider packages" in init.stderr or "could not connect" in init.stderr:
+    if os.environ.get("REQUIRE_TERRAFORM_TESTS") != "1" and (
+            "Failed to query available provider packages" in init.stderr or "could not connect" in init.stderr):
         pytest.skip("hashicorp/null provider not downloadable (offline)")
     raise AssertionError(init.stdout + init.stderr)
 
@@ -274,6 +314,7 @@ def test_existing_state_migrates_without_dropping_and_sheds_the_secret(tmp_path)
     assert actions == {
         "null_resource.deploy_masking_functions": ["forget"],
         "terraform_data.masking_functions": ["create"],
+        "terraform_data.masking_functions_drop": ["create"],
     }
 
     var_args = [f"-var={k}={v}" for k, v in tfvars.items()]
@@ -292,6 +333,54 @@ def test_existing_state_migrates_without_dropping_and_sheds_the_secret(tmp_path)
     # A different SP identity still replaces the functions.
     actions = _plan_actions(root, {**tfvars, "databricks_client_id": "other-sp"}, env)
     assert actions == {"terraform_data.masking_functions": ["delete", "create"]}
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_upgraded_masking_state_survives_a_sql_change_without_dropping(tmp_path):
+    """The prod risk: masking_functions created by the pre-#76 module (which
+    drops on destroy) is replaced by the first SQL change after the upgrade.
+    That replacement must re-run CREATE OR REPLACE without any --drop; only
+    destroying the layer drops the functions, exactly once."""
+    root, env_dir, tfvars = _fixture_root(tmp_path, tf=_pre_drop_split_module(), old_state=False)
+    log = tmp_path / "stub.log"
+    env = {**os.environ, "STUB_LOG": str(log), "TF_IN_AUTOMATION": "1"}
+    _skip_if_providers_unavailable(_tf(root, "init", "-input=false", env=env))
+    var_args = [f"-var={k}={v}" for k, v in tfvars.items()]
+    apply = _tf(root, "apply", "-input=false", "-auto-approve", *var_args, env=env)
+    assert apply.returncode == 0, apply.stdout + apply.stderr
+    created = json.loads((root / "terraform.tfstate").read_text())
+    assert [r["name"] for r in created["resources"]] == ["masking_functions"]
+
+    # Upgrade to this code on the same state, with a changed SQL (sql_hash).
+    (root / "main.tf").write_text(_masking_root(MODULE_TF.read_text()))
+    (env_dir / "masking_functions.sql").write_text("-- sql with one more function\n")
+    actions = _plan_actions(root, tfvars, env)
+    apply = _tf(root, "apply", "-input=false", "-auto-approve", *var_args, env=env)
+    assert apply.returncode == 0, apply.stdout + apply.stderr
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(calls) == 2 and not any("--drop" in call for call in calls), calls
+    assert actions == {
+        "terraform_data.masking_functions": ["delete", "create"],
+        "terraform_data.masking_functions_drop": ["create"],
+    }
+
+    # Later SQL changes stay drop-free; a new host (or warehouse, script,
+    # file) updates the drop's settings in place.
+    (env_dir / "masking_functions.sql").write_text("-- sql changed again\n")
+    apply = _tf(root, "apply", "-input=false", "-auto-approve", *var_args, env=env)
+    assert apply.returncode == 0, apply.stdout + apply.stderr
+    assert _plan_actions(root, {**tfvars, "databricks_workspace_host": "https://other.invalid"}, env) == {
+        "terraform_data.masking_functions": ["delete", "create"],
+        "terraform_data.masking_functions_drop": ["update"],
+    }
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(calls) == 3 and not any("--drop" in call for call in calls), calls
+
+    destroy = _tf(root, "destroy", "-input=false", "-auto-approve", *var_args, env=env)
+    assert destroy.returncode == 0, destroy.stdout + destroy.stderr
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(calls) == 4 and [("--drop" in call) for call in calls] == [False, False, False, True], calls
+    assert calls[3][calls[3].index("--auth-file") + 1] == f"{env_dir}/auth.auto.tfvars"
 
 
 # ── spinner ──────────────────────────────────────────────────────────────────

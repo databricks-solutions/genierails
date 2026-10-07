@@ -193,6 +193,7 @@ def test_plan_real_target_runs_configured_workspace_layers(tmp_path):
     # The workspace plan first checks CAN_RUN; no ACL widens it here.
     closed_can_run = base64.b64encode(json.dumps({
         "groups": {}, "blocker": "", "widening": {}, "missing": {},
+        "refreshed_at": "2000-01-01T00:00:00Z", "fresh_until": "2999-01-01T00:00:00Z", "problems": {},
     }).encode()).decode()
     runner.write_text(
         "#!/bin/sh\n"
@@ -336,6 +337,7 @@ def test_apply_flags_reach_the_layer_and_change_fingerprint(tmp_path):
     # opens CAN_RUN while exposure is blocked; nothing is blocked here.
     open_can_run = base64.b64encode(json.dumps({
         "groups": {}, "blocker": "", "widening": {}, "missing": {},
+        "refreshed_at": "2000-01-01T00:00:00Z", "fresh_until": "2999-01-01T00:00:00Z", "problems": {},
     }).encode()).decode()
     runner.write_text(
         "#!/bin/sh\n"

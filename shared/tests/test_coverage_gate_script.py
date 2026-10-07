@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -997,7 +998,18 @@ def test_data_access_apply_keeps_grants_when_uc_is_down_but_never_adds_one(live_
         assert raw.returncode == 0, raw.stdout + raw.stderr
 
 
+_PROBLEMS = {"unrefreshed": "no live refresh", "expired": "refresh too old"}
+
+
+def _refresh(age: timedelta, max_age: timedelta = timedelta(hours=6)) -> dict:
+    """Console fields for a gate result refreshed `age` ago (a fresh one by default)."""
+    at = datetime.now(timezone.utc) - age
+    return {"refreshed_at": at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "fresh_until": (at + max_age).strftime("%Y-%m-%dT%H:%M:%SZ"), "problems": _PROBLEMS}
+
+
 def _console_runner(tmp_path, answer):
+    answer = {**_refresh(timedelta(minutes=1)), **answer}
     runner = tmp_path / "console-runner"
     runner.write_text(f"#!/bin/sh\necho '+ terraform console'\necho '\"{_encoded(answer)}\"'\n")
     runner.chmod(0o755)
@@ -1031,6 +1043,27 @@ def test_can_run_check_mirrors_the_workspace_precondition(tmp_path, capsys, answ
     runner = _console_runner(tmp_path, answer)
     assert cg.can_run_check(tmp_path, "prod", runner, "") == code
     assert message in capsys.readouterr().err
+
+
+# terraform console can't evaluate the gate's refresh-time checks
+# (plantimestamp()), so the static blocker comes back "" and the check applies
+# them itself: a pass resting on an old, future or malformed refresh still
+# refuses widening, and still lets keeping, shrinking or clearing through.
+@pytest.mark.parametrize("refresh, groups, widening, code, message", [
+    (_refresh(timedelta(hours=7)), "a,b", ["b"], 1, "refresh too old"),
+    (_refresh(timedelta(hours=-1)), "a,b", ["b"], 1, "no live refresh"),
+    ({"refreshed_at": "", "fresh_until": ""}, "a,b", ["b"], 1, "no live refresh"),
+    ({"refreshed_at": None, "fresh_until": None}, "a,b", ["b"], 1, "no live refresh"),
+    (_refresh(timedelta(hours=7)), "a", [], 0, "refresh too old"),
+    (_refresh(timedelta(hours=5, minutes=50)), "a,b", ["b"], 0, ""),
+])
+def test_can_run_check_applies_the_refresh_time_checks(tmp_path, capsys, refresh, groups, widening, code, message):
+    runner = _console_runner(tmp_path, {"groups": {"sales": groups}, "blocker": "",
+                                        "widening": {"sales": widening}, "missing": {"sales": []},
+                                        **refresh})
+    assert cg.can_run_check(tmp_path, "prod", runner, "") == code
+    err = capsys.readouterr().err
+    assert message in err if message else "blocked" not in err
 
 
 def test_can_run_check_fails_closed_when_terraform_cant_answer(tmp_path):
