@@ -74,7 +74,7 @@ Key config & code: [`treatment_config.json`](../../treatment_config.json) (the `
 - **drift** — a gap between what's tagged and what's protected; `audit-rulebook` reports it.
 - **entitlement / workspace assignment** — what lets a group *into* a workspace at all (applied every apply; harmless without a data grant).
 - **evidence** — the compliance record `make evidence` produces (what was scanned, tagged, protected, and approved).
-- **exposure gate (retired)** — the old on/off `business_access_enabled` switch, now ignored. Exposure follows the coverage check instead, which Terraform enforces: no new or wider `SELECT` grant or Genie run permission without a recent pass. (The former `business_access_enabled` flag is retired and ignored.)
+- **exposure gate (retired)** — the old on/off `business_access_enabled` switch, now ignored. Exposure follows the coverage check instead, which Terraform enforces: no new or wider `SELECT` grant or Genie run permission without a recent pass.
 - **facts vs rules** — *facts* = which columns got tagged in *this* workspace (from the scan); *rules* = the mapping + policies (portable, promoted).
 - **fail-closed** — if native classification can't be read, `generate` aborts rather than guessing.
 - **FGAC (fine-grained access control)** — Unity Catalog column masks + row filters.

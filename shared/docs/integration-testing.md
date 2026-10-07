@@ -316,7 +316,7 @@ This deletes cloud-specific resources, the workspace, metastore (and all catalog
 
 ## Scenarios
 
-`scripts/run_integration_tests.py` runs 19 live scenarios end-to-end (data setup, generation/apply, assertions, teardown), each isolated. These exercise **topology, import, and promotion** mechanics; most predate the dev-to-prod invariants and do not by themselves prove native-classification / coverage-gate / coverage-gated exposure / derive-assignments — the dev-to-prod **regression suite** above covers those deterministically, and **champion** exercises them live. (In the dev-to-prod walkthrough, prod enforcement is `derive-assignments` with no LLM, not re-generation.)
+`scripts/run_integration_tests.py` runs 19 live scenarios end-to-end (data setup, generation/apply, assertions, teardown), each isolated. These exercise **topology, import, and promotion** mechanics; most predate the dev-to-prod invariants and do not by themselves prove native classification / coverage check / coverage-checked exposure / derive-assignments — the dev-to-prod **regression suite** above covers those deterministically, and **champion** exercises them live. (In the dev-to-prod walkthrough, prod enforcement is `derive-assignments` with no LLM, not re-generation.)
 
 | Scenario | playbook.md section | What it validates |
 |---|---|---|
