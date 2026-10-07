@@ -139,16 +139,17 @@ resource "null_resource" "genie_space_config_existing" {
   for_each = local.existing_spaces_with_config
 
   triggers = {
-    space_id        = each.value.genie_space_id
-    description     = each.value.config.description
-    questions       = jsonencode(each.value.config.sample_questions)
-    instructions    = each.value.config.instructions
-    benchmarks      = jsonencode(each.value.config.benchmarks)
-    sql_filters     = jsonencode(each.value.config.sql_filters)
-    sql_measures    = jsonencode(each.value.config.sql_measures)
-    sql_expressions = jsonencode(each.value.config.sql_expressions)
-    join_specs      = jsonencode(each.value.config.join_specs)
-    warehouse_id    = each.value.configured_sql_warehouse_id == null ? "" : each.value.configured_sql_warehouse_id
+    space_id           = each.value.genie_space_id
+    description        = each.value.config.description
+    questions          = jsonencode(each.value.config.sample_questions)
+    instructions       = each.value.config.instructions
+    benchmarks         = jsonencode(each.value.config.benchmarks)
+    sql_filters        = jsonencode(each.value.config.sql_filters)
+    sql_measures       = jsonencode(each.value.config.sql_measures)
+    sql_expressions    = jsonencode(each.value.config.sql_expressions)
+    join_specs         = jsonencode(each.value.config.join_specs)
+    warehouse_id       = each.value.configured_sql_warehouse_id == null ? "" : each.value.configured_sql_warehouse_id
+    warehouse_explicit = (each.value.configured_sql_warehouse_id == null ? "" : each.value.configured_sql_warehouse_id) != "" ? "1" : "0"
   }
 
   provisioner "local-exec" {
@@ -169,8 +170,8 @@ resource "null_resource" "genie_space_config_existing" {
       GENIE_SQL_EXPRESSIONS    = jsonencode(each.value.config.sql_expressions)
       GENIE_SQL_MEASURES       = jsonencode(each.value.config.sql_measures)
       GENIE_JOIN_SPECS         = jsonencode(each.value.config.join_specs)
-      GENIE_WAREHOUSE_ID       = each.value.configured_sql_warehouse_id == null ? "" : each.value.configured_sql_warehouse_id
-      GENIE_WAREHOUSE_EXPLICIT = (each.value.configured_sql_warehouse_id == null ? "" : each.value.configured_sql_warehouse_id) != "" ? "1" : "0"
+      GENIE_WAREHOUSE_ID       = self.triggers.warehouse_id
+      GENIE_WAREHOUSE_EXPLICIT = self.triggers.warehouse_explicit
     }
   }
 

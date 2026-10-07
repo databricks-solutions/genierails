@@ -207,3 +207,9 @@ cannot be read or audited; `GENIE_ACL_FORCE=1` is an explicit, printed emergency
 override. Production changes must run through the pipeline; do not edit these
 resources by hand in the UI. Change production Genie ACLs by editing
 `envs/prod/env.auto.tfvars` in a PR and letting the pipeline apply it.
+
+When an environment switches from an auto-created warehouse to an explicit ID,
+GenieRails retains the old warehouse to prevent an unsafe delete during agent
+migration. After verifying no agent uses it, an operator may deliberately
+unmanage it with `terraform state rm` in the workspace and data-access layer
+states, then retire it through the platform's normal reviewed process.

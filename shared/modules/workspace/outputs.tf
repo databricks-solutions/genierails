@@ -44,6 +44,16 @@ output "genie_spaces_created" {
   value       = keys(terraform_data.genie_space)
 }
 
+output "genie_existing_space_warehouse_intent" {
+  description = "Per attached agent, the raw per-space warehouse trigger and whether it is explicit."
+  value = {
+    for key, resource in null_resource.genie_space_config_existing : key => {
+      warehouse_id       = resource.triggers.warehouse_id
+      warehouse_explicit = resource.triggers.warehouse_explicit
+    }
+  }
+}
+
 output "genie_groups_csv" {
   description = "Comma-separated group names for Genie ACL calls (all groups, for backward compat)."
   value       = join(",", keys(var.groups))

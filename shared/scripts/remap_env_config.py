@@ -545,6 +545,14 @@ def main():
                         f"added in dev={added!r}; revoked in dev={revoked!r}. "
                         "To change prod, edit envs/prod/env.auto.tfvars in a PR."
                     )
+            elif source_acl != dest_acl:
+                source_display = repr(source_acl) if isinstance(source_acl, list) else "<derived>"
+                dest_display = repr(dest_acl) if isinstance(dest_acl, list) else "<derived>"
+                print(
+                    f"  Genie ACL diff for {name!r} (dev vs prod): "
+                    f"dev={source_display}; prod={dest_display}. "
+                    "To change prod, edit envs/prod/env.auto.tfvars in a PR."
+                )
         lines.append("  },")
     lines.append("]")
     lines.append("")

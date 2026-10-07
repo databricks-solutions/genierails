@@ -33,6 +33,8 @@ SPACE_CONFIG = (
     "benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], "
     'acl_groups = ["analysts"] }'
 )
+# A non-empty description makes the legacy module manage the attached agent's
+# config, so the upgrade plan exposes the new warehouse trigger behavior.
 ATTACHED_SPACE_CONFIG = SPACE_CONFIG.replace('description = ""', 'description = "attached"')
 WORKSPACE_SPACES = (
     "{ "
@@ -497,8 +499,8 @@ def test_released_workspace_state_plans_no_change_after_the_retirement(tmp_path)
         module_source.index('resource "null_resource" "genie_space_config_existing"'):
         module_source.index("# ── New spaces: create")
     ]
-    assert "GENIE_WAREHOUSE_ID       = each.value.configured_sql_warehouse_id" in existing_block
-    assert "GENIE_WAREHOUSE_EXPLICIT = (each.value.configured_sql_warehouse_id" in existing_block
+    assert "GENIE_WAREHOUSE_ID       = self.triggers.warehouse_id" in existing_block
+    assert "GENIE_WAREHOUSE_EXPLICIT = self.triggers.warehouse_explicit" in existing_block
     assert "GENIE_WAREHOUSE_ID       = each.value.sql_warehouse_id" not in existing_block
 
     # Never released: refused while blocked; once the gate allows it, only the

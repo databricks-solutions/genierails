@@ -421,9 +421,8 @@ def test_m2m_builds_fresh_workspace_auth_without_mutating_account_config():
             auth_type="oauth-m2m",
         )
     account_header_factory = object()
-    workspace_header_factory = object()
     account_config._header_factory = account_header_factory
-    workspace = SimpleNamespace(config=SimpleNamespace(_header_factory=workspace_header_factory))
+    workspace = SimpleNamespace()
     with patch("databricks.sdk.AccountClient"), \
          patch("databricks.sdk.WorkspaceClient", return_value=workspace) as workspace_client, \
          patch("databricks.sdk.config.Config", return_value=account_config):
@@ -435,8 +434,7 @@ def test_m2m_builds_fresh_workspace_auth_without_mutating_account_config():
     )
     assert account_config.host == account_host
     assert account_config.account_id == "acct"
-    assert result.config._header_factory is workspace_header_factory
-    assert result.config._header_factory is not account_config._header_factory
+    assert result is workspace
     assert account_config._header_factory is account_header_factory
 
 

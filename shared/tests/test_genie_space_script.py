@@ -305,3 +305,53 @@ printf '%s' {json.dumps(json.dumps({"serialized_space": serialized}))}
     assert [t["identifier"] for t in space["data_sources"]["tables"]] == [
         "cat.s.customers", "cat.s.notes",
     ]
+
+
+def _update_config_warehouse_body(tmp_path, *, adopted, explicit):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    patch_body = tmp_path / "patch.json"
+    fake = bin_dir / "curl"
+    fake.write_text(r'''#!/usr/bin/env python3
+import json, os, shutil, sys
+args = sys.argv[1:]
+method = args[args.index("-X") + 1] if "-X" in args else "GET"
+if method == "PATCH":
+    data_arg = args[args.index("-d") + 1]
+    shutil.copyfile(data_arg.removeprefix("@"), os.environ["PATCH_BODY"])
+    print("{}")
+    print("200")
+else:
+    print(json.dumps({"warehouse_id": "live-warehouse"}))
+''')
+    fake.chmod(0o755)
+    id_file = tmp_path / ".genie_space_id_sales"
+    id_file.write_text("space-1\n")
+    if adopted:
+        (tmp_path / ".genie_adopted_sales").touch()
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "PATCH_BODY": str(patch_body),
+        "DATABRICKS_HOST": "https://target",
+        "DATABRICKS_TOKEN": "token",
+        "GENIE_ID_FILE": str(id_file),
+        "GENIE_TABLES_CSV": "cat.schema.table",
+        "GENIE_WAREHOUSE_ID": "configured-warehouse",
+        "GENIE_WAREHOUSE_CREATED_DEFAULT": "1",
+        "GENIE_WAREHOUSE_EXPLICIT": "1" if explicit else "0",
+    }
+    result = subprocess.run(["bash", str(SCRIPT), "update-config"], env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(patch_body.read_text())
+
+
+def test_update_config_title_adopted_agent_ignores_created_default_warehouse(tmp_path):
+    body = _update_config_warehouse_body(tmp_path, adopted=True, explicit=False)
+    assert "warehouse_id" not in body
+
+
+def test_update_config_non_adopted_agent_sends_explicit_per_space_warehouse(tmp_path):
+    body = _update_config_warehouse_body(tmp_path, adopted=False, explicit=True)
+    assert body["warehouse_id"] == "configured-warehouse"

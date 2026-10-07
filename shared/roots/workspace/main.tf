@@ -659,6 +659,11 @@ output "genie_space_can_run_widening" {
   value       = local.genie_space_can_run_widening
 }
 
+output "genie_existing_space_warehouse_intent" {
+  description = "Per attached agent, the raw per-space warehouse update intent."
+  value       = module.workspace.genie_existing_space_warehouse_intent
+}
+
 output "genie_exposure_blocker" {
   description = "Why Genie CAN_RUN grants are blocked (data_access layer not applied with a current passing coverage check), or \"\" when they may be granted."
   value       = local.genie_exposure_blocker
