@@ -287,3 +287,18 @@ def test_only_columns_terraform_masks_are_required(tmp_path):
     env = _env(tmp_path, policies=NARROW)
     only_ssn = _spec(tmp_path, {"column_masks": [_mask("cat.sch.customers", "ssn")]})
     assert rh.require_mask_proof(env, "prod", "", only_ssn) == 0
+
+
+def test_a_mixed_case_policy_catalog_still_requires_its_columns(tmp_path, capsys):
+    env = _env(tmp_path, policies=TAGGED.replace('catalog = "cat"', 'catalog = "CAT"'))
+    assert rh.require_mask_proof(env, "prod", "", _spec(tmp_path, UNRELATED_SPEC)) == 1
+    assert "does not check masked column(s): cat.sch.customers.ssn, cat.sch.notes.free_text" in capsys.readouterr().err
+    covering = {"column_masks": [_mask("CAT.SCH.CUSTOMERS", "SSN"), _mask("cat.sch.Notes", "free_text")]}
+    assert rh.require_mask_proof(env, "prod", "", _spec(tmp_path, covering)) == 0
+
+
+def test_an_unreadable_mask_condition_refuses(tmp_path, capsys):
+    env = _env(tmp_path, policies=TAGGED.replace("hasTagValue('gr_treatment', 'redact')",
+                                                 "has_tag_value('gr_treatment', 'redact')"))
+    assert rh.require_mask_proof(env, "prod", "customer_id", "") == 1
+    assert "cannot tell which columns" in capsys.readouterr().err

@@ -940,3 +940,40 @@ class TestRequiredMaskColumns:
         assignments = [("columns", "cat.sch.t.ssn", "pii", "ssn"), ("columns", "cat.sch.u.ssn", "pii", "ssn"),
                        ("tables", "cat.sch.t", "domain", "hr")]
         assert self._cols({"when_condition": "hasTagValue('domain', 'hr')"}, assignments) == {("cat.sch.t", "ssn")}
+
+    # Unity Catalog identifiers are case-insensitive; tags are not.
+    def test_policy_catalog_matches_case_insensitively(self):
+        assert self._cols({"catalog": "CAT"}, [("columns", "cat.sch.t.ssn", "pii", "ssn")]) == {("cat.sch.t", "ssn")}
+        assert self._cols({}, [("columns", "Cat.Sch.T.SSN", "pii", "ssn")]) == {("cat.sch.t", "ssn")}
+
+    def test_spellings_of_one_column_are_one_entity(self):
+        cond = "hasTagValue('pii', 'ssn') AND hasTagValue('region', 'us')"
+        assert self._cols({"match_condition": cond}, [
+            ("columns", "cat.sch.t.ssn", "pii", "ssn"), ("columns", "CAT.SCH.T.SSN", "region", "us"),
+        ]) == {("cat.sch.t", "ssn")}
+
+    def test_when_condition_finds_the_table_case_insensitively(self):
+        assignments = [("columns", "cat.sch.t.ssn", "pii", "ssn"), ("tables", "CAT.Sch.T", "domain", "hr")]
+        assert self._cols({"when_condition": "hasTagValue('domain', 'hr')"}, assignments) == {("cat.sch.t", "ssn")}
+
+    def test_tag_keys_and_values_stay_case_sensitive(self):
+        assert self._cols({}, [("columns", "cat.sch.t.a", "PII", "ssn"), ("columns", "cat.sch.t.b", "pii", "SSN")]) == set()
+
+    @pytest.mark.parametrize("cond", ["has_tag_value('pii', 'ssn')", "has_tag('pii')", "hasTagValue('pii', 'ssn') XOR"])
+    def test_an_unreadable_condition_fails_closed(self, cond):
+        with pytest.raises(ValueError, match="cannot tell which columns"):
+            self._cols({"match_condition": cond}, [("columns", "cat.sch.t.ssn", "pii", "ssn")])
+
+    def test_strict_verify_refuses_an_unreadable_mask_condition(self, tmp_path, capsys):
+        tfvars = tmp_path / "abac.auto.tfvars"
+        tfvars.write_text("""
+fgac_policies = [
+  { name = "m", policy_type = "POLICY_TYPE_COLUMN_MASK", to_principals = ["analysts"],
+    match_condition = "has_tag_value('pii', 'ssn')" },
+]
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.t.ssn", tag_key = "pii", tag_value = "ssn" },
+]
+""")
+        assert main(["--from-tfvars", str(tfvars), "--key-column", "id", "--require-mask-checks"]) == 2
+        assert "cannot tell which columns" in capsys.readouterr().err

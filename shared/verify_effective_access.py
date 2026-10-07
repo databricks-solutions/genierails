@@ -306,13 +306,24 @@ def required_mask_columns(
     match_condition against each column's tags (hasTagValue, hasTag, AND, OR,
     parentheses) and when_condition against its table's tags.
     """
-    from validate_abac import column_mask_matches
+    from validate_abac import column_mask_matches, condition_is_supported
 
     effective = [
         pol for pol in fgac_policies
         if _as_str(pol.get("policy_type")) == "POLICY_TYPE_COLUMN_MASK"
         and set(_as_list(pol.get("to_principals"))) - set(_as_list(pol.get("except_principals")))
     ]
+    # A condition the evaluator can't read (e.g. snake_case has_tag_value())
+    # would match nothing and silently drop its mask from the coverage.
+    unreadable = sorted(
+        f"{_as_str(pol.get('name')) or '<unnamed>'}: {cond!r}"
+        for pol in effective
+        for cond in (_as_str(pol.get("match_condition")), _as_str(pol.get("when_condition")))
+        if not condition_is_supported(cond)
+    )
+    if unreadable:
+        raise ValueError("cannot tell which columns these column masks apply to (only hasTagValue, "
+                         "hasTag, AND, OR and parentheses are understood): " + "; ".join(unreadable))
     columns = column_mask_matches({"fgac_policies": list(effective), "tag_assignments": list(tag_assignments)})
     return {
         (table.lower(), column.lower())
@@ -1233,8 +1244,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.require_mask_checks and args.from_tfvars:
         # Every tagged masked column must have a check; a mask that yields
         # none (no concrete masked tier) must not leave the run "passing".
-        unchecked = unchecked_mask_columns(
-            required_mask_columns_from_tfvars(args.from_tfvars), spec.column_masks, keyed_only=False)
+        try:
+            required = required_mask_columns_from_tfvars(args.from_tfvars)
+        except ValueError as exc:
+            print(f"ERROR: {exc}. Refusing to report success.", file=sys.stderr)
+            return 2
+        unchecked = unchecked_mask_columns(required, spec.column_masks, keyed_only=False)
         if unchecked:
             print(
                 f"ERROR: {len(unchecked)} masked column(s) produce no effective-access check, so their "
