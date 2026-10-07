@@ -649,6 +649,33 @@ class TestCliEmptySpec:
         assert rc == 2
         assert "masking would NOT be verified" in capsys.readouterr().err
 
+    # A mask verify-access can derive no check for must fail the strict run,
+    # not leave it passing on the checks it could derive: "everyone except
+    # analysts" has no concrete masked tier when the account config lists no
+    # other groups.
+    def test_main_require_mask_checks_fails_when_a_tagged_mask_yields_no_check(self, tmp_path, capsys):
+        tfvars = tmp_path / "abac.auto.tfvars"
+        tfvars.write_text("""
+fgac_policies = [
+  { name = "everyone", policy_type = "POLICY_TYPE_COLUMN_MASK", to_principals = ["account users"],
+    except_principals = ["analysts"], match_condition = "hasTagValue('gr_treatment', 'redact')" },
+  { name = "analysts", policy_type = "POLICY_TYPE_COLUMN_MASK", to_principals = ["analysts"],
+    match_condition = "hasTagValue('gr_treatment', 'name_partial')" },
+]
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.t.ssn", tag_key = "gr_treatment", tag_value = "redact" },
+  { entity_type = "columns", entity_name = "cat.sch.t.name", tag_key = "gr_treatment", tag_value = "name_partial" },
+]
+""")
+        account = tmp_path / "account.auto.tfvars"
+        account.write_text("groups = {}\n")
+        args = ["--from-tfvars", str(tfvars), "--account-tfvars", str(account), "--key-column", "id"]
+        assert main(args) == 0  # non-strict: the one derivable check dry-runs
+        capsys.readouterr()
+        assert main(args + ["--require-mask-checks"]) == 2
+        err = capsys.readouterr().err
+        assert "cat.sch.t.ssn" in err and "would NOT be verified" in err
+
     def test_main_require_mask_checks_accepts_keyed_checks(self, tmp_path, capsys):
         spec_file = tmp_path / "spec.json"
         spec_file.write_text(

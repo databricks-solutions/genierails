@@ -291,6 +291,44 @@ def resolve_columns_for_condition(
     return out
 
 
+def required_mask_columns(
+    fgac_policies: Sequence[Mapping[str, Any]],
+    tag_assignments: Sequence[Mapping[str, Any]],
+) -> set[tuple[str, str]]:
+    """Every (table, column) a column-mask policy's match_condition tags (pure).
+
+    The coverage a verification must prove, whatever principals a check could
+    use: derive_spec_from_config drops a mask whose masked tier set comes out
+    empty (e.g. "account users" with no concrete groups), so it can't be the
+    measure of what must be checked.
+    """
+    return {
+        (c["table"].lower(), c["column"].lower())
+        for pol in fgac_policies
+        if _as_str(pol.get("policy_type")) == "POLICY_TYPE_COLUMN_MASK"
+        for c in resolve_columns_for_condition(
+            _as_str(pol.get("match_condition")), tag_assignments, entity_type="columns")
+    }
+
+
+def required_mask_columns_from_tfvars(tfvars_file: Path) -> set[tuple[str, str]]:
+    """required_mask_columns of a data_access abac.auto.tfvars."""
+    import hcl2
+
+    with open(tfvars_file) as f:
+        data = hcl2.load(f)
+    return required_mask_columns(data.get("fgac_policies", []) or [], data.get("tag_assignments", []) or [])
+
+
+def unchecked_mask_columns(
+    required: set[tuple[str, str]], checks: Sequence["ColumnMaskCheck"], *, keyed_only: bool = True,
+) -> list[str]:
+    """Required masked columns no (keyed) check covers, as "table.column"."""
+    covered = {(c.table.lower(), c.column.lower()) for c in checks
+               if not keyed_only or c.key_column.strip()}
+    return sorted(f"{t}.{c}" for t, c in required - covered)
+
+
 def derive_spec_from_config(
     fgac_policies: Sequence[Mapping[str, Any]],
     tag_assignments: Sequence[Mapping[str, Any]],
@@ -1182,6 +1220,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             + ", ".join(sensitive_keys)
             + ". Configure a non-sensitive stable row identifier."
         )
+
+    if args.require_mask_checks and args.from_tfvars:
+        # Every tagged masked column must have a check; a mask that yields
+        # none (no concrete masked tier) must not leave the run "passing".
+        unchecked = unchecked_mask_columns(
+            required_mask_columns_from_tfvars(args.from_tfvars), spec.column_masks, keyed_only=False)
+        if unchecked:
+            print(
+                f"ERROR: {len(unchecked)} masked column(s) produce no effective-access check, so their "
+                f"masking would NOT be verified: {', '.join(unchecked)}. Their policies have no "
+                "concrete masked group to test (e.g. 'account users' with no groups in the account "
+                "config). Refusing to report success.",
+                file=sys.stderr,
+            )
+            return 2
 
     if spec.is_empty():
         # (issue 4) Deriving zero checks means we would verify nothing. That is

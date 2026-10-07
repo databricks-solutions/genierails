@@ -211,3 +211,46 @@ def test_release_verifies_strictly():
     assert "_VERIFY_REQUIRE_FLAG = $(if $(filter 1,$(VERIFY_REQUIRE_MASKS)),--require-mask-checks,)" in makefile
     verify = makefile[makefile.index("\nverify-access:"):]
     assert "$(_VERIFY_REQUIRE_FLAG)" in verify[:verify.index("\n\n")]
+
+
+# ── a mask verify-access derives no check for ───────────────────────────────
+# A mask on "account users" has no concrete masked tier unless the account
+# config lists groups; verify-access then derives no check for its columns.
+# The required coverage comes from the tags alone, so neither an unrelated
+# keyed VERIFY_SPEC nor a key can let release through.
+
+ACCOUNT_USERS = MASK_POLICY.replace('to_principals = ["analysts"]', 'to_principals = ["account users"]') + '''tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.t.ssn", tag_key = "gr_treatment", tag_value = "redact" },
+]
+'''
+UNRELATED_SPEC = {"column_masks": [_mask("other.sch.t", "x")], "row_filters": []}
+
+
+def test_account_users_mask_and_an_unrelated_spec_refuse(tmp_path, capsys):
+    env = _env(tmp_path, policies=ACCOUNT_USERS)
+    missing_account = tmp_path / "account" / "abac.auto.tfvars"
+    assert rh.require_mask_proof(env, "prod", "", _spec(tmp_path, UNRELATED_SPEC), missing_account) == 1
+    assert "does not check masked column(s): cat.sch.t.ssn" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("account", [None, "absent", 'groups = {}\n'])
+def test_account_users_mask_with_a_key_refuses_without_concrete_groups(tmp_path, capsys, account):
+    env = _env(tmp_path, policies=ACCOUNT_USERS)
+    account_tfvars = None
+    if account is not None:
+        account_tfvars = tmp_path / "account" / "abac.auto.tfvars"
+        if account != "absent":
+            account_tfvars.parent.mkdir()
+            account_tfvars.write_text(account)
+    assert rh.require_mask_proof(env, "prod", "customer_id", "", account_tfvars) == 1
+    err = capsys.readouterr().err
+    assert "cat.sch.t.ssn" in err or "account config" in err
+    assert "nothing was applied" in err
+
+
+def test_account_users_mask_with_account_groups_and_a_key_passes(tmp_path):
+    env = _env(tmp_path, policies=ACCOUNT_USERS)
+    account = tmp_path / "account" / "abac.auto.tfvars"
+    account.parent.mkdir()
+    account.write_text('groups = { analysts = {}, viewers = {} }\n')
+    assert rh.require_mask_proof(env, "prod", "customer_id", "", account) == 0

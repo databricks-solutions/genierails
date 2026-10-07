@@ -36,38 +36,57 @@ def _refuse(env: str, reason: str) -> int:
     return 1
 
 
-def _derived_mask_columns(env_dir: Path, account_tfvars: Path | None) -> set[tuple[str, str]]:
-    """(table, column) of every mask check verify-access derives from the promoted config."""
-    from verify_effective_access import load_spec_from_tfvars
-
-    tfvars = env_dir / "data_access" / "abac.auto.tfvars"
-    if not tfvars.is_file():
-        return set()
-    account = account_tfvars if account_tfvars and account_tfvars.is_file() else None
-    spec = load_spec_from_tfvars(tfvars, account)
-    return {(c.table.lower(), c.column.lower()) for c in spec.column_masks}
+def _promoted_tfvars(env_dir: Path) -> Path:
+    return env_dir / "data_access" / "abac.auto.tfvars"
 
 
 def require_mask_proof(env_dir: Path, env: str, key: str, spec: str,
                        account_tfvars: Path | None = None) -> int:
     """Refuse a release whose verify-access could not prove every mask.
 
-    verify-access pairs rows by a key column to prove masking. Without a key
-    it skips every mask comparison, and an explicit VERIFY_SPEC replaces the
-    derived checks altogether, so a spec without keyed mask checks (row
-    filters only, say) proves no mask either. Run before the release lock and
-    again after release promotes the live-derived config, before it applies.
+    The masked columns to prove are every column a column-mask policy's tags
+    match (required_mask_columns), whatever principals a check could use.
+    Without a key verify-access skips every mask comparison; with a key it
+    derives checks, but drops a mask with no concrete masked tier (e.g.
+    "account users" without account groups); an explicit VERIFY_SPEC replaces
+    the derived checks altogether. Each must cover every required column. Run
+    before the release lock and again after release promotes the live-derived
+    config (prod's tag assignments only exist then), before it applies.
     """
+    from verify_effective_access import (
+        load_spec_from_file, load_spec_from_tfvars, required_mask_columns_from_tfvars,
+        unchecked_mask_columns,
+    )
+
     masks = column_mask_policies(env_dir)
     if not masks:
         return 0
-    if not spec.strip():
-        if key.strip():
-            return 0  # verify-access derives a keyed check for every masked column
-        return _refuse(env, f"no row-pairing key for {env}, so verify-access could not prove "
-                            f"its {len(masks)} column mask(s)")
+    tfvars = _promoted_tfvars(env_dir)
+    try:
+        required = required_mask_columns_from_tfvars(tfvars) if tfvars.is_file() else set()
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return _refuse(env, f"could not read the masked columns from {tfvars} ({exc})")
 
-    from verify_effective_access import load_spec_from_file
+    if not spec.strip():
+        if not key.strip():
+            return _refuse(env, f"no row-pairing key for {env}, so verify-access could not prove "
+                                f"its {len(masks)} column mask(s)")
+        if not required:
+            return 0  # nothing tagged yet; re-checked once release has derived the assignments
+        # The checks verify-access will derive, with the account groups it uses.
+        if account_tfvars is not None and not account_tfvars.is_file():
+            return _refuse(env, f"the account config {account_tfvars} that verify-access reads groups "
+                                f"from is missing, so it could not check {len(required)} masked column(s)")
+        try:
+            checks = load_spec_from_tfvars(tfvars, account_tfvars, key_column=key.strip()).column_masks
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return _refuse(env, f"verify-access could not derive its checks from {tfvars} ({exc})")
+        unchecked = unchecked_mask_columns(required, checks)
+        if unchecked:
+            return _refuse(env, f"verify-access would derive no check for masked column(s) "
+                                f"{', '.join(unchecked)}: their policies have no concrete masked group "
+                                "to test (e.g. 'account users' with no groups in the account config)")
+        return 0
 
     # verify-access reads VERIFY_SPEC from shared/; resolve it the same way.
     path = Path(spec.strip())
@@ -82,13 +101,9 @@ def require_mask_proof(env_dir: Path, env: str, key: str, spec: str,
     keyless = sorted(f"{c.table}.{c.column}" for c in checks if not c.key_column.strip())
     if keyless:
         return _refuse(env, f"VERIFY_SPEC {path} has mask checks without a key_column: {', '.join(keyless)}")
-    try:
-        required = _derived_mask_columns(env_dir, account_tfvars)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        return _refuse(env, f"could not derive the masked columns to check VERIFY_SPEC against ({exc})")
-    missing = sorted(f"{t}.{c}" for t, c in required - {(c.table.lower(), c.column.lower()) for c in checks})
-    if missing:
-        return _refuse(env, f"VERIFY_SPEC {path} does not check masked column(s): {', '.join(missing)}")
+    unchecked = unchecked_mask_columns(required, checks)
+    if unchecked:
+        return _refuse(env, f"VERIFY_SPEC {path} does not check masked column(s): {', '.join(unchecked)}")
     return 0
 
 
