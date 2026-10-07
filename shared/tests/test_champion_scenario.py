@@ -7,8 +7,10 @@ remap_env_config.py), so the README step order and the scenario's own
 assertions are exercised without credentials.
 """
 
-import shlex
 import json
+import os
+import shlex
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +24,7 @@ sys.path.insert(0, str(SHARED))
 import run_integration_tests as rit  # noqa: E402
 import run_parallel_tests as rpt  # noqa: E402
 from access_tier_groups import persist_access_tier_groups  # noqa: E402
+from scripts import environment_lock as env_lock  # noqa: E402
 from scripts.release_helpers import open_gate  # noqa: E402
 
 SPACE_ID = "01champion0dev"
@@ -118,7 +121,10 @@ class FakeMake:
         return self._done(args)
 
     def _release(self, args, env_dir):
-        open_gate(env_dir)
+        lock_path = env_dir / env_lock.LOCK_RELPATH
+        lock_path.write_text(json.dumps({"pid": os.getpid(), "host": socket.gethostname()}))
+        open_gate(env_dir, os.getpid())
+        lock_path.unlink()
         (env_dir / ".genie_space_id_champion_finance_analytics").write_text("01champion0prod\n")
         return self._done(args, 0, (
             "  ✓ [PASS] column-mask x\n  RESULT: ALL EFFECTIVE (1 passed / 1)\n"

@@ -77,7 +77,6 @@ def test_rehearse_rejects_prod_before_any_recursive_make_call(tmp_path):
     output = result.stdout + result.stderr
     assert "rehearse: ENV=prod is not allowed" in output
     assert "make release ENV=prod" in output
-    assert "make release ENV=prod" in output
     assert "business_access_enabled" not in output
 
 

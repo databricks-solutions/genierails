@@ -44,10 +44,10 @@ So "expose last" isn't a policy you hope holds — there is simply no `SELECT` a
 | `make coverage-gate ENV=<e>` | 1/4 | **Block** if any tagged-sensitive column has no mask (the "says NO" check) |
 | `make validate-generated ENV=<e>` | 1/4 | Static validation incl. the one-mask-per-column guard |
 | `make apply ENV=<e>` | 1/5 | Full stack (account → data_access → workspace; auto-promotes same-env first); creates the Genie agent; releases gated access when `business_access_enabled=true` |
-| `make apply-governance ENV=<e>` | 4 | Enforcement only (account + data_access); no Genie agent |
+| `make apply-governance ENV=<e>` | — | Governance-team command: enforcement only (account + data_access); no Genie agent |
 | `make genie-adopt-preflight ENV=<e>` | — | Read-only. Before the one-time upgrade to secret-free Genie state, checks that every Genie agent created by an earlier version can be adopted with its current ID (ID file, workspace, GET 200). `make apply` runs it first and stops if any agent fails. |
 | `make rehearse ENV=dev VERIFY_KEY_COLUMN=<pk>` | 1 | (dev) coverage-gate → validate-generated → apply → verify-access, stopping at the first failure |
-| `make release ENV=prod VERIFY_KEY_COLUMN=<pk>` | 5 | (prod) Under one lock: placeholder guard → live derive → validate → coverage → all-layer apply → `verify-access`; saves `business_access_enabled = true` (removed in PR 4) |
+| `make release ENV=prod VERIFY_KEY_COLUMN=<pk>` | 5 | (prod) Placeholder guard → lock → live derive → validate → coverage → promote → read-only rulebook audit → all-layer apply → `verify-access`; saves `business_access_enabled = true` |
 | `make certify ENV=prod` | 5 | Deprecated alias for `make release` |
 | `make maintain ENV=prod` | 6 | (prod, scheduled) audit-schema → derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook; never changes access or Genie |
 | `make promote SOURCE_ENV DEST_ENV DEST_CATALOG_MAP` | 2 | Promote **rules only** (leaves tag assignments behind); creates + writes prod `env.auto.tfvars`. Policy names take the prod catalog (`gr_mask_<prod_catalog>_<treatment>`) only when a read-only policy listing of the prod catalog (prod `auth.auto.tfvars`) shows neither the old nor the new name and prod's state doesn't hold the old key; otherwise it keeps its name, since renaming a live policy would drop and recreate it |

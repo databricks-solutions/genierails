@@ -197,7 +197,7 @@ Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` and re-run `make
 <details>
 <summary><strong>Phase 4 — Prod: Review the release gate</strong></summary>
 
-**Goal —** confirm prod classification has finished and the promoted rulebook covers the types you expect. The release command performs the live derivation and blocking coverage check immediately before apply in Phase 5.
+**Goal —** confirm prod classification has finished and preview the same live derivation and coverage check that Phase 5 repeats immediately before release.
 
 ```bash
 make derive-assignments ENV=prod
@@ -206,11 +206,11 @@ make coverage-gate ENV=prod
 
 The derivation reuses the exact rules you reviewed in dev and never calls a model. A promoted per-column override is merged strictest-wins with the native result, so it can strengthen but never weaken native protection.
 
-It verifies coverage and deploys only the governance protections: masks and access policies. It does not deploy or update the Genie agent. If prod's tags cannot be read, or a detected data type has no protection rule, the command stops instead of applying incomplete protection.
+These commands are read-only apart from refreshing generated local files: they do not deploy governance or the Genie agent. If prod's tags cannot be read, or a detected data type has no protection rule, the coverage check stops.
 
-**Done when —** `coverage-gate` exits PASS and `audit-rulebook` reports no uncovered tags.
+**Done when —** `coverage-gate` exits PASS. `make release` repeats this check and then runs `audit-rulebook` against the promoted rules before it can apply new or wider access.
 
-**If the gate fails or `audit-rulebook` reports drift** — prod surfaced a sensitive tag your promoted rules don't cover (a type the classifier found only in prod, or a rule dropped in promotion). This is a **rule change — made in dev, never hand-edited in prod**. Loop back:
+**If the gate fails here, or `audit-rulebook` reports drift during Phase 5** — prod surfaced a sensitive tag your promoted rules don't cover (a type the classifier found only in prod, or a rule dropped in promotion). This is a **rule change — made in dev, never hand-edited in prod**. Loop back:
 
 1. **Scaffold the missing mappings** — `make scaffold-treatments ENV=prod` adds a **safe default** (full redaction, marked `REVIEW`) for each tag prod surfaced, so you don't hand-edit anything. Then **review each** — keep the redaction, or set a type-appropriate mask. This changes the shared *rulebook* (not prod's live state), so you validate it in dev and re-promote below.
 2. **Re-validate in dev:** `make generate ENV=dev` (reuses `access_tier_groups`; keeps reviewed rules; adds rules only for uncovered columns) → `make coverage-gate ENV=dev`.
@@ -233,7 +233,7 @@ Repeat until the gate passes and drift is clean. The agent stays uncreated and c
 make release ENV=prod VERIFY_KEY_COLUMN=customer_id
 ```
 
-One command, under one per-environment lock: placeholder guard → live UC re-read/`derive-assignments` → validation → coverage check → all-layer apply → `verify-access`. It creates the Genie agent, releases the withheld business `SELECT` and Genie run access, and saves `business_access_enabled = true` in `envs/prod/env.auto.tfvars`. The gate remains for compatibility and will be removed in PR 4. Don't edit it by hand.
+One command: placeholder guard → lock → live UC re-read/`derive-assignments` → validation → coverage check → promote the derived config into its Terraform layers → read-only `audit-rulebook` → all-layer apply → `verify-access`. The audit runs before the access-granting apply, so drift or an audit error leaves existing access unchanged and blocks any new or wider business `SELECT` or Genie run access. On success, release saves `business_access_enabled = true` in `envs/prod/env.auto.tfvars`. Don't edit it by hand.
 
 If `release` fails after it started applying, or you interrupt it, access may be partly open. Follow the rollback steps it prints; if it was interrupted, set `business_access_enabled = false` in `envs/prod/env.auto.tfvars` and run `make apply ENV=prod`.
 

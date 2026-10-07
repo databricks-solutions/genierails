@@ -64,8 +64,8 @@ Scenarios
   champion         The dev → prod CHAMPION flow from shared/examples/dev_to_prod/README.md,
                    driven only through real make targets: placeholder guard, ID-only
                    import with --groups once, enable-classification + class.* wait,
-                   generate, rehearse, promote, unified release
-                   release refusal, release, maintain. Set CHAMPION_SEED_CLASS_TAGS=1
+                   generate, rehearse, promote, unified release, maintain.
+                   Set CHAMPION_SEED_CLASS_TAGS=1
                    to seed class.* tags if native auto-tagging is too slow (logged loudly).
 
   all              Run all scenarios sequentially (default when no --scenario given).

@@ -404,22 +404,34 @@ _ENV_LOCK = trap '$(_NO_SIGNALS); $(_ENV_LOCK_HELPER) unlock "$(ENV_DIR)" --pid 
 	trap '$(_NO_SIGNALS); exit 129' HUP; trap '$(_NO_SIGNALS); exit 130' INT; trap '$(_NO_SIGNALS); exit 143' TERM; \
 	$(_ENV_LOCK_HELPER) lock "$(ENV_DIR)" --pid $$$$ --owner $(1) --env "$(ENV)" || exit 1
 
-certify: ## [Deprecated] Alias for make release
+certify: _guard-genie-placeholder ## [Deprecated] Alias for make release
 	@echo "DEPRECATED: make certify is now an alias for make release; use make release ENV=$(ENV)."
 	@$(MAKE) --no-print-directory release ENV="$(ENV)" $(if $(strip $(VERIFY_KEY_COLUMN)),VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",)
 
-release: ## Derive, validate, prove coverage, apply all layers, and verify production access
+release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify production access
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,release); \
-	$(MAKE) --no-print-directory _guard-genie-placeholder ENV="$(ENV)" || exit 1; \
+	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
 	$(MAKE) derive-assignments ENV="$(ENV)" || exit 1; \
 	$(MAKE) validate-generated ENV="$(ENV)" || exit 1; \
 	$(MAKE) coverage-gate ENV="$(ENV)" || exit 1; \
+	$(MAKE) --no-print-directory promote ENV="$(ENV)" || exit 1; \
+	$(MAKE) audit-rulebook ENV="$(ENV)"; audit_rc=$$?; \
+	if [ $$audit_rc -ne 0 ]; then \
+		if [ $$audit_rc -eq 1 ]; then \
+			echo "release: audit-rulebook reported drift (output above); no new or wider business access was applied." >&2; \
+			echo "  Fix the rulebook in dev, rehearse, promote, then re-run make release ENV=$(ENV)." >&2; \
+		else \
+			echo "release: audit-rulebook failed (error, not drift); no new or wider business access was applied." >&2; \
+			echo "  Review the error output above, then re-run make release ENV=$(ENV)." >&2; \
+		fi; \
+		exit $$audit_rc; \
+	fi; \
 	if ! $(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" _EXPOSURE_DERIVED=1; then \
 		$(_RELEASE_HELPER) failed "$(ENV_DIR)" --env "$(ENV)" --reason "apply failed"; \
 		exit 1; \
 	fi; \
-	if ! $(_RELEASE_HELPER) open-gate "$(ENV_DIR)"; then \
+	if ! $(_RELEASE_HELPER) open-gate "$(ENV_DIR)" --pid $$$$; then \
 		$(_RELEASE_HELPER) failed "$(ENV_DIR)" --env "$(ENV)" --reason "business_access_enabled = true could not be persisted"; \
 		exit 1; \
 	fi; \
@@ -433,10 +445,10 @@ release: ## Derive, validate, prove coverage, apply all layers, and verify produ
 	echo "  Verification:  make verify-access ENV=$(ENV) passed"; \
 	echo "  Steady state:  make maintain ENV=$(ENV)"
 
-maintain: ## Native-first governance refresh: audit-schema -> derive-assignments -> gate -> apply-governance -> audit-rulebook (never touches exposure or Genie)
+maintain: _guard-genie-placeholder ## Native-first governance refresh: audit-schema -> derive-assignments -> gate -> apply-governance -> audit-rulebook (never touches exposure or Genie)
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,maintain); \
-	$(MAKE) --no-print-directory _guard-genie-placeholder ENV="$(ENV)" || exit 1; \
+	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
 	$(MAKE) --no-print-directory _guarded-bootstrap _guard-workspace-target ENV="$(ENV)" || exit 1; \
 	echo "=== Schema Drift Audit ($(ENV)) ==="; \
 	(cd "$(ENV_DIR)" && python3 "$(AUDIT_SCHEMA_SCRIPT)"); audit_rc=$$?; \
