@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Settings make saves into an env's env.auto.tfvars so later runs need fewer flags.
 
-verify-key      after a rehearse/release whose verify-access passed with an
-                explicit VERIFY_KEY_COLUMN, save it as verify_key_column.
+verify-key      after a rehearse/release whose verify-access passed a mask check
+                paired by an explicit VERIFY_KEY_COLUMN (per its result file),
+                save it as verify_key_column.
 promote-resolve pick the source env and catalog map for make promote-to from
                 FROM / CATALOG_MAP, else the destination's saved promote_from /
                 catalog_map; prints "<source> <map>".
@@ -15,7 +16,9 @@ untouched, and are atomic; nothing is ever written into the source env.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -29,6 +32,8 @@ import hcl2  # noqa: E402
 from access_tier_groups import _assignment_spans, _hcl_string, display_path  # noqa: E402
 
 RESERVED_ENVS = ("account", "data_access")
+# Env names are plain directory names under this cloud's envs/ (no paths).
+ENV_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 def _parse(text: str, path: Path) -> dict:
@@ -85,9 +90,27 @@ def set_settings(path: Path, values: dict[str, str], comment: str) -> bool:
     return True
 
 
-def save_verify_key(env_file: Path, value: str) -> int:
+def key_proven(result_file: Path | None, value: str) -> bool:
+    """True when verify-access's result shows a passing mask check paired by ``value``."""
+    if result_file is None:
+        return False
+    try:
+        result = json.loads(result_file.read_text())
+        return result.get("passed") is True and int(
+            (result.get("mask_checks_passed_by_key") or {}).get(value, 0)) > 0
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def save_verify_key(env_file: Path, value: str, result_file: Path | None = None) -> int:
     value = value.strip()
     if not value:
+        return 0
+    if not key_proven(result_file, value):
+        print(
+            f"NOTE: VERIFY_KEY_COLUMN={value} not saved: verify-access proved no mask check "
+            "paired by it (only row filters ran, or no result)."
+        )
         return 0
     if not env_file.is_file():
         print(f"NOTE: {display_path(env_file)} not found; VERIFY_KEY_COLUMN not saved.")
@@ -133,13 +156,36 @@ def normalize_catalog_map(value: str) -> str:
     return ",".join(f"{src}={dest}" for src, dest in pairs.items())
 
 
+def _env_name(label: str, value: str) -> str:
+    if not ENV_NAME.fullmatch(value):
+        raise ValueError(
+            f"{label}={value!r} is not an env name (lowercase letters, digits, '_' or '-', "
+            "starting with a letter; no paths)"
+        )
+    return value
+
+
+def source_env_dir(envs_dir: Path, source: str) -> Path:
+    """The source env as a real directory directly under envs/, or raise ValueError."""
+    path = envs_dir / source
+    root = envs_dir.resolve()
+    if path.is_symlink() or not path.is_dir() or path.resolve().parent != root:
+        raise ValueError(f"source env {source!r} not found (no envs/{source}/ directory)")
+    if not (path / "env.auto.tfvars").is_file():
+        raise ValueError(f"source env {source!r} not found (no envs/{source}/env.auto.tfvars)")
+    return path
+
+
 def resolve_promote(env: str, env_dir: Path, envs_dir: Path, source: str, catalog_map: str) -> str:
     """Return "<source> <catalog_map>" for promote-to, or raise ValueError."""
+    _env_name("ENV", env)
     env_file = env_dir / "env.auto.tfvars"
     saved = _load(env_file)
     saved_from = _saved(saved, "promote_from")
     saved_map = _saved(saved, "catalog_map")
     source, catalog_map = source.strip(), catalog_map.strip()
+    if source:
+        _env_name("FROM", source)
     first_use = f'make promote-to ENV={env} FROM=<source_env> CATALOG_MAP="<src_catalog>=<{env}_catalog>"'
     if not source and not saved_from:
         raise ValueError(f"no source env saved for {env}; the first run needs FROM and CATALOG_MAP:\n  {first_use}")
@@ -151,14 +197,13 @@ def resolve_promote(env: str, env_dir: Path, envs_dir: Path, source: str, catalo
     if not catalog_map and not saved_map:
         raise ValueError(f"no catalog map saved for {env}; pass CATALOG_MAP:\n  {first_use}")
     reused = [name for name, given in (("FROM", source), ("CATALOG_MAP", catalog_map)) if not given]
-    source = source or saved_from
+    source = _env_name("FROM" if source else f"promote_from in {display_path(env_file)}", source or saved_from)
     catalog_map = normalize_catalog_map(catalog_map or saved_map)
     if source == env:
         raise ValueError(f"FROM must name another env (FROM={source} is the destination ENV={env})")
     if source in RESERVED_ENVS:
         raise ValueError(f"FROM must be a workspace env, not {source}")
-    if not (envs_dir / source / "env.auto.tfvars").is_file():
-        raise ValueError(f"source env {source!r} not found (no envs/{source}/env.auto.tfvars)")
+    source_env_dir(envs_dir, source)
     for name, given, kept in (("FROM", source, saved_from), ("CATALOG_MAP", catalog_map, saved_map)):
         if kept and given != kept:
             print(f"  {name}={given} overrides the saved {kept!r}; saved after a successful promote.", file=sys.stderr)
@@ -194,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     key = sub.add_parser("verify-key")
     key.add_argument("--env-file", type=Path, required=True)
     key.add_argument("--value", default="")
+    key.add_argument("--result-file", type=Path)
     resolve = sub.add_parser("promote-resolve")
     resolve.add_argument("--env", required=True)
     resolve.add_argument("--env-dir", type=Path, required=True)
@@ -207,7 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "verify-key":
-        return save_verify_key(args.env_file, args.value)
+        return save_verify_key(args.env_file, args.value, args.result_file)
     if args.command == "promote-save":
         return save_promote(args.env_file, args.source, args.catalog_map)
     try:

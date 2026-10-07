@@ -100,11 +100,11 @@ def classification_cloud(tmp_path):
     logs = {"genie": tmp_path / "genie.log", "tf": tmp_path / "tf.log"}
 
     def run(**fake):
-        env = _clean_env(
-            PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}", PYTHONPATH=str(tmp_path / "sdk"),
-            FAKE_TF_STDOUT=str(TF_CAPTURE), FAKE_TF_LOG=str(logs["tf"]),
-            FAKE_GENIE_LOG=str(logs["genie"]), FAKE_SERIALIZED=SERIALIZED, **fake,
-        )
+        env = _clean_env(**{
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}", "PYTHONPATH": str(tmp_path / "sdk"),
+            "FAKE_TF_STDOUT": str(TF_CAPTURE), "FAKE_TF_LOG": str(logs["tf"]),
+            "FAKE_GENIE_LOG": str(logs["genie"]), "FAKE_SERIALIZED": SERIALIZED, **fake,
+        })
         return subprocess.run(
             ["make", "--no-print-directory", "enable-classification", "ENV=dev", *args],
             cwd=REPO / "aws", text=True, capture_output=True, env=env, timeout=120,
@@ -134,7 +134,7 @@ def test_enable_classification_discovers_tables_from_the_agent_id(classification
     assert out.index("Discover Genie agent tables") < out.index("Enable UC Data Classification")
 
 
-def test_enable_classification_does_not_rediscover_an_agent(classification_cloud):
+def test_enable_classification_rereads_an_unchanged_agent_without_rewriting(classification_cloud):
     assert classification_cloud().returncode == 0
     path = classification_cloud.env_dir / "data_access/discovered_uc_tables.auto.tfvars"
     before = path.read_text()
@@ -142,8 +142,26 @@ def test_enable_classification_does_not_rediscover_an_agent(classification_cloud
     result = classification_cloud()
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert len(_calls(classification_cloud.logs["genie"])) == 1
+    assert len(_calls(classification_cloud.logs["genie"])) == 2
     assert path.read_text() == before
+
+
+def test_changed_agent_id_with_the_same_name_replaces_the_stale_tables(classification_cloud):
+    env_file = classification_cloud.env_dir / "env.auto.tfvars"
+    env_file.write_text(env_file.read_text().replace(
+        f'{{ genie_space_id = "{SPACE_ID}" }}', f'{{ genie_space_id = "{SPACE_ID}", name = "Pay" }}'))
+    assert classification_cloud().returncode == 0
+    env_file.write_text(env_file.read_text().replace(SPACE_ID, "01new"))
+    new_tables = json.dumps({"data_sources": {"tables": [{"identifier": "dev_fin.cards.cards"}]}})
+
+    result = classification_cloud(FAKE_SERIALIZED=new_tables)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _calls(classification_cloud.logs["genie"])[-1] == "GET /api/2.0/genie/spaces/01new"
+    discovered = hcl2.loads(
+        (classification_cloud.env_dir / "data_access/discovered_uc_tables.auto.tfvars").read_text())
+    assert discovered["discovered_uc_tables"] == ["dev_fin.cards.cards"]
+    assert discovered["discovered_table_agents"] == {"dev_fin.cards.cards": ["Pay"]}
 
 
 def test_enable_classification_api_failure_writes_nothing(classification_cloud):
@@ -190,23 +208,36 @@ def _discovery_env(tmp_path, spaces, discovered=None, id_to_name=None):
 
 
 @pytest.mark.parametrize(
-    ("spaces", "discovered", "id_to_name", "pending"),
+    ("spaces", "agents"),
     [
-        ('[{ genie_space_id = "a" }]', None, None, ["a"]),
-        ('[{ genie_space_id = "a" }]', 'discovered_uc_tables = ["c.s.t"]\ndiscovered_table_agents = { "c.s.t" = ["Pay"] }\n', None, []),
-        ('[{ genie_space_id = "a" }, { genie_space_id = "b" }]', 'discovered_uc_tables = ["c.s.t"]\ndiscovered_table_agents = { "c.s.t" = ["Pay"] }\n', None, ["a", "b"]),
-        ('[{ genie_space_id = "a" }, { genie_space_id = "b" }]', 'discovered_uc_tables = ["c.s.t"]\ndiscovered_table_agents = { "c.s.t" = ["Pay"] }\n', '{ a = "Pay" }', ["b"]),
-        ('[{ genie_space_id = "a", name = "Pay" }]', 'discovered_uc_tables = ["c.s.t"]\ndiscovered_table_agents = { "c.s.t" = ["HR"] }\n', None, ["a"]),
-        ('[{ genie_space_id = "a", uc_tables = ["c.s.t"] }]', None, None, []),
-        ('[{ genie_space_id = "" }]', None, None, []),
-        ('[{ genie_space_id = "a" }]\nuc_tables = ["c.s.t"]', None, None, []),
-        # Legacy discovery without attribution is left exactly as it is.
-        ('[{ genie_space_id = "a" }]', 'discovered_uc_tables = ["c.s.t"]\n', None, []),
+        ('[{ genie_space_id = "a" }]', ["a"]),
+        ('[{ genie_space_id = "a", name = "Pay" }, { genie_space_id = "b" }]', ["a", "b"]),
+        ('[{ genie_space_id = "a", uc_tables = ["c.s.t"] }]', []),
+        ('[{ genie_space_id = "" }]', []),
+        ('[{ genie_space_id = "a" }]\nuc_tables = ["c.s.t"]', []),
     ],
 )
-def test_pending_agents(tmp_path, spaces, discovered, id_to_name, pending):
-    env_dir = _discovery_env(tmp_path, spaces, discovered, id_to_name)
-    assert [s["genie_space_id"] for s in discover_agent_tables.pending_agents(env_dir)] == pending
+def test_every_id_only_agent_is_refreshed(spaces, agents):
+    config = hcl2.loads(f"genie_spaces = {spaces}\n")
+    assert [s["genie_space_id"] for s in discover_agent_tables.id_only_agents(config)] == agents
+
+
+def test_refresh_keeps_only_other_agents_entries():
+    existing = {"c.s.old": ["Pay"], "c.s.hr": ["HR"], "c.s.both": ["Pay", "HR"], "c.s.gone": ["Old title"]}
+    fresh = {"c.s.new": ["Pay"], "c.s.both": ["Pay"]}
+
+    assert discover_agent_tables.refreshed_footprint(existing, fresh, keep={"HR"}) == {
+        "c.s.hr": ["HR"], "c.s.both": ["HR", "Pay"], "c.s.new": ["Pay"],
+    }
+
+
+def test_other_agent_names_come_from_name_id_and_imported_title(tmp_path):
+    env_dir = _discovery_env(
+        tmp_path, '[{ genie_space_id = "a" }, { name = "HR", genie_space_id = "", uc_tables = ["c.s.t"] }, '
+                  '{ genie_space_id = "b", uc_tables = ["c.s.u"] }]',
+        id_to_name='{ b = "Cards" }')
+    config = hcl2.loads((env_dir / "env.auto.tfvars").read_text())
+    assert discover_agent_tables.other_agent_names(env_dir, config) == {"HR", "b", "Cards"}
 
 
 def test_discovery_is_skipped_when_classification_is_off(tmp_path, monkeypatch):
@@ -282,7 +313,6 @@ def test_plain_generate_without_class_tags_stops_before_the_model(agent_env, mon
     discovered = hcl2.loads((agent_env / "data_access/discovered_uc_tables.auto.tfvars").read_text())
     assert discovered["discovered_uc_tables"] == TABLES
     assert discovered["discovered_table_agents"] == {t: ["Payments Agent"] for t in TABLES}
-    assert discover_agent_tables.pending_agents(agent_env) == []
     assert not (agent_env / "generated/abac.auto.tfvars").exists()
 
 
@@ -436,6 +466,12 @@ def test_promote_to_chains_dev_to_stg_to_prod(promote_cloud):
         (["ENV=prod", "FROM=dev", "CATALOG_MAP=paycat"], "is not <src_catalog>=<dest_catalog>"),
         (["ENV=account", "FROM=dev", "CATALOG_MAP=paycat=ppay"], "This command is workspace-driven"),
         (["ENV=prod", "FROM=account", "CATALOG_MAP=paycat=ppay"], "FROM must be a workspace env"),
+        (["ENV=prod", "FROM=../envs/prod", "CATALOG_MAP=paycat=ppay"], "FROM='../envs/prod' is not an env name"),
+        (["ENV=prod", "FROM=../envs/dev", "CATALOG_MAP=paycat=ppay"], "FROM='../envs/dev' is not an env name"),
+        (["ENV=prod", "FROM=prod/", "CATALOG_MAP=paycat=ppay"], "FROM='prod/' is not an env name"),
+        (["ENV=prod", "FROM=dev/", "CATALOG_MAP=paycat=ppay"], "FROM='dev/' is not an env name"),
+        (["ENV=prod", "FROM=/tmp/dev", "CATALOG_MAP=paycat=ppay"], "FROM='/tmp/dev' is not an env name"),
+        (["ENV=Prod", "FROM=dev", "CATALOG_MAP=paycat=ppay"], "ENV='Prod' is not an env name"),
     ],
 )
 def test_promote_to_refusals_write_nothing(promote_cloud, args, message):
@@ -445,6 +481,30 @@ def test_promote_to_refusals_write_nothing(promote_cloud, args, message):
     assert message in result.stdout + result.stderr
     assert not (promote_cloud.envs / "prod").exists()
     assert not (promote_cloud.envs / "dve").exists()
+
+
+def test_promote_to_refuses_a_symlinked_source_env(promote_cloud):
+    (promote_cloud.envs / "link").symlink_to(promote_cloud.envs / "dev")
+
+    result = promote_cloud("promote-to", "ENV=prod", "FROM=link", "CATALOG_MAP=paycat=ppay")
+
+    assert result.returncode != 0
+    assert "source env 'link' not found (no envs/link/ directory)" in result.stderr
+    assert not (promote_cloud.envs / "prod").exists()
+
+
+def test_promote_to_refuses_a_saved_promote_from_that_is_a_path(promote_cloud):
+    prod = promote_cloud.envs / "prod"
+    prod.mkdir()
+    text = 'promote_from = "../dev"\ncatalog_map = "paycat=ppay"\n'
+    (prod / "env.auto.tfvars").write_text(text)
+
+    result = promote_cloud("promote-to", "ENV=prod")
+
+    assert result.returncode != 0
+    assert "promote_from in envs/prod/env.auto.tfvars='../dev' is not an env name" in result.stderr
+    assert (prod / "env.auto.tfvars").read_text() == text
+    assert sorted(p.name for p in prod.iterdir()) == ["env.auto.tfvars"]
 
 
 def test_promote_to_ignores_from_and_map_leaked_from_the_shell(promote_cloud):
@@ -536,11 +596,20 @@ def test_promote_to_calls_promote_with_every_cross_env_variable(tmp_path):
 
 
 # ── 4. A passing rehearse / release saves an explicit VERIFY_KEY_COLUMN ─────
+# Only when verify-access's result file proves a passing mask check paired by it.
 
-def _stub_make(tmp_path, fail=None):
+MASK_PASS = {"passed": True, "mask_checks_passed": 1, "mask_checks_passed_by_key": {"customer_id": 1},
+             "row_filter_checks_passed": 0}
+ROW_FILTER_ONLY = {"passed": True, "mask_checks_passed": 0, "mask_checks_passed_by_key": {},
+                   "row_filter_checks_passed": 2}
+
+
+def _stub_make(tmp_path, fail=None, result=None, result_path=None):
     log = tmp_path / "calls"
     stub = tmp_path / "make-stub"
     body = ["#!/bin/sh", f"printf '%s\\n' \"$*\" >> '{log}'"]
+    if result is not None:
+        body.append(f"""if [ "$1" = "verify-access" ]; then printf '%s' '{json.dumps(result)}' > '{result_path}'; fi""")
     if fail:
         body.append(f'[ "$1" = "{fail}" ] && exit 1')
     stub.write_text("\n".join(body + ["exit 0"]) + "\n")
@@ -548,26 +617,44 @@ def _stub_make(tmp_path, fail=None):
     return stub
 
 
-def _run_target(tmp_path, target, env_name, *extra, fail=None, env_text="enable_classification = true\n"):
+def _run_target(tmp_path, target, env_name, *extra, fail=None, result=MASK_PASS,
+                env_text="enable_classification = true\n"):
     env_dir = tmp_path / env_name
     (env_dir / "generated").mkdir(parents=True, exist_ok=True)
     env_file = env_dir / "env.auto.tfvars"
     if not env_file.exists():
         env_file.write_text(env_text)
+    stub = _stub_make(tmp_path, fail, result, env_dir / "generated/.verify_access.json")
     result = subprocess.run(
-        ["make", target, f"ENV={env_name}", f"ENV_DIR={env_dir}", f"MAKE={_stub_make(tmp_path, fail)}", *extra],
+        ["make", target, f"ENV={env_name}", f"ENV_DIR={env_dir}", f"MAKE={stub}", *extra],
         cwd=REPO / "aws", text=True, capture_output=True, env=_clean_env())
     return result, env_file
 
 
 @pytest.mark.parametrize(("target", "env_name"), [("rehearse", "dev"), ("release", "prod")])
-def test_passing_run_saves_the_explicit_verify_key(tmp_path, target, env_name):
+def test_passing_mask_check_saves_the_explicit_verify_key(tmp_path, target, env_name):
     result, env_file = _run_target(tmp_path, target, env_name, "VERIFY_KEY_COLUMN= customer_id ")
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert hcl2.loads(env_file.read_text())["verify_key_column"] == "customer_id"
     assert env_file.read_text().startswith("enable_classification = true\n")
     assert f"Saved VERIFY_KEY_COLUMN=customer_id as verify_key_column in {env_file}" in result.stdout
+
+
+@pytest.mark.parametrize(("target", "env_name"), [("rehearse", "dev"), ("release", "prod")])
+@pytest.mark.parametrize(
+    "proof",
+    [ROW_FILTER_ONLY, None,
+     {**MASK_PASS, "mask_checks_passed_by_key": {"account_id": 1}},
+     {**MASK_PASS, "passed": False}],
+    ids=["row-filter-only", "no-result-file", "other-key", "not-passed"],
+)
+def test_pass_without_mask_proof_never_saves_the_key(tmp_path, target, env_name, proof):
+    result, env_file = _run_target(tmp_path, target, env_name, "VERIFY_KEY_COLUMN=customer_id", result=proof)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert env_file.read_text() == "enable_classification = true\n"
+    assert "VERIFY_KEY_COLUMN=customer_id not saved: verify-access proved no mask check paired by it" in result.stdout
 
 
 @pytest.mark.parametrize(("target", "env_name"), [("rehearse", "dev"), ("release", "prod")])
@@ -594,13 +681,19 @@ def test_different_explicit_key_updates_the_saved_one_with_a_note(tmp_path):
     assert "changed from 'account_id' to 'customer_id' (the VERIFY_KEY_COLUMN you passed)" in result.stdout
 
 
+def _proof(tmp_path, payload=MASK_PASS):
+    path = tmp_path / ".verify_access.json"
+    path.write_text(json.dumps(payload))
+    return path
+
+
 def test_save_verify_key_is_idempotent_and_keeps_the_file_mode(tmp_path, capsys):
     env_file = tmp_path / "env.auto.tfvars"
     env_file.write_text('# keep\nverify_key_column = ""\n')
     env_file.chmod(0o640)
 
-    assert saved_settings.save_verify_key(env_file, "customer_id") == 0
-    assert saved_settings.save_verify_key(env_file, "customer_id") == 0
+    assert saved_settings.save_verify_key(env_file, "customer_id", _proof(tmp_path)) == 0
+    assert saved_settings.save_verify_key(env_file, "customer_id", _proof(tmp_path)) == 0
 
     assert env_file.read_text() == '# keep\nverify_key_column = "customer_id"\n'
     assert env_file.stat().st_mode & 0o777 == 0o640
@@ -612,10 +705,74 @@ def test_save_refuses_a_duplicated_setting(tmp_path, capsys):
     text = 'verify_key_column = "a"\nverify_key_column = "b"\n'
     env_file.write_text(text)
 
-    assert saved_settings.save_verify_key(env_file, "c") == 0
+    assert saved_settings.save_verify_key(env_file, "customer_id", _proof(tmp_path)) == 0
 
     assert env_file.read_text() == text
     assert "VERIFY_KEY_COLUMN not saved" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("bad", ["", "{", '{"passed": true, "mask_checks_passed_by_key": []}'])
+def test_unreadable_proof_is_no_proof(tmp_path, bad):
+    path = tmp_path / ".verify_access.json"
+    path.write_text(bad)
+    assert not saved_settings.key_proven(path, "customer_id")
+    assert not saved_settings.key_proven(tmp_path / "missing.json", "customer_id")
+
+
+def _live_main(monkeypatch, tmp_path, spec, statuses):
+    import verify_effective_access as vea
+
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec))
+
+    def live(spec_obj, *_a, **_k):
+        report = vea.EffectiveAccessReport()
+        for check in list(spec_obj.column_masks) + list(spec_obj.row_filters):
+            kind = "column-mask" if isinstance(check, vea.ColumnMaskCheck) else "row-filter"
+            report.add(vea.CheckResult(kind, check.describe(), statuses[kind], "x"))
+        return report
+
+    monkeypatch.setattr(vea, "verify_effective_access_live", live)
+    result_file = tmp_path / "result.json"
+    rc = vea.main(["--spec", str(spec_path), "--live", "--auth-file", str(tmp_path / "auth"),
+                   "--result-file", str(result_file)])
+    return rc, json.loads(result_file.read_text())
+
+
+MASK = {"table": "c.s.t", "column": "email", "key_column": "customer_id",
+        "masked_principals": ["viewers"], "unmasked_principals": ["ops"]}
+ROW = {"table": "c.s.t", "restricted_principals": ["viewers"], "unrestricted_principals": ["ops"]}
+
+
+def test_verify_result_file_counts_mask_passes_per_key(monkeypatch, tmp_path, capsys):
+    rc, result = _live_main(monkeypatch, tmp_path, {"column_masks": [MASK], "row_filters": [ROW]},
+                            {"column-mask": "PASS", "row-filter": "PASS"})
+    assert rc == 0
+    assert result == {"passed": True, "mask_checks_passed": 1,
+                      "mask_checks_passed_by_key": {"customer_id": 1}, "row_filter_checks_passed": 1}
+
+
+def test_verify_result_file_row_filter_only_proves_no_key(monkeypatch, tmp_path, capsys):
+    rc, result = _live_main(monkeypatch, tmp_path, {"row_filters": [ROW]},
+                            {"column-mask": "PASS", "row-filter": "PASS"})
+    assert rc == 0
+    assert result["passed"] is True and result["mask_checks_passed_by_key"] == {}
+
+
+def test_verify_result_file_records_a_failed_mask(monkeypatch, tmp_path, capsys):
+    rc, result = _live_main(monkeypatch, tmp_path, {"column_masks": [MASK]},
+                            {"column-mask": "FAIL", "row-filter": "PASS"})
+    assert rc == 1
+    assert result["passed"] is False and result["mask_checks_passed"] == 0
+
+
+def test_verify_access_target_writes_and_clears_the_result_file():
+    makefile = MAKEFILE.read_text()
+    body = makefile[makefile.index("\nverify-access:"):]
+    body = body[:body.index("\n\n")]
+    assert '@rm -f "$(_VERIFY_RESULT)"' in body
+    assert '--live --result-file "$(_VERIFY_RESULT)"' in body
+    assert '--result-file "$(_VERIFY_RESULT)"' in makefile[makefile.index("_SAVE_VERIFY_KEY ="):]
 
 
 # ── 5. Make wiring and dry runs ─────────────────────────────────────────────

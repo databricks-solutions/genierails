@@ -39,7 +39,7 @@ The key is how the tool knows two result rows, one per tier, are the *same* row.
 
 If you omit it, the column-mask check is **skipped** (row filters are still checked) and the run can still exit 0, so masking has not been proven. Always set it.
 
-Pass it once — `make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id` saves it to `envs/dev/env.auto.tfvars` after verify-access passes (so does `make release`) — or set it there yourself. `make rehearse` / `make release` / `make verify-access` then use it without the flag, and promotion carries it to prod:
+Pass it once — `make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id` saves it to `envs/dev/env.auto.tfvars` once verify-access passes a mask check paired by it (so does `make release`; a row-filter-only pass saves nothing) — or set it there yourself. `make rehearse` / `make release` / `make verify-access` then use it without the flag, and promotion carries it to prod:
 
 ```hcl
 verify_key_column = "customer_id"

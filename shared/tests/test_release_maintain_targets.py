@@ -91,11 +91,9 @@ def test_release_runs_unified_pipeline_in_order_and_writes_no_receipt(tmp_path):
         ["verify-access", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],
     ]
     # No gate to open or persist: release neither passes nor writes it. The
-    # passing verify saves only the explicit key; the rest of the file stays.
+    # stubbed verify-access proves no mask check, so the key isn't saved either.
     assert "business_access_enabled" not in log.read_text()
-    assert (env_dir / "env.auto.tfvars").read_text() == RELEASED_ENV_FILE + (
-        "\n# Row-pairing key for verify-access (saved after a passing run).\n"
-        'verify_key_column = "customer_id"\n')
+    assert (env_dir / "env.auto.tfvars").read_text() == RELEASED_ENV_FILE
     assert not list(env_dir.rglob(".certified*"))
     assert not (env_dir / "generated/.governance.lock").exists()
 

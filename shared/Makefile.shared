@@ -396,9 +396,12 @@ _refresh-live-ddl: _guarded-bootstrap _guard-workspace-target
 	@cd "$(ENV_DIR)" && python3 "$(DERIVE_ASSIGNMENTS_SCRIPT)" --ddl-only --auth-file auth.auto.tfvars --env-file env.auto.tfvars --write-ddl ddl/_fetched.sql --refresh-record generated/.live_refresh.json
 
 # After verify-access passes, an explicit VERIFY_KEY_COLUMN is saved as
-# verify_key_column (promote carries it), so later runs can omit it.
+# verify_key_column (promote carries it), so later runs can omit it — but only
+# when verify-access's result file shows a passing mask check paired by that key
+# (a row-filter-only pass never used it).
 _SAVED_SETTINGS = python3 "$(SHARED_ROOT)/scripts/saved_settings.py"
-_SAVE_VERIFY_KEY = $(if $(strip $(VERIFY_KEY_COLUMN)),$(_SAVED_SETTINGS) verify-key --env-file "$(ENV_DIR)/env.auto.tfvars" --value "$(strip $(VERIFY_KEY_COLUMN))",true)
+_VERIFY_RESULT = $(ENV_DIR)/generated/.verify_access.json
+_SAVE_VERIFY_KEY = $(if $(strip $(VERIFY_KEY_COLUMN)),$(_SAVED_SETTINGS) verify-key --env-file "$(ENV_DIR)/env.auto.tfvars" --value "$(strip $(VERIFY_KEY_COLUMN))" --result-file "$(_VERIFY_RESULT)",true)
 
 rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to prove masking live; saved after a pass)
 	@if [ "$(ENV)" = "prod" ]; then \
@@ -942,11 +945,12 @@ verify-access-spec: _guarded-bootstrap _guard-workspace-target ## Print the deri
 		$(_VERIFY_SPEC_FLAG) --key-column "$$key" --print-spec
 
 verify-access: _guarded-bootstrap _guard-workspace-target ## Verify masking/row-filters take effect via per-tier test principals (LIVE workspace)
+	@rm -f "$(_VERIFY_RESULT)"
 	@key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" && \
 	warehouse_id="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" warehouse --env-dir "$(ENV_DIR)" --explicit "$(WAREHOUSE_ID)" --terraform-runner "$(ROOT_RUNNER)" --env-name "$(ENV)")" && \
 	cd "$(SHARED_ROOT)" && GENIERAILS_LIVE_VERIFY=1 python3 verify_effective_access.py \
 		$(_VERIFY_SPEC_FLAG) --key-column "$$key" --warehouse-id "$$warehouse_id" $(_VERIFY_KEEP_FLAG) \
-		--auth-file "$(ENV_DIR)/auth.auto.tfvars" --live
+		--auth-file "$(ENV_DIR)/auth.auto.tfvars" --live --result-file "$(_VERIFY_RESULT)"
 
 test-quickstart: _bootstrap _guard-workspace-target ## Scenario: single space, single catalog (quickstart flow)
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
