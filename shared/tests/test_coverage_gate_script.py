@@ -538,6 +538,7 @@ def _apply_layer(env_dir, runner, apply_flags):
     return subprocess.run(
         ["make", "--no-print-directory", "_apply-layer", "LAYER=data_access", "TARGET_ENV=prod",
          f"LAYER_ENV_DIR={env_dir / 'data_access'}", f"ROOT_RUNNER={runner}",
+         "IMPORT_EXISTING_SCRIPT=/usr/bin/true",
          f"APPLY_FLAGS={apply_flags}"],
         cwd=SHARED.parent / "aws", text=True, capture_output=True, env=env,
     )

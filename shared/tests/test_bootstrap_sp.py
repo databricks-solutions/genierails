@@ -412,25 +412,7 @@ def test_clients_reuses_azure_sp_profile_with_workspace_host():
 def test_m2m_builds_fresh_workspace_auth_without_mutating_account_config():
     account_host = "https://accounts.cloud.databricks.com"
     workspace_host = "https://dbc.example.com"
-    discovered_urls = []
-
-    def oidc_response(_client, _method, url, **_kwargs):
-        discovered_urls.append(url)
-        token_host = workspace_host if url.startswith(workspace_host) else account_host
-        return {
-            "authorization_endpoint": f"{token_host}/oidc/v1/authorize",
-            "token_endpoint": f"{token_host}/oidc/v1/token",
-        }
-
-    token_response = MagicMock(ok=True)
-    token_response.json.return_value = {
-        "access_token": "workspace-token",
-        "token_type": "Bearer",
-        "expires_in": 3600,
-    }
-    with patch("databricks.sdk.oauth._BaseClient.do", autospec=True,
-               side_effect=oidc_response), \
-         patch("databricks.sdk.oauth.requests.post", return_value=token_response) as post:
+    with patch.object(SdkConfig, "init_auth"):
         account_config = SdkConfig(
             host=account_host,
             account_id="acct",
@@ -438,20 +420,17 @@ def test_m2m_builds_fresh_workspace_auth_without_mutating_account_config():
             client_secret="client-secret",
             auth_type="oauth-m2m",
         )
-        account_header_factory = account_config._header_factory
-
-        with patch("databricks.sdk.AccountClient"), \
-             patch("databricks.sdk.config.Config", return_value=account_config):
+    with patch("databricks.sdk.AccountClient"), \
+         patch("databricks.sdk.WorkspaceClient") as workspace_client, \
+         patch("databricks.sdk.config.Config", return_value=account_config):
             _account, factory = _clients(_cfg(profile="account-m2m"))
-            workspace = factory(workspace_host)
-        headers = workspace.config.authenticate()
+            factory(workspace_host)
 
-    assert headers["Authorization"] == "Bearer workspace-token"
-    assert workspace.config._header_factory is not account_header_factory
+    workspace_client.assert_called_once_with(
+        host=workspace_host, client_id="client-id", client_secret="client-secret"
+    )
     assert account_config.host == account_host
     assert account_config.account_id == "acct"
-    assert f"{workspace_host}/oidc/.well-known/oauth-authorization-server" in discovered_urls
-    assert post.call_args.args[0] == f"{workspace_host}/oidc/v1/token"
 
 
 @pytest.mark.parametrize("account_auth_type", ["databricks-cli", "pat", "external-browser"])

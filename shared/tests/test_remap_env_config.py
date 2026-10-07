@@ -8,6 +8,27 @@ import pytest
 from scripts import remap_env_config
 
 
+def test_repromote_preserves_destination_space_acl_and_access_tiers(tmp_path, monkeypatch):
+    source, dest = tmp_path / "dev", tmp_path / "prod"
+    source.mkdir(); dest.mkdir()
+    (source / "env.auto.tfvars").write_text('''
+genie_spaces = [{ name = "Sales" uc_tables = ["dev.s.t"] acl_groups = ["dev-users"] }]
+uc_tables = ["dev.s.t"]
+access_tier_groups = ["dev-admin", "dev-users"]
+''')
+    (dest / "env.auto.tfvars").write_text('''
+genie_spaces = [{ name = "Sales" uc_tables = ["prod.s.t"] acl_groups = ["prod-only"] }]
+uc_tables = ["prod.s.t"]
+access_tier_groups = ["prod-admin", "prod-only"]
+''')
+    monkeypatch.setattr(sys, "argv", ["remap_env_config.py", str(source), str(dest), "dev=prod"])
+    remap_env_config.main()
+    import hcl2
+    result = hcl2.load((dest / "env.auto.tfvars").open())
+    assert result["genie_spaces"][0]["acl_groups"] == ["prod-only"]
+    assert result["access_tier_groups"] == ["prod-admin", "prod-only"]
+
+
 def test_table_only_promotion_preserves_and_remaps_top_level_uc_tables(tmp_path, monkeypatch):
     source = tmp_path / "dev"
     dest = tmp_path / "prod"

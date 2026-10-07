@@ -69,6 +69,12 @@ variable "warehouse_name" {
   description = "Name of the auto-created serverless warehouse."
 }
 
+variable "retain_auto_warehouse" {
+  type        = bool
+  default     = false
+  description = "Keep a previously auto-created warehouse managed while agents transition to an explicit warehouse."
+}
+
 # ── Multi-space Genie variables ───────────────────────────────────────────────
 
 variable "genie_spaces" {

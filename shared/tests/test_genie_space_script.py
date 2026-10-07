@@ -87,6 +87,48 @@ def test_create_adopts_one_exact_unicode_quoted_title_match(tmp_path):
     assert id_file.read_text().strip() == "existing-id"
     assert f'Adopted existing Genie agent existing-id titled "{title}" instead of creating a duplicate' in result.stdout
     assert not any(c["method"] == "POST" for c in calls)
+    assert Path(str(id_file) + ".adopted").exists()
+
+
+def test_destroy_unmanages_title_adopted_agent_without_delete(tmp_path):
+    title = "Existing"
+    result, id_file, _ = _create_with_fake_api(
+        tmp_path, [{"spaces": [{"space_id": "adopted-id", "title": title}]}], title
+    )
+    assert result.returncode == 0
+    before = len((tmp_path / "calls.jsonl").read_text().splitlines())
+    env = {**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}",
+           "CALLS": str(tmp_path / "calls.jsonl"), "PAGES": "[]",
+           "DATABRICKS_HOST": "https://target", "DATABRICKS_TOKEN": "token",
+           "GENIE_ID_FILE": str(id_file)}
+    destroyed = subprocess.run(["bash", str(SCRIPT), "trash"], env=env,
+                               capture_output=True, text=True)
+    assert destroyed.returncode == 0, destroyed.stdout + destroyed.stderr
+    assert "Unmanaging adopted Genie agent adopted-id" in destroyed.stdout
+    new_calls = [json.loads(x) for x in (tmp_path / "calls.jsonl").read_text().splitlines()[before:]]
+    assert not any(call["method"] == "DELETE" for call in new_calls)
+    assert not id_file.exists()
+
+
+def test_acl_replace_prints_each_direct_removed_principal_but_not_inherited(tmp_path):
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+    (bin_dir / "curl").write_text(r'''#!/bin/sh
+if echo " $* " | grep -q " PUT "; then printf '{}\n200'; else cat <<'EOF'
+{"access_control_list":[{"group_name":"configured","permission_level":"CAN_RUN"},{"group_name":"manual","permission_level":"CAN_RUN"},{"user_name":"person@example.com","permission_level":"CAN_MANAGE"},{"group_name":"admins","inherited":true,"permission_level":"CAN_MANAGE"}]}
+200
+EOF
+fi
+''')
+    (bin_dir / "curl").chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+           "DATABRICKS_HOST": "https://target", "DATABRICKS_TOKEN": "token",
+           "GENIE_SPACE_OBJECT_ID": "space", "GENIE_GROUPS_CSV": "configured"}
+    result = subprocess.run(["bash", str(SCRIPT), "set-acls"], env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Removing hand-added Genie access: manual (CAN_RUN) — not in config" in result.stdout
+    assert "Removing hand-added Genie access: person@example.com (CAN_MANAGE) — not in config" in result.stdout
+    assert "admins" not in result.stdout
 
 
 def test_adopted_id_is_used_by_normal_config_and_acl_updates(tmp_path):

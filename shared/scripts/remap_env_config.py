@@ -115,14 +115,16 @@ def _deployed_space_keys(dest_env_dir: str) -> dict[str, list[str]]:
     return keys
 
 
-def _promoted_access_tier_groups(cfg: dict, source_env_dir: str) -> list[str]:
-    """Carry the source's access_tier_groups so prod consumes the same tiers."""
+def _promoted_access_tier_groups(cfg: dict, source_env_dir: str, dest_cfg: dict) -> list[str]:
+    """Preserve destination tiers on re-promote; seed them from source initially."""
     shared_root = str(Path(__file__).resolve().parent.parent)
     if shared_root not in sys.path:
         sys.path.insert(0, shared_root)
     from access_tier_groups import promoted_lines
 
     try:
+        if "access_tier_groups" in dest_cfg:
+            return ["", "access_tier_groups = " + json.dumps(dest_cfg["access_tier_groups"])]
         return promoted_lines(cfg, Path(source_env_dir) / "env.auto.tfvars")
     except ValueError as e:
         print(f"ERROR: {e}")
@@ -495,8 +497,9 @@ def main():
                 f"  Preserved destination Genie space {name!r} "
                 f"sql_warehouse_id={space_warehouse!r}"
             )
-        if "acl_groups" in space:
-            acl_groups = space["acl_groups"]
+        acl_source = dest_space if dest_space.get("acl_groups") is not None else space
+        if "acl_groups" in acl_source:
+            acl_groups = acl_source["acl_groups"]
             if acl_groups is not None and (
                 not isinstance(acl_groups, list) or not all(
                     isinstance(group, str) for group in acl_groups
@@ -534,7 +537,7 @@ def main():
         lines.append("coverage_acknowledged_columns = [")
         lines.extend(f"  {json.dumps(column)}," for column in preserved_acknowledged)
         lines.append("]")
-    lines.extend(_promoted_access_tier_groups(cfg, source_env_dir))
+    lines.extend(_promoted_access_tier_groups(cfg, source_env_dir, dest_cfg))
 
     # Write
     os.makedirs(dest_env_dir, exist_ok=True)

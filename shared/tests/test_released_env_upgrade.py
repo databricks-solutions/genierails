@@ -480,10 +480,13 @@ def test_released_data_access_state_plans_no_change_after_the_retirement(tmp_pat
 def test_released_workspace_state_plans_no_change_after_the_retirement(tmp_path):
     runs = _upgrade_runs(tmp_path, "workspace", WORKSPACE_TEST)
 
-    # Released env: both Genie agents and both CAN_RUN ACLs (existing and
-    # created agent) stay exactly as applied, also while exposure is blocked.
-    _assert_no_change(runs["released_upgrade_plan"])
-    _assert_no_change(runs["released_upgrade_plan_while_exposure_is_blocked"])
+    # Adding the effective warehouse to config triggers causes one safe
+    # in-place update of the created agent; agents and ACLs are never replaced.
+    warehouse_refresh = {
+        ('null_resource.genie_space_config["ops"]', "will be updated in-place")
+    }
+    assert _changes(runs["released_upgrade_plan"]) == warehouse_refresh
+    assert _changes(runs["released_upgrade_plan_while_exposure_is_blocked"]) == warehouse_refresh
 
     # Never released: refused while blocked; once the gate allows it, only the
     # CAN_RUN ACLs are added and no agent is replaced.
@@ -491,4 +494,5 @@ def test_released_workspace_state_plans_no_change_after_the_retirement(tmp_path)
     assert _changes(runs["never_released_upgrade_grants_through_the_gate"]) == {
         ('null_resource.genie_space_acls["sales"]', "will be created"),
         ('null_resource.genie_space_acls_created["ops"]', "will be created"),
+        ('null_resource.genie_space_config["ops"]', "will be updated in-place"),
     }

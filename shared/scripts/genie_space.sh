@@ -307,6 +307,35 @@ set_genie_acls() {
   local body="{\"access_control_list\": ${access_control}}"
   local path="/api/2.0/permissions/genie/${space_id}"
 
+  # PUT is intentionally authoritative. Read first so every direct grant that
+  # config will remove is visible; inherited grants are not part of PUT.
+  local current current_code current_body
+  current=$(curl -s -w "\n%{http_code}" \
+    -H "${UA_HEADER}" -H "Authorization: Bearer ${token}" \
+    "${workspace_url}${path}") || current=""
+  current_code=$(printf '%s\n' "$current" | tail -n1)
+  current_body=$(printf '%s\n' "$current" | sed '$d')
+  if [[ "$current_code" == "200" ]]; then
+    CONFIGURED_GROUPS="$GENIE_GROUPS_CSV" python3 -c '
+import json, os, sys
+configured = {g for g in os.environ.get("CONFIGURED_GROUPS", "").split(",") if g}
+for ace in json.load(sys.stdin).get("access_control_list", []):
+    if ace.get("inherited") is True or any(p.get("inherited") for p in ace.get("all_permissions", [])):
+        continue
+    principal = ace.get("group_name") or ace.get("user_name") or ace.get("service_principal_name")
+    if not principal or (ace.get("group_name") and principal in configured):
+        continue
+    level = ace.get("permission_level")
+    if not level:
+        level = next((p.get("permission_level") for p in ace.get("all_permissions", []) if not p.get("inherited")), "UNKNOWN")
+    print(f"Removing hand-added Genie access: {principal} ({level}) — not in config")
+' <<< "$current_body" || {
+      echo "WARNING: Could not parse current Genie ACL for ${space_id}; proceeding with authoritative PUT because config is the source of truth." >&2
+    }
+  else
+    echo "WARNING: Could not read current Genie ACL for ${space_id} (HTTP ${current_code:-unknown}); proceeding with authoritative PUT because config is the source of truth." >&2
+  fi
+
   echo "Putting permissions on Genie agent ${space_id} for groups: ${GENIE_GROUPS[*]}"
   local response
   response=$(curl -s -w "\n%{http_code}" -X PUT \
@@ -343,9 +372,10 @@ create_genie_space() {
   # Adoption required (GENIE_ADOPT_REQUIRED=1, or the marker that
   # genie_adopt_preflight.py --arm writes during the migration) accepts only
   # HTTP 200 and never creates.
-  local adopt_marker="" adopt_required=""
+  local adopt_marker="" adopted_marker="" adopt_required=""
   if [[ -n "${GENIE_ID_FILE:-}" ]]; then
     adopt_marker="$(dirname "${GENIE_ID_FILE}")/.genie_adopt_required_$(basename "${GENIE_ID_FILE}" | sed 's/^\.genie_space_id_//')"
+    adopted_marker="${GENIE_ID_FILE}.adopted"
   fi
   if [[ "${GENIE_ADOPT_REQUIRED:-}" == "1" || ( -n "$adopt_marker" && -f "$adopt_marker" ) ]]; then
     adopt_required=1
@@ -365,6 +395,7 @@ create_genie_space() {
     if [[ "$existing_code" == "200" ]]; then
       echo "Genie agent ${existing_id} (from ${GENIE_ID_FILE}) already exists; adopting it, no new agent created."
       [[ -n "$adopt_marker" ]] && rm -f "$adopt_marker"
+      [[ -n "$adopted_marker" ]] && : > "$adopted_marker"
       echo "Done. Genie agent ID: ${existing_id}"
       return 0
     elif [[ -n "$adopt_required" ]]; then
@@ -391,6 +422,7 @@ create_genie_space() {
     fi
     printf '%s\n' "${matching_ids[0]}" > "$GENIE_ID_FILE"
     [[ -n "$adopt_marker" ]] && rm -f "$adopt_marker"
+    [[ -n "$adopted_marker" ]] && : > "$adopted_marker"
     echo "Adopted existing Genie agent ${matching_ids[0]} titled \"${title}\" instead of creating a duplicate"
     echo "Done. Genie agent ID: ${matching_ids[0]}"
     return 0
@@ -483,6 +515,7 @@ PYEOF
 
   if [[ -n "${GENIE_ID_FILE:-}" ]]; then
     echo "$space_id" > "$GENIE_ID_FILE"
+    rm -f "${GENIE_ID_FILE}.adopted"
     echo "Space ID saved to ${GENIE_ID_FILE}"
   fi
 
@@ -516,6 +549,24 @@ update_genie_config() {
     echo "ERROR: No Genie agent ID available for update-config." >&2
     echo "  Set GENIE_SPACE_OBJECT_ID (for existing spaces) or ensure GENIE_ID_FILE exists (for auto-created spaces)." >&2
     exit 1
+  fi
+
+  # Only offer a warehouse change when config explicitly selected one, and
+  # only when it differs from the live attachment. This keeps unrelated config
+  # updates from resetting adopted or hand-adjusted agents.
+  if [[ -n "${GENIE_WAREHOUSE_ID:-}" && "${GENIE_WAREHOUSE_EXPLICIT:-0}" == "1" ]]; then
+    local current_agent current_warehouse
+    current_agent=$(curl -sf -H "${UA_HEADER}" -H "Authorization: Bearer ${token}" \
+      "${workspace_url}/api/2.0/genie/spaces/${space_id}") || {
+      echo "ERROR: could not read Genie agent ${space_id} to compare its warehouse." >&2
+      exit 1
+    }
+    current_warehouse=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("warehouse_id", ""))' <<< "$current_agent") || exit 1
+    if [[ "$current_warehouse" == "$GENIE_WAREHOUSE_ID" ]]; then
+      unset GENIE_WAREHOUSE_ID
+    fi
+  else
+    unset GENIE_WAREHOUSE_ID
   fi
 
   # An agent attached by genie_space_id alone keeps the tables it already has
@@ -810,6 +861,12 @@ trash_genie_space() {
     echo "ERROR: Cannot identify Genie agent to trash: ID file missing or empty at ${GENIE_ID_FILE:-<not set>}." >&2
     echo "Refusing to continue because this would orphan the live space." >&2
     exit 1
+  fi
+
+  if [[ -n "${GENIE_ID_FILE:-}" && -f "${GENIE_ID_FILE}.adopted" ]]; then
+    echo "Unmanaging adopted Genie agent ${space_id}; leaving the agent in place."
+    rm -f "${GENIE_ID_FILE}" "${GENIE_ID_FILE}.adopted"
+    return 0
   fi
 
   local token

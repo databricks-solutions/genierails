@@ -173,6 +173,12 @@ locals {
   # always plans, and an unchanged ACL never errors once the gate expires.
   # Unreadable state means nothing is on record (fail closed).
   _own_state = fileexists("${var.env_dir}/terraform.tfstate") ? try(jsondecode(file("${var.env_dir}/terraform.tfstate")), null) : null
+  retain_auto_warehouse = anytrue([
+    for resource in try(local._own_state.resources, []) :
+    try(resource.module, "") == "module.workspace" &&
+    try(resource.type, "") == "databricks_sql_endpoint" &&
+    try(resource.name, "") == "warehouse" && length(try(resource.instances, [])) > 0
+  ])
   _state_instances = flatten([
     for resource in try(local._own_state.resources, []) : [
       for instance in try(resource.instances, []) : {
@@ -606,6 +612,7 @@ module "workspace" {
   genie_space_can_run_widening = local.genie_space_can_run_widening
   sql_warehouse_id             = var.sql_warehouse_id
   warehouse_name               = var.warehouse_name
+  retain_auto_warehouse        = local.retain_auto_warehouse
   genie_spaces                 = local.merged_spaces
   genie_id_file_prefix         = "${var.env_dir}/.genie_space_id"
   genie_script_path            = "${local.project_root}/scripts/genie_space.sh"

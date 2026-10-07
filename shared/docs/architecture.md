@@ -197,3 +197,10 @@ All nine fields are included in the `serialized_space` when a new Genie agent is
 Notes:
 
 - `make plan ENV=<workspace>` assumes the referenced groups already exist — normally because they are IdP-synced (via AIM, or SCIM where AIM isn't available), or, in an opt-in demo/greenfield deployment, because `make apply ENV=account` created them with `manage_groups = true`
+# Production access ownership
+
+GenieRails configuration is authoritative for managed group workspace grants,
+entitlements, and Genie ACLs. Direct Genie ACL entries not present in config are
+reported and removed on apply. If the ACL pre-read fails, apply prints a warning
+and still sends the authoritative ACL. Production changes must run through the
+pipeline; do not edit these resources by hand in the UI.
