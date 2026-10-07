@@ -43,7 +43,7 @@ def _slug(label: str) -> str:
 
 
 def _live_unmapped_markers(auth_path: Path, env_path: Path) -> list[tuple[str, str, str]]:
-    """Read unmapped class.* semantics from the certify-time native source."""
+    """Read unmapped class.* semantics from the release-time native source."""
     runtime = load_auth_config(auth_path, env_path)
     declared = list(runtime.get("uc_tables") or [])
     declared.extend(runtime.get("declared_footprint") or [])
@@ -273,7 +273,7 @@ def main() -> int:
             f'{verb} {item["label"]} -> gr_treatment={item["value"]} '
             f'-> {item["function"]}{suffix}'
         )
-    print("Review the stubs, then re-run `make certify` (or `make generate`+`make coverage-gate`).")
+    print("Review the stubs, then re-run `make release` (or `make generate`+`make coverage-gate`).")
     return 0
 
 

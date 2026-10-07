@@ -411,7 +411,7 @@ def main():
     }
 
     # Build dest env.auto.tfvars. The complete promoted union is top-level so
-    # Terraform, classification, derive-assignments, and certify share it.
+    # Terraform, classification, derive-assignments, and release share it.
     lines = []
     if follows_walkthrough(Path(source_env_dir) / "env.auto.tfvars"):
         lines += [PROMOTED_HEADER, ""]

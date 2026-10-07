@@ -24,7 +24,7 @@ for the fingerprint Terraform computes at plan time AND a live refresh no
 older than coverage_gate_max_age. So a raw terraform or terraform_layer.sh run
 can't grant with a missing, failed, stale or old gate. Terraform can't re-read
 live UC itself: it can only verify that a recent refreshed pass exists for the
-current local inputs. Like the certification receipt, this catches drift and
+current local inputs. This catches drift and
 skipped steps; it is not a defence against someone who hand-forges the files.
 
 `needs-derive` prints which live refresh make must run before a plan/apply

@@ -114,7 +114,7 @@ def test_setup_omits_completed_walkthrough_copy_and_renumbers(cloud, tmp_path):
 
 
 @pytest.mark.parametrize("cloud", CLOUDS)
-def test_setup_prod_prints_promote_certify_release_maintain_steps(cloud, tmp_path):
+def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
     result = _make(cloud, tmp_path, "setup", "ENV=prod")
     assert result.returncode == 0, result.stderr
     out = result.stdout
@@ -124,7 +124,6 @@ def test_setup_prod_prints_promote_certify_release_maintain_steps(cloud, tmp_pat
         "make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=",
         "envs/prod/auth.auto.tfvars",
         "make enable-classification ENV=prod",
-        "make certify ENV=prod",
         "make release ENV=prod VERIFY_KEY_COLUMN=",
         "make maintain ENV=prod",
     ]
@@ -135,7 +134,8 @@ def test_setup_prod_prints_promote_certify_release_maintain_steps(cloud, tmp_pat
     assert "Set business_access_enabled" not in out
     assert "make apply ENV=prod" not in out
     assert "make verify-access ENV=prod" not in out
-    assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == ["1", "2", "3", "4", "5", "6", "7"]
+    assert "make certify" not in out
+    assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == ["1", "2", "3", "4", "5", "6"]
     assert "shared/examples/dev_to_prod/README.md" in out
 
 
@@ -181,11 +181,10 @@ def test_test_ci_guard_creates_default_account_admin_env_and_stops(tmp_path):
     assert admin_env.read_text() == (SHARED_ROOT / "scripts" / "account-admin.aws.env.example").read_text()
 
 
-def test_cross_env_promote_points_to_certify_not_apply():
-    """Applying prod straight after promote would skip the Phase 3-4 scan + certify."""
+def test_cross_env_promote_points_to_release_not_apply():
     makefile = (SHARED_ROOT / "Makefile.shared").read_text()
     block = makefile[makefile.index("=== Promote complete:"):]
     block = block[:block.index("trap - EXIT")]
 
-    assert "make certify ENV=$(DEST_ENV)" in block
+    assert "make release ENV=$(DEST_ENV)" in block
     assert "make apply ENV=$(DEST_ENV)" not in block

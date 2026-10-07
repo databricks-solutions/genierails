@@ -8927,9 +8927,9 @@ def generate_next_steps(
         return champion_genie_next_steps(env_name)
     if champion_flow and mode == "full":
         # Walkthrough Phase 1c -> 1d: rehearse already runs validate-generated +
-        # apply. Prod never rehearses (the Makefile refuses); it certifies.
+        # apply. Prod never rehearses (the Makefile refuses); it releases.
         next_cmd = (
-            f"make certify ENV={env_name}" if env_name == "prod"
+            f"make release ENV={env_name}" if env_name == "prod"
             else f"make rehearse ENV={env_name} VERIFY_KEY_COLUMN=<key_column>"
         )
         lines = ["  Next steps:", "    1. Review the draft:"]
