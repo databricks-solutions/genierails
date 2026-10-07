@@ -65,7 +65,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: hashicorp/setup-terraform@v3
+      # Pinned by commit (v3.1.2), not the mutable v3 tag, as in unit-tests.
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
 
       - name: Install dependencies
         run: pip install python-hcl2 databricks-sdk requests
@@ -117,7 +118,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: hashicorp/setup-terraform@v3
+      # Pinned by commit (v3.1.2), not the mutable v3 tag, as in unit-tests.
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
 
       - name: Install dependencies
         run: pip install python-hcl2 databricks-sdk requests
