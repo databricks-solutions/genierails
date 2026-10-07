@@ -37,6 +37,7 @@ run "gate_inputs" {
   plan_options {
     mode = refresh-only
   }
+  expect_failures = [check.business_select_withheld]
 }
 
 run "gate_passes" {

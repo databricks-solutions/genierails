@@ -204,9 +204,15 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
 
    # prod workspace + prod catalog: reuses the same SP (same default SP_NAME)
    make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<prod-workspace-id> TARGET_CATALOG=<prod-catalog> YES=1
+
+   # Or bootstrap both at once; catalog values align positionally with workspace IDs
+   make bootstrap-sp ACCOUNT_PROFILE=genierails-bootstrap ACCOUNT_ID=<id> WORKSPACE_ID=<dev-workspace-id>,<prod-workspace-id> TARGET_CATALOG=<dev-catalog>,<prod-catalog> YES=1
    ```
 
    To preview the changes first, run the same command with `PLAN=1` instead of `YES=1`.
+   Plan mode performs the same read-only authentication, endpoint, access-path, and
+   grant-authority preflight as apply mode. If credentials are absent, it explicitly
+   reports that it is showing an offline, unverified plan.
 
    | Parameter | Required | Value / where to find it |
    |-----------|----------|--------------------------|
@@ -215,13 +221,13 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
    | `ACCOUNT_ID` | Yes | Databricks Account Console → top-right profile menu. |
    | `WORKSPACE_ID` | Yes | Numeric ID in Account Console → **Workspaces**, or the workspace URL's `?o=` value. Use commas for multiple workspaces. |
    | `SP_NAME` | No | Display name for the deployment SP; defaults to `genierails-deployer`. |
-   | `TARGET_CATALOG` | Recommended | Exact name of the existing Unity Catalog catalog GenieRails will govern, from Catalog Explorer. Omit only for the greenfield alternative below. |
+   | `TARGET_CATALOG` | Recommended | Exact name of the existing Unity Catalog catalog GenieRails will govern, from Catalog Explorer. With multiple `WORKSPACE_ID` values, supply either one catalog for every workspace (back-compatible) or one comma-separated catalog per workspace in the same order. Omit only for the greenfield alternative below. |
    | `MODEL_ENDPOINT` | No | Model serving endpoint to grant query access; bootstrap grants `CAN QUERY` on custom endpoints or Unity Catalog `EXECUTE` on the backing `system.ai` function for Foundation Model API endpoints. Defaults to `databricks-claude-sonnet-4-6`. |
    | `PLAN=1` / `YES=1` | No | `PLAN=1` previews without changing anything; `YES=1` applies without an interactive prompt. |
 
    - A preflight confirms the catalog exists and the caller can grant access. It stops before making changes if either check fails.
    - On success, it grants the required catalog permissions and prints the `auth.auto.tfvars` values, including a new OAuth secret when one is created.
-   - Run it once per environment: dev and prod usually govern different catalogs, and `TARGET_CATALOG` applies to every workspace in `WORKSPACE_ID`. (If dev and prod use the *same* catalog name, one run with `WORKSPACE_ID=<dev-id>,<prod-id>` is enough.)
+   - Run once per environment, or combine environments positionally: `WORKSPACE_ID=<dev-id>,<prod-id> TARGET_CATALOG=<dev-catalog>,<prod-catalog>`. A single catalog value still applies to every workspace for backward compatibility.
    - The first run creates the SP and prints its OAuth secret; the second run reuses the SP and doesn't print a new secret. Use the same `client_id` / `client_secret` in both `envs/dev/auth.auto.tfvars` and `envs/prod/auth.auto.tfvars`.
 
    <details>

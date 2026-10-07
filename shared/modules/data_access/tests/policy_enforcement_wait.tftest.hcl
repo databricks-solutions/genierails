@@ -77,7 +77,10 @@ run "gate_inputs" {
   }
   # No gate result yet: business SELECT is refused, and the gate inputs are
   # still readable.
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "write_passing_gate" {
