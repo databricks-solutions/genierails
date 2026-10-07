@@ -43,7 +43,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--create-groups", action="store_true", help=f"Also create the demo access-tier account groups ({', '.join(SAMPLE_GROUPS)}) for an account with no IdP-synced groups; requires --account-id.")
     p.add_argument("--account-id", default=os.getenv("DATABRICKS_ACCOUNT_ID"), help="Databricks account ID for --create-groups (env: DATABRICKS_ACCOUNT_ID). Teardown uses the account recorded at creation and refuses a different one.")
     p.add_argument("--account-profile", default=os.getenv("DATABRICKS_ACCOUNT_PROFILE"), help="Account-level CLI profile for --create-groups; default: environment credentials (env: DATABRICKS_ACCOUNT_PROFILE).")
-    p.add_argument("--skip-agent", action="store_true", help="Seed the tables only, without a Genie agent (e.g. the prod catalog: make promote creates prod's agent).")
+    p.add_argument("--skip-agent", action="store_true", help="Seed only the prod tables; `make release ENV=prod` later creates or updates the prod agent.")
     p.add_argument("--teardown", action="store_true", help="Remove only resources recorded as created by this script.")
     p.add_argument("--delete-legacy-groups-by-name", action="store_true", help="Teardown only: also delete groups recorded by name alone (state written before group IDs were recorded), by exact display name. Can remove a different group that reused the name.")
     return p
