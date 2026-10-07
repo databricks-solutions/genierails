@@ -193,16 +193,23 @@ def _workspace_host(account: Any, workspace_id: int) -> str:
         account_host = _normalize_host(_value(_value(account, "config"), "host"))
         cloud = str(_value(workspace, "cloud") or "").lower()
         azure_suffix = ""
-        if "azure" in cloud or "azuredatabricks" in account_host or account_host.endswith("accounts.azure.cn"):
+        if (
+            "azure" in cloud
+            or "azuredatabricks" in account_host
+            or account_host.endswith("accounts.databricks.azure.cn")
+            or account_host.endswith("accounts.azure.cn")
+        ):
             azure_suffix = (
                 "azuredatabricks.us" if account_host.endswith("azuredatabricks.us")
-                else "azuredatabricks.cn" if account_host.endswith("azure.cn")
+                else "databricks.azure.cn" if account_host.endswith("azure.cn")
                 else "azuredatabricks.net"
             )
         if deployment_name:
             deployment_name = str(deployment_name)
             if (
                 ".azuredatabricks.net" in deployment_name
+                or ".azuredatabricks.us" in deployment_name
+                or ".databricks.azure.cn" in deployment_name
                 or ".cloud.databricks.com" in deployment_name
             ):
                 host = deployment_name

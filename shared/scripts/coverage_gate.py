@@ -42,6 +42,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 import signal
 import shlex
@@ -80,7 +81,7 @@ def _run_bounded(command: list[str], *, label: str, **kwargs) -> subprocess.Comp
     """Run a child in its own process group and kill the whole group on timeout."""
     try:
         timeout = float(SUBPROCESS_TIMEOUT)
-        if timeout <= 0:
+        if timeout <= 0 or not math.isfinite(timeout):
             raise ValueError
     except (TypeError, ValueError) as exc:
         raise GateError(
@@ -90,27 +91,37 @@ def _run_bounded(command: list[str], *, label: str, **kwargs) -> subprocess.Comp
     input_value = kwargs.pop("input", None)
     if input_value is not None:
         kwargs["stdin"] = subprocess.PIPE
-    process = subprocess.Popen(command, start_new_session=True, **kwargs)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _raise_on_sigterm(_signum, _frame):
+        raise SystemExit(143)
+
+    signal.signal(signal.SIGTERM, _raise_on_sigterm)
     try:
-        stdout, stderr = process.communicate(input=input_value, timeout=timeout)
-    except subprocess.TimeoutExpired:
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        stdout, stderr = process.communicate()
-        raise CommandTimeout(
-            f"{label} timed out after {timeout:g}s; its process group was killed "
-            "and the coverage result was invalidated"
-        )
-    except BaseException:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-        raise
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            process = subprocess.Popen(command, start_new_session=True, **kwargs)
+            stdout, stderr = process.communicate(input=input_value, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+            raise CommandTimeout(
+                f"{label} timed out after {timeout:g}s; its process group was killed "
+                "and the coverage result was invalidated"
+            )
+        except BaseException:
+            if "process" in locals():
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            raise
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def _load_tfvars(path: Path) -> dict:

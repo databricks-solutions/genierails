@@ -157,13 +157,23 @@ def test_workspace_client_never_guesses_aws_host_for_azure_account():
 
 @pytest.mark.parametrize("account_host, suffix", [
     ("https://accounts.azuredatabricks.us", "azuredatabricks.us"),
-    ("https://accounts.azure.cn", "azuredatabricks.cn"),
+    ("https://accounts.databricks.azure.cn", "databricks.azure.cn"),
 ])
 def test_workspace_client_derives_sovereign_azure_domain(account_host, suffix):
     account = MagicMock()
     account.config.host = account_host
     account.workspaces.get.return_value = SimpleNamespace(deployment_name="adb-123.4")
     assert _workspace_host(account, 123) == f"https://adb-123.4.{suffix}"
+
+
+@pytest.mark.parametrize("full_host", [
+    "adb-123.4.azuredatabricks.us",
+    "adb-123.4.databricks.azure.cn",
+])
+def test_workspace_client_preserves_sovereign_azure_deployment_domain(full_host):
+    account = MagicMock()
+    account.workspaces.get.return_value = SimpleNamespace(deployment_name=full_host)
+    assert _workspace_host(account, 123) == f"https://{full_host}"
 
 
 def test_preflight_catalog_owner_passes_without_effective_grant_lookup():
