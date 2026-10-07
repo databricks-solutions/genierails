@@ -8,7 +8,9 @@ assertions are exercised without credentials.
 """
 
 import json
+import os
 import shlex
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -22,7 +24,8 @@ sys.path.insert(0, str(SHARED))
 import run_integration_tests as rit  # noqa: E402
 import run_parallel_tests as rpt  # noqa: E402
 from access_tier_groups import persist_access_tier_groups  # noqa: E402
-from scripts import certification_receipt as cr  # noqa: E402
+from scripts import environment_lock as env_lock  # noqa: E402
+from scripts.release_helpers import open_gate  # noqa: E402
 
 SPACE_ID = "01champion0dev"
 WAREHOUSE = "wh0champion"
@@ -117,27 +120,17 @@ class FakeMake:
         (dest / "generated" / "masking_functions.sql").write_text("-- prod masks\n")
         return self._done(args)
 
-    def _write_receipt(self, env_dir, by, stamp):
-        (env_dir / "generated" / ".certified.json").write_text(json.dumps(
-            {"certified_by": by, "env": env_dir.name, "certified_at": stamp}))
-
-    def _certify(self, args, env_dir):
-        self._write_receipt(env_dir, "certify", f"t{len(self.calls)}")
-        return self._done(args)
-
     def _release(self, args, env_dir):
-        if b"post-certify edit" in (env_dir / "generated" / "masking_functions.sql").read_bytes():
-            return self._done(args, 1, (
-                "release: config changed since certification (changed: "
-                "env:generated/masking_functions.sql); re-run make certify ENV=prod\n"))
-        cr.persist_gate_open(env_dir)
+        lock_path = env_dir / env_lock.LOCK_RELPATH
+        lock_path.write_text(json.dumps({"pid": os.getpid(), "host": socket.gethostname()}))
+        open_gate(env_dir, os.getpid())
+        lock_path.unlink()
         (env_dir / ".genie_space_id_champion_finance_analytics").write_text("01champion0prod\n")
         return self._done(args, 0, (
             "  ✓ [PASS] column-mask x\n  RESULT: ALL EFFECTIVE (1 passed / 1)\n"
             "=== Release complete (prod) ===\n"))
 
     def _maintain(self, args, env_dir):
-        self._write_receipt(env_dir, "maintain", f"t{len(self.calls)}")
         return self._done(args)
 
 
@@ -193,9 +186,6 @@ def test_champion_dry_run_follows_the_readme_order(champion):
         ["promote", "SOURCE_ENV=dev", "DEST_ENV=prod", "DEST_CATALOG_MAP=dev_fin=prod_fin"],
         ["enable-classification", "ENV=prod"],
         ["enable-classification", "ENV=prod"],
-        ["certify", "ENV=prod"],
-        ["release", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],   # stale: refused
-        ["certify", "ENV=prod"],
         ["release", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],
         ["maintain", "ENV=prod"],
     ]
@@ -210,33 +200,17 @@ def test_champion_dry_run_follows_the_readme_order(champion):
     prod_cfg = rit._load_tfvars(envs / "prod" / "env.auto.tfvars")
     assert prod_cfg["business_access_enabled"] is True
     assert prod_cfg["sql_warehouse_id"] == WAREHOUSE
-    # The stale-certification probe was reverted.
     assert (envs / "prod" / "generated" / "masking_functions.sql").read_text() == "-- prod masks\n"
 
 
 def test_champion_tears_down_when_a_step_fails(champion, monkeypatch):
     fake, envs, _waits, teardown = champion
-    monkeypatch.setattr(FakeMake, "_certify",
+    monkeypatch.setattr(FakeMake, "_release",
                         lambda self, args, env_dir: self._done(args, 2, "coverage-gate FAILED\n"))
-    with pytest.raises(RuntimeError, match="make certify ENV=prod"):
+    with pytest.raises(RuntimeError, match="make release ENV=prod"):
         rit.scenario_champion(envs / "dev" / "auth.auto.tfvars", "", keep_data=False)
     assert {"_try_destroy", "_try_destroy_account", "_delete_genie_space_via_api",
             "_delete_account_groups", "_teardown_data"} <= set(teardown)
-
-
-def test_release_refusal_that_applied_would_fail_the_scenario(champion, monkeypatch):
-    fake, envs, _waits, _teardown = champion
-    real_release = FakeMake._release
-
-    def leaky_release(self, args, env_dir):
-        result = real_release(self, args, env_dir)
-        if result.returncode:
-            cr.persist_gate_open(env_dir)  # refused, yet opened the gate
-        return result
-
-    monkeypatch.setattr(FakeMake, "_release", leaky_release)
-    with pytest.raises(AssertionError, match="refused release still changed state"):
-        rit.scenario_champion(envs / "dev" / "auth.auto.tfvars", "", keep_data=False)
 
 
 def test_missing_class_tags_fail_by_default_without_seeding(monkeypatch):

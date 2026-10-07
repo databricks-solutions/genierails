@@ -913,23 +913,15 @@ def test_genie_mode_import_with_deferred_acl_cannot_be_applied(tmp_path, target)
 
 
 def test_genie_mode_import_with_deferred_acl_cannot_be_released(tmp_path):
-    """release needs a certify receipt, and certify cannot pass on the deferred ACL."""
+    """Unified release fails closed on a deferred ACL before Terraform apply."""
     env, runner, runner_log = _genie_mode_import(tmp_path)
 
-    certify = subprocess.run(
-        ["make", "certify", "ENV=dev", f"ROOT_RUNNER={runner}"],
-        cwd=tmp_path, text=True, capture_output=True,
-    )
     release = subprocess.run(
         ["make", "release", "ENV=dev", f"ROOT_RUNNER={runner}"],
         cwd=tmp_path, text=True, capture_output=True,
     )
 
-    # A genie-mode draft carries no rules, so certify stops at its first stage.
-    assert certify.returncode != 0, certify.stdout + certify.stderr
-    assert "no tag_assignments section" in certify.stdout + certify.stderr
-    assert not (env / "generated" / ".certified.json").exists()
     assert release.returncode != 0, release.stdout + release.stderr
-    assert "no certification receipt" in release.stderr
+    assert "no tag_assignments section" in release.stdout + release.stderr
     assert not runner_log.exists() or " apply" not in runner_log.read_text()
     assert "business_access_enabled = true" not in (env / "env.auto.tfvars").read_text()

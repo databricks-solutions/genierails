@@ -164,7 +164,7 @@ def _check(env_dir: Path) -> int:
                   "never LLM-tags columns.", file=sys.stderr)
         if rulebook_rc == 1:
             print(f"For rulebook gaps, add the rule in dev, re-promote, then "
-                  f"run `make certify ENV={env}`.", file=sys.stderr)
+                  f"run `make release ENV={env}`.", file=sys.stderr)
     if errors:
         return errors[0]
     return rulebook_rc or audit_rc

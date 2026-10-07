@@ -113,9 +113,9 @@ def test_self_service_genie_next_steps_unchanged(tmp_path):
 
 @pytest.mark.parametrize(
     ("env_name", "next_cmd"),
-    [("dev", "make rehearse ENV=dev VERIFY_KEY_COLUMN=<key_column>"), ("prod", "make certify ENV=prod")],
+    [("dev", "make rehearse ENV=dev VERIFY_KEY_COLUMN=<key_column>"), ("prod", "make release ENV=prod")],
 )
-def test_champion_full_mode_points_to_rehearse_or_certify(tmp_path, env_name, next_cmd):
+def test_champion_full_mode_points_to_rehearse_or_release(tmp_path, env_name, next_cmd):
     lines = generate_next_steps(tmp_path, "full", env_name, has_sql=True, champion_flow=True)
 
     assert lines[-1] == f"    2. {next_cmd}"

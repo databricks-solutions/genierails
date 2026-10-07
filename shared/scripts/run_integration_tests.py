@@ -64,8 +64,8 @@ Scenarios
   champion         The dev → prod CHAMPION flow from shared/examples/dev_to_prod/README.md,
                    driven only through real make targets: placeholder guard, ID-only
                    import with --groups once, enable-classification + class.* wait,
-                   generate, rehearse, promote, certify, a stale-certification
-                   release refusal, release, maintain. Set CHAMPION_SEED_CLASS_TAGS=1
+                   generate, rehearse, promote, unified release, maintain.
+                   Set CHAMPION_SEED_CLASS_TAGS=1
                    to seed class.* tags if native auto-tagging is too slow (logged loudly).
 
   all              Run all scenarios sequentially (default when no --scenario given).
@@ -6262,7 +6262,7 @@ def _champion_make(*targets_and_vars: str, **kwargs) -> subprocess.CompletedProc
 
     The champion flow consumes pre-existing groups whose names are already
     unique, and its enforcement tag key (gr_treatment) must stay canonical so
-    `make certify`'s derive-assignments output matches the promoted masks.
+    the production derive-assignments output matches the promoted masks.
     """
     return _make(*targets_and_vars, suffix_account_names=False, **kwargs)
 
@@ -6527,15 +6527,12 @@ def scenario_champion(
        6. make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=...;
           assert the promoted prod env; fill prod auth + sql_warehouse_id.
        7. make enable-classification ENV=prod (+ auto-tagging), wait; make
-          certify ENV=prod; receipt written, no lock left.
-       8. Negative: touch an enforcement input; make release ENV=prod refuses
-          as stale and applies nothing; revert; make certify ENV=prod again.
-       9. make release ENV=prod VERIFY_KEY_COLUMN=...; gate persisted open,
+          release ENV=prod VERIFY_KEY_COLUMN=...; gate persisted open,
           prod Genie agent exists, verify-access ALL EFFECTIVE.
-      10. make maintain ENV=prod; receipt renewed, gate stays open.
-      11. Teardown (always, unless --keep-data).
+       8. make maintain ENV=prod; gate stays open.
+       9. Teardown (always, unless --keep-data).
     """
-    _banner("Scenario: champion — dev → prod CHAMPION flow (setup → certify → release → maintain)")
+    _banner("Scenario: champion — dev → prod CHAMPION flow (setup → release → maintain)")
     dev_env, prod_env = "dev", "prod"
     dev_dir, prod_dir = ENVS_DIR / dev_env, ENVS_DIR / prod_env
     token = _TEST_SUFFIX or os.urandom(3).hex()
@@ -6555,10 +6552,9 @@ def scenario_champion(
         # ── 1. Setup ─────────────────────────────────────────────────────────
         _champion_phase(1, "setup — fixtures, groups, curated dev Genie agent, make setup, template")
         _preamble_cleanup(dev_env, prod_env, fresh_env=fresh_env)
-        # The receipt/lock live in generated/, which preamble cleanup keeps.
+        # The governance lock lives in generated/, which preamble cleanup keeps.
         for env_dir in (dev_dir, prod_dir):
-            for rel in (".certified.json", ".certified.pending.json", ".governance.lock"):
-                (env_dir / "generated" / rel).unlink(missing_ok=True)
+            (env_dir / "generated" / ".governance.lock").unlink(missing_ok=True)
             (env_dir / "data_access" / "discovered_uc_tables.auto.tfvars").unlink(missing_ok=True)
             (env_dir / "env.auto.tfvars").unlink(missing_ok=True)
 
@@ -6675,61 +6671,15 @@ def scenario_champion(
         _copy_auth(dev_env, prod_env)
         _set_tfvar(prod_env_file, "sql_warehouse_id", f'"{resolved_wh}"')
 
-        # ── 7. Prod classification + certify ─────────────────────────────────
-        _champion_phase(7, "make enable-classification ENV=prod + wait; make certify ENV=prod")
+        # ── 7. Prod classification + unified release ─────────────────────────
+        _champion_phase(7, "make enable-classification ENV=prod + wait; make release ENV=prod")
         _enable_classification_with_auto_tagging(prod_env)
         _wait_for_class_tags(auth_file, resolved_wh, PROD_FIN_CAT)
-        _force_account_reapply("champion prod certify")
-        _champion_make("certify", f"ENV={prod_env}", retries=1, retry_delay_seconds=120)
-        receipt = prod_dir / "generated" / ".certified.json"
+        _force_account_reapply("champion prod release")
         lock = prod_dir / "generated" / ".governance.lock"
-        _assert_file_exists(receipt, "prod certification receipt")
-        certified = json.loads(receipt.read_text())
-        if certified.get("certified_by") != "certify" or certified.get("env") != prod_env:
-            raise AssertionError(f"unexpected receipt metadata: {certified}")
-        if lock.exists():
-            raise AssertionError(f"certify left {lock} behind")
-        print(f"  {_green('PASS')}  no governance lock left after certify")
-
-        # ── 8. Negative: stale certification ─────────────────────────────────
-        _champion_phase(8, "negative — make release ENV=prod refuses a stale certification")
-        # env.auto.tfvars is hashed semantically (a comment is not a change), so
-        # touch a byte-hashed enforcement input: the promoted masking SQL.
-        probe = prod_dir / "generated" / "masking_functions.sql"
-        original = probe.read_bytes()
-        guarded = _snapshot_files(
-            prod_env_file,
-            prod_dir / "terraform.tfstate",
-            prod_dir / "data_access" / "terraform.tfstate",
-            ENVS_DIR / "account" / "terraform.tfstate",
-        )
-        try:
-            probe.write_bytes(original + b"\n-- champion: post-certify edit\n")
-            result = _champion_make(
-                "release", f"ENV={prod_env}", f"VERIFY_KEY_COLUMN={CHAMPION_KEY_COLUMN}",
-                check=False, capture=True,
-            )
-        finally:
-            probe.write_bytes(original)
-        _assert_make_refused(
-            result,
-            ("config changed since certification", "generated/masking_functions.sql",
-             f"re-run make certify ENV={prod_env}"),
-            "make release ENV=prod after a post-certify edit",
-        )
-        changed = [str(p.relative_to(ENVS_DIR)) for p, before in guarded.items()
-                   if (p.read_bytes() if p.exists() else None) != before]
-        if changed or list(prod_dir.glob(".genie_space_id*")) or lock.exists():
-            raise AssertionError(f"refused release still changed state: {changed or 'genie id / lock'}")
-        print(f"  {_green('PASS')}  nothing applied: gate, Terraform state and Genie agent untouched")
-        _step("Re-certifying after reverting the edit")
-        _champion_make("certify", f"ENV={prod_env}", retries=1, retry_delay_seconds=120)
-        _assert_file_exists(receipt, "prod certification receipt (re-certified)")
-
-        # ── 9. Release ───────────────────────────────────────────────────────
-        _champion_phase(9, "make release ENV=prod VERIFY_KEY_COLUMN=...")
         result = _champion_make(
             "release", f"ENV={prod_env}", f"VERIFY_KEY_COLUMN={CHAMPION_KEY_COLUMN}", capture=True,
+            retries=1, retry_delay_seconds=120,
         )
         _assert_output(result, "=== Release complete (prod) ===", "release completed")
         _assert_output(result, "RESULT: ALL EFFECTIVE", "prod verify-access")
@@ -6748,15 +6698,9 @@ def scenario_champion(
         if lock.exists():
             raise AssertionError(f"release left {lock} behind")
 
-        # ── 10. Maintain ─────────────────────────────────────────────────────
-        _champion_phase(10, "make maintain ENV=prod")
-        before = json.loads(receipt.read_text())["certified_at"]
+        # ── 8. Maintain ──────────────────────────────────────────────────────
+        _champion_phase(8, "make maintain ENV=prod")
         _champion_make("maintain", f"ENV={prod_env}")
-        renewed = json.loads(receipt.read_text())
-        certified_at = renewed.get("certified_at")
-        if renewed.get("certified_by") != "maintain" or certified_at == before:
-            raise AssertionError(f"maintain did not renew the receipt: {renewed}")
-        print(f"  {_green('PASS')}  receipt renewed by maintain at {certified_at}")
         if _load_tfvars(prod_env_file).get("business_access_enabled") is not True:
             raise AssertionError("maintain changed business_access_enabled")
         print(f"  {_green('PASS')}  business_access_enabled stays true after maintain")
@@ -6765,8 +6709,8 @@ def scenario_champion(
 
         print(f"\n  {_green(_bold('PASSED'))}  champion")
     finally:
-        # ── 11. Teardown ─────────────────────────────────────────────────────
-        _champion_phase(11, "teardown")
+        # ── 9. Teardown ──────────────────────────────────────────────────────
+        _champion_phase(9, "teardown")
         if keep_data:
             print(f"  {_yellow('KEEP')}  --keep-data: leaving envs, catalogs, groups and "
                   f"Genie agent {dev_space_id or '(none)'} in place")
@@ -6807,7 +6751,7 @@ SCENARIOS: dict[str, tuple[str, Callable]] = {
     "aus-bank-demo": ("Australian bank demo — dev-to-prod walkthrough (ANZ + financial_services, import + promote)", scenario_aus_bank_demo),
     "india-bank-demo": ("India bank demo — dev-to-prod walkthrough (IN + financial_services, import + promote)", scenario_india_bank_demo),
     "asean-bank-demo": ("ASEAN bank demo — dev-to-prod walkthrough (SEA + financial_services, import + promote)", scenario_asean_bank_demo),
-    "champion": ("Dev → prod CHAMPION flow via make: generate → rehearse → promote → certify → release → maintain", scenario_champion),
+    "champion": ("Dev → prod CHAMPION flow via make: generate → rehearse → promote → release → maintain", scenario_champion),
 }
 
 
