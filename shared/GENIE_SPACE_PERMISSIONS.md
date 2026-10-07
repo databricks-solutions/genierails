@@ -46,6 +46,7 @@ on a live Genie API response.
 - **Automation:** Terraform manages Genie agent lifecycle via `module.workspace`:
   - **`genie_space_id` empty** (greenfield): `terraform apply` auto-creates a Genie agent from `uc_tables`, sets ACLs, and trashes the space on `terraform destroy`.
   - **`genie_space_id` set** (existing): `terraform apply` only applies CAN_RUN ACLs to the existing space.
+  - In both modes, new or wider CAN_RUN ACLs are granted only after the coverage gate has passed and the matching table grants exist.
 
 ### Auto-create mode
 

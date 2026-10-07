@@ -54,7 +54,7 @@ vi envs/dev/generated/abac.auto.tfvars
 vi envs/dev/generated/masking_functions.sql
 # Review and iterate on the generated masking and row-filter functions.
 
-make coverage-gate       # BLOCKS the release if any classified sensitive column has no protection ("says NO")
+make coverage-gate       # fails if any classified sensitive column has no protection ("says NO")
 make validate-generated
 make rehearse VERIFY_KEY_COLUMN=<key>   # apply (masks first; grants only if coverage passes), then prove masking as each tier
 ```
@@ -66,7 +66,7 @@ make rehearse VERIFY_KEY_COLUMN=<key>   # apply (masks first; grants only if cov
 3. You review detections, set `enable_auto_tagging = true`, re-apply, then wait for the scan to write `class.*` tags
 4. `make generate` fetches DDLs and native classification, then writes a draft into `envs/dev/generated/`
 5. You tune generated governance and semantic config; durable agent ACL intent remains in `env.auto.tfvars`
-6. `make coverage-gate` blocks the release if any classified sensitive column has no protection
+6. `make coverage-gate` fails if any classified sensitive column has no protection
 7. `make rehearse` splits the generated draft into layered configs, applies all three layers (masks and policies before grants; business access only if the coverage gate passes), then runs `verify-access`
 
 Generation remains fail-closed: after enabling classification, wait for native tags before
