@@ -58,7 +58,7 @@ Then [import the agent](../../docs/import-genie-agent-from-ui.md) — `MODE=geni
 make generate ENV=dev MODE=genie
 ```
 
-Every later `make generate` reads `access_tier_groups`, and `make promote` carries it to prod, so you never retype the groups. (Prefer the CLI? Leave it `[]` and pass `GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'` once — the first run saves it there. A later `--groups` that differs applies to that run only and prints how to update the setting.)
+Every later `make generate` reads `access_tier_groups`. The first promote seeds it in prod; re-promotes preserve prod's reviewed value. To change prod tiers or a space's `acl_groups`, edit `envs/prod/env.auto.tfvars` in a PR and let the pipeline apply it. (Prefer the CLI? Leave it `[]` and pass `GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'` once — the first run saves it there. A later `--groups` that differs applies to that run only and prints how to update the setting.)
 
 The import discovers the agent's tables into `envs/dev/data_access/discovered_uc_tables.auto.tfvars` — no `uc_tables` needed. *No agent yet?* Use the [Sample Environment Setup](SAMPLE_ENV.md).
 

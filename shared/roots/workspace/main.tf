@@ -129,11 +129,12 @@ locals {
       : s.genie_space_id)
       : "${s.name != "" ? trim(replace(lower(s.name), "/[^a-z0-9]+/", "_"), "_") : s.genie_space_id}--${s.genie_space_id != "" ? s.genie_space_id : idx}"
       ) => {
-      name             = local.canonical_space_names[idx]
-      genie_space_id   = s.genie_space_id
-      sql_warehouse_id = s.sql_warehouse_id != "" ? s.sql_warehouse_id : var.sql_warehouse_id
-      uc_tables        = s.uc_tables
-      config           = try(local.effective_genie_space_configs[local.canonical_space_names[idx]], local.empty_genie_config)
+      name                        = local.canonical_space_names[idx]
+      genie_space_id              = s.genie_space_id
+      sql_warehouse_id            = s.sql_warehouse_id != "" ? s.sql_warehouse_id : var.sql_warehouse_id
+      configured_sql_warehouse_id = s.sql_warehouse_id
+      uc_tables                   = s.uc_tables
+      config                      = try(local.effective_genie_space_configs[local.canonical_space_names[idx]], local.empty_genie_config)
     }
   }
 

@@ -9,7 +9,8 @@ SCRIPT = Path(__file__).parents[1] / "scripts" / "genie_space.sh"
 
 
 def _create_with_fake_api(
-    tmp_path, pages, title='Finance "北"', list_status=200, raw_list_body=""
+    tmp_path, pages, title='Finance "北"', list_status=200, raw_list_body="",
+    existing_status=404,
 ):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -34,7 +35,9 @@ if method == "GET" and url.endswith("/api/2.0/genie/spaces"):
 elif method == "POST" and url.endswith("/api/2.0/genie/spaces"):
     status, body = 201, {"space_id": "created-id"}
 elif method == "GET" and "/api/2.0/genie/spaces/" in url:
-    status, body = 404, {"message": "gone"}
+    status, body = int(os.environ.get("EXISTING_STATUS", "404")), {"message": "existing check"}
+elif method == "GET" and "/api/2.0/permissions/genie/" in url:
+    status, body = 200, {"access_control_list": []}
 text = os.environ.get("RAW_LIST_BODY", "") if (
     method == "GET" and url.endswith("/api/2.0/genie/spaces")
     and os.environ.get("RAW_LIST_BODY")
@@ -55,6 +58,7 @@ else:
         "PAGES": json.dumps(pages, ensure_ascii=False),
         "LIST_STATUS": str(list_status),
         "RAW_LIST_BODY": raw_list_body,
+        "EXISTING_STATUS": str(existing_status),
         "DATABRICKS_HOST": "https://target",
         "DATABRICKS_TOKEN": "token",
         "GENIE_ID_FILE": str(id_file),
@@ -87,7 +91,7 @@ def test_create_adopts_one_exact_unicode_quoted_title_match(tmp_path):
     assert id_file.read_text().strip() == "existing-id"
     assert f'Adopted existing Genie agent existing-id titled "{title}" instead of creating a duplicate' in result.stdout
     assert not any(c["method"] == "POST" for c in calls)
-    assert Path(str(id_file) + ".adopted").exists()
+    assert (tmp_path / ".genie_adopted_finance").exists()
 
 
 def test_destroy_unmanages_title_adopted_agent_without_delete(tmp_path):
@@ -110,11 +114,31 @@ def test_destroy_unmanages_title_adopted_agent_without_delete(tmp_path):
     assert not id_file.exists()
 
 
+def test_migration_id_file_adopt_remains_created_and_trash_deletes(tmp_path):
+    id_file = tmp_path / ".genie_space_id_finance"
+    id_file.write_text("created-id\n")
+    result, id_file, _ = _create_with_fake_api(
+        tmp_path, [{"spaces": []}], title="Finance", existing_status=200
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (tmp_path / ".genie_adopted_finance").exists()
+    before = len((tmp_path / "calls.jsonl").read_text().splitlines())
+    env = {**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}",
+           "CALLS": str(tmp_path / "calls.jsonl"), "PAGES": "[]",
+           "DATABRICKS_HOST": "https://target", "DATABRICKS_TOKEN": "token",
+           "GENIE_ID_FILE": str(id_file)}
+    destroyed = subprocess.run(["bash", str(SCRIPT), "trash"], env=env,
+                               capture_output=True, text=True)
+    assert destroyed.returncode == 0, destroyed.stdout + destroyed.stderr
+    calls = [json.loads(x) for x in (tmp_path / "calls.jsonl").read_text().splitlines()[before:]]
+    assert any(call["method"] == "DELETE" for call in calls)
+
+
 def test_acl_replace_prints_each_direct_removed_principal_but_not_inherited(tmp_path):
     bin_dir = tmp_path / "bin"; bin_dir.mkdir()
     (bin_dir / "curl").write_text(r'''#!/bin/sh
 if echo " $* " | grep -q " PUT "; then printf '{}\n200'; else cat <<'EOF'
-{"access_control_list":[{"group_name":"configured","permission_level":"CAN_RUN"},{"group_name":"manual","permission_level":"CAN_RUN"},{"user_name":"person@example.com","permission_level":"CAN_MANAGE"},{"group_name":"admins","inherited":true,"permission_level":"CAN_MANAGE"}]}
+{"access_control_list":[{"group_name":"configured","display_name":"Configured Team","all_permissions":[{"permission_level":"CAN_MANAGE","inherited":false}]},{"group_name":"manual","display_name":"Manual Team","all_permissions":[{"permission_level":"CAN_MANAGE","inherited":true},{"permission_level":"CAN_RUN","inherited":false}]},{"user_name":"person@example.com","display_name":"Person Name","all_permissions":[{"permission_level":"CAN_MANAGE","inherited":false}]},{"service_principal_name":"00000000-0000-0000-0000-000000000001","display_name":"Deploy Bot","all_permissions":[{"permission_level":"CAN_RUN","inherited":false}]},{"group_name":"admins","all_permissions":[{"permission_level":"CAN_MANAGE","inherited":true}]}]}
 200
 EOF
 fi
@@ -126,9 +150,33 @@ fi
     result = subprocess.run(["bash", str(SCRIPT), "set-acls"], env=env,
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Removing hand-added Genie access: manual (CAN_RUN) — not in config" in result.stdout
-    assert "Removing hand-added Genie access: person@example.com (CAN_MANAGE) — not in config" in result.stdout
+    assert "Changing configured Genie access: group:configured [Configured Team] (CAN_MANAGE -> CAN_RUN)" in result.stdout
+    assert "Removing hand-added Genie access: group:manual [Manual Team] (CAN_RUN) — not in config" in result.stdout
+    assert "Removing hand-added Genie access: user:person@example.com [Person Name] (CAN_MANAGE) — not in config" in result.stdout
+    assert "Removing hand-added Genie access: sp:00000000-0000-0000-0000-000000000001 [Deploy Bot] (CAN_RUN) — not in config" in result.stdout
     assert "admins" not in result.stdout
+
+
+def test_acl_replace_fails_closed_on_get_error_unless_force_is_printed(tmp_path):
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+    calls = tmp_path / "calls"
+    (bin_dir / "curl").write_text(f'''#!/bin/sh
+echo "$*" >> {calls}
+if echo " $* " | grep -q " PUT "; then printf '{{}}\\n200'; else printf '{{"message":"down"}}\\n503'; fi
+''')
+    (bin_dir / "curl").chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+           "DATABRICKS_HOST": "https://target", "DATABRICKS_TOKEN": "token",
+           "GENIE_SPACE_OBJECT_ID": "space", "GENIE_GROUPS_CSV": "configured"}
+    refused = subprocess.run(["bash", str(SCRIPT), "set-acls"], env=env,
+                             capture_output=True, text=True)
+    assert refused.returncode != 0
+    assert "refusing authoritative PUT" in refused.stderr
+    assert " PUT " not in f" {calls.read_text()} "
+    forced = subprocess.run(["bash", str(SCRIPT), "set-acls"],
+                            env={**env, "GENIE_ACL_FORCE": "1"}, capture_output=True, text=True)
+    assert forced.returncode == 0, forced.stdout + forced.stderr
+    assert "GENIE_ACL_FORCE=1" in forced.stderr
 
 
 def test_adopted_id_is_used_by_normal_config_and_acl_updates(tmp_path):

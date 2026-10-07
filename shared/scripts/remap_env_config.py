@@ -380,6 +380,12 @@ def main():
         id_file = Path(dest_env_dir) / f".genie_space_id_{old_key}"
         if id_file.exists():
             print(f"         mv '{id_file}' '{id_file.with_name(f'.genie_space_id_{new_key}')}'")
+        adopted_marker = Path(dest_env_dir) / f".genie_adopted_{old_key}"
+        if adopted_marker.exists():
+            print(
+                f"         mv '{adopted_marker}' "
+                f"'{adopted_marker.with_name(f'.genie_adopted_{new_key}')}'"
+            )
         sys.exit(1)
 
     # Preserve destination-owned settings across remediation re-promotions.
@@ -497,7 +503,11 @@ def main():
                 f"  Preserved destination Genie space {name!r} "
                 f"sql_warehouse_id={space_warehouse!r}"
             )
-        acl_source = dest_space if dest_space.get("acl_groups") is not None else space
+        # An existing destination space owns its ACL intent, including deliberate
+        # omission (derive from destination policy) and explicit []. First promote
+        # seeds from the source; later ACL changes are reviewed directly in prod.
+        is_repromote = bool(dest_space)
+        acl_source = dest_space if is_repromote else space
         if "acl_groups" in acl_source:
             acl_groups = acl_source["acl_groups"]
             if acl_groups is not None and (
@@ -513,6 +523,28 @@ def main():
             if acl_groups is not None:
                 rendered_acl = ", ".join(json.dumps(group) for group in acl_groups)
                 lines.append(f"    acl_groups       = [{rendered_acl}]")
+        if is_repromote:
+            if "acl_groups" in dest_space:
+                print(
+                    f"  Preserved destination Genie space {name!r} "
+                    f"acl_groups={dest_space['acl_groups']!r}"
+                )
+            else:
+                print(
+                    f"  Preserved destination Genie space {name!r} omitted acl_groups "
+                    "(destination policy derivation remains authoritative)"
+                )
+            source_acl = space.get("acl_groups")
+            dest_acl = dest_space.get("acl_groups")
+            if isinstance(source_acl, list) and isinstance(dest_acl, list):
+                added = sorted(set(source_acl) - set(dest_acl))
+                revoked = sorted(set(dest_acl) - set(source_acl))
+                if added or revoked:
+                    print(
+                        f"  Genie ACL diff for {name!r} (dev vs prod): "
+                        f"added in dev={added!r}; revoked in dev={revoked!r}. "
+                        "To change prod, edit envs/prod/env.auto.tfvars in a PR."
+                    )
         lines.append("  },")
     lines.append("]")
     lines.append("")

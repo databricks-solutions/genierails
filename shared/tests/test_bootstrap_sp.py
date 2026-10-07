@@ -420,17 +420,24 @@ def test_m2m_builds_fresh_workspace_auth_without_mutating_account_config():
             client_secret="client-secret",
             auth_type="oauth-m2m",
         )
+    account_header_factory = object()
+    workspace_header_factory = object()
+    account_config._header_factory = account_header_factory
+    workspace = SimpleNamespace(config=SimpleNamespace(_header_factory=workspace_header_factory))
     with patch("databricks.sdk.AccountClient"), \
-         patch("databricks.sdk.WorkspaceClient") as workspace_client, \
+         patch("databricks.sdk.WorkspaceClient", return_value=workspace) as workspace_client, \
          patch("databricks.sdk.config.Config", return_value=account_config):
             _account, factory = _clients(_cfg(profile="account-m2m"))
-            factory(workspace_host)
+            result = factory(workspace_host)
 
     workspace_client.assert_called_once_with(
         host=workspace_host, client_id="client-id", client_secret="client-secret"
     )
     assert account_config.host == account_host
     assert account_config.account_id == "acct"
+    assert result.config._header_factory is workspace_header_factory
+    assert result.config._header_factory is not account_config._header_factory
+    assert account_config._header_factory is account_header_factory
 
 
 @pytest.mark.parametrize("account_auth_type", ["databricks-cli", "pat", "external-browser"])

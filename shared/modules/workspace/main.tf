@@ -148,7 +148,7 @@ resource "null_resource" "genie_space_config_existing" {
     sql_measures    = jsonencode(each.value.config.sql_measures)
     sql_expressions = jsonencode(each.value.config.sql_expressions)
     join_specs      = jsonencode(each.value.config.join_specs)
-    warehouse_id    = each.value.sql_warehouse_id
+    warehouse_id    = each.value.configured_sql_warehouse_id == null ? "" : each.value.configured_sql_warehouse_id
   }
 
   provisioner "local-exec" {
@@ -169,8 +169,8 @@ resource "null_resource" "genie_space_config_existing" {
       GENIE_SQL_EXPRESSIONS    = jsonencode(each.value.config.sql_expressions)
       GENIE_SQL_MEASURES       = jsonencode(each.value.config.sql_measures)
       GENIE_JOIN_SPECS         = jsonencode(each.value.config.join_specs)
-      GENIE_WAREHOUSE_ID       = each.value.sql_warehouse_id
-      GENIE_WAREHOUSE_EXPLICIT = each.value.sql_warehouse_id != "" ? "1" : "0"
+      GENIE_WAREHOUSE_ID       = each.value.configured_sql_warehouse_id == null ? "" : each.value.configured_sql_warehouse_id
+      GENIE_WAREHOUSE_EXPLICIT = (each.value.configured_sql_warehouse_id == null ? "" : each.value.configured_sql_warehouse_id) != "" ? "1" : "0"
     }
   }
 
@@ -275,16 +275,17 @@ resource "null_resource" "genie_space_config" {
         ? each.value.sql_warehouse_id
         : local.shared_warehouse_id
       )
-      GENIE_WAREHOUSE_EXPLICIT = each.value.sql_warehouse_id != "" ? "1" : "0"
-      GENIE_TITLE              = each.value.config.title != "" ? each.value.config.title : each.value.name
-      GENIE_DESCRIPTION        = each.value.config.description
-      GENIE_SAMPLE_QUESTIONS   = jsonencode(each.value.config.sample_questions)
-      GENIE_INSTRUCTIONS       = each.value.config.instructions
-      GENIE_BENCHMARKS         = jsonencode(each.value.config.benchmarks)
-      GENIE_SQL_FILTERS        = jsonencode(each.value.config.sql_filters)
-      GENIE_SQL_EXPRESSIONS    = jsonencode(each.value.config.sql_expressions)
-      GENIE_SQL_MEASURES       = jsonencode(each.value.config.sql_measures)
-      GENIE_JOIN_SPECS         = jsonencode(each.value.config.join_specs)
+      GENIE_WAREHOUSE_EXPLICIT        = (each.value.configured_sql_warehouse_id == null ? "" : each.value.configured_sql_warehouse_id) != "" ? "1" : "0"
+      GENIE_WAREHOUSE_CREATED_DEFAULT = "1"
+      GENIE_TITLE                     = each.value.config.title != "" ? each.value.config.title : each.value.name
+      GENIE_DESCRIPTION               = each.value.config.description
+      GENIE_SAMPLE_QUESTIONS          = jsonencode(each.value.config.sample_questions)
+      GENIE_INSTRUCTIONS              = each.value.config.instructions
+      GENIE_BENCHMARKS                = jsonencode(each.value.config.benchmarks)
+      GENIE_SQL_FILTERS               = jsonencode(each.value.config.sql_filters)
+      GENIE_SQL_EXPRESSIONS           = jsonencode(each.value.config.sql_expressions)
+      GENIE_SQL_MEASURES              = jsonencode(each.value.config.sql_measures)
+      GENIE_JOIN_SPECS                = jsonencode(each.value.config.join_specs)
     }
   }
 

@@ -33,9 +33,10 @@ SPACE_CONFIG = (
     "benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], "
     'acl_groups = ["analysts"] }'
 )
+ATTACHED_SPACE_CONFIG = SPACE_CONFIG.replace('description = ""', 'description = "attached"')
 WORKSPACE_SPACES = (
     "{ "
-    f'sales = {{ name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], {SPACE_CONFIG} }}, '
+    f'sales = {{ name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], {ATTACHED_SPACE_CONFIG} }}, '
     f'ops = {{ name = "Ops", genie_space_id = "", sql_warehouse_id = "warehouse", uc_tables = ["cat.sch.customers"], {SPACE_CONFIG} }} '
     "}"
 )
@@ -483,10 +484,22 @@ def test_released_workspace_state_plans_no_change_after_the_retirement(tmp_path)
     # Adding the effective warehouse to config triggers causes one safe
     # in-place update of the created agent; agents and ACLs are never replaced.
     warehouse_refresh = {
-        ('null_resource.genie_space_config["ops"]', "will be updated in-place")
+        ('null_resource.genie_space_config["ops"]', "will be updated in-place"),
+        ('null_resource.genie_space_config_existing["sales"]', "will be updated in-place"),
     }
     assert _changes(runs["released_upgrade_plan"]) == warehouse_refresh
     assert _changes(runs["released_upgrade_plan_while_exposure_is_blocked"]) == warehouse_refresh
+    # The module's top-level warehouse is only a creation default. The attached
+    # sales agent has no raw per-space override, so its trigger remains empty
+    # and update-config receives no warehouse to send.
+    module_source = (SHARED / "modules/workspace/main.tf").read_text()
+    existing_block = module_source[
+        module_source.index('resource "null_resource" "genie_space_config_existing"'):
+        module_source.index("# ── New spaces: create")
+    ]
+    assert "GENIE_WAREHOUSE_ID       = each.value.configured_sql_warehouse_id" in existing_block
+    assert "GENIE_WAREHOUSE_EXPLICIT = (each.value.configured_sql_warehouse_id" in existing_block
+    assert "GENIE_WAREHOUSE_ID       = each.value.sql_warehouse_id" not in existing_block
 
     # Never released: refused while blocked; once the gate allows it, only the
     # CAN_RUN ACLs are added and no agent is replaced.
@@ -495,4 +508,5 @@ def test_released_workspace_state_plans_no_change_after_the_retirement(tmp_path)
         ('null_resource.genie_space_acls["sales"]', "will be created"),
         ('null_resource.genie_space_acls_created["ops"]', "will be created"),
         ('null_resource.genie_space_config["ops"]', "will be updated in-place"),
+        ('null_resource.genie_space_config_existing["sales"]', "will be updated in-place"),
     }

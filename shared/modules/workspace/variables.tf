@@ -79,10 +79,11 @@ variable "retain_auto_warehouse" {
 
 variable "genie_spaces" {
   type = map(object({
-    name             = string
-    genie_space_id   = string
-    sql_warehouse_id = string
-    uc_tables        = list(string)
+    name                        = string
+    genie_space_id              = string
+    sql_warehouse_id            = string
+    configured_sql_warehouse_id = optional(string, "")
+    uc_tables                   = list(string)
     config = object({
       title            = string
       description      = string
