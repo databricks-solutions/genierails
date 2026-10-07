@@ -233,6 +233,8 @@ Repeat until the check passes and drift is clean. These checks don't apply anyth
 make release ENV=prod VERIFY_KEY_COLUMN=customer_id
 ```
 
+`release` must prove every mask, so it needs the row-pairing key. Pass `VERIFY_KEY_COLUMN`, or save `verify_key_column` in `envs/dev/env.auto.tfvars` (promote carries it to prod) or in `envs/prod/env.auto.tfvars`. Without a key (or a `VERIFY_SPEC`), `release` refuses before it applies anything, instead of skipping the mask checks.
+
 One command: placeholder guard → lock → live UC re-read/`derive-assignments` → validation → coverage check → promote the derived config into its Terraform layers → read-only `audit-rulebook` → all-layer apply → `verify-access`. The audit runs before the access-granting apply, so drift or an audit error leaves existing access unchanged and blocks any new or wider business `SELECT` or Genie run access. There is no access flag to set or save: Terraform grants business `SELECT` and Genie run access only through the passing coverage check, and re-running `promote` never closes access that is already live.
 
 If `release` fails after it started applying, or you interrupt it, access may be partly applied — but only access that passed the coverage check. Follow the steps it prints. To withdraw access, remove the groups (or set `acl_groups = []`) in `envs/prod/env.auto.tfvars` and run `make apply ENV=prod`; `business_access_enabled` is retired and setting it to `false` does not revoke anything.

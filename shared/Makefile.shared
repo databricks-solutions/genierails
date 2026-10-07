@@ -233,6 +233,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
 		echo "  5. Run: make release ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
 		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
+		echo "     The key may come from a saved verify_key_column; without one, release refuses before applying."; \
 		echo "  6. Steady state (scheduled): make maintain ENV=$(ENV)"; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 2 onward)"; \
@@ -257,6 +258,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		step=$$((step+1)); echo "  $$step. Run: make generate ENV=$(ENV)   (drafts masks and rules from the class.* tags)"; \
 		step=$$((step+1)); echo "  $$step. Run: make rehearse ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
 		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
+		echo "     Save the key as verify_key_column in $(_SETUP_ENV_REL)/env.auto.tfvars: promote carries it, and make release needs it."; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 0 and Phase 1)"; \
 	fi
@@ -408,6 +410,11 @@ rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is
 # (envs/<env>/generated/.governance.lock) throughout.
 _ENV_LOCK_HELPER = python3 "$(SHARED_ROOT)/scripts/environment_lock.py"
 _RELEASE_HELPER = python3 "$(SHARED_ROOT)/scripts/release_helpers.py"
+# release refuses, before its lock, to run when verify-access could not prove
+# every mask (no key, or a VERIFY_SPEC without keyed mask checks for them), and
+# re-checks after promoting the live-derived config, before it applies.
+_REQUIRE_MASK_PROOF = $(_RELEASE_HELPER) require-mask-proof "$(ENV_DIR)" --env "$(ENV)" --key "$$key" \
+	--spec "$(VERIFY_SPEC)" --account-tfvars "$(ACCOUNT_ENV_DIR)/abac.auto.tfvars"
 # Same-env promote for release, apply, apply-governance and plan. Command-line
 # values beat the environment and MAKEFLAGS, so a SOURCE_ENV/DEST_ENV exported
 # in the shell (or passed to the outer make) can't turn it into a cross-env
@@ -438,12 +445,16 @@ certify:
 
 release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify access
 	@$(_GUARD_WORKSPACE_ENV); \
-	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,release); \
+	$(_DRY_RUN_GUARD); \
+	key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" || exit 1; \
+	$(_REQUIRE_MASK_PROOF) || exit 1; \
+	$(call _ENV_LOCK,release); \
 	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
 	$(MAKE) derive-assignments ENV="$(ENV)" || exit 1; \
 	$(MAKE) validate-generated ENV="$(ENV)" || exit 1; \
 	$(MAKE) coverage-gate ENV="$(ENV)" || exit 1; \
 	$(_SAME_ENV_PROMOTE) || exit 1; \
+	$(_REQUIRE_MASK_PROOF) || exit 1; \
 	$(MAKE) audit-rulebook ENV="$(ENV)"; audit_rc=$$?; \
 	if [ $$audit_rc -ne 0 ]; then \
 		if [ $$audit_rc -eq 1 ]; then \
@@ -459,7 +470,7 @@ release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, ap
 		$(_RELEASE_HELPER) failed "$(ENV_DIR)" --env "$(ENV)" --reason "apply failed"; \
 		exit 1; \
 	fi; \
-	if ! $(MAKE) verify-access ENV="$(ENV)"$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \
+	if ! $(MAKE) verify-access ENV="$(ENV)" VERIFY_REQUIRE_MASKS=1$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \
 		$(_RELEASE_HELPER) failed "$(ENV_DIR)" --env "$(ENV)" --reason "access was applied but verify-access failed"; \
 		exit 1; \
 	fi; \
@@ -930,10 +941,14 @@ test-unit: ## Run fast unit tests (no Databricks/LLM/Terraform required) — use
 #   VERIFY_SPEC=<file>     explicit JSON spec (overrides --from-tfvars derivation)
 #   WAREHOUSE_ID=<id>      pin a specific SQL warehouse
 #   KEEP_PRINCIPALS=1      leave the provisioned test principals in place (debug)
+#   VERIFY_REQUIRE_MASKS=1 fail when a mask check has no key column (make release sets it)
 VERIFY_KEY_COLUMN ?=
 VERIFY_SPEC ?=
 _VERIFY_SPEC_FLAG = $(if $(VERIFY_SPEC),--spec "$(VERIFY_SPEC)",--from-tfvars "$(TARGET_DATA_ACCESS_ENV_DIR)/abac.auto.tfvars" --account-tfvars "$(ACCOUNT_ENV_DIR)/abac.auto.tfvars")
 _VERIFY_KEEP_FLAG = $(if $(KEEP_PRINCIPALS),--keep-principals,)
+# make release sets VERIFY_REQUIRE_MASKS=1: a mask check skipped for want of a
+# key column fails instead of letting the release report success.
+_VERIFY_REQUIRE_FLAG = $(if $(filter 1,$(VERIFY_REQUIRE_MASKS)),--require-mask-checks,)
 
 verify-access-spec: _guarded-bootstrap _guard-workspace-target ## Print the derived effective-access checks (no workspace/cluster needed)
 	@key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" && \
@@ -944,7 +959,7 @@ verify-access: _guarded-bootstrap _guard-workspace-target ## Verify masking/row-
 	@key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" && \
 	warehouse_id="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" warehouse --env-dir "$(ENV_DIR)" --explicit "$(WAREHOUSE_ID)" --terraform-runner "$(ROOT_RUNNER)" --env-name "$(ENV)")" && \
 	cd "$(SHARED_ROOT)" && GENIERAILS_LIVE_VERIFY=1 python3 verify_effective_access.py \
-		$(_VERIFY_SPEC_FLAG) --key-column "$$key" --warehouse-id "$$warehouse_id" $(_VERIFY_KEEP_FLAG) \
+		$(_VERIFY_SPEC_FLAG) --key-column "$$key" --warehouse-id "$$warehouse_id" $(_VERIFY_KEEP_FLAG) $(_VERIFY_REQUIRE_FLAG) \
 		--auth-file "$(ENV_DIR)/auth.auto.tfvars" --live
 
 test-quickstart: _bootstrap _guard-workspace-target ## Scenario: single space, single catalog (quickstart flow)

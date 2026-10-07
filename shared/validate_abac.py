@@ -164,17 +164,10 @@ def _extract_tag_refs(condition: str) -> tuple[list[tuple[str, str]], list[str]]
     return value_refs, key_refs
 
 
-def _condition_matches_tags(condition: str, tags: dict[str, set[str]]) -> bool:
-    """Evaluate a limited ABAC condition against a tag context.
-
-    Supported syntax is intentionally narrow and matches the prompt / validator:
-    hasTagValue('k','v'), hasTag('k'), AND, OR, parentheses.
-    """
-    if not condition:
-        return True
-
-    expr = condition
-
+def _condition_expr(condition: str, tags: dict[str, set[str]]) -> str | None:
+    """The condition as a Python boolean expression over tags, or None if it
+    uses anything outside hasTagValue('k','v'), hasTag('k'), AND, OR and
+    parentheses. Tag keys and values match exactly (UC tags are case-sensitive)."""
     def repl_value(match: re.Match) -> str:
         key, value = match.group(1), match.group(2)
         return str(value in tags.get(key, set()))
@@ -183,15 +176,42 @@ def _condition_matches_tags(condition: str, tags: dict[str, set[str]]) -> bool:
         key = match.group(1)
         return str(key in tags and bool(tags[key]))
 
-    expr = re.sub(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", repl_value, expr)
+    expr = re.sub(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", repl_value, condition)
     expr = re.sub(r"hasTag\(\s*'([^']+)'\s*\)", repl_key, expr)
     expr = re.sub(r"\bAND\b", " and ", expr)
     expr = re.sub(r"\bOR\b", " or ", expr)
 
     # Refuse anything outside the expected boolean grammar.
     if re.search(r"[^()\sA-Za-z]", expr):
-        return False
+        return None
+    return expr
 
+
+def condition_is_supported(condition: str) -> bool:
+    """Whether _condition_matches_tags can evaluate the condition at all."""
+    if not condition:
+        return True
+    expr = _condition_expr(condition, {})
+    if expr is None:
+        return False
+    try:
+        eval(expr, {"__builtins__": {}}, {})
+    except Exception:
+        return False
+    return True
+
+
+def _condition_matches_tags(condition: str, tags: dict[str, set[str]]) -> bool:
+    """Evaluate a limited ABAC condition against a tag context.
+
+    Supported syntax is intentionally narrow and matches the prompt / validator:
+    hasTagValue('k','v'), hasTag('k'), AND, OR, parentheses.
+    """
+    if not condition:
+        return True
+    expr = _condition_expr(condition, tags)
+    if expr is None:
+        return False
     try:
         return bool(eval(expr, {"__builtins__": {}}, {}))
     except Exception:
@@ -206,15 +226,17 @@ def _entity_table_name(entity_type: str, entity_name: str) -> str:
     return ""
 
 
-def validate_policy_overlaps(cfg: dict, result: ValidationResult):
-    """Fail when multiple FGAC policies resolve for one securable object."""
-    assignments = cfg.get("tag_assignments", [])
-    policies = cfg.get("fgac_policies", [])
-    if not isinstance(assignments, list) or not isinstance(policies, list):
-        return
+def _entity_tags(assignments) -> tuple[dict[tuple[str, str], dict[str, set[str]]], dict[tuple[str, str], str]]:
+    """Tags per entity from tag_assignments, and each entity's first spelling.
 
+    Entities are keyed by (entity_type, casefolded name): Unity Catalog
+    identifiers are case-insensitive, so differently cased spellings of one
+    column are one entity. Tag keys and values stay exact (UC tags are
+    case-sensitive).
+    """
     entity_tags: dict[tuple[str, str], dict[str, set[str]]] = {}
-    for assignment in assignments:
+    spelling: dict[tuple[str, str], str] = {}
+    for assignment in assignments if isinstance(assignments, list) else []:
         if not isinstance(assignment, dict):
             continue
         entity_type = assignment.get("entity_type", "")
@@ -222,27 +244,63 @@ def validate_policy_overlaps(cfg: dict, result: ValidationResult):
         tag_key = assignment.get("tag_key", "")
         tag_value = assignment.get("tag_value", "")
         if entity_type and entity_name and tag_key and tag_value:
-            tags = entity_tags.setdefault((entity_type, entity_name), {})
-            tags.setdefault(tag_key, set()).add(tag_value)
+            entity = (entity_type, entity_name.casefold())
+            spelling.setdefault(entity, entity_name)
+            entity_tags.setdefault(entity, {}).setdefault(tag_key, set()).add(tag_value)
+    return entity_tags, spelling
 
-    def catalog_matches(policy: dict, entity_name: str) -> bool:
-        policy_catalog = policy.get("catalog", "") or policy.get("function_catalog", "")
-        entity_catalog = entity_name.split(".")[0] if entity_name else ""
-        return not policy_catalog or not entity_catalog or policy_catalog == entity_catalog
 
-    for (entity_type, entity_name), tags in sorted(entity_tags.items()):
+def _catalog_matches(policy: dict, entity_name: str) -> bool:
+    policy_catalog = policy.get("catalog", "") or policy.get("function_catalog", "")
+    entity_catalog = entity_name.split(".")[0] if entity_name else ""
+    return not policy_catalog or not entity_catalog or policy_catalog.casefold() == entity_catalog.casefold()
+
+
+def column_mask_matches(cfg: dict) -> dict[str, list[str]]:
+    """Column -> names of the column-mask policies that resolve for it.
+
+    As Unity Catalog resolves them: the policy's catalog, the column's own
+    tags against the full match_condition (hasTagValue, hasTag, AND, OR,
+    parentheses), and its table's tags against when_condition.
+    """
+    policies = cfg.get("fgac_policies", [])
+    if not isinstance(policies, list):
+        return {}
+    entity_tags, spelling = _entity_tags(cfg.get("tag_assignments", []))
+    matches: dict[str, list[str]] = {}
+    for (entity_type, entity_key), tags in sorted(entity_tags.items()):
+        if entity_type != "columns":
+            continue
+        entity_name = spelling[(entity_type, entity_key)]
+        table_tags = entity_tags.get(("tables", _entity_table_name(entity_type, entity_key)), {})
+        names = [
+            policy.get("name", "<unnamed>")
+            for policy in policies
+            if isinstance(policy, dict)
+            and policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
+            and _catalog_matches(policy, entity_name)
+            and _condition_matches_tags(policy.get("match_condition", ""), tags)
+            and _condition_matches_tags(policy.get("when_condition", ""), table_tags)
+        ]
+        if names:
+            matches[entity_name] = names
+    return matches
+
+
+def validate_policy_overlaps(cfg: dict, result: ValidationResult):
+    """Fail when multiple FGAC policies resolve for one securable object."""
+    assignments = cfg.get("tag_assignments", [])
+    policies = cfg.get("fgac_policies", [])
+    if not isinstance(assignments, list) or not isinstance(policies, list):
+        return
+
+    entity_tags, spelling = _entity_tags(assignments)
+    mask_matches = column_mask_matches(cfg)
+
+    for (entity_type, entity_key), tags in sorted(entity_tags.items()):
+        entity_name = spelling[(entity_type, entity_key)]
         if entity_type == "columns":
-            table_name = _entity_table_name(entity_type, entity_name)
-            table_tags = entity_tags.get(("tables", table_name), {})
-            matches = [
-                policy.get("name", "<unnamed>")
-                for policy in policies
-                if isinstance(policy, dict)
-                and policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
-                and catalog_matches(policy, entity_name)
-                and _condition_matches_tags(policy.get("match_condition", ""), tags)
-                and _condition_matches_tags(policy.get("when_condition", ""), table_tags)
-            ]
+            matches = mask_matches.get(entity_name, [])
             if len(set(matches)) > 1:
                 result.error(
                     f"Column '{entity_name}' matches multiple column-mask policies: "
@@ -257,7 +315,7 @@ def validate_policy_overlaps(cfg: dict, result: ValidationResult):
                 for policy in policies
                 if isinstance(policy, dict)
                 and policy.get("policy_type") == "POLICY_TYPE_ROW_FILTER"
-                and catalog_matches(policy, entity_name)
+                and _catalog_matches(policy, entity_name)
                 and _condition_matches_tags(policy.get("when_condition", ""), tags)
             ]
             if len(set(matches)) > 1:

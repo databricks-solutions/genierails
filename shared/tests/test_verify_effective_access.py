@@ -634,6 +634,58 @@ class TestCliEmptySpec:
         assert "skipped (no key column)" in out
         assert "masking NOT verified" in out
 
+    # make release passes --require-mask-checks: a keyless mask check must fail
+    # the run (before any workspace call), never let it report success.
+    def test_main_require_mask_checks_fails_keyless_before_going_live(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        spec_file = tmp_path / "spec.json"
+        spec_file.write_text(
+            '{"column_masks": [{"table": "c.s.t", "column": "ssn", '
+            '"masked_principals": ["Jr"], "unmasked_principals": ["Sr"]}], '
+            '"row_filters": []}'
+        )
+        rc = main(["--spec", str(spec_file), "--require-mask-checks", "--live",
+                   "--auth-file", str(tmp_path / "missing.auto.tfvars")])
+        assert rc == 2
+        assert "masking would NOT be verified" in capsys.readouterr().err
+
+    # A mask verify-access can derive no check for must fail the strict run,
+    # not leave it passing on the checks it could derive: "everyone except
+    # analysts" has no concrete masked tier when the account config lists no
+    # other groups.
+    def test_main_require_mask_checks_fails_when_a_tagged_mask_yields_no_check(self, tmp_path, capsys):
+        tfvars = tmp_path / "abac.auto.tfvars"
+        tfvars.write_text("""
+fgac_policies = [
+  { name = "everyone", policy_type = "POLICY_TYPE_COLUMN_MASK", to_principals = ["account users"],
+    except_principals = ["analysts"], match_condition = "hasTagValue('gr_treatment', 'redact')" },
+  { name = "analysts", policy_type = "POLICY_TYPE_COLUMN_MASK", to_principals = ["analysts"],
+    match_condition = "hasTagValue('gr_treatment', 'name_partial')" },
+]
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.t.ssn", tag_key = "gr_treatment", tag_value = "redact" },
+  { entity_type = "columns", entity_name = "cat.sch.t.name", tag_key = "gr_treatment", tag_value = "name_partial" },
+]
+""")
+        account = tmp_path / "account.auto.tfvars"
+        account.write_text("groups = {}\n")
+        args = ["--from-tfvars", str(tfvars), "--account-tfvars", str(account), "--key-column", "id"]
+        assert main(args) == 0  # non-strict: the one derivable check dry-runs
+        capsys.readouterr()
+        assert main(args + ["--require-mask-checks"]) == 2
+        err = capsys.readouterr().err
+        assert "cat.sch.t.ssn" in err and "would NOT be verified" in err
+
+    def test_main_require_mask_checks_accepts_keyed_checks(self, tmp_path, capsys):
+        spec_file = tmp_path / "spec.json"
+        spec_file.write_text(
+            '{"column_masks": [{"table": "c.s.t", "column": "ssn", "key_column": "id",'
+            '"masked_principals": ["Jr"], "unmasked_principals": ["Sr"]}],'
+            '"row_filters": []}'
+        )
+        assert main(["--spec", str(spec_file), "--require-mask-checks"]) == 0
+        assert "dry run" in capsys.readouterr().out
+
 
 # ---------------------------------------------------------------------------
 # Live guard — must be airtight
@@ -834,3 +886,94 @@ class TestTemporaryWarehouseAccess:
             )
 
         assert deleted == ["456"]
+
+
+# ---------------------------------------------------------------------------
+# required_mask_columns: the columns Terraform actually masks
+# ---------------------------------------------------------------------------
+class TestRequiredMaskColumns:
+    @staticmethod
+    def _cols(policy_overrides, assignments):
+        from verify_effective_access import required_mask_columns
+        policy = {"name": "m", "policy_type": "POLICY_TYPE_COLUMN_MASK", "catalog": "cat",
+                  "to_principals": ["analysts"], "match_condition": "hasTagValue('pii', 'ssn')"}
+        policy.update(policy_overrides)
+        return required_mask_columns([policy], [
+            {"entity_type": t, "entity_name": n, "tag_key": k, "tag_value": v} for t, n, k, v in assignments])
+
+    def test_tagged_column_in_the_policy_catalog(self):
+        assert self._cols({}, [("columns", "cat.sch.t.ssn", "pii", "ssn")]) == {("cat.sch.t", "ssn")}
+
+    def test_other_catalog_is_not_masked(self):
+        assert self._cols({}, [("columns", "cat2.sch.t.ssn", "pii", "ssn")]) == set()
+
+    def test_fully_excepted_targets_mask_nobody(self):
+        assert self._cols({"except_principals": ["analysts"]}, [("columns", "cat.sch.t.ssn", "pii", "ssn")]) == set()
+
+    def test_account_users_with_exceptions_still_masks_the_rest(self):
+        assert self._cols({"to_principals": ["account users"], "except_principals": ["admins"]},
+                          [("columns", "cat.sch.t.ssn", "pii", "ssn")]) == {("cat.sch.t", "ssn")}
+
+    def test_and_needs_every_clause_on_the_same_column(self):
+        cond = "hasTagValue('pii', 'ssn') AND hasTagValue('region', 'us')"
+        assert self._cols({"match_condition": cond}, [
+            ("columns", "cat.sch.t.ssn", "pii", "ssn"),
+            ("columns", "cat.sch.t.ssn", "region", "us"),
+            ("columns", "cat.sch.t.other", "pii", "ssn"),   # only one clause
+            ("columns", "cat.sch.u.x", "region", "us"),
+        ]) == {("cat.sch.t", "ssn")}
+
+    def test_or_with_parentheses(self):
+        cond = "(hasTagValue('pii', 'ssn') OR hasTagValue('pii', 'tfn')) AND hasTag('region')"
+        assert self._cols({"match_condition": cond}, [
+            ("columns", "cat.sch.t.ssn", "pii", "ssn"), ("columns", "cat.sch.t.ssn", "region", "us"),
+            ("columns", "cat.sch.t.tfn", "pii", "tfn"), ("columns", "cat.sch.t.tfn", "region", "au"),
+            ("columns", "cat.sch.t.bare", "pii", "tfn"),
+        ]) == {("cat.sch.t", "ssn"), ("cat.sch.t", "tfn")}
+
+    def test_has_tag_matches_any_value(self):
+        assert self._cols({"match_condition": "hasTag('pii')"}, [
+            ("columns", "cat.sch.t.ssn", "pii", "ssn"), ("columns", "cat.sch.t.name", "other", "x"),
+        ]) == {("cat.sch.t", "ssn")}
+
+    def test_when_condition_is_judged_on_the_table_tags(self):
+        assignments = [("columns", "cat.sch.t.ssn", "pii", "ssn"), ("columns", "cat.sch.u.ssn", "pii", "ssn"),
+                       ("tables", "cat.sch.t", "domain", "hr")]
+        assert self._cols({"when_condition": "hasTagValue('domain', 'hr')"}, assignments) == {("cat.sch.t", "ssn")}
+
+    # Unity Catalog identifiers are case-insensitive; tags are not.
+    def test_policy_catalog_matches_case_insensitively(self):
+        assert self._cols({"catalog": "CAT"}, [("columns", "cat.sch.t.ssn", "pii", "ssn")]) == {("cat.sch.t", "ssn")}
+        assert self._cols({}, [("columns", "Cat.Sch.T.SSN", "pii", "ssn")]) == {("cat.sch.t", "ssn")}
+
+    def test_spellings_of_one_column_are_one_entity(self):
+        cond = "hasTagValue('pii', 'ssn') AND hasTagValue('region', 'us')"
+        assert self._cols({"match_condition": cond}, [
+            ("columns", "cat.sch.t.ssn", "pii", "ssn"), ("columns", "CAT.SCH.T.SSN", "region", "us"),
+        ]) == {("cat.sch.t", "ssn")}
+
+    def test_when_condition_finds_the_table_case_insensitively(self):
+        assignments = [("columns", "cat.sch.t.ssn", "pii", "ssn"), ("tables", "CAT.Sch.T", "domain", "hr")]
+        assert self._cols({"when_condition": "hasTagValue('domain', 'hr')"}, assignments) == {("cat.sch.t", "ssn")}
+
+    def test_tag_keys_and_values_stay_case_sensitive(self):
+        assert self._cols({}, [("columns", "cat.sch.t.a", "PII", "ssn"), ("columns", "cat.sch.t.b", "pii", "SSN")]) == set()
+
+    @pytest.mark.parametrize("cond", ["has_tag_value('pii', 'ssn')", "has_tag('pii')", "hasTagValue('pii', 'ssn') XOR"])
+    def test_an_unreadable_condition_fails_closed(self, cond):
+        with pytest.raises(ValueError, match="cannot tell which columns"):
+            self._cols({"match_condition": cond}, [("columns", "cat.sch.t.ssn", "pii", "ssn")])
+
+    def test_strict_verify_refuses_an_unreadable_mask_condition(self, tmp_path, capsys):
+        tfvars = tmp_path / "abac.auto.tfvars"
+        tfvars.write_text("""
+fgac_policies = [
+  { name = "m", policy_type = "POLICY_TYPE_COLUMN_MASK", to_principals = ["analysts"],
+    match_condition = "has_tag_value('pii', 'ssn')" },
+]
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.t.ssn", tag_key = "pii", tag_value = "ssn" },
+]
+""")
+        assert main(["--from-tfvars", str(tfvars), "--key-column", "id", "--require-mask-checks"]) == 2
+        assert "cannot tell which columns" in capsys.readouterr().err
