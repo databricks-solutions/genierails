@@ -634,6 +634,31 @@ class TestCliEmptySpec:
         assert "skipped (no key column)" in out
         assert "masking NOT verified" in out
 
+    # make release passes --require-mask-checks: a keyless mask check must fail
+    # the run (before any workspace call), never let it report success.
+    def test_main_require_mask_checks_fails_keyless_before_going_live(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        spec_file = tmp_path / "spec.json"
+        spec_file.write_text(
+            '{"column_masks": [{"table": "c.s.t", "column": "ssn", '
+            '"masked_principals": ["Jr"], "unmasked_principals": ["Sr"]}], '
+            '"row_filters": []}'
+        )
+        rc = main(["--spec", str(spec_file), "--require-mask-checks", "--live",
+                   "--auth-file", str(tmp_path / "missing.auto.tfvars")])
+        assert rc == 2
+        assert "masking would NOT be verified" in capsys.readouterr().err
+
+    def test_main_require_mask_checks_accepts_keyed_checks(self, tmp_path, capsys):
+        spec_file = tmp_path / "spec.json"
+        spec_file.write_text(
+            '{"column_masks": [{"table": "c.s.t", "column": "ssn", "key_column": "id",'
+            '"masked_principals": ["Jr"], "unmasked_principals": ["Sr"]}],'
+            '"row_filters": []}'
+        )
+        assert main(["--spec", str(spec_file), "--require-mask-checks"]) == 0
+        assert "dry run" in capsys.readouterr().out
+
 
 # ---------------------------------------------------------------------------
 # Live guard — must be airtight

@@ -1059,18 +1059,20 @@ def test_can_run_check_mirrors_the_workspace_precondition(tmp_path, capsys, answ
 # (plantimestamp()), so the static blocker comes back "" and the check applies
 # them itself: a pass resting on an old, future or malformed refresh still
 # refuses widening, and still lets keeping, shrinking or clearing through.
+# Each refresh is built when the test runs (a lambda), not at collection: a
+# long suite run must not age a "still fresh" refresh past its window.
 @pytest.mark.parametrize("refresh, groups, widening, code, message", [
-    (_refresh(timedelta(hours=7)), "a,b", ["b"], 1, "refresh too old"),
-    (_refresh(timedelta(hours=-1)), "a,b", ["b"], 1, "no live refresh"),
-    ({"refreshed_at": "", "fresh_until": ""}, "a,b", ["b"], 1, "no live refresh"),
-    ({"refreshed_at": None, "fresh_until": None}, "a,b", ["b"], 1, "no live refresh"),
-    (_refresh(timedelta(hours=7)), "a", [], 0, "refresh too old"),
-    (_refresh(timedelta(hours=5, minutes=50)), "a,b", ["b"], 0, ""),
+    (lambda: _refresh(timedelta(hours=7)), "a,b", ["b"], 1, "refresh too old"),
+    (lambda: _refresh(timedelta(hours=-1)), "a,b", ["b"], 1, "no live refresh"),
+    (lambda: {"refreshed_at": "", "fresh_until": ""}, "a,b", ["b"], 1, "no live refresh"),
+    (lambda: {"refreshed_at": None, "fresh_until": None}, "a,b", ["b"], 1, "no live refresh"),
+    (lambda: _refresh(timedelta(hours=7)), "a", [], 0, "refresh too old"),
+    (lambda: _refresh(timedelta(hours=5, minutes=50)), "a,b", ["b"], 0, ""),
 ])
 def test_can_run_check_applies_the_refresh_time_checks(tmp_path, capsys, refresh, groups, widening, code, message):
     runner = _console_runner(tmp_path, {"groups": {"sales": groups}, "blocker": "",
                                         "widening": {"sales": widening}, "missing": {"sales": []},
-                                        **refresh})
+                                        **refresh()})
     assert cg.can_run_check(tmp_path, "prod", runner, "") == code
     err = capsys.readouterr().err
     assert message in err if message else "blocked" not in err

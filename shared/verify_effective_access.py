@@ -1134,6 +1134,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Do not delete the provisioned test principals (debugging).")
     p.add_argument("--print-spec", action="store_true",
                    help="Print the resolved spec and exit (no workspace needed).")
+    p.add_argument("--require-mask-checks", action="store_true",
+                   help="Fail instead of skipping mask checks that have no key column "
+                        "(make release: production masking must be proven).")
     return p
 
 
@@ -1200,6 +1203,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "Row-filter checks will still run. Configure verify_key_column in "
             "env.auto.tfvars or pass VERIFY_KEY_COLUMN=<col> to enable them."
         )
+        if args.require_mask_checks:
+            print(
+                f"ERROR: {len(missing_key_checks)} mask check(s) have no key column, so masking "
+                "would NOT be verified. Set verify_key_column in env.auto.tfvars (or pass "
+                "VERIFY_KEY_COLUMN=<col> or VERIFY_SPEC=<file>). Refusing to report success.",
+                file=sys.stderr,
+            )
+            return 2
 
     if args.print_spec or not args.live:
         print("Resolved effective-access spec:")

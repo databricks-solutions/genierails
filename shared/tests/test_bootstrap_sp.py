@@ -417,6 +417,12 @@ def test_m2m_builds_fresh_workspace_auth_without_mutating_account_config():
     def oidc_response(_client, _method, url, **_kwargs):
         discovered_urls.append(url)
         token_host = workspace_host if url.startswith(workspace_host) else account_host
+        # databricks-sdk >= 0.148 first reads the host metadata and takes the
+        # OIDC discovery URL from it; answer as real hosts do (older SDKs
+        # never ask).
+        if url.endswith("/.well-known/databricks-config"):
+            oidc = "/oidc" if token_host == workspace_host else "/oidc/accounts/{account_id}"
+            return {"oidc_endpoint": f"{token_host}{oidc}"}
         return {
             "authorization_endpoint": f"{token_host}/oidc/v1/authorize",
             "token_endpoint": f"{token_host}/oidc/v1/token",
