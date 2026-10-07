@@ -42,7 +42,7 @@ databricks_workspace_host = "https://dbc-xxxxxxxx-xxxx.cloud.databricks.com"
 
 ## Step 3 — Follow the dev-to-prod walkthrough
 
-The **[dev-to-prod walkthrough](../shared/examples/dev_to_prod/)** is the canonical end-to-end walkthrough: Unity Catalog classifies your data, GenieRails derives one protection per classified column, a coverage gate fails the build if any classified sensitive column is unprotected, and the agent is exposed to users only after the prod gate passes. No tables or agent of your own? It ships an optional sample-environment script that creates everything, so you can run the whole flow to see it in action.
+The **[dev-to-prod walkthrough](../shared/examples/dev_to_prod/)** is the canonical end-to-end walkthrough: Unity Catalog classifies your data, GenieRails derives one protection per classified column, a coverage gate fails the build if any classified sensitive column is unprotected, and users are granted access to the prod agent only after prod's own coverage check passes. No tables or agent of your own? It ships an optional sample-environment script that creates everything, so you can run the whole flow to see it in action.
 
 Starting from a specific point? These entry guides feed into the dev-to-prod walkthrough:
 

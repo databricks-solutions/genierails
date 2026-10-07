@@ -422,11 +422,11 @@ _ENV_LOCK = trap '$(_NO_SIGNALS); $(_ENV_LOCK_HELPER) unlock "$(ENV_DIR)" --pid 
 	trap '$(_NO_SIGNALS); exit 129' HUP; trap '$(_NO_SIGNALS); exit 130' INT; trap '$(_NO_SIGNALS); exit 143' TERM; \
 	$(_ENV_LOCK_HELPER) lock "$(ENV_DIR)" --pid $$$$ --owner $(1) --env "$(ENV)" || exit 1
 
-certify: _guard-genie-placeholder ## [Deprecated] Alias for make release
+certify: _guard-genie-placeholder
 	@echo "DEPRECATED: make certify is now an alias for make release; use make release ENV=$(ENV)."
 	@$(MAKE) --no-print-directory release ENV="$(ENV)" $(if $(strip $(VERIFY_KEY_COLUMN)),VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",)
 
-release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify production access
+release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify access
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,release); \
 	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \

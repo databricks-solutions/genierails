@@ -1,6 +1,6 @@
 # GenieRails Dev-to-Prod Walkthrough — ship a Genie agent to production, safely
 
-Take a curated Genie agent in **dev** and ship it to **production** without ever exposing sensitive data. Databricks' built-in classifier — running inside your own workspace — decides *what* is sensitive by sampling your column values (emails, SSNs, card numbers); GenieRails derives *how* it's protected (column masks and access rules) and applies it all as code; and a **coverage check blocks the release** until every classified sensitive column the agent can reach is provably covered. You rehearse the whole thing safely in **dev**, then do it for real in **prod**.
+Take a curated Genie agent in **dev** and ship it to **production** without ever exposing sensitive data. Databricks' built-in classifier — running inside your own workspace — decides *what* is sensitive by sampling your column values (emails, SSNs, card numbers); GenieRails derives *how* it's protected (column masks and access rules) and applies it all as code; and **no new business access is granted** until every classified sensitive column the agent can reach is provably covered. You rehearse the whole thing safely in **dev**, then do it for real in **prod**.
 
 ---
 
@@ -195,9 +195,9 @@ Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` and re-run `make
 
 <a id="phase-4--prod-prove-coverage"></a>
 <details>
-<summary><strong>Phase 4 — Prod: Review the release gate</strong></summary>
+<summary><strong>Phase 4 — Prod: Review prod coverage</strong></summary>
 
-**Goal —** confirm prod classification has finished and preview the same live derivation and coverage check that Phase 5 repeats immediately before release.
+**Goal —** confirm prod classification has finished and preview the live derivation and coverage check that `make release` repeats before it applies.
 
 ```bash
 make derive-assignments ENV=prod
@@ -217,7 +217,7 @@ These commands are read-only apart from refreshing generated local files: they d
 3. **Re-promote:** `make promote …` (carries the updated rules to prod — same command as [Phase 2](#phase-2--prod-set-up-and-promote-rules)).
 4. **Re-run the checks above**, then continue to Phase 5.
 
-Repeat until the gate passes and drift is clean. The agent stays uncreated and closed to users throughout — that's the point of exposing last.
+Repeat until the gate passes and drift is clean. These checks don't apply anything, so prod access doesn't change while you loop.
 
 </details>
 
@@ -225,9 +225,9 @@ Repeat until the gate passes and drift is clean. The agent stays uncreated and c
 
 <a id="phase-5--prod-release-access-and-verify"></a>
 <details>
-<summary><strong>Phase 5 — Prod: Release access and verify</strong></summary>
+<summary><strong>Phase 5 — Prod: Release and verify</strong></summary>
 
-**Goal —** prove live coverage, release access, create the agent, and confirm masking live.
+**Goal —** re-check live coverage, apply prod (masks first, then access), and confirm masking live.
 
 ```bash
 make release ENV=prod VERIFY_KEY_COLUMN=customer_id
