@@ -40,12 +40,23 @@ locals {
 
   _result = fileexists(var.gate_file) ? try(jsondecode(file(var.gate_file)), null) : null
 
-  status = (
+  # Everything but the refresh-time checks. plantimestamp() is unknown under
+  # terraform console, so scripts/coverage_gate.py can-run-check reads this and
+  # applies the two time checks below itself, from refreshed_at and fresh_until.
+  static_status = (
     !fileexists(var.gate_file) ? "missing" :
     local._result == null ? "unreadable" :
     !local.max_age_valid ? "invalid_max_age" :
     try(local._result.fingerprint, "") != var.expected_fingerprint ? "stale" :
     try(local._result.status, "") != "pass" ? "failed" :
+    "pass"
+  )
+  # "" when refreshed_at is missing or malformed.
+  refreshed_at = try(timeadd(local._result.refreshed_at, "0s"), "")
+  fresh_until  = try(timeadd(local._result.refreshed_at, var.max_age), "")
+
+  status = (
+    local.static_status != "pass" ? local.static_status :
     # A missing or malformed refreshed_at, or one in the future (beyond clock
     # skew), is not a live refresh.
     try(timecmp(local._result.refreshed_at, timeadd(plantimestamp(), local.future_skew)) > 0, true) ? "unrefreshed" :
@@ -73,6 +84,31 @@ output "status" {
 output "problem" {
   description = "Why the result doesn't pass, or \"\"."
   value       = local.problems[local.status]
+}
+
+output "static_status" {
+  description = "status without the refresh-time checks: missing, unreadable, invalid_max_age, stale, failed or pass. Known under terraform console."
+  value       = local.static_status
+}
+
+output "static_problem" {
+  description = "Why static_status doesn't pass, or \"\"."
+  value       = local.problems[local.static_status]
+}
+
+output "refreshed_at" {
+  description = "The result's live refresh time (RFC 3339), or \"\" if missing or malformed."
+  value       = local.refreshed_at
+}
+
+output "fresh_until" {
+  description = "refreshed_at + max_age (RFC 3339), or \"\"."
+  value       = local.fresh_until
+}
+
+output "problems" {
+  description = "Message for each status."
+  value       = local.problems
 }
 
 output "max_age_ceiling" {

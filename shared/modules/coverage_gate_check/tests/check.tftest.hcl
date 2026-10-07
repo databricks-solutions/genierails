@@ -209,6 +209,10 @@ run "malformed_refresh_is_unrefreshed" {
     condition     = output.status == "unrefreshed"
     error_message = "expected unrefreshed, got ${output.status}: ${output.problem}"
   }
+  assert {
+    condition     = output.static_status == "pass" && output.refreshed_at == "" && output.fresh_until == ""
+    error_message = "a malformed refresh must leave no window for can-run-check to accept"
+  }
 }
 
 run "pass_from_the_future" {
@@ -246,6 +250,16 @@ run "old_refresh_is_expired" {
   assert {
     condition     = output.status == "expired"
     error_message = "expected expired, got ${output.status}: ${output.problem}"
+  }
+  # What can-run-check reads under terraform console, where plantimestamp()
+  # is unknown: the clock-free status and the window it then checks itself.
+  assert {
+    condition     = output.static_status == "pass" && output.static_problem == ""
+    error_message = "the refresh time must not reach static_status, got ${output.static_status}"
+  }
+  assert {
+    condition     = output.refreshed_at == "2000-01-01T00:00:00Z" && output.fresh_until == "2000-01-01T06:00:00Z"
+    error_message = "expected the refresh window 2000-01-01T00:00:00Z..06:00:00Z, got ${output.refreshed_at}..${output.fresh_until}"
   }
 }
 

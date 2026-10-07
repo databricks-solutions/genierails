@@ -47,7 +47,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import hcl2
@@ -282,13 +282,34 @@ def _failed(gate_path: Path, record: dict, inputs: dict, env_name: str, reason: 
     return 1
 
 
+# local.genie_exposure_blocker itself is unknown under terraform console (its
+# refresh-time checks need plantimestamp()), so read the rest of it and apply
+# those two checks here (refresh_problem), as modules/coverage_gate_check does.
 CAN_RUN_EXPRESSION = (
     "base64encode(jsonencode({"
     "groups = module.workspace.genie_space_acls_groups, "
-    "blocker = local.genie_exposure_blocker, "
+    "blocker = local.genie_exposure_static_blocker, "
+    "refreshed_at = module.coverage_gate_check.refreshed_at, "
+    "fresh_until = module.coverage_gate_check.fresh_until, "
+    "problems = module.coverage_gate_check.problems, "
     "widening = local.genie_space_can_run_widening, "
     "missing = local.genie_space_missing_grants}))"
 )
+# modules/coverage_gate_check future_skew.
+FUTURE_SKEW = timedelta(minutes=5)
+
+
+def refresh_problem(state: dict, now: datetime) -> str:
+    """The gate module's refresh-time checks against this clock, or "" if fresh."""
+    try:
+        refreshed_at, fresh_until = (
+            datetime.fromisoformat(state[key].replace("Z", "+00:00")) for key in ("refreshed_at", "fresh_until"))
+        # A missing, malformed or future (beyond clock skew) refresh is not a live refresh.
+        if refreshed_at > now + FUTURE_SKEW:
+            return state["problems"]["unrefreshed"]
+    except (ValueError, TypeError, AttributeError):
+        return state["problems"]["unrefreshed"]
+    return state["problems"]["expired"] if fresh_until < now else ""
 
 
 def can_run_check(env_dir: Path, env_name: str, runner: Path, apply_flags: str) -> int:
@@ -314,7 +335,8 @@ def can_run_check(env_dir: Path, env_name: str, runner: Path, apply_flags: str) 
             raise ValueError(line)
         state = json.loads(base64.b64decode(line[1:-1], validate=True))
         groups = state["groups"]
-        blocker, widening, missing = state["blocker"], state["widening"], state["missing"]
+        blocker = state["blocker"] or refresh_problem(state, datetime.now(timezone.utc))
+        widening, missing = state["widening"], state["missing"]
     except (IndexError, ValueError, KeyError, TypeError) as exc:
         raise GateError(f"unexpected terraform console output: {exc}") from exc
     refused = {

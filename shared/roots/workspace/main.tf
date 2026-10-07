@@ -149,7 +149,9 @@ locals {
   data_access_dir        = "${var.env_dir}/data_access"
   _data_access_state     = fileexists("${local.data_access_dir}/terraform.tfstate") ? try(jsondecode(file("${local.data_access_dir}/terraform.tfstate")), null) : null
   _applied_coverage_gate = try(local._data_access_state.outputs.coverage_gate.value, null)
-  genie_exposure_blocker = (
+  # The blocker minus the gate's refresh-time checks, which need the plan time
+  # (unknown under terraform console); can-run-check applies those itself.
+  genie_exposure_static_blocker = (
     local._data_access_state == null ? "the data_access layer has no readable state (${local.data_access_dir}/terraform.tfstate)" :
     local._applied_coverage_gate == null ? "the data_access state predates the coverage gate; re-apply the data_access layer" :
     # Legacy state from before business_access_enabled was retired: an apply
@@ -158,9 +160,10 @@ locals {
     try(local._applied_coverage_gate.status, "") != "pass" ? "the data_access layer was last applied without a passing coverage gate" :
     try(local._applied_coverage_gate.table_grant_count, 0) < 1 ? "the data_access layer has no business table grants in place" :
     try(local._applied_coverage_gate.max_age, null) == null ? "the data_access state predates the coverage-gate max age; re-apply the data_access layer" :
-    module.coverage_gate_check.status == "stale" ? "the data_access config changed after its last gated apply" :
-    module.coverage_gate_check.problem
+    module.coverage_gate_check.static_status == "stale" ? "the data_access config changed after its last gated apply" :
+    module.coverage_gate_check.static_problem
   )
+  genie_exposure_blocker = local.genie_exposure_static_blocker != "" ? local.genie_exposure_static_blocker : module.coverage_gate_check.problem
 
   # What CAN_RUN the last apply left in place, per space, from this layer's
   # own state (the layer runner's local backend): the groups recorded in the
