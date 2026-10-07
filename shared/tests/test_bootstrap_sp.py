@@ -52,11 +52,12 @@ def _fake(*, existing=False, existing_secrets=True, roles=()):
         workspace_id=123, metastore_id="meta-1"
     )
     workspace.metastores.get.return_value = MetastoreInfo(
-        metastore_id="meta-1", owner="metastore-owner@example.com"
+        metastore_id="meta-1", owner="caller@example.com"
     )
     workspace.catalogs.get.return_value = CatalogInfo(owner="caller@example.com")
     workspace.current_user.me.return_value = User(
-        user_name="caller@example.com", display_name="Caller", groups=[]
+        user_name="caller@example.com", display_name="Caller",
+        groups=[ComplexValue(display="admins")],
     )
     workspace.grants.get_effective.return_value = SimpleNamespace(privilege_assignments=[])
     workspace.api_client.do.return_value = {"id": "abcdef1234567890"}
@@ -82,6 +83,12 @@ def _preflight(workspace):
     workspace_factory = MagicMock(return_value=workspace)
     _preflight_target_catalog(
         _cfg(target_catalog="existing_catalog"), account, workspace_factory
+    )
+
+
+def _not_metastore_owner(workspace):
+    workspace.metastores.get.return_value = MetastoreInfo(
+        metastore_id="meta-1", owner="metastore-owner@example.com"
     )
 
 
@@ -214,6 +221,10 @@ def test_preflight_workspace_admin_owner_requires_admins_group_membership():
     workspace.catalogs.get.return_value = CatalogInfo(
         owner="_workspace_admins_existing_catalog_123"
     )
+    workspace.current_user.me.return_value = User(
+        user_name="caller@example.com", groups=[]
+    )
+    _not_metastore_owner(workspace)
 
     with pytest.raises(RuntimeError, match="caller 'caller@example.com'.*catalog owner"):
         _preflight(workspace)
@@ -227,6 +238,7 @@ def test_preflight_display_name_admins_does_not_grant_workspace_admin_authority(
     workspace.current_user.me.return_value = User(
         user_name="caller@example.com", display_name="Admins", groups=[]
     )
+    _not_metastore_owner(workspace)
 
     with pytest.raises(RuntimeError, match="caller 'caller@example.com'.*catalog owner"):
         _preflight(workspace)
@@ -241,6 +253,7 @@ def test_preflight_workspace_admin_group_for_another_workspace_does_not_own_cata
         user_name="caller@example.com",
         groups=[ComplexValue(display="admins")],
     )
+    _not_metastore_owner(workspace)
 
     with pytest.raises(RuntimeError, match="caller 'caller@example.com'.*catalog owner"):
         _preflight(workspace)
@@ -253,7 +266,7 @@ def test_preflight_metastore_get_permission_error_falls_through_to_manage():
 
     with pytest.raises(
         RuntimeError,
-        match=r"metastore owner \(<unavailable>\).*lacks MANAGE",
+        match=r"metastore owner is '<unavailable>'.*lacks effective MANAGE",
     ):
         _preflight(workspace)
 
@@ -275,7 +288,7 @@ def test_preflight_missing_metastore_id_skips_metastore_lookup():
         workspace_id=123, metastore_id=None
     )
 
-    with pytest.raises(RuntimeError, match=r"metastore owner \(<unavailable>\)"):
+    with pytest.raises(RuntimeError, match=r"no metastore is assigned"):
         _preflight(workspace)
 
     workspace.metastores.get.assert_not_called()
@@ -284,6 +297,7 @@ def test_preflight_missing_metastore_id_skips_metastore_lookup():
 def test_preflight_non_owner_with_effective_manage_passes():
     _account, workspace, _workspace_factory, _factory = _fake()
     workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    _not_metastore_owner(workspace)
     workspace.grants.get_effective.return_value = SimpleNamespace(
         privilege_assignments=[SimpleNamespace(
             privileges=[SimpleNamespace(privilege="MANAGE")]
@@ -302,6 +316,7 @@ def test_preflight_non_owner_with_effective_manage_passes():
 def test_preflight_non_owner_without_manage_fails():
     _account, workspace, _workspace_factory, _factory = _fake()
     workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    _not_metastore_owner(workspace)
 
     with pytest.raises(RuntimeError, match="preflight failed.*catalog owner"):
         _preflight(workspace)
@@ -325,12 +340,19 @@ def test_preflight_owner_match_is_case_insensitive():
     workspace.grants.get_effective.assert_not_called()
 
 
-def test_dry_run_makes_no_client_calls():
-    factory = MagicMock()
+def test_dry_run_runs_read_only_preflight_and_makes_no_writes():
+    account, workspace, workspace_factory, factory = _fake()
     output = []
     assert bootstrap(_cfg(dry_run=True), client_factory=factory, emit=output.append) == 0
-    factory.assert_not_called()
-    assert output[-1] == "DRY RUN: no API calls were made."
+    workspace_factory.assert_called_once_with("https://dbc.example.com")
+    workspace.api_client.do.assert_called_once_with(
+        "GET", "/api/2.0/serving-endpoints/custom-model"
+    )
+    account.service_principals.create.assert_not_called()
+    account.service_principal_secrets.create.assert_not_called()
+    workspace.grants.update.assert_not_called()
+    assert any("model access CAN_QUERY" in line for line in output)
+    assert output[-1] == "DRY RUN: read-only preflight passed; no changes were made."
 
 
 def test_declining_confirmation_makes_no_client_calls():
@@ -353,7 +375,38 @@ def test_target_catalog_flows_from_parser_to_config():
     cfg = _config_from_args(args)
 
     assert cfg.workspace_ids == (123, 456)
-    assert cfg.target_catalog == "existing_catalog"
+    assert cfg.target_catalogs == ("existing_catalog", "existing_catalog")
+
+
+def test_per_workspace_catalogs_align_with_workspace_ids():
+    args = parser().parse_args([
+        "--account-id", "acct", "--workspace-id", "123,456",
+        "--target-catalog", "dev_cat,prod_cat",
+    ])
+    cfg = _config_from_args(args)
+    assert cfg.target_catalogs == ("dev_cat", "prod_cat")
+    output = []
+    _plan(cfg, output.append)
+    assert any("workspace 123" in line and "dev_cat" in line for line in output)
+    assert any("workspace 456" in line and "prod_cat" in line for line in output)
+
+
+def test_bad_target_catalog_count_exits_cleanly(capsys):
+    result = main([
+        "--account-id", "acct", "--workspace-id", "123,456,789",
+        "--target-catalog", "dev_cat,prod_cat", "--dry-run",
+    ])
+    assert result == 2
+    assert "2 catalog(s) for 3 workspace ID(s)" in capsys.readouterr().err
+
+
+def test_dry_run_falls_back_offline_only_when_credentials_are_absent():
+    output = []
+    factory = MagicMock(side_effect=ValueError(
+        "default auth: cannot configure default credentials"
+    ))
+    assert bootstrap(_cfg(dry_run=True), client_factory=factory, emit=output.append) == 0
+    assert output[-1].startswith("DRY RUN OFFLINE: credentials are absent")
 
 
 def test_workspace_profile_flows_from_parser_to_config():
@@ -744,6 +797,7 @@ def test_target_catalog_grants_brownfield_privileges():
 def test_target_catalog_preflight_fails_before_sp_or_secret_creation():
     account, workspace, _workspace_factory, factory = _fake()
     workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    _not_metastore_owner(workspace)
 
     with pytest.raises(RuntimeError, match="preflight failed.*catalog owner"):
         bootstrap(
@@ -756,6 +810,25 @@ def test_target_catalog_preflight_fails_before_sp_or_secret_creation():
     account.service_principals.create.assert_not_called()
     account.service_principal_secrets.create.assert_not_called()
     account.workspace_assignment.update.assert_not_called()
+
+
+def test_metastore_preflight_failure_happens_before_every_write():
+    account, workspace, _workspace_factory, factory = _fake()
+    _not_metastore_owner(workspace)
+    workspace.grants.get_effective.return_value = SimpleNamespace(
+        privilege_assignments=[]
+    )
+
+    with pytest.raises(RuntimeError, match=r"cannot grant CREATE CATALOG.*Nothing was changed"):
+        bootstrap(_cfg(), client_factory=factory, emit=MagicMock())
+
+    account.service_principals.list.assert_not_called()
+    account.service_principals.create.assert_not_called()
+    account.service_principal_secrets.create.assert_not_called()
+    account.api_client.do.assert_not_called()
+    account.access_control.update_rule_set.assert_not_called()
+    account.workspace_assignment.update.assert_not_called()
+    workspace.grants.update.assert_not_called()
 
 
 def test_missing_workspace_login_fails_before_sp_or_secret_creation():
@@ -847,6 +920,7 @@ def test_preflight_authority_error_includes_cause():
 def test_effective_grants_permission_denied_is_authority_failure():
     _account, workspace, _workspace_factory, _factory = _fake()
     workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    _not_metastore_owner(workspace)
     workspace.grants.get_effective.side_effect = PermissionDenied("cannot inspect grants")
 
     with pytest.raises(
@@ -890,7 +964,9 @@ def test_target_catalog_grant_fails_loudly_when_caller_lacks_authority():
             emit=MagicMock(),
         )
 
-    workspace.api_client.do.assert_not_called()
+    workspace.api_client.do.assert_called_once_with(
+        "GET", "/api/2.0/serving-endpoints/custom-model"
+    )
 
 
 def test_existing_sp_and_grants_are_not_duplicated():
