@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -116,10 +117,7 @@ def _gate_file(env_dir):
 
 def _state(env_dir, tables):
     auth = cg._load_tfvars(env_dir / "data_access" / "auth.auto.tfvars")
-    binding = cg.hashlib.sha256(json.dumps({
-        "workspace_host": str(auth.get("databricks_workspace_host", "")).strip().rstrip("/").lower(),
-        "workspace_id": str(auth.get("databricks_workspace_id", "")).strip(),
-    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    binding = cg.deployment_binding(auth)
     (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps({
         "version": 4,
         "outputs": {"coverage_gate": {
@@ -204,6 +202,14 @@ def test_no_state_means_nothing_is_granted(env_dir):
 def test_granted_tables_come_from_table_access_instances(env_dir):
     _state(env_dir, [TABLE, "Cat.Sch.Orders"])
     assert cg.granted_tables(env_dir / "data_access") == {TABLE, "cat.sch.orders"}
+
+
+def test_deployment_binding_matches_terraform_jsonencode_golden_vector():
+    # Produced by Terraform 1.11.4 from roots/data_access's exact expression.
+    assert cg.deployment_binding({
+        "databricks_workspace_host": " HTTPS://EXAMPLE.COM/<&>// ",
+        "databricks_workspace_id": " 123 ",
+    }) == "af6da7a8afa9328108d1c0ff9042a2e7e40e2d42b9cc1524db79f7b3db9a989a"
 
 
 def test_granted_tables_excludes_tainted_deposed_and_foreign_binding(env_dir):
@@ -334,6 +340,48 @@ def test_validator_timeout_records_failed_gate(env_dir, stub_runner, tmp_path, m
     gate = json.loads(_gate_file(env_dir).read_text())
     assert gate["status"] == "fail"
     assert "coverage validator timed out" in gate["reason"]
+
+
+@pytest.mark.parametrize("invalid", ["nan", "inf", "-inf", "0", "-1", "not-a-number"])
+def test_bounded_runner_rejects_non_finite_and_non_positive_timeouts(tmp_path, monkeypatch, invalid):
+    marker = tmp_path / "ran"
+    monkeypatch.setattr(cg, "SUBPROCESS_TIMEOUT", invalid)
+    with pytest.raises(cg.GateError, match="must be a positive number"):
+        cg._run_bounded(["touch", str(marker)], label="test command")
+    assert not marker.exists()
+
+
+def test_sigterm_kills_bounded_runner_process_group(tmp_path):
+    child_pid = tmp_path / "child.pid"
+    runner = tmp_path / "slow-runner"
+    runner.write_text(
+        "#!/bin/sh\n"
+        f"sleep 30 & echo $! > {child_pid!s}\n"
+        "wait\n"
+    )
+    runner.chmod(0o755)
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "from scripts import coverage_gate as cg\n"
+        f"cg._run_bounded([{str(runner)!r}], label='TERM test')\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, str(driver)],
+        env={**os.environ, "PYTHONPATH": str(SHARED)},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    for _ in range(200):
+        if child_pid.exists():
+            break
+        time.sleep(0.01)
+    assert child_pid.exists()
+    process.terminate()
+    stdout, stderr = process.communicate(timeout=5)
+    assert process.returncode == 143, stdout + stderr
+    pid = int(child_pid.read_text())
+    status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], text=True,
+                            capture_output=True).stdout.strip()
+    assert not status or status.startswith("Z")
 
 
 def test_pass_requires_a_live_refresh(env_dir, stub_runner, stub_validator):

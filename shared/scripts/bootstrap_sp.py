@@ -221,22 +221,35 @@ def _workspace_host(account: Any, workspace_id: int) -> str:
         deployment_name = _value(workspace, "deployment_name")
         account_host = _normalize_host(_value(_value(account, "config"), "host"))
         cloud = str(_value(workspace, "cloud") or "").lower()
-        is_azure = "azure" in cloud or account_host.endswith("accounts.azuredatabricks.net")
+        azure_suffix = ""
+        if (
+            "azure" in cloud
+            or "azuredatabricks" in account_host
+            or account_host.endswith("accounts.databricks.azure.cn")
+            or account_host.endswith("accounts.azure.cn")
+        ):
+            azure_suffix = (
+                "azuredatabricks.us" if account_host.endswith("azuredatabricks.us")
+                else "databricks.azure.cn" if account_host.endswith("azure.cn")
+                else "azuredatabricks.net"
+            )
         if deployment_name:
             deployment_name = str(deployment_name)
             if (
                 ".azuredatabricks.net" in deployment_name
+                or ".azuredatabricks.us" in deployment_name
+                or ".databricks.azure.cn" in deployment_name
                 or ".cloud.databricks.com" in deployment_name
             ):
                 host = deployment_name
-            elif is_azure:
-                host = f"{deployment_name}.azuredatabricks.net"
+            elif azure_suffix:
+                host = f"{deployment_name}.{azure_suffix}"
             else:
                 host = f"{deployment_name}.cloud.databricks.com"
-        elif is_azure:
+        elif azure_suffix:
             raise ValueError(
                 f"workspace {workspace_id} metadata has no workspace_url or deployment_name; "
-                "an explicit Azure workspace host is required"
+                "ensure the account Workspace API returns one of those fields before running bootstrap"
             )
         else:
             host = f"dbc-{workspace_id}.cloud.databricks.com"

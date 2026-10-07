@@ -42,6 +42,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 import signal
 import shlex
@@ -63,7 +64,9 @@ ACL_RESOURCES = ("genie_space_acls", "genie_space_acls_created")
 REFRESH_RELPATH = Path("generated") / ".live_refresh.json"
 REFRESH_VERSION = 1
 GATE_VERSION = 1
-SUBPROCESS_TIMEOUT = int(os.environ.get("COVERAGE_GATE_TIMEOUT_SECONDS", "300"))
+# Longer than terraform_layer.sh's default 600s init-lock wait, so lock
+# contention reports the lock-specific timeout rather than a console timeout.
+SUBPROCESS_TIMEOUT = os.environ.get("COVERAGE_GATE_TIMEOUT_SECONDS", "660")
 TABLE_GRANT = ("module.data_access", "databricks_grant", "table_access")
 INPUTS_EXPRESSION = "base64encode(jsonencode(module.data_access.coverage_gate_inputs))"
 
@@ -78,20 +81,49 @@ class CommandTimeout(GateError):
 
 def _run_bounded(command: list[str], *, label: str, **kwargs) -> subprocess.CompletedProcess:
     """Run a child in its own process group and kill the whole group on timeout."""
+    try:
+        timeout = float(SUBPROCESS_TIMEOUT)
+        if timeout <= 0 or not math.isfinite(timeout):
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise GateError(
+            "COVERAGE_GATE_TIMEOUT_SECONDS must be a positive number "
+            f"(got {SUBPROCESS_TIMEOUT!r})"
+        ) from exc
     input_value = kwargs.pop("input", None)
     if input_value is not None:
         kwargs["stdin"] = subprocess.PIPE
-    process = subprocess.Popen(command, start_new_session=True, **kwargs)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def _raise_on_sigterm(_signum, _frame):
+        raise SystemExit(143)
+
+    signal.signal(signal.SIGTERM, _raise_on_sigterm)
     try:
-        stdout, stderr = process.communicate(input=input_value, timeout=SUBPROCESS_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        stdout, stderr = process.communicate()
-        raise CommandTimeout(
-            f"{label} timed out after {SUBPROCESS_TIMEOUT}s; its process group was killed "
-            "and the coverage result was invalidated"
-        )
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        try:
+            process = subprocess.Popen(command, start_new_session=True, **kwargs)
+            stdout, stderr = process.communicate(input=input_value, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+            raise CommandTimeout(
+                f"{label} timed out after {timeout:g}s; its process group was killed "
+                "and the coverage result was invalidated"
+            )
+        except BaseException:
+            if "process" in locals():
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            raise
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def _load_tfvars(path: Path) -> dict:
@@ -166,6 +198,26 @@ def needs_derive(env_dir: Path, apply_flags: str) -> tuple[str, str | None]:
 
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+
+
+def deployment_binding(source: dict | Path) -> str:
+    """Match roots/data_access's binding from tfvars or already-loaded vars."""
+    if isinstance(source, Path):
+        variables = {}
+        for path in (source / "auth.auto.tfvars", source / "env.auto.tfvars"):
+            variables.update(_load_tfvars(path))
+    else:
+        variables = source
+    host = str(variables.get("databricks_workspace_host", "")).strip().lower()
+    if host.endswith("/"):
+        host = host[:-1]
+    binding_json = json.dumps({
+        "workspace_host": host,
+        "workspace_id": str(variables.get("databricks_workspace_id", "")).strip(),
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    # Terraform jsonencode escapes these HTML-sensitive characters.
+    binding_json = binding_json.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return hashlib.sha256(binding_json.encode()).hexdigest()
 
 
 def tag_assignments_digest(assignments: list) -> str:
@@ -246,17 +298,6 @@ def query_inputs(runner: Path, env_name: str, layer_dir: Path, flags: list[str])
     except (IndexError, ValueError, KeyError, TypeError) as exc:
         raise GateError(f"unexpected terraform console output: {exc}") from exc
     return inputs
-
-
-def deployment_binding(layer_dir: Path) -> str:
-    """roots/data_access local.deployment_binding, from the layer's tfvars."""
-    variables = {}
-    for path in (layer_dir / "auth.auto.tfvars", layer_dir / "env.auto.tfvars"):
-        variables.update(_load_tfvars(path))
-    return hashlib.sha256(json.dumps({
-        "workspace_host": str(variables.get("databricks_workspace_host", "")).strip().rstrip("/").lower(),
-        "workspace_id": str(variables.get("databricks_workspace_id", "")).strip(),
-    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _is_for_this_deployment(state: dict, layer_dir: Path) -> bool:

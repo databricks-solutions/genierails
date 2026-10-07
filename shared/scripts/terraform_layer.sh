@@ -74,11 +74,16 @@ INIT_LOCK="$ROOT_DIR/.terraform-init.lock.d"
 INIT_LOCK_OWNER="$INIT_LOCK/owner"
 INIT_LOCK_HOST="$(hostname)"
 INIT_LOCK_TIMEOUT_SECONDS="${INIT_LOCK_TIMEOUT_SECONDS:-600}"
+INIT_LOCK_ACQUIRED=0
 case "$INIT_LOCK_TIMEOUT_SECONDS" in
   ''|*[!0-9]*) echo "INIT_LOCK_TIMEOUT_SECONDS must be a non-negative integer" >&2; exit 2 ;;
 esac
 _unlock_init() {
-  if [ -f "$INIT_LOCK_OWNER" ]; then
+  if [ "$INIT_LOCK_ACQUIRED" = "1" ]; then
+    rm -f "$INIT_LOCK_OWNER"
+    rmdir "$INIT_LOCK" 2>/dev/null || true
+    INIT_LOCK_ACQUIRED=0
+  elif [ -f "$INIT_LOCK_OWNER" ]; then
     owner_pid="$(sed -n 's/^pid=//p' "$INIT_LOCK_OWNER" 2>/dev/null || true)"
     owner_host="$(sed -n 's/^host=//p' "$INIT_LOCK_OWNER" 2>/dev/null || true)"
     if [ "$owner_pid" = "$$" ] && [ "$owner_host" = "$INIT_LOCK_HOST" ]; then
@@ -87,19 +92,40 @@ _unlock_init() {
     fi
   fi
 }
-_lock_interrupted() { echo "Interrupted while waiting for Terraform init lock $INIT_LOCK" >&2; exit "$1"; }
+_lock_interrupted() {
+  if [ "$INIT_LOCK_ACQUIRED" = "1" ]; then
+    echo "Interrupted while holding Terraform init lock $INIT_LOCK" >&2
+  else
+    echo "Interrupted while waiting for Terraform init lock $INIT_LOCK" >&2
+  fi
+  exit "$1"
+}
 trap '_unlock_init' EXIT
 trap '_lock_interrupted 130' INT
 trap '_lock_interrupted 143' TERM
 lock_wait_started="$(date +%s)"
-while ! mkdir "$INIT_LOCK" 2>/dev/null; do
+while :; do
+  if mkdir "$INIT_LOCK" 2>/dev/null; then
+    INIT_LOCK_ACQUIRED=1
+    break
+  fi
   if [ -f "$INIT_LOCK_OWNER" ]; then
     owner_pid="$(sed -n 's/^pid=//p' "$INIT_LOCK_OWNER" 2>/dev/null || true)"
     owner_host="$(sed -n 's/^host=//p' "$INIT_LOCK_OWNER" 2>/dev/null || true)"
-    if [ "$owner_host" = "$INIT_LOCK_HOST" ] && [ -n "$owner_pid" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
-      echo "+ reclaiming stale Terraform init lock $INIT_LOCK (dead local PID $owner_pid)" >&2
-      rm -f "$INIT_LOCK_OWNER"
-      rmdir "$INIT_LOCK" 2>/dev/null || true
+    if [ "$owner_host" = "$INIT_LOCK_HOST" ] && [ -n "$owner_pid" ] \
+      && ! kill -0 "$owner_pid" 2>/dev/null && ! ps -p "$owner_pid" >/dev/null 2>&1; then
+      stale_owner="$INIT_LOCK/owner.reclaim.$$"
+      if mv "$INIT_LOCK_OWNER" "$stale_owner" 2>/dev/null; then
+        claimed_pid="$(sed -n 's/^pid=//p' "$stale_owner" 2>/dev/null || true)"
+        claimed_host="$(sed -n 's/^host=//p' "$stale_owner" 2>/dev/null || true)"
+        if [ "$claimed_pid" = "$owner_pid" ] && [ "$claimed_host" = "$owner_host" ]; then
+          echo "+ reclaiming stale Terraform init lock $INIT_LOCK (dead local PID $owner_pid)" >&2
+          rm -f "$stale_owner"
+          rmdir "$INIT_LOCK" 2>/dev/null || true
+        else
+          mv "$stale_owner" "$INIT_LOCK_OWNER" 2>/dev/null || true
+        fi
+      fi
       continue
     fi
   fi
