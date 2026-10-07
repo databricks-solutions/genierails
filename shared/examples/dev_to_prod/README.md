@@ -210,14 +210,14 @@ These commands are read-only apart from refreshing generated local files: they d
 
 **Done when —** `coverage-gate` exits PASS. `make release` repeats this check and then runs `audit-rulebook` against the promoted rules before it can apply new or wider access.
 
-**If the gate fails here, or `audit-rulebook` reports drift during Phase 5** — prod surfaced a sensitive tag your promoted rules don't cover (a type the classifier found only in prod, or a rule dropped in promotion). This is a **rule change — made in dev, never hand-edited in prod**. Loop back:
+**If the check fails here, or `audit-rulebook` reports drift during Phase 5** — prod surfaced a sensitive tag your promoted rules don't cover (a type the classifier found only in prod, or a rule dropped in promotion). This is a **rule change — made in dev, never hand-edited in prod**. Loop back:
 
 1. **Scaffold the missing mappings** — `make scaffold-treatments ENV=prod` adds a **safe default** (full redaction, marked `REVIEW`) for each tag prod surfaced, so you don't hand-edit anything. Then **review each** — keep the redaction, or set a type-appropriate mask. This changes the shared *rulebook* (not prod's live state), so you validate it in dev and re-promote below.
 2. **Re-validate in dev:** `make generate ENV=dev` (reuses `access_tier_groups`; keeps reviewed rules; adds rules only for uncovered columns) → `make coverage-gate ENV=dev`.
 3. **Re-promote:** `make promote …` (carries the updated rules to prod — same command as [Phase 2](#phase-2--prod-set-up-and-promote-rules)).
 4. **Re-run the checks above**, then continue to Phase 5.
 
-Repeat until the gate passes and drift is clean. These checks don't apply anything, so prod access doesn't change while you loop.
+Repeat until the check passes and drift is clean. These checks don't apply anything, so prod access doesn't change while you loop.
 
 </details>
 
@@ -292,6 +292,6 @@ A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog gr
 Kept out of this walkthrough so it stays scannable — all in **[REFERENCE.md](REFERENCE.md)**:
 
 - **[Command reference](REFERENCE.md#command-reference)** — every `make` target in one table.
-- **[How it works (under the hood)](REFERENCE.md#how-it-works-under-the-hood)** — how access follows the coverage gate, the three governance layers, and one-mask-per-column, explained.
-- **[Glossary](REFERENCE.md#glossary)** — every term used here (`gr_treatment`, `class.*`, coverage gate, ABAC, …).
+- **[How it works (under the hood)](REFERENCE.md#how-it-works-under-the-hood)** — how access follows the coverage check, the three governance layers, and one-mask-per-column, explained.
+- **[Glossary](REFERENCE.md#glossary)** — every term used here (`gr_treatment`, `class.*`, coverage check, ABAC, …).
 </details>

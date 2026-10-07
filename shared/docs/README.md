@@ -1,6 +1,6 @@
 # GenieRails Documentation
 
-New here? Start with the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/)** — the canonical end-to-end guide (native classification → coverage gate → safe dev→prod promotion). The full reference is grouped below.
+New here? Start with the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/)** — the canonical end-to-end guide (native classification → coverage check → safe dev→prod promotion). The full reference is grouped below.
 
 ### Guides
 - **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/)** — the canonical end-to-end walkthrough.

@@ -46,7 +46,7 @@ databricks_workspace_host = "https://adb-1234567890.12.azuredatabricks.net"
 
 ## Step 3 — Follow the dev-to-prod walkthrough
 
-The **[dev-to-prod walkthrough](../shared/examples/dev_to_prod/)** is the canonical end-to-end walkthrough: Unity Catalog classifies your data, GenieRails derives one protection per classified column, a coverage gate fails the build if any classified sensitive column is unprotected, and users are granted access to the prod agent only after prod's own coverage check passes. No tables or agent of your own? It ships an optional sample-environment script that creates everything, so you can run the whole flow to see it in action.
+The **[dev-to-prod walkthrough](../shared/examples/dev_to_prod/)** is the canonical end-to-end walkthrough: Unity Catalog classifies your data, GenieRails derives one protection per classified column, a coverage check fails the build if any classified sensitive column is unprotected, and users are granted access to the prod agent only after prod's own coverage check passes. No tables or agent of your own? It ships an optional sample-environment script that creates everything, so you can run the whole flow to see it in action.
 
 Starting from a specific point? These entry guides feed into the dev-to-prod walkthrough:
 
@@ -60,7 +60,7 @@ Starting from a specific point? These entry guides feed into the dev-to-prod wal
 ## Documentation
 
 - [Azure Prerequisites](docs/azure-prerequisites.md) — Azure-specific resource setup, RBAC roles, storage accounts
-- [Dev-to-Prod Walkthrough](../shared/examples/dev_to_prod/) — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion)
+- [Dev-to-Prod Walkthrough](../shared/examples/dev_to_prod/) — the canonical end-to-end walkthrough (native classification → coverage check → safe dev→prod promotion)
 - [Import a Genie Agent from UI into Code](../shared/docs/import-genie-agent-from-ui.md) — import your existing agent, then follow the dev-to-prod walkthrough
 - [Quickstart](../shared/docs/quickstart.md) — create a Genie agent from scratch
 - [Playbook](../shared/docs/playbook.md) — after first deployment: add spaces, promote, overlays, advanced scenarios

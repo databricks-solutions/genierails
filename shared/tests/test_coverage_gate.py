@@ -158,7 +158,7 @@ def test_coverage_gate_cli_warns_untagged_columns_from_fetched_ddl(tmp_path):
     )
     assert "fail-open" in completed.stdout
     assert "cat.sch.people.ssn" in completed.stdout
-    assert "COVERAGE GATE —" not in completed.stdout.replace("COVERAGE GATE (non-blocking)", "")
+    assert "COVERAGE CHECK —" not in completed.stdout.replace("COVERAGE CHECK (non-blocking)", "")
 
 
 def test_coverage_gate_groups_unmapped_native_classification():
@@ -279,7 +279,7 @@ def test_already_granted_table_keeps_todays_warning():
     result = _gate(_PEOPLE_DDL, first=[])
     assert result.passed
     [warning] = result.warnings
-    assert "COVERAGE GATE (non-blocking)" in warning
+    assert "COVERAGE CHECK (non-blocking)" in warning
     assert "cat.sch.people.ssn" in warning
 
 

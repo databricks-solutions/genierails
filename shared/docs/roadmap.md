@@ -8,9 +8,9 @@ The native-classification governance model has since shipped and is the current 
 
 - **Native classification as the sensitivity source** — Unity Catalog `class.*` tags decide what's sensitive (no LLM guessing); fail-closed if unreadable.
 - **Deterministic treatment derivation** — one `gr_treatment` per column, so exactly one mask resolves.
-- **Blocking coverage gate** — `make coverage-gate` fails the release until every classified column is protected.
+- **Blocking coverage check** — `make coverage-gate` fails the release until every classified column is protected.
 - **Safe dev→prod promotion** — `make derive-assignments` re-derives prod facts from prod's own classification (no LLM re-generation), reusing the promoted rules.
-- **Coverage-gated exposure** — Terraform refuses new or wider business `SELECT` + Genie `CAN_RUN` without a recent passing coverage result, and masks are created before grants. The old `business_access_enabled` switch is deprecated and ignored.
+- **Coverage-checked exposure** — Terraform refuses new or wider business `SELECT` + Genie `CAN_RUN` without a recent passing coverage result, and masks are created before grants. The old `business_access_enabled` switch is deprecated and ignored.
 - **Consume-IdP groups by default** — GenieRails consumes IdP-synced groups (`manage_groups=false`) rather than inventing them.
 - **Effective-access verification** — `make verify-access` proves masking/row filters by querying as per-tier principals (item 5 below).
 - **Scheduled steady-state governance** and a **compliance evidence report**.

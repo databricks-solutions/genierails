@@ -67,16 +67,16 @@ make rehearse VERIFY_KEY_COLUMN=<key>   # apply (masks first; grants only if cov
 4. `make generate` fetches DDLs and native classification, then writes a draft into `envs/dev/generated/`
 5. You tune generated governance and semantic config; durable agent ACL intent remains in `env.auto.tfvars`
 6. `make coverage-gate` fails if any classified sensitive column has no protection
-7. `make rehearse` splits the generated draft into layered configs, applies all three layers (masks and policies before grants; business access only if the coverage gate passes), then runs `verify-access`
+7. `make rehearse` splits the generated draft into layered configs, applies all three layers (masks and policies before grants; business access only if the coverage check passes), then runs `verify-access`
 
 Generation remains fail-closed: after enabling classification, wait for native tags before
 running it. The explicit `--allow-llm-sensitivity` escape hatch is unchanged.
 
 Business exposure is fail-closed without a manual switch. Every apply re-reads live tags
-and runs the coverage gate first; Terraform refuses to plan new or wider business-group
+and runs the coverage check first; Terraform refuses to plan new or wider business-group
 table `SELECT` or Genie `CAN_RUN` unless a recent coverage result passed. A table's first
 grant is also blocked while it has a sensitive-looking column with no tag (wait for the
-scan, tag it, or list it in `coverage_acknowledged_columns`). Agent creation is not gated,
+scan, tag it, or list it in `coverage_acknowledged_columns`). Agent creation doesn't wait for the check,
 so administrators can finish and inspect an agent's configuration first.
 
 ## Multiple Genie agents and multiple catalogs

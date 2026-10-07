@@ -89,7 +89,7 @@ run "first_apply" {
   }
   assert {
     condition     = length(databricks_grant.table_access) == 1
-    error_message = "the gated apply must make the grant"
+    error_message = "the checked apply must make the grant"
   }
 }
 

@@ -18,7 +18,7 @@ By design, prod refresh rejects empty native results and unmapped `class.*` find
 
 ### Users can't query after apply / agent not runnable
 
-Check the **coverage gate**: business `SELECT` and Genie `CAN_RUN` are only granted when a recent coverage check has passed against live tags. Run `make coverage-gate` to see what is uncovered (or a sensitive-looking untagged column blocking first exposure), fix it, then re-run `make rehearse` (dev) or `make release ENV=prod`. `business_access_enabled` is deprecated and ignored; setting it does nothing.
+Check the **coverage check**: business `SELECT` and Genie `CAN_RUN` are only granted when a recent coverage check has passed against live tags. Run `make coverage-gate` to see what is uncovered (or a sensitive-looking untagged column blocking first exposure), fix it, then re-run `make rehearse` (dev) or `make release ENV=prod`. `business_access_enabled` is deprecated and ignored; setting it does nothing.
 
 ## Importing Existing Resources (Brownfield)
 

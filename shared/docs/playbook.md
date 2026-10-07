@@ -1,6 +1,6 @@
 # Playbook
 
-GenieRails puts Genie onboarding on rails: Unity Catalog's classifier decides what's sensitive, GenieRails derives one protection per column and proves coverage with a blocking gate, then promotes the rules safely to production. This playbook covers common tasks after your first deployment; for the full end-to-end flow, see the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)**.
+GenieRails puts Genie onboarding on rails: Unity Catalog's classifier decides what's sensitive, GenieRails derives one protection per column and proves coverage with a blocking check, then promotes the rules safely to production. This playbook covers common tasks after your first deployment; for the full end-to-end flow, see the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/README.md)**.
 
 ## Pick your starting point
 
@@ -9,7 +9,7 @@ GenieRails puts Genie onboarding on rails: Unity Catalog's classifier decides wh
 | **I already have a Genie agent** | An agent configured in the Databricks UI that needs governance and promotion to prod | [Import a Genie Agent from UI into Code](import-genie-agent-from-ui.md) |
 | **I'm starting from scratch** | Tables in Unity Catalog, no Genie agent yet | [Quickstart](quickstart.md) |
 
-> Both routes converge on the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)** — the canonical end-to-end walkthrough (native classification → coverage gate → safe dev→prod promotion).
+> Both routes converge on the **[dev-to-prod walkthrough](../examples/dev_to_prod/README.md)** — the canonical end-to-end walkthrough (native classification → coverage check → safe dev→prod promotion).
 
 ---
 
@@ -51,7 +51,7 @@ vi envs/prod/auth.auto.tfvars             # enter prod workspace credentials
 
 # prod re-derives its OWN facts — never re-run generate in prod
 make enable-classification ENV=prod       # or the Databricks UI (recommended); then wait for prod class.* tags
-make release ENV=prod VERIFY_KEY_COLUMN=<key>   # derive (no LLM) → validate → coverage gate → audit → apply → verify-access
+make release ENV=prod VERIFY_KEY_COLUMN=<key>   # derive (no LLM) → validate → coverage check → audit → apply → verify-access
 ```
 
 Promotion carries the reviewed **rules** (mapping, masks, policies, Genie config) — *not* dev's tag assignments. Prod establishes its own facts from its own classification scan, so dev data never decides what's protected in prod.
@@ -142,7 +142,7 @@ cd envs/dev && python3 "$SHARED_ROOT/scripts/audit_schema_drift.py" --mode all
 
 ## Advanced scenarios
 
-These cover less common deployment patterns. Most users won't need them on day one. **The commands below show the scenario-specific mechanics only** — each still runs through the dev-to-prod gates: consume your IdP groups (`--groups`, `manage_groups=false`), rehearse in dev, and in prod use `make release` (which re-derives with `derive-assignments`, not `generate`, and grants only when the coverage gate passes).
+These cover less common deployment patterns. Most users won't need them on day one. **The commands below show the scenario-specific mechanics only** — each still runs through the dev-to-prod checks: consume your IdP groups (`--groups`, `manage_groups=false`), rehearse in dev, and in prod use `make release` (which re-derives with `derive-assignments`, not `generate`, and grants only when the coverage check passes).
 
 ### ABAC governance only (no Genie agent)
 

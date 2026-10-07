@@ -205,7 +205,7 @@ def test_champion_dry_run_follows_the_readme_order(champion):
 def test_champion_tears_down_when_a_step_fails(champion, monkeypatch):
     fake, envs, _waits, teardown = champion
     monkeypatch.setattr(FakeMake, "_release",
-                        lambda self, args, env_dir: self._done(args, 2, "coverage-gate FAILED\n"))
+                        lambda self, args, env_dir: self._done(args, 2, "coverage check FAILED\n"))
     with pytest.raises(RuntimeError, match="make release ENV=prod"):
         rit.scenario_champion(envs / "dev" / "auth.auto.tfvars", "", keep_data=False)
     assert {"_try_destroy", "_try_destroy_account", "_delete_genie_space_via_api",

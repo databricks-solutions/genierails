@@ -15,7 +15,7 @@ Use this split of responsibilities:
 - CI workflow:
   - validate committed config **and run `make coverage-gate`** (block the build if any classified sensitive column has no covering mask)
   - for prod: enable/wait for native classification, then `make derive-assignments ENV=prod` (re-derive facts from prod's own tags — no LLM), then `make coverage-gate ENV=prod`
-  - run `make plan`, then on approved branches `make release ENV=prod` (re-derive → validate → coverage gate → rulebook audit → apply → verify-access, under a lock)
+  - run `make plan`, then on approved branches `make release ENV=prod` (re-derive → validate → coverage check → rulebook audit → apply → verify-access, under a lock)
   - the shipped `.github/workflows/ci.yml` only runs tests and validation; to deploy from CI, add your own deployment job that runs `make release ENV=prod`, and if you need a human approval before business users get access, attach a protected `environment:` (approval rule) to that job. There is no separate exposure switch
 
 This keeps LLM-driven generation and human review out of the automated deployment path, keeps the LLM out of prod entirely (prod re-derives deterministically), and makes coverage an explicit, enforced check rather than something you hope happened.
@@ -67,7 +67,7 @@ make validate ENV=dev
 make validate ENV=prod
 ```
 
-If the change includes fresh generated drafts that have not yet been split, also run the blocking coverage gate and generated-config validation — the coverage gate fails the PR if any classified sensitive column has no covering mask:
+If the change includes fresh generated drafts that have not yet been split, also run the blocking coverage check and generated-config validation — the coverage check fails the PR if any classified sensitive column has no covering mask:
 
 ```bash
 make coverage-gate ENV=dev
@@ -98,7 +98,7 @@ After approval, deploy. **For prod, re-derive facts from prod's own classificati
 make release ENV=prod VERIFY_KEY_COLUMN=<key>
 ```
 
-`make release` re-derives assignments from prod's own tags (no LLM), validates, runs the coverage gate and the rulebook audit, applies all layers in order (masks and policies before grants), then proves masking with `verify-access`. It never re-generates via the LLM. Terraform itself refuses new or wider business `SELECT` / Genie `CAN_RUN` without a recent passing coverage result, so no path can grant access past the gate. The shipped `.github/workflows/ci.yml` has no deployment job, so add one that runs this command; if you want a human approval before a deployment can add or widen access, give that job a protected `environment:`.
+`make release` re-derives assignments from prod's own tags (no LLM), validates, runs the coverage check and the rulebook audit, applies all layers in order (masks and policies before grants), then proves masking with `verify-access`. It never re-generates via the LLM. Terraform itself refuses new or wider business `SELECT` / Genie `CAN_RUN` without a recent passing coverage result, so no path can grant access past the gate. The shipped `.github/workflows/ci.yml` has no deployment job, so add one that runs this command; if you want a human approval before a deployment can add or widen access, give that job a protected `environment:`.
 
 ## Promotion in CI/CD
 
@@ -181,7 +181,7 @@ When drift is found, prefer letting native classification tag the new columns, t
 ## Notes and Gotchas
 
 - Avoid running `make generate` automatically in CI — and never in prod. Dev drafts locally with the LLM (reviewed, committed); prod re-derives facts with `make derive-assignments` (no LLM), so prod enforcement can't drift from the reviewed rules.
-- Every plan/apply (`make apply`, `plan`, `apply-governance`, `apply-genie`, and `release`) re-reads live UC state and runs the enforced coverage gate. Still keep `make coverage-gate` as a required PR check, so uncovered columns fail early on the generated config.
+- Every plan/apply (`make apply`, `plan`, `apply-governance`, `apply-genie`, and `release`) re-reads live UC state and runs the enforced coverage check. Still keep `make coverage-gate` as a required PR check, so uncovered columns fail early on the generated config.
 - `make apply ENV=<workspace>` also applies the shared account layer, so your CI user must be authorized for both account and workspace operations.
 - If you deploy multiple environments from the same repo, parameterize `ENV` and inject the matching workspace secrets per environment.
 - Destroy should usually be a separate manual workflow, for example `make destroy ENV=dev`, rather than part of the normal deployment pipeline.

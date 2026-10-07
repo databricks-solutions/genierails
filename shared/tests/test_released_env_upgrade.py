@@ -303,7 +303,7 @@ run "released_upgrade_plan_while_exposure_is_blocked" {
   command   = plan
 PROVIDERS_NULL
   variables {
-    genie_exposure_blocker       = "the data_access config changed after its last gated apply"
+    genie_exposure_blocker       = "the data_access config changed after its last checked apply"
     genie_space_can_run_widening = { sales = [], ops = [] }
     genie_space_missing_grants   = { sales = [], ops = [] }
   }

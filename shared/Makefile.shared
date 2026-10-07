@@ -179,7 +179,7 @@ _guard-genie-placeholder:
 	@$(_GENIE_PLACEHOLDER_GUARD)
 
 # business_access_enabled is deprecated and ignored (business access is granted
-# whenever the coverage gate allows it). One warning line per run, whether it
+# whenever the coverage check passes). One warning line per run, whether it
 # is set in env.auto.tfvars, in APPLY_FLAGS (-var), or as TF_VAR_; never fails.
 # The guard reads the caller's original APPLY_FLAGS: the outermost make sets
 # GENIERAILS_APPLY_FLAGS once and nested makes inherit it from the environment,
@@ -374,7 +374,7 @@ _derive-before-exposure:
 	if [ "$$refreshed" != 1 ]; then \
 		$(_COVERAGE_GATE) invalidate --env-dir "$(ENV_DIR)" || exit 1; \
 		if [ "$(TOLERATE_REFRESH_FAILURE)" != 1 ]; then exit 1; fi; \
-		echo "WARNING: the live refresh of tags/DDL failed; the coverage gate will fail closed, so only changes that keep or revoke access can apply." >&2; \
+		echo "WARNING: the live refresh of tags/DDL failed; the coverage check will fail closed, so only changes that keep or revoke access can apply." >&2; \
 		exit 0; \
 	fi; \
 	if [ "$(PROMOTE_AFTER)" = 1 ] && [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
@@ -455,11 +455,11 @@ release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, ap
 	fi; \
 	echo ""; \
 	echo "=== Release complete ($(ENV)) ==="; \
-	echo "  Business access: applied (granted only through the coverage gate)"; \
+	echo "  Business access: applied (granted only after the coverage check passed)"; \
 	echo "  Verification:  make verify-access ENV=$(ENV) passed"; \
 	echo "  Steady state:  make maintain ENV=$(ENV)"
 
-maintain: _guard-genie-placeholder ## Native-first governance refresh: audit-schema -> derive-assignments -> gate -> apply-governance -> audit-rulebook (never touches exposure or Genie)
+maintain: _guard-genie-placeholder ## Native-first governance refresh: audit-schema -> derive-assignments -> coverage check -> apply-governance -> audit-rulebook (never touches exposure or Genie)
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,maintain); \
 	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
@@ -755,7 +755,7 @@ apply-genie: _guarded-bootstrap _guard-workspace-target ## [BU team] Apply works
 		echo "=== Skipping split (no $(ENV_DIR)/generated/abac.auto.tfvars) ==="; \
 	fi; \
 	$(_COVERAGE_GATE) run --env-dir "$(ENV_DIR)" --env-name "$(ENV)" --runner "$(ROOT_RUNNER)" --apply-flags="$(APPLY_FLAGS)" $(if $(filter 1,$(VERBOSE)),--verbose,) \
-		|| echo "WARNING: the coverage gate did not pass; only CAN_RUN changes that keep, shrink or clear what is applied can proceed." >&2; \
+		|| echo "WARNING: the coverage check did not pass; only CAN_RUN changes that keep, shrink or clear what is applied can proceed." >&2; \
 	$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"
 
 destroy-governance: _bootstrap _guard-workspace-target ## [Governance team] Destroy data_access layer for the selected env (leaves workspace/Genie untouched)

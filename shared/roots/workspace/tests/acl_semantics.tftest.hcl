@@ -7,7 +7,7 @@ mock_provider "databricks" {
 mock_provider "null" {}
 
 # Non-empty CAN_RUN needs a data_access layer applied with a current passing
-# coverage gate (genie_exposure_gate.tftest.hcl); record one for these runs.
+# coverage check (genie_exposure_gate.tftest.hcl); record one for these runs.
 run "data_access_is_gated" {
   module {
     source = "../data_access/tests/file_writer"

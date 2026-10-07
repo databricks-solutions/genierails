@@ -43,7 +43,7 @@ Workspace layer    →  Workspace Assignment + Entitlements + Genie agents + ACL
 
 The workspace module (`modules/workspace/main.tf`) looks up groups by name — it never creates them. This means BU teams can reference the IdP-synced access-tier groups (provisioned via AIM, or SCIM where AIM isn't available) without any additional coordination. The IdP owns groups and membership; the governance team owns grants and ABAC, and consumes those groups by name.
 
-Catalog grants (`USE_CATALOG`, `USE_SCHEMA`, `SELECT`) are applied by the governance team's data_access layer. Note the **coverage gate**: business-user `SELECT` and Genie `CAN_RUN` are only granted once a recent coverage check has passed against live tags, so an agent becomes reachable only after coverage is proven — not the moment grants are declared.
+Catalog grants (`USE_CATALOG`, `USE_SCHEMA`, `SELECT`) are applied by the governance team's data_access layer. Note the **coverage check**: business-user `SELECT` and Genie `CAN_RUN` are only granted once a recent coverage check has passed against live tags, so an agent becomes reachable only after coverage is proven — not the moment grants are declared.
 
 ---
 
@@ -213,7 +213,7 @@ make promote SOURCE_ENV=bu_finance_dev DEST_ENV=bu_finance_prod \
 make apply-genie ENV=bu_finance_prod
 ```
 
-Governance runs separately for the prod environment — the promotion only carries `genie_space_configs`, not ABAC. Prod governance re-derives its own facts (`make derive-assignments ENV=<prod>`, no LLM), and must pass the coverage gate before new or wider business access can be applied (`make release ENV=<prod>` runs it).
+Governance runs separately for the prod environment — the promotion only carries `genie_space_configs`, not ABAC. Prod governance re-derives its own facts (`make derive-assignments ENV=<prod>`, no LLM), and must pass the coverage check before new or wider business access can be applied (`make release ENV=<prod>` runs it).
 
 ### Import an existing Genie agent to prod (no ABAC)
 
