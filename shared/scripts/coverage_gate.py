@@ -59,6 +59,8 @@ RUNNER = SHARED_ROOT / "scripts" / "terraform_layer.sh"
 VALIDATOR = SHARED_ROOT / "validate_abac.py"
 DATA_ACCESS_SUBDIR = "data_access"
 GATE_FILENAME = ".coverage_gate.json"
+CAN_RUN_FILENAME = ".can_run_check.json"
+ACL_RESOURCES = ("genie_space_acls", "genie_space_acls_created")
 REFRESH_RELPATH = Path("generated") / ".live_refresh.json"
 REFRESH_VERSION = 1
 GATE_VERSION = 1
@@ -198,8 +200,14 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
 
 
-def deployment_binding(variables: dict) -> str:
-    """Match roots/data_access's sha256(jsonencode(workspace host/ID))."""
+def deployment_binding(source: dict | Path) -> str:
+    """Match roots/data_access's binding from tfvars or already-loaded vars."""
+    if isinstance(source, Path):
+        variables = {}
+        for path in (source / "auth.auto.tfvars", source / "env.auto.tfvars"):
+            variables.update(_load_tfvars(path))
+    else:
+        variables = source
     host = str(variables.get("databricks_workspace_host", "")).strip().lower()
     if host.endswith("/"):
         host = host[:-1]
@@ -292,6 +300,13 @@ def query_inputs(runner: Path, env_name: str, layer_dir: Path, flags: list[str])
     return inputs
 
 
+def _is_for_this_deployment(state: dict, layer_dir: Path) -> bool:
+    """A data_access state recorded for this workspace (host and ID); a copied
+    or pre-binding state counts as nothing applied."""
+    applied = (state.get("outputs", {}).get("coverage_gate", {}) or {}).get("value") or {}
+    return str(applied.get("deployment_binding", "")) == deployment_binding(layer_dir)
+
+
 def granted_tables(layer_dir: Path) -> set[str]:
     """Tables the data_access state already grants business SELECT on.
 
@@ -304,12 +319,7 @@ def granted_tables(layer_dir: Path) -> set[str]:
         return set()
     try:
         state = json.loads(state_path.read_text())
-        variables = {}
-        for path in (layer_dir / "auth.auto.tfvars", layer_dir / "env.auto.tfvars"):
-            variables.update(_load_tfvars(path))
-        binding = deployment_binding(variables)
-        applied = state.get("outputs", {}).get("coverage_gate", {}).get("value") or {}
-        if str(applied.get("deployment_binding", "")) != binding:
+        if not _is_for_this_deployment(state, layer_dir):
             return set()
         tables = set()
         for resource in state.get("resources", []):
@@ -340,26 +350,29 @@ def write_result(path: Path, record: dict) -> None:
 
 
 def _failed(gate_path: Path, record: dict, inputs: dict, env_name: str, reason: str) -> int:
-    """Record a failed gate. Keeping or revoking SELECT may still proceed.
+    """Record a failed gate. Removing, keeping and withholding may still proceed.
 
-    Terraform's own needs_gate (coverage_gate_inputs) is false when every
-    planned grant already exists with unchanged protection, which is exactly
-    when the table_access precondition doesn't need a pass. Then the change
-    can only keep or revoke SELECT, so a failing gate (e.g. Unity Catalog
-    unreachable) must not stop it. Anything else, or an older Terraform
-    output without needs_gate, stops here.
+    Without a pass, Terraform leaves new grants out of the plan (withholds
+    them) and applies the rest: removals and grants already in place. Its
+    needs_gate (coverage_gate_inputs) is true only when a grant already in
+    place would be kept with weakened or unrecorded protection, which fails
+    the plan without a pass; then, or with an older Terraform output without
+    needs_gate, this stops here.
     """
     record.update(status="fail", reason=reason)
     write_result(gate_path, record)
     if inputs.get("needs_gate") is False:
+        new = inputs.get("new_grants") or []
+        withheld = (f" {len(new)} new SELECT grant(s) are withheld ({', '.join(new)}); make exits "
+                    "non-zero after the apply." if new else "")
         print(f"WARNING: coverage check FAILED for data_access:{env_name}: {reason}\n"
-              "  Proceeding only because this change adds no SELECT grant and changes no "
-              "protection (tags, policies, masks, DDL) of the grants already in place; it "
-              "can only keep or revoke access. Fix the check before opening anything.",
-              file=sys.stderr)
+              "  Proceeding because this change weakens the protection (tags, policies, masks) of no "
+              "grant already in place: removals and existing grants apply." + withheld +
+              " Fix the check before opening anything.", file=sys.stderr)
         return 0
     print(f"coverage check FAILED for data_access:{env_name}: {reason}\n"
-          "  Business SELECT stays closed. Fix the errors above, then re-run the same make command.",
+          "  This change keeps business SELECT with weaker (or unrecorded) protection, so nothing is "
+          "applied. Fix the errors above, then re-run the same make command.",
           file=sys.stderr)
     return 1
 
@@ -396,12 +409,14 @@ def refresh_problem(state: dict, now: datetime) -> str:
 
 
 def can_run_check(env_dir: Path, env_name: str, runner: Path, apply_flags: str) -> int:
-    """Mirror the workspace CAN_RUN precondition before make applies the layer.
+    """Mirror what the workspace layer withholds from CAN_RUN before make applies it.
 
     Asks Terraform (terraform console on the workspace root) which agents'
     ACLs add CAN_RUN groups beyond what the last apply left in place. While
-    exposure is blocked, those are refused here; keeping, shrinking or
-    clearing ACLs proceeds, so revocation never waits on the gate.
+    exposure is blocked, Terraform withholds those groups and this says so;
+    keeping, shrinking or clearing ACLs (and every other agent) proceeds, so
+    revocation never waits on the gate. Records the desired groups for
+    `withheld`.
     """
     try:
         result = _run_bounded(
@@ -426,18 +441,23 @@ def can_run_check(env_dir: Path, env_name: str, runner: Path, apply_flags: str) 
         widening, missing = state["widening"], state["missing"]
     except (IndexError, ValueError, KeyError, TypeError) as exc:
         raise GateError(f"unexpected terraform console output: {exc}") from exc
-    refused = {
+    # What the config asks for; `withheld` compares it with the state after
+    # the apply.
+    write_result(env_dir / CAN_RUN_FILENAME, {"version": 1, "desired": groups})
+    # Terraform (modules/workspace) leaves these groups out of the ACLs and
+    # applies everything else.
+    withheld = {
         key: widening.get(key, ["unknown"])
         for key, csv in groups.items()
         if csv and widening.get(key, ["unknown"]) and (blocker or missing.get(key, ["unknown"]))
     }
-    if refused:
+    if withheld:
         reason = blocker or "the data_access state lacks the SELECT grants those groups need"
-        details = "; ".join(f"{key}: +{', '.join(added)}" for key, added in sorted(refused.items()))
-        print(f"Genie CAN_RUN blocked for workspace:{env_name}: these ACLs add groups ({details}) "
-              f"while {reason}.\n  Removing or keeping CAN_RUN would apply; fix the coverage check "
-              "(make apply / make apply-governance) before opening it.", file=sys.stderr)
-        return 1
+        details = "; ".join(f"{key}: +{', '.join(added)}" for key, added in sorted(withheld.items()))
+        print(f"WARNING: Genie CAN_RUN withheld for workspace:{env_name}: these groups wait ({details}) "
+              f"while {reason}.\n  Everything else in this change (keeping, shrinking or clearing "
+              "CAN_RUN, other agents) applies, and make exits non-zero after the apply. Fix the "
+              "coverage check (make apply / make apply-governance) to open them.", file=sys.stderr)
     if blocker:
         # What this apply removes, from the CAN_RUN the last apply left in place.
         try:
@@ -486,6 +506,9 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "first_exposure_tables": first,
         "granted_tables": sorted(granted),
+        # What the config grants; `withheld` compares it with the state after
+        # the apply.
+        "grant_keys": inputs.get("grant_keys"),
     }
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
         json.dump({
@@ -531,6 +554,96 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
     return 0
 
 
+def _state(path: Path) -> dict | None:
+    """A layer's local state, or None if missing or unreadable."""
+    try:
+        state = json.loads(path.read_text())
+        return state if isinstance(state, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _current_instances(state: dict | None, module: str, rtype: str, names: tuple[str, ...]) -> dict:
+    """index_key -> attributes of current (not tainted or deposed) instances."""
+    found: dict = {}
+    for resource in (state or {}).get("resources", []):
+        if (resource.get("module"), resource.get("mode", "managed"), resource.get("type")) != (module, "managed", rtype):
+            continue
+        if resource.get("name") not in names:
+            continue
+        for instance in resource.get("instances", []):
+            if instance.get("status") == "tainted" or instance.get("deposed") or instance.get("index_key") is None:
+                continue
+            found[str(instance["index_key"])] = instance.get("attributes") or {}
+    return found
+
+
+def withheld_access(layer: str, layer_dir: Path) -> list[str]:
+    """Access the config asks for that the layer's state doesn't hold."""
+    state = _state(layer_dir / "terraform.tfstate")
+    if layer == "data_access":
+        try:
+            desired = json.loads((layer_dir / GATE_FILENAME).read_text()).get("grant_keys")
+        except (OSError, ValueError, AttributeError):
+            return []
+        try:
+            ours = state is not None and _is_for_this_deployment(state, layer_dir)
+        except GateError:
+            ours = False
+        applied = _current_instances(state, *TABLE_GRANT[:2], (TABLE_GRANT[2],)) if ours else {}
+        return sorted(f"SELECT {key}" for key in desired or [] if key not in applied)
+    try:
+        desired = json.loads((layer_dir / CAN_RUN_FILENAME).read_text())["desired"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    applied = _current_instances(state, "module.workspace", "null_resource", ACL_RESOURCES)
+    missing = []
+    for key, csv in sorted((desired or {}).items()):
+        have = set(str(applied.get(key, {}).get("triggers", {}).get("groups", "")).split(","))
+        missing += [f"CAN_RUN {key}: {group}" for group in (csv or "").split(",") if group and group not in have]
+    return missing
+
+
+def report_withheld(layer: str, layer_dir: Path, env_name: str) -> int:
+    """Exit non-zero, after an apply, when it withheld access the config asks for."""
+    missing = withheld_access(layer, layer_dir)
+    if not missing:
+        return 0
+    print(f"{layer}:{env_name}: applied, but this access is withheld until the coverage check passes "
+          f"(removals and existing access were applied):\n  " + "\n  ".join(missing) +
+          f"\n  Fix the coverage check, then re-run make apply ENV={env_name}.", file=sys.stderr)
+    return 1
+
+
+def skip_key(layer: str, layer_dir: Path) -> str:
+    """What else make's "inputs unchanged" apply skip must depend on, or "noskip".
+
+    data_access: the gate result (status, fingerprint), and never skip while
+    the state isn't this deployment's or records an apply without a pass: a later pass must reach the
+    state (and so the workspace layer's CAN_RUN check). workspace: the
+    data_access state it reads, and never skip while CAN_RUN is withheld.
+    """
+    if layer == "data_access":
+        state = _state(layer_dir / "terraform.tfstate") or {}
+        try:
+            ours = _is_for_this_deployment(state, layer_dir)
+        except GateError:
+            ours = False
+        if not ours or (state.get("outputs", {}).get("coverage_gate", {}).get("value") or {}).get("status") != "pass":
+            return "noskip"
+        try:
+            gate = json.loads((layer_dir / GATE_FILENAME).read_text())
+            return f"gate {gate.get('status')} {gate.get('fingerprint')}"
+        except (OSError, ValueError, AttributeError):
+            return "noskip"
+    if withheld_access(layer, layer_dir):
+        return "noskip"
+    outputs = (_state(layer_dir / DATA_ACCESS_SUBDIR / "terraform.tfstate") or {}).get("outputs", {})
+    return "data_access " + hashlib.sha256(json.dumps(
+        [outputs.get("coverage_gate"), outputs.get("table_grant_resource_keys")], sort_keys=True,
+    ).encode()).hexdigest()
+
+
 def invalidate(env_dir: Path, reason: str) -> None:
     """Mark the recorded result failed (a live refresh is starting or failed)."""
     path = env_dir / DATA_ACCESS_SUBDIR / GATE_FILENAME
@@ -568,13 +681,25 @@ def main(argv: list[str] | None = None) -> int:
     retired.add_argument("--label", default="")
     retired.add_argument("--file-only", action="store_true",
                          help="check only --env-file (the account layer never reads APPLY_FLAGS or TF_VAR_)")
-    check = sub.add_parser("can-run-check", help="refuse a workspace apply that opens or widens CAN_RUN while exposure is blocked")
+    check = sub.add_parser("can-run-check", help="report the CAN_RUN a workspace apply withholds while exposure is blocked")
     check.add_argument("--env-dir", required=True, type=Path)
     check.add_argument("--env-name", required=True)
     check.add_argument("--runner", type=Path, default=RUNNER)
     check.add_argument("--apply-flags", default="")
+    held = sub.add_parser("withheld", help="after an apply: exit 1 if it withheld access the config asks for")
+    held.add_argument("--layer", required=True, choices=("data_access", "workspace"))
+    held.add_argument("--layer-dir", required=True, type=Path)
+    held.add_argument("--env-name", required=True)
+    skip = sub.add_parser("skip-key", help="print what make's unchanged-inputs apply skip also depends on (or noskip)")
+    skip.add_argument("--layer", required=True, choices=("data_access", "workspace"))
+    skip.add_argument("--layer-dir", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.command == "withheld":
+            return report_withheld(args.layer, args.layer_dir, args.env_name)
+        if args.command == "skip-key":
+            print(skip_key(args.layer, args.layer_dir))
+            return 0
         if args.command == "warn-retired-flag":
             # APPLY_FLAGS comes through the environment, so its quoting survives.
             if args.file_only:

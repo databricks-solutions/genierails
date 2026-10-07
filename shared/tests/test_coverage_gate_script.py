@@ -22,8 +22,12 @@ SHARED = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SHARED))
 
 from scripts import coverage_gate as cg  # noqa: E402
+from tests.terraform_helpers import shared_copy, tf, tf_env, tf_init  # noqa: E402
 
 RUNNER = SHARED / "scripts" / "terraform_layer.sh"
+# What Terraform runs from: live_like_env points this (and RUNNER) at a copy,
+# so real roots never get a lock file or state written by a test.
+TF_SHARED = SHARED
 TABLE = "cat.sch.customers"
 
 
@@ -546,6 +550,9 @@ def live_like_env(tmp_path, plugin_cache, monkeypatch):
     )
     monkeypatch.setenv("TF_PLUGIN_CACHE_DIR", str(plugin_cache))
     monkeypatch.setenv("TF_IN_AUTOMATION", "1")
+    copy = shared_copy(tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "TF_SHARED", copy)
+    monkeypatch.setattr(sys.modules[__name__], "RUNNER", copy / "scripts" / "terraform_layer.sh")
     _record_refresh(env)
     return env
 
@@ -562,19 +569,26 @@ def _raw_plan(env, *flags):
 
 def _gate(env, *flags):
     return subprocess.run(
-        [sys.executable, str(SHARED / "scripts" / "coverage_gate.py"), "run",
+        [sys.executable, str(TF_SHARED / "scripts" / "coverage_gate.py"), "run",
          "--env-dir", str(env), "--env-name", "prod", *flags],
         text=True, capture_output=True,
     )
 
 
 @needs_terraform
+def _withheld(plan, status):
+    """A raw plan without a current pass: it succeeds, withholding the grant."""
+    output = plan.stdout + plan.stderr
+    assert plan.returncode == 0, output
+    assert f'table_access["{TABLE}|analysts"] will be created' not in output
+    assert f"Coverage check {status}" in output
+    assert f"New business SELECT withheld: {TABLE}|analysts" in " ".join(output.split())
+    return True
+
+
 def test_raw_layer_plan_cannot_grant_without_a_current_pass(live_like_env):
     env = live_like_env
-    missing = _raw_plan(env)
-    assert missing.returncode != 0
-    assert "Coverage check missing" in missing.stderr
-    assert "Business SELECT grants are blocked" in missing.stderr
+    assert _withheld(_raw_plan(env), "missing")
 
     gated = _gate(env)
     assert gated.returncode == 0, gated.stdout + gated.stderr
@@ -586,18 +600,14 @@ def test_raw_layer_plan_cannot_grant_without_a_current_pass(live_like_env):
     assert f'databricks_grant.table_access["{TABLE}|analysts"] will be created' in planned.stdout
 
     # -var overrides change what Terraform would apply, so the pass is stale.
-    override = _raw_plan(env, "-var=tag_assignments=[]")
-    assert override.returncode != 0
-    assert "Coverage check stale" in override.stderr
+    assert _withheld(_raw_plan(env, "-var=tag_assignments=[]"), "stale")
 
     # So does editing the config after the gate.
     abac = env / "data_access" / "abac.auto.tfvars"
     abac.write_text(DATA_ACCESS_ABAC.replace("email_partial\" }", "email_partial\" }") + "\n# comment only\n")
     assert _raw_plan(env).returncode == 0, "a comment-only edit must not invalidate the gate"
     abac.write_text(DATA_ACCESS_ABAC.replace('to_principals    = ["analysts"]', "to_principals    = []"))
-    edited = _raw_plan(env)
-    assert edited.returncode != 0
-    assert "Coverage check stale" in edited.stderr
+    assert _withheld(_raw_plan(env), "stale")
 
 
 @needs_terraform
@@ -606,22 +616,60 @@ def test_first_exposure_failure_blocks_the_plan_until_acknowledged(live_like_env
     (env / "ddl" / "_fetched.sql").write_text(DDL.replace("email STRING", "email STRING,\n  ssn STRING"))
     _record_refresh(env)  # the live refresh read the new column
     failed = _gate(env)
-    assert failed.returncode == 1
+    # Nothing is granted yet, so nothing is weakened: the gate lets the apply
+    # run, withholding the first grant.
+    assert failed.returncode == 0
+    assert f"1 new SELECT grant(s) are withheld ({TABLE}|analysts)" in failed.stderr
     assert "first exposure blocked" in failed.stdout
     assert f"{TABLE}.ssn (looks like: ssn)" in failed.stdout
     assert json.loads(_gate_file(env).read_text())["status"] == "fail"
-    blocked = _raw_plan(env)
-    assert blocked.returncode != 0
-    assert "Coverage check failed" in blocked.stderr
+    assert _withheld(_raw_plan(env), "failed")
 
     with (env / "env.auto.tfvars").open("a") as handle:
         handle.write(f'coverage_acknowledged_columns = ["{TABLE}.ssn"]\n')
     # The acknowledgement is itself a gate input: the failed result is now
     # stale, and the re-run passes.
-    assert "Coverage check stale" in _raw_plan(env).stderr
+    assert _withheld(_raw_plan(env), "stale")
     acknowledged = _gate(env)
     assert acknowledged.returncode == 0, acknowledged.stdout + acknowledged.stderr
-    assert _raw_plan(env).returncode == 0
+    granted = _raw_plan(env)
+    assert granted.returncode == 0, granted.stdout + granted.stderr
+    assert f'table_access["{TABLE}|analysts"] will be created' in granted.stdout
+
+
+@needs_terraform
+@pytest.mark.parametrize("how", ["tainted", "deposed", "copied", "pre_binding"])
+def test_tainted_or_copied_state_keeps_the_table_a_blocking_first_exposure(live_like_env, how):
+    """Only a current grant this deployment applied makes a table "already
+    granted"; anything else must not turn the first-exposure block into the
+    non-blocking warning, so it can never yield a pass."""
+    env = live_like_env
+    (env / "ddl" / "_fetched.sql").write_text(DDL.replace("email STRING", "email STRING,\n  ssn STRING"))
+    _record_refresh(env)  # the live refresh read the new, untagged column
+    _state(env, [TABLE])
+    path = env / "data_access" / "terraform.tfstate"
+    state = json.loads(path.read_text())
+    instance = state["resources"][0]["instances"][0]
+    if how == "tainted":
+        instance["status"] = "tainted"
+    elif how == "deposed":
+        instance["deposed"] = "deadbeef"
+    elif how == "copied":  # recorded for another workspace
+        state["outputs"]["coverage_gate"]["value"]["deployment_binding"] = "another-deployment"
+    else:
+        state.pop("outputs")
+    path.write_text(json.dumps(state))
+
+    gated = _gate(env, "--verbose")
+    result = json.loads(_gate_file(env).read_text())
+    assert result["status"] == "fail", gated.stdout + gated.stderr
+    assert result["first_exposure_tables"] == [TABLE]
+    assert "first exposure blocked" in gated.stdout
+    assert f"{TABLE}.ssn (looks like: ssn)" in gated.stdout
+    # Nothing is in place for this deployment, so nothing is weakened: the
+    # apply may run, but the grant is withheld (never a pass).
+    assert "1 new SELECT grant(s) are withheld" in gated.stderr
+    assert _withheld(_raw_plan(env), "failed")
 
 
 @needs_terraform
@@ -658,7 +706,7 @@ def _apply_layer(env_dir, runner, apply_flags):
     return subprocess.run(
         ["make", "--no-print-directory", "_apply-layer", "LAYER=data_access", "TARGET_ENV=prod",
          f"LAYER_ENV_DIR={env_dir / 'data_access'}", f"ROOT_RUNNER={runner}",
-         f"APPLY_FLAGS={apply_flags}"],
+         f"APPLY_FLAGS={apply_flags}", "IMPORT_EXISTING_SCRIPT=true"],
         cwd=SHARED.parent / "aws", text=True, capture_output=True, env=env,
     )
 
@@ -679,7 +727,7 @@ def test_make_applies_data_access_after_the_gate(env_dir, stub_runner):
     runner, log = stub_runner(_inputs(needs_gate=False))
     result = _apply_layer(env_dir, runner, "")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Proceeding only because this change adds no SELECT grant" in result.stderr
+    assert "Proceeding because this change weakens the protection" in result.stderr
     commands = [call.split("|", 1)[1].split()[2] for call in log.read_text().splitlines()]
     assert commands[0] == "console"
     assert "apply" in commands
@@ -699,6 +747,11 @@ def test_ddl_change_reapplies_data_access_so_genie_sees_the_new_gate(env_dir, st
         assert result.returncode == 0, result.stdout + result.stderr
         return "inputs unchanged" not in result.stdout
 
+    # An apply is only skipped once this deployment's state records a pass.
+    binding = cg.deployment_binding(env_dir / "data_access")
+    (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(
+        {"version": 4, "outputs": {"coverage_gate": {"value": {"status": "pass", "deployment_binding": binding}}},
+         "resources": []}))
     assert applies()
     assert not applies()
     ddl.write_text("CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n")
@@ -712,14 +765,10 @@ def test_ddl_change_reapplies_data_access_so_genie_sees_the_new_gate(env_dir, st
 ])
 def test_terraform_test_suites_pass(config, tmp_path, plugin_cache):
     """The gate's Terraform-native tests (and the existing ones) stay green."""
-    directory = SHARED / config
-    env = {**os.environ, "TF_DATA_DIR": str(tmp_path / ".terraform"),
-           "TF_PLUGIN_CACHE_DIR": str(plugin_cache), "TF_IN_AUTOMATION": "1"}
-    init = subprocess.run(["terraform", "init", "-backend=false", "-input=false"],
-                          cwd=directory, env=env, text=True, capture_output=True)
-    assert init.returncode == 0, init.stdout + init.stderr
-    result = subprocess.run(["terraform", "test", "-no-color"],
-                            cwd=directory, env=env, text=True, capture_output=True)
+    directory = shared_copy(tmp_path) / config
+    env = tf_env(tmp_path, plugin_cache)
+    tf_init(directory, env=env)
+    result = tf(directory, "test", "-no-color", env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "0 failed" in result.stdout
 
@@ -765,7 +814,7 @@ def live_uc(live_like_env, tmp_path, monkeypatch):
         env["TF_CLI_ARGS_plan"] = "-no-color"
         return subprocess.run(
             ["make", "--no-print-directory", "plan", "ENV=prod", f"CLOUD_ROOT={cloud_root}",
-             f"SHARED_ROOT={SHARED}", f"DERIVE_ASSIGNMENTS_SCRIPT={fake}"],
+             f"SHARED_ROOT={TF_SHARED}", f"DERIVE_ASSIGNMENTS_SCRIPT={fake}"],
             cwd=SHARED.parent / "aws", text=True, capture_output=True, env=env,
         )
 
@@ -786,16 +835,14 @@ def test_make_plan_refreshes_live_metadata_and_blocks_a_new_untagged_column(live
     # says email only, and it passed a moment ago.
     live_ddl.write_text(DDL.replace("email STRING", "email STRING,\n  ssn STRING"))
     second = plan()
-    assert second.returncode != 0
     assert "first exposure blocked" in second.stdout
     assert f"{TABLE}.ssn (looks like: ssn)" in second.stdout
-    assert "=== Terraform Plan (data_access:prod) ===" not in second.stdout
+    # The plan still shows what an apply would do: nothing new is granted.
+    assert f'databricks_grant.table_access["{TABLE}|analysts"] will be created' not in second.stdout
     assert "ssn STRING" in (env / "ddl" / "_fetched.sql").read_text()
     assert json.loads(_gate_file(env).read_text())["status"] == "fail"
     # ... and raw Terraform can't fall back on the earlier pass.
-    raw = _raw_plan(env)
-    assert raw.returncode != 0
-    assert "Coverage check failed" in raw.stderr
+    assert _withheld(_raw_plan(env), "failed")
 
 
 @needs_terraform
@@ -806,15 +853,14 @@ def test_failed_live_refresh_leaves_no_usable_pass(live_uc, monkeypatch):
 
     monkeypatch.setenv("LIVE_UC_DOWN", "1")
     down = plan()
-    assert down.returncode != 0
     assert "Could not fetch DDL" in down.stderr
-    assert "=== Terraform Plan (data_access:prod) ===" not in down.stdout
+    # The plan still runs (a revoke must never wait on UC), granting nothing new.
+    assert down.returncode == 0, down.stdout + down.stderr
+    assert f'databricks_grant.table_access["{TABLE}|analysts"] will be created' not in down.stdout
     assert not (env / cg.REFRESH_RELPATH).exists()
     result = json.loads(_gate_file(env).read_text())
     assert result["status"] == "fail" and "refreshed_at" not in result
-    raw = _raw_plan(env)
-    assert raw.returncode != 0
-    assert "Coverage check failed" in raw.stderr
+    assert _withheld(_raw_plan(env), "failed")
 
 
 @needs_terraform
@@ -823,8 +869,9 @@ def test_gate_run_without_a_refresh_for_the_current_ddl_fails_closed(live_like_e
     # The DDL snapshot changes without anyone re-reading UC.
     (env / "ddl" / "_fetched.sql").write_text(DDL.replace("id BIGINT", "id BIGINT,\n  note STRING"))
     gated = _gate(env)
-    assert gated.returncode == 1
+    assert gated.returncode == 0  # it withholds the first grant
     assert "changed since the last live refresh" in gated.stderr
+    assert "new SELECT grant(s) are withheld" in gated.stderr
     assert json.loads(_gate_file(env).read_text())["status"] == "fail"
 
 
@@ -876,7 +923,7 @@ run "can_run" {{
     genie_spaces              = [{{ name = "Sales", genie_space_id = "space-1", uc_tables = ["cat.sch.customers"] }}]
     genie_space_configs       = {{ Sales = {{ acl_groups = {acl} }} }}
   }}
-}}
+{expect}}}
 '''
 
 
@@ -900,35 +947,37 @@ run "can_run" {{
          "records no live refresh", "2999-01-01T00:00:00Z"),
     ],
 )
-def test_workspace_root_refuses_can_run_without_the_spaces_grants(
+def test_workspace_root_withholds_can_run_without_the_spaces_grants(
         tmp_path, plugin_cache, count, keys, acl, refused, refreshed):
-    root = SHARED / "roots" / "workspace"
-    name = f"refusal-{tmp_path.name}"
-    test_dir = root / "tests" / ".tmp" / name
+    root = shared_copy(tmp_path) / "roots" / "workspace"
+    relative = "tests/.tmp/refusal"
+    test_dir = root / relative
     test_dir.mkdir(parents=True)
-    try:
-        (test_dir / "can_run.tftest.hcl").write_text(_WS_TEST.format(
-            env=f"tests/.tmp/{name}/env", state=_WS_STATE.format(count=count, keys=keys), acl=acl,
-            refreshed=refreshed,
-        ))
-        env = {**os.environ, "TF_DATA_DIR": str(tmp_path / ".terraform"),
-               "TF_PLUGIN_CACHE_DIR": str(plugin_cache), "TF_IN_AUTOMATION": "1"}
-        relative = f"tests/.tmp/{name}"
-        init = subprocess.run(["terraform", "init", "-backend=false", f"-test-directory={relative}"],
-                              cwd=root, env=env, text=True, capture_output=True)
-        assert init.returncode == 0, init.stdout + init.stderr
-        result = subprocess.run(["terraform", "test", "-no-color", f"-test-directory={relative}"],
-                                cwd=root, env=env, text=True, capture_output=True)
-        output = " ".join((result.stdout + result.stderr).split())
-        if refused:
-            assert result.returncode != 0
-            assert "Resource precondition failed" in output
-            assert "Opening Genie CAN_RUN for Sales to analysts is blocked" in output
-            assert refused in output
-        else:
-            assert result.returncode == 0, output
-    finally:
-        shutil.rmtree(test_dir, ignore_errors=True)
+    if refused:
+        # The plan still succeeds: it withholds analysts (no ACL resource) and
+        # the genie_can_run_withheld check names why.
+        why = (f'contains(output.genie_space_missing_grants["sales"], "{refused.split("(")[-1].rstrip(")")}")'
+               if "lacks the SELECT grants" in refused else f'strcontains(output.genie_exposure_blocker, "{refused}")')
+        expect = (
+            "  expect_failures = [check.genie_can_run_withheld]\n"
+            "  assert {\n"
+            f'    condition     = length(output.genie_space_can_run_withheld) == 1 && toset(output.genie_space_can_run_withheld["sales"]) == toset(["analysts"]) && !output.genie_space_acls_applied && {why}\n'
+            '    error_message = "CAN_RUN must be withheld, for the expected reason"\n'
+            "  }\n"
+        )
+    else:
+        expect = ("  assert {\n"
+                  "    condition     = length(output.genie_space_can_run_withheld) == 0\n"
+                  '    error_message = "nothing may be withheld"\n'
+                  "  }\n")
+    (test_dir / "can_run.tftest.hcl").write_text(_WS_TEST.format(
+        env=f"{relative}/env", state=_WS_STATE.format(count=count, keys=keys), acl=acl,
+        refreshed=refreshed, expect=expect,
+    ))
+    env = tf_env(tmp_path, plugin_cache)
+    tf_init(root, f"-test-directory={relative}", env=env)
+    result = tf(root, "test", "-no-color", f"-test-directory={relative}", env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_max_age_ceiling_is_the_same_everywhere():
@@ -1026,7 +1075,7 @@ def genie_env(live_like_env, tmp_path, monkeypatch):
         clean = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MAKELEVEL", "APPLY_FLAGS")}
         result = subprocess.run(
             ["make", "--no-print-directory", "apply-genie", "ENV=prod", f"CLOUD_ROOT={env.parents[1]}",
-             f"SHARED_ROOT={SHARED}", f"ROOT_RUNNER={runner}", f"DERIVE_ASSIGNMENTS_SCRIPT={fake}",
+             f"SHARED_ROOT={TF_SHARED}", f"ROOT_RUNNER={runner}", f"DERIVE_ASSIGNMENTS_SCRIPT={fake}",
              *_OFFLINE_STEPS],
             cwd=SHARED.parent / "aws", text=True, capture_output=True, env=clean,
         )
@@ -1044,7 +1093,7 @@ def test_apply_genie_keeps_or_revokes_can_run_when_uc_is_down(genie_env, acl):
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert "live refresh of tags/DDL failed" in output
-    assert "coverage check did not pass" in output
+    assert "coverage check FAILED for data_access:prod" in output
     kept = ("kept except what this config removes (sales: -analysts)" if acl == "[]"
             else "kept and nothing is revoked")
     assert f"Existing Genie CAN_RUN access is {kept}; only new CAN_RUN groups wait" in output
@@ -1054,14 +1103,35 @@ def test_apply_genie_keeps_or_revokes_can_run_when_uc_is_down(genie_env, acl):
 
 
 @needs_terraform
-def test_apply_genie_refuses_to_widen_can_run_when_uc_is_down(genie_env):
+@pytest.mark.parametrize("acl, withheld", [
+    ('["analysts", "auditors"]', "auditors"),
+    # Mixed: analysts is revoked while auditors waits.
+    ('["auditors"]', "auditors"),
+])
+def test_apply_genie_withholds_only_the_wider_can_run_when_uc_is_down(genie_env, acl, withheld):
     _env, apply_genie = genie_env
-    result, applied = apply_genie('["analysts", "auditors"]')
+    result, applied = apply_genie(acl)
     output = result.stdout + result.stderr
+    assert "Genie CAN_RUN withheld for workspace:prod" in output
+    assert f"sales: +{withheld}" in output
+    # The rest of the change is applied; then make fails, naming what waits.
+    assert applied, output
     assert result.returncode != 0
-    assert "Genie CAN_RUN blocked for workspace:prod" in output
-    assert "sales: +auditors" in output
-    assert not applied
+    assert f"CAN_RUN sales: {withheld}" in output
+    assert "Fix the coverage check, then re-run make apply ENV=prod" in output
+
+
+def _tf_type(value):
+    """The Terraform type JSON a state records for this (decoded) value."""
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return ["tuple", [_tf_type(item) for item in value]]
+    return ["object", {key: _tf_type(item) for key, item in value.items()}]
 
 
 def _data_access_state(env, keys, protection, binding):
@@ -1080,18 +1150,8 @@ def _data_access_state(env, keys, protection, binding):
     }))
 
 
-@needs_terraform
-@pytest.mark.parametrize("widen", [False, True])
-def test_data_access_apply_keeps_grants_when_uc_is_down_but_never_adds_one(live_like_env, tmp_path, widen):
-    env = live_like_env
-    # What the last gated apply recorded: this grant, with today's protection.
-    current = cg.query_inputs(RUNNER, "prod", env / "data_access", [])
-    _data_access_state(env, [f"{TABLE}|analysts"], current["protection_fingerprint"],
-                       current["deployment_binding"])
-    if widen:
-        abac = env / "data_access" / "abac.auto.tfvars"
-        abac.write_text(abac.read_text().replace("groups = { analysts = {} }", "groups = { analysts = {}, auditors = {} }"))
-    # UC unreachable: the refresh started (invalidating the gate) and failed.
+def _failed_refresh_apply(env, tmp_path):
+    """make _apply-layer data_access after the live refresh failed (UC down)."""
     cg.invalidate(env, "a live refresh of tags/DDL started and has not been checked since")
     log = tmp_path / "applies.log"
     runner = tmp_path / "runner"
@@ -1103,22 +1163,76 @@ def test_data_access_apply_keeps_grants_when_uc_is_down_but_never_adds_one(live_
          f"LAYER_ENV_DIR={env / 'data_access'}", f"ROOT_RUNNER={runner}", *_OFFLINE_STEPS],
         cwd=SHARED.parent / "aws", text=True, capture_output=True, env=clean,
     )
-    output = result.stdout + result.stderr
     applied = log.exists() and "data_access prod apply" in log.read_text()
+    return result, applied
+
+
+@needs_terraform
+@pytest.mark.parametrize("widen", [False, True])
+def test_data_access_apply_keeps_grants_when_uc_is_down_but_never_adds_one(live_like_env, tmp_path, widen):
+    env = live_like_env
+    # What the last gated apply recorded: this grant, with today's protection.
+    current = cg.query_inputs(RUNNER, "prod", env / "data_access", [])
+    _data_access_state(env, [f"{TABLE}|analysts"], current["protection_fingerprint"],
+                       current["deployment_binding"])
     if widen:
+        abac = env / "data_access" / "abac.auto.tfvars"
+        abac.write_text(abac.read_text().replace("groups = { analysts = {} }", "groups = { analysts = {}, auditors = {} }"))
+    result, applied = _failed_refresh_apply(env, tmp_path)
+    output = result.stdout + result.stderr
+    # Either way the apply runs: keeping (and revoking) never waits.
+    assert applied, output
+    assert "removals and existing grants apply" in output
+    if widen:
+        # ... but the new grant is withheld, and make says so and fails.
+        assert "1 new SELECT grant(s) are withheld" in output
         assert result.returncode != 0
-        assert "Business SELECT stays closed" in output
-        assert not applied
+        assert f"SELECT {TABLE}|auditors" in output
     else:
         assert result.returncode == 0, output
-        assert "can only keep or revoke access" in output
-        assert applied
-    # Terraform agrees: the same plan with the failed gate.
+    # Terraform agrees: the same plan with the failed gate keeps analysts and
+    # leaves auditors out.
     raw = _raw_plan(env)
+    assert raw.returncode == 0, raw.stdout + raw.stderr
+    assert f'table_access["{TABLE}|auditors"] will be created' not in raw.stdout
     if widen:
-        assert raw.returncode != 0 and "Resource precondition failed" in raw.stderr
+        assert "New business SELECT withheld" in " ".join((raw.stdout + raw.stderr).split())
+
+
+@needs_terraform
+@pytest.mark.parametrize("change", ["tag", "ddl"])
+def test_revoke_applies_after_a_rederive_changed_the_protection(live_like_env, tmp_path, change):
+    """Every kept grant's protection fingerprint moved; the revoke still applies."""
+    env = live_like_env
+    abac = env / "data_access" / "abac.auto.tfvars"
+    abac.write_text(abac.read_text().replace("groups = { analysts = {} }", "groups = { analysts = {}, auditors = {} }"))
+    before = cg.query_inputs(RUNNER, "prod", env / "data_access", [])
+    _data_access_state(env, [f"{TABLE}|analysts", f"{TABLE}|auditors"], before["protection_fingerprint"],
+                       before["deployment_binding"])
+    state = json.loads((env / "data_access" / "terraform.tfstate").read_text())
+    state["outputs"]["coverage_gate"]["value"]["protection"] = before["protection"]
+    state["outputs"]["coverage_gate"]["type"][1]["protection"] = _tf_type(before["protection"])
+    (env / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+    # The re-derive: one more tag, or a re-read DDL. And auditors is revoked.
+    text = abac.read_text().replace("groups = { analysts = {}, auditors = {} }", "groups = { analysts = {} }")
+    if change == "tag":
+        text = text.replace("tag_assignments = [\n", f'tag_assignments = [\n  {{ entity_type = "columns", entity_name = "{TABLE}.id", tag_key = "gr_treatment", tag_value = "email_partial" }},\n')
     else:
-        assert raw.returncode == 0, raw.stdout + raw.stderr
+        (env / "ddl" / "_fetched.sql").write_text(DDL.replace("id BIGINT", "id BIGINT,\n  note STRING"))
+    abac.write_text(text)
+    after = cg.query_inputs(RUNNER, "prod", env / "data_access", [])
+    assert after["protection_fingerprint"] != before["protection_fingerprint"]
+    assert after["needs_gate"] is False and after["new_grants"] == []
+
+    result, applied = _failed_refresh_apply(env, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert applied
+    raw = _raw_plan(env)
+    assert raw.returncode == 0, raw.stdout + raw.stderr
+    assert f'table_access["{TABLE}|auditors"] will be destroyed' in raw.stdout
+    # Kept (the minimal state here plans it as a replacement, never a destroy).
+    assert f'table_access["{TABLE}|analysts"] will be destroyed' not in raw.stdout
+    assert "Resource precondition failed" not in raw.stdout + raw.stderr
 
 
 _PROBLEMS = {"unrefreshed": "no live refresh", "expired": "refresh too old"}
@@ -1139,8 +1253,8 @@ def _console_runner(tmp_path, answer):
     return runner
 
 
-@pytest.mark.parametrize("answer, code, message", [
-    # Exposure blocked: an ACL adding a group is refused ...
+@pytest.mark.parametrize("answer, withheld, message", [
+    # Exposure blocked: the group an ACL adds is withheld ...
     ({"groups": {"sales": "a,b"}, "blocker": "gate expired",
       "widening": {"sales": ["b"]}, "missing": {"sales": []}}, 1, "sales: +b"),
     # ... keeping, shrinking or clearing proceeds (with a warning).
@@ -1155,31 +1269,38 @@ def _console_runner(tmp_path, answer):
     ({"groups": {"sales": "a"}, "blocker": "gate expired",
       "widening": {"sales": []}, "missing": {"sales": []}}, 0,
      "Existing Genie CAN_RUN access is kept unless this config removes it"),
-    # The layer is ready but this agent lacks its grants: adding is refused.
+    # The layer is ready but this agent lacks its grants: the addition is withheld.
     ({"groups": {"sales": "a,b"}, "blocker": "",
       "widening": {"sales": ["b"]}, "missing": {"sales": ["t|b"]}}, 1, "lacks the SELECT grants"),
     # An agent missing from the widening map counts as widening.
     ({"groups": {"sales": "a"}, "blocker": "gate expired",
       "widening": {}, "missing": {}}, 1, "sales: +unknown"),
-    # Ready: nothing to refuse.
+    # Ready: nothing to withhold.
     ({"groups": {"sales": "a,b"}, "blocker": "",
       "widening": {"sales": ["b"]}, "missing": {"sales": []}}, 0, ""),
     # There is no closed state to skip the check: a (legacy) enabled = false
-    # in the answer is ignored and the widening is still refused.
+    # in the answer is ignored and the widening is still withheld.
     ({"enabled": False, "groups": {"sales": "a,b"}, "blocker": "gate expired",
       "widening": {"sales": ["b"]}, "missing": {}}, 1, "sales: +b"),
 ])
-def test_can_run_check_mirrors_the_workspace_precondition(tmp_path, capsys, answer, code, message):
+def test_can_run_check_mirrors_what_the_workspace_withholds(tmp_path, capsys, answer, withheld, message):
     runner = _console_runner(tmp_path, answer)
-    assert cg.can_run_check(tmp_path, "prod", runner, "") == code
-    assert message in capsys.readouterr().err
+    # Never refuses the apply: Terraform withholds the new groups and applies
+    # the rest; make fails after the apply if anything was withheld.
+    assert cg.can_run_check(tmp_path, "prod", runner, "") == 0
+    err = capsys.readouterr().err
+    assert message in err
+    assert ("Genie CAN_RUN withheld" in err) == bool(withheld)
+    assert json.loads((tmp_path / cg.CAN_RUN_FILENAME).read_text())["desired"] == answer["groups"]
 
 
 # terraform console can't evaluate the gate's refresh-time checks
 # (plantimestamp()), so the static blocker comes back "" and the check applies
 # them itself: a pass resting on an old, future or malformed refresh still
-# refuses widening, and still lets keeping, shrinking or clearing through.
-@pytest.mark.parametrize("refresh, groups, widening, code, message", [
+# withholds widening, and still lets keeping, shrinking or clearing through.
+@pytest.mark.parametrize("refresh, groups, widening, withheld, message", [
+    # A timedelta is the refresh's age, turned into timestamps inside the test
+    # so a long suite can't age a "fresh" case past the max age before it runs.
     (timedelta(hours=7), "a,b", ["b"], 1, "refresh too old"),
     (timedelta(hours=-1), "a,b", ["b"], 1, "no live refresh"),
     ({"refreshed_at": "", "fresh_until": ""}, "a,b", ["b"], 1, "no live refresh"),
@@ -1187,15 +1308,15 @@ def test_can_run_check_mirrors_the_workspace_precondition(tmp_path, capsys, answ
     (timedelta(hours=7), "a", [], 0, "refresh too old"),
     (timedelta(hours=5, minutes=50), "a,b", ["b"], 0, ""),
 ])
-def test_can_run_check_applies_the_refresh_time_checks(tmp_path, capsys, refresh, groups, widening, code, message):
-    if isinstance(refresh, timedelta):
-        refresh = _refresh(refresh)
+def test_can_run_check_applies_the_refresh_time_checks(tmp_path, capsys, refresh, groups, widening, withheld, message):
+    fields = _refresh(refresh) if isinstance(refresh, timedelta) else refresh
     runner = _console_runner(tmp_path, {"groups": {"sales": groups}, "blocker": "",
                                         "widening": {"sales": widening}, "missing": {"sales": []},
-                                        **refresh})
-    assert cg.can_run_check(tmp_path, "prod", runner, "") == code
+                                        **fields})
+    assert cg.can_run_check(tmp_path, "prod", runner, "") == 0
     err = capsys.readouterr().err
     assert message in err if message else "blocked" not in err
+    assert ("Genie CAN_RUN withheld" in err) == bool(withheld)
 
 
 def test_can_run_check_fails_closed_when_terraform_cant_answer(tmp_path):

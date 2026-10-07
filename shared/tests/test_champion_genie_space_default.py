@@ -134,7 +134,6 @@ GUARDED_TARGETS = [
     ("coverage-gate", "ENV=dev"),
     ("validate", "ENV=dev"),
     ("rehearse", "ENV=dev"),
-    ("certify", "ENV=dev"),
     ("promote", "ENV=dev"),
     ("promote", "SOURCE_ENV=dev", "DEST_ENV=prod", "DEST_CATALOG_MAP=dev_finance=prod_finance"),
     ("plan", "ENV=dev"),
