@@ -103,7 +103,7 @@ def test_generate_never_prunes_a_function_that_was_already_in_the_sql(env_dir, m
     assert "no policy uses: mask_unused_draft\n" in out
 
 
-def test_prune_keeps_referenced_unparseable_and_reviewed_functions(tmp_path):
+def test_prune_keeps_referenced_and_reviewed_functions(tmp_path):
     abac = tmp_path / "abac.auto.tfvars"
     abac.write_text('fgac_policies = [{ name = "p", function_name = "Mask_Used" }]\n')
     sql = tmp_path / "masking_functions.sql"
@@ -113,18 +113,106 @@ def test_prune_keeps_referenced_unparseable_and_reviewed_functions(tmp_path):
         "-- old\nCREATE OR REPLACE FUNCTION mask_reviewed(v STRING) RETURNS STRING RETURN v;\n\n"
         "-- new\nCREATE OR REPLACE FUNCTION mask_new(v STRING) RETURNS STRING RETURN 'a;b';\n"
         "USE SCHEMA t;\n\n"
-        "CREATE OR REPLACE FUNCTION mask_broken(v STRING) RETURNS STRING RETURN 'unterminated\n"
+        "CREATE OR REPLACE FUNCTION mask_later(v STRING) RETURNS STRING RETURN v;\n"
     )
-    assert prune_unused_new_functions(sql, abac, {"mask_reviewed"}) == ["mask_new"]
+    assert prune_unused_new_functions(sql, abac, {"mask_reviewed", "mask_later"}) == ["mask_new"]
     text = sql.read_text()
     assert "mask_new" not in text and "-- new" not in text and "'a;b'" not in text
     # The context it carried for later functions is kept.
     assert "USE SCHEMA t;" in text
-    for name in ("mask_used", "mask_reviewed", "mask_broken"):
+    for name in ("mask_used", "mask_reviewed", "mask_later"):
         assert f"FUNCTION {name}(" in text
     # An unreadable policy file prunes nothing.
     abac.write_text("fgac_policies = [")
     assert prune_unused_new_functions(sql, abac, set()) == []
+
+
+def _prune(tmp_path, functions, reviewed=()):
+    """functions: {name: body}; the policy uses mask_main."""
+    abac = tmp_path / "abac.auto.tfvars"
+    abac.write_text('fgac_policies = [{ name = "p", function_name = "mask_main" }]\n')
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text("USE CATALOG dev_fin;\nUSE SCHEMA payments;\n\n" + "\n\n".join(
+        f"CREATE OR REPLACE FUNCTION {name}(v STRING)\nRETURNS STRING\nRETURN {body};"
+        for name, body in functions.items()) + "\n")
+    removed = prune_unused_new_functions(sql, abac, set(reviewed))
+    text = sql.read_text()
+    return removed, {name for name in functions if f"FUNCTION {name}(" in text}
+
+
+@pytest.mark.parametrize("call", [
+    "helper(v)",                          # unqualified
+    "dev_fin.payments.helper(v)",         # qualified
+    "Dev_Fin.Payments.HELPER (v)",        # mixed case, space before (
+    "`dev_fin`.`payments`.`helper`(v)",   # back-quoted
+])
+def test_prune_keeps_a_helper_a_referenced_mask_calls(tmp_path, call):
+    removed, kept = _prune(tmp_path, {
+        "helper": "CONCAT('***', v)",
+        "mask_main": f"CASE WHEN v IS NULL THEN NULL ELSE {call} END",
+        "unrelated": "'x'",
+    })
+    assert removed == ["unrelated"]
+    assert kept == {"helper", "mask_main"}
+
+
+def test_prune_keeps_a_chain_of_helpers(tmp_path):
+    removed, kept = _prune(tmp_path, {
+        "mask_main": "helper_one(v)",
+        "helper_one": "UPPER(helper_two(v))",
+        "helper_two": "CONCAT('***', RIGHT(v, 4))",
+        "unrelated": "'x'",
+    })
+    assert removed == ["unrelated"]
+    assert kept == {"mask_main", "helper_one", "helper_two"}
+
+
+def test_prune_keeps_helpers_a_reviewed_function_calls(tmp_path):
+    removed, kept = _prune(tmp_path, {
+        "mask_main": "v",
+        "mask_old": "new_helper(v)",
+        "new_helper": "'***'",
+        "unrelated": "'x'",
+    }, reviewed={"mask_old"})
+    assert removed == ["unrelated"]
+    assert kept == {"mask_main", "mask_old", "new_helper"}
+
+
+def test_prune_ignores_names_in_strings_and_comments(tmp_path):
+    removed, kept = _prune(tmp_path, {
+        "mask_main": "CONCAT('unrelated(v)', v) /* unrelated(v) */",
+        "unrelated": "'x'",
+    })
+    assert removed == ["unrelated"]
+    assert kept == {"mask_main"}
+
+
+@pytest.mark.parametrize("broken", [
+    "'unterminated",       # unterminated string
+    "v /* unterminated",   # unterminated comment
+])
+def test_prune_removes_nothing_when_any_function_cannot_be_parsed(tmp_path, broken):
+    abac = tmp_path / "abac.auto.tfvars"
+    abac.write_text('fgac_policies = [{ name = "p", function_name = "mask_main" }]\n')
+    sql = tmp_path / "masking_functions.sql"
+    original = ("CREATE OR REPLACE FUNCTION mask_main(v STRING) RETURNS STRING RETURN v;\n\n"
+                "CREATE OR REPLACE FUNCTION unrelated(v STRING) RETURNS STRING RETURN 'x';\n\n"
+                f"CREATE OR REPLACE FUNCTION broken(v STRING) RETURNS STRING RETURN {broken}\n")
+    sql.write_text(original)
+    assert prune_unused_new_functions(sql, abac, set()) == []
+    assert sql.read_text() == original
+
+
+def test_prune_removes_nothing_when_a_function_name_cannot_be_read(tmp_path):
+    abac = tmp_path / "abac.auto.tfvars"
+    abac.write_text('fgac_policies = [{ name = "p", function_name = "mask_main" }]\n')
+    sql = tmp_path / "masking_functions.sql"
+    original = ("CREATE OR REPLACE FUNCTION mask_main(v STRING) RETURNS STRING RETURN v;\n\n"
+                "CREATE OR REPLACE FUNCTION `odd name`(v STRING) RETURNS STRING RETURN 'x';\n\n"
+                "CREATE OR REPLACE FUNCTION unrelated(v STRING) RETURNS STRING RETURN 'x';\n")
+    sql.write_text(original)
+    assert prune_unused_new_functions(sql, abac, set()) == []
+    assert sql.read_text() == original
 
 
 # ---------------------------------------------------------------------------

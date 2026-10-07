@@ -1277,45 +1277,67 @@ def keep_reviewed_group_descriptions(reviewed_cfg: dict, abac_path: Path) -> lis
     return [f"  kept the reviewed description of {len(kept)} group(s): {', '.join(kept)}"]
 
 
-def _statement_end(sql: str) -> int | None:
-    """Index just past the first ``;`` outside strings, identifiers and comments."""
-    i, n = 0, len(sql)
+def _scan_statement(sql: str) -> tuple[int, str] | None:
+    """(index just past the first ``;``, the statement's code) or None.
+
+    The ``;`` counts only outside strings, identifiers and comments. In the
+    returned code, string literals and comments are blanked and back-quoted
+    identifiers are unquoted, so calls can be read from it. None means the
+    statement can't be scanned (no ``;``, or an unterminated literal).
+    """
+    i, n, code = 0, len(sql), []
     while i < n:
         if sql.startswith("--", i):
             end = sql.find("\n", i)
             i = n if end < 0 else end + 1
+            code.append(" ")
         elif sql.startswith("/*", i):
             end = sql.find("*/", i + 2)
             if end < 0:
                 return None
             i = end + 2
+            code.append(" ")
         elif sql.startswith("$$", i):
             end = sql.find("$$", i + 2)
             if end < 0:
                 return None
             i = end + 2
+            code.append(" ")
         elif sql[i] in "'\"`":
             quote, j = sql[i], i + 1
             while j < n and sql[j] != quote:
                 j += 2 if sql[j] == "\\" and quote != "`" else 1
             if j >= n:
                 return None
+            code.append(sql[i + 1:j] if quote == "`" else " ")
             i = j + 1
         elif sql[i] == ";":
-            return i + 1
+            return i + 1, "".join(code)
         else:
+            code.append(sql[i])
             i += 1
     return None
 
 
+# A call: a (possibly catalog.schema-qualified) name followed by "(".
+_CALL_RE = re.compile(r"([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*\(")
+
+
+def _called_names(code: str) -> set[str]:
+    """Lower-cased function names called in code (the last part if qualified)."""
+    return {re.split(r"\s*\.\s*", call)[-1].lower() for call in _CALL_RE.findall(code)}
+
+
 def prune_unused_new_functions(sql_path: Path, abac_path: Path, reviewed_names: set[str]) -> list[str]:
-    """Remove masking functions this run added that no fgac_policy uses.
+    """Remove masking functions this run added that nothing uses.
 
     The model sometimes drafts masks nothing applies, which only earns a
-    validator warning. A function is removed only when no policy names it
-    (compared case-insensitively) and the masking SQL from before this run
-    did not define it, so reviewed or hand-written functions always stay.
-    Anything that can't be parsed is left alone. Returns the removed names.
+    validator warning. A function stays if a policy names it, if the masking
+    SQL from before this run defined it (reviewed or hand-written), or if
+    one of those calls it, directly or through other functions (names
+    compared case-insensitively, qualified or not). Only the other functions
+    this run added are removed. If any function can't be parsed, nothing is
+    removed. Returns the removed names.
     """
     if not sql_path.exists() or not abac_path.exists():
         return []
@@ -1329,12 +1351,31 @@ def prune_unused_new_functions(sql_path: Path, abac_path: Path, reviewed_names: 
     }
     text = sql_path.read_text()
     parts = re.split(r"(?=CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE\s+)?FUNCTION\b)", text, flags=re.IGNORECASE)
-    kept_parts, removed = [parts[0]], []
+    functions = []  # (name, end of its statement) per part after parts[0]
+    calls: dict[str, set[str]] = {}
     for part in parts[1:]:
         match = _FUNC_NAME_RE.match(part)
-        name = match.group(1).lower() if match else ""
-        end = _statement_end(part)
-        if not name or name in used or name in reviewed_names or end is None:
+        scanned = _scan_statement(part)
+        if not match or scanned is None:
+            return []
+        name = match.group(1).lower()
+        end, code = scanned
+        functions.append((name, end))
+        # Calls in the body (after the CREATE ... name( header).
+        calls.setdefault(name, set()).update(_called_names(code[match.end():]))
+
+    reachable: set[str] = set()
+    pending = [name for name in used | {n.lower() for n in reviewed_names} if name in calls]
+    while pending:
+        name = pending.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        pending.extend(callee for callee in calls[name] if callee in calls and callee not in reachable)
+
+    kept_parts, removed = [parts[0]], []
+    for part, (name, end) in zip(parts[1:], functions):
+        if name in reachable or name in used or name in reviewed_names:
             kept_parts.append(part)
             continue
         removed.append(name)
