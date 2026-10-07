@@ -86,7 +86,8 @@ def _runner_with_stale_lock(tmp_path, init_error):
     runner.chmod(0o755)
     root = tmp_path / "project" / "roots" / "workspace"
     root.mkdir(parents=True)
-    (root / ".terraform.lock.hcl").write_text("# stale\n")
+    (root / ".terraform.lock.hcl").write_text(
+        'provider "registry.terraform.io/hashicorp/null" {\n  version     = "3.3.2"\n}\n')
 
     log = tmp_path / "terraform.log"
     bin_dir = tmp_path / "bin"
@@ -97,6 +98,8 @@ def _runner_with_stale_lock(tmp_path, init_error):
         f"printf '%s\\n' \"$*\" >> \"{log}\"\n"
         'case "$*" in *-lockfile=readonly*)\n'
         f"  echo '{init_error}' >&2; exit 1;;\n"
+        # The writable init records the missing provider.
+        "init*) printf 'provider \"registry.terraform.io/hashicorp/time\" {\\n  version     = \"0.13.1\"\\n}\\n' >> .terraform.lock.hcl;;\n"
         "esac\n"
     )
     terraform.chmod(0o755)
@@ -122,6 +125,9 @@ def test_stale_lock_file_is_updated_instead_of_failing(tmp_path):
     assert "-lockfile=readonly" in calls[0]
     assert "-lockfile=readonly" not in calls[1]
     assert "lacks providers" in result.stderr
+    # Only what the writable init added is reported.
+    assert "recorded registry.terraform.io/hashicorp/time 0.13.1" in result.stderr
+    assert "recorded registry.terraform.io/hashicorp/null" not in result.stderr
 
 
 def test_other_init_failures_still_fail(tmp_path):

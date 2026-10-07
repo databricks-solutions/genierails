@@ -27,14 +27,14 @@ pytestmark = pytest.mark.skipif(shutil.which("terraform") is None, reason="terra
 
 @pytest.fixture(scope="module")
 def data_dir(tmp_path_factory):
+    # Init the way make does (terraform_layer.sh), so a fresh clone without a
+    # lock file, or with a stale one, initializes too.
     tf = tmp_path_factory.mktemp("tf")
-    data = tf / ".terraform"
-    init = subprocess.run(["terraform", "init", "-input=false", "-reconfigure", "-lockfile=readonly",
-                           f"-backend-config=path={tf / 'terraform.tfstate'}"], cwd=ROOT,
-                          env={**os.environ, "TF_DATA_DIR": str(data), "TF_IN_AUTOMATION": "1"},
+    init = subprocess.run([str(SHARED / "scripts" / "terraform_layer.sh"), "workspace", "test", "print-cmd", "plan"],
+                          env={**os.environ, "LAYER_ENV_DIR": str(tf), "TF_IN_AUTOMATION": "1"},
                           text=True, capture_output=True)
     assert init.returncode == 0, init.stdout + init.stderr
-    return data
+    return tf / ".terraform"
 
 
 def _env(tmp_path, data_dir, refreshed_at):

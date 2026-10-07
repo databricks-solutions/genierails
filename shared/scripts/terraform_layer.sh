@@ -85,8 +85,18 @@ if ! init_output="$("${INIT_CMD[@]}" 2>&1)"; then
     exit 1
   fi
   echo "+ $ROOT_DIR/.terraform.lock.hcl lacks providers this version needs; updating it" >&2
+  _lock_providers() {
+    awk '/^provider "/ { p = $2; gsub(/"/, "", p) } /^  version / { v = $3; gsub(/"/, "", v); print p " " v }' .terraform.lock.hcl
+  }
+  locked_before="$(_lock_providers)"
   echo "+ ${WRITABLE_INIT_CMD[*]}"
   "${WRITABLE_INIT_CMD[@]}" >/dev/null
+  _lock_providers | while read -r provider version; do
+    case "$locked_before" in
+      *"$provider $version"*) ;;
+      *) echo "+   recorded $provider $version" >&2 ;;
+    esac
+  done
 fi
 _unlock_init
 trap - EXIT
