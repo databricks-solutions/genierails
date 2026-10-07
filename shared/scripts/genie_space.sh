@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Genie agent: create / update-config / set-acls / trash
+# Genie agent: create / update-config / set-acls / revoke-acls / trash
 # =============================================================================
 # Commands:
 #   create        Create a minimal Genie agent (tables + warehouse + title).
@@ -9,6 +9,11 @@
 #                 Reads space_id from GENIE_ID_FILE.
 #   set-acls      Set CAN_RUN on a Genie agent for the configured groups.
 #                 Reads space_id from GENIE_SPACE_OBJECT_ID or GENIE_ID_FILE.
+#   revoke-acls   Remove the groups in GENIE_REVOKE_GROUPS_CSV from a Genie
+#                 agent's direct ACL, keeping every other direct entry (and
+#                 inherited ones, e.g. workspace admins). Run by Terraform when
+#                 an ACL it set is destroyed. Reads space_id from
+#                 GENIE_SPACE_OBJECT_ID or $LAYER_ENV_DIR/$GENIE_ID_BASENAME.
 #   trash         Move a Genie agent to trash. Reads space_id from GENIE_ID_FILE.
 #
 # Authentication (in order of precedence):
@@ -40,6 +45,7 @@
 # Usage:
 #   ./genie_space.sh create [workspace_url] [token] [title] [warehouse_id]
 #   ./genie_space.sh set-acls [workspace_url] [token] [space_id]
+#   ./genie_space.sh revoke-acls
 #   ./genie_space.sh trash
 #
 # Or set env and run: ./genie_space.sh create   or   ./genie_space.sh set-acls
@@ -55,6 +61,7 @@ UA_HEADER="User-Agent: genierails/0.1.0"
 usage() {
   echo "Usage: $0 create [workspace_url] [token] [title] [warehouse_id]"
   echo "       $0 set-acls [workspace_url] [token] [space_id]"
+  echo "       $0 revoke-acls"
   echo "       $0 trash"
   echo "  Or set DATABRICKS_HOST + DATABRICKS_TOKEN (or DATABRICKS_CLIENT_ID + DATABRICKS_CLIENT_SECRET)"
   echo "  For create: set GENIE_WAREHOUSE_ID; for set-acls: set GENIE_SPACE_OBJECT_ID"
@@ -768,9 +775,9 @@ PYEOF
 }
 
 # ---------- Trash (delete) a Genie agent ----------
-trash_genie_space() {
-  # Destroy provisioners can outlive the worktree that created their state.
-  # Resolve the current environment path and credentials at execution time.
+# Destroy provisioners can outlive the worktree that created their state.
+# Resolve the current environment path and credentials at execution time.
+load_layer_auth() {
   if [[ -n "${LAYER_ENV_DIR:-}" ]]; then
     if [[ -n "${GENIE_ID_BASENAME:-}" ]]; then
       GENIE_ID_FILE="${LAYER_ENV_DIR}/${GENIE_ID_BASENAME}"
@@ -783,6 +790,82 @@ trash_genie_space() {
       export DATABRICKS_HOST DATABRICKS_CLIENT_ID DATABRICKS_CLIENT_SECRET
     fi
   fi
+}
+
+# Remove only the groups this tool granted (GENIE_REVOKE_GROUPS_CSV) from the
+# agent's direct ACL. The permissions API has no per-entry delete, so PUT the
+# direct entries that remain; inherited ones (workspace admins) and the owner
+# aren't direct entries to PUT, and are left as they are.
+revoke_genie_acls() {
+  local groups="${GENIE_REVOKE_GROUPS_CSV:-}"
+  if [[ -z "${groups//,/}" ]]; then
+    echo "No Genie CAN_RUN groups to revoke."
+    return 0
+  fi
+  load_layer_auth
+  local workspace_url="${DATABRICKS_HOST%/}"
+  local space_id="${GENIE_SPACE_OBJECT_ID:-}"
+  if [[ -z "$space_id" && -n "${GENIE_ID_FILE:-}" && -f "${GENIE_ID_FILE}" ]]; then
+    space_id=$(tr -d '[:space:]' < "${GENIE_ID_FILE}")
+  fi
+  if [[ -z "$space_id" ]]; then
+    echo "ERROR: Cannot identify the Genie agent to revoke CAN_RUN (${groups}) on: no GENIE_SPACE_OBJECT_ID and no ID file at ${GENIE_ID_FILE:-<not set>}." >&2
+    echo "  Remove those groups from the agent's permissions by hand." >&2
+    exit 1
+  fi
+  if [[ -z "$workspace_url" ]]; then
+    echo "ERROR: Need workspace URL to revoke CAN_RUN on Genie agent ${space_id}. Set DATABRICKS_HOST or LAYER_ENV_DIR." >&2
+    exit 1
+  fi
+  local token
+  token=$(resolve_token "$workspace_url" "") || exit 1
+
+  local path="/api/2.0/permissions/genie/${space_id}"
+  local response http_code body
+  response=$(curl -s -w "\n%{http_code}" -H "${UA_HEADER}" -H "Authorization: Bearer ${token}" "${workspace_url}${path}")
+  http_code=$(echo "$response" | tail -n1)
+  body=$(echo "$response" | sed '$d')
+  if [[ "$http_code" == "404" ]]; then
+    echo "Genie agent ${space_id} not found; no CAN_RUN left to revoke."
+    return 0
+  fi
+  if [[ "$http_code" != "200" ]]; then
+    echo "ERROR: Could not read permissions of Genie agent ${space_id} (HTTP ${http_code}): ${body}" >&2
+    exit 1
+  fi
+  local remaining
+  remaining=$(printf '%s' "$body" | GROUPS_CSV="$groups" python3 -c '
+import json, os, sys
+revoke = {g for g in os.environ["GROUPS_CSV"].split(",") if g}
+kept = []
+for entry in json.load(sys.stdin).get("access_control_list") or []:
+    if entry.get("group_name") in revoke:
+        continue
+    principal = {k: entry[k] for k in ("user_name", "group_name", "service_principal_name") if entry.get(k)}
+    for permission in entry.get("all_permissions") or []:
+        level = permission.get("permission_level")
+        if not permission.get("inherited") and level and level != "IS_OWNER" and principal:
+            kept.append({**principal, "permission_level": level})
+print(json.dumps({"access_control_list": kept}))
+') || { echo "ERROR: Could not parse permissions of Genie agent ${space_id}." >&2; exit 1; }
+
+  echo "Revoking Genie CAN_RUN on agent ${space_id} for groups: ${groups//,/ }"
+  response=$(curl -s -w "\n%{http_code}" -X PUT -H "${UA_HEADER}" -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" -d "${remaining}" "${workspace_url}${path}")
+  http_code=$(echo "$response" | tail -n1)
+  if [[ "$http_code" == "404" ]]; then
+    echo "Genie agent ${space_id} not found; no CAN_RUN left to revoke."
+    return 0
+  fi
+  if [[ "$http_code" != "200" && "$http_code" != "201" ]]; then
+    echo "ERROR: Revoking CAN_RUN on Genie agent ${space_id} failed (HTTP ${http_code}): $(echo "$response" | sed '$d')" >&2
+    exit 1
+  fi
+  echo "Genie agent CAN_RUN revoked."
+}
+
+trash_genie_space() {
+  load_layer_auth
 
   local auth_host="${DATABRICKS_HOST%/}"
   local expected_host="${GENIE_EXPECTED_HOST:-}"
@@ -912,6 +995,9 @@ elif [[ "$COMMAND" == "set-acls" ]]; then
   fi
 
   set_genie_acls "$WORKSPACE_URL" "$TOKEN" "$SPACE_ID"
+
+elif [[ "$COMMAND" == "revoke-acls" ]]; then
+  revoke_genie_acls
 
 elif [[ "$COMMAND" == "trash" ]]; then
   trash_genie_space

@@ -35,8 +35,13 @@ output "genie_space_acls_applied" {
 }
 
 output "genie_space_acls_groups" {
-  description = "Per-space groups granted CAN_RUN on each Genie agent."
+  description = "Per-space groups the config grants CAN_RUN on each Genie agent (before any are withheld)."
   value       = local.genie_space_groups
+}
+
+output "genie_space_can_run_withheld" {
+  description = "Per-space CAN_RUN groups this plan withholds because opening them is blocked (genie_exposure_blocker or missing SELECT grants). Everything else in the change applies."
+  value       = { for key, groups in local.genie_space_can_run_withheld : key => groups if length(groups) > 0 }
 }
 
 output "genie_spaces_created" {

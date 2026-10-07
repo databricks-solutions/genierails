@@ -22,6 +22,7 @@ run "per_agent_select_grants_are_isolated_and_shared_tables_union_acls__gate_inp
   plan_options {
     mode = refresh-only
   }
+  expect_failures = [check.business_select_withheld]
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -151,6 +152,7 @@ run "legacy_unattributed_discovery_falls_back_to_all_principals__gate_inputs" {
   plan_options {
     mode = refresh-only
   }
+  expect_failures = [check.business_select_withheld]
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -215,6 +217,7 @@ run "id_only_space_uses_canonical_title_for_select__gate_inputs" {
   plan_options {
     mode = refresh-only
   }
+  expect_failures = [check.business_select_withheld]
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -395,6 +398,7 @@ run "unknown_agent_does_not_widen_known_agent_scope__gate_inputs" {
   plan_options {
     mode = refresh-only
   }
+  expect_failures = [check.business_select_withheld]
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -463,6 +467,7 @@ run "top_level_admin_table_wins_over_agent_scope__gate_inputs" {
   plan_options {
     mode = refresh-only
   }
+  expect_failures = [check.business_select_withheld]
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -534,6 +539,7 @@ run "absent_discovery_preserves_legacy_user_table_behavior__gate_inputs" {
   plan_options {
     mode = refresh-only
   }
+  expect_failures = [check.business_select_withheld]
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"

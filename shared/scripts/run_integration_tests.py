@@ -658,7 +658,7 @@ def _needs_account_ops_lock(items: tuple[str, ...]) -> bool:
     return bool(
         _make_targets(items)
         & {"apply", "apply-governance", "sync-tags", "wait-tag-policies", "import",
-           "rehearse", "certify", "release", "maintain"}
+           "rehearse", "release", "maintain"}
     )
 
 
@@ -6527,9 +6527,9 @@ def scenario_champion(
        6. make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=...;
           assert the promoted prod env; fill prod auth + sql_warehouse_id.
        7. make enable-classification ENV=prod (+ auto-tagging), wait; make
-          release ENV=prod VERIFY_KEY_COLUMN=...; gate persisted open,
-          prod Genie agent exists, verify-access ALL EFFECTIVE.
-       8. make maintain ENV=prod; gate stays open.
+          release ENV=prod VERIFY_KEY_COLUMN=...; coverage check recorded
+          as passed, prod Genie agent exists, verify-access ALL EFFECTIVE.
+       8. make maintain ENV=prod; the coverage check still passes.
        9. Teardown (always, unless --keep-data).
     """
     _banner("Scenario: champion — dev → prod CHAMPION flow (setup → release → maintain)")

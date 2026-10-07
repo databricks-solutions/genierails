@@ -233,6 +233,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
 		echo "  5. Run: make release ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
 		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
+		echo "     The key may come from a saved verify_key_column; without one, release refuses before applying."; \
 		echo "  6. Steady state (scheduled): make maintain ENV=$(ENV)"; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 2 onward)"; \
@@ -257,6 +258,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		step=$$((step+1)); echo "  $$step. Run: make generate ENV=$(ENV)   (drafts masks and rules from the class.* tags)"; \
 		step=$$((step+1)); echo "  $$step. Run: make rehearse ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
 		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
+		echo "     Save the key as verify_key_column in $(_SETUP_ENV_REL)/env.auto.tfvars: promote carries it, and make release needs it."; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 0 and Phase 1)"; \
 	fi
@@ -355,7 +357,7 @@ coverage-gate: _guarded-bootstrap _guard-workspace-target ## Block on any sensit
 
 # Terraform-enforced gate for the split data_access config (scripts/coverage_gate.py).
 # _apply-layer and _plan-layer run it before every data_access plan/apply; the
-# module refuses business SELECT unless its recorded result matches the inputs.
+# module withholds new business SELECT unless its recorded result matches the inputs.
 _COVERAGE_GATE = python3 "$(SHARED_ROOT)/scripts/coverage_gate.py"
 
 # Before a plan/apply that opens business access, re-read live UC so the gate
@@ -408,6 +410,11 @@ rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is
 # (envs/<env>/generated/.governance.lock) throughout.
 _ENV_LOCK_HELPER = python3 "$(SHARED_ROOT)/scripts/environment_lock.py"
 _RELEASE_HELPER = python3 "$(SHARED_ROOT)/scripts/release_helpers.py"
+# release refuses, before its lock, to run when verify-access could not prove
+# every mask (no key, or a VERIFY_SPEC without keyed mask checks for them), and
+# re-checks after promoting the live-derived config, before it applies.
+_REQUIRE_MASK_PROOF = $(_RELEASE_HELPER) require-mask-proof "$(ENV_DIR)" --env "$(ENV)" --key "$$key" \
+	--spec "$(VERIFY_SPEC)" --account-tfvars "$(ACCOUNT_ENV_DIR)/abac.auto.tfvars"
 # Same-env promote for release, apply, apply-governance and plan. Command-line
 # values beat the environment and MAKEFLAGS, so a SOURCE_ENV/DEST_ENV exported
 # in the shell (or passed to the outer make) can't turn it into a cross-env
@@ -429,18 +436,25 @@ _ENV_LOCK = trap '$(_NO_SIGNALS); $(_ENV_LOCK_HELPER) unlock "$(ENV_DIR)" --pid 
 	trap '$(_NO_SIGNALS); exit 129' HUP; trap '$(_NO_SIGNALS); exit 130' INT; trap '$(_NO_SIGNALS); exit 143' TERM; \
 	$(_ENV_LOCK_HELPER) lock "$(ENV_DIR)" --pid $$$$ --owner $(1) --env "$(ENV)" || exit 1
 
-certify: _guard-genie-placeholder
-	@echo "DEPRECATED: make certify is now an alias for make release; use make release ENV=$(ENV)."
-	@$(MAKE) --no-print-directory release ENV="$(ENV)" $(if $(strip $(VERIFY_KEY_COLUMN)),VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",)
+# Removed, not aliased: certify used to stop before granting access, so a
+# pipeline running certify -> approval -> release must not grant at certify.
+certify:
+	@echo "make certify was removed; run make release ENV=$(or $(ENV),<env>) (it runs the coverage check, audit and verification, then grants access)." >&2
+	@echo "  To review before granting, run make plan ENV=$(or $(ENV),<env>) and gate make release behind your approval step." >&2
+	@exit 1
 
 release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify access
 	@$(_GUARD_WORKSPACE_ENV); \
-	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,release); \
+	$(_DRY_RUN_GUARD); \
+	key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" || exit 1; \
+	$(_REQUIRE_MASK_PROOF) || exit 1; \
+	$(call _ENV_LOCK,release); \
 	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
 	$(MAKE) derive-assignments ENV="$(ENV)" || exit 1; \
 	$(MAKE) validate-generated ENV="$(ENV)" || exit 1; \
 	$(MAKE) coverage-gate ENV="$(ENV)" || exit 1; \
 	$(_SAME_ENV_PROMOTE) || exit 1; \
+	$(_REQUIRE_MASK_PROOF) || exit 1; \
 	$(MAKE) audit-rulebook ENV="$(ENV)"; audit_rc=$$?; \
 	if [ $$audit_rc -ne 0 ]; then \
 		if [ $$audit_rc -eq 1 ]; then \
@@ -456,7 +470,7 @@ release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, ap
 		$(_RELEASE_HELPER) failed "$(ENV_DIR)" --env "$(ENV)" --reason "apply failed"; \
 		exit 1; \
 	fi; \
-	if ! $(MAKE) verify-access ENV="$(ENV)"$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \
+	if ! $(MAKE) verify-access ENV="$(ENV)" VERIFY_REQUIRE_MASKS=1$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \
 		$(_RELEASE_HELPER) failed "$(ENV_DIR)" --env "$(ENV)" --reason "access was applied but verify-access failed"; \
 		exit 1; \
 	fi; \
@@ -466,7 +480,7 @@ release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, ap
 	echo "  Verification:  make verify-access ENV=$(ENV) passed"; \
 	echo "  Steady state:  make maintain ENV=$(ENV)"
 
-maintain: _guard-genie-placeholder ## Native-first governance refresh: audit-schema -> derive-assignments -> coverage check -> apply-governance -> audit-rulebook (never touches exposure or Genie)
+maintain: _guard-genie-placeholder ## Reconcile governance (including existing covered SELECT): audit-schema -> derive-assignments -> coverage check -> validate -> audit-rulebook -> apply-governance; never widen past coverage or touch Genie
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,maintain); \
 	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
@@ -483,11 +497,21 @@ maintain: _guard-genie-placeholder ## Native-first governance refresh: audit-sch
 		fi; \
 		exit $$audit_rc; \
 	fi; \
-	$(MAKE) derive-assignments ENV="$(ENV)" && \
-		$(MAKE) coverage-gate ENV="$(ENV)" && \
-		$(MAKE) validate-generated ENV="$(ENV)" && \
-		$(MAKE) apply-governance ENV="$(ENV)" APPLY_FLAGS= _EXPOSURE_DERIVED=1 && \
-		$(MAKE) audit-rulebook ENV="$(ENV)"
+	$(MAKE) derive-assignments ENV="$(ENV)" || exit 1; \
+	$(MAKE) coverage-gate ENV="$(ENV)" || exit 1; \
+	$(MAKE) validate-generated ENV="$(ENV)" || exit 1; \
+	$(MAKE) audit-rulebook ENV="$(ENV)"; audit_rc=$$?; \
+	if [ $$audit_rc -ne 0 ]; then \
+		if [ $$audit_rc -eq 1 ]; then \
+			echo "maintain: audit-rulebook reported drift (output above); governance was not applied." >&2; \
+			echo "  Fix the rulebook in dev, rehearse, promote, then re-run make maintain ENV=$(ENV)." >&2; \
+		else \
+			echo "maintain: audit-rulebook failed (error, not drift); governance was not applied." >&2; \
+			echo "  Review the error output above, then re-run make maintain ENV=$(ENV)." >&2; \
+		fi; \
+		exit $$audit_rc; \
+	fi; \
+	$(MAKE) apply-governance ENV="$(ENV)" APPLY_FLAGS= _EXPOSURE_DERIVED=1
 
 validate: _guarded-bootstrap ## Validate split config in the selected environment
 	@echo "=== Validate ($(ENV)) ==="
@@ -651,8 +675,10 @@ _apply-layer:
 	if [ -f "$$env_dir/masking_functions.sql" ]; then files="$$files $$env_dir/masking_functions.sql"; fi; \
 	if [ "$$layer" = "data_access" ]; then files="$$files $$(dirname "$$env_dir")/ddl/_fetched.sql"; fi; \
 	fingerprint_file="$$env_dir/.$$layer.apply.sha"; \
-	current_fingerprint="$$( { for file in $$files; do [ -f "$$file" ] && shasum "$$file"; done; find "$(SHARED_ROOT)/roots/$$layer" "$(SHARED_ROOT)/modules/$$layer" -type f -name '*.tf' ! -path '*/tests/*' ! -path '*/.terraform/*' 2>/dev/null | LC_ALL=C sort | while IFS= read -r code_file; do shasum "$$code_file"; done; if [ "$$layer" = "workspace" ]; then shasum "$(SHARED_ROOT)/scripts/genie_space.sh"; elif [ "$$layer" = "data_access" ]; then shasum "$(SHARED_ROOT)/deploy_masking_functions.py"; fi; [ -z "$$apply_flags" ] || printf '%s\n' "$$apply_flags"; } | shasum | awk '{print $$1}')"; \
-	if [ -f "$$fingerprint_file" ] && [ "$$(cat "$$fingerprint_file")" = "$$current_fingerprint" ]; then \
+	skip_key=""; \
+	if [ "$$layer" = "data_access" ] || [ "$$layer" = "workspace" ]; then skip_key="$$($(_COVERAGE_GATE) skip-key --layer "$$layer" --layer-dir "$$env_dir")"; fi; \
+	current_fingerprint="$$( { printf '%s\n' "$$skip_key"; for file in $$files; do [ -f "$$file" ] && shasum "$$file"; done; find "$(SHARED_ROOT)/roots/$$layer" "$(SHARED_ROOT)/modules/$$layer" -type f -name '*.tf' ! -path '*/tests/*' ! -path '*/.terraform/*' 2>/dev/null | LC_ALL=C sort | while IFS= read -r code_file; do shasum "$$code_file"; done; if [ "$$layer" = "workspace" ]; then shasum "$(SHARED_ROOT)/scripts/genie_space.sh"; elif [ "$$layer" = "data_access" ]; then shasum "$(SHARED_ROOT)/deploy_masking_functions.py"; fi; [ -z "$$apply_flags" ] || printf '%s\n' "$$apply_flags"; } | shasum | awk '{print $$1}')"; \
+	if [ "$(FORCE_APPLY)" != "1" ] && [ "$$skip_key" != "noskip" ] && [ -f "$$fingerprint_file" ] && [ "$$(cat "$$fingerprint_file")" = "$$current_fingerprint" ]; then \
 		echo "=== Skipping terraform apply ($$layer:$$target_env): inputs unchanged ==="; \
 		exit 0; \
 	fi; \
@@ -670,11 +696,19 @@ _apply-layer:
 		python3 "$(GENIE_ADOPT_PREFLIGHT_SCRIPT)" "$$env_dir" --arm --quiet; \
 		echo "=== Auto-importing existing workspace resources (idempotent apply) ==="; \
 		(cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(IMPORT_EXISTING_SCRIPT)" 2>&1) || true; \
+		apply_log="$$(mktemp)"; trap 'rm -f "$$apply_log"' EXIT; \
 		for _retry in 1 2 3; do \
-			if LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve $$apply_flags; then \
+			set +e; \
+			LAYER_ENV_DIR="$$env_dir" "$(ROOT_RUNNER)" "$$layer" "$$target_env" apply -parallelism=1 -auto-approve $$apply_flags 2>&1 | (trap '' INT TERM HUP; exec tee "$$apply_log"); \
+			apply_rc=$${PIPESTATUS[0]}; \
+			set -e; \
+			if [ "$$apply_rc" -eq 0 ]; then \
 				break; \
 			else \
-				if [ "$$_retry" -lt 3 ]; then \
+				if grep -q "Resource precondition failed\|Invalid for_each argument\|Error: Invalid value for variable" "$$apply_log"; then \
+					echo "=== Workspace apply failed on a configuration check; not retrying ===" >&2; \
+					exit 1; \
+				elif [ "$$_retry" -lt 3 ]; then \
 					echo "=== Workspace apply failed — retrying in 30s (attempt $$_retry/3, group propagation) ==="; \
 					sleep 30; \
 				else \
@@ -688,7 +722,10 @@ _apply-layer:
 	if [ "$$layer" = "account" ]; then \
 		$(MAKE) --no-print-directory sync-tags; \
 	fi; \
-	printf "%s\n" "$$current_fingerprint" > "$$fingerprint_file"
+	printf "%s\n" "$$current_fingerprint" > "$$fingerprint_file"; \
+	if [ -z "$(DEFER_WITHHELD)" ] && { [ "$$layer" = "data_access" ] || [ "$$layer" = "workspace" ]; }; then \
+		$(_COVERAGE_GATE) withheld --layer "$$layer" --layer-dir "$$env_dir" --env-name "$$target_env"; \
+	fi
 
 apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access -> workspace for ENV=<workspace>
 	@set -e; $(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
@@ -710,10 +747,14 @@ apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access
 		$(MAKE) --no-print-directory wait-tag-policies REQUIRED_VALUES_TFVARS="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars"; \
 		echo "=== Waiting 30s for account-level groups to propagate before data_access apply ==="; \
 		sleep 30; \
-		$(MAKE) --no-print-directory _apply-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
+		$(MAKE) --no-print-directory _apply-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" FORCE_APPLY=1 DEFER_WITHHELD=1; \
 		echo "=== Waiting 30s for data_access resources to propagate before workspace apply ==="; \
 		sleep 30; \
-		$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"; \
+		$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)" DEFER_WITHHELD=1; \
+		withheld_rc=0; \
+		$(_COVERAGE_GATE) withheld --layer data_access --layer-dir "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" --env-name "$(ENV)" || withheld_rc=1; \
+		$(_COVERAGE_GATE) withheld --layer workspace --layer-dir "$(ENV_DIR)" --env-name "$(ENV)" || withheld_rc=1; \
+		exit $$withheld_rc; \
 	fi
 
 apply-governance: _guarded-bootstrap _guard-workspace-target ## [Governance team] Apply account + data_access layers only (no Genie agents)
@@ -742,8 +783,8 @@ genie-adopt-preflight: _guard-workspace-target ## Read-only: check every legacy 
 # data_access. If the refreshed inputs differ from the last governance apply,
 # new CAN_RUN stays blocked until make apply / apply-governance applies them.
 # A failing refresh or gate never stops keeping, shrinking or clearing ACLs:
-# the workspace layer's can-run-check (and its precondition) refuse only ACLs
-# that add groups beyond what is applied.
+# the workspace layer withholds only the groups an ACL adds beyond what is
+# applied, applies everything else, then exits non-zero naming them.
 apply-genie: _guarded-bootstrap _guard-workspace-target ## [BU team] Apply workspace layer only — groups + Genie agents (assumes governance already applied)
 	@set -e; $(_DRY_RUN_GUARD); \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
@@ -900,10 +941,14 @@ test-unit: ## Run fast unit tests (no Databricks/LLM/Terraform required) — use
 #   VERIFY_SPEC=<file>     explicit JSON spec (overrides --from-tfvars derivation)
 #   WAREHOUSE_ID=<id>      pin a specific SQL warehouse
 #   KEEP_PRINCIPALS=1      leave the provisioned test principals in place (debug)
+#   VERIFY_REQUIRE_MASKS=1 fail when a mask check has no key column (make release sets it)
 VERIFY_KEY_COLUMN ?=
 VERIFY_SPEC ?=
 _VERIFY_SPEC_FLAG = $(if $(VERIFY_SPEC),--spec "$(VERIFY_SPEC)",--from-tfvars "$(TARGET_DATA_ACCESS_ENV_DIR)/abac.auto.tfvars" --account-tfvars "$(ACCOUNT_ENV_DIR)/abac.auto.tfvars")
 _VERIFY_KEEP_FLAG = $(if $(KEEP_PRINCIPALS),--keep-principals,)
+# make release sets VERIFY_REQUIRE_MASKS=1: a mask check skipped for want of a
+# key column fails instead of letting the release report success.
+_VERIFY_REQUIRE_FLAG = $(if $(filter 1,$(VERIFY_REQUIRE_MASKS)),--require-mask-checks,)
 
 verify-access-spec: _guarded-bootstrap _guard-workspace-target ## Print the derived effective-access checks (no workspace/cluster needed)
 	@key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" && \
@@ -914,7 +959,7 @@ verify-access: _guarded-bootstrap _guard-workspace-target ## Verify masking/row-
 	@key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" && \
 	warehouse_id="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" warehouse --env-dir "$(ENV_DIR)" --explicit "$(WAREHOUSE_ID)" --terraform-runner "$(ROOT_RUNNER)" --env-name "$(ENV)")" && \
 	cd "$(SHARED_ROOT)" && GENIERAILS_LIVE_VERIFY=1 python3 verify_effective_access.py \
-		$(_VERIFY_SPEC_FLAG) --key-column "$$key" --warehouse-id "$$warehouse_id" $(_VERIFY_KEEP_FLAG) \
+		$(_VERIFY_SPEC_FLAG) --key-column "$$key" --warehouse-id "$$warehouse_id" $(_VERIFY_KEEP_FLAG) $(_VERIFY_REQUIRE_FLAG) \
 		--auth-file "$(ENV_DIR)/auth.auto.tfvars" --live
 
 test-quickstart: _bootstrap _guard-workspace-target ## Scenario: single space, single catalog (quickstart flow)

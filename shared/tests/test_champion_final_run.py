@@ -18,6 +18,8 @@ from pathlib import Path
 import pytest
 
 import deploy_masking_functions as dmf
+from tests.terraform_helpers import skip_if_providers_unavailable as _skip_if_providers_unavailable  # noqa: E402
+from tests.terraform_helpers import tf as _tf  # noqa: E402
 import generate_abac
 
 SHARED = Path(__file__).parents[1]
@@ -270,20 +272,6 @@ def _pre_drop_split_module() -> str:
             pytest.fail(message)
         pytest.skip(message)
     return show.stdout
-
-
-def _skip_if_providers_unavailable(init: subprocess.CompletedProcess) -> None:
-    if init.returncode == 0:
-        return
-    if os.environ.get("REQUIRE_TERRAFORM_TESTS") != "1" and (
-            "Failed to query available provider packages" in init.stderr or "could not connect" in init.stderr):
-        pytest.skip("hashicorp/null provider not downloadable (offline)")
-    raise AssertionError(init.stdout + init.stderr)
-
-
-def _tf(root: Path, *args: str, env: dict) -> subprocess.CompletedProcess:
-    return subprocess.run(["terraform", *args], cwd=root, text=True,
-                          capture_output=True, env=env, timeout=300)
 
 
 def _plan_actions(root: Path, tfvars: dict, env: dict) -> dict:
@@ -744,6 +732,18 @@ def test_make_runs_the_preflight_before_any_layer_is_applied():
     assert workspace.index('"$(GENIE_ADOPT_PREFLIGHT_SCRIPT)"') < workspace.index("apply -parallelism=1")
     assert "GENIE_ADOPT_PREFLIGHT_SCRIPT ?= $(SHARED_ROOT)/scripts/genie_adopt_preflight.py" in makefile
     assert "\ngenie-adopt-preflight: " in makefile
+
+
+def test_combined_apply_never_skips_data_access_before_workspace_can_run():
+    makefile = (SHARED / "Makefile.shared").read_text()
+    apply = makefile[makefile.index("\napply: "):]
+    apply = apply[: apply.index("\n\n")]
+    data_access = (
+        '_apply-layer LAYER=data_access TARGET_ENV=$(ENV) '
+        'LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" FORCE_APPLY=1'
+    )
+    assert data_access in apply
+    assert apply.index(data_access) < apply.index("LAYER=workspace")
 
 
 def test_no_saved_plan_file_is_written_by_the_product():
