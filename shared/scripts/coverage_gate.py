@@ -61,7 +61,9 @@ GATE_FILENAME = ".coverage_gate.json"
 REFRESH_RELPATH = Path("generated") / ".live_refresh.json"
 REFRESH_VERSION = 1
 GATE_VERSION = 1
-SUBPROCESS_TIMEOUT = int(os.environ.get("COVERAGE_GATE_TIMEOUT_SECONDS", "300"))
+# Longer than terraform_layer.sh's default 600s init-lock wait, so lock
+# contention reports the lock-specific timeout rather than a console timeout.
+SUBPROCESS_TIMEOUT = os.environ.get("COVERAGE_GATE_TIMEOUT_SECONDS", "660")
 TABLE_GRANT = ("module.data_access", "databricks_grant", "table_access")
 INPUTS_EXPRESSION = "base64encode(jsonencode(module.data_access.coverage_gate_inputs))"
 
@@ -76,19 +78,38 @@ class CommandTimeout(GateError):
 
 def _run_bounded(command: list[str], *, label: str, **kwargs) -> subprocess.CompletedProcess:
     """Run a child in its own process group and kill the whole group on timeout."""
+    try:
+        timeout = float(SUBPROCESS_TIMEOUT)
+        if timeout <= 0:
+            raise ValueError
+    except (TypeError, ValueError) as exc:
+        raise GateError(
+            "COVERAGE_GATE_TIMEOUT_SECONDS must be a positive number "
+            f"(got {SUBPROCESS_TIMEOUT!r})"
+        ) from exc
     input_value = kwargs.pop("input", None)
     if input_value is not None:
         kwargs["stdin"] = subprocess.PIPE
     process = subprocess.Popen(command, start_new_session=True, **kwargs)
     try:
-        stdout, stderr = process.communicate(input=input_value, timeout=SUBPROCESS_TIMEOUT)
+        stdout, stderr = process.communicate(input=input_value, timeout=timeout)
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         stdout, stderr = process.communicate()
         raise CommandTimeout(
-            f"{label} timed out after {SUBPROCESS_TIMEOUT}s; its process group was killed "
+            f"{label} timed out after {timeout:g}s; its process group was killed "
             "and the coverage result was invalidated"
         )
+    except BaseException:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        raise
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
@@ -164,6 +185,20 @@ def needs_derive(env_dir: Path, apply_flags: str) -> tuple[str, str | None]:
 
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+
+
+def deployment_binding(variables: dict) -> str:
+    """Match roots/data_access's sha256(jsonencode(workspace host/ID))."""
+    host = str(variables.get("databricks_workspace_host", "")).strip().lower()
+    if host.endswith("/"):
+        host = host[:-1]
+    binding_json = json.dumps({
+        "workspace_host": host,
+        "workspace_id": str(variables.get("databricks_workspace_id", "")).strip(),
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    # Terraform jsonencode escapes these HTML-sensitive characters.
+    binding_json = binding_json.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    return hashlib.sha256(binding_json.encode()).hexdigest()
 
 
 def tag_assignments_digest(assignments: list) -> str:
@@ -261,10 +296,7 @@ def granted_tables(layer_dir: Path) -> set[str]:
         variables = {}
         for path in (layer_dir / "auth.auto.tfvars", layer_dir / "env.auto.tfvars"):
             variables.update(_load_tfvars(path))
-        binding = hashlib.sha256(json.dumps({
-            "workspace_host": str(variables.get("databricks_workspace_host", "")).strip().rstrip("/").lower(),
-            "workspace_id": str(variables.get("databricks_workspace_id", "")).strip(),
-        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        binding = deployment_binding(variables)
         applied = state.get("outputs", {}).get("coverage_gate", {}).get("value") or {}
         if str(applied.get("deployment_binding", "")) != binding:
             return set()

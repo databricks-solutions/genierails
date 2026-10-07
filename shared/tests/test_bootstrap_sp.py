@@ -151,8 +151,19 @@ def test_workspace_client_never_guesses_aws_host_for_azure_account():
     account = MagicMock()
     account.config.host = "https://accounts.azuredatabricks.net"
     account.workspaces.get.return_value = SimpleNamespace()
-    with pytest.raises(ValueError, match="explicit Azure workspace host is required"):
+    with pytest.raises(ValueError, match="Workspace API returns one of those fields"):
         _workspace_host(account, 456)
+
+
+@pytest.mark.parametrize("account_host, suffix", [
+    ("https://accounts.azuredatabricks.us", "azuredatabricks.us"),
+    ("https://accounts.azure.cn", "azuredatabricks.cn"),
+])
+def test_workspace_client_derives_sovereign_azure_domain(account_host, suffix):
+    account = MagicMock()
+    account.config.host = account_host
+    account.workspaces.get.return_value = SimpleNamespace(deployment_name="adb-123.4")
+    assert _workspace_host(account, 123) == f"https://adb-123.4.{suffix}"
 
 
 def test_preflight_catalog_owner_passes_without_effective_grant_lookup():

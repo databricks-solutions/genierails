@@ -112,10 +112,7 @@ def _gate_file(env_dir):
 
 def _state(env_dir, tables):
     auth = cg._load_tfvars(env_dir / "data_access" / "auth.auto.tfvars")
-    binding = cg.hashlib.sha256(json.dumps({
-        "workspace_host": str(auth.get("databricks_workspace_host", "")).strip().rstrip("/").lower(),
-        "workspace_id": str(auth.get("databricks_workspace_id", "")).strip(),
-    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    binding = cg.deployment_binding(auth)
     (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps({
         "version": 4,
         "outputs": {"coverage_gate": {
@@ -200,6 +197,14 @@ def test_no_state_means_nothing_is_granted(env_dir):
 def test_granted_tables_come_from_table_access_instances(env_dir):
     _state(env_dir, [TABLE, "Cat.Sch.Orders"])
     assert cg.granted_tables(env_dir / "data_access") == {TABLE, "cat.sch.orders"}
+
+
+def test_deployment_binding_matches_terraform_jsonencode_golden_vector():
+    # Produced by Terraform 1.11.4 from roots/data_access's exact expression.
+    assert cg.deployment_binding({
+        "databricks_workspace_host": " HTTPS://EXAMPLE.COM/<&>// ",
+        "databricks_workspace_id": " 123 ",
+    }) == "af6da7a8afa9328108d1c0ff9042a2e7e40e2d42b9cc1524db79f7b3db9a989a"
 
 
 def test_granted_tables_excludes_tainted_deposed_and_foreign_binding(env_dir):
@@ -1132,16 +1137,16 @@ def test_can_run_check_mirrors_the_workspace_precondition(tmp_path, capsys, answ
 # them itself: a pass resting on an old, future or malformed refresh still
 # refuses widening, and still lets keeping, shrinking or clearing through.
 @pytest.mark.parametrize("refresh, groups, widening, code, message", [
-    (_refresh(timedelta(hours=7)), "a,b", ["b"], 1, "refresh too old"),
-    (_refresh(timedelta(hours=-1)), "a,b", ["b"], 1, "no live refresh"),
+    (timedelta(hours=7), "a,b", ["b"], 1, "refresh too old"),
+    (timedelta(hours=-1), "a,b", ["b"], 1, "no live refresh"),
     ({"refreshed_at": "", "fresh_until": ""}, "a,b", ["b"], 1, "no live refresh"),
     ({"refreshed_at": None, "fresh_until": None}, "a,b", ["b"], 1, "no live refresh"),
-    (_refresh(timedelta(hours=7)), "a", [], 0, "refresh too old"),
-    # Leave enough margin for the full Terraform-required suite (which can
-    # take well over ten minutes) before this parametrized case executes.
-    (_refresh(timedelta(hours=5, minutes=30)), "a,b", ["b"], 0, ""),
+    (timedelta(hours=7), "a", [], 0, "refresh too old"),
+    (timedelta(hours=5, minutes=50), "a,b", ["b"], 0, ""),
 ])
 def test_can_run_check_applies_the_refresh_time_checks(tmp_path, capsys, refresh, groups, widening, code, message):
+    if isinstance(refresh, timedelta):
+        refresh = _refresh(refresh)
     runner = _console_runner(tmp_path, {"groups": {"sales": groups}, "blocker": "",
                                         "widening": {"sales": widening}, "missing": {"sales": []},
                                         **refresh})

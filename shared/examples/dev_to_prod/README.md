@@ -274,7 +274,7 @@ ENVS_DIR="$PWD/envs" ../shared/scripts/terraform_layer.sh workspace prod output 
 make maintain ENV=prod   # audit-schema → derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook
 ```
 
-It protects newly tagged columns using prod's own `class.*` tags. It reconciles governance, including `SELECT` for tables already covered by the passing coverage check; it never widens access past that check or changes the Genie agent.
+It protects newly tagged columns using prod's own `class.*` tags. It reconciles governance, including `SELECT` for tables already covered by the passing coverage check; it never widens access past that check or changes the Genie agent. When generated inputs are unchanged, the apply is skipped, so `maintain` does not repair grants revoked outside Terraform.
 
 - **Stops at `audit-schema`** — a sensitive-looking column has no `class.*` tag yet. Review it in native classification (`make enable-classification ENV=prod`) or tag it in Unity Catalog, then re-run `make maintain ENV=prod`.
 - **Stops at `coverage-gate` or `audit-rulebook`** — prod has a tag your rules don't cover. Add the rule in dev, rehearse, and re-promote before running `make release ENV=prod` again.
