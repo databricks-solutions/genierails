@@ -66,7 +66,7 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert (
         "  3. Edit envs/dev/env.auto.tfvars — set genie_space_id to your Genie agent ID and\n"
         "     access_tier_groups to your IdP groups, most to least privileged, then run:\n"
-        "       make generate ENV=dev MODE=genie\n"
+        "       make generate ENV=dev MODE=genie   (imports the agent and discovers its tables; drafts no rules)\n"
     ) in out
     # access_tier_groups makes --groups unnecessary on every champion command.
     assert "GENERATE_ARGS" not in out
@@ -78,7 +78,7 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "pick one" not in out
     assert "make enable-classification ENV=dev" in out
     assert "  4. Enable classification" in out
-    assert "  5. Run: make generate ENV=dev\n" in out
+    assert "  5. Run: make generate ENV=dev   (drafts masks and rules from the class.* tags)\n" in out
     assert "make rehearse ENV=dev VERIFY_KEY_COLUMN=" in out
     assert "  6. Run: make rehearse" in out
     assert "business_access_enabled" not in out

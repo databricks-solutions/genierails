@@ -293,6 +293,7 @@ CAN_RUN_EXPRESSION = (
     "fresh_until = module.coverage_gate_check.fresh_until, "
     "problems = module.coverage_gate_check.problems, "
     "widening = local.genie_space_can_run_widening, "
+    "applied = local.applied_can_run_groups, "
     "missing = local.genie_space_missing_grants}))"
 )
 # modules/coverage_gate_check future_skew.
@@ -352,8 +353,24 @@ def can_run_check(env_dir: Path, env_name: str, runner: Path, apply_flags: str) 
               "(make apply / make apply-governance) before opening it.", file=sys.stderr)
         return 1
     if blocker:
-        print(f"WARNING: Genie exposure is blocked for workspace:{env_name} ({blocker}); applying "
-              "only ACLs that keep, shrink or clear the CAN_RUN already in place.", file=sys.stderr)
+        # What this apply removes, from the CAN_RUN the last apply left in place.
+        try:
+            removed = {
+                key: names for key, previous in state["applied"].items()
+                if (names := sorted(set(previous) - set((groups.get(key) or "").split(","))))
+            }
+        except (KeyError, AttributeError, TypeError):
+            removed = None  # an answer without it makes no claim either way
+        if removed is None:
+            kept = "Existing Genie CAN_RUN access is kept unless this config removes it"
+        elif removed:
+            details = "; ".join(f"{key}: -{', '.join(names)}" for key, names in sorted(removed.items()))
+            kept = f"Existing Genie CAN_RUN access is kept except what this config removes ({details})"
+        else:
+            kept = "Existing Genie CAN_RUN access is kept and nothing is revoked"
+        print(f"WARNING: Genie exposure is blocked for workspace:{env_name} ({blocker}).\n"
+              f"  {kept}; only new CAN_RUN groups wait. This clears on the next make release "
+              "(or make apply) once the coverage check passes.", file=sys.stderr)
     return 0
 
 
@@ -460,6 +477,8 @@ def main(argv: list[str] | None = None) -> int:
     retired = sub.add_parser("warn-retired-flag", help="print one deprecation line if business_access_enabled is still set (never fails)")
     retired.add_argument("--env-file", required=True, type=Path)
     retired.add_argument("--label", default="")
+    retired.add_argument("--file-only", action="store_true",
+                         help="check only --env-file (the account layer never reads APPLY_FLAGS or TF_VAR_)")
     check = sub.add_parser("can-run-check", help="refuse a workspace apply that opens or widens CAN_RUN while exposure is blocked")
     check.add_argument("--env-dir", required=True, type=Path)
     check.add_argument("--env-name", required=True)
@@ -469,7 +488,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "warn-retired-flag":
             # APPLY_FLAGS comes through the environment, so its quoting survives.
-            sources = retired_flag_sources(args.env_file, os.environ.get("GENIERAILS_APPLY_FLAGS", ""), os.environ)
+            if args.file_only:
+                sources = retired_flag_sources(args.env_file, "", {})
+            else:
+                sources = retired_flag_sources(args.env_file, os.environ.get("GENIERAILS_APPLY_FLAGS", ""), os.environ)
             if sources:
                 where = ", ".join(args.label or source if source == str(args.env_file) else source
                                   for source in sources)

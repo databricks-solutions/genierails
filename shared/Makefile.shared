@@ -159,6 +159,13 @@ _guard-workspace-target:
 		exit 1; \
 	fi
 
+# The account layer reads only envs/account/env.auto.tfvars (never APPLY_FLAGS
+# or TF_VAR_), where a leftover business_access_enabled otherwise gets only
+# Terraform's generic undeclared-variable warning. plan, apply and
+# apply-governance print the same one-line deprecation; never fails.
+_WARN_ACCOUNT_RETIRED_FLAG = $(_COVERAGE_GATE) warn-retired-flag --file-only \
+	--env-file "$(ACCOUNT_ENV_DIR)/env.auto.tfvars" --label "$(patsubst $(CLOUD_ROOT)/%,%,$(ACCOUNT_ENV_DIR))/env.auto.tfvars" || true
+
 _guard-account-config:
 	@cd "$(ACCOUNT_ENV_DIR)" && if [ -f abac.auto.tfvars ]; then \
 		python3 -c 'import sys,hcl2; cfg=hcl2.load(open("abac.auto.tfvars")); bad=[name for name in ("tag_assignments","fgac_policies","genie_space_configs","genie_space_title","genie_space_description","genie_sample_questions","genie_instructions","genie_benchmarks","genie_sql_filters","genie_sql_expressions","genie_sql_measures","genie_join_specs") if cfg.get(name)]; bad and (print("Account config still contains non-account sections: " + ", ".join(bad)), sys.exit(1))'; \
@@ -243,11 +250,11 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "  $$step. Edit $(_SETUP_ENV_REL)/auth.auto.tfvars — deploying SP client_id / client_secret + workspace host & id"; step=$$((step+1)); \
 		echo "  $$step. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — set genie_space_id to your Genie agent ID and"; \
 		echo "     access_tier_groups to your IdP groups, most to least privileged, then run:"; \
-		echo "       make generate ENV=$(ENV) MODE=genie"; \
+		echo "       make generate ENV=$(ENV) MODE=genie   (imports the agent and discovers its tables; drafts no rules)"; \
 		echo "       (No agent yet? See ../shared/examples/dev_to_prod/SAMPLE_ENV.md)"; step=$$((step+1)); \
 		echo "  $$step. Enable classification on your catalog (Databricks UI, or: make enable-classification ENV=$(ENV)),"; \
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
-		step=$$((step+1)); echo "  $$step. Run: make generate ENV=$(ENV)"; \
+		step=$$((step+1)); echo "  $$step. Run: make generate ENV=$(ENV)   (drafts masks and rules from the class.* tags)"; \
 		step=$$((step+1)); echo "  $$step. Run: make rehearse ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
 		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
 		echo ""; \
@@ -605,7 +612,7 @@ _plan-layer:
 
 plan: _guarded-bootstrap ## Run terraform plan for the selected layer or workspace env
 	@set -e; $(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
-		$(MAKE) --no-print-directory _guard-account-config; \
+		$(_WARN_ACCOUNT_RETIRED_FLAG); $(MAKE) --no-print-directory _guard-account-config; \
 		$(MAKE) --no-print-directory _plan-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 	else \
 		$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
@@ -685,7 +692,7 @@ _apply-layer:
 
 apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access -> workspace for ENV=<workspace>
 	@set -e; $(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
-		$(MAKE) --no-print-directory _guard-account-config; \
+		$(_WARN_ACCOUNT_RETIRED_FLAG); $(MAKE) --no-print-directory _guard-account-config; \
 		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 		$(MAKE) --no-print-directory wait-tag-policies; \
 	else \
@@ -697,7 +704,7 @@ apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access
 		else \
 			echo "=== Skipping promote (no $(ENV_DIR)/generated/abac.auto.tfvars) ==="; \
 		fi; \
-		$(MAKE) --no-print-directory _guard-account-config; \
+		$(_WARN_ACCOUNT_RETIRED_FLAG); $(MAKE) --no-print-directory _guard-account-config; \
 		$(MAKE) --no-print-directory TARGET_ENV="$(ENV)" _guard-data-access-config; \
 		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 		$(MAKE) --no-print-directory wait-tag-policies REQUIRED_VALUES_TFVARS="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars"; \
@@ -718,7 +725,7 @@ apply-governance: _guarded-bootstrap _guard-workspace-target ## [Governance team
 	else \
 		echo "=== Skipping promote (no $(ENV_DIR)/generated/abac.auto.tfvars) ==="; \
 	fi; \
-	$(MAKE) --no-print-directory _guard-account-config; \
+	$(_WARN_ACCOUNT_RETIRED_FLAG); $(MAKE) --no-print-directory _guard-account-config; \
 	$(MAKE) --no-print-directory TARGET_ENV="$(ENV)" _guard-data-access-config; \
 	$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 	$(MAKE) --no-print-directory wait-tag-policies REQUIRED_VALUES_TFVARS="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars"; \

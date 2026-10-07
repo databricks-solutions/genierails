@@ -925,7 +925,10 @@ def test_apply_genie_keeps_or_revokes_can_run_when_uc_is_down(genie_env, acl):
     assert result.returncode == 0, output
     assert "live refresh of tags/DDL failed" in output
     assert "coverage check did not pass" in output
-    assert "applying only ACLs that keep, shrink or clear" in output
+    kept = ("kept except what this config removes (sales: -analysts)" if acl == "[]"
+            else "kept and nothing is revoked")
+    assert f"Existing Genie CAN_RUN access is {kept}; only new CAN_RUN groups wait" in output
+    assert "clears on the next make release (or make apply) once the coverage check passes" in output
     assert applied, output
     assert json.loads(_gate_file(env).read_text())["status"] == "fail"
 
@@ -1021,10 +1024,17 @@ def _console_runner(tmp_path, answer):
     ({"groups": {"sales": "a,b"}, "blocker": "gate expired",
       "widening": {"sales": ["b"]}, "missing": {"sales": []}}, 1, "sales: +b"),
     # ... keeping, shrinking or clearing proceeds (with a warning).
+    ({"groups": {"sales": "a"}, "blocker": "gate expired", "applied": {"sales": ["a"]},
+      "widening": {"sales": []}, "missing": {"sales": []}}, 0,
+     "(gate expired).\n  Existing Genie CAN_RUN access is kept and nothing is revoked; only new CAN_RUN "
+     "groups wait. This clears on the next make release (or make apply) once the coverage check passes."),
+    ({"groups": {"sales": ""}, "blocker": "gate expired", "applied": {"sales": ["a", "b"]},
+      "widening": {"sales": []}, "missing": {"sales": []}}, 0,
+     "Existing Genie CAN_RUN access is kept except what this config removes (sales: -a, b)"),
+    # An older console answer without what is applied: no claim either way.
     ({"groups": {"sales": "a"}, "blocker": "gate expired",
-      "widening": {"sales": []}, "missing": {"sales": []}}, 0, "keep, shrink or clear"),
-    ({"groups": {"sales": ""}, "blocker": "gate expired",
-      "widening": {"sales": []}, "missing": {"sales": []}}, 0, "keep, shrink or clear"),
+      "widening": {"sales": []}, "missing": {"sales": []}}, 0,
+     "Existing Genie CAN_RUN access is kept unless this config removes it"),
     # The layer is ready but this agent lacks its grants: adding is refused.
     ({"groups": {"sales": "a,b"}, "blocker": "",
       "widening": {"sales": ["b"]}, "missing": {"sales": ["t|b"]}}, 1, "lacks the SELECT grants"),

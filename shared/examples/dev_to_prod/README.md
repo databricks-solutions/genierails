@@ -52,7 +52,7 @@ cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfva
 access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
 ```
 
-Then [import the agent](../../docs/import-genie-agent-from-ui.md):
+Then [import the agent](../../docs/import-genie-agent-from-ui.md) — `MODE=genie` imports the agent and discovers its tables; it drafts no rules yet:
 
 ```bash
 make generate ENV=dev MODE=genie
@@ -104,7 +104,7 @@ As code, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-r
 
 </details>
 
-**1c. Draft the protection rules.**
+**1c. Draft the protection rules.** This time without `MODE=genie`: it drafts masks and rules from the `class.*` tags.
 ```bash
 make generate ENV=dev
 ```
