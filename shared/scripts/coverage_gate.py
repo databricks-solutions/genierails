@@ -248,6 +248,24 @@ def query_inputs(runner: Path, env_name: str, layer_dir: Path, flags: list[str])
     return inputs
 
 
+def deployment_binding(layer_dir: Path) -> str:
+    """roots/data_access local.deployment_binding, from the layer's tfvars."""
+    variables = {}
+    for path in (layer_dir / "auth.auto.tfvars", layer_dir / "env.auto.tfvars"):
+        variables.update(_load_tfvars(path))
+    return hashlib.sha256(json.dumps({
+        "workspace_host": str(variables.get("databricks_workspace_host", "")).strip().rstrip("/").lower(),
+        "workspace_id": str(variables.get("databricks_workspace_id", "")).strip(),
+    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _is_for_this_deployment(state: dict, layer_dir: Path) -> bool:
+    """A data_access state recorded for this workspace (host and ID); a copied
+    or pre-binding state counts as nothing applied."""
+    applied = (state.get("outputs", {}).get("coverage_gate", {}) or {}).get("value") or {}
+    return str(applied.get("deployment_binding", "")) == deployment_binding(layer_dir)
+
+
 def granted_tables(layer_dir: Path) -> set[str]:
     """Tables the data_access state already grants business SELECT on.
 
@@ -260,15 +278,7 @@ def granted_tables(layer_dir: Path) -> set[str]:
         return set()
     try:
         state = json.loads(state_path.read_text())
-        variables = {}
-        for path in (layer_dir / "auth.auto.tfvars", layer_dir / "env.auto.tfvars"):
-            variables.update(_load_tfvars(path))
-        binding = hashlib.sha256(json.dumps({
-            "workspace_host": str(variables.get("databricks_workspace_host", "")).strip().rstrip("/").lower(),
-            "workspace_id": str(variables.get("databricks_workspace_id", "")).strip(),
-        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        applied = state.get("outputs", {}).get("coverage_gate", {}).get("value") or {}
-        if str(applied.get("deployment_binding", "")) != binding:
+        if not _is_for_this_deployment(state, layer_dir):
             return set()
         tables = set()
         for resource in state.get("resources", []):
@@ -535,7 +545,11 @@ def withheld_access(layer: str, layer_dir: Path) -> list[str]:
             desired = json.loads((layer_dir / GATE_FILENAME).read_text()).get("grant_keys")
         except (OSError, ValueError, AttributeError):
             return []
-        applied = _current_instances(state, *TABLE_GRANT[:2], (TABLE_GRANT[2],))
+        try:
+            ours = state is not None and _is_for_this_deployment(state, layer_dir)
+        except GateError:
+            ours = False
+        applied = _current_instances(state, *TABLE_GRANT[:2], (TABLE_GRANT[2],)) if ours else {}
         return sorted(f"SELECT {key}" for key in desired or [] if key not in applied)
     try:
         desired = json.loads((layer_dir / CAN_RUN_FILENAME).read_text())["desired"]
@@ -564,13 +578,17 @@ def skip_key(layer: str, layer_dir: Path) -> str:
     """What else make's "inputs unchanged" apply skip must depend on, or "noskip".
 
     data_access: the gate result (status, fingerprint), and never skip while
-    the state records an apply without a pass: a later pass must reach the
+    the state isn't this deployment's or records an apply without a pass: a later pass must reach the
     state (and so the workspace layer's CAN_RUN check). workspace: the
     data_access state it reads, and never skip while CAN_RUN is withheld.
     """
     if layer == "data_access":
-        recorded = (_state(layer_dir / "terraform.tfstate") or {}).get("outputs", {})
-        if (recorded.get("coverage_gate", {}).get("value") or {}).get("status") != "pass":
+        state = _state(layer_dir / "terraform.tfstate") or {}
+        try:
+            ours = _is_for_this_deployment(state, layer_dir)
+        except GateError:
+            ours = False
+        if not ours or (state.get("outputs", {}).get("coverage_gate", {}).get("value") or {}).get("status") != "pass":
             return "noskip"
         try:
             gate = json.loads((layer_dir / GATE_FILENAME).read_text())

@@ -590,6 +590,41 @@ def test_first_exposure_failure_blocks_the_plan_until_acknowledged(live_like_env
 
 
 @needs_terraform
+@pytest.mark.parametrize("how", ["tainted", "deposed", "copied", "pre_binding"])
+def test_tainted_or_copied_state_keeps_the_table_a_blocking_first_exposure(live_like_env, how):
+    """Only a current grant this deployment applied makes a table "already
+    granted"; anything else must not turn the first-exposure block into the
+    non-blocking warning, so it can never yield a pass."""
+    env = live_like_env
+    (env / "ddl" / "_fetched.sql").write_text(DDL.replace("email STRING", "email STRING,\n  ssn STRING"))
+    _record_refresh(env)  # the live refresh read the new, untagged column
+    _state(env, [TABLE])
+    path = env / "data_access" / "terraform.tfstate"
+    state = json.loads(path.read_text())
+    instance = state["resources"][0]["instances"][0]
+    if how == "tainted":
+        instance["status"] = "tainted"
+    elif how == "deposed":
+        instance["deposed"] = "deadbeef"
+    elif how == "copied":  # recorded for another workspace
+        state["outputs"]["coverage_gate"]["value"]["deployment_binding"] = "another-deployment"
+    else:
+        state.pop("outputs")
+    path.write_text(json.dumps(state))
+
+    gated = _gate(env, "--verbose")
+    result = json.loads(_gate_file(env).read_text())
+    assert result["status"] == "fail", gated.stdout + gated.stderr
+    assert result["first_exposure_tables"] == [TABLE]
+    assert "first exposure blocked" in gated.stdout
+    assert f"{TABLE}.ssn (looks like: ssn)" in gated.stdout
+    # Nothing is in place for this deployment, so nothing is weakened: the
+    # apply may run, but the grant is withheld (never a pass).
+    assert "1 new SELECT grant(s) are withheld" in gated.stderr
+    assert _withheld(_raw_plan(env), "failed")
+
+
+@needs_terraform
 def test_already_granted_table_keeps_the_warning(live_like_env):
     env = live_like_env
     (env / "ddl" / "_fetched.sql").write_text(DDL.replace("email STRING", "email STRING,\n  ssn STRING"))
@@ -1214,19 +1249,20 @@ def test_can_run_check_mirrors_what_the_workspace_withholds(tmp_path, capsys, an
 # them itself: a pass resting on an old, future or malformed refresh still
 # withholds widening, and still lets keeping, shrinking or clearing through.
 @pytest.mark.parametrize("refresh, groups, widening, withheld, message", [
-    (_refresh(timedelta(hours=7)), "a,b", ["b"], 1, "refresh too old"),
-    (_refresh(timedelta(hours=-1)), "a,b", ["b"], 1, "no live refresh"),
+    # A timedelta is the refresh's age, turned into timestamps inside the test
+    # so a long suite can't age a "fresh" case past the max age before it runs.
+    (timedelta(hours=7), "a,b", ["b"], 1, "refresh too old"),
+    (timedelta(hours=-1), "a,b", ["b"], 1, "no live refresh"),
     ({"refreshed_at": "", "fresh_until": ""}, "a,b", ["b"], 1, "no live refresh"),
     ({"refreshed_at": None, "fresh_until": None}, "a,b", ["b"], 1, "no live refresh"),
-    (_refresh(timedelta(hours=7)), "a", [], 0, "refresh too old"),
-    # Leave enough margin for the full Terraform-required suite (which can
-    # take well over ten minutes) before this parametrized case executes.
-    (_refresh(timedelta(hours=5, minutes=30)), "a,b", ["b"], 0, ""),
+    (timedelta(hours=7), "a", [], 0, "refresh too old"),
+    (timedelta(hours=5, minutes=50), "a,b", ["b"], 0, ""),
 ])
 def test_can_run_check_applies_the_refresh_time_checks(tmp_path, capsys, refresh, groups, widening, withheld, message):
+    fields = _refresh(refresh) if isinstance(refresh, timedelta) else refresh
     runner = _console_runner(tmp_path, {"groups": {"sales": groups}, "blocker": "",
                                         "widening": {"sales": widening}, "missing": {"sales": []},
-                                        **refresh})
+                                        **fields})
     assert cg.can_run_check(tmp_path, "prod", runner, "") == 0
     err = capsys.readouterr().err
     assert message in err if message else "blocked" not in err

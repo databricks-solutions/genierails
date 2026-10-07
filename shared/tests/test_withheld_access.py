@@ -28,9 +28,11 @@ TABLE = "cat.sch.customers"
 GENIE_SCRIPT = SHARED / "scripts" / "genie_space.sh"
 
 
-def _grant_state(path, keys, status="pass", tainted=()):
+def _grant_state(path, keys, status="pass", tainted=(), binding=None):
+    """A data_access state; recorded for the layer's own deployment unless `binding`."""
+    binding = cg.deployment_binding(path.parent) if binding is None else binding
     path.write_text(json.dumps({"version": 4, "outputs": {
-        "coverage_gate": {"value": {"status": status, "fingerprint": "applied"}},
+        "coverage_gate": {"value": {"status": status, "fingerprint": "applied", "deployment_binding": binding}},
         "table_grant_resource_keys": {"value": list(keys)},
     }, "resources": [{
         "module": "module.data_access", "mode": "managed", "type": "databricks_grant", "name": "table_access",
@@ -67,6 +69,9 @@ def test_data_access_reports_grants_the_apply_withheld(tmp_path, capsys):
     _grant_state(layer / "terraform.tfstate", [f"{TABLE}|analysts", f"{TABLE}|viewers"],
                  tainted={f"{TABLE}|viewers"})
     assert cg.report_withheld("data_access", layer, "prod") == 1
+    # So is a state copied from another deployment.
+    _grant_state(layer / "terraform.tfstate", [f"{TABLE}|analysts", f"{TABLE}|viewers"], binding="elsewhere")
+    assert cg.report_withheld("data_access", layer, "prod") == 1
 
 
 def test_workspace_reports_can_run_the_apply_withheld(tmp_path, capsys):
@@ -101,6 +106,9 @@ def test_skip_key_never_skips_data_access_while_its_state_records_no_pass(tmp_pa
     assert passing.startswith("gate pass fp")
     (layer / cg.GATE_FILENAME).write_text(json.dumps({"status": "fail", "fingerprint": "fp"}))
     assert cg.skip_key("data_access", layer) not in (passing, "noskip")
+    # A passing state copied from another deployment is no record of ours.
+    _grant_state(layer / "terraform.tfstate", [f"{TABLE}|analysts"], status="pass", binding="elsewhere")
+    assert cg.skip_key("data_access", layer) == "noskip"
 
 
 def test_skip_key_never_skips_workspace_while_can_run_is_withheld(tmp_path):
