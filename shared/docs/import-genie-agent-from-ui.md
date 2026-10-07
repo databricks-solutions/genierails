@@ -82,6 +82,13 @@ For an imported agent:
 - Omit `acl_groups` on the agent's `genie_spaces[]` entry to derive it fresh from current policies. To override derivation, set the user-owned field there; an explicit `[]` means nobody. Generated drafts are not an authoritative ACL input.
 - `make apply` updates the attached agent's configuration and ACLs without creating or deleting it.
 - In production, leave `genie_space_id` empty to create a new agent, or set an existing production agent ID to attach to it.
+- Creation first lists every page of agents in the target workspace and adopts
+  the single exact, case-sensitive title match. If more than one agent has that
+  title, set `genie_space_id` explicitly to choose which one to manage.
+- A rename that also changes the effective title, with no ID file or attached
+  destination `genie_space_id`, represents a genuinely different agent. The old
+  agent is left as-is; attach its ID explicitly if the renamed config should
+  continue managing it.
 
 </details>
 
