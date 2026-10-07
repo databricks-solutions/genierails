@@ -88,7 +88,7 @@ def test_release_runs_unified_pipeline_in_order_and_writes_no_receipt(tmp_path):
         _same_env_promote(env_dir),
         ["audit-rulebook", "ENV=prod"],
         ["apply", "ENV=prod", "APPLY_FLAGS=", "_EXPOSURE_DERIVED=1"],
-        ["verify-access", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],
+        ["verify-access", "ENV=prod", "VERIFY_REQUIRE_MASKS=1", "VERIFY_KEY_COLUMN=customer_id"],
     ]
     # No gate to open or persist: release neither passes nor writes it.
     assert "business_access_enabled" not in log.read_text()
@@ -251,11 +251,13 @@ def test_every_in_recipe_same_env_promote_clears_cross_env_variables():
 
 
 def test_release_without_key_still_calls_verify_access(tmp_path):
+    # No column masks to pair rows for, so no key is needed; verify-access
+    # still runs, and strictly (test_release_mask_proof covers masks).
     env_dir = _env_dir(tmp_path)
     stub, log, audit = _stub(tmp_path)
     result = _make("release", env_dir, stub, audit)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert _calls(log)[-1] == ["verify-access", "ENV=prod"]
+    assert _calls(log)[-1] == ["verify-access", "ENV=prod", "VERIFY_REQUIRE_MASKS=1"]
 
 
 @pytest.mark.parametrize("target", ["release", "certify", "maintain"])
