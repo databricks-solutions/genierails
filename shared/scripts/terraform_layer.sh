@@ -151,12 +151,18 @@ if [ "$LAYER" = "data_access" ] && { [ "$COMMAND" = "plan" ] || [ "$COMMAND" = "
   # Terraform's output passes through unchanged; a copy lets the note below
   # explain a plan whose only destroys replace terraform_data.masking_functions.
   OUTPUT_COPY="$(mktemp)"
-  trap 'rm -f "$OUTPUT_COPY"' EXIT
+  STATUS_FILE="$(mktemp)"
+  trap 'rm -f "$OUTPUT_COPY" "$STATUS_FILE"' EXIT
   set +e
-  "${CMD[@]}" | tee "$OUTPUT_COPY"
-  status="${PIPESTATUS[0]}"
+  # On Ctrl-C (or TERM/HUP) Terraform shuts down gracefully and keeps writing
+  # (saving state) through the pipe, so tee ignores those signals. This shell
+  # and the group around Terraform trap them instead (a trap, unlike ignoring,
+  # isn't inherited by Terraform) so they wait for it and return its status.
+  trap ':' TERM HUP
+  { trap ':' TERM HUP; "${CMD[@]}"; echo "$?" > "$STATUS_FILE"; } | (trap '' INT TERM HUP; exec tee "$OUTPUT_COPY")
+  status="$(cat "$STATUS_FILE")"
   set -e
   python3 "$SCRIPT_DIR/masking_replace_note.py" "$OUTPUT_COPY" || true
-  exit "$status"
+  exit "${status:-1}"
 fi
 "${CMD[@]}"

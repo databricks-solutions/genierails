@@ -21,6 +21,7 @@ ROOT = SHARED / "roots" / "workspace"
 sys.path.insert(0, str(SHARED / "scripts"))
 
 import coverage_gate as cg  # noqa: E402
+from tests.terraform_helpers import TIMEOUT, shared_copy, skip_if_providers_unavailable  # noqa: E402
 
 pytestmark = pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
 
@@ -28,12 +29,16 @@ pytestmark = pytest.mark.skipif(shutil.which("terraform") is None, reason="terra
 @pytest.fixture(scope="module")
 def data_dir(tmp_path_factory):
     # Init the way make does (terraform_layer.sh), so a fresh clone without a
-    # lock file, or with a stale one, initializes too.
+    # lock file, or with a stale one, initializes too; in a copy of shared/,
+    # so the real root never gets a lock file from a test.
+    global ROOT
+    copy = shared_copy(tmp_path_factory.mktemp("shared"))
+    ROOT = copy / "roots" / "workspace"
     tf = tmp_path_factory.mktemp("tf")
-    init = subprocess.run([str(SHARED / "scripts" / "terraform_layer.sh"), "workspace", "test", "print-cmd", "plan"],
+    init = subprocess.run([str(copy / "scripts" / "terraform_layer.sh"), "workspace", "test", "print-cmd", "plan"],
                           env={**os.environ, "LAYER_ENV_DIR": str(tf), "TF_IN_AUTOMATION": "1"},
-                          text=True, capture_output=True)
-    assert init.returncode == 0, init.stdout + init.stderr
+                          text=True, capture_output=True, timeout=TIMEOUT)
+    skip_if_providers_unavailable(init)
     return tf / ".terraform"
 
 
@@ -67,16 +72,19 @@ def _env(tmp_path, data_dir, refreshed_at):
     return env, runner
 
 
-@pytest.mark.parametrize("age, code, message", [
-    (timedelta(minutes=1), 0, None),
-    (timedelta(hours=7), 1, "older than coverage_gate_max_age (6h)"),
-    (timedelta(hours=-1), 1, "records no live refresh"),
+@pytest.mark.parametrize("age, message", [
+    (timedelta(minutes=1), None),
+    (timedelta(hours=7), "older than coverage_gate_max_age (6h)"),
+    (timedelta(hours=-1), "records no live refresh"),
 ])
-def test_can_run_check_judges_the_refresh_time_itself(tmp_path, data_dir, capsys, age, code, message):
+def test_can_run_check_judges_the_refresh_time_itself(tmp_path, data_dir, capsys, age, message):
     env, runner = _env(tmp_path, data_dir, datetime.now(timezone.utc) - age)
-    assert cg.can_run_check(env, "prod", runner, "") == code
+    # Never refuses the apply: Terraform withholds the new groups and applies
+    # the rest; make fails after the apply (withheld).
+    assert cg.can_run_check(env, "prod", runner, "") == 0
     err = capsys.readouterr().err
+    assert json.loads((env / cg.CAN_RUN_FILENAME).read_text())["desired"] == {"sales": "analysts"}
     if message:
-        assert "Genie CAN_RUN blocked" in err and "sales: +analysts" in err and message in err
+        assert "Genie CAN_RUN withheld" in err and "sales: +analysts" in err and message in err
     else:
-        assert "blocked" not in err
+        assert "withheld" not in err and "blocked" not in err

@@ -15,7 +15,7 @@ Lookup companion to the **[Dev-to-Prod Walkthrough](README.md)**: the full comma
 | Workspace assignment + consume entitlement | applied on **every** apply (harmless without `SELECT`/`CAN_RUN`) |
 | Warehouse `CAN_USE` | **not managed by GenieRails** — you grant it (Phase 5) |
 
-So "expose last" isn't a policy you hope holds — there is simply no new or wider `SELECT` or `CAN_RUN` without a passing check. There is no on/off flag: the old `business_access_enabled` setting is deprecated and ignored (make warns while it is set; `false` does **not** revoke access). To withdraw access, remove the groups or `acl_groups` entries and apply.
+So "expose last" isn't a policy you hope holds — there is simply no new or wider `SELECT` or `CAN_RUN` without a passing check. There is no on/off flag: the old `business_access_enabled` setting is deprecated and ignored (make warns while it is set; `false` does **not** revoke access). To withdraw access, remove the groups or `acl_groups` entries (or the agent) and apply: that revokes their `SELECT` and the Genie `CAN_RUN` GenieRails granted them, and never waits for the coverage check (other direct entries and inherited permissions on the agent are left alone).
 
 **Three layers of governance, and the Terraform layers that build them:**
 
@@ -48,7 +48,7 @@ So "expose last" isn't a policy you hope holds — there is simply no new or wid
 | `make genie-adopt-preflight ENV=<e>` | — | Read-only. Before the one-time upgrade to secret-free Genie state, checks that every Genie agent created by an earlier version can be adopted with its current ID (ID file, workspace, GET 200). `make apply` runs it first and stops if any agent fails. |
 | `make rehearse ENV=dev VERIFY_KEY_COLUMN=<pk>` | 1 | (dev) live derive → validate-generated → coverage-gate → apply → verify-access, stopping at the first failure |
 | `make release ENV=prod VERIFY_KEY_COLUMN=<pk>` | 5 | (prod) Placeholder guard → lock → live derive → validate → coverage → promote → read-only rulebook audit → all-layer apply → `verify-access` |
-| `make maintain ENV=prod` | 6 | (prod, scheduled) audit-schema → derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook; never changes access or Genie |
+| `make maintain ENV=prod` | 6 | (prod, scheduled) audit-schema → derive-assignments → coverage-gate → validate-generated → audit-rulebook → apply-governance; never touches Genie |
 | `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_cat=prod_cat"` | 2 | Promote **rules only** (leaves tag assignments behind); creates + writes prod `env.auto.tfvars`. Policy names take the prod catalog (`gr_mask_<prod_catalog>_<treatment>`) only when a read-only policy listing of the prod catalog (prod `auth.auto.tfvars`) shows neither the old nor the new name and prod's state doesn't hold the old key; otherwise it keeps its name, since renaming a live policy would drop and recreate it |
 | `make verify-access ENV=<e> VERIFY_KEY_COLUMN=<pk>` | 1/5 | Prove masking by querying as per-tier test principals (**needs the business grants applied**) |
 | `make audit-rulebook ENV=<e>` | 4/6 | Drift check — tags with no covering rule |

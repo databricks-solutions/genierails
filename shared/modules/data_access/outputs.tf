@@ -42,10 +42,15 @@ output "coverage_gate_inputs" {
     grant_tables         = local.coverage_gate_grant_tables
     acknowledged_columns = sort(distinct([for column in var.coverage_acknowledged_columns : lower(column)]))
     max_age              = var.coverage_gate_max_age
-    # false when every planned grant already exists with unchanged protection:
-    # the change only keeps or revokes SELECT, so a failing gate needn't stop it.
-    needs_gate             = length(local.table_grants_needing_gate) > 0
+    # Every planned grant key, and those the last apply didn't make. Without a
+    # pass the new ones are withheld while the rest of the change applies.
+    grant_keys = local.table_grant_keys
+    new_grants = local.table_grants_new
+    # true when a failing gate would fail the plan: a grant already in place
+    # would be kept with weakened (or unrecorded) protection.
+    needs_gate             = length(local.table_grants_blocking) > 0
     protection_fingerprint = local.coverage_gate_protection
+    protection             = local.coverage_gate_protection_parts
     deployment_binding     = var.deployment_binding
   }
 }
@@ -57,7 +62,17 @@ output "coverage_gate" {
     status                 = local.coverage_gate_status
     max_age                = var.coverage_gate_max_age
     protection_fingerprint = local.coverage_gate_protection
+    protection             = local.coverage_gate_protection_parts
     deployment_binding     = var.deployment_binding
     table_grant_count      = length(databricks_grant.table_access)
+  }
+}
+
+output "withheld_table_grants" {
+  description = "New table_access keys left out of this plan because the coverage check doesn't pass (removals and kept grants still apply), with the check's status and why."
+  value = {
+    grants  = local.table_grants_withheld
+    status  = local.coverage_gate_status
+    problem = local.coverage_gate_problem
   }
 }

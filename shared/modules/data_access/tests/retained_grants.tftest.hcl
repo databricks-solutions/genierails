@@ -1,7 +1,8 @@
 # Keeping or revoking SELECT never needs the gate: after a gated apply, a grant
 # that already exists stays plannable when the gate result later expires or
-# fails, as long as its protection (tags, policies, masks, DDL, acks, max age)
-# is unchanged. New grants, or a changed protection, still need a pass.
+# fails, as long as its protection (tags, policies, masks, acks, max age)
+# wasn't weakened. New grants are withheld without a pass; a kept grant whose
+# protection is unknown or weakened fails the plan without one.
 # The masking SQL is a committed fixture: the applied module needs it again
 # at teardown, after the file writer has cleaned up.
 
@@ -66,7 +67,10 @@ run "gate_inputs" {
   }
   # No gate result yet: business SELECT is refused, and the gate inputs are
   # still readable.
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "write_passing_gate" {
@@ -127,7 +131,7 @@ run "replan_unchanged_grant_after_expiry" {
   }
 }
 
-run "widened_grant_after_expiry_blocks" {
+run "widened_grant_after_expiry_is_withheld" {
   command = plan
   providers = {
     databricks.account   = databricks.account
@@ -139,7 +143,10 @@ run "widened_grant_after_expiry_blocks" {
     applied_protection_fingerprint = run.first_apply.coverage_gate.protection_fingerprint
     groups                         = { analysts = {}, auditors = {} }
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = toset(keys(databricks_grant.table_access)) == toset(["cat.sch.customers|analysts"])
+    error_message = "the new grant must be withheld while the existing one is kept"
+  }
 }
 
 run "removed_mask_after_expiry_blocks_existing_grant" {

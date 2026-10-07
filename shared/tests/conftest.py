@@ -50,7 +50,11 @@ def pytest_configure(config):
 
 def pytest_runtest_setup(item):
     if item.get_closest_marker("gnu_make") and GNU_MAKE is None:
-        pytest.skip("needs GNU Make 4+ (`make --version`); on macOS: brew install make, which provides gmake")
+        message = "needs GNU Make 4+ (`make --version`); on macOS: brew install make, which provides gmake"
+        # CI must never pass because the make-driven tests quietly didn't run.
+        if os.environ.get("REQUIRE_TERRAFORM_TESTS") == "1":
+            pytest.fail(f"REQUIRE_TERRAFORM_TESTS=1 but this test {message}")
+        pytest.skip(message)
 
 
 @pytest.fixture
