@@ -6,6 +6,20 @@ mock_provider "databricks" {
 }
 mock_provider "null" {}
 
+# Non-empty CAN_RUN needs a data_access layer applied with a current passing
+# coverage gate (genie_exposure_gate.tftest.hcl); record one for these runs.
+run "data_access_is_gated" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/acl/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { business_access_enabled = true, fingerprint = "f1", status = "pass", max_age = "6h", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["pay.agent.facts|pay_group"] } } })
+      "tests/.tmp/acl/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "f1", refreshed_at = "@NOW@" })
+    }
+  }
+}
+
 run "explicit_empty_acl_clears_can_run" {
   command = plan
 
@@ -17,7 +31,7 @@ run "explicit_empty_acl_clears_can_run" {
   }
 
   variables {
-    env_dir                   = "."
+    env_dir                   = "tests/.tmp/acl"
     databricks_account_id     = "account"
     databricks_client_id      = "service-principal"
     databricks_client_secret  = "secret"
@@ -55,21 +69,21 @@ run "id_only_space_uses_canonical_title_for_can_run" {
     values = { id = 123 }
   }
   variables {
-    env_dir = "."
-    databricks_account_id = "account"
-    databricks_client_id = "service-principal"
-    databricks_client_secret = "secret"
-    databricks_workspace_id = "123"
+    env_dir                   = "tests/.tmp/acl"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_id   = "123"
     databricks_workspace_host = "https://example.invalid"
-    sql_warehouse_id = "warehouse"
-    business_access_enabled = true
-    groups = { pay_group = {}, hr_group = {} }
-    genie_spaces = [{ genie_space_id = "space-1", uc_tables = [] }]
-    genie_space_id_to_name = { "space-1" = "Payments" }
-    genie_space_configs = { Payments = { acl_groups = ["pay_group"] } }
+    sql_warehouse_id          = "warehouse"
+    business_access_enabled   = true
+    groups                    = { pay_group = {}, hr_group = {} }
+    genie_spaces              = [{ genie_space_id = "space-1", uc_tables = [] }]
+    genie_space_id_to_name    = { "space-1" = "Payments" }
+    genie_space_configs       = { Payments = { acl_groups = ["pay_group"] } }
   }
   assert {
-    condition = output.genie_space_acls_groups["space-1"] == "pay_group"
+    condition     = output.genie_space_acls_groups["space-1"] == "pay_group"
     error_message = "id-only spaces must apply CAN_RUN from the canonical resolved title"
   }
 }

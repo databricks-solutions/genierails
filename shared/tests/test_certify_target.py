@@ -50,7 +50,7 @@ def test_certify_is_ordered_and_enforcement_only(tmp_path):
         ["derive-assignments", "ENV=prod"],
         ["coverage-gate", "ENV=prod"],
         ["validate-generated", "ENV=prod"],
-        ["apply-governance", "ENV=prod"],
+        ["apply-governance", "ENV=prod", "_EXPOSURE_DERIVED=1"],
         ["audit-rulebook", "ENV=prod"],
     ]
     assert not any(

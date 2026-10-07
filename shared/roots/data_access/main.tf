@@ -73,6 +73,31 @@ locals {
     ))
   }
   full_effective_uc_tables = distinct(concat(local.full_uc_tables, local.full_discovered_uc_tables))
+
+  # What the last apply of this layer left in place, read from its own state
+  # (the layer runner's local backend), so keeping or revoking SELECT never
+  # needs a current coverage gate (see modules/data_access). Only current,
+  # successfully applied objects count: tainted instances and deposed ones
+  # (left by a failed or partial replacement) don't. The record must also be
+  # for this deployment (workspace host and ID); a state copied from another
+  # environment, or written before the binding existed, counts as nothing
+  # applied. Unreadable state means nothing is exempt.
+  deployment_binding = sha256(jsonencode({
+    workspace_host = lower(trimsuffix(trimspace(var.databricks_workspace_host), "/"))
+    workspace_id   = trimspace(var.databricks_workspace_id)
+  }))
+  _own_state       = fileexists("${var.env_dir}/terraform.tfstate") ? try(jsondecode(file("${var.env_dir}/terraform.tfstate")), null) : null
+  _applied_record  = try(local._own_state.outputs.coverage_gate.value, null)
+  _state_is_for_us = try(tostring(local._applied_record.deployment_binding), "") == local.deployment_binding
+  applied_table_grants = local._state_is_for_us ? flatten([
+    for resource in try(local._own_state.resources, []) : [
+      for instance in try(resource.instances, []) : tostring(instance.index_key)
+      if try(instance.status, "") != "tainted" && try(instance.deposed, "") == "" && try(instance.index_key, null) != null
+    ]
+    if try(resource.module, "") == "module.data_access" && try(resource.mode, "") == "managed"
+    && try(resource.type, "") == "databricks_grant" && try(resource.name, "") == "table_access"
+  ]) : []
+  applied_protection_fingerprint = local._state_is_for_us ? try(tostring(local._applied_record.protection_fingerprint), "") : ""
 }
 
 variable "env_dir" {
@@ -168,6 +193,18 @@ variable "enable_classification" {
   type        = bool
   default     = false
   description = "Opt-in to enable UC Data Classification scanning, scoped to schemas in the combined classification footprint."
+}
+
+variable "coverage_gate_max_age" {
+  type        = string
+  default     = "6h"
+  description = "Oldest live refresh of tags and DDL a passing coverage gate may rest on (Terraform duration). Set in env.auto.tfvars."
+}
+
+variable "coverage_acknowledged_columns" {
+  type        = list(string)
+  default     = []
+  description = "Fully qualified catalog.schema.table.column names reviewed as not sensitive; the coverage gate does not block first exposure on them. Set in env.auto.tfvars."
 }
 
 variable "verify_key_column" {
@@ -343,6 +380,13 @@ module "data_access" {
   genie_space_acl_groups          = var.genie_space_acl_groups
   classification_uc_tables        = local.full_effective_uc_tables
   business_access_enabled         = var.business_access_enabled
+  coverage_gate_file              = "${var.env_dir}/.coverage_gate.json"
+  coverage_ddl_file               = "${var.env_dir}/../ddl/_fetched.sql"
+  coverage_acknowledged_columns   = var.coverage_acknowledged_columns
+  coverage_gate_max_age           = var.coverage_gate_max_age
+  applied_table_grants            = local.applied_table_grants
+  applied_protection_fingerprint  = local.applied_protection_fingerprint
+  deployment_binding              = local.deployment_binding
   enable_classification           = var.enable_classification
   enable_auto_tagging             = var.enable_auto_tagging
   classification_existing_schemas = var.classification_existing_schemas
@@ -388,6 +432,16 @@ output "schema_grant_resource_keys" {
 
 output "table_grant_resource_keys" {
   value = module.data_access.table_grant_resource_keys
+}
+
+output "coverage_gate_inputs" {
+  description = "Read by scripts/coverage_gate.py through terraform console."
+  value       = module.data_access.coverage_gate_inputs
+}
+
+output "coverage_gate" {
+  description = "Coverage-gate result this layer was applied with; the workspace layer reads it from state."
+  value       = module.data_access.coverage_gate
 }
 
 output "legacy_unattributed_discovered_tables" {

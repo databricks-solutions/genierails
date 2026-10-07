@@ -70,6 +70,57 @@ variable "business_access_enabled" {
   description = "Fail-closed exposure gate. Set true only after the coverage gate and schema drift check pass; controls business-group SELECT grants."
 }
 
+variable "coverage_gate_file" {
+  type        = string
+  description = "Path to the coverage-gate result scripts/coverage_gate.py writes for this layer. Business SELECT grants are planned only while it records a pass for the current inputs."
+}
+
+variable "coverage_ddl_file" {
+  type        = string
+  description = "Path to the fetched DDL the coverage gate reads; its content is part of the gate fingerprint."
+}
+
+variable "coverage_gate_max_age" {
+  type        = string
+  default     = "6h"
+  description = "Oldest live refresh (derive-assignments re-reading class.* tags and DDL from Unity Catalog) a passing coverage gate may rest on, as a Terraform duration of at most 24h. make refreshes right before every gated plan/apply; this bounds what a raw terraform run can rely on. It is part of the gate fingerprint, so changing it requires a new gate run."
+
+  # Same bounds as modules/coverage_gate_check (the authority, whose 24h
+  # ceiling no variable can raise); repeated here only to fail early.
+  validation {
+    condition = try(
+      timecmp(timeadd("2000-01-01T00:00:00Z", var.coverage_gate_max_age), "2000-01-01T00:00:00Z") > 0
+      && timecmp(timeadd("2000-01-01T00:00:00Z", var.coverage_gate_max_age), timeadd("2000-01-01T00:00:00Z", "24h")) <= 0,
+      false
+    )
+    error_message = "coverage_gate_max_age must be a positive Terraform duration of at most 24h, such as \"6h\" or \"90m\"."
+  }
+}
+
+variable "applied_table_grants" {
+  type        = list(string)
+  default     = []
+  description = "table_access keys (\"<table>|<principal>\") the last apply made, from this layer's state. With an unchanged protection fingerprint they stay plannable without a current gate pass."
+}
+
+variable "deployment_binding" {
+  type        = string
+  default     = ""
+  description = "Identity of this deployment (hash of workspace host and ID), recorded with the applied protection so a state from another deployment exempts nothing."
+}
+
+variable "applied_protection_fingerprint" {
+  type        = string
+  default     = ""
+  description = "coverage_gate.protection_fingerprint the last apply recorded in this layer's state; \"\" when unknown (no exemption)."
+}
+
+variable "coverage_acknowledged_columns" {
+  type        = list(string)
+  default     = []
+  description = "Fully qualified catalog.schema.table.column names reviewed as not sensitive. The coverage gate does not block first exposure on them."
+}
+
 variable "enable_classification" {
   type        = bool
   default     = false

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import re
 import sys
 from pathlib import Path
@@ -21,15 +23,18 @@ from generate_abac import (  # noqa: E402
     _render_tag_assignment_block,
     _replace_bracket_section,
     discover_agent_footprint,
+    fetch_tables_from_databricks,
     footprint_contains_column,
     footprint_table_refs,
     load_auth_config,
+    scope_ddl_to_footprint,
 )
 from treatment_derivation import (  # noqa: E402
     collapse_sensitivity_assignments,
     derive_treatment_model,
     load_treatment_config,
 )
+from scripts.coverage_gate import write_refresh_record  # noqa: E402
 from scripts.footprint import FootprintError, resolve_footprint  # noqa: E402
 
 
@@ -75,8 +80,65 @@ def _assert_promoted_masks_cover(assignments: list[dict], promoted: dict, tag_ke
         )
 
 
-def derive_assignments(config_path: Path, auth_path: Path, env_path: Path) -> int:
-    """Atomically replace only the promoted config's tag_assignments section."""
+def refresh_fetched_ddl(table_refs: list[str], runtime: dict, footprint: list[dict], ddl_out: Path) -> None:
+    """Write the footprint's live DDL, as make generate does, for the coverage gate.
+
+    Promoted envs never ran generate, so this is the only DDL the first-exposure
+    check has there. Any read failure raises: the gate must not judge stale DDL.
+    """
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(captured):
+            ddl_text, _catalog_schemas = fetch_tables_from_databricks(table_refs, runtime)
+    except SystemExit as exc:
+        raise RuntimeError(
+            "Could not fetch DDL for the governed footprint: " + captured.getvalue().strip()
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(f"Could not fetch DDL for the governed footprint: {exc}") from exc
+    text = scope_ddl_to_footprint(ddl_text, footprint) + "\n"
+    if not ddl_out.is_file() or ddl_out.read_text() != text:
+        ddl_out.parent.mkdir(parents=True, exist_ok=True)
+        ddl_out.write_text(text)
+
+
+def _governed_footprint(auth_path: Path, env_path: Path) -> tuple[dict, list[dict], list[str]]:
+    runtime = load_auth_config(auth_path, env_path)
+    # The live read must target this env's workspace. Without a host the SDK
+    # falls back to ambient configuration (environment, ~/.databrickscfg),
+    # which may be another workspace or the account console.
+    if not str(runtime.get("databricks_workspace_host") or "").strip():
+        raise RuntimeError(
+            f"{auth_path} does not set databricks_workspace_host; refusing a live read of "
+            "Unity Catalog with ambient credentials"
+        )
+    declared = resolve_footprint(env_path.parent, env_file=env_path)
+    uc_catalog = str(runtime.get("uc_catalog") or "").strip()
+    if uc_catalog:
+        declared = [
+            table if len(str(table).split(".")) >= 3 else f"{uc_catalog}.{table}"
+            for table in declared
+        ]
+    declared.extend(runtime.get("declared_footprint") or [])
+    for space in runtime.get("genie_spaces") or []:
+        declared.extend(space.get("declared_footprint") or [])
+    footprint = discover_agent_footprint(declared_footprint=declared)
+    return runtime, footprint, footprint_table_refs(footprint)
+
+
+def refresh_ddl_only(auth_path: Path, env_path: Path, ddl_out: Path) -> None:
+    """Refresh only the live DDL, for envs whose tags come from make generate."""
+    runtime, footprint, table_refs = _governed_footprint(auth_path, env_path)
+    refresh_fetched_ddl(table_refs, runtime, footprint, ddl_out)
+
+
+def derive_assignments(
+    config_path: Path, auth_path: Path, env_path: Path, ddl_out: Path | None = None,
+) -> int:
+    """Atomically replace only the promoted config's tag_assignments section.
+
+    With ``ddl_out``, also refresh the fetched DDL the coverage gate reads.
+    """
     if not config_path.is_file():
         raise RuntimeError(
             f"Promoted config not found: {config_path}. Run `make promote` first."
@@ -90,19 +152,7 @@ def derive_assignments(config_path: Path, auth_path: Path, env_path: Path) -> in
     if _find_bracket_section(original, "tag_assignments") is None:
         raise RuntimeError(f"Promoted config {config_path} has no tag_assignments section")
 
-    runtime = load_auth_config(auth_path, env_path)
-    declared = resolve_footprint(env_path.parent, env_file=env_path)
-    uc_catalog = str(runtime.get("uc_catalog") or "").strip()
-    if uc_catalog:
-        declared = [
-            table if len(str(table).split(".")) >= 3 else f"{uc_catalog}.{table}"
-            for table in declared
-        ]
-    declared.extend(runtime.get("declared_footprint") or [])
-    for space in runtime.get("genie_spaces") or []:
-        declared.extend(space.get("declared_footprint") or [])
-    footprint = discover_agent_footprint(declared_footprint=declared)
-    table_refs = footprint_table_refs(footprint)
+    runtime, footprint, table_refs = _governed_footprint(auth_path, env_path)
 
     native = _fetch_live_classification_source(table_refs, runtime, require_native=True)
     # require_native guarantees a non-empty source; retain this assertion as a
@@ -111,6 +161,8 @@ def derive_assignments(config_path: Path, auth_path: Path, env_path: Path) -> in
         raise NativeClassificationRequiredError(
             "Native classification returned no class.* findings; refusing to replace assignments"
         )
+    if ddl_out is not None:
+        refresh_fetched_ddl(table_refs, runtime, footprint, ddl_out)
 
     config = load_treatment_config()
     unmapped = native.unmapped_columns(sorted(native.classified_columns()))
@@ -189,13 +241,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", default="generated/abac.auto.tfvars")
     parser.add_argument("--auth-file", default="auth.auto.tfvars")
     parser.add_argument("--env-file", default="env.auto.tfvars")
+    parser.add_argument("--write-ddl", type=Path, metavar="PATH",
+                        help="also write the footprint's live DDL here (ddl/_fetched.sql) for the coverage gate")
+    parser.add_argument("--refresh-record", type=Path, metavar="PATH",
+                        help="after a successful live refresh, record it here for the coverage gate "
+                             "(removed first, so a failed refresh leaves none)")
+    parser.add_argument("--ddl-only", action="store_true",
+                        help="refresh only the live DDL (envs without native classification); "
+                             "tag_assignments are left as make generate wrote them")
     args = parser.parse_args(argv)
+    if args.ddl_only and not args.write_ddl:
+        parser.error("--ddl-only requires --write-ddl")
+    if args.refresh_record:
+        args.refresh_record.unlink(missing_ok=True)
     try:
-        count = derive_assignments(Path(args.config), Path(args.auth_file), Path(args.env_file))
+        if args.ddl_only:
+            refresh_ddl_only(Path(args.auth_file), Path(args.env_file), args.write_ddl)
+            message = f"Refreshed live DDL ({args.write_ddl}); tag_assignments were not changed."
+        else:
+            count = derive_assignments(
+                Path(args.config), Path(args.auth_file), Path(args.env_file), ddl_out=args.write_ddl,
+            )
+            message = f"Derived {count} gr_treatment assignment(s); reviewed rules were not changed."
+        if args.refresh_record:
+            write_refresh_record(
+                args.refresh_record,
+                mode="ddl" if args.ddl_only else "full",
+                ddl_path=args.write_ddl,
+                config_path=None if args.ddl_only else Path(args.config),
+            )
     except (RuntimeError, NativeClassificationRequiredError, FootprintError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-    print(f"Derived {count} gr_treatment assignment(s); reviewed rules were not changed.")
+    print(message)
     return 0
 
 

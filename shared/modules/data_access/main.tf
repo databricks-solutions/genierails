@@ -129,6 +129,69 @@ locals {
     local._fgac_catalogs,
     local._uc_catalogs,
   ))
+
+  # Coverage gate. scripts/coverage_gate.py reads this fingerprint (terraform
+  # console), runs the gate, and records the result in var.coverage_gate_file.
+  # Business SELECT is planned only while that file records a pass for exactly
+  # these inputs, so editing the config, the masks, the DDL or the grants after
+  # the gate (or passing -var overrides to a raw terraform run) fails the plan.
+  # It deliberately ignores business_access_enabled: opening the gate must not
+  # invalidate the result it depends on.
+  #
+  # The inputs are local snapshots of live UC tags and DDL. Terraform can't
+  # re-read UC, so the pass must also carry the time make last refreshed them
+  # (refreshed_at, from derive-assignments) and that refresh must be no older
+  # than var.coverage_gate_max_age when this plan is made. The max age is a
+  # gate input too: raising it after the gate ran makes the result stale, and
+  # modules/coverage_gate_check caps it at 24h whatever it is set to.
+  coverage_gate_grant_tables = sort(distinct([for pair in local.table_access_pairs : pair.table]))
+  coverage_gate_fingerprint = sha256(jsonencode({
+    version         = 1
+    tag_assignments = sort(keys(local.tag_assignment_map))
+    fgac_policies   = local.fgac_policy_map
+    table_grants    = sort([for pair in local.table_access_pairs : "${pair.table}|${pair.principal}"])
+    masking_sql     = filesha256(var.masking_sql_file)
+    ddl             = fileexists(var.coverage_ddl_file) ? filesha256(var.coverage_ddl_file) : ""
+    acknowledged    = sort(distinct([for column in var.coverage_acknowledged_columns : lower(column)]))
+    max_age         = var.coverage_gate_max_age
+  }))
+  coverage_gate_status  = module.coverage_gate.status
+  coverage_gate_problem = module.coverage_gate.problem
+
+  # Keeping or revoking SELECT never needs the gate. A grant that the last
+  # apply already made (var.applied_table_grants, from this layer's state)
+  # stays plannable whatever the gate says, as long as everything that
+  # protects it (tags, policies, masks, DDL, acknowledgements, max age) is
+  # exactly what that apply recorded: then nothing about the exposure changed.
+  # New grants, or existing ones whose protection changed (a mask removed,
+  # tags re-derived), still need a current pass.
+  coverage_gate_protection = sha256(jsonencode({
+    version         = 1
+    deployment      = var.deployment_binding
+    tag_assignments = sort(keys(local.tag_assignment_map))
+    fgac_policies   = local.fgac_policy_map
+    masking_sql     = filesha256(var.masking_sql_file)
+    ddl             = fileexists(var.coverage_ddl_file) ? filesha256(var.coverage_ddl_file) : ""
+    acknowledged    = sort(distinct([for column in var.coverage_acknowledged_columns : lower(column)]))
+    max_age         = var.coverage_gate_max_age
+  }))
+  _protection_unchanged = (
+    var.applied_protection_fingerprint != ""
+    && var.applied_protection_fingerprint == local.coverage_gate_protection
+  )
+  table_grants_needing_gate = sort([
+    for pair in local.table_access_pairs : "${pair.table}|${pair.principal}"
+    if var.business_access_enabled && !(local._protection_unchanged && contains(var.applied_table_grants, "${pair.table}|${pair.principal}"))
+  ])
+}
+
+# Shared with the workspace layer's CAN_RUN check; no resources.
+module "coverage_gate" {
+  source = "../coverage_gate_check"
+
+  gate_file            = var.coverage_gate_file
+  expected_fingerprint = local.coverage_gate_fingerprint
+  max_age              = var.coverage_gate_max_age
 }
 
 # Data Classification is opt-in because deleting this resource disables scans
@@ -243,6 +306,16 @@ resource "databricks_grant" "table_access" {
     databricks_policy_info.policies,
     time_sleep.wait_for_policy_enforcement,
   ]
+
+  # Checked for every planned instance, so neither a raw terraform run nor
+  # terraform_layer.sh can add a grant (or keep one whose protection changed)
+  # without a current pass. Removed grants are never checked.
+  lifecycle {
+    precondition {
+      condition     = local.coverage_gate_status == "pass" || !contains(local.table_grants_needing_gate, each.key)
+      error_message = "Coverage gate ${local.coverage_gate_status}: ${local.coverage_gate_problem}. Business SELECT grants are blocked. Terraform can't re-read Unity Catalog, so run this layer through make (make apply, make plan, make release or make maintain ENV=${basename(dirname(dirname(var.coverage_gate_file)))}), which refreshes live tags and DDL, then runs the coverage gate."
+    }
+  }
 }
 
 resource "databricks_sql_endpoint" "warehouse" {
@@ -352,13 +425,16 @@ resource "databricks_policy_info" "policies" {
 }
 
 # Unity Catalog policy creation can return before enforcement is observable.
-# Keep SELECT closed through that propagation window.
+# New table grants wait out that window. The wait restarts when the policies
+# change or the masking functions are redeployed (any terraform_data
+# replacement: SQL, warehouse, host, client ID), which delays grants created in
+# the same apply; SELECT grants that already exist stay in place throughout.
 resource "time_sleep" "wait_for_policy_enforcement" {
   depends_on      = [databricks_policy_info.policies]
   create_duration = "30s"
 
   triggers = {
-    policy_hash      = sha256(jsonencode(local.fgac_policy_map))
-    masking_sql_hash = filemd5(var.masking_sql_file)
+    policy_hash          = sha256(jsonencode(local.fgac_policy_map))
+    masking_functions_id = terraform_data.masking_functions.id
   }
 }

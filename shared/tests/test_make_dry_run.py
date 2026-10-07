@@ -1,5 +1,7 @@
 """Regression tests for GNU Make dry-run safety in mixed recursive recipes."""
 
+import base64
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -181,9 +183,21 @@ def test_plan_real_target_runs_configured_workspace_layers(tmp_path):
     (data_access_dir / "abac.auto.tfvars").write_text("# present\n")
     runner_log = tmp_path / "runner.log"
     runner = tmp_path / "record-runner"
+    # The data_access plan first asks terraform console for the coverage-gate
+    # inputs; business access is closed here, so the gate is not required.
+    closed = base64.b64encode(json.dumps({
+        "fingerprint": "f", "business_access_enabled": False,
+        "grant_tables": [], "acknowledged_columns": [],
+    }).encode()).decode()
+    # The workspace plan first checks CAN_RUN; business access is closed too.
+    closed_can_run = base64.b64encode(json.dumps({
+        "enabled": False, "groups": {}, "blocker": "", "widening": {}, "missing": {},
+    }).encode()).decode()
     runner.write_text(
         "#!/bin/sh\n"
         f"printf '%s|%s\\n' \"$LAYER_ENV_DIR\" \"$*\" >> \"{runner_log}\"\n"
+        f"if [ \"$1 $3\" = 'data_access console' ]; then echo '\"{closed}\"'; fi\n"
+        f"if [ \"$1 $3\" = 'workspace console' ]; then echo '\"{closed_can_run}\"'; fi\n"
     )
     runner.chmod(0o755)
 
@@ -205,9 +219,12 @@ def test_plan_real_target_runs_configured_workspace_layers(tmp_path):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert runner_log.read_text().splitlines() == [
+        f"{data_access_dir}|data_access dev console",
         f"{data_access_dir}|data_access dev plan",
+        f"{env_dir}|workspace dev console",
         f"{env_dir}|workspace dev plan",
     ]
+    assert "Coverage gate (data_access:dev): not required" in result.stdout
 
 
 @pytest.mark.parametrize("configured", [False, True])
@@ -306,8 +323,14 @@ def test_rehearsal_apply_flag_follows_tfvars_and_changes_fingerprint(tmp_path):
 
     runner_log = tmp_path / "runner.log"
     runner = tmp_path / "record-runner"
+    # The workspace apply first asks terraform console whether the change
+    # opens CAN_RUN while exposure is blocked; nothing is blocked here.
+    open_can_run = base64.b64encode(json.dumps({
+        "enabled": True, "groups": {}, "blocker": "", "widening": {}, "missing": {},
+    }).encode()).decode()
     runner.write_text(
         "#!/bin/sh\n"
+        f"if [ \"$3\" = console ]; then echo '\"{open_can_run}\"'; exit 0; fi\n"
         f"printf '%s\\n' \"$*\" >> \"{runner_log}\"\n"
     )
     runner.chmod(0o755)

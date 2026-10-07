@@ -136,6 +136,113 @@ locals {
       config           = try(local.effective_genie_space_configs[local.canonical_space_names[idx]], local.empty_genie_config)
     }
   }
+
+  # ── Cross-layer exposure check for Genie CAN_RUN ──────────────────────────
+  # CAN_RUN is granted only after the data_access layer was applied with
+  # business access open and a passing coverage gate, and only while the gate
+  # result on disk is still for the inputs that apply used (otherwise the
+  # governance config moved on and hasn't been applied) and rests on a live
+  # refresh no older than the max age that apply recorded. The result is
+  # judged by modules/coverage_gate_check, the same check data_access uses.
+  # Read from the local state the layer runner writes; anything missing or
+  # unreadable blocks.
+  data_access_dir        = "${var.env_dir}/data_access"
+  _data_access_state     = fileexists("${local.data_access_dir}/terraform.tfstate") ? try(jsondecode(file("${local.data_access_dir}/terraform.tfstate")), null) : null
+  _applied_coverage_gate = try(local._data_access_state.outputs.coverage_gate.value, null)
+  genie_exposure_blocker = (
+    local._data_access_state == null ? "the data_access layer has no readable state (${local.data_access_dir}/terraform.tfstate)" :
+    local._applied_coverage_gate == null ? "the data_access state predates the coverage gate; re-apply the data_access layer" :
+    try(local._applied_coverage_gate.business_access_enabled, false) != true ? "the data_access layer was last applied with business_access_enabled = false" :
+    try(local._applied_coverage_gate.status, "") != "pass" ? "the data_access layer was last applied without a passing coverage gate" :
+    try(local._applied_coverage_gate.table_grant_count, 0) < 1 ? "the data_access layer has no business table grants in place" :
+    try(local._applied_coverage_gate.max_age, null) == null ? "the data_access state predates the coverage-gate max age; re-apply the data_access layer" :
+    module.coverage_gate_check.status == "stale" ? "the data_access config changed after its last gated apply" :
+    module.coverage_gate_check.problem
+  )
+
+  # What CAN_RUN the last apply left in place, per space, from this layer's
+  # own state (the layer runner's local backend): the groups recorded in the
+  # ACL resource's triggers, for the same Genie agent (same space ID, or the
+  # same created agent on the same host). The blocker and grant checks only
+  # bite for groups beyond that, so keeping, shrinking or clearing an ACL
+  # always plans, and an unchanged ACL never errors once the gate expires.
+  # Unreadable state means nothing is on record (fail closed).
+  _own_state = fileexists("${var.env_dir}/terraform.tfstate") ? try(jsondecode(file("${var.env_dir}/terraform.tfstate")), null) : null
+  _state_instances = flatten([
+    for resource in try(local._own_state.resources, []) : [
+      for instance in try(resource.instances, []) : {
+        name  = resource.name
+        key   = try(tostring(instance.index_key), "")
+        attrs = try(instance.attributes, {})
+      }
+      # Tainted and deposed (failed or partial replacement) objects aren't
+      # successfully applied CAN_RUN.
+      if try(instance.status, "") != "tainted" && try(instance.deposed, "") == ""
+    ]
+    if try(resource.module, "") == "module.workspace" && try(resource.mode, "") == "managed"
+  ])
+  # Grouped so an unexpected duplicate can't fail the plan; anything but
+  # exactly one current object counts as nothing applied.
+  _applied_candidates = { for instance in local._state_instances : "${instance.name}|${instance.key}" => instance.attrs... }
+  _applied            = { for key, attrs in local._applied_candidates : key => attrs[0] if length(attrs) == 1 }
+  applied_can_run_groups = {
+    for key, space in local.merged_spaces : key => [
+      for group in split(",", (
+        space.genie_space_id != ""
+        ? (
+          try(local._applied["genie_space_acls|${key}"].triggers.space_id, "") == space.genie_space_id
+          ? try(local._applied["genie_space_acls|${key}"].triggers.groups, "")
+          : ""
+        )
+        : (
+          try(local._applied["genie_space_acls_created|${key}"].triggers.space_create_id, "") != ""
+          && try(local._applied["genie_space_acls_created|${key}"].triggers.space_create_id, "") == try(local._applied["genie_space|${key}"].id, "-")
+          && try(local._applied["genie_space|${key}"].triggers_replace.value.host, local._applied["genie_space|${key}"].triggers_replace.host, "") == var.databricks_workspace_host
+          ? try(local._applied["genie_space_acls_created|${key}"].triggers.groups, "")
+          : ""
+        )
+      )) : group if group != ""
+    ]
+  }
+  # Groups each space's desired CAN_RUN adds beyond what is applied.
+  genie_space_can_run_widening = {
+    for key, space in local.merged_spaces : key => (
+      length(var.groups) > 0
+      ? sort(tolist(setsubtract(toset(space.config.acl_groups), toset(local.applied_can_run_groups[key]))))
+      : []
+    )
+  }
+
+  # Per space: the SELECT grants its CAN_RUN groups need must be in the
+  # data_access state (table_grant_resource_keys, "<table>|<group>"). Spaces
+  # that list tables need every table x group pair (a catalog.schema.* entry
+  # needs a grant in that schema); spaces known only by ID, whose tables were
+  # discovered on the data_access side, need at least one grant per group.
+  _applied_table_grants = toset(try(local._data_access_state.outputs.table_grant_resource_keys.value, []))
+  _space_tables = {
+    for key, space in local.merged_spaces : key => [
+      for t in space.uc_tables :
+      length(split(".", t)) >= 3 ? t : (var.uc_catalog != "" ? "${var.uc_catalog}.${t}" : t)
+    ]
+  }
+  genie_space_missing_grants = {
+    for key, space in local.merged_spaces : key => (
+      length(local._space_tables[key]) > 0
+      ? [
+        for pair in setproduct(local._space_tables[key], space.config.acl_groups) : "${pair[0]}|${pair[1]}"
+        if length([
+          for grant in local._applied_table_grants : grant
+          if endswith(pair[0], "*")
+          ? (startswith(grant, trimsuffix(pair[0], "*")) && endswith(grant, "|${pair[1]}"))
+          : grant == "${pair[0]}|${pair[1]}"
+        ]) == 0
+      ]
+      : [
+        for group in space.config.acl_groups : "<any table>|${group}"
+        if length([for grant in local._applied_table_grants : grant if endswith(grant, "|${group}")]) == 0
+      ]
+    )
+  }
 }
 
 # ── Variables ─────────────────────────────────────────────────────────────────
@@ -397,6 +504,21 @@ variable "verify_key_column" {
 }
 
 # Shared env.auto.tfvars is consumed by both workspace and data-access roots.
+# The coverage gate reads acknowledgements only in data_access; declare it
+# here to avoid an undeclared-variable warning during a full apply.
+variable "coverage_acknowledged_columns" {
+  type    = list(string)
+  default = []
+}
+
+# Read by data_access, which binds it into the gate and records it in state;
+# the CAN_RUN check uses that recorded value, so it can't be overridden here.
+variable "coverage_gate_max_age" {
+  type    = string
+  default = "6h"
+}
+
+# Shared env.auto.tfvars is consumed by both workspace and data-access roots.
 # Auto-tagging is implemented only in data_access; declare it here to avoid an
 # undeclared-variable warning during a full apply.
 variable "enable_auto_tagging" {
@@ -448,6 +570,16 @@ variable "fgac_policies" {
 
 # ── Module call ───────────────────────────────────────────────────────────────
 
+# The current gate result must still be for the inputs (fingerprint, max age)
+# the last data_access apply used, and its live refresh must be recent.
+module "coverage_gate_check" {
+  source = "../../modules/coverage_gate_check"
+
+  gate_file            = "${local.data_access_dir}/.coverage_gate.json"
+  expected_fingerprint = try(local._applied_coverage_gate.fingerprint, "")
+  max_age              = try(local._applied_coverage_gate.max_age, "")
+}
+
 module "workspace" {
   source = "../../modules/workspace"
 
@@ -456,20 +588,23 @@ module "workspace" {
     databricks.workspace = databricks.workspace
   }
 
-  databricks_account_id     = var.databricks_account_id
-  databricks_client_id      = var.databricks_client_id
-  databricks_client_secret  = var.databricks_client_secret
-  databricks_workspace_id   = var.databricks_workspace_id
-  databricks_workspace_host = var.databricks_workspace_host
-  genie_only                = var.genie_only
-  manage_groups             = var.manage_groups
-  groups                    = var.groups
-  business_access_enabled   = var.business_access_enabled
-  sql_warehouse_id          = var.sql_warehouse_id
-  warehouse_name            = var.warehouse_name
-  genie_spaces              = local.merged_spaces
-  genie_id_file_prefix      = "${var.env_dir}/.genie_space_id"
-  genie_script_path         = "${local.project_root}/scripts/genie_space.sh"
+  databricks_account_id        = var.databricks_account_id
+  databricks_client_id         = var.databricks_client_id
+  databricks_client_secret     = var.databricks_client_secret
+  databricks_workspace_id      = var.databricks_workspace_id
+  databricks_workspace_host    = var.databricks_workspace_host
+  genie_only                   = var.genie_only
+  manage_groups                = var.manage_groups
+  groups                       = var.groups
+  business_access_enabled      = var.business_access_enabled
+  genie_exposure_blocker       = local.genie_exposure_blocker
+  genie_space_missing_grants   = local.genie_space_missing_grants
+  genie_space_can_run_widening = local.genie_space_can_run_widening
+  sql_warehouse_id             = var.sql_warehouse_id
+  warehouse_name               = var.warehouse_name
+  genie_spaces                 = local.merged_spaces
+  genie_id_file_prefix         = "${var.env_dir}/.genie_space_id"
+  genie_script_path            = "${local.project_root}/scripts/genie_space.sh"
 }
 
 # ── Outputs ───────────────────────────────────────────────────────────────────
@@ -500,6 +635,21 @@ output "genie_space_acls_applied" {
 
 output "genie_space_acls_groups" {
   value = module.workspace.genie_space_acls_groups
+}
+
+output "genie_space_missing_grants" {
+  description = "Per Genie agent: <table>|<group> SELECT grants its CAN_RUN groups need that the data_access state doesn't have. Any entry blocks that agent's non-empty CAN_RUN."
+  value       = local.genie_space_missing_grants
+}
+
+output "genie_space_can_run_widening" {
+  description = "Per Genie agent: CAN_RUN groups its ACL adds beyond what the last apply left in place. Only these need the coverage gate and the agent's grants."
+  value       = local.genie_space_can_run_widening
+}
+
+output "genie_exposure_blocker" {
+  description = "Why Genie CAN_RUN grants are blocked (data_access layer not applied with a current passing coverage gate), or \"\" when they may be granted."
+  value       = local.genie_exposure_blocker
 }
 
 output "genie_spaces_created" {

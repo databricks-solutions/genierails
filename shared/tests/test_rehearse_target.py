@@ -59,7 +59,7 @@ def test_rehearse_stops_after_first_failing_stage(tmp_path):
     )
 
     assert result.returncode != 0
-    assert log.read_text().splitlines() == ["coverage-gate"]
+    assert log.read_text().splitlines() == ["_derive-before-exposure"]
 
 
 def test_rehearse_rejects_prod_before_any_recursive_make_call(tmp_path):
@@ -100,12 +100,18 @@ def test_rehearse_with_key_opens_exposure_gate_for_its_apply_only(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     output = result.stdout + result.stderr
     assert _recorded_calls(log) == [
+        [
+            "_derive-before-exposure",
+            "ENV=dev",
+            "APPLY_FLAGS=-var=business_access_enabled=true",
+        ],
         ["coverage-gate", "ENV=dev"],
         ["validate-generated", "ENV=dev"],
         [
             "apply",
             "ENV=dev",
             "APPLY_FLAGS=-var=business_access_enabled=true",
+            "_EXPOSURE_DERIVED=1",
         ],
         ["verify-access", "ENV=dev", "VERIFY_KEY_COLUMN=customer_id"],
     ]
@@ -128,12 +134,18 @@ def test_rehearse_without_key_runs_key_independent_live_verification(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     output = result.stdout + result.stderr
     assert _recorded_calls(log) == [
+        [
+            "_derive-before-exposure",
+            "ENV=dev",
+            "APPLY_FLAGS=-var=business_access_enabled=true",
+        ],
         ["coverage-gate", "ENV=dev"],
         ["validate-generated", "ENV=dev"],
         [
             "apply",
             "ENV=dev",
             "APPLY_FLAGS=-var=business_access_enabled=true",
+            "_EXPOSURE_DERIVED=1",
         ],
         ["verify-access", "ENV=dev"],
     ]

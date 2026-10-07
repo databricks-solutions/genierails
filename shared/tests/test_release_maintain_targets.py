@@ -471,7 +471,9 @@ def test_release_forces_gate_for_apply_then_persists_and_verifies(tmp_path):
     result = _make("release", env_dir, stub, "VERIFY_KEY_COLUMN= customer_id ")
     assert result.returncode == 0, result.stdout + result.stderr
     assert _calls(log) == [
-        ["apply", "ENV=prod", "APPLY_FLAGS=-var=business_access_enabled=true"],
+        ["_derive-before-exposure", "ENV=prod", "APPLY_FLAGS=-var=business_access_enabled=true"],
+        ["apply", "ENV=prod", "APPLY_FLAGS=-var=business_access_enabled=true",
+         "_EXPOSURE_DERIVED=1"],
         ["verify-access", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],
     ]
     assert cr.gate_open(env_dir)
@@ -496,7 +498,7 @@ def test_release_failed_apply_prints_rollback_and_does_not_persist(tmp_path):
     stub, log = _stub(tmp_path, fail_on="apply")
     result = _make("release", env_dir, stub)
     assert result.returncode != 0
-    assert [c[0] for c in _calls(log)] == ["apply"]
+    assert [c[0] for c in _calls(log)] == ["_derive-before-exposure", "apply"]
     assert not cr.gate_open(env_dir)
     assert "PARTIALLY OPENED" in result.stderr
     assert "still has business_access_enabled = false, so run: make apply ENV=prod" in result.stderr
@@ -508,7 +510,7 @@ def test_release_mutation_during_apply_is_not_persisted(tmp_path):
     stub, log = _stub(tmp_path, on={"apply": _mutate_abac(env_dir)})
     result = _make("release", env_dir, stub)
     assert result.returncode != 0
-    assert [c[0] for c in _calls(log)] == ["apply"]
+    assert [c[0] for c in _calls(log)] == ["_derive-before-exposure", "apply"]
     assert not cr.gate_open(env_dir)
     assert "config changed since certification" in result.stderr
     assert "PARTIALLY OPENED" in result.stderr
@@ -584,7 +586,7 @@ def test_parallel_make_maintain_release_serialises_on_lock(tmp_path):
     assert calls in (
         ["audit-schema", "derive-assignments", "coverage-gate", "validate-generated",
          "apply-governance", "audit-rulebook"],
-        ["apply", "verify-access"],
+        ["_derive-before-exposure", "apply", "verify-access"],
     )
     assert not _lock(env_dir).exists()
 
@@ -604,7 +606,7 @@ def test_maintain_is_ordered_governance_only_and_refreshes_receipt(tmp_path):
         ["derive-assignments", "ENV=prod"],
         ["coverage-gate", "ENV=prod"],
         ["validate-generated", "ENV=prod"],
-        ["apply-governance", "ENV=prod", "APPLY_FLAGS="],
+        ["apply-governance", "ENV=prod", "APPLY_FLAGS=", "_EXPOSURE_DERIVED=1"],
         ["audit-rulebook", "ENV=prod"],
     ]
     assert not any(c[0] in ("apply", "apply-genie", "generate-delta", "generate") for c in calls)
@@ -928,7 +930,17 @@ def test_dry_run_creates_no_lock_or_env_dirs(tmp_path):
     assert not env_dir.exists()
 
 
-_SLOW_STAGE = {"release": "apply", "certify": "derive-assignments", "maintain": "audit-schema"}
+# maintain runs the audit script directly (not via $(MAKE)), so its first stub
+# stage after the lock is derive-assignments.
+_SLOW_STAGE = {"release": "apply", "certify": "derive-assignments", "maintain": "derive-assignments"}
+
+
+def _default_signals():
+    # A suite launched in the background (INT ignored) or under nohup (HUP
+    # ignored) passes SIG_IGN down, and a shell cannot trap a signal ignored
+    # on entry, so the signal would never land. Model an interactive terminal.
+    for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, signal.SIG_DFL)
 
 
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
@@ -942,7 +954,7 @@ def test_signal_mid_run_releases_lock(tmp_path, target, sig):
          f"ACCOUNT_ENV_DIR={tmp_path / 'account'}", f"MAKE={stub}",
          f"AUDIT_SCHEMA_SCRIPT={stub.parent / 'fake-audit-schema.py'}"],
         cwd=CLOUD_ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=_clean_env(), start_new_session=True,
+        env=_clean_env(), start_new_session=True, preexec_fn=_default_signals,
     )
     try:
         deadline = time.time() + 15
