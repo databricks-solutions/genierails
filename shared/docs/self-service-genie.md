@@ -213,7 +213,7 @@ make promote SOURCE_ENV=bu_finance_dev DEST_ENV=bu_finance_prod \
 make apply-genie ENV=bu_finance_prod
 ```
 
-Governance runs separately for the prod environment — the promotion only carries `genie_space_configs`, not ABAC. Prod governance re-derives its own facts (`make derive-assignments ENV=<prod>`, no LLM), and must pass `make coverage-gate` before the exposure gate is opened.
+Governance runs separately for the prod environment — the promotion only carries `genie_space_configs`, not ABAC. Prod governance re-derives its own facts (`make derive-assignments ENV=<prod>`, no LLM), and must pass the coverage gate before new or wider business access can be applied (`make release ENV=<prod>` runs it).
 
 ### Import an existing Genie agent to prod (no ABAC)
 

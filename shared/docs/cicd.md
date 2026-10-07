@@ -16,7 +16,7 @@ Use this split of responsibilities:
   - validate committed config **and run `make coverage-gate`** (block the build if any classified sensitive column has no covering mask)
   - for prod: enable/wait for native classification, then `make derive-assignments ENV=prod` (re-derive facts from prod's own tags — no LLM), then `make coverage-gate ENV=prod`
   - run `make plan`, then on approved branches `make release ENV=prod` (re-derive → validate → coverage gate → rulebook audit → apply → verify-access, under a lock)
-  - if you need a human approval before business users get access, put it on the job that runs `make release` (a CI environment protection rule); there is no separate exposure switch
+  - the shipped `.github/workflows/ci.yml` only runs tests and validation; to deploy from CI, add your own deployment job that runs `make release ENV=prod`, and if you need a human approval before business users get access, attach a protected `environment:` (approval rule) to that job. There is no separate exposure switch
 
 This keeps LLM-driven generation and human review out of the automated deployment path, keeps the LLM out of prod entirely (prod re-derives deterministically), and makes coverage + exposure explicit gates rather than side effects of deploy.
 
@@ -98,7 +98,7 @@ After approval, deploy. **For prod, re-derive facts from prod's own classificati
 make release ENV=prod VERIFY_KEY_COLUMN=<key>
 ```
 
-`make release` re-derives assignments from prod's own tags (no LLM), validates, runs the coverage gate and the rulebook audit, applies all layers in order (masks and policies before grants), then proves masking with `verify-access`. It never re-generates via the LLM. Terraform itself refuses new or wider business `SELECT` / Genie `CAN_RUN` without a recent passing coverage result, so no path can grant access past the gate. If you want a human approval before access opens, require it on the CI job that runs `make release`.
+`make release` re-derives assignments from prod's own tags (no LLM), validates, runs the coverage gate and the rulebook audit, applies all layers in order (masks and policies before grants), then proves masking with `verify-access`. It never re-generates via the LLM. Terraform itself refuses new or wider business `SELECT` / Genie `CAN_RUN` without a recent passing coverage result, so no path can grant access past the gate. The shipped `.github/workflows/ci.yml` has no deployment job, so add one that runs this command; if you want a human approval before access opens, give that job a protected `environment:`.
 
 ## Promotion in CI/CD
 

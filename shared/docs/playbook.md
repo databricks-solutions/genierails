@@ -225,7 +225,7 @@ The core loop (dev-to-prod walkthrough):
 
 ```
 enable-classification → wait for class.* → make generate (--groups) → coverage-gate
-  → review generated/ → validate-generated → apply (gate closed) → verify → open gate → apply
+  → review generated/ → validate-generated → make rehearse   (prod: make release ENV=prod)
 ```
 Prod swaps `generate` for `derive-assignments` (re-derive facts from prod's own tags, no LLM).
 
