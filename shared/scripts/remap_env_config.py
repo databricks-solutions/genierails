@@ -235,14 +235,14 @@ def main():
             agent = space_id or name or "<unknown>"
             print(
                 f"ERROR: no tables found for agent {agent}; run "
-                f"`make generate ENV={source_env} MODE=genie ...` first"
+                f"`make generate ENV={source_env}` first"
             )
             sys.exit(1)
 
     if not effective_tables:
         print(
             "ERROR: no tables found for source environment; run "
-            f"`make generate ENV={source_env} MODE=genie ...` first"
+            f"`make generate ENV={source_env}` first"
         )
         sys.exit(1)
 
@@ -279,7 +279,7 @@ def main():
             for table in api_resolved_tables
         ):
             print(
-                f"       Run `make generate ENV={source_env} MODE=genie ...` first "
+                f"       Run `make generate ENV={source_env}` first "
                 "to persist the API-discovered catalogs, then update DEST_CATALOG_MAP."
             )
         sys.exit(1)
@@ -372,6 +372,12 @@ def main():
     preserved_acknowledged = [
         _str(column) for column in dest_cfg.get("coverage_acknowledged_columns") or []
     ]
+    # make promote-to's saved source env + catalog map belong to the destination.
+    preserved_promote = {
+        name: _str(dest_cfg.get(name, ""))
+        for name in ("promote_from", "catalog_map")
+        if _str(dest_cfg.get(name, ""))
+    }
     promoted_verify_key = (
         _str(cfg.get("verify_key_column", ""))
         or _str(dest_cfg.get("verify_key_column", ""))
@@ -478,6 +484,10 @@ def main():
         lines.extend(f"  {json.dumps(column)}," for column in preserved_acknowledged)
         lines.append("]")
     lines.extend(_promoted_access_tier_groups(cfg, source_env_dir))
+    if preserved_promote:
+        lines.append("")
+        lines.append("# Saved by make promote-to (source env + catalog map for the next promote).")
+        lines.extend(f"{name} = {json.dumps(value)}" for name, value in preserved_promote.items())
 
     # Write
     os.makedirs(dest_env_dir, exist_ok=True)

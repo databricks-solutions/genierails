@@ -26,4 +26,4 @@ def test_empty_footprint_has_generate_guidance(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         run_validator(monkeypatch, tmp_path, "dev=prod")
     assert exc.value.code == 1
-    assert f"make generate ENV={tmp_path.name} MODE=genie" in capsys.readouterr().out
+    assert f"make generate ENV={tmp_path.name}`" in capsys.readouterr().out

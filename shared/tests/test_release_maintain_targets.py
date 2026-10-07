@@ -90,9 +90,12 @@ def test_release_runs_unified_pipeline_in_order_and_writes_no_receipt(tmp_path):
         ["apply", "ENV=prod", "APPLY_FLAGS=", "_EXPOSURE_DERIVED=1"],
         ["verify-access", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],
     ]
-    # No gate to open or persist: release neither passes nor writes it.
+    # No gate to open or persist: release neither passes nor writes it. The
+    # passing verify saves only the explicit key; the rest of the file stays.
     assert "business_access_enabled" not in log.read_text()
-    assert (env_dir / "env.auto.tfvars").read_text() == RELEASED_ENV_FILE
+    assert (env_dir / "env.auto.tfvars").read_text() == RELEASED_ENV_FILE + (
+        "\n# Row-pairing key for verify-access (saved after a passing run).\n"
+        'verify_key_column = "customer_id"\n')
     assert not list(env_dir.rglob(".certified*"))
     assert not (env_dir / "generated/.governance.lock").exists()
 
@@ -243,10 +246,17 @@ def test_every_in_recipe_same_env_promote_clears_cross_env_variables():
     for setting in ('SOURCE_ENV="$(ENV)"', 'DEST_ENV= ', "DEST_ENV_DIR= ", "DEST_CATALOG_MAP="):
         assert setting in definition
     # release, apply, apply-governance and plan's PROMOTE_AFTER all use it;
-    # the only raw promote calls left are the explicit cross-env test targets.
+    # the only raw promote calls left are the explicit cross-env test targets
+    # and promote-to, which passes every cross-env variable explicitly.
     raw = [line.strip() for line in makefile.splitlines()
            if re.search(r"\$\(MAKE\)[^\n]*\bpromote\b", line) and "_SAME_ENV_PROMOTE =" not in line]
-    assert raw == ["$(MAKE) --no-print-directory promote \\"], raw
+    assert raw == [
+        '$(MAKE) --no-print-directory promote ENV="$$src" ENV_DIR="$$src_dir" SOURCE_ENV="$$src" SOURCE_ENV_DIR="$$src_dir" \\',
+        "$(MAKE) --no-print-directory promote \\",
+    ], raw
+    to = makefile[makefile.index("\npromote-to:"):]
+    to = to[:to.index("\n\n")]
+    assert 'DEST_ENV="$(ENV)" DEST_ENV_DIR="$(ENV_DIR)" DEST_CATALOG_MAP="$$map"' in to
     assert makefile.count("$(_SAME_ENV_PROMOTE)") == 4
 
 

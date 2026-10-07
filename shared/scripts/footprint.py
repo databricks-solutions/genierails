@@ -53,7 +53,7 @@ def load_discovered_footprint(env_dir: str | Path) -> tuple[list[str], dict[str,
     except FootprintError as exc:
         raise FootprintError(
             f"invalid discovered footprint {path}: {exc}; re-run "
-            "`make generate ENV=<env> MODE=genie ...`"
+            "`make generate ENV=<env>`"
         ) from exc
     return list(dict.fromkeys(tables)), agents
 

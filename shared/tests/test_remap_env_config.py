@@ -364,7 +364,7 @@ def test_api_discovered_catalog_must_be_mapped(tmp_path, monkeypatch, capsys):
     assert exc.value.code == 1
     output = capsys.readouterr().out
     assert "missing mappings for resolved catalog(s): other" in output
-    assert "make generate ENV=dev MODE=genie" in output
+    assert "make generate ENV=dev`" in output
     assert not (dest / "env.auto.tfvars").exists()
 
 

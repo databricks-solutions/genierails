@@ -71,7 +71,7 @@ def main():
     if not src_cats:
         print(
             "ERROR: no tables found for source environment; run "
-            f"`make generate ENV={Path(source_env_dir).name} MODE=genie ...` first"
+            f"`make generate ENV={Path(source_env_dir).name}` first"
         )
         sys.exit(1)
 

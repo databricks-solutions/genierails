@@ -137,6 +137,7 @@ GUARDED_TARGETS = [
     ("certify", "ENV=dev"),
     ("promote", "ENV=dev"),
     ("promote", "SOURCE_ENV=dev", "DEST_ENV=prod", "DEST_CATALOG_MAP=dev_finance=prod_finance"),
+    ("promote-to", "ENV=prod", "FROM=dev", "CATALOG_MAP=dev_finance=prod_finance"),
     ("plan", "ENV=dev"),
     ("apply", "ENV=dev"),
     ("apply-governance", "ENV=dev"),
@@ -230,7 +231,8 @@ def test_promote_fails_fast_on_placeholder_in_existing_dest(placeholder_cloud):
     "target",
     [("generate", "ENV=dev", "MODE=genie"), ("enable-classification", "ENV=dev"),
      ("plan", "ENV=dev"), ("apply", "ENV=dev"),
-     ("promote", "SOURCE_ENV=dev", "DEST_ENV=prod", "DEST_CATALOG_MAP=dev_finance=prod_finance")],
+     ("promote", "SOURCE_ENV=dev", "DEST_ENV=prod", "DEST_CATALOG_MAP=dev_finance=prod_finance"),
+     ("promote-to", "ENV=prod", "FROM=dev", "CATALOG_MAP=dev_finance=prod_finance")],
     ids=" ".join,
 )
 def test_placeholder_guard_runs_before_any_bootstrap_side_effect(placeholder_cloud, target, jobs):
@@ -323,7 +325,8 @@ def test_enable_classification_footprint_uses_discovered_tables_without_uc_table
     assert requested == ["catalogs/dev_finance/config", "catalogs/dev_ops/config"]
 
 
-def test_enable_classification_without_import_explains_how_to_get_tables(tmp_path):
+def test_enable_classification_accepts_an_agent_id_without_import(tmp_path):
+    # enable-classification discovers the agent's tables right after this check.
     env_dir = _dev_env(tmp_path, genie_space_id="01ef7b3c2a4d5e6f")
 
     result = subprocess.run(
@@ -331,8 +334,19 @@ def test_enable_classification_without_import_explains_how_to_get_tables(tmp_pat
         capture_output=True, text=True,
     )
 
+    assert result.returncode == 0, result.stderr
+
+
+def test_enable_classification_without_tables_or_agent_explains_how_to_get_tables(tmp_path):
+    env_dir = _dev_env(tmp_path, genie_space_id="")
+
+    result = subprocess.run(
+        [sys.executable, VALIDATOR, env_dir / "env.auto.tfvars"],
+        capture_output=True, text=True,
+    )
+
     assert result.returncode == 1
-    assert "import a Genie agent to populate discovered_uc_tables" in result.stderr
+    assert "or set a Genie agent's genie_space_id (its tables are discovered)" in result.stderr
 
 
 def test_sample_env_snippet_replaces_template_lines_without_duplicates():

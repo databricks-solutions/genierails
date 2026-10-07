@@ -4,7 +4,7 @@
 
 **No tables or Genie agent of your own?** Expand this to create a sample schema (three tables of realistic synthetic PII) + a sample agent and get the exact values to paste into `envs/dev/env.auto.tfvars`. **Skip it if you have your own.**
 
-Do [Phase 0](README.md#phase-0--dev-set-up) steps 1–2 first, then this, then Phase 0 step 3 (the import) with the printed agent ID.
+Do [Phase 0](README.md#phase-0--dev-set-up) steps 1–2 first, then this, then Phase 0 step 3 with the printed agent ID.
 
 ```bash
 cd ../shared/examples/dev_to_prod          # from the cloud root (aws/ or azure/); return with 'cd ../../../aws' afterward
