@@ -4,7 +4,7 @@
 
 # GenieRails
 
-Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent from dev to production without exposing sensitive data: Unity Catalog's built-in classifier decides *what* is sensitive, GenieRails derives *how* it's protected and applies it as code — groups, column masks, row filters, ACLs, entitlements, and the agent itself — and **no business user is granted access** until every *classified* sensitive column the agent can reach is covered. No Terraform to write.
+Put Genie onboarding on rails — with built-in guardrails. Take a Genie agent from dev to production without exposing sensitive data: Unity Catalog's built-in classifier decides *what* is sensitive, GenieRails derives *how* it's protected and applies it as code — groups, column masks, row filters, ACLs, entitlements, and the agent itself — and **no new business access is granted** until every *classified* sensitive column the agent can reach is covered. No Terraform to write.
 
 **▶ Start here — the [Dev-to-Prod Walkthrough](shared/examples/dev_to_prod/):** the canonical end-to-end guide (native classification → coverage gate → safe dev→prod promotion, ~30 min). Point it at the Genie agent and catalog you already have.
 

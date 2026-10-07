@@ -41,7 +41,7 @@ So "expose last" isn't a policy you hope holds — there is simply no new or wid
 | `make enable-classification ENV=<e>` | 1/3 | Turn on UC Data Classification (scanning) — as-code alternative to the Databricks UI (recommended); auto-tagging is opt-in |
 | `make generate ENV=<e>` | 1 | (dev) Draft masks + access rules from the model and derive one `gr_treatment`/column from native `class.*` (fail-closed); groups come from `access_tier_groups` in `env.auto.tfvars` (or `GENERATE_ARGS='--groups "..."'`, saved there on first use). Re-runs keep reviewed rules and add rules only for uncovered columns; `GENERATE_ARGS='--allow-rule-changes'` accepts the model's changes |
 | `make derive-assignments ENV=<e>` | 4 | (prod) Re-derive **only** `tag_assignments` from live `class.*`, reusing the promoted rules unchanged — no model call (fail-closed; requires a prior `promote`) |
-| `make coverage-gate ENV=<e>` | 1/4 | Fail if any tagged-sensitive column has no mask (the "says NO" check). Every plan/apply also runs it against live tags, and blocks a table's first grant while it has a sensitive-looking untagged column |
+| `make coverage-gate ENV=<e>` | 1/4 | Fail if any tagged-sensitive column has no mask (the "says NO" check). Every plan/apply also runs it against live tags |
 | `make validate-generated ENV=<e>` | 1/4 | Static validation incl. the one-mask-per-column guard |
 | `make apply ENV=<e>` | 1/5 | Full stack (account → data_access → workspace; auto-promotes same-env first); creates the Genie agent; grants business access only through the coverage gate |
 | `make apply-governance ENV=<e>` | — | Governance-team command: enforcement only (account + data_access); no Genie agent |
