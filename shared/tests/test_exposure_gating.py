@@ -42,35 +42,82 @@ def test_workspace_business_acls_follow_the_gate_not_a_flag():
     assert source.count("var.genie_exposure_blocker == \"\"") == 2
 
 
-def _guard_workspace_config(tmp_path, env_file):
+def _guard_workspace_config(tmp_path, env_file, *make_args, environ=None, nested=False):
+    """Run the real guard; nested=True calls it the way apply/plan do (a
+    recursive make), with make_args on the OUTER command line."""
     env_dir = tmp_path / "envs" / "dev"
     env_dir.mkdir(parents=True)
     (env_dir / "env.auto.tfvars").write_text(env_file)
-    env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MAKELEVEL")}
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("MAKEFLAGS", "MAKELEVEL", "APPLY_FLAGS", "TF_VAR_business_access_enabled")}
+    env.update(environ or {})
+    target = ["_guard-workspace-config"]
+    if nested:
+        wrapper = tmp_path / "nested.mk"
+        wrapper.write_text('_nested-guard:\n\t@$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config\n')
+        target = ["-f", "Makefile", "-f", str(wrapper), "_nested-guard"]
     return subprocess.run(
-        ["make", "--no-print-directory", "_guard-workspace-config", "ENV=dev",
-         f"ENV_DIR={env_dir}", f"CLOUD_ROOT={tmp_path}", f"SHARED_ROOT={SHARED}"],
+        ["make", "--no-print-directory", *target, "ENV=dev",
+         f"ENV_DIR={env_dir}", f"CLOUD_ROOT={tmp_path}", f"SHARED_ROOT={SHARED}", *make_args],
         cwd=SHARED.parent / "aws", text=True, capture_output=True, env=env,
     )
+
+
+def _retired_flag_warnings(result):
+    assert result.returncode == 0, result.stdout + result.stderr
+    return [line for line in (result.stdout + result.stderr).splitlines() if "business_access_enabled" in line]
+
+
+def _assert_one_warning(result, *sources):
+    warnings = _retired_flag_warnings(result)
+    assert len(warnings) == 1, result.stdout + result.stderr
+    assert warnings[0].startswith("WARNING: business_access_enabled (")
+    assert ") is deprecated and ignored" in warnings[0]
+    assert "setting it false does not revoke access" in warnings[0]
+    assert "remove the groups or acl_groups entries" in warnings[0]
+    for source in sources:
+        assert source in warnings[0], warnings[0]
 
 
 @pytest.mark.parametrize("value", ["true", "false"])
 def test_setting_the_retired_flag_warns_once_and_does_not_fail(tmp_path, value):
     result = _guard_workspace_config(tmp_path, f'business_access_enabled = {value}\nsql_warehouse_id = ""\n')
-    assert result.returncode == 0, result.stdout + result.stderr
-    warnings = [line for line in result.stderr.splitlines() if "business_access_enabled" in line]
-    assert len(warnings) == 1, result.stderr
-    assert warnings[0].startswith("WARNING: business_access_enabled in envs/dev/env.auto.tfvars is deprecated and ignored")
-    assert "setting it false does not revoke access" in warnings[0]
-    assert "remove the groups or acl_groups entries" in warnings[0]
+    _assert_one_warning(result, "envs/dev/env.auto.tfvars")
     # Warning only: the file is left exactly as it was.
     assert (tmp_path / "envs/dev/env.auto.tfvars").read_text().startswith(f"business_access_enabled = {value}")
 
 
-def test_unset_retired_flag_prints_no_warning(tmp_path):
-    result = _guard_workspace_config(tmp_path, 'sql_warehouse_id = ""\n')
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "business_access_enabled" not in result.stdout + result.stderr
+@pytest.mark.parametrize("flags", [
+    "-var=business_access_enabled=false",
+    "-var=business_access_enabled=true",
+    "-var business_access_enabled=false",
+    "-parallelism=1 -var business_access_enabled=true -var=coverage_gate_max_age=6h",
+])
+@pytest.mark.parametrize("nested", [False, True])
+def test_retired_flag_in_apply_flags_warns_once_without_a_file_setting(tmp_path, flags, nested):
+    result = _guard_workspace_config(tmp_path, 'sql_warehouse_id = ""\n', f"APPLY_FLAGS={flags}", nested=nested)
+    _assert_one_warning(result, "APPLY_FLAGS")
+    assert "env.auto.tfvars" not in _retired_flag_warnings(result)[0]
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_file_and_apply_flags_together_still_warn_exactly_once(tmp_path, nested):
+    result = _guard_workspace_config(
+        tmp_path, "business_access_enabled = true\n", "APPLY_FLAGS=-var=business_access_enabled=false",
+        environ={"TF_VAR_business_access_enabled": "false"}, nested=nested)
+    _assert_one_warning(result, "envs/dev/env.auto.tfvars", "APPLY_FLAGS", "TF_VAR_business_access_enabled")
+
+
+def test_tf_var_environment_setting_warns_once(tmp_path):
+    result = _guard_workspace_config(tmp_path, 'sql_warehouse_id = ""\n',
+                                     environ={"TF_VAR_business_access_enabled": "true"})
+    _assert_one_warning(result, "TF_VAR_business_access_enabled")
+
+
+@pytest.mark.parametrize("flags", ["", "-var=coverage_gate_max_age=6h", "-var=other_business_access_enabled=true"])
+def test_unset_retired_flag_prints_no_warning(tmp_path, flags):
+    result = _guard_workspace_config(tmp_path, 'sql_warehouse_id = ""\n', f"APPLY_FLAGS={flags}")
+    assert _retired_flag_warnings(result) == []
 
 
 def test_genie_creation_replaces_only_on_host_and_keeps_no_credentials():

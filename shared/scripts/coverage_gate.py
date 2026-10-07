@@ -77,6 +77,34 @@ def _load_tfvars(path: Path) -> dict:
         raise GateError(f"cannot parse {path}: {exc}") from exc
 
 
+RETIRED_FLAG = "business_access_enabled"
+
+
+def retired_flag_sources(env_file: Path, apply_flags: str, environ: dict) -> list[str]:
+    """Where the retired business_access_enabled is still set: the env file,
+    a -var in APPLY_FLAGS (either form), or TF_VAR_business_access_enabled.
+    Never raises: the deprecation warning must not fail a run."""
+    sources = []
+    try:
+        if RETIRED_FLAG in _load_tfvars(env_file):
+            sources.append(str(env_file))
+    except GateError:
+        pass
+    try:
+        args = shlex.split(apply_flags or "")
+    except ValueError:
+        args = (apply_flags or "").split()
+    for index, arg in enumerate(args):
+        assignment = arg[len("-var="):] if arg.startswith("-var=") else (
+            args[index + 1] if arg == "-var" and index + 1 < len(args) else "")
+        if assignment.split("=", 1)[0].strip() == RETIRED_FLAG:
+            sources.append("APPLY_FLAGS")
+            break
+    if f"TF_VAR_{RETIRED_FLAG}" in environ:
+        sources.append(f"TF_VAR_{RETIRED_FLAG}")
+    return sources
+
+
 def console_flags(apply_flags: str) -> list[str]:
     """Keep only the variable flags terraform console accepts."""
     args = shlex.split(apply_flags or "")
@@ -407,6 +435,9 @@ def main(argv: list[str] | None = None) -> int:
     derive.add_argument("--apply-flags", default="")
     stale = sub.add_parser("invalidate", help="mark the recorded result failed (and drop the refresh record) before a live refresh")
     stale.add_argument("--env-dir", required=True, type=Path)
+    retired = sub.add_parser("warn-retired-flag", help="print one deprecation line if business_access_enabled is still set (never fails)")
+    retired.add_argument("--env-file", required=True, type=Path)
+    retired.add_argument("--label", default="")
     check = sub.add_parser("can-run-check", help="refuse a workspace apply that opens or widens CAN_RUN while exposure is blocked")
     check.add_argument("--env-dir", required=True, type=Path)
     check.add_argument("--env-name", required=True)
@@ -414,6 +445,16 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--apply-flags", default="")
     args = parser.parse_args(argv)
     try:
+        if args.command == "warn-retired-flag":
+            # APPLY_FLAGS comes through the environment, so its quoting survives.
+            sources = retired_flag_sources(args.env_file, os.environ.get("GENIERAILS_APPLY_FLAGS", ""), os.environ)
+            if sources:
+                where = ", ".join(args.label or source if source == str(args.env_file) else source
+                                  for source in sources)
+                print(f"WARNING: {RETIRED_FLAG} ({where}) is deprecated and ignored (business access follows "
+                      "the coverage gate; setting it false does not revoke access). Remove it; to withdraw "
+                      "access, remove the groups or acl_groups entries.", file=sys.stderr)
+            return 0
         if args.command == "can-run-check":
             return can_run_check(args.env_dir.resolve(), args.env_name, args.runner, args.apply_flags)
         if args.command == "invalidate":

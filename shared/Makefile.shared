@@ -179,10 +179,13 @@ _guard-genie-placeholder:
 	@$(_GENIE_PLACEHOLDER_GUARD)
 
 # business_access_enabled is deprecated and ignored (business access is granted
-# whenever the coverage gate allows it); warn, never fail, whatever its value.
+# whenever the coverage gate allows it). One warning line per run, whether it
+# is set in env.auto.tfvars, in APPLY_FLAGS (-var), or as TF_VAR_; never fails.
+_guard-workspace-config: export GENIERAILS_APPLY_FLAGS = $(APPLY_FLAGS)
 _guard-workspace-config:
+	@$(_COVERAGE_GATE) warn-retired-flag --env-file "$(ENV_DIR)/env.auto.tfvars" --label "$(_SETUP_ENV_REL)/env.auto.tfvars" || true
 	@cd "$(ENV_DIR)" && if [ -f env.auto.tfvars ]; then \
-		python3 -c 'import sys,hcl2; cfg=hcl2.load(open("env.auto.tfvars")); "business_access_enabled" in cfg and print("WARNING: business_access_enabled in $(_SETUP_ENV_REL)/env.auto.tfvars is deprecated and ignored (business access follows the coverage gate; setting it false does not revoke access). Remove the line; to withdraw access, remove the groups or acl_groups entries.", file=sys.stderr); ok = cfg.get("manage_groups", False) is False; ok or print("Workspace env.auto.tfvars must not set manage_groups = true. Manage groups in envs/account instead."); sys.exit(0 if ok else 1)'; \
+		python3 -c 'import sys,hcl2; cfg=hcl2.load(open("env.auto.tfvars")); ok = cfg.get("manage_groups", False) is False; ok or print("Workspace env.auto.tfvars must not set manage_groups = true. Manage groups in envs/account instead."); sys.exit(0 if ok else 1)'; \
 	fi
 	@$(MAKE) --no-print-directory _guard-genie-placeholder ENV="$(ENV)" ENV_DIR="$(ENV_DIR)"
 	@cd "$(ENV_DIR)" && if [ -f abac.auto.tfvars ]; then \
