@@ -159,6 +159,19 @@ def test_create_checks_every_page_before_adopting(tmp_path):
     assert not any(c["method"] == "POST" for c in calls)
 
 
+def test_create_refuses_repeated_pagination_token(tmp_path):
+    result, id_file, calls = _create_with_fake_api(tmp_path, [
+        {"spaces": [], "next_page_token": "1"},
+        {"spaces": [], "next_page_token": "1"},
+    ], "Paged")
+    assert result.returncode != 0
+    assert "repeated page token '1'" in result.stderr
+    assert "refusing to create" in result.stderr
+    assert not id_file.exists()
+    assert len([c for c in calls if c["method"] == "GET"]) == 2
+    assert not any(c["method"] == "POST" for c in calls)
+
+
 def test_sql_expressions_and_measures_include_required_display_name():
     source = SCRIPT.read_text()
 

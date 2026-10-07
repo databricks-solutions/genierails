@@ -141,6 +141,34 @@ def test_repromotion_preserves_destination_id_by_promoted_name_and_never_source_
     assert "dev-id" not in (dest / "env.auto.tfvars").read_text()
 
 
+def test_repromotion_refuses_destination_id_copied_from_source(
+    tmp_path, monkeypatch, capsys
+):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    dest.mkdir()
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "Agent", genie_space_id = "dev-id", '
+        'uc_tables = ["dev.s.t"] }]\n'
+    )
+    original = (
+        'genie_spaces = [{ name = "Agent", genie_space_id = "dev-id" }]\n'
+        'sql_warehouse_id = "prod-wh"\n'
+    )
+    (dest / "env.auto.tfvars").write_text(original)
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    with pytest.raises(SystemExit) as exc:
+        remap_env_config.main()
+    assert exc.value.code == 1
+    output = capsys.readouterr().out
+    assert "which is also configured in the source environment" in output
+    assert "nothing was written" in output
+    assert (dest / "env.auto.tfvars").read_text() == original
+
+
 def test_first_promotion_never_copies_source_genie_space_id(tmp_path, monkeypatch):
     source = tmp_path / "dev"
     dest = tmp_path / "prod"

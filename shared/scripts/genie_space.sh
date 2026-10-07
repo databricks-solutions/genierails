@@ -199,24 +199,31 @@ expand_tables() {
 matching_space_ids_by_title() {
   local workspace_url="$1" token="$2" title="$3"
   local page_token="" response http_code response_body parsed next_token
-  local matches_file
+  local page_count=0 matches_file seen_tokens_file
   matches_file=$(mktemp)
+  seen_tokens_file=$(mktemp)
 
   while true; do
+    page_count=$((page_count + 1))
+    if [[ $page_count -gt 1000 ]]; then
+      rm -f "$matches_file" "$seen_tokens_file"
+      echo "ERROR: Genie agent listing exceeded 1000 pages; refusing to create because duplicate detection could not complete." >&2
+      return 1
+    fi
     local curl_args=(-s -w "\n%{http_code}" -G
       -H "${UA_HEADER}" -H "Authorization: Bearer ${token}")
     if [[ -n "$page_token" ]]; then
       curl_args+=(--data-urlencode "page_token=${page_token}")
     fi
     response=$(curl "${curl_args[@]}" "${workspace_url}/api/2.0/genie/spaces") || {
-      rm -f "$matches_file"
+      rm -f "$matches_file" "$seen_tokens_file"
       echo "ERROR: Could not list Genie agents in ${workspace_url}; refusing to create because duplicate detection failed." >&2
       return 1
     }
     http_code=$(printf '%s\n' "$response" | tail -n1)
     response_body=$(printf '%s\n' "$response" | sed '$d')
     if [[ "$http_code" != "200" ]]; then
-      rm -f "$matches_file"
+      rm -f "$matches_file" "$seen_tokens_file"
       echo "ERROR: Could not list Genie agents in ${workspace_url} (HTTP ${http_code}); refusing to create because duplicate detection failed." >&2
       return 1
     fi
@@ -245,18 +252,24 @@ except (ValueError, json.JSONDecodeError) as exc:
     print(f"Malformed Genie list response: {exc}", file=sys.stderr)
     sys.exit(1)
 ' <<< "$response_body") || {
-      rm -f "$matches_file"
+      rm -f "$matches_file" "$seen_tokens_file"
       echo "ERROR: Could not parse the Genie agent list from ${workspace_url}; refusing to create because duplicate detection failed." >&2
       return 1
     }
     printf '%s\n' "$parsed" | sed -n 's/^MATCH\t//p' >> "$matches_file"
     next_token=$(printf '%s\n' "$parsed" | sed -n 's/^NEXT\t//p' | tail -n1)
     [[ -z "$next_token" ]] && break
+    if grep -Fqx -- "$next_token" "$seen_tokens_file"; then
+      rm -f "$matches_file" "$seen_tokens_file"
+      echo "ERROR: Genie agent listing repeated page token '${next_token}'; refusing to create because duplicate detection could not complete." >&2
+      return 1
+    fi
+    printf '%s\n' "$next_token" >> "$seen_tokens_file"
     page_token="$next_token"
   done
 
   cat "$matches_file"
-  rm -f "$matches_file"
+  rm -f "$matches_file" "$seen_tokens_file"
 }
 
 # ---------- Set ACLs on a Genie agent (CAN_RUN for configured groups) ----------

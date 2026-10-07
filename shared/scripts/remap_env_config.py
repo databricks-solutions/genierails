@@ -430,6 +430,11 @@ def main():
         )
 
     dest_spaces = dest_cfg.get("genie_spaces", [])
+    source_space_ids = {
+        _str(space.get("genie_space_id", ""))
+        for space in spaces
+        if _str(space.get("genie_space_id", ""))
+    }
 
     def matching_dest_space(name: str) -> dict:
         """Match the promoted name first, then its Terraform normalized key."""
@@ -466,6 +471,13 @@ def main():
         # IDs belong to a workspace. Preserve only an explicitly attached
         # destination ID; never copy the source environment's ID.
         destination_space_id = _str(dest_space.get("genie_space_id", ""))
+        if destination_space_id and destination_space_id in source_space_ids:
+            print(
+                f"ERROR: Destination Genie space {name!r} has genie_space_id "
+                f"{destination_space_id!r}, which is also configured in the source "
+                "environment. Refusing to preserve a source-workspace ID; nothing was written."
+            )
+            sys.exit(1)
         lines.append(f"    genie_space_id   = {json.dumps(destination_space_id)}")
         lines.append(f'    uc_tables = [')
         for t in remapped_tables:

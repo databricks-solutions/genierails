@@ -85,6 +85,7 @@ For an imported agent:
 - Creation first lists every page of agents in the target workspace and adopts
   the single exact, case-sensitive title match. If more than one agent has that
   title, set `genie_space_id` explicitly to choose which one to manage.
+- The duplicate check sees only agents visible to the deploying service principal, so give it access to an agent created in the UI or set that agent's `genie_space_id` explicitly.
 - A rename that also changes the effective title, with no ID file or attached
   destination `genie_space_id`, represents a genuinely different agent. The old
   agent is left as-is; attach its ID explicitly if the renamed config should
