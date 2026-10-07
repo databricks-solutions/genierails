@@ -147,4 +147,16 @@ case "$COMMAND" in
 esac
 
 echo "+ ${CMD[*]}"
+if [ "$LAYER" = "data_access" ] && { [ "$COMMAND" = "plan" ] || [ "$COMMAND" = "apply" ]; }; then
+  # Terraform's output passes through unchanged; a copy lets the note below
+  # explain a plan whose only destroys replace terraform_data.masking_functions.
+  OUTPUT_COPY="$(mktemp)"
+  trap 'rm -f "$OUTPUT_COPY"' EXIT
+  set +e
+  "${CMD[@]}" | tee "$OUTPUT_COPY"
+  status="${PIPESTATUS[0]}"
+  set -e
+  python3 "$SCRIPT_DIR/masking_replace_note.py" "$OUTPUT_COPY" || true
+  exit "$status"
+fi
 "${CMD[@]}"

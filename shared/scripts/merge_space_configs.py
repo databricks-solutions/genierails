@@ -1203,6 +1203,154 @@ def keep_reviewed_rules(
     ]
 
 
+def _hcl_block_span(text: str, key: str) -> tuple[int, int] | None:
+    """(start, end) of the braces of a top-level ``key = { ... }``, strings respected."""
+    match = re.search(rf"^{re.escape(key)}\s*=\s*\{{", text, re.MULTILINE)
+    if not match:
+        return None
+    depth, i, start = 0, match.end() - 1, match.end() - 1
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            i += 1
+            while i < len(text) and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif ch == "#" or text.startswith("//", i):
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+            continue
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return start, i + 1
+        i += 1
+    return None
+
+
+def keep_reviewed_group_descriptions(reviewed_cfg: dict, abac_path: Path) -> list[str]:
+    """Keep the reviewed description of each group the new draft still has.
+
+    The model rewords group descriptions on every run, so without this every
+    re-run of generate shows a diff (and an account-layer change) for nothing.
+    Only the description string is replaced in place; groups the model adds
+    or drops are left as drafted. Returns one summary message, or none.
+    """
+    prior = {
+        str(name).strip('"'): value.get("description")
+        for name, value in (reviewed_cfg.get("groups") or {}).items()
+        if isinstance(value, dict)
+    }
+    try:
+        text = abac_path.read_text()
+        new = {
+            str(name).strip('"'): value.get("description")
+            for name, value in (hcl2.loads(text).get("groups") or {}).items()
+            if isinstance(value, dict)
+        }
+    except Exception:
+        return []
+    span = _hcl_block_span(text, "groups")
+    if span is None:
+        return []
+    block = text[span[0]:span[1]]
+    kept = []
+    for name, description in sorted(prior.items()):
+        proposed = new.get(name)
+        if not isinstance(description, str) or not isinstance(proposed, str) or proposed == description:
+            continue
+        pattern = re.compile(
+            rf'(^\s*"?{re.escape(name)}"?\s*=\s*\{{[^{{}}]*?\bdescription\s*=\s*)"(?:[^"\\]|\\.)*"',
+            re.MULTILINE,
+        )
+        # python-hcl2 unescapes \\, \" and \n on load but leaves $${ as written,
+        # so re-escaping only those reproduces the reviewed source string.
+        escaped = description.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        quoted = f'"{escaped}"'
+        block, count = pattern.subn(lambda m: m.group(1) + quoted, block, count=1)
+        if count:
+            kept.append(name)
+    if not kept:
+        return []
+    abac_path.write_text(text[:span[0]] + block + text[span[1]:])
+    return [f"  kept the reviewed description of {len(kept)} group(s): {', '.join(kept)}"]
+
+
+def _statement_end(sql: str) -> int | None:
+    """Index just past the first ``;`` outside strings, identifiers and comments."""
+    i, n = 0, len(sql)
+    while i < n:
+        if sql.startswith("--", i):
+            end = sql.find("\n", i)
+            i = n if end < 0 else end + 1
+        elif sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            if end < 0:
+                return None
+            i = end + 2
+        elif sql.startswith("$$", i):
+            end = sql.find("$$", i + 2)
+            if end < 0:
+                return None
+            i = end + 2
+        elif sql[i] in "'\"`":
+            quote, j = sql[i], i + 1
+            while j < n and sql[j] != quote:
+                j += 2 if sql[j] == "\\" and quote != "`" else 1
+            if j >= n:
+                return None
+            i = j + 1
+        elif sql[i] == ";":
+            return i + 1
+        else:
+            i += 1
+    return None
+
+
+def prune_unused_new_functions(sql_path: Path, abac_path: Path, reviewed_names: set[str]) -> list[str]:
+    """Remove masking functions this run added that no fgac_policy uses.
+
+    The model sometimes drafts masks nothing applies, which only earns a
+    validator warning. A function is removed only when no policy names it
+    (compared case-insensitively) and the masking SQL from before this run
+    did not define it, so reviewed or hand-written functions always stay.
+    Anything that can't be parsed is left alone. Returns the removed names.
+    """
+    if not sql_path.exists() or not abac_path.exists():
+        return []
+    try:
+        policies = hcl2.loads(abac_path.read_text()).get("fgac_policies") or []
+    except Exception:
+        return []
+    used = {
+        _uc_identifier(p.get("function_name")).rsplit(".", 1)[-1]
+        for p in policies if isinstance(p, dict)
+    }
+    text = sql_path.read_text()
+    parts = re.split(r"(?=CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE\s+)?FUNCTION\b)", text, flags=re.IGNORECASE)
+    kept_parts, removed = [parts[0]], []
+    for part in parts[1:]:
+        match = _FUNC_NAME_RE.match(part)
+        name = match.group(1).lower() if match else ""
+        end = _statement_end(part)
+        if not name or name in used or name in reviewed_names or end is None:
+            kept_parts.append(part)
+            continue
+        removed.append(name)
+        # Drop the comment lines written directly above the removed function.
+        previous = kept_parts[-1].split("\n")
+        while len(previous) > 1 and previous[-1].strip() == "" and previous[-2].lstrip().startswith("--"):
+            previous.pop()
+            previous[-1] = ""
+        kept_parts[-1] = "\n".join(previous)
+        kept_parts.append(part[end:].lstrip("\n"))
+    if not removed:
+        return []
+    sql_path.write_text("".join(kept_parts).rstrip() + "\n")
+    return removed
+
+
 def main():
     if len(sys.argv) != 3:
         print(

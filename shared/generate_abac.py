@@ -4371,6 +4371,39 @@ def autofix_canonical_function_names(tfvars_path: Path, sql_path: Path | None = 
     return total
 
 
+# fgac_policies whose function an autofix changed or removed during this run.
+# A reviewed rule can then restore the policy, so policy_autofix_results
+# reports what each one finally became.
+_POLICY_AUTOFIXES: set[str] = set()
+
+
+def policy_autofix_results(tfvars_path: Path, reviewed_cfg: dict) -> list[str]:
+    """One line per autofixed policy: what generated/abac.auto.tfvars holds now."""
+    if not _POLICY_AUTOFIXES:
+        return []
+    try:
+        import hcl2
+        final = {p.get("name", ""): p for p in hcl2.loads(tfvars_path.read_text()).get("fgac_policies") or []}
+    except Exception:
+        return []
+    reviewed = {p.get("name", ""): p for p in reviewed_cfg.get("fgac_policies") or []}
+    lines = []
+    for name in sorted(_POLICY_AUTOFIXES):
+        policy = final.get(name)
+        if policy is None:
+            lines.append(f"  result: policy '{name}' is not in {tfvars_path.name} (removed by the autofix above)")
+            continue
+        function = ".".join(
+            part for part in (policy.get("function_catalog"), policy.get("function_schema"),
+                              policy.get("function_name")) if part
+        )
+        how = ("reviewed rule kept; the autofix above was discarded"
+               if json.dumps(reviewed.get(name), sort_keys=True) == json.dumps(policy, sort_keys=True)
+               else "the autofix above applies")
+        lines.append(f"  result: policy '{name}' uses {function} in {tfvars_path.name} ({how})")
+    return lines
+
+
 def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = None) -> int:
     """Fix FGAC policies referencing functions that don't exist in the SQL file.
 
@@ -4479,6 +4512,7 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
         else:
             # No replacement found — mark for removal
             removals.append(pname)
+            _POLICY_AUTOFIXES.add(pname)
             print(f"  [AUTOFIX] Removing fgac_policy '{pname}': function '{fn}' not found "
                   f"in SQL file and no suitable replacement available")
 
@@ -4540,6 +4574,7 @@ def autofix_invalid_function_refs(tfvars_path: Path, sql_path: Path | None = Non
             fixes += 1
             loc_old = f"{old_fn}@{old_cat}.{old_sch}"
             loc_new = f"{new_fn}@{new_cat}.{new_sch}"
+            _POLICY_AUTOFIXES.add(pname)
             print(f"  [AUTOFIX] Fixed function ref in policy '{pname}': {loc_old} -> {loc_new}")
 
     if not fixes:
@@ -4754,6 +4789,7 @@ def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = N
                 old_fn = fn_m.group(2)
                 new_block = block_text[:fn_m.start(2)] + new_fn + block_text[fn_m.end(2):]
                 rewritten = rewritten[:blk_start] + new_block + rewritten[blk_end + 1:]
+                _POLICY_AUTOFIXES.add(pname)
                 print(
                     f"  [AUTOFIX] Replaced function '{old_fn}' → '{new_fn}' in fgac_policy "
                     f"'{pname}' (arg count mismatch)"
@@ -4785,6 +4821,7 @@ def autofix_fgac_arg_count_mismatch(tfvars_path: Path, sql_path: Path | None = N
             pname = pname_m.group(1) if pname_m else "?"
             fn_name = fn_m.group(1) if fn_m else "?"
             rewritten = rewritten[:start] + rewritten[end:]
+            _POLICY_AUTOFIXES.add(pname)
             print(
                 f"  [AUTOFIX] Removed fgac_policy '{pname}' — function '{fn_name}' "
                 f"arg count does not match policy type"
@@ -5115,6 +5152,7 @@ def autofix_function_category_mismatch(tfvars_path: Path, sql_path: Path | None 
         if updated != block_text:
             rewritten = rewritten[:blk_start] + updated + rewritten[blk_end + 1:]
             fixes += 1
+            _POLICY_AUTOFIXES.add(pname)
             print(
                 f"  [AUTOFIX] Fixed function category mismatch in policy '{pname}': "
                 f"'{old_fn}' -> '{new_fn}'"
@@ -8000,9 +8038,17 @@ def main():
     # The assembled generated/ draft is the reviewed rule set, also in --space
     # mode. Genie mode drafts no rules, so it has nothing to merge.
     from scripts.merge_space_configs import (
-        footprint_from_ddl, keep_reviewed_rules, load_reviewed_rules,
+        extract_function_names, footprint_from_ddl, keep_reviewed_group_descriptions,
+        keep_reviewed_rules, load_reviewed_rules, prune_unused_new_functions,
     )
     reviewed_rules = None
+    # Functions the masking SQL defined before this run; only ones added since
+    # are pruned when no policy uses them.
+    _prior_sql_path = Path(args.out_dir).resolve() / "masking_functions.sql"
+    try:
+        prior_function_names = extract_function_names(_prior_sql_path.read_text())
+    except FileNotFoundError:
+        prior_function_names = set()
     if args.mode != "genie":
         try:
             reviewed_rules = load_reviewed_rules(Path(args.out_dir).resolve())
@@ -8837,6 +8883,20 @@ Before you apply, tune for your business roles, security requirements, and Genie
                 # Restored policies feed the derived Genie ACL sidecar.
                 rules_env = validation_dir.parent / "env.auto.tfvars"
                 autofix_acl_groups(rules_abac, rules_env if rules_env.exists() else None)
+        if not args.allow_rule_changes:
+            for line in keep_reviewed_group_descriptions(reviewed_rules[0], rules_abac):
+                print(line)
+        for line in policy_autofix_results(rules_abac, reviewed_rules[0]):
+            print(line)
+
+    if sql_block and hcl_block and args.mode != "genie":
+        pruned = prune_unused_new_functions(
+            validation_dir / "masking_functions.sql", validation_dir / "abac.auto.tfvars",
+            prior_function_names,
+        )
+        if pruned:
+            print(f"  [AUTOFIX] Removed {len(pruned)} new masking function(s) no policy uses: "
+                  f"{', '.join(pruned)}")
 
     # Genie mode: skip validation — the output intentionally has no groups/ABAC sections
     # and validate_abac.py would incorrectly report "groups is missing".
