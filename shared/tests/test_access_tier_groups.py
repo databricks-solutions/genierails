@@ -427,7 +427,7 @@ def test_promote_carries_access_tier_groups_and_prod_generate_uses_them(
     prod_cfg = hcl2.loads((dest / "env.auto.tfvars").read_text())
     assert prod_cfg["access_tier_groups"] == TIERS
     assert prod_cfg["uc_tables"] == ["prod_catalog.s.t"]
-    assert prod_cfg["business_access_enabled"] is False
+    assert "business_access_enabled" not in prod_cfg
 
     # derive-assignments / certify load prod config through load_auth_config.
     (dest / "auth.auto.tfvars").write_text('databricks_workspace_host = "https://x.invalid"\n')

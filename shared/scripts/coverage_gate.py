@@ -4,8 +4,8 @@
 `run` gates the split data_access config exactly as Terraform will apply it:
 
   1. Ask Terraform (terraform console, same var files and -var flags as the
-     apply) for the gate inputs: their fingerprint, whether business SELECT is
-     requested, and the tables it would grant.
+     apply) for the gate inputs: their fingerprint and the tables it would
+     grant.
   2. Read the data_access state for the tables already granted. Tables about
      to be granted for the first time get the first-exposure check: an
      untagged sensitive-looking column blocks unless it is acknowledged in
@@ -27,10 +27,13 @@ live UC itself: it can only verify that a recent refreshed pass exists for the
 current local inputs. This catches drift and
 skipped steps; it is not a defence against someone who hand-forges the files.
 
-`needs-derive` prints which live refresh make must run before a plan/apply
-that opens business access: "full" (derive-assignments: live class.* tags and
-DDL), "ddl" (live DDL only, for envs whose tags come from make generate), or
-"none" when access stays closed.
+`needs-derive` prints which live refresh make must run before a plan/apply:
+"full" (derive-assignments: live class.* tags and DDL), "ddl" (live DDL only,
+for envs whose tags come from make generate), or "none" when the env has no
+governance config to grant through.
+
+Business access has no on/off switch: the retired business_access_enabled
+variable is ignored wherever it is set (env.auto.tfvars or -var flags).
 """
 
 from __future__ import annotations
@@ -57,7 +60,6 @@ GATE_FILENAME = ".coverage_gate.json"
 REFRESH_RELPATH = Path("generated") / ".live_refresh.json"
 REFRESH_VERSION = 1
 GATE_VERSION = 1
-GATE_FLAG = "business_access_enabled"
 TABLE_GRANT = ("module.data_access", "databricks_grant", "table_access")
 INPUTS_EXPRESSION = "base64encode(jsonencode(module.data_access.coverage_gate_inputs))"
 
@@ -75,19 +77,32 @@ def _load_tfvars(path: Path) -> dict:
         raise GateError(f"cannot parse {path}: {exc}") from exc
 
 
-def _flag_override(apply_flags: str) -> bool | None:
-    """The last -var=business_access_enabled=... in APPLY_FLAGS, if any."""
-    value = None
-    args = shlex.split(apply_flags or "")
+RETIRED_FLAG = "business_access_enabled"
+
+
+def retired_flag_sources(env_file: Path, apply_flags: str, environ: dict) -> list[str]:
+    """Where the retired business_access_enabled is still set: the env file,
+    a -var in APPLY_FLAGS (either form), or TF_VAR_business_access_enabled.
+    Never raises: the deprecation warning must not fail a run."""
+    sources = []
+    try:
+        if RETIRED_FLAG in _load_tfvars(env_file):
+            sources.append(str(env_file))
+    except GateError:
+        pass
+    try:
+        args = shlex.split(apply_flags or "")
+    except ValueError:
+        args = (apply_flags or "").split()
     for index, arg in enumerate(args):
-        assignment = None
-        if arg.startswith("-var="):
-            assignment = arg[len("-var="):]
-        elif arg == "-var" and index + 1 < len(args):
-            assignment = args[index + 1]
-        if assignment and assignment.split("=", 1)[0].strip() == GATE_FLAG:
-            value = assignment.split("=", 1)[1].strip().strip("\"'").lower() == "true"
-    return value
+        assignment = arg[len("-var="):] if arg.startswith("-var=") else (
+            args[index + 1] if arg == "-var" and index + 1 < len(args) else "")
+        if assignment.split("=", 1)[0].strip() == RETIRED_FLAG:
+            sources.append("APPLY_FLAGS")
+            break
+    if f"TF_VAR_{RETIRED_FLAG}" in environ:
+        sources.append(f"TF_VAR_{RETIRED_FLAG}")
+    return sources
 
 
 def console_flags(apply_flags: str) -> list[str]:
@@ -107,18 +122,20 @@ def console_flags(apply_flags: str) -> list[str]:
 
 
 def needs_derive(env_dir: Path, apply_flags: str) -> tuple[str, str | None]:
-    """Which live refresh must precede a plan/apply: full, ddl or none."""
+    """Which live refresh must precede a plan/apply: full, ddl or none.
+
+    apply_flags is accepted for older callers and ignored: no flag changes
+    whether business access is gated.
+    """
     env = _load_tfvars(env_dir / "env.auto.tfvars")
-    requested = _flag_override(apply_flags)
-    if requested is None:
-        requested = env.get(GATE_FLAG) is True
-    if not requested:
+    generated = (env_dir / "generated" / "abac.auto.tfvars").is_file()
+    if not generated and not (env_dir / DATA_ACCESS_SUBDIR / "abac.auto.tfvars").is_file():
         return "none", None
     if env.get("enable_classification") is not True:
         return "ddl", "enable_classification is false; tags come from make generate, so only the DDL is re-read"
-    if not (env_dir / "generated" / "abac.auto.tfvars").is_file():
+    if not generated:
         return "ddl", "no generated/abac.auto.tfvars to derive tags into, so only the DDL is re-read"
-    return "full", "business access is being opened in a native-classification env"
+    return "full", "business access is gated on live tags in a native-classification env"
 
 
 def file_sha256(path: Path) -> str:
@@ -195,7 +212,7 @@ def query_inputs(runner: Path, env_name: str, layer_dir: Path, flags: list[str])
         if not (encoded.startswith('"') and encoded.endswith('"')):
             raise ValueError(encoded)
         inputs = json.loads(base64.b64decode(encoded[1:-1], validate=True))
-        for key in ("fingerprint", "business_access_enabled", "grant_tables", "acknowledged_columns"):
+        for key in ("fingerprint", "grant_tables", "acknowledged_columns"):
             inputs[key]
     except (IndexError, ValueError, KeyError, TypeError) as exc:
         raise GateError(f"unexpected terraform console output: {exc}") from exc
@@ -267,7 +284,6 @@ def _failed(gate_path: Path, record: dict, inputs: dict, env_name: str, reason: 
 
 CAN_RUN_EXPRESSION = (
     "base64encode(jsonencode({"
-    "enabled = var.business_access_enabled, "
     "groups = module.workspace.genie_space_acls_groups, "
     "blocker = local.genie_exposure_blocker, "
     "widening = local.genie_space_can_run_widening, "
@@ -297,12 +313,10 @@ def can_run_check(env_dir: Path, env_name: str, runner: Path, apply_flags: str) 
         if not (line.startswith('"') and line.endswith('"')):
             raise ValueError(line)
         state = json.loads(base64.b64decode(line[1:-1], validate=True))
-        enabled, groups = state["enabled"], state["groups"]
+        groups = state["groups"]
         blocker, widening, missing = state["blocker"], state["widening"], state["missing"]
     except (IndexError, ValueError, KeyError, TypeError) as exc:
         raise GateError(f"unexpected terraform console output: {exc}") from exc
-    if not enabled:
-        return 0
     refused = {
         key: widening.get(key, ["unknown"])
         for key, csv in groups.items()
@@ -330,9 +344,6 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
         return 0
     flags = console_flags(apply_flags)
     inputs = query_inputs(runner, env_name, layer_dir, flags)
-    if not inputs["business_access_enabled"]:
-        print(f"=== Coverage gate (data_access:{env_name}): not required, business_access_enabled = false ===")
-        return 0
 
     print(f"=== Coverage Gate (data_access:{env_name}) ===")
     granted = granted_tables(layer_dir)
@@ -424,6 +435,9 @@ def main(argv: list[str] | None = None) -> int:
     derive.add_argument("--apply-flags", default="")
     stale = sub.add_parser("invalidate", help="mark the recorded result failed (and drop the refresh record) before a live refresh")
     stale.add_argument("--env-dir", required=True, type=Path)
+    retired = sub.add_parser("warn-retired-flag", help="print one deprecation line if business_access_enabled is still set (never fails)")
+    retired.add_argument("--env-file", required=True, type=Path)
+    retired.add_argument("--label", default="")
     check = sub.add_parser("can-run-check", help="refuse a workspace apply that opens or widens CAN_RUN while exposure is blocked")
     check.add_argument("--env-dir", required=True, type=Path)
     check.add_argument("--env-name", required=True)
@@ -431,6 +445,16 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--apply-flags", default="")
     args = parser.parse_args(argv)
     try:
+        if args.command == "warn-retired-flag":
+            # APPLY_FLAGS comes through the environment, so its quoting survives.
+            sources = retired_flag_sources(args.env_file, os.environ.get("GENIERAILS_APPLY_FLAGS", ""), os.environ)
+            if sources:
+                where = ", ".join(args.label or source if source == str(args.env_file) else source
+                                  for source in sources)
+                print(f"WARNING: {RETIRED_FLAG} ({where}) is deprecated and ignored (business access follows "
+                      "the coverage gate; setting it false does not revoke access). Remove it; to withdraw "
+                      "access, remove the groups or acl_groups entries.", file=sys.stderr)
+            return 0
         if args.command == "can-run-check":
             return can_run_check(args.env_dir.resolve(), args.env_name, args.runner, args.apply_flags)
         if args.command == "invalidate":

@@ -25,7 +25,6 @@ import run_integration_tests as rit  # noqa: E402
 import run_parallel_tests as rpt  # noqa: E402
 from access_tier_groups import persist_access_tier_groups  # noqa: E402
 from scripts import environment_lock as env_lock  # noqa: E402
-from scripts.release_helpers import open_gate  # noqa: E402
 
 SPACE_ID = "01champion0dev"
 WAREHOUSE = "wh0champion"
@@ -123,7 +122,6 @@ class FakeMake:
     def _release(self, args, env_dir):
         lock_path = env_dir / env_lock.LOCK_RELPATH
         lock_path.write_text(json.dumps({"pid": os.getpid(), "host": socket.gethostname()}))
-        open_gate(env_dir, os.getpid())
         lock_path.unlink()
         (env_dir / ".genie_space_id_champion_finance_analytics").write_text("01champion0prod\n")
         return self._done(args, 0, (
@@ -198,7 +196,8 @@ def test_champion_dry_run_follows_the_readme_order(champion):
     assert dev_cfg["enable_auto_tagging"] is True
     assert dev_cfg["verify_key_column"] == "customer_id"
     prod_cfg = rit._load_tfvars(envs / "prod" / "env.auto.tfvars")
-    assert prod_cfg["business_access_enabled"] is True
+    # Promote and release neither write nor need the retired exposure flag.
+    assert "business_access_enabled" not in prod_cfg
     assert prod_cfg["sql_warehouse_id"] == WAREHOUSE
     assert (envs / "prod" / "generated" / "masking_functions.sql").read_text() == "-- prod masks\n"
 

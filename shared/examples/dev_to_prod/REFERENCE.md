@@ -6,16 +6,16 @@ Lookup companion to the **[Dev-to-Prod Walkthrough](README.md)**: the full comma
 
 ## How it works (under the hood)
 
-**The exposure gate is mechanical.** `business_access_enabled` holds back exactly the two things that let a user reach data through the agent; everything else applies regardless:
+**Exposure follows the coverage gate, mechanically.** Terraform itself holds back exactly the two things that let a user reach data through the agent until a recent passing coverage check (including the first-exposure check) covers them; everything else applies regardless:
 
 | Control | When it applies |
 |---|---|
-| Table `SELECT` grant | **held until `business_access_enabled=true`** |
-| Genie run permission (`CAN_RUN`) | **held until `business_access_enabled=true`** |
+| Table `SELECT` grant | **only after the masks exist and a recent coverage check passes** for it |
+| Genie run permission (`CAN_RUN`) | **only once its groups' `SELECT` grants are applied** through that gate |
 | Workspace assignment + consume entitlement | applied on **every** apply (harmless without `SELECT`/`CAN_RUN`) |
 | Warehouse `CAN_USE` | **not managed by GenieRails** — you grant it (Phase 5) |
 
-So "expose last" isn't a policy you hope holds — there is simply no `SELECT` and no `CAN_RUN` until the gate is opened.
+So "expose last" isn't a policy you hope holds — there is simply no new or wider `SELECT` or `CAN_RUN` without a passing gate. There is no on/off flag: the old `business_access_enabled` setting is deprecated and ignored (make warns while it is set; `false` does **not** revoke access). To withdraw access, remove the groups or `acl_groups` entries and apply.
 
 **Three layers of governance, and the Terraform layers that build them:**
 
@@ -43,15 +43,15 @@ So "expose last" isn't a policy you hope holds — there is simply no `SELECT` a
 | `make derive-assignments ENV=<e>` | 4 | (prod) Re-derive **only** `tag_assignments` from live `class.*`, reusing the promoted rules unchanged — no model call (fail-closed; requires a prior `promote`) |
 | `make coverage-gate ENV=<e>` | 1/4 | **Block** if any tagged-sensitive column has no mask (the "says NO" check) |
 | `make validate-generated ENV=<e>` | 1/4 | Static validation incl. the one-mask-per-column guard |
-| `make apply ENV=<e>` | 1/5 | Full stack (account → data_access → workspace; auto-promotes same-env first); creates the Genie agent; releases gated access when `business_access_enabled=true` |
+| `make apply ENV=<e>` | 1/5 | Full stack (account → data_access → workspace; auto-promotes same-env first); creates the Genie agent; grants business access only through the coverage gate |
 | `make apply-governance ENV=<e>` | — | Governance-team command: enforcement only (account + data_access); no Genie agent |
 | `make genie-adopt-preflight ENV=<e>` | — | Read-only. Before the one-time upgrade to secret-free Genie state, checks that every Genie agent created by an earlier version can be adopted with its current ID (ID file, workspace, GET 200). `make apply` runs it first and stops if any agent fails. |
-| `make rehearse ENV=dev VERIFY_KEY_COLUMN=<pk>` | 1 | (dev) coverage-gate → validate-generated → apply → verify-access, stopping at the first failure |
-| `make release ENV=prod VERIFY_KEY_COLUMN=<pk>` | 5 | (prod) Placeholder guard → lock → live derive → validate → coverage → promote → read-only rulebook audit → all-layer apply → `verify-access`; saves `business_access_enabled = true` |
+| `make rehearse ENV=dev VERIFY_KEY_COLUMN=<pk>` | 1 | (dev) live derive → validate-generated → coverage-gate → apply → verify-access, stopping at the first failure |
+| `make release ENV=prod VERIFY_KEY_COLUMN=<pk>` | 5 | (prod) Placeholder guard → lock → live derive → validate → coverage → promote → read-only rulebook audit → all-layer apply → `verify-access` |
 | `make certify ENV=prod` | 5 | Deprecated alias for `make release` |
 | `make maintain ENV=prod` | 6 | (prod, scheduled) audit-schema → derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook; never changes access or Genie |
 | `make promote SOURCE_ENV DEST_ENV DEST_CATALOG_MAP` | 2 | Promote **rules only** (leaves tag assignments behind); creates + writes prod `env.auto.tfvars`. Policy names take the prod catalog (`gr_mask_<prod_catalog>_<treatment>`) only when a read-only policy listing of the prod catalog (prod `auth.auto.tfvars`) shows neither the old nor the new name and prod's state doesn't hold the old key; otherwise it keeps its name, since renaming a live policy would drop and recreate it |
-| `make verify-access ENV=<e> VERIFY_KEY_COLUMN=<pk>` | 1/5 | Prove masking by querying as per-tier test principals (**needs the gate open**) |
+| `make verify-access ENV=<e> VERIFY_KEY_COLUMN=<pk>` | 1/5 | Prove masking by querying as per-tier test principals (**needs the business grants applied**) |
 | `make audit-rulebook ENV=<e>` | 4/6 | Drift check — tags with no covering rule |
 | `make audit-schema ENV=<e>` | 6 | Untagged-column audit (also the first step of `make maintain`) |
 | `make generate-delta ENV=<e>` | — | [Legacy] model-based incremental tag assignments; the champion flow uses `make maintain` instead |
@@ -69,13 +69,13 @@ Key config & code: [`treatment_config.json`](../../treatment_config.json) (the `
 
 - **access tier** — a group of users who should see data at the same level (e.g. full / masked / least). You map one IdP group to each tier.
 - **ABAC (attribute-based access control)** — masks/filters that apply based on a column's *tag*, not its name — so a rule covers any column carrying that tag.
-- **`CAN_RUN` / `CAN_USE`** — Databricks permissions: `CAN_RUN` lets a group open and run a Genie agent (released by the exposure gate); `CAN_USE` lets a group run a SQL warehouse (you grant it yourself).
+- **`CAN_RUN` / `CAN_USE`** — Databricks permissions: `CAN_RUN` lets a group open and run a Genie agent (granted only through the coverage gate); `CAN_USE` lets a group run a SQL warehouse (you grant it yourself).
 - **`class.*` tag** — a tag Unity Catalog's classifier writes on a column it finds sensitive (e.g. `class.email_address`).
 - **coverage gate** — `make coverage-gate`; the blocking check that fails if any tagged-sensitive column has no covering mask/policy. The "tool says NO" step.
 - **drift** — a gap between what's tagged and what's protected; `audit-rulebook` reports it.
 - **entitlement / workspace assignment** — what lets a group *into* a workspace at all (applied every apply; harmless without a data grant).
 - **evidence** — the compliance record `make evidence` produces (what was scanned, tagged, protected, and approved).
-- **exposure gate** — `business_access_enabled`; releases the `SELECT` grant + Genie run permission only when `true`.
+- **exposure gate** — the coverage gate as Terraform enforces it: no new or wider `SELECT` grant or Genie run permission without a recent pass. (The former `business_access_enabled` flag is retired and ignored.)
 - **facts vs rules** — *facts* = which columns got tagged in *this* workspace (from the scan); *rules* = the mapping + policies (portable, promoted).
 - **fail-closed** — if native classification can't be read, `generate` aborts rather than guessing.
 - **FGAC (fine-grained access control)** — Unity Catalog column masks + row filters.

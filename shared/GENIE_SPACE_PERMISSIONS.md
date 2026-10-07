@@ -2,12 +2,13 @@
 
 This document lists everything that must be in place for business users (the groups defined in `abac.auto.tfvars`) to use an AI/BI Genie agent.
 
-Business exposure is fail-closed. `business_access_enabled` defaults to `false`,
-which withholds table `SELECT` and Genie agent business-group ACLs while retaining
-the structural grants and resources needed to prepare the environment. Set it to
-`true` only after the coverage gate (`make validate-generated`) and schema drift
-check (`make audit-schema`) pass. Genie agent creation and configuration are not
-gated, so administrators can inspect them before granting business access.
+Business exposure is fail-closed through the coverage gate. Terraform plans a new
+or wider table `SELECT` grant only after the masks exist and a recent passing
+coverage check covers it, and a Genie agent business-group ACL only once those
+grants are applied; structural grants and resources apply regardless. There is no
+on/off flag: the former `business_access_enabled` setting is deprecated and
+ignored (`false` does not revoke access; remove the groups or `acl_groups` entries
+instead). Genie agent creation and configuration are not gated.
 
 ## 1. Identity
 

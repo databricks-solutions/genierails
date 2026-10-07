@@ -80,7 +80,7 @@ def test_rehearse_rejects_prod_before_any_recursive_make_call(tmp_path):
     assert "business_access_enabled" not in output
 
 
-def test_rehearse_with_key_opens_exposure_gate_for_its_apply_only(tmp_path):
+def test_rehearse_with_key_derives_validates_gates_applies_and_verifies(tmp_path):
     stub, log = _recording_stub(tmp_path)
     result = subprocess.run(
         [
@@ -99,21 +99,14 @@ def test_rehearse_with_key_opens_exposure_gate_for_its_apply_only(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     output = result.stdout + result.stderr
     assert _recorded_calls(log) == [
-        [
-            "_derive-before-exposure",
-            "ENV=dev",
-            "APPLY_FLAGS=-var=business_access_enabled=true",
-        ],
-        ["coverage-gate", "ENV=dev"],
+        ["_derive-before-exposure", "ENV=dev", "APPLY_FLAGS="],
         ["validate-generated", "ENV=dev"],
-        [
-            "apply",
-            "ENV=dev",
-            "APPLY_FLAGS=-var=business_access_enabled=true",
-            "_EXPOSURE_DERIVED=1",
-        ],
+        ["coverage-gate", "ENV=dev"],
+        ["apply", "ENV=dev", "APPLY_FLAGS=", "_EXPOSURE_DERIVED=1"],
         ["verify-access", "ENV=dev", "VERIFY_KEY_COLUMN=customer_id"],
     ]
+    # No gate toggle: nothing passes or writes the retired flag.
+    assert "business_access_enabled" not in log.read_text() + output
     assert not any(
         mutation in output
         for mutation in ("sed ", "perl ", "env.auto.tfvars >>", "env.auto.tfvars >")
@@ -133,19 +126,10 @@ def test_rehearse_without_key_runs_key_independent_live_verification(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     output = result.stdout + result.stderr
     assert _recorded_calls(log) == [
-        [
-            "_derive-before-exposure",
-            "ENV=dev",
-            "APPLY_FLAGS=-var=business_access_enabled=true",
-        ],
-        ["coverage-gate", "ENV=dev"],
+        ["_derive-before-exposure", "ENV=dev", "APPLY_FLAGS="],
         ["validate-generated", "ENV=dev"],
-        [
-            "apply",
-            "ENV=dev",
-            "APPLY_FLAGS=-var=business_access_enabled=true",
-            "_EXPOSURE_DERIVED=1",
-        ],
+        ["coverage-gate", "ENV=dev"],
+        ["apply", "ENV=dev", "APPLY_FLAGS=", "_EXPOSURE_DERIVED=1"],
         ["verify-access", "ENV=dev"],
     ]
     assert "skipped verify-access" not in output

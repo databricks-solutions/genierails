@@ -41,7 +41,6 @@ variables {
     function_catalog = "cat"
     function_schema  = "sch"
   }]
-  business_access_enabled = true
 }
 
 run "setup_inputs" {
@@ -57,26 +56,8 @@ run "setup_inputs" {
   }
 }
 
-run "closed_gate_plans_without_a_gate_result" {
-  command = plan
-  providers = {
-    databricks.account   = databricks.account
-    databricks.workspace = databricks.workspace
-    time                 = time
-  }
-  variables {
-    business_access_enabled = false
-  }
-  assert {
-    condition     = length(databricks_grant.table_access) == 0
-    error_message = "business_access_enabled = false must plan no business SELECT"
-  }
-  assert {
-    condition     = toset(output.coverage_gate_inputs.grant_tables) == toset(["cat.sch.customers"])
-    error_message = "the gate inputs must name the tables the open gate would grant"
-  }
-}
-
+# There is no exposure switch: without a gate result, business SELECT is
+# refused, and the gate inputs are still readable (they come from config).
 run "missing_gate_result_blocks_select" {
   command = plan
   providers = {
@@ -95,7 +76,7 @@ run "write_passing_gate" {
     files = {
       "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
       "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n"
-      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.missing_gate_result_blocks_select.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }
@@ -112,12 +93,16 @@ run "current_passing_gate_allows_select" {
     error_message = "a current pass must plan the business SELECT grant"
   }
   assert {
-    condition     = output.coverage_gate.status == "pass" && output.coverage_gate.business_access_enabled
+    condition     = output.coverage_gate.status == "pass"
     error_message = "the applied gate status recorded in state must be pass"
   }
   assert {
-    condition     = output.coverage_gate_inputs.fingerprint == run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint
-    error_message = "opening business_access_enabled must not change the gate fingerprint"
+    condition     = toset(output.coverage_gate_inputs.grant_tables) == toset(["cat.sch.customers"])
+    error_message = "the gate inputs must name the tables the gate would grant"
+  }
+  assert {
+    condition     = output.coverage_gate_inputs.fingerprint == run.missing_gate_result_blocks_select.coverage_gate_inputs.fingerprint
+    error_message = "the gate result must not change the gate fingerprint"
   }
 }
 
@@ -181,7 +166,7 @@ run "changed_ddl_and_masks_make_the_gate_stale" {
     files = {
       "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
       "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING,\n  phone STRING\n);\n"
-      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.missing_gate_result_blocks_select.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }
@@ -204,7 +189,7 @@ run "write_failed_gate" {
     files = {
       "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
       "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n"
-      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "fail", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "fail", fingerprint = run.missing_gate_result_blocks_select.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }
@@ -252,7 +237,7 @@ run "write_pass_without_a_live_refresh" {
     files = {
       "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
       "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n"
-      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint })
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.missing_gate_result_blocks_select.coverage_gate_inputs.fingerprint })
     }
   }
 }
@@ -275,7 +260,7 @@ run "write_pass_from_an_old_refresh" {
     files = {
       "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
       "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n"
-      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint, refreshed_at = "2000-01-01T00:00:00Z" })
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.missing_gate_result_blocks_select.coverage_gate_inputs.fingerprint, refreshed_at = "2000-01-01T00:00:00Z" })
     }
   }
 }
@@ -301,7 +286,7 @@ run "write_pass_with_a_future_refresh" {
     files = {
       "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
       "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n"
-      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint, refreshed_at = "2999-01-01T00:00:00Z" })
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.missing_gate_result_blocks_select.coverage_gate_inputs.fingerprint, refreshed_at = "2999-01-01T00:00:00Z" })
     }
   }
 }
@@ -327,7 +312,7 @@ run "write_fresh_pass_at_the_default_max_age" {
     files = {
       "tests/.tmp/gate/data_access/masking_functions.sql" = "CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING) RETURNS STRING RETURN '***';\n"
       "tests/.tmp/gate/ddl/_fetched.sql"                  = "CREATE TABLE cat.sch.customers (\n  id BIGINT,\n  email STRING\n);\n"
-      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
+      "tests/.tmp/gate/data_access/.coverage_gate.json"   = jsonencode({ status = "pass", fingerprint = run.missing_gate_result_blocks_select.coverage_gate_inputs.fingerprint, refreshed_at = "@NOW@" })
     }
   }
 }
@@ -366,11 +351,12 @@ run "gate_inputs_at_the_ceiling" {
     time                 = time
   }
   variables {
-    business_access_enabled = false
-    coverage_gate_max_age   = "24h"
+    coverage_gate_max_age = "24h"
   }
+  # The recorded pass is for the 6h inputs, so this plan refuses SELECT.
+  expect_failures = [databricks_grant.table_access]
   assert {
-    condition     = output.coverage_gate_inputs.fingerprint != run.closed_gate_plans_without_a_gate_result.coverage_gate_inputs.fingerprint
+    condition     = output.coverage_gate_inputs.fingerprint != run.missing_gate_result_blocks_select.coverage_gate_inputs.fingerprint
     error_message = "the max age must be part of the gate fingerprint"
   }
 }

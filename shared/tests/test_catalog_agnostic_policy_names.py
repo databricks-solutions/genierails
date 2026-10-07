@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import hcl2
@@ -464,11 +465,25 @@ def _policy_plan(tmp_path: Path, generated: Path) -> dict[str, tuple[list[str], 
         cwd=ROOT, env=tf_env, text=True, capture_output=True,
     )
     assert init.returncode == 0, init.stdout + init.stderr
+    var_args = [f"-var=env_dir={da}", f"-var-file={da / 'auth.auto.tfvars'}",
+                f"-var-file={da / 'abac.auto.tfvars'}"]
+    # Business SELECT has no off switch: record a current passing coverage
+    # gate for Terraform's own fingerprint so the plan reaches the policies.
+    console = subprocess.run(
+        ["terraform", "console", *var_args],
+        input="module.data_access.coverage_gate_inputs.fingerprint\n",
+        cwd=ROOT, env=tf_env, text=True, capture_output=True,
+    )
+    assert console.returncode == 0, console.stdout + console.stderr
+    fingerprint = console.stdout.strip().splitlines()[-1].strip('"')
+    (da / ".coverage_gate.json").write_text(json.dumps({
+        "status": "pass", "fingerprint": fingerprint,
+        "refreshed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }))
     plan_file = da / "plan.bin"
     plan = subprocess.run(
         ["terraform", "plan", "-refresh=false", "-lock=false", "-input=false", "-no-color",
-         f"-out={plan_file}", f"-var=env_dir={da}",
-         f"-var-file={da / 'auth.auto.tfvars'}", f"-var-file={da / 'abac.auto.tfvars'}"],
+         f"-out={plan_file}", *var_args],
         cwd=ROOT, env=tf_env, text=True, capture_output=True,
     )
     assert plan.returncode == 0, plan.stdout + plan.stderr

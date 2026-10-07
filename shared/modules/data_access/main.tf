@@ -135,8 +135,6 @@ locals {
   # Business SELECT is planned only while that file records a pass for exactly
   # these inputs, so editing the config, the masks, the DDL or the grants after
   # the gate (or passing -var overrides to a raw terraform run) fails the plan.
-  # It deliberately ignores business_access_enabled: opening the gate must not
-  # invalidate the result it depends on.
   #
   # The inputs are local snapshots of live UC tags and DDL. Terraform can't
   # re-read UC, so the pass must also carry the time make last refreshed them
@@ -181,7 +179,7 @@ locals {
   )
   table_grants_needing_gate = sort([
     for pair in local.table_access_pairs : "${pair.table}|${pair.principal}"
-    if var.business_access_enabled && !(local._protection_unchanged && contains(var.applied_table_grants, "${pair.table}|${pair.principal}"))
+    if !(local._protection_unchanged && contains(var.applied_table_grants, "${pair.table}|${pair.principal}"))
   ])
 }
 
@@ -288,10 +286,12 @@ resource "databricks_grant" "schema_access" {
 }
 
 resource "databricks_grant" "table_access" {
-  for_each = var.business_access_enabled ? {
+  # Same addresses and keys as when this was held behind the retired
+  # business_access_enabled flag, so already-released grants are never rebuilt.
+  for_each = {
     for pair in local.table_access_pairs :
     "${pair.table}|${pair.principal}" => { table = pair.table, group = pair.principal }
-  } : {}
+  }
 
   provider   = databricks.workspace
   table      = each.value.table

@@ -138,8 +138,8 @@ locals {
   }
 
   # ── Cross-layer exposure check for Genie CAN_RUN ──────────────────────────
-  # CAN_RUN is granted only after the data_access layer was applied with
-  # business access open and a passing coverage gate, and only while the gate
+  # CAN_RUN is granted only after the data_access layer was applied with a
+  # passing coverage gate and business grants in place, and only while the gate
   # result on disk is still for the inputs that apply used (otherwise the
   # governance config moved on and hasn't been applied) and rests on a live
   # refresh no older than the max age that apply recorded. The result is
@@ -152,7 +152,9 @@ locals {
   genie_exposure_blocker = (
     local._data_access_state == null ? "the data_access layer has no readable state (${local.data_access_dir}/terraform.tfstate)" :
     local._applied_coverage_gate == null ? "the data_access state predates the coverage gate; re-apply the data_access layer" :
-    try(local._applied_coverage_gate.business_access_enabled, false) != true ? "the data_access layer was last applied with business_access_enabled = false" :
+    # Legacy state from before business_access_enabled was retired: an apply
+    # made with it false granted nothing. Current state no longer records it.
+    try(local._applied_coverage_gate.business_access_enabled, true) != true ? "the data_access layer was last applied with business access closed (before business_access_enabled was retired); re-apply the data_access layer" :
     try(local._applied_coverage_gate.status, "") != "pass" ? "the data_access layer was last applied without a passing coverage gate" :
     try(local._applied_coverage_gate.table_grant_count, 0) < 1 ? "the data_access layer has no business table grants in place" :
     try(local._applied_coverage_gate.max_age, null) == null ? "the data_access state predates the coverage-gate max age; re-apply the data_access layer" :
@@ -485,8 +487,8 @@ variable "groups" {
 
 variable "business_access_enabled" {
   type        = bool
-  default     = false
-  description = "Fail-closed exposure gate. Enable only after coverage validation and the schema drift check pass."
+  default     = null
+  description = "DEPRECATED and ignored; removed in the next release. Business SELECT and Genie CAN_RUN are granted whenever the coverage gate allows it, so true and false both do nothing (false does NOT revoke access: remove the groups or acl_groups entries instead). Still declared so existing env.auto.tfvars files and -var flags keep working; make warns while it is set."
 }
 
 # Shared env.auto.tfvars is consumed by both workspace and data-access roots.
@@ -596,7 +598,6 @@ module "workspace" {
   genie_only                   = var.genie_only
   manage_groups                = var.manage_groups
   groups                       = var.groups
-  business_access_enabled      = var.business_access_enabled
   genie_exposure_blocker       = local.genie_exposure_blocker
   genie_space_missing_grants   = local.genie_space_missing_grants
   genie_space_can_run_widening = local.genie_space_can_run_widening

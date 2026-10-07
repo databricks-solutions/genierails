@@ -898,7 +898,6 @@ def test_genie_mode_import_with_deferred_acl_cannot_be_applied(tmp_path, target)
 
     result = subprocess.run(
         ["make", target, "ENV=dev", f"ROOT_RUNNER={runner}",
-         "APPLY_FLAGS=-var=business_access_enabled=true",
          # ... so the deferred ACL, not the live read, is what stops it.
          f"DERIVE_ASSIGNMENTS_SCRIPT={_live_refresh_stub(tmp_path)}"],
         cwd=tmp_path, text=True, capture_output=True,
@@ -924,4 +923,5 @@ def test_genie_mode_import_with_deferred_acl_cannot_be_released(tmp_path):
     assert release.returncode != 0, release.stdout + release.stderr
     assert "no tag_assignments section" in release.stdout + release.stderr
     assert not runner_log.exists() or " apply" not in runner_log.read_text()
-    assert "business_access_enabled = true" not in (env / "env.auto.tfvars").read_text()
+    # Release writes no exposure flag (there is none to open).
+    assert "business_access_enabled" not in (env / "env.auto.tfvars").read_text()

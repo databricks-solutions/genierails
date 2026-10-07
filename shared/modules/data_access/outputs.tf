@@ -36,13 +36,12 @@ output "legacy_unattributed_discovered_tables" {
 }
 
 output "coverage_gate_inputs" {
-  description = "What scripts/coverage_gate.py gates: the input fingerprint, whether business SELECT is requested, the tables it would grant, and the acknowledged columns. Computed from configuration only, so terraform console can read it before any apply."
+  description = "What scripts/coverage_gate.py gates: the input fingerprint, the tables it would grant, and the acknowledged columns. Computed from configuration only, so terraform console can read it before any apply."
   value = {
-    fingerprint             = local.coverage_gate_fingerprint
-    business_access_enabled = var.business_access_enabled
-    grant_tables            = local.coverage_gate_grant_tables
-    acknowledged_columns    = sort(distinct([for column in var.coverage_acknowledged_columns : lower(column)]))
-    max_age                 = var.coverage_gate_max_age
+    fingerprint          = local.coverage_gate_fingerprint
+    grant_tables         = local.coverage_gate_grant_tables
+    acknowledged_columns = sort(distinct([for column in var.coverage_acknowledged_columns : lower(column)]))
+    max_age              = var.coverage_gate_max_age
     # false when every planned grant already exists with unchanged protection:
     # the change only keeps or revokes SELECT, so a failing gate needn't stop it.
     needs_gate             = length(local.table_grants_needing_gate) > 0
@@ -54,12 +53,11 @@ output "coverage_gate_inputs" {
 output "coverage_gate" {
   description = "Coverage-gate result this layer was applied with. The workspace layer reads it from state before it grants Genie CAN_RUN. It references the table grants, so a failed grant leaves the previous value in state."
   value = {
-    business_access_enabled = var.business_access_enabled
-    fingerprint             = local.coverage_gate_fingerprint
-    status                  = local.coverage_gate_status
-    max_age                 = var.coverage_gate_max_age
-    protection_fingerprint  = local.coverage_gate_protection
-    deployment_binding      = var.deployment_binding
-    table_grant_count       = length(databricks_grant.table_access)
+    fingerprint            = local.coverage_gate_fingerprint
+    status                 = local.coverage_gate_status
+    max_age                = var.coverage_gate_max_age
+    protection_fingerprint = local.coverage_gate_protection
+    deployment_binding     = var.deployment_binding
+    table_grant_count      = length(databricks_grant.table_access)
   }
 }

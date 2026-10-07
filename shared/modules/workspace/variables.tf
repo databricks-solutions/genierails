@@ -42,12 +42,6 @@ variable "groups" {
   description = "Map of group name -> config. Workspace state looks these groups up by name."
 }
 
-variable "business_access_enabled" {
-  type        = bool
-  default     = false
-  description = "Fail-closed exposure gate. Set true only after the coverage gate and schema drift check pass; controls business-group Genie ACLs."
-}
-
 variable "genie_exposure_blocker" {
   type        = string
   description = "Why the data_access layer isn't ready for business exposure, or \"\" when it is. A non-empty value blocks every non-empty Genie CAN_RUN grant."

@@ -2,10 +2,11 @@
 
 import json
 import os
+import re
 import shlex
+import shutil
 import signal
 import socket
-import stat
 import subprocess
 import sys
 import time
@@ -17,18 +18,28 @@ ROOT = Path(__file__).parents[2]
 CLOUD_ROOT = ROOT / "aws"
 sys.path.insert(0, str(ROOT / "shared"))
 from scripts import environment_lock as lock  # noqa: E402
-from scripts import release_helpers as release_helpers  # noqa: E402
 
 
 def _env():
     return {k: v for k, v in os.environ.items() if k not in ("VERIFY_KEY_COLUMN", "APPLY_FLAGS", "MAKEFLAGS", "MAKELEVEL")}
 
 
-def _env_dir(tmp_path, gate="false"):
+# An already-released prod env still carries the retired flag; release and
+# maintain must leave the file exactly as they found it.
+RELEASED_ENV_FILE = "business_access_enabled = true\n"
+
+
+def _env_dir(tmp_path, env_file=RELEASED_ENV_FILE):
     path = tmp_path / "prod"
     (path / "generated").mkdir(parents=True)
-    (path / "env.auto.tfvars").write_text(f"business_access_enabled = {gate}\n")
+    (path / "env.auto.tfvars").write_text(env_file)
     return path
+
+
+def _same_env_promote(env_dir):
+    return ["--no-print-directory", "promote", "ENV=prod", f"ENV_DIR={env_dir}",
+            "SOURCE_ENV=prod", f"SOURCE_ENV_DIR={env_dir}", "DEST_ENV=", "DEST_ENV_DIR=",
+            "DEST_CATALOG_MAP="]
 
 
 def _stub(tmp_path, fail=None, sleep=0, on=None):
@@ -74,12 +85,14 @@ def test_release_runs_unified_pipeline_in_order_and_writes_no_receipt(tmp_path):
         ["derive-assignments", "ENV=prod"],
         ["validate-generated", "ENV=prod"],
         ["coverage-gate", "ENV=prod"],
-        ["--no-print-directory", "promote", "ENV=prod"],
+        _same_env_promote(env_dir),
         ["audit-rulebook", "ENV=prod"],
-        ["apply", "ENV=prod", "APPLY_FLAGS=-var=business_access_enabled=true", "_EXPOSURE_DERIVED=1"],
+        ["apply", "ENV=prod", "APPLY_FLAGS=", "_EXPOSURE_DERIVED=1"],
         ["verify-access", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],
     ]
-    assert "business_access_enabled = true" in (env_dir / "env.auto.tfvars").read_text()
+    # No gate to open or persist: release neither passes nor writes it.
+    assert "business_access_enabled" not in log.read_text()
+    assert (env_dir / "env.auto.tfvars").read_text() == RELEASED_ENV_FILE
     assert not list(env_dir.rglob(".certified*"))
     assert not (env_dir / "generated/.governance.lock").exists()
 
@@ -91,7 +104,7 @@ def test_release_coverage_failure_never_applies(tmp_path):
     assert result.returncode != 0
     assert [c[0] if c[0] != "--no-print-directory" else c[1] for c in _calls(log)] == [
         "derive-assignments", "validate-generated", "coverage-gate"]
-    assert "business_access_enabled = false" in (env_dir / "env.auto.tfvars").read_text()
+    assert (env_dir / "env.auto.tfvars").read_text() == RELEASED_ENV_FILE
     assert not list(env_dir.rglob(".certified*"))
 
 
@@ -100,13 +113,17 @@ def test_release_verify_failure_prints_rollback_guidance(tmp_path):
     stub, _log, audit = _stub(tmp_path, fail="verify-access")
     result = _make("release", env_dir, stub, audit)
     assert result.returncode != 0
-    assert "PARTIALLY OPENED" in result.stderr
-    assert "set business_access_enabled = false" in result.stderr
+    assert "verify-access failed" in result.stderr
+    assert "PARTLY APPLIED" in result.stderr
+    # Withdrawing access means removing groups/ACL entries; the retired flag
+    # does nothing, so the hint must not point at it.
+    assert "remove the groups" in result.stderr
+    assert "business_access_enabled" not in result.stderr
     assert "make apply ENV=prod" in result.stderr
 
 
 def test_maintain_remains_governance_only_and_writes_no_receipt(tmp_path):
-    env_dir = _env_dir(tmp_path, "true")
+    env_dir = _env_dir(tmp_path)
     stub, log, audit = _stub(tmp_path)
     result = _make("maintain", env_dir, stub, audit)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -163,7 +180,7 @@ def test_rulebook_drift_blocks_release_before_access_apply(tmp_path):
     assert names == ["derive-assignments", "validate-generated", "coverage-gate", "promote", "audit-rulebook"]
     assert "reported drift" in result.stderr
     assert "no new or wider business access was applied" in result.stderr
-    assert "business_access_enabled = false" in (env_dir / "env.auto.tfvars").read_text()
+    assert (env_dir / "env.auto.tfvars").read_text() == RELEASED_ENV_FILE
 
 
 def test_rulebook_audit_error_is_not_described_as_drift(tmp_path):
@@ -176,15 +193,61 @@ def test_rulebook_audit_error_is_not_described_as_drift(tmp_path):
     assert not any(c[0] == "apply" for c in _calls(log))
 
 
-def test_release_failed_apply_prints_rollback_and_does_not_persist(tmp_path):
+def test_release_failed_apply_prints_withdrawal_guidance_and_writes_nothing(tmp_path):
     env_dir = _env_dir(tmp_path)
     stub, log, audit = _stub(tmp_path, fail="apply")
     result = _make("release", env_dir, stub, audit)
     assert result.returncode != 0
     assert [c[0] for c in _calls(log)][-1] == "apply"
-    assert not release_helpers.gate_open(env_dir)
-    assert "PARTIALLY OPENED" in result.stderr
-    assert "still has business_access_enabled = false" in result.stderr
+    assert (env_dir / "env.auto.tfvars").read_text() == RELEASED_ENV_FILE
+    assert "apply failed" in result.stderr and "PARTLY APPLIED" in result.stderr
+    assert "remove the groups" in result.stderr
+    assert "business_access_enabled" not in result.stderr
+
+
+def test_release_promote_stays_same_env_when_dest_env_leaks_from_the_shell(tmp_path):
+    env_dir = _env_dir(tmp_path)
+    stub, log, audit = _stub(tmp_path)
+    leaked = {**_env(), "DEST_ENV": "dev", "SOURCE_ENV": "dev", "DEST_CATALOG_MAP": "a=b",
+              "SOURCE_ENV_DIR": str(tmp_path / "dev"), "DEST_ENV_DIR": str(tmp_path / "dev")}
+    result = subprocess.run(["make", "release", "ENV=prod", f"ENV_DIR={env_dir}", f"MAKE={stub}",
+                             f"AUDIT_SCHEMA_SCRIPT={audit}"], cwd=CLOUD_ROOT,
+                            text=True, capture_output=True, env=leaked)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _same_env_promote(env_dir) in _calls(log)
+
+
+def test_same_env_promote_arguments_beat_leaked_shell_variables(tmp_path):
+    """The arguments release/apply pass to promote win over a leaked shell
+    environment (and over the outer make's command line), so promote takes
+    its same-env branch."""
+    env_dir = tmp_path / "prod"
+    leaked = {**_env(), "DEST_ENV": "dev", "SOURCE_ENV": "dev", "DEST_CATALOG_MAP": "a=b",
+              "SOURCE_ENV_DIR": str(tmp_path / "dev"), "DEST_ENV_DIR": str(tmp_path / "dev")}
+    args = [a for a in _same_env_promote(env_dir) if a not in ("--no-print-directory", "promote")]
+    show = tmp_path / "show.mk"
+    show.write_text('_show-promote-vars: ; @echo "DEST_ENV=[$(DEST_ENV)] SOURCE_ENV=[$(SOURCE_ENV)] '
+                    'SOURCE_ENV_DIR=[$(SOURCE_ENV_DIR)] DEST_ENV_DIR=[$(DEST_ENV_DIR)] MAP=[$(DEST_CATALOG_MAP)]"\n')
+    result = subprocess.run(["make", "--no-print-directory", "-f", "Makefile", "-f", str(show),
+                             "_show-promote-vars", *args], cwd=CLOUD_ROOT,
+                            text=True, capture_output=True, env=leaked)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == (
+        f"DEST_ENV=[] SOURCE_ENV=[prod] SOURCE_ENV_DIR=[{env_dir}] DEST_ENV_DIR=[] MAP=[]")
+
+
+def test_every_in_recipe_same_env_promote_clears_cross_env_variables():
+    makefile = (ROOT / "shared/Makefile.shared").read_text()
+    definition = makefile[makefile.index("_SAME_ENV_PROMOTE = "):]
+    definition = definition[:definition.index("\n\n")]
+    for setting in ('SOURCE_ENV="$(ENV)"', 'DEST_ENV= ', "DEST_ENV_DIR= ", "DEST_CATALOG_MAP="):
+        assert setting in definition
+    # release, apply, apply-governance and plan's PROMOTE_AFTER all use it;
+    # the only raw promote calls left are the explicit cross-env test targets.
+    raw = [line.strip() for line in makefile.splitlines()
+           if re.search(r"\$\(MAKE\)[^\n]*\bpromote\b", line) and "_SAME_ENV_PROMOTE =" not in line]
+    assert raw == ["$(MAKE) --no-print-directory promote \\"], raw
+    assert makefile.count("$(_SAME_ENV_PROMOTE)") == 4
 
 
 def test_release_without_key_still_calls_verify_access(tmp_path):
@@ -371,50 +434,6 @@ def test_maintain_preserves_direct_audit_exit_code_with_real_nested_make(tmp_pat
     assert result.returncode != 0 and expected in result.stderr
 
 
-def test_persist_gate_replaces_existing_line_or_appends(tmp_path):
-    env_dir = _env_dir(tmp_path)
-    assert lock.acquire_lock(env_dir, os.getpid(), "release")[0]
-    release_helpers.open_gate(env_dir, os.getpid())
-    assert (env_dir / "env.auto.tfvars").read_text().count("business_access_enabled") == 1
-    (env_dir / "env.auto.tfvars").write_text('uc_tables = ["a.b.c"]')
-    release_helpers.open_gate(env_dir, os.getpid())
-    assert (env_dir / "env.auto.tfvars").read_text() == 'uc_tables = ["a.b.c"]\nbusiness_access_enabled = true\n'
-    lock.release_lock(env_dir, os.getpid())
-
-
-def test_persist_gate_is_atomic_keeps_mode_and_symlink(tmp_path, monkeypatch):
-    env_dir = _env_dir(tmp_path)
-    real = tmp_path / "real.tfvars"
-    real.write_text("business_access_enabled = false\n"); real.chmod(0o600)
-    (env_dir / "env.auto.tfvars").unlink(); (env_dir / "env.auto.tfvars").symlink_to(real)
-    assert lock.acquire_lock(env_dir, os.getpid(), "release")[0]
-    replaced = []
-    original = os.replace
-    monkeypatch.setattr(release_helpers.os, "replace", lambda src, dst: (replaced.append(Path(dst)), original(src, dst)))
-    release_helpers.open_gate(env_dir, os.getpid())
-    assert replaced == [real.resolve()] and (env_dir / "env.auto.tfvars").is_symlink()
-    assert stat.S_IMODE(real.stat().st_mode) == 0o600
-    lock.release_lock(env_dir, os.getpid())
-
-
-def test_failed_atomic_write_leaves_original_intact(tmp_path, monkeypatch):
-    env_dir = _env_dir(tmp_path)
-    before = (env_dir / "env.auto.tfvars").read_text()
-    assert lock.acquire_lock(env_dir, os.getpid(), "release")[0]
-    monkeypatch.setattr(release_helpers.os, "replace", lambda *_: (_ for _ in ()).throw(OSError("disk full")))
-    with pytest.raises(OSError):
-        release_helpers.open_gate(env_dir, os.getpid())
-    assert (env_dir / "env.auto.tfvars").read_text() == before
-    assert not list(env_dir.glob(".env.auto.tfvars.*.tmp"))
-    lock.release_lock(env_dir, os.getpid())
-
-
-def test_gate_open_parses_inline_comment(tmp_path):
-    env_dir = _env_dir(tmp_path)
-    (env_dir / "env.auto.tfvars").write_text("business_access_enabled = true # note\n")
-    assert release_helpers.gate_open(env_dir)
-
-
 def test_old_receipts_are_removed_by_release_and_maintain(tmp_path):
     for target in ("release", "maintain"):
         env_dir = _env_dir(tmp_path / target)
@@ -431,3 +450,92 @@ def test_old_receipts_are_removed_by_release_and_maintain(tmp_path):
 def test_generate_delta_help_is_marked_legacy():
     result = subprocess.run(["make", "help"], cwd=CLOUD_ROOT, text=True, capture_output=True, env=_env())
     assert "[Legacy]" in next(line for line in result.stdout.splitlines() if "generate-delta" in line)
+
+
+def _guarding_stub(tmp_path):
+    """MAKE stand-in: records every nested call and, where the real apply /
+    apply-governance would run _guard-workspace-config, runs exactly that real
+    target with the arguments the nested apply received (so APPLY_FLAGS= is
+    in force there). Everything else is a no-op, so nothing live runs."""
+    log = tmp_path / "calls"
+    stub = tmp_path / "guarding-make"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> '{log}'\n"
+        'case "$1" in apply|apply-governance) shift; '
+        f'exec {shutil.which("make")} --no-print-directory _guard-workspace-config "$@" ;; esac\n'
+        "exit 0\n"
+    )
+    stub.chmod(0o755)
+    audit = tmp_path / "audit.py"
+    audit.write_text("raise SystemExit(0)\n")
+    return stub, log, audit
+
+
+def _run_with_flags(tmp_path, target, env_name, apply_flags, env_file='sql_warehouse_id = ""\n'):
+    env_dir = tmp_path / env_name
+    (env_dir / "generated").mkdir(parents=True)
+    (env_dir / "env.auto.tfvars").write_text(env_file)
+    stub, log, audit = _guarding_stub(tmp_path)
+    result = subprocess.run(
+        ["make", target, f"ENV={env_name}", f"ENV_DIR={env_dir}", f"MAKE={stub}",
+         f"AUDIT_SCHEMA_SCRIPT={audit}", f"APPLY_FLAGS={apply_flags}"],
+        cwd=CLOUD_ROOT, text=True, capture_output=True, env=_env(),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    warnings = [line for line in (result.stdout + result.stderr).splitlines()
+                if line.startswith("WARNING: business_access_enabled")]
+    return _calls(log), warnings
+
+
+@pytest.mark.parametrize("flags", ["-var=business_access_enabled=false", "-var business_access_enabled=false",
+                                   "-var=business_access_enabled=true"])
+@pytest.mark.parametrize("target, env_name, nested", [
+    ("release", "prod", "apply"),
+    ("rehearse", "dev", "apply"),
+    ("maintain", "prod", "apply-governance"),
+])
+def test_retired_flag_in_caller_apply_flags_warns_once_though_nested_apply_clears_them(
+        tmp_path, flags, target, env_name, nested):
+    calls, warnings = _run_with_flags(tmp_path, target, env_name, flags)
+    assert len(warnings) == 1, warnings
+    assert "(APPLY_FLAGS)" in warnings[0]
+    # What reaches Terraform is unchanged: the nested apply still gets empty flags.
+    nested_calls = [call for call in calls if call[0] == nested]
+    assert nested_calls == [[nested, f"ENV={env_name}", "APPLY_FLAGS=", "_EXPOSURE_DERIVED=1"]]
+    assert not any(f"APPLY_FLAGS={flags}" in call for call in calls)
+
+
+@pytest.mark.parametrize("target, env_name", [("release", "prod"), ("rehearse", "dev")])
+def test_retired_flag_in_file_and_caller_flags_warns_exactly_once(tmp_path, target, env_name):
+    _calls_, warnings = _run_with_flags(tmp_path, target, env_name, "-var business_access_enabled=false",
+                                        env_file="business_access_enabled = true\n")
+    assert len(warnings) == 1, warnings
+    assert f"envs/{env_name}/env.auto.tfvars" in warnings[0] or "env.auto.tfvars" in warnings[0]
+    assert "APPLY_FLAGS" in warnings[0]
+
+
+@pytest.mark.parametrize("target, env_name", [("release", "prod"), ("rehearse", "dev"), ("maintain", "prod")])
+def test_no_retired_flag_means_no_warning_through_nested_apply(tmp_path, target, env_name):
+    _calls_, warnings = _run_with_flags(tmp_path, target, env_name, "-var=coverage_gate_max_age=6h")
+    assert warnings == []
+
+
+def test_certify_hands_the_caller_apply_flags_to_release_for_the_warning(tmp_path):
+    # certify re-enters make for release; the release (covered above) then
+    # warns from the inherited GENIERAILS_APPLY_FLAGS.
+    env_dir = tmp_path / "prod"
+    (env_dir / "generated").mkdir(parents=True)
+    (env_dir / "env.auto.tfvars").write_text('sql_warehouse_id = ""\n')
+    seen = tmp_path / "seen"
+    stub = tmp_path / "make-stub"
+    stub.write_text(f"#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"$GENIERAILS_APPLY_FLAGS\" >> '{seen}'\nexit 0\n")
+    stub.chmod(0o755)
+    result = subprocess.run(
+        ["make", "certify", "ENV=prod", f"ENV_DIR={env_dir}", f"MAKE={stub}",
+         "APPLY_FLAGS=-var business_access_enabled=false"],
+        cwd=CLOUD_ROOT, text=True, capture_output=True, env=_env(),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert seen.read_text().splitlines() == [
+        "--no-print-directory release ENV=prod|-var business_access_enabled=false"]

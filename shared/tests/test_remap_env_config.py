@@ -30,7 +30,8 @@ def test_table_only_promotion_preserves_and_remaps_top_level_uc_tables(tmp_path,
     assert config["uc_tables"] == ["prod_catalog.genierails_e2e.customers"]
     assert config["enable_classification"] is True
     assert config["enable_auto_tagging"] is False
-    assert config["business_access_enabled"] is False
+    # Promote writes no exposure flag: access follows the coverage gate.
+    assert "business_access_enabled" not in config
     assert config["sql_warehouse_id"] == ""
 
 
@@ -233,7 +234,7 @@ def test_empty_environment_fails_closed(tmp_path, monkeypatch, capsys):
     assert not (dest / "env.auto.tfvars").exists()
 
 
-def test_repromotion_preserves_destination_settings_and_closes_gate(tmp_path, monkeypatch):
+def test_repromotion_preserves_destination_settings_and_never_closes_live_access(tmp_path, monkeypatch):
     source = tmp_path / "dev"
     dest = tmp_path / "prod"
     source.mkdir()
@@ -251,7 +252,10 @@ def test_repromotion_preserves_destination_settings_and_closes_gate(tmp_path, mo
     config = hcl2.load((dest / "env.auto.tfvars").open())
     assert config["sql_warehouse_id"] == "warehouse-prod"
     assert config["enable_auto_tagging"] is True
-    assert config["business_access_enabled"] is False
+    # Re-promoting into a released prod used to reset the flag to false, so
+    # the next apply revoked live access. The retired flag is dropped instead.
+    assert "business_access_enabled" not in config
+    assert "business_access_enabled = false" not in (dest / "env.auto.tfvars").read_text()
 
 
 def test_repromotion_keeps_destination_coverage_acknowledgements_only(tmp_path, monkeypatch):
@@ -472,7 +476,8 @@ def test_preservation_messages_and_per_space_warehouse(tmp_path, monkeypatch, ca
     output = capsys.readouterr().out
     assert "Preserved destination sql_warehouse_id" not in output
     assert "Preserved destination enable_auto_tagging" not in output
-    assert "Reset destination business_access_enabled=true to false" in output
+    assert "Reset destination business_access_enabled" not in output
+    assert "Dropped the retired business_access_enabled setting from the destination" in output
     config = hcl2.load((dest / "env.auto.tfvars").open())
     assert config["genie_spaces"][0]["sql_warehouse_id"] == "space-wh"
 

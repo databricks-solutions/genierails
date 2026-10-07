@@ -57,7 +57,8 @@ def test_template_genie_space_placeholder_is_the_only_active_footprint():
     assert cfg["sql_warehouse_id"] == ""
     assert cfg["enable_classification"] is True
     assert cfg["enable_auto_tagging"] is False
-    assert cfg["business_access_enabled"] is False
+    # The retired exposure flag is no longer needed (or set) in the template.
+    assert "business_access_enabled" not in cfg
 
 
 def test_placeholder_error_names_the_file_and_the_fix(tmp_path):

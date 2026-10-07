@@ -38,7 +38,6 @@ run "explicit_empty_acl_clears_can_run" {
     databricks_workspace_id   = "123"
     databricks_workspace_host = "https://example.invalid"
     sql_warehouse_id          = "warehouse"
-    business_access_enabled   = true
     groups = {
       group_a = {}
       group_b = {}
@@ -76,7 +75,6 @@ run "id_only_space_uses_canonical_title_for_can_run" {
     databricks_workspace_id   = "123"
     databricks_workspace_host = "https://example.invalid"
     sql_warehouse_id          = "warehouse"
-    business_access_enabled   = true
     groups                    = { pay_group = {}, hr_group = {} }
     genie_spaces              = [{ genie_space_id = "space-1", uc_tables = [] }]
     genie_space_id_to_name    = { "space-1" = "Payments" }

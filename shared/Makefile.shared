@@ -178,7 +178,17 @@ _GENIE_PLACEHOLDER_GUARD = python3 "$(SHARED_ROOT)/genie_space_placeholder.py" "
 _guard-genie-placeholder:
 	@$(_GENIE_PLACEHOLDER_GUARD)
 
+# business_access_enabled is deprecated and ignored (business access is granted
+# whenever the coverage gate allows it). One warning line per run, whether it
+# is set in env.auto.tfvars, in APPLY_FLAGS (-var), or as TF_VAR_; never fails.
+# The guard reads the caller's original APPLY_FLAGS: the outermost make sets
+# GENIERAILS_APPLY_FLAGS once and nested makes inherit it from the environment,
+# so release, rehearse and maintain clearing APPLY_FLAGS for their nested
+# apply (which still gets empty flags) doesn't hide the setting.
+GENIERAILS_APPLY_FLAGS ?= $(APPLY_FLAGS)
+export GENIERAILS_APPLY_FLAGS
 _guard-workspace-config:
+	@$(_COVERAGE_GATE) warn-retired-flag --env-file "$(ENV_DIR)/env.auto.tfvars" --label "$(_SETUP_ENV_REL)/env.auto.tfvars" || true
 	@cd "$(ENV_DIR)" && if [ -f env.auto.tfvars ]; then \
 		python3 -c 'import sys,hcl2; cfg=hcl2.load(open("env.auto.tfvars")); ok = cfg.get("manage_groups", False) is False; ok or print("Workspace env.auto.tfvars must not set manage_groups = true. Manage groups in envs/account instead."); sys.exit(0 if ok else 1)'; \
 	fi
@@ -215,6 +225,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "  4. Enable classification on the prod catalog (Databricks UI, or: make enable-classification ENV=$(ENV)),"; \
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
 		echo "  5. Run: make release ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
+		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
 		echo "  6. Steady state (scheduled): make maintain ENV=$(ENV)"; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 2 onward)"; \
@@ -238,6 +249,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
 		step=$$((step+1)); echo "  $$step. Run: make generate ENV=$(ENV)"; \
 		step=$$((step+1)); echo "  $$step. Run: make rehearse ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>"; \
+		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 0 and Phase 1)"; \
 	fi
@@ -366,7 +378,7 @@ _derive-before-exposure:
 		exit 0; \
 	fi; \
 	if [ "$(PROMOTE_AFTER)" = 1 ] && [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
-		$(MAKE) --no-print-directory ENV="$(ENV)" promote; \
+		$(_SAME_ENV_PROMOTE); \
 	fi
 
 _refresh-live-ddl: _guarded-bootstrap _guard-workspace-target
@@ -379,16 +391,22 @@ rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is
 		echo "rehearse: ENV=prod is not allowed; use make release ENV=prod" >&2; \
 		exit 1; \
 	fi; \
-	$(_DRY_RUN_GUARD); $(MAKE) _derive-before-exposure ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" && \
-		$(MAKE) coverage-gate ENV="$(ENV)" && \
+	$(_DRY_RUN_GUARD); $(MAKE) _derive-before-exposure ENV="$(ENV)" APPLY_FLAGS= && \
 		$(MAKE) validate-generated ENV="$(ENV)" && \
-		$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" _EXPOSURE_DERIVED=1 && \
+		$(MAKE) coverage-gate ENV="$(ENV)" && \
+		$(MAKE) apply ENV="$(ENV)" APPLY_FLAGS= _EXPOSURE_DERIVED=1 && \
 		$(MAKE) verify-access ENV="$(ENV)" $(if $(strip $(VERIFY_KEY_COLUMN)),VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",)
 
 # release and maintain hold a per-env lock
 # (envs/<env>/generated/.governance.lock) throughout.
 _ENV_LOCK_HELPER = python3 "$(SHARED_ROOT)/scripts/environment_lock.py"
 _RELEASE_HELPER = python3 "$(SHARED_ROOT)/scripts/release_helpers.py"
+# Same-env promote for release, apply, apply-governance and plan. Command-line
+# values beat the environment and MAKEFLAGS, so a SOURCE_ENV/DEST_ENV exported
+# in the shell (or passed to the outer make) can't turn it into a cross-env
+# promote that rewrites another env.
+_SAME_ENV_PROMOTE = $(MAKE) --no-print-directory promote ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" \
+	SOURCE_ENV="$(ENV)" SOURCE_ENV_DIR="$(ENV_DIR)" DEST_ENV= DEST_ENV_DIR= DEST_CATALOG_MAP=
 _GUARD_WORKSPACE_ENV = if [ "$(ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
 		echo "This command is workspace-driven. Use ENV=<workspace> instead of ENV=$(ENV)." >&2; \
 		exit 1; \
@@ -415,7 +433,7 @@ release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, ap
 	$(MAKE) derive-assignments ENV="$(ENV)" || exit 1; \
 	$(MAKE) validate-generated ENV="$(ENV)" || exit 1; \
 	$(MAKE) coverage-gate ENV="$(ENV)" || exit 1; \
-	$(MAKE) --no-print-directory promote ENV="$(ENV)" || exit 1; \
+	$(_SAME_ENV_PROMOTE) || exit 1; \
 	$(MAKE) audit-rulebook ENV="$(ENV)"; audit_rc=$$?; \
 	if [ $$audit_rc -ne 0 ]; then \
 		if [ $$audit_rc -eq 1 ]; then \
@@ -427,21 +445,17 @@ release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, ap
 		fi; \
 		exit $$audit_rc; \
 	fi; \
-	if ! $(MAKE) apply ENV="$(ENV)" APPLY_FLAGS="-var=business_access_enabled=true" _EXPOSURE_DERIVED=1; then \
+	if ! $(MAKE) apply ENV="$(ENV)" APPLY_FLAGS= _EXPOSURE_DERIVED=1; then \
 		$(_RELEASE_HELPER) failed "$(ENV_DIR)" --env "$(ENV)" --reason "apply failed"; \
 		exit 1; \
 	fi; \
-	if ! $(_RELEASE_HELPER) open-gate "$(ENV_DIR)" --pid $$$$; then \
-		$(_RELEASE_HELPER) failed "$(ENV_DIR)" --env "$(ENV)" --reason "business_access_enabled = true could not be persisted"; \
-		exit 1; \
-	fi; \
 	if ! $(MAKE) verify-access ENV="$(ENV)"$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \
-		$(_RELEASE_HELPER) failed "$(ENV_DIR)" --env "$(ENV)" --reason "exposure is OPEN but verify-access failed"; \
+		$(_RELEASE_HELPER) failed "$(ENV_DIR)" --env "$(ENV)" --reason "access was applied but verify-access failed"; \
 		exit 1; \
 	fi; \
 	echo ""; \
 	echo "=== Release complete ($(ENV)) ==="; \
-	echo "  Exposure gate: open (business_access_enabled = true persisted in env.auto.tfvars)"; \
+	echo "  Business access: applied (granted only through the coverage gate)"; \
 	echo "  Verification:  make verify-access ENV=$(ENV) passed"; \
 	echo "  Steady state:  make maintain ENV=$(ENV)"
 
@@ -679,7 +693,7 @@ apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access
 		python3 "$(SHARED_ROOT)/scripts/genie_adopt_preflight.py" "$(ENV_DIR)" --arm; \
 		if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" TOLERATE_REFRESH_FAILURE=1 _derive-before-exposure; fi; \
 		if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
-			$(MAKE) --no-print-directory ENV="$(ENV)" promote; \
+			$(_SAME_ENV_PROMOTE); \
 		else \
 			echo "=== Skipping promote (no $(ENV_DIR)/generated/abac.auto.tfvars) ==="; \
 		fi; \
@@ -700,7 +714,7 @@ apply-governance: _guarded-bootstrap _guard-workspace-target ## [Governance team
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 	if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" TOLERATE_REFRESH_FAILURE=1 _derive-before-exposure; fi; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
-		$(MAKE) --no-print-directory ENV="$(ENV)" promote; \
+		$(_SAME_ENV_PROMOTE); \
 	else \
 		echo "=== Skipping promote (no $(ENV_DIR)/generated/abac.auto.tfvars) ==="; \
 	fi; \

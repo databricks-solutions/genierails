@@ -6635,8 +6635,8 @@ def scenario_champion(
         )
         _assert_output(result, "RESULT: ALL EFFECTIVE", "dev rehearse verify-access")
         _assert_output(result, "[PASS] column-mask", "dev masking proven by effect")
-        if _load_tfvars(dev_env_file).get("business_access_enabled") is not False:
-            raise AssertionError("rehearse must not persist business_access_enabled in dev")
+        if "business_access_enabled" in _load_tfvars(dev_env_file):
+            raise AssertionError("rehearse must not write the retired business_access_enabled in dev")
         _set_tfvar(dev_env_file, "verify_key_column", f'"{CHAMPION_KEY_COLUMN}"')
 
         # ── 6. Promote ───────────────────────────────────────────────────────
@@ -6652,7 +6652,7 @@ def scenario_champion(
             "remapped catalog": set(prod_cfg.get("uc_tables") or []) == set(prod_tables),
             "no dev catalog": DEV_FIN_CAT not in prod_env_file.read_text(),
             "verify_key_column": prod_cfg.get("verify_key_column") == CHAMPION_KEY_COLUMN,
-            "business_access_enabled = false": prod_cfg.get("business_access_enabled") is False,
+            "no business_access_enabled": "business_access_enabled" not in prod_cfg,
         }
         bad = [name for name, ok in checks.items() if not ok]
         if bad:
@@ -6684,9 +6684,8 @@ def scenario_champion(
         _assert_output(result, "=== Release complete (prod) ===", "release completed")
         _assert_output(result, "RESULT: ALL EFFECTIVE", "prod verify-access")
         _assert_output(result, "[PASS] column-mask", "prod masked for unprivileged, raw for authorized")
-        if _load_tfvars(prod_env_file).get("business_access_enabled") is not True:
-            raise AssertionError("release did not persist business_access_enabled = true")
-        print(f"  {_green('PASS')}  business_access_enabled = true persisted in prod")
+        if "business_access_enabled" in _load_tfvars(prod_env_file):
+            raise AssertionError("release wrote the retired business_access_enabled")
         prod_ids = sorted(prod_dir.glob(".genie_space_id*"))
         if not prod_ids:
             raise AssertionError("release created no prod Genie agent (.genie_space_id_* missing)")
@@ -6701,9 +6700,8 @@ def scenario_champion(
         # ── 8. Maintain ──────────────────────────────────────────────────────
         _champion_phase(8, "make maintain ENV=prod")
         _champion_make("maintain", f"ENV={prod_env}")
-        if _load_tfvars(prod_env_file).get("business_access_enabled") is not True:
-            raise AssertionError("maintain changed business_access_enabled")
-        print(f"  {_green('PASS')}  business_access_enabled stays true after maintain")
+        if "business_access_enabled" in _load_tfvars(prod_env_file):
+            raise AssertionError("maintain wrote the retired business_access_enabled")
         if lock.exists():
             raise AssertionError(f"maintain left {lock} behind")
 

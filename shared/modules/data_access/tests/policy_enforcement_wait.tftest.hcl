@@ -54,7 +54,6 @@ variables {
     function_catalog = "cat"
     function_schema  = "sch"
   }]
-  business_access_enabled = true
 }
 
 run "setup_inputs" {
@@ -76,9 +75,9 @@ run "gate_inputs" {
     databricks.workspace = databricks.workspace
     time                 = time
   }
-  variables {
-    business_access_enabled = false
-  }
+  # No gate result yet: business SELECT is refused, and the gate inputs are
+  # still readable.
+  expect_failures = [databricks_grant.table_access]
 }
 
 run "write_passing_gate" {
