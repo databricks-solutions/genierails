@@ -54,7 +54,7 @@ variable "genie_space_missing_grants" {
 
 variable "genie_space_can_run_widening" {
   type        = map(list(string))
-  description = "Per Genie agent key: CAN_RUN groups the desired ACL adds beyond what the last apply left in place. Empty (keep, shrink or clear) needs no gate; a missing key counts as widening."
+  description = "Per Genie agent key: CAN_RUN groups the desired ACL adds beyond what the last apply left in place. Empty (keep, shrink or clear) needs no coverage check; a missing key counts as widening."
 }
 
 variable "sql_warehouse_id" {

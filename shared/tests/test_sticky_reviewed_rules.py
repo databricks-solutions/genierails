@@ -664,7 +664,7 @@ def _generated(env_dir):
 
 def test_end_to_end_rerun_keeps_dropped_rule_through_validation_and_gate(env_dir, monkeypatch, capfd):
     _generate(env_dir, monkeypatch, {EMAIL: EMAIL, LIMIT: LIMIT})
-    assert "Coverage gate: 2" in _coverage_gate(env_dir)
+    assert "Coverage check: 2" in _coverage_gate(env_dir)
     first = _generated(env_dir)
     capfd.readouterr()
 
@@ -673,7 +673,7 @@ def test_end_to_end_rerun_keeps_dropped_rule_through_validation_and_gate(env_dir
     assert f"kept reviewed rule {LIMIT} → round_amount (model proposed removing it); {HINT}" in out
     assert "RESULT: PASS" in out
     assert _generated(env_dir) == first
-    assert "Coverage gate: 2" in _coverage_gate(env_dir)
+    assert "Coverage check: 2" in _coverage_gate(env_dir)
 
     # The table is removed from the footprint: its reviewed rules are stale.
     _generate(env_dir, monkeypatch, {EMAIL: EMAIL}, ddl=E2E_DDL_WITHOUT_PAYMENTS)
@@ -681,7 +681,7 @@ def test_end_to_end_rerun_keeps_dropped_rule_through_validation_and_gate(env_dir
     assert f"dropped stale reviewed rule {LIMIT} → round_amount (column no longer exists)" in out
     assert "dropped stale reviewed rule policy gr_mask_dev_fin_round_amount" in out
     assert _generated(env_dir) == ({EMAIL: "email_partial"}, ["gr_mask_dev_fin_email_partial"])
-    assert "Coverage gate: 1" in _coverage_gate(env_dir)
+    assert "Coverage check: 1" in _coverage_gate(env_dir)
 
 
 def test_end_to_end_space_rerun_keeps_reviewed_rule(env_dir, monkeypatch, capfd):

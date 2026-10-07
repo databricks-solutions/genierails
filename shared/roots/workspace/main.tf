@@ -139,7 +139,7 @@ locals {
 
   # ── Cross-layer exposure check for Genie CAN_RUN ──────────────────────────
   # CAN_RUN is granted only after the data_access layer was applied with a
-  # passing coverage gate and business grants in place, and only while the gate
+  # passing coverage check and business grants in place, and only while the check
   # result on disk is still for the inputs that apply used (otherwise the
   # governance config moved on and hasn't been applied) and rests on a live
   # refresh no older than the max age that apply recorded. The result is
@@ -153,14 +153,14 @@ locals {
   # (unknown under terraform console); can-run-check applies those itself.
   genie_exposure_static_blocker = (
     local._data_access_state == null ? "the data_access layer has no readable state (${local.data_access_dir}/terraform.tfstate)" :
-    local._applied_coverage_gate == null ? "the data_access state predates the coverage gate; re-apply the data_access layer" :
+    local._applied_coverage_gate == null ? "the data_access state predates the coverage check; re-apply the data_access layer" :
     # Legacy state from before business_access_enabled was retired: an apply
     # made with it false granted nothing. Current state no longer records it.
     try(local._applied_coverage_gate.business_access_enabled, true) != true ? "the data_access layer was last applied with business access closed (before business_access_enabled was retired); re-apply the data_access layer" :
-    try(local._applied_coverage_gate.status, "") != "pass" ? "the data_access layer was last applied without a passing coverage gate" :
+    try(local._applied_coverage_gate.status, "") != "pass" ? "the data_access layer was last applied without a passing coverage check" :
     try(local._applied_coverage_gate.table_grant_count, 0) < 1 ? "the data_access layer has no business table grants in place" :
-    try(local._applied_coverage_gate.max_age, null) == null ? "the data_access state predates the coverage-gate max age; re-apply the data_access layer" :
-    module.coverage_gate_check.static_status == "stale" ? "the data_access config changed after its last gated apply" :
+    try(local._applied_coverage_gate.max_age, null) == null ? "the data_access state predates the coverage check max age; re-apply the data_access layer" :
+    module.coverage_gate_check.static_status == "stale" ? "the data_access config changed after its last checked apply" :
     module.coverage_gate_check.static_problem
   )
   genie_exposure_blocker = local.genie_exposure_static_blocker != "" ? local.genie_exposure_static_blocker : module.coverage_gate_check.problem
@@ -491,7 +491,7 @@ variable "groups" {
 variable "business_access_enabled" {
   type        = bool
   default     = null
-  description = "DEPRECATED and ignored; removed in the next release. Business SELECT and Genie CAN_RUN are granted whenever the coverage gate allows it, so true and false both do nothing (false does NOT revoke access: remove the groups or acl_groups entries instead). Still declared so existing env.auto.tfvars files and -var flags keep working; make warns while it is set."
+  description = "DEPRECATED and ignored; removed in the next release. The old access switch is retired: Business SELECT and Genie CAN_RUN are granted whenever the coverage check passes, so true and false both do nothing (false does NOT revoke access: remove the groups or acl_groups entries instead). Still declared so existing env.auto.tfvars files and -var flags keep working; make warns while it is set."
 }
 
 # Shared env.auto.tfvars is consumed by both workspace and data-access roots.
@@ -509,7 +509,7 @@ variable "verify_key_column" {
 }
 
 # Shared env.auto.tfvars is consumed by both workspace and data-access roots.
-# The coverage gate reads acknowledgements only in data_access; declare it
+# The coverage check reads acknowledgements only in data_access; declare it
 # here to avoid an undeclared-variable warning during a full apply.
 variable "coverage_acknowledged_columns" {
   type    = list(string)
@@ -647,12 +647,12 @@ output "genie_space_missing_grants" {
 }
 
 output "genie_space_can_run_widening" {
-  description = "Per Genie agent: CAN_RUN groups its ACL adds beyond what the last apply left in place. Only these need the coverage gate and the agent's grants."
+  description = "Per Genie agent: CAN_RUN groups its ACL adds beyond what the last apply left in place. Only these need the coverage check and the agent's grants."
   value       = local.genie_space_can_run_widening
 }
 
 output "genie_exposure_blocker" {
-  description = "Why Genie CAN_RUN grants are blocked (data_access layer not applied with a current passing coverage gate), or \"\" when they may be granted."
+  description = "Why Genie CAN_RUN grants are blocked (data_access layer not applied with a current passing coverage check), or \"\" when they may be granted."
   value       = local.genie_exposure_blocker
 }
 

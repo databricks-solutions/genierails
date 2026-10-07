@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage gate for the data_access layer, enforced by Terraform.
+"""Coverage check for the data_access layer, enforced by Terraform.
 
 `run` gates the split data_access config exactly as Terraform will apply it:
 
@@ -135,7 +135,7 @@ def needs_derive(env_dir: Path, apply_flags: str) -> tuple[str, str | None]:
         return "ddl", "enable_classification is false; tags come from make generate, so only the DDL is re-read"
     if not generated:
         return "ddl", "no generated/abac.auto.tfvars to derive tags into, so only the DDL is re-read"
-    return "full", "business access is gated on live tags in a native-classification env"
+    return "full", "business access requires a coverage check of live tags in a native-classification env"
 
 
 def file_sha256(path: Path) -> str:
@@ -270,13 +270,13 @@ def _failed(gate_path: Path, record: dict, inputs: dict, env_name: str, reason: 
     record.update(status="fail", reason=reason)
     write_result(gate_path, record)
     if inputs.get("needs_gate") is False:
-        print(f"WARNING: coverage gate FAILED for data_access:{env_name}: {reason}\n"
+        print(f"WARNING: coverage check FAILED for data_access:{env_name}: {reason}\n"
               "  Proceeding only because this change adds no SELECT grant and changes no "
               "protection (tags, policies, masks, DDL) of the grants already in place; it "
-              "can only keep or revoke access. Fix the gate before opening anything.",
+              "can only keep or revoke access. Fix the check before opening anything.",
               file=sys.stderr)
         return 0
-    print(f"coverage gate FAILED for data_access:{env_name}: {reason}\n"
+    print(f"coverage check FAILED for data_access:{env_name}: {reason}\n"
           "  Business SELECT stays closed. Fix the errors above, then re-run the same make command.",
           file=sys.stderr)
     return 1
@@ -348,7 +348,7 @@ def can_run_check(env_dir: Path, env_name: str, runner: Path, apply_flags: str) 
         reason = blocker or "the data_access state lacks the SELECT grants those groups need"
         details = "; ".join(f"{key}: +{', '.join(added)}" for key, added in sorted(refused.items()))
         print(f"Genie CAN_RUN blocked for workspace:{env_name}: these ACLs add groups ({details}) "
-              f"while {reason}.\n  Removing or keeping CAN_RUN would apply; fix the coverage gate "
+              f"while {reason}.\n  Removing or keeping CAN_RUN would apply; fix the coverage check "
               "(make apply / make apply-governance) before opening it.", file=sys.stderr)
         return 1
     if blocker:
@@ -362,12 +362,12 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
     tfvars = layer_dir / "abac.auto.tfvars"
     gate_path = layer_dir / GATE_FILENAME
     if not tfvars.is_file():
-        print(f"=== Skipping coverage gate (data_access:{env_name}): no {tfvars} ===")
+        print(f"=== Skipping coverage check (data_access:{env_name}): no {tfvars} ===")
         return 0
     flags = console_flags(apply_flags)
     inputs = query_inputs(runner, env_name, layer_dir, flags)
 
-    print(f"=== Coverage Gate (data_access:{env_name}) ===")
+    print(f"=== Coverage Check (data_access:{env_name}) ===")
     granted = granted_tables(layer_dir)
     grant_tables = sorted({t.lower() for t in inputs["grant_tables"]})
     first = [t for t in grant_tables if t not in granted]
@@ -397,7 +397,7 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
             str(layer_dir / "masking_functions.sql"),
             "--ddl", str(env_dir / "ddl" / "_fetched.sql"),
             "--exposure-context", str(context),
-            "--summary-label", f"coverage-gate (data_access:{env_name})",
+            "--summary-label", f"coverage check (data_access:{env_name})",
         ]
         if verbose:
             command.append("--verbose")
@@ -408,14 +408,14 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
 
     after = query_inputs(runner, env_name, layer_dir, flags)
     if after["fingerprint"] != inputs["fingerprint"]:
-        record.update(status="fail", reason="inputs changed while the gate ran")
+        record.update(status="fail", reason="inputs changed while the coverage check ran")
         write_result(gate_path, record)
-        print("coverage gate: inputs changed while the gate ran; re-run the same make command.",
+        print("coverage check: inputs changed while the check ran; re-run the same make command.",
               file=sys.stderr)
         return 1
     if validation.returncode != 0:
         return _failed(gate_path, record, inputs, env_name,
-                       "validate_abac.py --coverage-gate failed (see the report above)")
+                       "coverage check failed (validate_abac.py --coverage-gate; see the report above)")
     refreshed_at, detail = live_refresh(env_dir, tfvars)
     if refreshed_at is None:
         return _failed(gate_path, record, inputs, env_name, detail)
@@ -446,7 +446,7 @@ def invalidate(env_dir: Path, reason: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", help="gate the data_access layer and record the result")
+    run = sub.add_parser("run", help="run the data_access coverage check and record the result")
     run.add_argument("--env-dir", required=True, type=Path)
     run.add_argument("--env-name", required=True)
     run.add_argument("--runner", type=Path, default=RUNNER)
@@ -474,13 +474,13 @@ def main(argv: list[str] | None = None) -> int:
                 where = ", ".join(args.label or source if source == str(args.env_file) else source
                                   for source in sources)
                 print(f"WARNING: {RETIRED_FLAG} ({where}) is deprecated and ignored (business access follows "
-                      "the coverage gate; setting it false does not revoke access). Remove it; to withdraw "
+                      "the coverage check; setting it false does not revoke access). Remove it; to withdraw "
                       "access, remove the groups or acl_groups entries.", file=sys.stderr)
             return 0
         if args.command == "can-run-check":
             return can_run_check(args.env_dir.resolve(), args.env_name, args.runner, args.apply_flags)
         if args.command == "invalidate":
-            invalidate(args.env_dir, "a live refresh of tags/DDL started and has not been gated since")
+            invalidate(args.env_dir, "a live refresh of tags/DDL started and has not been checked since")
             return 0
         if args.command == "needs-derive":
             mode, reason = needs_derive(args.env_dir, args.apply_flags)
@@ -491,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_gate(args.env_dir.resolve(), args.env_name, args.runner,
                         args.apply_flags, args.verbose)
     except GateError as exc:
-        print(f"coverage gate: ERROR: {exc}", file=sys.stderr)
+        print(f"coverage check: ERROR: {exc}", file=sys.stderr)
         return 2
 
 

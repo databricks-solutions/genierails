@@ -130,7 +130,7 @@ locals {
     local._uc_catalogs,
   ))
 
-  # Coverage gate. scripts/coverage_gate.py reads this fingerprint (terraform
+  # Coverage check. scripts/coverage_gate.py reads this fingerprint (terraform
   # console), runs the gate, and records the result in var.coverage_gate_file.
   # Business SELECT is planned only while that file records a pass for exactly
   # these inputs, so editing the config, the masks, the DDL or the grants after
@@ -313,7 +313,7 @@ resource "databricks_grant" "table_access" {
   lifecycle {
     precondition {
       condition     = local.coverage_gate_status == "pass" || !contains(local.table_grants_needing_gate, each.key)
-      error_message = "Coverage gate ${local.coverage_gate_status}: ${local.coverage_gate_problem}. Business SELECT grants are blocked. Terraform can't re-read Unity Catalog, so run this layer through make (make apply, make plan, make release or make maintain ENV=${basename(dirname(dirname(var.coverage_gate_file)))}), which refreshes live tags and DDL, then runs the coverage gate."
+      error_message = "Coverage check ${local.coverage_gate_status}: ${local.coverage_gate_problem}. Business SELECT grants are blocked. Terraform can't re-read Unity Catalog, so run this layer through make (make apply, make plan, make release or make maintain ENV=${basename(dirname(dirname(var.coverage_gate_file)))}), which refreshes live tags and DDL, then runs the coverage check."
     }
   }
 }

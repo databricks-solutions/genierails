@@ -257,7 +257,7 @@ def test_inputs_changing_during_the_gate_fail_it(env_dir, stub_runner, stub_vali
     assert cg.run_gate(env_dir, "prod", runner, "", False) == 1
     gate = json.loads(_gate_file(env_dir).read_text())
     assert gate["status"] == "fail"
-    assert gate["reason"] == "inputs changed while the gate ran"
+    assert gate["reason"] == "inputs changed while the coverage check ran"
 
 
 def test_pass_requires_a_live_refresh(env_dir, stub_runner, stub_validator):
@@ -453,7 +453,7 @@ def test_raw_layer_plan_cannot_grant_without_a_current_pass(live_like_env):
     env = live_like_env
     missing = _raw_plan(env)
     assert missing.returncode != 0
-    assert "Coverage gate missing" in missing.stderr
+    assert "Coverage check missing" in missing.stderr
     assert "Business SELECT grants are blocked" in missing.stderr
 
     gated = _gate(env)
@@ -468,7 +468,7 @@ def test_raw_layer_plan_cannot_grant_without_a_current_pass(live_like_env):
     # -var overrides change what Terraform would apply, so the pass is stale.
     override = _raw_plan(env, "-var=tag_assignments=[]")
     assert override.returncode != 0
-    assert "Coverage gate stale" in override.stderr
+    assert "Coverage check stale" in override.stderr
 
     # So does editing the config after the gate.
     abac = env / "data_access" / "abac.auto.tfvars"
@@ -477,7 +477,7 @@ def test_raw_layer_plan_cannot_grant_without_a_current_pass(live_like_env):
     abac.write_text(DATA_ACCESS_ABAC.replace('to_principals    = ["analysts"]', "to_principals    = []"))
     edited = _raw_plan(env)
     assert edited.returncode != 0
-    assert "Coverage gate stale" in edited.stderr
+    assert "Coverage check stale" in edited.stderr
 
 
 @needs_terraform
@@ -492,13 +492,13 @@ def test_first_exposure_failure_blocks_the_plan_until_acknowledged(live_like_env
     assert json.loads(_gate_file(env).read_text())["status"] == "fail"
     blocked = _raw_plan(env)
     assert blocked.returncode != 0
-    assert "Coverage gate failed" in blocked.stderr
+    assert "Coverage check failed" in blocked.stderr
 
     with (env / "env.auto.tfvars").open("a") as handle:
         handle.write(f'coverage_acknowledged_columns = ["{TABLE}.ssn"]\n')
     # The acknowledgement is itself a gate input: the failed result is now
     # stale, and the re-run passes.
-    assert "Coverage gate stale" in _raw_plan(env).stderr
+    assert "Coverage check stale" in _raw_plan(env).stderr
     acknowledged = _gate(env)
     assert acknowledged.returncode == 0, acknowledged.stdout + acknowledged.stderr
     assert _raw_plan(env).returncode == 0
@@ -512,7 +512,7 @@ def test_already_granted_table_keeps_the_warning(live_like_env):
     _state(env, [TABLE])
     granted = _gate(env, "--verbose")
     assert granted.returncode == 0, granted.stdout + granted.stderr
-    assert "COVERAGE GATE (non-blocking)" in granted.stdout
+    assert "COVERAGE CHECK (non-blocking)" in granted.stdout
     assert f"{TABLE}.ssn" in granted.stdout
     assert json.loads(_gate_file(env).read_text())["first_exposure_tables"] == []
 
@@ -548,7 +548,7 @@ def test_make_never_applies_data_access_when_the_gate_fails(env_dir, stub_runner
     runner, log = stub_runner(_inputs())
     result = _apply_layer(env_dir, runner, "-var=business_access_enabled=true")
     assert result.returncode != 0
-    assert "coverage gate FAILED" in result.stderr
+    assert "coverage check FAILED" in result.stderr
     calls = log.read_text().splitlines()
     assert calls and all(" console " in f" {call.split('|', 1)[1]} " for call in calls), calls
     assert json.loads(_gate_file(env_dir).read_text())["status"] == "fail"
@@ -675,7 +675,7 @@ def test_make_plan_refreshes_live_metadata_and_blocks_a_new_untagged_column(live
     # ... and raw Terraform can't fall back on the earlier pass.
     raw = _raw_plan(env)
     assert raw.returncode != 0
-    assert "Coverage gate failed" in raw.stderr
+    assert "Coverage check failed" in raw.stderr
 
 
 @needs_terraform
@@ -694,7 +694,7 @@ def test_failed_live_refresh_leaves_no_usable_pass(live_uc, monkeypatch):
     assert result["status"] == "fail" and "refreshed_at" not in result
     raw = _raw_plan(env)
     assert raw.returncode != 0
-    assert "Coverage gate failed" in raw.stderr
+    assert "Coverage check failed" in raw.stderr
 
 
 @needs_terraform
@@ -924,7 +924,7 @@ def test_apply_genie_keeps_or_revokes_can_run_when_uc_is_down(genie_env, acl):
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert "live refresh of tags/DDL failed" in output
-    assert "coverage gate did not pass" in output
+    assert "coverage check did not pass" in output
     assert "applying only ACLs that keep, shrink or clear" in output
     assert applied, output
     assert json.loads(_gate_file(env).read_text())["status"] == "fail"
@@ -969,7 +969,7 @@ def test_data_access_apply_keeps_grants_when_uc_is_down_but_never_adds_one(live_
         abac = env / "data_access" / "abac.auto.tfvars"
         abac.write_text(abac.read_text().replace("groups = { analysts = {} }", "groups = { analysts = {}, auditors = {} }"))
     # UC unreachable: the refresh started (invalidating the gate) and failed.
-    cg.invalidate(env, "a live refresh of tags/DDL started and has not been gated since")
+    cg.invalidate(env, "a live refresh of tags/DDL started and has not been checked since")
     log = tmp_path / "applies.log"
     runner = tmp_path / "runner"
     runner.write_text(_APPLY_STUB.format(real=RUNNER, log=log))

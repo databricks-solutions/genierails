@@ -354,7 +354,7 @@ def _check_unclassified_sensitive_columns(
         unreadable = sorted(first - ddl_tables)
         if unreadable:
             result.error(
-                "COVERAGE GATE — first exposure blocked: no fetched DDL "
+                "COVERAGE CHECK — first exposure blocked: no fetched DDL "
                 "(ddl/_fetched.sql) for these tables, so their columns can't be "
                 "checked before SELECT is granted:\n    - " + "\n    - ".join(unreadable)
                 + "\n  derive-assignments refreshes ddl/_fetched.sql from Unity Catalog; "
@@ -382,13 +382,13 @@ def _check_unclassified_sensitive_columns(
             gaps.append(label)
     if reviewed:
         result.ok(
-            f"Coverage gate: {len(reviewed)} acknowledged column(s) not treated as "
+            f"Coverage check: {len(reviewed)} acknowledged column(s) not treated as "
             f"sensitive (coverage_acknowledged_columns): {', '.join(reviewed)}"
         )
     if blocked:
         names = ", ".join(json.dumps(column) for column, _ in blocked)
         result.error(
-            "COVERAGE GATE — first exposure blocked: these tables are about to be "
+            "COVERAGE CHECK — first exposure blocked: these tables are about to be "
             "granted SELECT for the first time, and these sensitive-looking columns "
             "have NO class.*/sensitivity tag and NO gr_treatment, so they would be "
             "readable unmasked:\n    - " + "\n    - ".join(label for _, label in blocked)
@@ -405,7 +405,7 @@ def _check_unclassified_sensitive_columns(
         )
     if gaps:
         result.warn(
-            "COVERAGE GATE (non-blocking) — sensitive-looking columns with NO "
+            "COVERAGE CHECK (non-blocking) — sensitive-looking columns with NO "
             "sensitivity/class.* tag and NO gr_treatment; these are NOT masked "
             "(fail-open):\n    - " + "\n    - ".join(gaps)
         )
@@ -514,18 +514,18 @@ def validate_coverage_gate(
     ]
     for title, items in groups:
         if items:
-            result.error(f"COVERAGE GATE — {title}:\n    - " + "\n    - ".join(items))
+            result.error(f"COVERAGE CHECK — {title}:\n    - " + "\n    - ".join(items))
     has_column_mask_policy = any(
         policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
         for policy in policies
     )
     if has_column_mask_policy and not protected_columns:
         result.error(
-            "COVERAGE GATE — zero classified/treatment columns were supplied; "
+            "COVERAGE CHECK — zero classified/treatment columns were supplied; "
             "refusing a vacuous pass (populate assignments from classification before retrying)"
         )
     elif not any(items for _, items in groups):
-        result.ok(f"Coverage gate: {len(protected_columns)} classified/treatment column(s) fully protected")
+        result.ok(f"Coverage check: {len(protected_columns)} classified/treatment column(s) fully protected")
 
 
 def _load_country_categories(
@@ -1343,19 +1343,19 @@ def main():
     validate_acl_groups(merged_cfg, group_names, result)
     if args.coverage_gate:
         if sql_path is None:
-            result.error("COVERAGE GATE — masking_functions.sql is required")
+            result.error("COVERAGE CHECK — masking_functions.sql is required")
         ddl_path = Path(args.ddl).resolve() if args.ddl else find_fetched_ddl(tfvars_path)
         ddl_columns = None
         if ddl_path and ddl_path.exists():
             ddl_columns = parse_ddl_columns(ddl_path.read_text())
         elif args.ddl:
-            result.warn(f"COVERAGE GATE — DDL file {ddl_path} not found; untagged-column check skipped")
+            result.warn(f"COVERAGE CHECK — DDL file {ddl_path} not found; untagged-column check skipped")
         exposure = None
         if args.exposure_context:
             try:
                 exposure = load_exposure_context(Path(args.exposure_context))
             except (OSError, ValueError) as exc:
-                result.error(f"COVERAGE GATE — unreadable exposure context {args.exposure_context}: {exc}")
+                result.error(f"COVERAGE CHECK — unreadable exposure context {args.exposure_context}: {exc}")
         validate_coverage_gate(
             merged_cfg, sql_functions, tfvars_path.read_text(), result,
             ddl_columns=ddl_columns, exposure=exposure,

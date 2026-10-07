@@ -81,7 +81,7 @@ def _assert_promoted_masks_cover(assignments: list[dict], promoted: dict, tag_ke
 
 
 def refresh_fetched_ddl(table_refs: list[str], runtime: dict, footprint: list[dict], ddl_out: Path) -> None:
-    """Write the footprint's live DDL, as make generate does, for the coverage gate.
+    """Write the footprint's live DDL, as make generate does, for the coverage check.
 
     Promoted envs never ran generate, so this is the only DDL the first-exposure
     check has there. Any read failure raises: the gate must not judge stale DDL.
@@ -137,7 +137,7 @@ def derive_assignments(
 ) -> int:
     """Atomically replace only the promoted config's tag_assignments section.
 
-    With ``ddl_out``, also refresh the fetched DDL the coverage gate reads.
+    With ``ddl_out``, also refresh the fetched DDL the coverage check reads.
     """
     if not config_path.is_file():
         raise RuntimeError(
@@ -242,9 +242,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--auth-file", default="auth.auto.tfvars")
     parser.add_argument("--env-file", default="env.auto.tfvars")
     parser.add_argument("--write-ddl", type=Path, metavar="PATH",
-                        help="also write the footprint's live DDL here (ddl/_fetched.sql) for the coverage gate")
+                        help="also write the footprint's live DDL here (ddl/_fetched.sql) for the coverage check")
     parser.add_argument("--refresh-record", type=Path, metavar="PATH",
-                        help="after a successful live refresh, record it here for the coverage gate "
+                        help="after a successful live refresh, record it here for the coverage check "
                              "(removed first, so a failed refresh leaves none)")
     parser.add_argument("--ddl-only", action="store_true",
                         help="refresh only the live DDL (envs without native classification); "

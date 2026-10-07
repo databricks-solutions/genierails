@@ -23,7 +23,7 @@ def main() -> int:
         return 0
     env_file = args.env_dir / "env.auto.tfvars"
     print(f"release: {args.reason}.\n  Business access (table SELECT / Genie CAN_RUN) for {args.env} may be PARTLY APPLIED;\n"
-          f"  Terraform granted only what passed the coverage gate. To withdraw access, remove the groups\n"
+          f"  Terraform granted only what passed the coverage check. To withdraw access, remove the groups\n"
           f"  (or set acl_groups = []) in {env_file}, then run: make apply ENV={args.env}\n"
           f"  Then fix the cause and re-run make release ENV={args.env}.", file=sys.stderr)
     return 0

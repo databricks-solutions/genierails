@@ -1,5 +1,5 @@
 # Genie CAN_RUN opens only after the data_access layer was applied with a
-# passing coverage gate and business grants in place, while the gate result on
+# passing coverage check and business grants in place, while the gate result on
 # disk is still the one that apply used. The root computes why exposure is
 # blocked (genie_exposure_blocker) from the data_access state and gate file;
 # modules/workspace/tests checks that the module then refuses every non-empty
@@ -70,7 +70,7 @@ run "state_predating_the_gate" {
 run "pre_gate_state_blocks" {
   command = plan
   assert {
-    condition     = strcontains(output.genie_exposure_blocker, "predates the coverage gate")
+    condition     = strcontains(output.genie_exposure_blocker, "predates the coverage check")
     error_message = "a data_access state without the gate output must block CAN_RUN"
   }
 }
@@ -112,7 +112,7 @@ run "ungated_data_access" {
 run "ungated_apply_blocks" {
   command = plan
   assert {
-    condition     = strcontains(output.genie_exposure_blocker, "without a passing coverage gate")
+    condition     = strcontains(output.genie_exposure_blocker, "without a passing coverage check")
     error_message = "an apply without a passing gate must block CAN_RUN"
   }
 }
@@ -132,7 +132,7 @@ run "gate_result_missing" {
 run "missing_gate_result_blocks" {
   command = plan
   assert {
-    condition     = strcontains(output.genie_exposure_blocker, "no coverage-gate result exists")
+    condition     = strcontains(output.genie_exposure_blocker, "no coverage check result exists")
     error_message = "a missing gate result must block CAN_RUN"
   }
 }
@@ -172,7 +172,7 @@ run "config_moved_on" {
 run "unapplied_config_blocks" {
   command = plan
   assert {
-    condition     = strcontains(output.genie_exposure_blocker, "changed after its last gated apply")
+    condition     = strcontains(output.genie_exposure_blocker, "changed after its last checked apply")
     error_message = "a gate for config data_access hasn't applied must block CAN_RUN"
   }
 }
@@ -258,7 +258,7 @@ run "zero_grants_block_can_run_but_not_an_empty_acl" {
   command = plan
   assert {
     condition     = strcontains(output.genie_exposure_blocker, "no business table grants")
-    error_message = "a gated apply that left zero table grants must block CAN_RUN"
+    error_message = "a checked apply that left zero table grants must block CAN_RUN"
   }
   assert {
     condition     = output.genie_space_acls_groups["sales"] == ""
@@ -436,7 +436,7 @@ run "state_predating_the_max_age" {
 run "state_without_a_recorded_max_age_blocks_can_run" {
   command = plan
   assert {
-    condition     = strcontains(output.genie_exposure_blocker, "predates the coverage-gate max age")
+    condition     = strcontains(output.genie_exposure_blocker, "predates the coverage check max age")
     error_message = "a data_access state without a recorded max age must block CAN_RUN"
   }
   assert {

@@ -36,7 +36,7 @@ output "legacy_unattributed_discovered_tables" {
 }
 
 output "coverage_gate_inputs" {
-  description = "What scripts/coverage_gate.py gates: the input fingerprint, the tables it would grant, and the acknowledged columns. Computed from configuration only, so terraform console can read it before any apply."
+  description = "What scripts/coverage_gate.py checks: the input fingerprint, the tables it would grant, and the acknowledged columns. Computed from configuration only, so terraform console can read it before any apply."
   value = {
     fingerprint          = local.coverage_gate_fingerprint
     grant_tables         = local.coverage_gate_grant_tables
@@ -51,7 +51,7 @@ output "coverage_gate_inputs" {
 }
 
 output "coverage_gate" {
-  description = "Coverage-gate result this layer was applied with. The workspace layer reads it from state before it grants Genie CAN_RUN. It references the table grants, so a failed grant leaves the previous value in state."
+  description = "Coverage check result this layer was applied with. The workspace layer reads it from state before it grants Genie CAN_RUN. It references the table grants, so a failed grant leaves the previous value in state."
   value = {
     fingerprint            = local.coverage_gate_fingerprint
     status                 = local.coverage_gate_status

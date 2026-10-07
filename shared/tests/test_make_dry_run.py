@@ -233,7 +233,7 @@ def test_plan_real_target_runs_configured_workspace_layers(tmp_path):
     ]
     # No flag makes the gate "not required" any more: it always runs.
     assert "not required" not in result.stdout
-    assert "=== Coverage Gate (data_access:dev) ===" in result.stdout
+    assert "=== Coverage Check (data_access:dev) ===" in result.stdout
     assert "Proceeding only because this change adds no SELECT grant" in result.stderr
 
 

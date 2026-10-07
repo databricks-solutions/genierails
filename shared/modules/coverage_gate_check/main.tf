@@ -12,7 +12,7 @@
 
 variable "gate_file" {
   type        = string
-  description = "Path to the coverage-gate result."
+  description = "Path to the coverage check result."
 }
 
 variable "expected_fingerprint" {
@@ -65,11 +65,11 @@ locals {
   )
 
   problems = {
-    missing         = "no coverage-gate result exists (${var.gate_file})"
-    unreadable      = "the coverage-gate result is not valid JSON (${var.gate_file})"
+    missing         = "no coverage check result exists (${var.gate_file})"
+    unreadable      = "the coverage check result is not valid JSON (${var.gate_file})"
     invalid_max_age = "coverage_gate_max_age ${jsonencode(var.max_age)} is not a positive duration of at most ${local.max_age_ceiling}"
-    stale           = "the inputs changed after the coverage gate ran (config, tags, masks, DDL, grants, coverage_gate_max_age or -var overrides)"
-    failed          = "the last coverage gate FAILED (see its report)"
+    stale           = "the inputs changed after the coverage check ran (config, tags, masks, DDL, grants, coverage_gate_max_age or -var overrides)"
+    failed          = "the last coverage check FAILED (see its report)"
     unrefreshed     = "the passing result records no live refresh of tags and DDL from Unity Catalog"
     expired         = "the live refresh of tags and DDL behind the pass is older than coverage_gate_max_age (${var.max_age})"
     pass            = ""

@@ -66,18 +66,18 @@ variable "classification_uc_tables" {
 
 variable "coverage_gate_file" {
   type        = string
-  description = "Path to the coverage-gate result scripts/coverage_gate.py writes for this layer. Business SELECT grants are planned only while it records a pass for the current inputs."
+  description = "Path to the coverage check result scripts/coverage_gate.py writes for this layer. Business SELECT grants are planned only while it records a pass for the current inputs."
 }
 
 variable "coverage_ddl_file" {
   type        = string
-  description = "Path to the fetched DDL the coverage gate reads; its content is part of the gate fingerprint."
+  description = "Path to the fetched DDL the coverage check reads; its content is part of the gate fingerprint."
 }
 
 variable "coverage_gate_max_age" {
   type        = string
   default     = "6h"
-  description = "Oldest live refresh (derive-assignments re-reading class.* tags and DDL from Unity Catalog) a passing coverage gate may rest on, as a Terraform duration of at most 24h. make refreshes right before every gated plan/apply; this bounds what a raw terraform run can rely on. It is part of the gate fingerprint, so changing it requires a new gate run."
+  description = "Oldest live refresh (derive-assignments re-reading class.* tags and DDL from Unity Catalog) a passing coverage check may rest on, as a Terraform duration of at most 24h. make refreshes right before every checked plan/apply; this bounds what a raw terraform run can rely on. It is part of the gate fingerprint, so changing it requires a new check run."
 
   # Same bounds as modules/coverage_gate_check (the authority, whose 24h
   # ceiling no variable can raise); repeated here only to fail early.
@@ -94,7 +94,7 @@ variable "coverage_gate_max_age" {
 variable "applied_table_grants" {
   type        = list(string)
   default     = []
-  description = "table_access keys (\"<table>|<principal>\") the last apply made, from this layer's state. With an unchanged protection fingerprint they stay plannable without a current gate pass."
+  description = "table_access keys (\"<table>|<principal>\") the last apply made, from this layer's state. With an unchanged protection fingerprint they stay plannable without a current coverage check pass."
 }
 
 variable "deployment_binding" {
@@ -112,7 +112,7 @@ variable "applied_protection_fingerprint" {
 variable "coverage_acknowledged_columns" {
   type        = list(string)
   default     = []
-  description = "Fully qualified catalog.schema.table.column names reviewed as not sensitive. The coverage gate does not block first exposure on them."
+  description = "Fully qualified catalog.schema.table.column names reviewed as not sensitive. The coverage check does not block first exposure on them."
 }
 
 variable "enable_classification" {

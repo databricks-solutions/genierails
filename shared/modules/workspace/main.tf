@@ -128,7 +128,7 @@ resource "null_resource" "genie_space_acls" {
   lifecycle {
     precondition {
       condition     = local.genie_space_groups[each.key] == "" || length(try(var.genie_space_can_run_widening[each.key], ["unknown"])) == 0 || (var.genie_exposure_blocker == "" && length(try(var.genie_space_missing_grants[each.key], ["unknown"])) == 0)
-      error_message = "Opening Genie CAN_RUN for ${each.value.name} to ${join(", ", try(var.genie_space_can_run_widening[each.key], ["unknown"]))} is blocked: ${var.genie_exposure_blocker != "" ? var.genie_exposure_blocker : "the data_access state lacks the SELECT grants its CAN_RUN groups need (${join(", ", try(var.genie_space_missing_grants[each.key], ["unknown"]))})"}. Apply governance first through make (make apply, make release or make apply-governance), which runs the coverage gate and applies data_access before Genie ACLs."
+      error_message = "Opening Genie CAN_RUN for ${each.value.name} to ${join(", ", try(var.genie_space_can_run_widening[each.key], ["unknown"]))} is blocked: ${var.genie_exposure_blocker != "" ? var.genie_exposure_blocker : "the data_access state lacks the SELECT grants its CAN_RUN groups need (${join(", ", try(var.genie_space_missing_grants[each.key], ["unknown"]))})"}. Apply governance first through make (make apply, make release or make apply-governance), which runs the coverage check and applies data_access before Genie ACLs."
     }
   }
 }
@@ -325,7 +325,7 @@ resource "null_resource" "genie_space_acls_created" {
   lifecycle {
     precondition {
       condition     = local.genie_space_groups[each.key] == "" || length(try(var.genie_space_can_run_widening[each.key], ["unknown"])) == 0 || (var.genie_exposure_blocker == "" && length(try(var.genie_space_missing_grants[each.key], ["unknown"])) == 0)
-      error_message = "Opening Genie CAN_RUN for ${each.value.name} to ${join(", ", try(var.genie_space_can_run_widening[each.key], ["unknown"]))} is blocked: ${var.genie_exposure_blocker != "" ? var.genie_exposure_blocker : "the data_access state lacks the SELECT grants its CAN_RUN groups need (${join(", ", try(var.genie_space_missing_grants[each.key], ["unknown"]))})"}. Apply governance first through make (make apply, make release or make apply-governance), which runs the coverage gate and applies data_access before Genie ACLs."
+      error_message = "Opening Genie CAN_RUN for ${each.value.name} to ${join(", ", try(var.genie_space_can_run_widening[each.key], ["unknown"]))} is blocked: ${var.genie_exposure_blocker != "" ? var.genie_exposure_blocker : "the data_access state lacks the SELECT grants its CAN_RUN groups need (${join(", ", try(var.genie_space_missing_grants[each.key], ["unknown"]))})"}. Apply governance first through make (make apply, make release or make apply-governance), which runs the coverage check and applies data_access before Genie ACLs."
     }
   }
 }

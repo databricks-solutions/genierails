@@ -76,7 +76,7 @@ locals {
 
   # What the last apply of this layer left in place, read from its own state
   # (the layer runner's local backend), so keeping or revoking SELECT never
-  # needs a current coverage gate (see modules/data_access). Only current,
+  # needs a current coverage check (see modules/data_access). Only current,
   # successfully applied objects count: tainted instances and deposed ones
   # (left by a failed or partial replacement) don't. The record must also be
   # for this deployment (workspace host and ID); a state copied from another
@@ -186,7 +186,7 @@ variable "genie_space_acl_groups" {
 variable "business_access_enabled" {
   type        = bool
   default     = null
-  description = "DEPRECATED and ignored; removed in the next release. Business SELECT and Genie CAN_RUN are granted whenever the coverage gate allows it, so true and false both do nothing (false does NOT revoke access: remove the groups or acl_groups entries instead). Still declared so existing env.auto.tfvars files and -var flags keep working; make warns while it is set."
+  description = "DEPRECATED and ignored; removed in the next release. The old access switch is retired: Business SELECT and Genie CAN_RUN are granted whenever the coverage check passes, so true and false both do nothing (false does NOT revoke access: remove the groups or acl_groups entries instead). Still declared so existing env.auto.tfvars files and -var flags keep working; make warns while it is set."
 }
 
 variable "enable_classification" {
@@ -198,13 +198,13 @@ variable "enable_classification" {
 variable "coverage_gate_max_age" {
   type        = string
   default     = "6h"
-  description = "Oldest live refresh of tags and DDL a passing coverage gate may rest on (Terraform duration). Set in env.auto.tfvars."
+  description = "Oldest live refresh of tags and DDL a passing coverage check may rest on (Terraform duration). Set in env.auto.tfvars."
 }
 
 variable "coverage_acknowledged_columns" {
   type        = list(string)
   default     = []
-  description = "Fully qualified catalog.schema.table.column names reviewed as not sensitive; the coverage gate does not block first exposure on them. Set in env.auto.tfvars."
+  description = "Fully qualified catalog.schema.table.column names reviewed as not sensitive; the coverage check does not block first exposure on them. Set in env.auto.tfvars."
 }
 
 variable "verify_key_column" {
@@ -439,7 +439,7 @@ output "coverage_gate_inputs" {
 }
 
 output "coverage_gate" {
-  description = "Coverage-gate result this layer was applied with; the workspace layer reads it from state."
+  description = "Coverage check result this layer was applied with; the workspace layer reads it from state."
   value       = module.data_access.coverage_gate
 }
 
