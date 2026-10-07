@@ -1,8 +1,10 @@
 """Regression tests for Terraform CLI argument precedence in the layer runner."""
 
 import os
+import signal
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -139,3 +141,57 @@ def test_other_init_failures_still_fail(tmp_path):
     assert "Failed to query available provider packages" in result.stderr
     assert [shlex.split(line)[0] for line in log.read_text().splitlines()] == ["init"]
     assert not (tmp_path / "project" / "roots" / "workspace" / ".terraform-init.lock.d").exists()
+
+
+def _locking_runner(tmp_path):
+    runner, env, log = _runner_with_stale_lock(tmp_path, "unused")
+    terraform = Path(env["PATH"].split(os.pathsep)[0]) / "terraform"
+    terraform.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> \"{log}\"\n"
+        'if [ "$1" = init ]; then sleep "${FAKE_INIT_SLEEP:-0}"; fi\n'
+    )
+    return runner, env
+
+
+def test_killed_init_holder_is_reclaimed(tmp_path):
+    runner, env = _locking_runner(tmp_path)
+    holder_env = {**env, "FAKE_INIT_SLEEP": "30"}
+    holder = subprocess.Popen([runner, "workspace", "dev", "plan"], env=holder_env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              start_new_session=True)
+    owner = tmp_path / "project/roots/workspace/.terraform-init.lock.d/owner"
+    for _ in range(100):
+        if owner.exists():
+            break
+        time.sleep(0.02)
+    assert owner.exists()
+    os.killpg(holder.pid, signal.SIGKILL)
+    holder.wait(timeout=5)
+    result = subprocess.run([runner, "workspace", "dev", "plan"], env=env,
+                            text=True, capture_output=True, timeout=5)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "reclaiming stale Terraform init lock" in result.stderr
+
+
+def test_live_init_holder_is_never_stolen_and_wait_times_out(tmp_path):
+    runner, env = _locking_runner(tmp_path)
+    holder = subprocess.Popen([runner, "workspace", "dev", "plan"],
+                              env={**env, "FAKE_INIT_SLEEP": "30"},
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              start_new_session=True)
+    owner = tmp_path / "project/roots/workspace/.terraform-init.lock.d/owner"
+    for _ in range(100):
+        if owner.exists():
+            break
+        time.sleep(0.02)
+    result = subprocess.run([runner, "workspace", "dev", "plan"],
+                            env={**env, "INIT_LOCK_TIMEOUT_SECONDS": "1"},
+                            text=True, capture_output=True, timeout=5)
+    assert result.returncode != 0
+    assert "Timed out after 1s" in result.stderr
+    assert str(owner.parent) in result.stderr
+    assert "rm -rf" in result.stderr
+    assert holder.poll() is None
+    os.killpg(holder.pid, signal.SIGTERM)
+    holder.wait(timeout=5)
