@@ -15,8 +15,8 @@ Use this split of responsibilities:
 - CI workflow:
   - validate committed config **and run `make coverage-gate`** (block the build if any classified sensitive column has no covering mask)
   - for prod: enable/wait for native classification, then `make derive-assignments ENV=prod` (re-derive facts from prod's own tags — no LLM), then `make coverage-gate ENV=prod`
-  - run `make plan`, then `make apply` on approved branches with `business_access_enabled = false`
-  - release business access as a **separate, separately-approved** step (set `business_access_enabled = true`, re-apply)
+  - run `make plan`, then on approved branches `make release ENV=prod` (re-derive → validate → coverage gate → rulebook audit → apply → verify-access, under a lock)
+  - if you need a human approval before business users get access, put it on the job that runs `make release` (a CI environment protection rule); there is no separate exposure switch
 
 This keeps LLM-driven generation and human review out of the automated deployment path, keeps the LLM out of prod entirely (prod re-derives deterministically), and makes coverage + exposure explicit gates rather than side effects of deploy.
 
@@ -94,22 +94,11 @@ This shows the net change across the layered state model:
 After approval, deploy. **For prod, re-derive facts from prod's own classification first** — never re-run `generate` in prod (that re-invokes the LLM and could drift from the reviewed rules):
 
 ```bash
-# prod facts: enable/wait for native classification, then re-derive assignments (no LLM)
-make derive-assignments ENV=prod
-make coverage-gate ENV=prod
-# closed rollout: enforcement applied, business access withheld
-make apply ENV=prod          # business_access_enabled = false
+# prod facts: enable/wait for native classification first
+make release ENV=prod VERIFY_KEY_COLUMN=<key>
 ```
 
-`make apply ENV=<workspace>` handles the required layer ordering (account → data_access → workspace). It does **not** run the coverage gate itself — run `make coverage-gate` as an explicit prior stage — and it does **not** re-generate via the LLM.
-
-Release business access as a **separate, separately-approved** job, so exposure is a deliberate gate rather than a side effect of deploy:
-
-```bash
-# envs/prod/env.auto.tfvars -> business_access_enabled = true
-make apply ENV=prod          # releases business SELECT + Genie CAN_RUN
-make verify-access ENV=prod VERIFY_KEY_COLUMN=<key>   # prove masking by querying as each tier
-```
+`make release` re-derives assignments from prod's own tags (no LLM), validates, runs the coverage gate and the rulebook audit, applies all layers in order (masks and policies before grants), then proves masking with `verify-access`. It never re-generates via the LLM. Terraform itself refuses new or wider business `SELECT` / Genie `CAN_RUN` without a recent passing coverage result, so no path can grant access past the gate. If you want a human approval before access opens, require it on the CI job that runs `make release`.
 
 ## Promotion in CI/CD
 
@@ -127,7 +116,7 @@ Recommended for most teams.
 
 2. The promoted config is reviewed and committed
 3. CI enables/waits for prod native classification, runs `make derive-assignments ENV=prod`, then `make coverage-gate ENV=prod` and `make plan ENV=prod`
-4. CI runs `make apply ENV=prod` (gate closed) after approval, then releases business access (`business_access_enabled = true`, re-apply) as a separate approved step
+4. After approval, CI runs `make release ENV=prod VERIFY_KEY_COLUMN=<key>`
 
 This is the best model when you want promotion to stay explicit and reviewable in Git.
 

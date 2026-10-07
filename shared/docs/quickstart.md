@@ -56,10 +56,7 @@ vi envs/dev/generated/masking_functions.sql
 
 make coverage-gate       # BLOCKS the release if any classified sensitive column has no protection ("says NO")
 make validate-generated
-make apply               # business_access_enabled = false: enforcement is applied, but access stays withheld
-# Verify masking works, then release access: open the gate and re-apply.
-#   envs/dev/env.auto.tfvars -> business_access_enabled = true
-make apply               # releases business SELECT + Genie CAN_RUN
+make rehearse VERIFY_KEY_COLUMN=<key>   # apply (masks first; grants only if coverage passes), then prove masking as each tier
 ```
 
 ## What happens end-to-end
@@ -70,17 +67,17 @@ make apply               # releases business SELECT + Genie CAN_RUN
 4. `make generate` fetches DDLs and native classification, then writes a draft into `envs/dev/generated/`
 5. You tune generated governance and semantic config; durable agent ACL intent remains in `env.auto.tfvars`
 6. `make coverage-gate` blocks the release if any classified sensitive column has no protection
-7. `make apply` splits the generated draft into layered configs and applies all three layers (with `business_access_enabled = false`, enforcement is applied but business access is withheld until you open the gate and re-apply)
+7. `make rehearse` splits the generated draft into layered configs, applies all three layers (masks and policies before grants; business access only if the coverage gate passes), then runs `verify-access`
 
 Generation remains fail-closed: after enabling classification, wait for native tags before
 running it. The explicit `--allow-llm-sensitivity` escape hatch is unchanged.
 
-Business exposure is fail-closed. With the default `business_access_enabled = false`,
-apply creates the enforcement scaffolding and may create/configure Genie agents, but
-it withholds business-group table `SELECT` and Genie `CAN_RUN` ACLs. Set the flag to
-`true` only after `make coverage-gate` passes and you've verified masking, then re-apply.
-Agent creation remains ungated so administrators can finish and inspect its configuration
-before releasing it to business users.
+Business exposure is fail-closed without a manual switch. Every apply re-reads live tags
+and runs the coverage gate first; Terraform refuses to plan new or wider business-group
+table `SELECT` or Genie `CAN_RUN` unless a recent coverage result passed. A table's first
+grant is also blocked while it has a sensitive-looking column with no tag (wait for the
+scan, tag it, or list it in `coverage_acknowledged_columns`). Agent creation is not gated,
+so administrators can finish and inspect an agent's configuration first.
 
 ## Multiple Genie agents and multiple catalogs
 

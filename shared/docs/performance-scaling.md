@@ -18,7 +18,7 @@ Guidelines for deploying GenieRails governance at scale.
 
 > **What actually scales.** In the dev-to-prod walkthrough, *sensitivity* comes from native classification and *enforcement* is derived deterministically — neither depends on LLM prompt size. The LLM only drafts the **rulebook and Genie content** in dev `generate`. Two cost models:
 >
-> - **Governance scaling (the important one):** classification **scan latency** (async, eventual-consistency before `derive-assignments`); deterministic **derivation** (scales with classified columns × catalog/treatment combinations, not tokens); **coverage-gate** cost (classified columns × relevant mask policies/functions); and **exposure rollout** (opening `business_access_enabled` releases `SELECT` + Genie `CAN_RUN`, so stage it per env/BU). Prod uses `derive-assignments` — **no LLM**.
+> - **Governance scaling (the important one):** classification **scan latency** (async, eventual-consistency before `derive-assignments`); deterministic **derivation** (scales with classified columns × catalog/treatment combinations, not tokens); **coverage-gate** cost (classified columns × relevant mask policies/functions); and **exposure rollout** (a passing `make release` grants `SELECT` + Genie `CAN_RUN`, so stage releases per env/BU). Prod uses `derive-assignments` — **no LLM**.
 > - **Generation scaling (dev only):** the LLM prompt-size table below governs *dev rule/Genie-content drafting quality*, not production enforcement.
 >
 > No defensible numeric benchmarks exist for scan latency or derive/gate throughput — measure in your own environment rather than assuming fixed timings.

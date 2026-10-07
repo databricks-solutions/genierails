@@ -30,7 +30,7 @@ make generate SPACE="Clinical Analytics"
 vi envs/dev/generated/abac.auto.tfvars   # verify existing agents are unchanged
 make coverage-gate ENV=dev               # blocks if any classified column is unprotected
 make validate-generated
-make apply ENV=dev                       # business_access_enabled stays false until you verify + open the gate
+make rehearse ENV=dev                    # apply (grants only if coverage passes) + verify-access
 ```
 
 | Situation | Command |
@@ -51,13 +51,7 @@ vi envs/prod/auth.auto.tfvars             # enter prod workspace credentials
 
 # prod re-derives its OWN facts — never re-run generate in prod
 make enable-classification ENV=prod       # or the Databricks UI (recommended); then wait for prod class.* tags
-make derive-assignments ENV=prod          # reuses the promoted rules, no LLM
-make coverage-gate ENV=prod               # blocks until every classified prod column is covered
-make apply-governance ENV=prod            # enforcement only; exposure gate still closed
-# open exposure only after the gate is green:
-#   envs/prod/env.auto.tfvars -> business_access_enabled = true
-make apply ENV=prod                       # releases business SELECT + Genie CAN_RUN
-make verify-access ENV=prod VERIFY_KEY_COLUMN=<key>
+make release ENV=prod VERIFY_KEY_COLUMN=<key>   # derive (no LLM) → validate → coverage gate → audit → apply → verify-access
 ```
 
 Promotion carries the reviewed **rules** (mapping, masks, policies, Genie config) — *not* dev's tag assignments. Prod establishes its own facts from its own classification scan, so dev data never decides what's protected in prod.
@@ -148,7 +142,7 @@ cd envs/dev && python3 "$SHARED_ROOT/scripts/audit_schema_drift.py" --mode all
 
 ## Advanced scenarios
 
-These cover less common deployment patterns. Most users won't need them on day one. **The commands below show the scenario-specific mechanics only** — each still runs through the dev-to-prod gates: consume your IdP groups (`--groups`, `manage_groups=false`), run `make coverage-gate` before applying, keep `business_access_enabled=false` until coverage passes, and in prod use `derive-assignments` (not `generate`).
+These cover less common deployment patterns. Most users won't need them on day one. **The commands below show the scenario-specific mechanics only** — each still runs through the dev-to-prod gates: consume your IdP groups (`--groups`, `manage_groups=false`), rehearse in dev, and in prod use `make release` (which re-derives with `derive-assignments`, not `generate`, and grants only when the coverage gate passes).
 
 ### ABAC governance only (no Genie agent)
 

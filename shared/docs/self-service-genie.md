@@ -43,7 +43,7 @@ Workspace layer    →  Workspace Assignment + Entitlements + Genie agents + ACL
 
 The workspace module (`modules/workspace/main.tf`) looks up groups by name — it never creates them. This means BU teams can reference the IdP-synced access-tier groups (provisioned via AIM, or SCIM where AIM isn't available) without any additional coordination. The IdP owns groups and membership; the governance team owns grants and ABAC, and consumes those groups by name.
 
-Catalog grants (`USE_CATALOG`, `USE_SCHEMA`, `SELECT`) are applied by the governance team's data_access layer. Note the **exposure gate**: business-user `SELECT` and Genie `CAN_RUN` are withheld until `business_access_enabled = true`, so an agent becomes reachable only after you open the gate (open it only once coverage passes) — not the moment grants are declared.
+Catalog grants (`USE_CATALOG`, `USE_SCHEMA`, `SELECT`) are applied by the governance team's data_access layer. Note the **coverage gate**: business-user `SELECT` and Genie `CAN_RUN` are only granted once a recent coverage check has passed against live tags, so an agent becomes reachable only after coverage is proven — not the moment grants are declared.
 
 ---
 
