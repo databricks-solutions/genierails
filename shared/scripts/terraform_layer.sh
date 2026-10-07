@@ -62,6 +62,7 @@ INIT_CMD=(
   -reconfigure
   -backend-config="path=$ENV_DIR/terraform.tfstate"
 )
+WRITABLE_INIT_CMD=("${INIT_CMD[@]}")
 if [ -f .terraform.lock.hcl ]; then
   INIT_CMD+=(-lockfile=readonly)
 fi
@@ -74,7 +75,19 @@ _unlock_init() { rmdir "$INIT_LOCK" 2>/dev/null || true; }
 while ! mkdir "$INIT_LOCK" 2>/dev/null; do sleep 0.2; done
 trap _unlock_init EXIT
 echo "+ ${INIT_CMD[*]}"
-"${INIT_CMD[@]}" >/dev/null
+# The lock file is generated locally (gitignored), so an upgrade that adds a
+# provider (even one only a tests/ module declares) leaves it stale and the
+# read-only init refuses it. Inits are serialized above, so re-run it once
+# writable to record the new provider instead of failing every command.
+if ! init_output="$("${INIT_CMD[@]}" 2>&1)"; then
+  if [[ "$init_output" != *"Provider dependency changes detected"* ]]; then
+    printf '%s\n' "$init_output" >&2
+    exit 1
+  fi
+  echo "+ $ROOT_DIR/.terraform.lock.hcl lacks providers this version needs; updating it" >&2
+  echo "+ ${WRITABLE_INIT_CMD[*]}"
+  "${WRITABLE_INIT_CMD[@]}" >/dev/null
+fi
 _unlock_init
 trap - EXIT
 

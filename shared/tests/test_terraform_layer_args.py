@@ -74,3 +74,62 @@ def test_data_access_runner_loads_discovered_table_facts(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     plan_args = shlex.split(log.read_text().splitlines()[1])
     assert f"-var-file={discovered}" in plan_args
+
+
+def _runner_with_stale_lock(tmp_path, init_error):
+    """A copy of the runner whose workspace root has a lock file, and a fake
+    terraform whose read-only init fails with init_error."""
+    scripts = tmp_path / "project" / "scripts"
+    scripts.mkdir(parents=True)
+    runner = scripts / RUNNER.name
+    runner.write_text(RUNNER.read_text())
+    runner.chmod(0o755)
+    root = tmp_path / "project" / "roots" / "workspace"
+    root.mkdir(parents=True)
+    (root / ".terraform.lock.hcl").write_text("# stale\n")
+
+    log = tmp_path / "terraform.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    terraform = bin_dir / "terraform"
+    terraform.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> \"{log}\"\n"
+        'case "$*" in *-lockfile=readonly*)\n'
+        f"  echo '{init_error}' >&2; exit 1;;\n"
+        "esac\n"
+    )
+    terraform.chmod(0o755)
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["LAYER_ENV_DIR"] = str(tmp_path / "env")
+    return runner, env, log
+
+
+def test_stale_lock_file_is_updated_instead_of_failing(tmp_path):
+    # Upgrading adds a provider the locally generated lock file lacks (e.g.
+    # hashicorp/time via a tests/ module); a read-only init must not wedge
+    # every plan/apply on an existing install.
+    runner, env, log = _runner_with_stale_lock(
+        tmp_path, "Error: Provider dependency changes detected")
+    result = subprocess.run([runner, "workspace", "dev", "plan"],
+                            text=True, capture_output=True, env=env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = [shlex.split(line) for line in log.read_text().splitlines()]
+    assert [c[0] for c in calls] == ["init", "init", "plan"]
+    assert "-lockfile=readonly" in calls[0]
+    assert "-lockfile=readonly" not in calls[1]
+    assert "lacks providers" in result.stderr
+
+
+def test_other_init_failures_still_fail(tmp_path):
+    runner, env, log = _runner_with_stale_lock(tmp_path, "Error: Failed to query available provider packages")
+    result = subprocess.run([runner, "workspace", "dev", "plan"],
+                            text=True, capture_output=True, env=env)
+
+    assert result.returncode != 0
+    assert "Failed to query available provider packages" in result.stderr
+    assert [shlex.split(line)[0] for line in log.read_text().splitlines()] == ["init"]
+    assert not (tmp_path / "project" / "roots" / "workspace" / ".terraform-init.lock.d").exists()
