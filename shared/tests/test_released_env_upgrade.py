@@ -435,14 +435,18 @@ def _changes(section: str) -> set[tuple[str, str]]:
     return set(CHANGE.findall(section))
 
 
-def _assert_no_change(section: str, *also_allowed: str) -> None:
-    """No resource change at all. The only output changes allowed are the
-    data_access outputs dropping their business_access_enabled key (plus
-    also_allowed)."""
-    assert not _changes(section), section
+def _assert_no_change(section: str, *also_allowed: str, added: frozenset = frozenset()) -> None:
+    """No resource change at all but creating `added` addresses. The only
+    output changes allowed are the data_access outputs dropping their
+    business_access_enabled key (plus also_allowed)."""
+    assert _changes(section) == {(address, "will be created") for address in added}, section
     if "No changes. Your infrastructure matches the configuration." in section:
         return
-    assert "without changing any real infrastructure" in section, section
+    if added:
+        assert f"Plan: {len(added)} to add, 0 to change, 0 to destroy." in section, section
+        section = section.partition("Changes to Outputs:")[2]
+    else:
+        assert "without changing any real infrastructure" in section, section
     diff = [line.strip() for line in section.splitlines() if re.match(r"\s+[-+~] ", line)]
     assert diff and set(diff) <= {
         "~ coverage_gate                         = {",
@@ -456,17 +460,20 @@ def test_released_data_access_state_plans_no_change_after_the_retirement(tmp_pat
     runs = _upgrade_runs(tmp_path, "data_access", DATA_ACCESS_TEST)
 
     # Released env: not a single grant, policy, mask, tag or wait is touched,
-    # with a current gate or an expired one.
-    _assert_no_change(runs["released_upgrade_plan"])
+    # with a current gate or an expired one. The only addition is the resource
+    # that drops the masking functions on destroy; creating it runs nothing.
+    drop = frozenset({"terraform_data.masking_functions_drop"})
+    _assert_no_change(runs["released_upgrade_plan"], added=drop)
     _assert_no_change(runs["released_upgrade_plan_after_gate_expiry"],
                       '~ status                  = "pass" -> "expired"',
-                      "~ needs_gate              = true -> false")
+                      "~ needs_gate              = true -> false", added=drop)
 
     # Never released: refused without a pass; with one, only business SELECT
-    # is added and nothing is destroyed or replaced.
+    # (and the drop resource) is added and nothing is destroyed or replaced.
     assert runs["never_released_upgrade_without_a_current_gate_refuses_select"].startswith("pass")
     assert _changes(runs["never_released_upgrade_grants_through_the_gate"]) == {
         ('databricks_grant.table_access["cat.sch.customers|analysts"]', "will be created"),
+        ("terraform_data.masking_functions_drop", "will be created"),
     }
 
 

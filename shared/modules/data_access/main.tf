@@ -335,7 +335,9 @@ resource "databricks_sql_endpoint" "warehouse" {
 # No secret goes into these triggers: state keeps them, and a destroy-time
 # provisioner can only read state, so a rotated secret would linger there and
 # break --drop. The script loads the current SP credentials from auth_file.
-# Every other input still forces a replacement.
+# Every other input still forces a replacement, which only re-runs CREATE OR
+# REPLACE: the drop lives in masking_functions_drop, so changing the SQL never
+# drops a function the live policies use.
 resource "terraform_data" "masking_functions" {
   triggers_replace = {
     sql_hash     = filemd5(var.masking_sql_file)
@@ -351,9 +353,29 @@ resource "terraform_data" "masking_functions" {
     command = "python3 ${self.triggers_replace.script} --sql-file ${self.triggers_replace.sql_file} --warehouse-id ${self.triggers_replace.warehouse_id} --auth-file ${self.triggers_replace.auth_file} --host ${self.triggers_replace.host}"
   }
 
+  depends_on = [
+    time_sleep.wait_for_tag_propagation,
+    databricks_grant.terraform_sp_manage_catalog,
+    databricks_sql_endpoint.warehouse,
+    terraform_data.masking_functions_drop,
+  ]
+}
+
+# Drops the functions when the layer is destroyed, after the policies and
+# masking_functions are gone. Its settings are input, not triggers, so a
+# change updates it in place: nothing but a real destroy runs the drop.
+resource "terraform_data" "masking_functions_drop" {
+  input = {
+    sql_file     = var.masking_sql_file
+    script       = var.deploy_masking_script
+    auth_file    = var.auth_file
+    warehouse_id = local.effective_warehouse_id
+    host         = var.databricks_workspace_host
+  }
+
   provisioner "local-exec" {
     when    = destroy
-    command = "python3 ${self.triggers_replace.script} --sql-file ${self.triggers_replace.sql_file} --warehouse-id ${self.triggers_replace.warehouse_id} --auth-file ${self.triggers_replace.auth_file} --host ${self.triggers_replace.host} --drop"
+    command = "python3 ${self.input.script} --sql-file ${self.input.sql_file} --warehouse-id ${self.input.warehouse_id} --auth-file ${self.input.auth_file} --host ${self.input.host} --drop"
   }
 
   depends_on = [
