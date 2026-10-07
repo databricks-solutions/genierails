@@ -165,7 +165,13 @@ def _workspace_profiles(value: str | None, workspace_count: int) -> tuple[str, .
 def _target_catalogs(value: str | None, workspace_count: int) -> tuple[str, ...]:
     if not value:
         return ()
-    catalogs = tuple(item.strip() for item in value.split(",") if item.strip())
+    raw_catalogs = value.split(",")
+    if any(not item.strip() for item in raw_catalogs):
+        raise ValueError(
+            "--target-catalog contains an empty catalog name; remove the extra comma "
+            "or supply one non-empty catalog per workspace"
+        )
+    catalogs = tuple(item.strip() for item in raw_catalogs)
     if len(catalogs) == 1:
         return catalogs * workspace_count
     if len(catalogs) != workspace_count:
@@ -332,6 +338,7 @@ class WorkspacePreflight:
     target_catalog: str | None
     model_access: str
     model_resource: str
+    model_grant_needed: bool
 
 
 def _caller_context(workspace: Any) -> tuple[str, set[str], bool]:
@@ -355,6 +362,7 @@ def _preflight(
     cfg: Config,
     workspaces: dict[int, tuple[Any, str]],
     emit: Callable[[str], None],
+    existing_sp: Any | None = None,
 ) -> dict[int, WorkspacePreflight]:
     results = {}
     for workspace_index, workspace_id in enumerate(cfg.workspace_ids):
@@ -408,7 +416,7 @@ def _preflight(
             or workspace_admin_owner
         )
         can_manage = False
-        if not owns_scope:
+        if not owns_scope and target_catalog:
             try:
                 effective = workspace.grants.get_effective(
                     securable_type=securable_type,
@@ -425,6 +433,14 @@ def _preflight(
                     f"Cause: {_error_details(exc)}"
                 ) from exc
         if not (owns_scope or can_manage):
+            if not target_catalog:
+                raise RuntimeError(
+                    f"preflight failed in workspace {workspace_id}: caller "
+                    f"{caller_name!r} cannot grant CREATE CATALOG on metastore "
+                    f"{metastore_id!r}; metastore owner is {metastore_owner!r}. Have the "
+                    "metastore owner run bootstrap or grant CREATE CATALOG to the "
+                    "deployment service principal. Nothing was changed."
+                )
             requested = (
                 "USE CATALOG, USE SCHEMA, MANAGE, and APPLY TAG"
                 if target_catalog else "CREATE CATALOG"
@@ -461,7 +477,35 @@ def _preflight(
                     f"in workspace {workspace_id} has no backing UC function"
                 )
             model_access, model_resource = "UC EXECUTE", foundation_model
-            if metastore_owner.casefold() not in caller_principals:
+            model_grant_needed = True
+            inherited_execute = False
+            try:
+                account_users_effective = workspace.grants.get_effective(
+                    securable_type="function",
+                    full_name=foundation_model,
+                    principal="account users",
+                )
+                inherited_execute = _has_effective_privilege(
+                    account_users_effective, "EXECUTE"
+                )
+            except Exception:
+                # If this inherited path cannot be inspected, caller authority below
+                # can still prove that a required grant is safe.
+                pass
+            if not inherited_execute and existing_sp is not None:
+                client_id = str(_value(existing_sp, "application_id"))
+                try:
+                    sp_effective = workspace.grants.get_effective(
+                        securable_type="function",
+                        full_name=foundation_model,
+                        principal=client_id,
+                    )
+                    inherited_execute = _has_effective_privilege(sp_effective, "EXECUTE")
+                except Exception:
+                    pass
+            if inherited_execute:
+                model_grant_needed = False
+            elif metastore_owner.casefold() not in caller_principals:
                 function_owner = "<unavailable>"
                 try:
                     function_owner = str(
@@ -474,11 +518,19 @@ def _preflight(
                             f"{foundation_model!r} in workspace {workspace_id}. "
                             f"Cause: {_error_details(exc)}"
                         ) from exc
-                function_effective = workspace.grants.get_effective(
-                    securable_type="function",
-                    full_name=foundation_model,
-                    principal=caller_name,
-                )
+                try:
+                    function_effective = workspace.grants.get_effective(
+                        securable_type="function",
+                        full_name=foundation_model,
+                        principal=caller_name,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"preflight failed in workspace {workspace_id}: could not inspect "
+                        f"effective grant rights and cannot prove MANAGE on function "
+                        f"{foundation_model!r}; caller lacks MANAGE unless this check "
+                        f"succeeds. Cause: {_error_details(exc)}"
+                    ) from exc
                 if (
                     function_owner.casefold() not in caller_principals
                     and not _has_effective_privilege(function_effective, "MANAGE")
@@ -498,6 +550,7 @@ def _preflight(
                     f"{workspace_id} ({host}) during preflight: endpoint lookup returned no ID"
                 )
             model_access, model_resource = "CAN_QUERY", str(endpoint_id)
+            model_grant_needed = True
             if not is_workspace_admin:
                 permissions = workspace.api_client.do(
                     "GET", f"/api/2.0/permissions/serving-endpoints/{endpoint_id}"
@@ -528,13 +581,20 @@ def _preflight(
                         "Have an endpoint manager grant CAN_QUERY to the deployment "
                         "service principal. Nothing was changed."
                     )
+        resolved_access = (
+            f"{model_access} (inherited)"
+            if model_access == "UC EXECUTE" and not model_grant_needed
+            else model_access
+        )
+        emit(f"PLAN RESOLVED workspace {workspace_id}: model access path {resolved_access}")
         emit(
             f"PREFLIGHT OK workspace {workspace_id} ({host}): authenticated as "
             f"{caller_name}; grant scope {securable_type} {full_name}; model access "
-            f"{model_access} on {cfg.model_endpoint}"
+            f"{resolved_access} on {cfg.model_endpoint}"
         )
         results[workspace_id] = WorkspacePreflight(
-            workspace, host, metastore_id, target_catalog, model_access, model_resource
+            workspace, host, metastore_id, target_catalog, model_access, model_resource,
+            model_grant_needed,
         )
     return results
 
@@ -588,8 +648,10 @@ def bootstrap(
 
     try:
         account, workspace_client = (client_factory or _clients)(cfg)
-        workspaces = _authenticate_workspaces(cfg, account, workspace_client)
-        preflight = _preflight(cfg, workspaces, emit)
+        escaped_name = cfg.sp_name.replace('"', '\\"')
+        existing = list(
+            account.service_principals.list(filter=f'displayName eq "{escaped_name}"')
+        )
     except Exception as exc:
         if cfg.dry_run and _credentials_absent(exc):
             emit(
@@ -599,13 +661,16 @@ def bootstrap(
             )
             return 0
         raise
+    if len(existing) > 1:
+        raise RuntimeError(f"multiple service principals have display name {cfg.sp_name!r}")
+
+    workspaces = _authenticate_workspaces(cfg, account, workspace_client)
+    preflight = _preflight(
+        cfg, workspaces, emit, existing_sp=existing[0] if existing else None
+    )
     if cfg.dry_run:
         emit("DRY RUN: read-only preflight passed; no changes were made.")
         return 0
-    escaped_name = cfg.sp_name.replace('"', '\\"')
-    existing = list(account.service_principals.list(filter=f'displayName eq "{escaped_name}"'))
-    if len(existing) > 1:
-        raise RuntimeError(f"multiple service principals have display name {cfg.sp_name!r}")
     created = not existing
     sp = existing[0] if existing else account.service_principals.create(
         display_name=cfg.sp_name, active=True
@@ -704,6 +769,13 @@ def bootstrap(
         endpoint_id = checked.model_resource if checked.model_access == "CAN_QUERY" else None
         foundation_model = checked.model_resource if checked.model_access == "UC EXECUTE" else None
         if checked.model_access == "UC EXECUTE":
+            if not checked.model_grant_needed:
+                emit(
+                    f"UNCHANGED workspace {workspace_id}: EXECUTE on {foundation_model} "
+                    f"(query access for {cfg.model_endpoint})"
+                )
+                workspace_summaries.append((workspace_id, host))
+                continue
             try:
                 effective = w.grants.get_effective(
                     securable_type="function",
