@@ -11,7 +11,11 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     steps:
+      # Full history: test_released_env_upgrade.py applies the pre-retirement
+      # modules from git history and plans the current code against that state.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:

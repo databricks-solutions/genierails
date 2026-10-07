@@ -360,7 +360,7 @@ def test_gate_fingerprint_covers_every_input_the_gate_judges():
         "acknowledged    = sort(distinct(",
     ):
         assert item in fingerprint, item
-    # Opening the gate must not invalidate the result it depends on.
+    # The retired flag never fed the fingerprint, so released passes stay valid.
     assert "business_access_enabled" not in fingerprint
 
 
@@ -375,12 +375,15 @@ def test_existing_grant_and_policy_resource_addresses_and_keys_are_unchanged():
     assert 'name                  = "${each.value.catalog}_${each.key}"' in policies
 
 
-def test_business_select_is_fail_closed_while_structural_grants_remain():
+def test_business_select_is_fail_closed_through_the_gate_not_a_flag():
     source = MAIN_TF.read_text()
+    table = _resource_body(source, "table_access")
 
-    assert "for_each = var.business_access_enabled ? {" in _resource_body(source, "table_access")
-    assert "var.business_access_enabled" not in _resource_body(source, "catalog_access")
-    assert "var.business_access_enabled" not in _resource_body(source, "schema_access")
+    # No flag empties the map; every planned grant is checked by the gate.
+    assert "for_each = {\n    for pair in local.table_access_pairs :" in table
+    assert "local.coverage_gate_status == \"pass\" || !contains(local.table_grants_needing_gate, each.key)" in table
+    assert "var.business_access_enabled" not in source
+    assert "var.business_access_enabled &&" not in source
 
 
 def test_explicit_empty_agent_acl_is_fail_closed_in_both_layers():

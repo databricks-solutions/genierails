@@ -4,8 +4,8 @@
 `run` gates the split data_access config exactly as Terraform will apply it:
 
   1. Ask Terraform (terraform console, same var files and -var flags as the
-     apply) for the gate inputs: their fingerprint, whether business SELECT is
-     requested, and the tables it would grant.
+     apply) for the gate inputs: their fingerprint and the tables it would
+     grant.
   2. Read the data_access state for the tables already granted. Tables about
      to be granted for the first time get the first-exposure check: an
      untagged sensitive-looking column blocks unless it is acknowledged in
@@ -27,10 +27,13 @@ live UC itself: it can only verify that a recent refreshed pass exists for the
 current local inputs. This catches drift and
 skipped steps; it is not a defence against someone who hand-forges the files.
 
-`needs-derive` prints which live refresh make must run before a plan/apply
-that opens business access: "full" (derive-assignments: live class.* tags and
-DDL), "ddl" (live DDL only, for envs whose tags come from make generate), or
-"none" when access stays closed.
+`needs-derive` prints which live refresh make must run before a plan/apply:
+"full" (derive-assignments: live class.* tags and DDL), "ddl" (live DDL only,
+for envs whose tags come from make generate), or "none" when the env has no
+governance config to grant through.
+
+Business access has no on/off switch: the retired business_access_enabled
+variable is ignored wherever it is set (env.auto.tfvars or -var flags).
 """
 
 from __future__ import annotations
@@ -57,7 +60,6 @@ GATE_FILENAME = ".coverage_gate.json"
 REFRESH_RELPATH = Path("generated") / ".live_refresh.json"
 REFRESH_VERSION = 1
 GATE_VERSION = 1
-GATE_FLAG = "business_access_enabled"
 TABLE_GRANT = ("module.data_access", "databricks_grant", "table_access")
 INPUTS_EXPRESSION = "base64encode(jsonencode(module.data_access.coverage_gate_inputs))"
 
@@ -73,21 +75,6 @@ def _load_tfvars(path: Path) -> dict:
         return hcl2.loads(path.read_text())
     except Exception as exc:
         raise GateError(f"cannot parse {path}: {exc}") from exc
-
-
-def _flag_override(apply_flags: str) -> bool | None:
-    """The last -var=business_access_enabled=... in APPLY_FLAGS, if any."""
-    value = None
-    args = shlex.split(apply_flags or "")
-    for index, arg in enumerate(args):
-        assignment = None
-        if arg.startswith("-var="):
-            assignment = arg[len("-var="):]
-        elif arg == "-var" and index + 1 < len(args):
-            assignment = args[index + 1]
-        if assignment and assignment.split("=", 1)[0].strip() == GATE_FLAG:
-            value = assignment.split("=", 1)[1].strip().strip("\"'").lower() == "true"
-    return value
 
 
 def console_flags(apply_flags: str) -> list[str]:
@@ -107,18 +94,20 @@ def console_flags(apply_flags: str) -> list[str]:
 
 
 def needs_derive(env_dir: Path, apply_flags: str) -> tuple[str, str | None]:
-    """Which live refresh must precede a plan/apply: full, ddl or none."""
+    """Which live refresh must precede a plan/apply: full, ddl or none.
+
+    apply_flags is accepted for older callers and ignored: no flag changes
+    whether business access is gated.
+    """
     env = _load_tfvars(env_dir / "env.auto.tfvars")
-    requested = _flag_override(apply_flags)
-    if requested is None:
-        requested = env.get(GATE_FLAG) is True
-    if not requested:
+    generated = (env_dir / "generated" / "abac.auto.tfvars").is_file()
+    if not generated and not (env_dir / DATA_ACCESS_SUBDIR / "abac.auto.tfvars").is_file():
         return "none", None
     if env.get("enable_classification") is not True:
         return "ddl", "enable_classification is false; tags come from make generate, so only the DDL is re-read"
-    if not (env_dir / "generated" / "abac.auto.tfvars").is_file():
+    if not generated:
         return "ddl", "no generated/abac.auto.tfvars to derive tags into, so only the DDL is re-read"
-    return "full", "business access is being opened in a native-classification env"
+    return "full", "business access is gated on live tags in a native-classification env"
 
 
 def file_sha256(path: Path) -> str:
@@ -195,7 +184,7 @@ def query_inputs(runner: Path, env_name: str, layer_dir: Path, flags: list[str])
         if not (encoded.startswith('"') and encoded.endswith('"')):
             raise ValueError(encoded)
         inputs = json.loads(base64.b64decode(encoded[1:-1], validate=True))
-        for key in ("fingerprint", "business_access_enabled", "grant_tables", "acknowledged_columns"):
+        for key in ("fingerprint", "grant_tables", "acknowledged_columns"):
             inputs[key]
     except (IndexError, ValueError, KeyError, TypeError) as exc:
         raise GateError(f"unexpected terraform console output: {exc}") from exc
@@ -267,7 +256,6 @@ def _failed(gate_path: Path, record: dict, inputs: dict, env_name: str, reason: 
 
 CAN_RUN_EXPRESSION = (
     "base64encode(jsonencode({"
-    "enabled = var.business_access_enabled, "
     "groups = module.workspace.genie_space_acls_groups, "
     "blocker = local.genie_exposure_blocker, "
     "widening = local.genie_space_can_run_widening, "
@@ -297,12 +285,10 @@ def can_run_check(env_dir: Path, env_name: str, runner: Path, apply_flags: str) 
         if not (line.startswith('"') and line.endswith('"')):
             raise ValueError(line)
         state = json.loads(base64.b64decode(line[1:-1], validate=True))
-        enabled, groups = state["enabled"], state["groups"]
+        groups = state["groups"]
         blocker, widening, missing = state["blocker"], state["widening"], state["missing"]
     except (IndexError, ValueError, KeyError, TypeError) as exc:
         raise GateError(f"unexpected terraform console output: {exc}") from exc
-    if not enabled:
-        return 0
     refused = {
         key: widening.get(key, ["unknown"])
         for key, csv in groups.items()
@@ -330,9 +316,6 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
         return 0
     flags = console_flags(apply_flags)
     inputs = query_inputs(runner, env_name, layer_dir, flags)
-    if not inputs["business_access_enabled"]:
-        print(f"=== Coverage gate (data_access:{env_name}): not required, business_access_enabled = false ===")
-        return 0
 
     print(f"=== Coverage Gate (data_access:{env_name}) ===")
     granted = granted_tables(layer_dir)

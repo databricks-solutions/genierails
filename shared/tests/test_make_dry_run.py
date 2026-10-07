@@ -184,22 +184,26 @@ def test_plan_real_target_runs_configured_workspace_layers(tmp_path):
     runner_log = tmp_path / "runner.log"
     runner = tmp_path / "record-runner"
     # The data_access plan first asks terraform console for the coverage-gate
-    # inputs; business access is closed here, so the gate is not required.
-    closed = base64.b64encode(json.dumps({
-        "fingerprint": "f", "business_access_enabled": False,
-        "grant_tables": [], "acknowledged_columns": [],
+    # inputs (asked again after the gate ran, so the inputs can't drift). The
+    # config adds no grant (needs_gate false), so the failing gate (no live
+    # refresh: the stubbed derive script fails) lets the plan proceed.
+    inputs = base64.b64encode(json.dumps({
+        "fingerprint": "f", "grant_tables": [], "acknowledged_columns": [], "needs_gate": False,
     }).encode()).decode()
-    # The workspace plan first checks CAN_RUN; business access is closed too.
+    # The workspace plan first checks CAN_RUN; no ACL widens it here.
     closed_can_run = base64.b64encode(json.dumps({
-        "enabled": False, "groups": {}, "blocker": "", "widening": {}, "missing": {},
+        "groups": {}, "blocker": "", "widening": {}, "missing": {},
     }).encode()).decode()
     runner.write_text(
         "#!/bin/sh\n"
         f"printf '%s|%s\\n' \"$LAYER_ENV_DIR\" \"$*\" >> \"{runner_log}\"\n"
-        f"if [ \"$1 $3\" = 'data_access console' ]; then echo '\"{closed}\"'; fi\n"
+        f"if [ \"$1 $3\" = 'data_access console' ]; then echo '\"{inputs}\"'; fi\n"
         f"if [ \"$1 $3\" = 'workspace console' ]; then echo '\"{closed_can_run}\"'; fi\n"
     )
     runner.chmod(0o755)
+    # Stands in for the live UC refresh (tests never reach Databricks); fails.
+    derive = tmp_path / "derive.py"
+    derive.write_text("raise SystemExit(1)\n")
 
     result = subprocess.run(
         [
@@ -210,6 +214,7 @@ def test_plan_real_target_runs_configured_workspace_layers(tmp_path):
             f"ENV_DIR={env_dir}",
             f"ACCOUNT_ENV_DIR={tmp_path / 'account'}",
             f"ROOT_RUNNER={runner}",
+            f"DERIVE_ASSIGNMENTS_SCRIPT={derive}",
         ],
         cwd=CLOUD_ROOT,
         text=True,
@@ -220,11 +225,15 @@ def test_plan_real_target_runs_configured_workspace_layers(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert runner_log.read_text().splitlines() == [
         f"{data_access_dir}|data_access dev console",
+        f"{data_access_dir}|data_access dev console",
         f"{data_access_dir}|data_access dev plan",
         f"{env_dir}|workspace dev console",
         f"{env_dir}|workspace dev plan",
     ]
-    assert "Coverage gate (data_access:dev): not required" in result.stdout
+    # No flag makes the gate "not required" any more: it always runs.
+    assert "not required" not in result.stdout
+    assert "=== Coverage Gate (data_access:dev) ===" in result.stdout
+    assert "Proceeding only because this change adds no SELECT grant" in result.stderr
 
 
 @pytest.mark.parametrize("configured", [False, True])
@@ -313,12 +322,12 @@ def test_discovered_agent_attribution_changes_apply_fingerprint(tmp_path):
     ]
 
 
-def test_rehearsal_apply_flag_follows_tfvars_and_changes_fingerprint(tmp_path):
+def test_apply_flags_reach_the_layer_and_change_fingerprint(tmp_path):
     env_dir = tmp_path / "env"
     env_dir.mkdir()
     (env_dir / "abac.auto.tfvars").write_text("# present\n")
     (env_dir / "env.auto.tfvars").write_text(
-        "business_access_enabled = false\n"
+        'coverage_gate_max_age = "6h"\n'
     )
 
     runner_log = tmp_path / "runner.log"
@@ -326,7 +335,7 @@ def test_rehearsal_apply_flag_follows_tfvars_and_changes_fingerprint(tmp_path):
     # The workspace apply first asks terraform console whether the change
     # opens CAN_RUN while exposure is blocked; nothing is blocked here.
     open_can_run = base64.b64encode(json.dumps({
-        "enabled": True, "groups": {}, "blocker": "", "widening": {}, "missing": {},
+        "groups": {}, "blocker": "", "widening": {}, "missing": {},
     }).encode()).decode()
     runner.write_text(
         "#!/bin/sh\n"
@@ -345,7 +354,7 @@ def test_rehearsal_apply_flag_follows_tfvars_and_changes_fingerprint(tmp_path):
         f"ROOT_RUNNER={runner}",
     ]
     rehearsed = subprocess.run(
-        [*base_args, "APPLY_FLAGS=-var=business_access_enabled=true"],
+        [*base_args, "APPLY_FLAGS=-var=coverage_gate_max_age=1h"],
         cwd=CLOUD_ROOT,
         text=True,
         capture_output=True,
@@ -363,7 +372,7 @@ def test_rehearsal_apply_flag_follows_tfvars_and_changes_fingerprint(tmp_path):
     assert normal.returncode == 0, normal.stdout + normal.stderr
     assert runner_log.read_text().splitlines() == [
         "workspace dev apply -parallelism=1 -auto-approve "
-        "-var=business_access_enabled=true",
+        "-var=coverage_gate_max_age=1h",
         "workspace dev apply -parallelism=1 -auto-approve",
     ]
 

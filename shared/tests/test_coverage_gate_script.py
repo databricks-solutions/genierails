@@ -32,7 +32,6 @@ def _encoded(inputs: dict) -> str:
 def _inputs(**overrides):
     inputs = {
         "fingerprint": "fp-1",
-        "business_access_enabled": True,
         "grant_tables": [TABLE],
         "acknowledged_columns": [],
     }
@@ -125,23 +124,37 @@ def _state(env_dir, tables):
 @pytest.mark.parametrize(
     "env, flags, generated, expected",
     [
+        ("enable_classification = true\n", "", True, "full"),
+        # The retired flag is ignored either way, in the file or in -var flags:
+        # false no longer skips the live refresh the gate rests on.
         ("business_access_enabled = true\nenable_classification = true\n", "", True, "full"),
+        ("business_access_enabled = false\nenable_classification = true\n", "", True, "full"),
         ("enable_classification = true\n", "-var=business_access_enabled=true", True, "full"),
-        ("enable_classification = true\n", "-var business_access_enabled=true", True, "full"),
+        ("enable_classification = true\n", "-var business_access_enabled=false", True, "full"),
         ("business_access_enabled = true\nenable_classification = true\n",
-         "-var=business_access_enabled=false", True, "none"),
-        ("enable_classification = true\n", "", True, "none"),
-        # Opening access without native classification still re-reads the DDL.
-        ("business_access_enabled = true\n", "", True, "ddl"),
-        ("business_access_enabled = true\nenable_classification = true\n", "", False, "ddl"),
+         "-var=business_access_enabled=false", True, "full"),
+        # Without native classification the gate still re-reads the DDL.
+        ("", "", True, "ddl"),
+        ("business_access_enabled = false\n", "", True, "ddl"),
+        # Only the split data_access config: nothing to derive tags into.
+        ("enable_classification = true\n", "", False, "ddl"),
     ],
 )
-def test_live_refresh_mode_before_opening_access(tmp_path, env, flags, generated, expected):
+def test_live_refresh_mode_before_a_gated_plan(tmp_path, env, flags, generated, expected):
     (tmp_path / "env.auto.tfvars").write_text(env)
+    (tmp_path / "data_access").mkdir()
+    (tmp_path / "data_access" / "abac.auto.tfvars").write_text("tag_assignments = []\n")
     if generated:
         (tmp_path / "generated").mkdir()
         (tmp_path / "generated" / "abac.auto.tfvars").write_text("tag_assignments = []\n")
     assert cg.needs_derive(tmp_path, flags)[0] == expected
+
+
+@pytest.mark.parametrize("env", ["", "enable_classification = true\n", "business_access_enabled = true\n"])
+def test_no_live_refresh_without_any_governance_config(tmp_path, env):
+    # Genie-only envs have nothing the gate could grant through.
+    (tmp_path / "env.auto.tfvars").write_text(env)
+    assert cg.needs_derive(tmp_path, "")[0] == "none"
 
 
 def test_needs_derive_cli_accepts_the_flags_make_passes(tmp_path, capsys):
@@ -185,12 +198,14 @@ def test_unreadable_state_fails_closed(env_dir):
 # ── run ───────────────────────────────────────────────────────────────────────
 
 
-def test_closed_gate_needs_no_gate_run(env_dir, stub_runner, stub_validator):
-    runner, _log = stub_runner(_inputs(business_access_enabled=False))
+@pytest.mark.parametrize("flags", ["", "-var=business_access_enabled=false"])
+def test_gate_always_runs_and_the_retired_flag_cannot_skip_it(env_dir, stub_runner, stub_validator, flags):
+    (env_dir / "env.auto.tfvars").write_text(f'uc_tables = ["{TABLE}"]\nbusiness_access_enabled = false\n')
+    runner, _log = stub_runner(_inputs())
     record = stub_validator(1)
-    assert cg.run_gate(env_dir, "prod", runner, "", False) == 0
-    assert not record.exists()
-    assert not _gate_file(env_dir).exists()
+    assert cg.run_gate(env_dir, "prod", runner, flags, False) == 1
+    assert record.exists()
+    assert json.loads(_gate_file(env_dir).read_text())["status"] == "fail"
 
 
 def test_missing_data_access_config_skips(tmp_path, stub_runner):
@@ -325,7 +340,9 @@ def _dry_run(target, *args):
 @pytest.mark.parametrize("target", ["apply", "apply-governance"])
 def test_apply_paths_derive_before_promote_unless_already_derived(target):
     recipe = _dry_run(target, "ENV=dev")
-    assert recipe.index("_derive-before-exposure") < recipe.index("promote;")
+    assert recipe.index("_derive-before-exposure") < recipe.index(" promote ENV=")
+    # Same-env promote, whatever DEST_ENV/SOURCE_ENV the shell exports.
+    assert 'SOURCE_ENV="dev"' in recipe and "DEST_ENV= DEST_ENV_DIR= DEST_CATALOG_MAP=" in recipe
     assert 'if [ -z "" ]; then' in recipe
     assert 'if [ -z "1" ]; then' in _dry_run(target, "ENV=dev", "_EXPOSURE_DERIVED=1")
 
@@ -500,13 +517,19 @@ def test_already_granted_table_keeps_the_warning(live_like_env):
 
 
 @needs_terraform
-def test_gate_honours_the_apply_flags_like_terraform(live_like_env):
+@pytest.mark.parametrize("flag", ["-var=business_access_enabled=false", "-var=business_access_enabled=true"])
+def test_retired_flag_neither_skips_the_gate_nor_changes_the_grants(live_like_env, flag):
+    # Real Terraform still accepts the deprecated -var (the env file here also
+    # still sets it true, as released envs do) and ignores it: the gate runs,
+    # and the plan grants exactly what the gate covers, false included.
     env = live_like_env
-    closed = _gate(env, "--apply-flags=-var=business_access_enabled=false")
-    assert closed.returncode == 0
-    assert "not required" in closed.stdout
-    assert not _gate_file(env).exists()
-    assert _raw_plan(env, "-var=business_access_enabled=false").returncode == 0
+    gated = _gate(env, f"--apply-flags={flag}")
+    assert gated.returncode == 0, gated.stdout + gated.stderr
+    assert "not required" not in gated.stdout
+    assert json.loads(_gate_file(env).read_text())["status"] == "pass"
+    plan = _raw_plan(env, flag)
+    assert plan.returncode == 0, plan.stdout + plan.stderr
+    assert f'module.data_access.databricks_grant.table_access["{TABLE}|analysts"] will be created' in plan.stdout
 
 
 def _apply_layer(env_dir, runner, apply_flags):
@@ -531,9 +554,11 @@ def test_make_never_applies_data_access_when_the_gate_fails(env_dir, stub_runner
 
 
 def test_make_applies_data_access_after_the_gate(env_dir, stub_runner):
-    runner, log = stub_runner(_inputs(business_access_enabled=False))
+    # The bare fixture fails the gate, but adds no grant (needs_gate false).
+    runner, log = stub_runner(_inputs(needs_gate=False))
     result = _apply_layer(env_dir, runner, "")
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "Proceeding only because this change adds no SELECT grant" in result.stderr
     commands = [call.split("|", 1)[1].split()[2] for call in log.read_text().splitlines()]
     assert commands[0] == "console"
     assert "apply" in commands
@@ -543,7 +568,7 @@ def test_ddl_change_reapplies_data_access_so_genie_sees_the_new_gate(env_dir, st
     # The DDL is a gate input: if a DDL-only change skipped the apply, the gate
     # result would move on while the state keeps the old fingerprint, and the
     # workspace layer would block CAN_RUN with nothing left to apply.
-    runner, log = stub_runner(_inputs(business_access_enabled=False))
+    runner, log = stub_runner(_inputs(needs_gate=False))
     (env_dir / "ddl").mkdir()
     ddl = env_dir / "ddl" / "_fetched.sql"
     ddl.write_text("CREATE TABLE cat.sch.customers (\n  id BIGINT\n);\n")
@@ -726,7 +751,6 @@ run "can_run" {{
     databricks_workspace_id   = "123"
     databricks_workspace_host = "https://example.invalid"
     sql_warehouse_id          = "warehouse"
-    business_access_enabled   = true
     groups                    = {{ analysts = {{}} }}
     genie_spaces              = [{{ name = "Sales", genie_space_id = "space-1", uc_tables = ["cat.sch.customers"] }}]
     genie_space_configs       = {{ Sales = {{ acl_groups = {acl} }} }}
@@ -982,24 +1006,26 @@ def _console_runner(tmp_path, answer):
 
 @pytest.mark.parametrize("answer, code, message", [
     # Exposure blocked: an ACL adding a group is refused ...
-    ({"enabled": True, "groups": {"sales": "a,b"}, "blocker": "gate expired",
+    ({"groups": {"sales": "a,b"}, "blocker": "gate expired",
       "widening": {"sales": ["b"]}, "missing": {"sales": []}}, 1, "sales: +b"),
     # ... keeping, shrinking or clearing proceeds (with a warning).
-    ({"enabled": True, "groups": {"sales": "a"}, "blocker": "gate expired",
+    ({"groups": {"sales": "a"}, "blocker": "gate expired",
       "widening": {"sales": []}, "missing": {"sales": []}}, 0, "keep, shrink or clear"),
-    ({"enabled": True, "groups": {"sales": ""}, "blocker": "gate expired",
+    ({"groups": {"sales": ""}, "blocker": "gate expired",
       "widening": {"sales": []}, "missing": {"sales": []}}, 0, "keep, shrink or clear"),
     # The layer is ready but this agent lacks its grants: adding is refused.
-    ({"enabled": True, "groups": {"sales": "a,b"}, "blocker": "",
+    ({"groups": {"sales": "a,b"}, "blocker": "",
       "widening": {"sales": ["b"]}, "missing": {"sales": ["t|b"]}}, 1, "lacks the SELECT grants"),
     # An agent missing from the widening map counts as widening.
-    ({"enabled": True, "groups": {"sales": "a"}, "blocker": "gate expired",
+    ({"groups": {"sales": "a"}, "blocker": "gate expired",
       "widening": {}, "missing": {}}, 1, "sales: +unknown"),
-    # Ready, or business access closed: nothing to check.
-    ({"enabled": True, "groups": {"sales": "a,b"}, "blocker": "",
+    # Ready: nothing to refuse.
+    ({"groups": {"sales": "a,b"}, "blocker": "",
       "widening": {"sales": ["b"]}, "missing": {"sales": []}}, 0, ""),
+    # There is no closed state to skip the check: a (legacy) enabled = false
+    # in the answer is ignored and the widening is still refused.
     ({"enabled": False, "groups": {"sales": "a,b"}, "blocker": "gate expired",
-      "widening": {"sales": ["b"]}, "missing": {}}, 0, ""),
+      "widening": {"sales": ["b"]}, "missing": {}}, 1, "sales: +b"),
 ])
 def test_can_run_check_mirrors_the_workspace_precondition(tmp_path, capsys, answer, code, message):
     runner = _console_runner(tmp_path, answer)

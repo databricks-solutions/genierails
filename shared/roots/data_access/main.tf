@@ -185,8 +185,8 @@ variable "genie_space_acl_groups" {
 
 variable "business_access_enabled" {
   type        = bool
-  default     = false
-  description = "Fail-closed exposure gate. Enable only after coverage validation and the schema drift check pass."
+  default     = null
+  description = "DEPRECATED and ignored; removed in the next release. Business SELECT and Genie CAN_RUN are granted whenever the coverage gate allows it, so true and false both do nothing (false does NOT revoke access: remove the groups or acl_groups entries instead). Still declared so existing env.auto.tfvars files and -var flags keep working; make warns while it is set."
 }
 
 variable "enable_classification" {
@@ -379,7 +379,6 @@ module "data_access" {
   table_agents                    = local.table_agents
   genie_space_acl_groups          = var.genie_space_acl_groups
   classification_uc_tables        = local.full_effective_uc_tables
-  business_access_enabled         = var.business_access_enabled
   coverage_gate_file              = "${var.env_dir}/.coverage_gate.json"
   coverage_ddl_file               = "${var.env_dir}/../ddl/_fetched.sql"
   coverage_acknowledged_columns   = var.coverage_acknowledged_columns

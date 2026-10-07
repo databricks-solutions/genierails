@@ -4,37 +4,73 @@ from pathlib import Path
 import re
 import subprocess
 
+import pytest
+
 
 SHARED = Path(__file__).parents[1]
 
 
-def test_gate_defaults_false_in_both_roots_and_modules():
-    for path in (
-        SHARED / "modules/data_access/variables.tf",
-        SHARED / "modules/workspace/variables.tf",
-        SHARED / "roots/data_access/main.tf",
-        SHARED / "roots/workspace/main.tf",
-    ):
+ROOTS = (SHARED / "roots/data_access/main.tf", SHARED / "roots/workspace/main.tf")
+
+
+def test_retired_flag_is_declared_deprecated_in_the_roots_only_and_never_read():
+    # Modules no longer know the flag; nothing can gate (or revoke) on it.
+    for module in ("data_access", "workspace"):
+        for path in (SHARED / "modules" / module).glob("*.tf"):
+            source = path.read_text()
+            assert "var.business_access_enabled" not in source, path
+            assert 'variable "business_access_enabled"' not in source, path
+    # The roots keep it declared for one release, so env.auto.tfvars files
+    # and -var flags that still set it (true or false) don't fail.
+    for path in ROOTS:
         source = path.read_text()
         start = source.index('variable "business_access_enabled"')
         body = source[start : source.index("}\n", start) + 2]
-        assert "default     = false" in body
+        assert "default     = null" in body
+        assert "DEPRECATED and ignored" in body
+        assert "false does NOT revoke access" in body
+        assert "var.business_access_enabled" not in source
 
 
-def test_workspace_business_acls_are_gated_but_creation_is_not():
+def test_workspace_business_acls_follow_the_gate_not_a_flag():
     source = (SHARED / "modules/workspace/main.tf").read_text()
 
-    assert source.count(
-        "if var.business_access_enabled && "
-        "contains(keys(local.genie_space_groups), k)"
-    ) == 2
+    # Same for_each keys as before the retirement, minus the flag.
+    assert source.count("if contains(keys(local.genie_space_groups), k)") == 2
     assert source.count('GENIE_ALLOW_EMPTY_ACL    = "1"') == 2
+    # Opening or widening CAN_RUN still needs the coverage gate.
+    assert source.count("var.genie_exposure_blocker == \"\"") == 2
 
-    create_start = source.index('resource "terraform_data" "genie_space"')
-    create_end = source.index(
-        'resource "null_resource" "genie_space_config"', create_start
+
+def _guard_workspace_config(tmp_path, env_file):
+    env_dir = tmp_path / "envs" / "dev"
+    env_dir.mkdir(parents=True)
+    (env_dir / "env.auto.tfvars").write_text(env_file)
+    env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MAKELEVEL")}
+    return subprocess.run(
+        ["make", "--no-print-directory", "_guard-workspace-config", "ENV=dev",
+         f"ENV_DIR={env_dir}", f"CLOUD_ROOT={tmp_path}", f"SHARED_ROOT={SHARED}"],
+        cwd=SHARED.parent / "aws", text=True, capture_output=True, env=env,
     )
-    assert "business_access_enabled" not in source[create_start:create_end]
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_setting_the_retired_flag_warns_once_and_does_not_fail(tmp_path, value):
+    result = _guard_workspace_config(tmp_path, f'business_access_enabled = {value}\nsql_warehouse_id = ""\n')
+    assert result.returncode == 0, result.stdout + result.stderr
+    warnings = [line for line in result.stderr.splitlines() if "business_access_enabled" in line]
+    assert len(warnings) == 1, result.stderr
+    assert warnings[0].startswith("WARNING: business_access_enabled in envs/dev/env.auto.tfvars is deprecated and ignored")
+    assert "setting it false does not revoke access" in warnings[0]
+    assert "remove the groups or acl_groups entries" in warnings[0]
+    # Warning only: the file is left exactly as it was.
+    assert (tmp_path / "envs/dev/env.auto.tfvars").read_text().startswith(f"business_access_enabled = {value}")
+
+
+def test_unset_retired_flag_prints_no_warning(tmp_path):
+    result = _guard_workspace_config(tmp_path, 'sql_warehouse_id = ""\n')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "business_access_enabled" not in result.stdout + result.stderr
 
 
 def test_genie_creation_replaces_only_on_host_and_keeps_no_credentials():
@@ -220,7 +256,6 @@ def test_apply_fingerprint_includes_terraform_and_genie_code():
     assert "! -path '*/.terraform/*'" in makefile
 
 
-def test_roots_forward_the_same_gate_to_both_modules():
-    assignment = r"business_access_enabled\s*=\s*var\.business_access_enabled"
-    assert re.search(assignment, (SHARED / "roots/data_access/main.tf").read_text())
-    assert re.search(assignment, (SHARED / "roots/workspace/main.tf").read_text())
+def test_roots_no_longer_forward_the_retired_flag():
+    for path in ROOTS:
+        assert not re.search(r"business_access_enabled\s*=\s*var\.", path.read_text()), path

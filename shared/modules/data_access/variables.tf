@@ -64,12 +64,6 @@ variable "classification_uc_tables" {
   description = "Classification-only UC table footprint; never used to derive grants."
 }
 
-variable "business_access_enabled" {
-  type        = bool
-  default     = false
-  description = "Fail-closed exposure gate. Set true only after the coverage gate and schema drift check pass; controls business-group SELECT grants."
-}
-
 variable "coverage_gate_file" {
   type        = string
   description = "Path to the coverage-gate result scripts/coverage_gate.py writes for this layer. Business SELECT grants are planned only while it records a pass for the current inputs."

@@ -96,7 +96,7 @@ resource "databricks_sql_endpoint" "warehouse" {
 resource "null_resource" "genie_space_acls" {
   for_each = {
     for k, v in local.existing_spaces : k => v
-    if var.business_access_enabled && contains(keys(local.genie_space_groups), k)
+    if contains(keys(local.genie_space_groups), k)
   }
 
   triggers = {
@@ -293,7 +293,7 @@ resource "null_resource" "genie_space_acls_created" {
   # where groups are managed by the governance team in a separate environment).
   for_each = {
     for k, v in local.new_spaces : k => v
-    if var.business_access_enabled && contains(keys(local.genie_space_groups), k)
+    if contains(keys(local.genie_space_groups), k)
   }
 
   triggers = {

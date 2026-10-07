@@ -116,7 +116,7 @@ Re-running `make generate ENV=dev` keeps the reviewed rules in `envs/dev/generat
 ```bash
 make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id
 ```
-`make rehearse` runs **coverage-gate → validate-generated → apply → verify-access** in order, stopping at the first failure. The last step, `verify-access`, proves masking *by effect*: it creates a test SP for each access tier, grants each test SP temporary `CAN_USE` on the selected warehouse, and confirms the unprivileged tier sees masked values while an authorized tier sees raw. No separate warehouse-permission command is required. In dev you **don't touch the exposure gate** — rehearse opens it just for this check (the masks protect the data either way; prod opens it deliberately in Phase 5). `VERIFY_KEY_COLUMN` is the single column used to pair rows across tiers — optional, but if you omit it the masking check is skipped, so always set it ([how to choose](../../docs/effective-access-verification.md#choosing-the-row-pairing-key-verify_key_column); save it as `verify_key_column` in `env.auto.tfvars` to drop the flag); for tables that don't share one key, pass a [`VERIFY_SPEC` JSON](../../docs/effective-access-verification.md) instead.
+`make rehearse` runs **live derive → validate-generated → coverage-gate → apply → verify-access** in order, stopping at the first failure. The last step, `verify-access`, proves masking *by effect*: it creates a test SP for each access tier, grants each test SP temporary `CAN_USE` on the selected warehouse, and confirms the unprivileged tier sees masked values while an authorized tier sees raw. No separate warehouse-permission command is required. There is no access flag to set: business `SELECT` and Genie run access are granted only when the coverage check passes, and dev keeps that access after rehearse (the masks protect the data either way). `VERIFY_KEY_COLUMN` is the single column used to pair rows across tiers — optional, but if you omit it the masking check is skipped, so always set it ([how to choose](../../docs/effective-access-verification.md#choosing-the-row-pairing-key-verify_key_column); save it as `verify_key_column` in `env.auto.tfvars` to drop the flag); for tables that don't share one key, pass a [`VERIFY_SPEC` JSON](../../docs/effective-access-verification.md) instead.
 
 </details>
 
@@ -233,9 +233,9 @@ Repeat until the gate passes and drift is clean. The agent stays uncreated and c
 make release ENV=prod VERIFY_KEY_COLUMN=customer_id
 ```
 
-One command: placeholder guard → lock → live UC re-read/`derive-assignments` → validation → coverage check → promote the derived config into its Terraform layers → read-only `audit-rulebook` → all-layer apply → `verify-access`. The audit runs before the access-granting apply, so drift or an audit error leaves existing access unchanged and blocks any new or wider business `SELECT` or Genie run access. On success, release saves `business_access_enabled = true` in `envs/prod/env.auto.tfvars`. Don't edit it by hand.
+One command: placeholder guard → lock → live UC re-read/`derive-assignments` → validation → coverage check → promote the derived config into its Terraform layers → read-only `audit-rulebook` → all-layer apply → `verify-access`. The audit runs before the access-granting apply, so drift or an audit error leaves existing access unchanged and blocks any new or wider business `SELECT` or Genie run access. There is no access flag to set or save: Terraform grants business `SELECT` and Genie run access only through the passing coverage check, and re-running `promote` never closes access that is already live.
 
-If `release` fails after it started applying, or you interrupt it, access may be partly open. Follow the rollback steps it prints; if it was interrupted, set `business_access_enabled = false` in `envs/prod/env.auto.tfvars` and run `make apply ENV=prod`.
+If `release` fails after it started applying, or you interrupt it, access may be partly applied — but only access that passed the coverage check. Follow the steps it prints. To withdraw access, remove the groups (or set `acl_groups = []`) in `envs/prod/env.auto.tfvars` and run `make apply ENV=prod`; `business_access_enabled` is retired and setting it to `false` does not revoke anything.
 
 <details>
 <summary><strong>Optional — Capture compliance evidence</strong></summary>
@@ -292,6 +292,6 @@ A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog gr
 Kept out of this walkthrough so it stays scannable — all in **[REFERENCE.md](REFERENCE.md)**:
 
 - **[Command reference](REFERENCE.md#command-reference)** — every `make` target in one table.
-- **[How it works (under the hood)](REFERENCE.md#how-it-works-under-the-hood)** — the exposure gate, the three governance layers, and one-mask-per-column, explained.
+- **[How it works (under the hood)](REFERENCE.md#how-it-works-under-the-hood)** — how access follows the coverage gate, the three governance layers, and one-mask-per-column, explained.
 - **[Glossary](REFERENCE.md#glossary)** — every term used here (`gr_treatment`, `class.*`, coverage gate, ABAC, …).
 </details>

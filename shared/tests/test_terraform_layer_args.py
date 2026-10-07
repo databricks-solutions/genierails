@@ -14,7 +14,7 @@ def test_caller_var_override_follows_repo_tfvars(tmp_path):
     env_dir = tmp_path / "env"
     env_dir.mkdir()
     tfvars = env_dir / "env.auto.tfvars"
-    tfvars.write_text("business_access_enabled = false\n")
+    tfvars.write_text('coverage_gate_max_age = "6h"\n')
 
     log = tmp_path / "terraform.log"
     bin_dir = tmp_path / "bin"
@@ -36,7 +36,7 @@ def test_caller_var_override_follows_repo_tfvars(tmp_path):
             "dev",
             "apply",
             "-auto-approve",
-            "-var=business_access_enabled=true",
+            "-var=coverage_gate_max_age=1h",
         ],
         text=True,
         capture_output=True,
@@ -46,7 +46,7 @@ def test_caller_var_override_follows_repo_tfvars(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     apply_args = shlex.split(log.read_text().splitlines()[1])
     assert apply_args.index(f"-var-file={tfvars}") < apply_args.index(
-        "-var=business_access_enabled=true"
+        "-var=coverage_gate_max_age=1h"
     )
 
 

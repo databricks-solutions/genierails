@@ -19,7 +19,6 @@ variables {
   sql_warehouse_id          = "warehouse"
   uc_tables                 = ["cat.sch.customers"]
   groups                    = { analysts = {} }
-  business_access_enabled   = true
 }
 
 run "setup" {
@@ -34,17 +33,20 @@ run "setup" {
   }
 }
 
+# Refresh-only: plans no grants, so the gate inputs read without a gate result.
 run "gate_inputs" {
   command = plan
-  variables {
-    business_access_enabled = false
+  plan_options {
+    mode = refresh-only
   }
 }
 
 run "gate_inputs_elsewhere" {
   command = plan
+  plan_options {
+    mode = refresh-only
+  }
   variables {
-    business_access_enabled   = false
     databricks_workspace_host = "https://other.invalid"
   }
 }

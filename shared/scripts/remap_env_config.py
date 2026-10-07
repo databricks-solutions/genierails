@@ -396,8 +396,10 @@ def main():
             "  Preserved destination enable_auto_tagging="
             f"{str(preserved_auto_tagging).lower()}"
         )
-    if dest_cfg.get("business_access_enabled") is True:
-        print("  Reset destination business_access_enabled=true to false")
+    if "business_access_enabled" in dest_cfg:
+        # Retired: access follows the coverage gate, so the rewrite drops the
+        # line instead of resetting it (a reset used to close live prod).
+        print("  Dropped the retired business_access_enabled setting from the destination")
     if preserved_acknowledged:
         print(
             "  Preserved destination coverage_acknowledged_columns "
@@ -465,10 +467,10 @@ def main():
     )
     lines.append(f"verify_key_column = {json.dumps(promoted_verify_key)}")
     lines.append("")
-    lines.append("# Safe production defaults; use the UI workflow before opening access.")
+    lines.append("# Safe production defaults. Business access is granted only through the")
+    lines.append("# coverage gate that make release runs; there is no access flag to set.")
     lines.append("enable_classification = true")
     lines.append(f"enable_auto_tagging = {str(preserved_auto_tagging).lower()}")
-    lines.append("business_access_enabled = false")
     if preserved_acknowledged:
         lines.append("")
         lines.append("# Reviewed as not sensitive; the coverage gate doesn't block first exposure on them.")

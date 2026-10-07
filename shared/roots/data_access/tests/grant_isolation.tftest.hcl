@@ -3,9 +3,9 @@ mock_provider "null" {}
 mock_provider "time" {}
 
 # Business SELECT needs a current coverage-gate pass (coverage_gate.tftest.hcl).
-# Before each grant-shape run, a closed-gate plan of the same inputs reads the
-# gate fingerprint and the file writer records a pass for it, refreshed at
-# plan time ("@NOW@").
+# Before each grant-shape run, a refresh-only plan of the same inputs (which
+# plans no grants, so the gate can't refuse them) reads the gate fingerprint
+# and the file writer records a pass for it, refreshed at plan time ("@NOW@").
 run "setup_masking_sql" {
   module {
     source = "./tests/file_writer"
@@ -19,6 +19,9 @@ run "setup_masking_sql" {
 
 run "per_agent_select_grants_are_isolated_and_shared_tables_union_acls__gate_inputs" {
   command = plan
+  plan_options {
+    mode = refresh-only
+  }
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -43,9 +46,8 @@ run "per_agent_select_grants_are_isolated_and_shared_tables_union_acls__gate_inp
       agent_a_group = {}
       agent_b_group = {}
     }
-    business_access_enabled = false
-    enable_classification   = true
-    sql_warehouse_id        = "warehouse"
+    enable_classification = true
+    sql_warehouse_id      = "warehouse"
   }
 }
 
@@ -87,9 +89,8 @@ run "per_agent_select_grants_are_isolated_and_shared_tables_union_acls" {
       agent_a_group = {}
       agent_b_group = {}
     }
-    business_access_enabled = true
-    enable_classification   = true
-    sql_warehouse_id        = "warehouse"
+    enable_classification = true
+    sql_warehouse_id      = "warehouse"
   }
 
   assert {
@@ -147,6 +148,9 @@ run "per_agent_select_grants_are_isolated_and_shared_tables_union_acls" {
 
 run "legacy_unattributed_discovery_falls_back_to_all_principals__gate_inputs" {
   command = plan
+  plan_options {
+    mode = refresh-only
+  }
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -159,8 +163,7 @@ run "legacy_unattributed_discovery_falls_back_to_all_principals__gate_inputs" {
       agent_a_group = {}
       agent_b_group = {}
     }
-    business_access_enabled = false
-    sql_warehouse_id        = "warehouse"
+    sql_warehouse_id = "warehouse"
   }
 }
 
@@ -190,8 +193,7 @@ run "legacy_unattributed_discovery_falls_back_to_all_principals" {
       agent_a_group = {}
       agent_b_group = {}
     }
-    business_access_enabled = true
-    sql_warehouse_id        = "warehouse"
+    sql_warehouse_id = "warehouse"
   }
 
   assert {
@@ -210,6 +212,9 @@ run "legacy_unattributed_discovery_falls_back_to_all_principals" {
 
 run "id_only_space_uses_canonical_title_for_select__gate_inputs" {
   command = plan
+  plan_options {
+    mode = refresh-only
+  }
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -221,7 +226,6 @@ run "id_only_space_uses_canonical_title_for_select__gate_inputs" {
     genie_space_id_to_name    = { "space-1" = "Payments" }
     genie_space_acl_groups    = { Payments = ["pay_group"] }
     groups                    = { pay_group = {}, hr_group = {} }
-    business_access_enabled   = false
     sql_warehouse_id          = "warehouse"
   }
 }
@@ -250,7 +254,6 @@ run "id_only_space_uses_canonical_title_for_select" {
     genie_space_id_to_name    = { "space-1" = "Payments" }
     genie_space_acl_groups    = { Payments = ["pay_group"] }
     groups                    = { pay_group = {}, hr_group = {} }
-    business_access_enabled   = true
     sql_warehouse_id          = "warehouse"
   }
   assert {
@@ -261,6 +264,9 @@ run "id_only_space_uses_canonical_title_for_select" {
 
 run "empty_agent_list_is_fail_closed__gate_inputs" {
   command = plan
+  plan_options {
+    mode = refresh-only
+  }
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -276,8 +282,7 @@ run "empty_agent_list_is_fail_closed__gate_inputs" {
       agent_a_group = {}
       agent_b_group = {}
     }
-    business_access_enabled = false
-    sql_warehouse_id        = "warehouse"
+    sql_warehouse_id = "warehouse"
   }
 }
 
@@ -310,8 +315,7 @@ run "empty_agent_list_is_fail_closed" {
       agent_a_group = {}
       agent_b_group = {}
     }
-    business_access_enabled = true
-    sql_warehouse_id        = "warehouse"
+    sql_warehouse_id = "warehouse"
   }
 
   assert {
@@ -322,6 +326,9 @@ run "empty_agent_list_is_fail_closed" {
 
 run "explicit_empty_space_acl_means_no_select_grants__gate_inputs" {
   command = plan
+  plan_options {
+    mode = refresh-only
+  }
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -339,8 +346,7 @@ run "explicit_empty_space_acl_means_no_select_grants__gate_inputs" {
       agent_a_group = {}
       agent_b_group = {}
     }
-    business_access_enabled = false
-    sql_warehouse_id        = "warehouse"
+    sql_warehouse_id = "warehouse"
   }
 }
 
@@ -375,8 +381,7 @@ run "explicit_empty_space_acl_means_no_select_grants" {
       agent_a_group = {}
       agent_b_group = {}
     }
-    business_access_enabled = true
-    sql_warehouse_id        = "warehouse"
+    sql_warehouse_id = "warehouse"
   }
 
   assert {
@@ -387,6 +392,9 @@ run "explicit_empty_space_acl_means_no_select_grants" {
 
 run "unknown_agent_does_not_widen_known_agent_scope__gate_inputs" {
   command = plan
+  plan_options {
+    mode = refresh-only
+  }
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -405,8 +413,7 @@ run "unknown_agent_does_not_widen_known_agent_scope__gate_inputs" {
       agent_a_group = {}
       agent_b_group = {}
     }
-    business_access_enabled = false
-    sql_warehouse_id        = "warehouse"
+    sql_warehouse_id = "warehouse"
   }
 }
 
@@ -442,8 +449,7 @@ run "unknown_agent_does_not_widen_known_agent_scope" {
       agent_a_group = {}
       agent_b_group = {}
     }
-    business_access_enabled = true
-    sql_warehouse_id        = "warehouse"
+    sql_warehouse_id = "warehouse"
   }
 
   assert {
@@ -454,6 +460,9 @@ run "unknown_agent_does_not_widen_known_agent_scope" {
 
 run "top_level_admin_table_wins_over_agent_scope__gate_inputs" {
   command = plan
+  plan_options {
+    mode = refresh-only
+  }
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -472,8 +481,7 @@ run "top_level_admin_table_wins_over_agent_scope__gate_inputs" {
       agent_a_group = {}
       agent_b_group = {}
     }
-    business_access_enabled = false
-    sql_warehouse_id        = "warehouse"
+    sql_warehouse_id = "warehouse"
   }
 }
 
@@ -509,8 +517,7 @@ run "top_level_admin_table_wins_over_agent_scope" {
       agent_a_group = {}
       agent_b_group = {}
     }
-    business_access_enabled = true
-    sql_warehouse_id        = "warehouse"
+    sql_warehouse_id = "warehouse"
   }
 
   assert {
@@ -524,6 +531,9 @@ run "top_level_admin_table_wins_over_agent_scope" {
 
 run "absent_discovery_preserves_legacy_user_table_behavior__gate_inputs" {
   command = plan
+  plan_options {
+    mode = refresh-only
+  }
 
   variables {
     env_dir                   = "tests/.tmp/grants/data_access"
@@ -533,7 +543,6 @@ run "absent_discovery_preserves_legacy_user_table_behavior__gate_inputs" {
     databricks_workspace_host = "https://example.invalid"
     uc_tables                 = ["legacy_catalog.business.orders"]
     groups                    = { analysts = {} }
-    business_access_enabled   = false
     sql_warehouse_id          = "warehouse"
   }
 }
@@ -561,7 +570,6 @@ run "absent_discovery_preserves_legacy_user_table_behavior" {
     databricks_workspace_host = "https://example.invalid"
     uc_tables                 = ["legacy_catalog.business.orders"]
     groups                    = { analysts = {} }
-    business_access_enabled   = true
     sql_warehouse_id          = "warehouse"
   }
 

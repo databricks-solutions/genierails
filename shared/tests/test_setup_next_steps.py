@@ -81,12 +81,14 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "  5. Run: make generate ENV=dev\n" in out
     assert "make rehearse ENV=dev VERIFY_KEY_COLUMN=" in out
     assert "  6. Run: make rehearse" in out
+    assert "business_access_enabled" not in out
+    assert "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)\n" in out
     assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == ["1", "2", "3", "4", "5", "6"]
     assert "shared/examples/dev_to_prod/README.md" in out
     # The champion flow relies on native Data Classification, not the country overlay.
     assert "APJ" not in out
     assert "country" not in out
-    # Plain apply skips the coverage gate; setup must not suggest it for dev.
+    # Setup points dev at rehearse (derive, validate and gate first), not plain apply.
     assert "make apply" not in out
     assert (
         out.index("envs/dev/auth.auto.tfvars")
@@ -132,6 +134,8 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
     assert "make rehearse" not in out
     assert "make generate" not in out
     assert "Set business_access_enabled" not in out
+    assert "business_access_enabled" not in out
+    assert "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)\n" in out
     assert "make apply ENV=prod" not in out
     assert "make verify-access ENV=prod" not in out
     assert "make certify" not in out

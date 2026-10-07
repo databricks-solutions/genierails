@@ -18,7 +18,6 @@ variables {
   databricks_workspace_id   = "123"
   databricks_workspace_host = "https://example.invalid"
   sql_warehouse_id          = "warehouse"
-  business_access_enabled   = true
   groups                    = { analysts = {} }
 }
 

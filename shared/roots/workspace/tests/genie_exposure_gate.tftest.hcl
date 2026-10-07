@@ -1,5 +1,5 @@
-# Genie CAN_RUN opens only after the data_access layer was applied with
-# business access open and a passing coverage gate, while the gate result on
+# Genie CAN_RUN opens only after the data_access layer was applied with a
+# passing coverage gate and business grants in place, while the gate result on
 # disk is still the one that apply used. The root computes why exposure is
 # blocked (genie_exposure_blocker) from the data_access state and gate file;
 # modules/workspace/tests checks that the module then refuses every non-empty
@@ -29,7 +29,6 @@ variables {
   databricks_workspace_id   = "123"
   databricks_workspace_host = "https://example.invalid"
   sql_warehouse_id          = "warehouse"
-  business_access_enabled   = true
   groups                    = { analysts = {} }
   genie_spaces              = [{ name = "Sales", genie_space_id = "space-1", uc_tables = [] }]
   genie_space_configs       = { Sales = { acl_groups = [] } }
@@ -76,7 +75,9 @@ run "pre_gate_state_blocks" {
   }
 }
 
-run "closed_data_access" {
+# State written before business_access_enabled was retired, by an apply made
+# with it false (nothing granted).
+run "legacy_closed_data_access" {
   module {
     source = "../data_access/tests/file_writer"
   }
@@ -88,11 +89,11 @@ run "closed_data_access" {
   }
 }
 
-run "closed_data_access_blocks" {
+run "legacy_closed_data_access_blocks" {
   command = plan
   assert {
-    condition     = strcontains(output.genie_exposure_blocker, "business_access_enabled = false")
-    error_message = "a data_access layer applied closed must block CAN_RUN"
+    condition     = strcontains(output.genie_exposure_blocker, "applied with business access closed")
+    error_message = "a data_access layer applied closed (legacy state) must block CAN_RUN"
   }
 }
 
@@ -200,6 +201,44 @@ run "ready_data_access_allows_can_run" {
   assert {
     condition     = output.genie_space_acls_groups["sales"] == "analysts" && output.genie_space_acls_applied
     error_message = "with data_access ready, the CAN_RUN ACL must be planned"
+  }
+}
+
+# The data_access state as written after the flag was retired: no
+# business_access_enabled key. Setting the deprecated variable (either way)
+# must change nothing: it neither withholds nor revokes CAN_RUN.
+run "data_access_ready_without_the_retired_flag" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { fingerprint = "applied", status = "pass", max_age = "6h", table_grant_count = 1 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "pass", fingerprint = "applied", refreshed_at = "@NOW@" })
+    }
+  }
+}
+
+run "retired_flag_false_does_not_withhold_can_run" {
+  command = plan
+  variables {
+    business_access_enabled = false
+    genie_space_configs     = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = output.genie_exposure_blocker == "" && output.genie_space_acls_groups["sales"] == "analysts" && output.genie_space_acls_applied
+    error_message = "business_access_enabled = false must not withhold or revoke CAN_RUN"
+  }
+}
+
+run "retired_flag_unset_plans_the_same_can_run" {
+  command = plan
+  variables {
+    genie_space_configs = { Sales = { acl_groups = ["analysts"] } }
+  }
+  assert {
+    condition     = output.genie_exposure_blocker == "" && output.genie_space_acls_groups["sales"] == "analysts" && output.genie_space_acls_applied
+    error_message = "CAN_RUN must be planned through the gate with no flag set"
   }
 }
 
