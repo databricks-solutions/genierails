@@ -12,6 +12,17 @@ With `enable_classification=true`, generation is **fail-closed**: if native `cla
 - If your data genuinely has no format-matchable PII yet, seed realistic values or wait for the scan.
 - Only to deliberately bypass (not recommended in prod): `GENERATE_ARGS='--allow-llm-sensitivity'`.
 
+### Auto-tagging safety refusal
+
+GenieRails refuses before applying when live auto-tagging is on in the UI but
+`envs/<env>/env.auto.tfvars` sets `enable_auto_tagging = false`. Delete that line
+to preserve the UI setting. Use `ALLOW_DISABLE_AUTO_TAGGING=1` only when you
+really intend to turn auto-tagging off. `make promote-to` also refuses to
+preserve an explicit `false` into the destination unless the same override is
+provided. Values must be the unquoted HCL booleans `true` or `false`; quoted
+`"true"` and `"false"` are rejected rather than coerced. Explicit `true` replaces
+the UI's per-tag choices with the module's supported tag list.
+
 ### `make derive-assignments` (prod) fails on empty/unmapped classifications
 
 By design, prod refresh rejects empty native results and unmapped `class.*` findings (a finding with no `gr_treatment` mapping). Add the missing mapping to `treatment_config.json` and re-run; it never falls back to the LLM.

@@ -130,7 +130,7 @@ variable "enable_classification" {
 variable "enable_auto_tagging" {
   type        = bool
   default     = null
-  description = "Optional scripted auto-tagging control. Null preserves the catalog's existing UI-managed auto-tag configuration; true enables the supported class.* types; false explicitly disables them."
+  description = "Optional scripted auto-tagging control. Null preserves the catalog's existing UI-managed auto-tag configuration; true replaces UI per-tag choices with the module's supported class.* tag list; false explicitly disables them."
 }
 
 variable "classification_existing_schemas" {

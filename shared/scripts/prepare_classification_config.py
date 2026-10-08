@@ -60,6 +60,14 @@ def main() -> int:
     env_dir = Path(sys.argv[1]).resolve()
     config = _load(env_dir / "env.auto.tfvars")
     auth = _load(env_dir / "auth.auto.tfvars")
+    auto_tagging_setting = config.get("enable_auto_tagging")
+    if auto_tagging_setting is not None and not isinstance(auto_tagging_setting, bool):
+        print(
+            f"ERROR: {_env_file_label(env_dir)} enable_auto_tagging must be "
+            "true, false, or omitted (do not quote it)",
+            file=sys.stderr,
+        )
+        return 1
 
     if not config.get("enable_classification", False):
         output = env_dir / "data_access" / "classification.auto.tfvars"
@@ -139,7 +147,7 @@ def main() -> int:
             for item in existing_auto_tags[catalog]
         )
         if (
-            config.get("enable_auto_tagging") is False
+            auto_tagging_setting is False
             and remote_auto_tagging_on
             and os.environ.get("ALLOW_DISABLE_AUTO_TAGGING") != "1"
         ):

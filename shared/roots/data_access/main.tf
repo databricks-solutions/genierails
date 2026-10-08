@@ -223,7 +223,7 @@ variable "verify_key_column" {
 variable "enable_auto_tagging" {
   type        = bool
   default     = null
-  description = "Optional scripted auto-tagging control. Null preserves the catalog's existing UI-managed setting; true enables supported class.* tags; false explicitly disables them."
+  description = "Optional scripted auto-tagging control. Null preserves the catalog's existing UI-managed setting; true replaces UI per-tag choices with the module's supported class.* tag list; false explicitly disables them."
 }
 
 variable "classification_existing_schemas" {

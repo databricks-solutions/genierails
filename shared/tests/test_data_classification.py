@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import hcl2
+import pytest
 
 from tests.terraform_helpers import (
     shared_copy,
@@ -461,6 +462,31 @@ def test_legacy_explicit_false_refuses_before_overwriting_ui_auto_tagging(
         "auto-tagging is on in the UI but envs/prod/env.auto.tfvars sets "
         "enable_auto_tagging = false; delete that line to keep the UI setting, "
         "or pass ALLOW_DISABLE_AUTO_TAGGING=1 to really turn it off"
+        in capsys.readouterr().err
+    )
+
+
+@pytest.mark.parametrize("quoted_value", ["false", "true"])
+def test_quoted_auto_tagging_boolean_is_rejected_before_writing_tfvars(
+    tmp_path, monkeypatch, capsys, quoted_value
+):
+    remote = SimpleNamespace(
+        included_schemas=SimpleNamespace(names=["customers"]),
+        auto_tag_configs=[{
+            "classification_tag": "class.email_address",
+            "auto_tagging_mode": "AUTO_TAGGING_ENABLED",
+        }],
+    )
+    rc, env_dir = _run_prepare_with_remote(
+        tmp_path,
+        monkeypatch,
+        remote,
+        auto_tagging_line=f'enable_auto_tagging = "{quoted_value}"\n',
+    )
+    assert rc == 1
+    assert not (env_dir / "data_access/classification.auto.tfvars").exists()
+    assert (
+        "enable_auto_tagging must be true, false, or omitted (do not quote it)"
         in capsys.readouterr().err
     )
 
