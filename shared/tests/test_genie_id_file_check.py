@@ -272,3 +272,120 @@ def test_the_check_runs_before_every_early_exit_of_both_layer_recipes():
     # maintain only warns (never refuses governance over Genie bookkeeping).
     maintain = _recipe(makefile, "maintain")
     assert '--id-files --warn;' in maintain and maintain.count("--id-files") == 1
+
+
+# ── which agents the config keeps, asked of the real workspace root ────────
+# terraform_data.genie_space manages managed_created_spaces: the create path's
+# new_spaces plus #87's verified create-to-ID handoffs. A handoff is verified
+# only while its ID file holds the configured ID, so the question is asked as
+# if the files were restored: a handoff that lost its ID file is still kept
+# (the missing-file refusal), and only a space gone from config is "removed".
+
+HOST = "https://example.invalid"
+CREATE_ID = "2afb2175-create"
+
+
+def _console_env(tmp_path, spaces_hcl):
+    from tests.terraform_helpers import shared_copy
+
+    copy = shared_copy(tmp_path / "copy")
+    env = tmp_path / "prod"
+    env.mkdir()
+    (env / "abac.auto.tfvars").write_text(
+        'databricks_account_id = "account"\ndatabricks_client_id = "sp"\n'
+        'databricks_client_secret = "secret"\ndatabricks_workspace_id = "123"\n'
+        f'databricks_workspace_host = "{HOST}"\nsql_warehouse_id = "warehouse"\n'
+        'groups = { analysts = {} }\n'
+        f"genie_spaces = {spaces_hcl}\n"
+    )
+    attrs_data = {
+        "id": CREATE_ID,
+        "input": {"value": {"id_file": f"{env}/.genie_space_id_{KEY}"}, "type": ["object", {"id_file": "string"}]},
+        "output": {"value": {"id_file": f"{env}/.genie_space_id_{KEY}"}, "type": ["object", {"id_file": "string"}]},
+        "triggers_replace": {"value": {"host": HOST}, "type": ["object", {"host": "string"}]},
+    }
+    (env / "terraform.tfstate").write_text(json.dumps({
+        "version": 4, "terraform_version": "1.11.4", "serial": 1, "lineage": "test", "outputs": {},
+        "resources": [
+            {"module": "module.workspace", "mode": "managed", "type": "terraform_data", "name": "genie_space",
+             "provider": 'provider["terraform.io/builtin/terraform"]',
+             "instances": [{"index_key": KEY, "schema_version": 0, "attributes": attrs_data,
+                            "sensitive_attributes": []}]},
+            {"module": "module.workspace", "mode": "managed", "type": "null_resource",
+             "name": "genie_space_acls_created", "provider": 'provider["registry.terraform.io/hashicorp/null"]',
+             "instances": [{"index_key": KEY, "schema_version": 0, "sensitive_attributes": [],
+                            "attributes": {"id": "1", "triggers": {"space_create_id": CREATE_ID,
+                                                                   "groups": "analysts"}}}]},
+        ],
+    }))
+    return env, copy / "scripts" / "terraform_layer.sh"
+
+
+def _real_check(tmp_path, monkeypatch, capsys, spaces_hcl):
+    from tests.terraform_helpers import tf_env
+
+    env, runner = _console_env(tmp_path, spaces_hcl)
+    for name, value in tf_env(tmp_path).items():
+        if name.startswith("TF_"):
+            monkeypatch.setenv(name, value)
+    monkeypatch.delenv("TF_DATA_DIR", raising=False)  # terraform_layer.sh sets its own
+    desired = pf.desired_created_keys(env, "prod", str(runner))
+    rc = pf.check_id_files(env, False, "prod", str(runner))
+    return desired, rc, capsys.readouterr().err
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_a_handoff_that_lost_its_id_file_is_kept_not_removed(tmp_path, monkeypatch, capsys):
+    # #87: the created agent is now configured by its explicit ID; with the
+    # ID file gone Terraform's own handoff set drops it, but it is kept.
+    spaces = f'[{{ name = "Sales", genie_space_id = "01handoff", uc_tables = ["cat.sch.t"] }}]'
+    desired, rc, err = _real_check(tmp_path, monkeypatch, capsys, spaces)
+    assert desired == {KEY}
+    assert rc == 1
+    assert "(still in config" in err and "a config or ACL change" in err
+    assert "removed from config" not in err and "the removal is refused too" not in err
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_a_genuinely_removed_agent_gets_the_removal_message(tmp_path, monkeypatch, capsys):
+    spaces = '[{ name = "Other", genie_space_id = "01other", uc_tables = ["cat.sch.o"] }]'
+    desired, rc, err = _real_check(tmp_path, monkeypatch, capsys, spaces)
+    assert desired == set()
+    assert rc == 1
+    assert "(removed from config, so this apply would trash it; on https://example.invalid)" in err
+    assert "the removal is refused too" in err and "still in config" not in err
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_a_create_path_agent_is_kept(tmp_path, monkeypatch, capsys):
+    spaces = '[{ name = "Sales", genie_space_id = "", uc_tables = ["cat.sch.t"] }]'
+    desired, rc, err = _real_check(tmp_path, monkeypatch, capsys, spaces)
+    assert desired == {KEY}
+    assert rc == 1 and "(still in config" in err
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_the_handoff_split_keeps_terraform_s_own_handoff_set(tmp_path, monkeypatch):
+    # created_acl_handoffs = candidates whose ID file holds the configured ID.
+    from tests.terraform_helpers import tf_env
+
+    spaces = f'[{{ name = "Sales", genie_space_id = "01handoff", uc_tables = ["cat.sch.t"] }}]'
+    env, runner = _console_env(tmp_path, spaces)
+    for name, value in tf_env(tmp_path).items():
+        if name.startswith("TF_"):
+            monkeypatch.setenv(name, value)
+    monkeypatch.delenv("TF_DATA_DIR", raising=False)
+
+    def ask(expression):
+        result = subprocess.run([str(runner), "workspace", "prod", "console"], input=expression + "\n",
+                                capture_output=True, text=True, timeout=600,
+                                env={**os.environ, "LAYER_ENV_DIR": str(env)})
+        assert result.returncode == 0, result.stdout + result.stderr
+        return json.loads([l for l in result.stdout.splitlines() if l.strip()][-1])
+
+    expression = 'jsonencode([keys(local.created_acl_handoffs), keys(local.created_acl_handoff_candidates)])'
+    assert json.loads(ask(expression)) == [[], [KEY]]  # file missing: candidate, not a handoff
+    (env / f".genie_space_id_{KEY}").write_text("01other\n")
+    assert json.loads(ask(expression)) == [[], [KEY]]  # wrong ID: still not a handoff
+    (env / f".genie_space_id_{KEY}").write_text("01handoff\n")
+    assert json.loads(ask(expression)) == [[KEY], [KEY]]

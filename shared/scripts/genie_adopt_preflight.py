@@ -110,11 +110,14 @@ def _identify(state: dict, key: str) -> str:
     return "; ".join(p for p in parts if p)
 
 
-# Created agents the workspace config still wants: the same filter as
-# modules/workspace new_spaces over the root's merged_spaces.
+# The agents terraform_data.genie_space keeps (modules/workspace
+# managed_created_spaces) as they would be with the ID files restored:
+# Terraform's own new_spaces, plus the root's state-verified create-to-ID
+# handoffs before their ID-file check (a missing file is what is being
+# diagnosed, and it would drop a kept handoff from managed_created_spaces).
 DESIRED_CREATED_EXPRESSION = (
-    'base64encode(jsonencode([for key, space in local.merged_spaces : key '
-    'if space.genie_space_id == "" && length(space.uc_tables) > 0]))'
+    "base64encode(jsonencode(sort(setunion("
+    "module.workspace.new_space_keys, keys(local.created_acl_handoff_candidates)))))"
 )
 
 

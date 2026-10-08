@@ -62,6 +62,11 @@ output "genie_space_acl_removal_only" {
   ))
 }
 
+output "new_space_keys" {
+  description = "Keys of the spaces the create path manages (genie_space_id empty, tables listed); with verified create-to-ID handoffs they make up terraform_data.genie_space."
+  value       = sort(keys(local.new_spaces))
+}
+
 output "genie_spaces_created" {
   description = "Set of Genie agent keys that were auto-created (genie_space_id was empty)."
   value       = keys(terraform_data.genie_space)
