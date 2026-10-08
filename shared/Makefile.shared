@@ -48,6 +48,10 @@ DERIVE_ASSIGNMENTS_SCRIPT ?= $(SHARED_ROOT)/scripts/derive_assignments.py
 # Live-API steps of _apply-layer; overridable so tests never reach Databricks.
 IMPORT_EXISTING_SCRIPT ?= $(SHARED_ROOT)/scripts/import_existing.sh
 GENIE_ADOPT_PREFLIGHT_SCRIPT ?= $(SHARED_ROOT)/scripts/genie_adopt_preflight.py
+# Every Genie agent GenieRails created must still have its ID file (state has
+# no agent ID). Runs first on the workspace path of _apply-layer (fails) and
+# _plan-layer (--warn), before any early exit. Local unless a file is missing.
+_GENIE_ID_FILE_CHECK = python3 "$(GENIE_ADOPT_PREFLIGHT_SCRIPT)" "$$env_dir" --id-files --env-name "$$target_env" --runner "$(ROOT_RUNNER)"
 # Optional: override the 'country' field in env.auto.tfvars for this invocation.
 # Comma-separated region codes. Normally set once in env.auto.tfvars.
 # Example: make generate COUNTRY=ANZ   (Australia & NZ)
@@ -69,6 +73,20 @@ ROOT_RUNNER := $(SHARED_ROOT)/scripts/terraform_layer.sh
 TARGET_ENV_NAME = $(if $(TARGET_ENV),$(TARGET_ENV),$(ENV))
 TARGET_ENV_DIR = $(if $(filter $(TARGET_ENV_NAME),$(ENV)),$(ENV_DIR),$(CLOUD_ROOT)/envs/$(TARGET_ENV_NAME))
 TARGET_DATA_ACCESS_ENV_DIR = $(TARGET_ENV_DIR)/$(DATA_ACCESS_SUBDIR)
+
+# Env names are plain directory names under envs/, by the rule promote-to
+# already applies (scripts/saved_settings.py ENV_NAME): lowercase letters,
+# digits, '_' or '-', starting with a letter. Checked when make reads this
+# file, before any recipe runs. Recipes loop over env names word by word, so
+# a name with spaces (one mis-quoted "ENV=prod VERIFY_KEY_COLUMN=x" argument)
+# would scaffold and clean envs/<each word>, and one with "/" or ".." would
+# reach outside envs/.
+_ENV_NAME_CHARS := a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9 _ -
+_without_chars = $(if $(2),$(call _without_chars,$(subst $(firstword $(2)),,$(1)),$(wordlist 2,$(words $(2)),$(2))),$(1))
+_is_env_name = $(and $(filter 1,$(words $(1))),$(if $(filter 0% 1% 2% 3% 4% 5% 6% 7% 8% 9% _% -%,$(1)),,yes),$(if $(call _without_chars,$(1),$(_ENV_NAME_CHARS)),,yes))
+_check_env_name = $(if $(call _is_env_name,$($(1))),,$(error $(1)='$($(1))' is not an env name (lowercase letters, digits, '_' or '-', starting with a letter; no paths or spaces). Pass each make argument separately, e.g. make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id))
+$(call _check_env_name,ENV)
+$(foreach name,SOURCE_ENV DEST_ENV FROM TARGET_ENV,$(if $($(name)),$(call _check_env_name,$(name))))
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-z_-]+:.*## / {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' "$(lastword $(MAKEFILE_LIST))"
@@ -100,6 +118,28 @@ _guard-root:
 		exit 1; \
 	fi
 
+# The checkout's own envs/ is $(GENIERAILS_CLOUD_DIR)/envs, where
+# GENIERAILS_CLOUD_DIR is the dir aws/Makefile or azure/Makefile records from
+# its own location; neither CLOUD_ROOT, which a command line or test can
+# override, nor MAKEFILES moves it. This guards against accidental
+# redirection, not a hostile environment (whoever controls MAKEFILES already
+# runs arbitrary make code). _is_own_env_dir <dir> <name> holds only when
+# <dir>'s physical path is exactly <physical GENIERAILS_CLOUD_DIR>/envs/<name>.
+# A physical path has no symlinks, so a symlinked envs/, envs/<name> or any dir
+# between them fails it, as do ENV_DIR, ACCOUNT_ENV_DIR, SOURCE_ENV_DIR and
+# DEST_ENV_DIR redirected elsewhere and an overridden CLOUD_ROOT. When this file
+# is included without GENIERAILS_CLOUD_DIR it never holds: _prepare-env skips
+# the cleanup and make clean refuses.
+_is_own_env_dir = { [ -n "$(GENIERAILS_CLOUD_DIR)" ] && _own=$$(CDPATH= cd -P "$(GENIERAILS_CLOUD_DIR)" 2>/dev/null && pwd) && _dir=$$(CDPATH= cd -P $(1) 2>/dev/null && pwd) && [ -n "$$_own" ] && [ "$$_dir" = "$$_own/envs/"$(2) ]; }
+
+# _prepare-env scaffolds each env dir, then removes leftovers of the retired
+# layout that copied root modules (*.tf, *.py, ABAC_PROMPT.md, scripts/) into
+# envs/<name> and kept ddl/, generated/ and data_access/ under envs/account.
+# Those globs would also match a user's own files, and the leftovers can only
+# exist in the checkout's own envs/<name>, so the cleanup runs only where
+# _is_own_env_dir holds. Anywhere else the dir is still scaffolded (missing
+# dirs, symlinks and tfvars are created), nothing is deleted, and one line
+# notes any leftovers kept.
 _prepare-env:
 	@envs="$(ENV)"; \
 	if [ "$(ENV)" != "$(ACCOUNT_ENV)" ] && [ "$(ENV)" != "$(DATA_ACCESS_SUBDIR)" ]; then \
@@ -114,8 +154,22 @@ _prepare-env:
 			env_dir="$(CLOUD_ROOT)/envs/$$env_name"; \
 		fi; \
 		mkdir -p "$$env_dir"; \
+		owned=; \
+		if $(call _is_own_env_dir,"$$env_dir","$$env_name"); then owned=1; fi; \
+		leftovers="$$env_dir/*.tf $$env_dir/*.py $$env_dir/ABAC_PROMPT.md $$env_dir/scripts"; \
 		if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
-			rm -rf "$$env_dir/ddl" "$$env_dir/generated" "$$env_dir/$(DATA_ACCESS_SUBDIR)"; \
+			leftovers="$$leftovers $$env_dir/ddl $$env_dir/generated $$env_dir/$(DATA_ACCESS_SUBDIR)"; \
+		fi; \
+		if [ -z "$$owned" ]; then \
+			for leftover in $$leftovers; do \
+				if [ -e "$$leftover" ] || [ -L "$$leftover" ]; then \
+					echo "Not removing old-layout files (*.tf, *.py, scripts/, ...) from $$env_dir: it is not this checkout's envs/$$env_name."; \
+					break; \
+				fi; \
+			done; \
+		fi; \
+		if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
+			if [ -n "$$owned" ]; then rm -rf "$$env_dir/ddl" "$$env_dir/generated" "$$env_dir/$(DATA_ACCESS_SUBDIR)"; fi; \
 		else \
 			mkdir -p "$$env_dir/ddl" "$$env_dir/generated"; \
 			gov_dir="$$env_dir/$(DATA_ACCESS_SUBDIR)"; \
@@ -123,9 +177,11 @@ _prepare-env:
 			if [ ! -e "$$gov_dir/auth.auto.tfvars" ]; then ln -sfn ../auth.auto.tfvars "$$gov_dir/auth.auto.tfvars"; fi; \
 			if [ ! -e "$$gov_dir/env.auto.tfvars" ]; then ln -sfn ../env.auto.tfvars "$$gov_dir/env.auto.tfvars"; fi; \
 		fi; \
-		rm -f "$$env_dir"/*.tf; \
-		rm -f "$$env_dir"/*.py "$$env_dir"/ABAC_PROMPT.md; \
-		rm -rf "$$env_dir/scripts"; \
+		if [ -n "$$owned" ]; then \
+			rm -f "$$env_dir"/*.tf; \
+			rm -f "$$env_dir"/*.py "$$env_dir"/ABAC_PROMPT.md; \
+			rm -rf "$$env_dir/scripts"; \
+		fi; \
 		if [ ! -e "$$env_dir/auth.auto.tfvars" ]; then \
 			if [ "$(ENV)" != "$(ACCOUNT_ENV)" ] && [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
 				ln -sfn "../$(ENV)/auth.auto.tfvars" "$$env_dir/auth.auto.tfvars"; \
@@ -135,6 +191,9 @@ _prepare-env:
 		fi; \
 		if [ ! -e "$$env_dir/env.auto.tfvars" ]; then \
 			cp "$(SHARED_ROOT)/env.auto.tfvars.example" "$$env_dir/env.auto.tfvars"; \
+			if [ "$${_SEED_PROMOTION_SETTINGS:-1}" != 0 ] && [ "$$env_name" != "$(ACCOUNT_ENV)" ] && [ "$$env_name" != "$(DEFAULT_ENV)" ]; then \
+				printf '\n# Promotion source and catalog renames; replace both catalog placeholders.\npromote_from = "$(DEFAULT_ENV)"\ncatalog_map  = { "<$(DEFAULT_ENV)_catalog>" = "<%s_catalog>" }\n' "$$env_name" >> "$$env_dir/env.auto.tfvars"; \
+			fi; \
 			if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
 				printf "\n# Consume IdP-synced groups by default; set true for demo/greenfield creation.\nmanage_groups = false\n" >> "$$env_dir/env.auto.tfvars"; \
 			fi; \
@@ -225,11 +284,11 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "Workspace environment ready:          $(ENV_DIR)"; \
 		echo ""; \
 		echo "Next steps (production — walkthrough Phases 2-5; finish the dev rehearsal first):"; \
-		echo "  1. Promote the reviewed dev rules (rewrites $(_SETUP_ENV_REL)/env.auto.tfvars with safe prod defaults):"; \
-		echo "       make promote-to ENV=$(ENV) FROM=$(DEFAULT_ENV) CATALOG_MAP=\"<dev_catalog>=<prod_catalog>\""; \
-		echo "     (saved; later just: make promote-to ENV=$(ENV))"; \
+		echo "  1. Set promote_from and catalog_map in $(_SETUP_ENV_REL)/env.auto.tfvars, then run:"; \
+		echo "       make promote-to ENV=$(ENV)"; \
+		echo "     (FROM=/CATALOG_MAP= remain optional command-line overrides.)"; \
 		echo "  2. Edit $(_SETUP_ENV_REL)/auth.auto.tfvars — deployment SP client_id / client_secret + prod workspace host & id"; \
-		echo "  3. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — set sql_warehouse_id only (or leave \"\" to auto-create)"; \
+		echo "  3. In $(_SETUP_ENV_REL)/env.auto.tfvars, also set sql_warehouse_id (or leave \"\" to auto-create)"; \
 		echo "  4. Run: make enable-classification ENV=$(ENV)   (or turn it on in the UI);"; \
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
 		echo "  5. Run: make release ENV=$(ENV)"; \
@@ -504,6 +563,7 @@ maintain: _guard-genie-placeholder ## Reconcile governance (including existing c
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,maintain); \
 	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
 	$(MAKE) --no-print-directory _guarded-bootstrap _guard-workspace-target ENV="$(ENV)" || exit 1; \
+	python3 "$(GENIE_ADOPT_PREFLIGHT_SCRIPT)" "$(ENV_DIR)" --id-files --warn; \
 	echo "=== Schema Drift Audit ($(ENV)) ==="; \
 	(cd "$(ENV_DIR)" && python3 "$(AUDIT_SCHEMA_SCRIPT)"); audit_rc=$$?; \
 	if [ $$audit_rc -ne 0 ]; then \
@@ -566,7 +626,7 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 		fi; \
 		python3 "$(SHARED_ROOT)/scripts/validate_catalog_map.py" "$(SOURCE_ENV_DIR)" "$(DEST_CATALOG_MAP)" || exit 1; \
 		echo "=== Cross-env promote: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
-		$(MAKE) --no-print-directory _prepare-env ENV="$(DEST_ENV)" ENV_DIR="$(DEST_ENV_DIR)"; \
+		_SEED_PROMOTION_SETTINGS=0 $(MAKE) --no-print-directory _prepare-env ENV="$(DEST_ENV)" ENV_DIR="$(DEST_ENV_DIR)"; \
 		dest_env_dir="$(DEST_ENV_DIR)"; \
 		acl_ok=0; trap 'if [ "$$acl_ok" != 1 ]; then rm -f "$$dest_env_dir/generated/genie_space_derived_acl_groups.auto.tfvars" "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars" "$$dest_env_dir/abac.auto.tfvars"; fi' EXIT; \
 		python3 "$(SHARED_ROOT)/scripts/remap_env_config.py" "$(SOURCE_ENV_DIR)" "$$dest_env_dir" "$(DEST_CATALOG_MAP)" || exit 1; \
@@ -627,9 +687,8 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 
 # make promote-to ENV=<dest> [FROM=<src>] [CATALOG_MAP="a=b,..."] is a thin
 # wrapper over the cross-env promote above (same remap, validation and policy-name
-# protection). The first run needs FROM and CATALOG_MAP; after a successful
-# promote they are saved in the destination's env.auto.tfvars (promote_from /
-# catalog_map), so later runs need only ENV. Explicit values override and update
+# protection). promote_from and catalog_map live in the destination's
+# env.auto.tfvars. Explicit FROM/CATALOG_MAP values override and update
 # them. Only command-line FROM/CATALOG_MAP count, never ones leaked from the
 # shell, and every cross-env variable is passed explicitly to promote. Both the
 # source and the destination must be real directories directly under envs/
@@ -637,7 +696,7 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 _PROMOTE_TO_FROM = $(if $(filter command line,$(origin FROM)),$(FROM))
 _PROMOTE_TO_MAP = $(if $(filter command line,$(origin CATALOG_MAP)),$(CATALOG_MAP))
 
-promote-to: ## Promote rules into ENV: make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_cat=prod_cat" (saved; later just ENV=prod)
+promote-to: ## Promote configured rules into ENV: set envs/prod/env.auto.tfvars, then make promote-to ENV=prod
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); \
 	resolved="$$($(_SAVED_SETTINGS) promote-resolve --env "$(ENV)" --env-dir "$(ENV_DIR)" --envs-dir "$(CLOUD_ROOT)/envs" \
@@ -663,6 +722,7 @@ _prepare-classification:
 _plan-layer:
 	@set -e; $(_DRY_RUN_GUARD); layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	env_dir="$(LAYER_ENV_DIR)"; \
+	if [ "$$layer" = "workspace" ]; then $(_GENIE_ID_FILE_CHECK) --warn; fi; \
 	if [ ! -f "$$env_dir/abac.auto.tfvars" ]; then \
 		echo "=== Skipping terraform plan ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
 		exit 0; \
@@ -703,6 +763,7 @@ _apply-layer:
 	@set -e; $(_DRY_RUN_GUARD); layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	env_dir="$(LAYER_ENV_DIR)"; \
 	apply_flags="$(if $(filter data_access workspace,$(LAYER)),$(APPLY_FLAGS),)"; \
+	if [ "$$layer" = "workspace" ]; then $(_GENIE_ID_FILE_CHECK); fi; \
 	if [ "$$layer" = "data_access" ]; then $(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$$env_dir")" IMPORT_CLASSIFICATION=1; fi; \
 	if [ ! -f "$$env_dir/abac.auto.tfvars" ]; then \
 		echo "=== Skipping terraform apply ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
@@ -920,10 +981,18 @@ destroy: _bootstrap ## Destroy the selected layer or workspace environment
 		$(MAKE) --no-print-directory _destroy-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
 	fi
 
+# clean deletes Terraform state and .terraform/ by glob, so it refuses unless
+# ENV_DIR is the checkout's own envs/$(ENV) (see _is_own_env_dir) with real
+# generated/ and data_access/ dirs, whatever ENV_DIR or CLOUD_ROOT say.
 clean: ## Remove generated files and Terraform state for the selected environment
 	@if [ ! -d "$(ENV_DIR)" ]; then \
 		echo "Environment '$(ENV)' not initialized: $(ENV_DIR)"; \
 		exit 0; \
+	fi
+	@if ! $(call _is_own_env_dir,"$(ENV_DIR)","$(ENV)") || [ -L "$(ENV_DIR)/generated" ] || [ -L "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" ]; then \
+		echo "make clean only cleans this checkout's $(if $(GENIERAILS_CLOUD_DIR),$(GENIERAILS_CLOUD_DIR)/,)envs/$(ENV) when it, envs/ and its generated/ and $(DATA_ACCESS_SUBDIR)/ are real directories."; \
+		echo "$(ENV_DIR) is not (a redirected ENV_DIR or CLOUD_ROOT, or a symlink on the way); delete its state files yourself."; \
+		exit 1; \
 	fi
 	@echo "=== Clean ($(ENV)) ==="
 	@rm -rf "$(ENV_DIR)/generated/abac.auto.tfvars" "$(ENV_DIR)/generated/masking_functions.sql" "$(ENV_DIR)/generated/generated_response.md" "$(ENV_DIR)/generated/genie_space_derived_acl_groups.auto.tfvars"

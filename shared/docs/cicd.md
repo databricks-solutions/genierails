@@ -111,7 +111,7 @@ Recommended for most teams.
 1. A developer runs:
 
    ```bash
-   make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_catalog=prod_catalog"   # saved; later: make promote-to ENV=prod
+   make promote-to ENV=prod   # promote_from/catalog_map are reviewed in envs/prod/env.auto.tfvars
    ```
 
 2. The promoted config is reviewed and committed

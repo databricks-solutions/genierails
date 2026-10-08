@@ -197,7 +197,12 @@ locals {
   # exactly one current object counts as nothing applied.
   _applied_candidates = { for instance in local._state_instances : "${instance.name}|${instance.key}" => instance.attrs... }
   _applied            = { for key, attrs in local._applied_candidates : key => attrs[0] if length(attrs) == 1 }
-  created_acl_handoffs = {
+  # Create-to-ID handoffs the state supports: a space now configured by ID
+  # whose create-path agent (same create ID, host and ID-file path) is
+  # applied. It is a handoff only while that ID file holds the configured ID;
+  # scripts/genie_adopt_preflight.py reads the candidates to tell a handoff
+  # that lost its ID file from an agent removed from config.
+  created_acl_handoff_candidates = {
     for key, space in local.merged_spaces : key => {
       space_create_id = local._applied["genie_space_acls_created|${key}"].triggers.space_create_id
       groups          = local._applied["genie_space_acls_created|${key}"].triggers.groups
@@ -207,8 +212,11 @@ locals {
     && try(local._applied["genie_space_acls_created|${key}"].triggers.space_create_id, "") == try(local._applied["genie_space|${key}"].id, "-")
     && try(local._applied["genie_space|${key}"].triggers_replace.value.host, local._applied["genie_space|${key}"].triggers_replace.host, "") == var.databricks_workspace_host
     && try(local._applied["genie_space|${key}"].input.value.id_file, local._applied["genie_space|${key}"].input.id_file, "") == "${var.env_dir}/.genie_space_id_${key}"
-    && fileexists("${var.env_dir}/.genie_space_id_${key}")
-    && try(trimspace(file("${var.env_dir}/.genie_space_id_${key}")), "") == space.genie_space_id
+  }
+  created_acl_handoffs = {
+    for key, handoff in local.created_acl_handoff_candidates : key => handoff
+    if fileexists("${var.env_dir}/.genie_space_id_${key}")
+    && (fileexists("${var.env_dir}/.genie_space_id_${key}") ? try(trimspace(file("${var.env_dir}/.genie_space_id_${key}")), "") == local.merged_spaces[key].genie_space_id : true)
   }
   applied_can_run_groups = {
     for key, space in local.merged_spaces : key => [
@@ -503,9 +511,9 @@ variable "promote_from" {
 }
 
 variable "catalog_map" {
-  type        = string
-  default     = ""
-  description = "make promote-to input only (saved in the destination env): comma-separated src=dest catalog renames. Declared so env.auto.tfvars loads cleanly; no resource reads it."
+  type        = any
+  default     = {}
+  description = "make promote-to input only (saved in the destination env): source-to-target catalog renames. Declared so env.auto.tfvars loads cleanly; no resource reads it."
 }
 
 variable "manage_groups" {

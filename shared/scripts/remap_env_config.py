@@ -43,6 +43,12 @@ def _str(v) -> str:
     return (v[0] if isinstance(v, list) else v or "").strip()
 
 
+def _promotion_setting(value) -> str:
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{json.dumps(str(k))} = {json.dumps(str(v))}" for k, v in value.items()) + " }"
+    return json.dumps(_str(value))
+
+
 def _discover_from_genie_api(space_id: str, auth_cfg: dict) -> tuple[str, list[str]]:
     """Query Genie agent API to get name and tables.
 
@@ -406,9 +412,9 @@ def main():
     ]
     # make promote-to's saved source env + catalog map belong to the destination.
     preserved_promote = {
-        name: _str(dest_cfg.get(name, ""))
+        name: dest_cfg[name]
         for name in ("promote_from", "catalog_map")
-        if _str(dest_cfg.get(name, ""))
+        if dest_cfg.get(name)
     }
     promoted_verify_key = (
         _str(cfg.get("verify_key_column", ""))
@@ -600,7 +606,7 @@ def main():
     if preserved_promote:
         lines.append("")
         lines.append("# Saved by make promote-to (source env + catalog map for the next promote).")
-        lines.extend(f"{name} = {json.dumps(value)}" for name, value in preserved_promote.items())
+        lines.extend(f"{name} = {_promotion_setting(value)}" for name, value in preserved_promote.items())
 
     # Write
     os.makedirs(dest_env_dir, exist_ok=True)

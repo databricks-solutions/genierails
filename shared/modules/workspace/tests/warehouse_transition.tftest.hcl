@@ -18,6 +18,7 @@ variables {
   genie_space_can_run_widening = {}
   genie_id_file_prefix         = "/tmp/.genie_space_id"
   genie_script_path            = ""
+  genie_destroy_script         = "bash tests/genie_destroy_stub.sh"
   genie_only                   = true
 }
 

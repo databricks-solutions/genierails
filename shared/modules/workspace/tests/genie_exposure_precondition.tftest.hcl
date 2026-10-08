@@ -24,6 +24,7 @@ variables {
   databricks_workspace_host = "https://example.invalid"
   sql_warehouse_id          = "warehouse"
   groups                    = { analysts = {} }
+  genie_destroy_script      = "bash tests/genie_destroy_stub.sh"
 }
 
 run "blocked_exposure_withholds_can_run_on_existing_space" {
