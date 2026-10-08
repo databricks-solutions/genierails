@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Settings make saves into an env's env.auto.tfvars so later runs need fewer flags.
 
-verify-key      after a rehearse/release whose verify-access passed a mask check
-                paired by an explicit VERIFY_KEY_COLUMN (per its result file),
-                save it as verify_key_column.
+verify-key      after a rehearse/release whose verify-access passed, save the
+                row-pairing key it proved for each masked table (its result
+                file's mask_keys_proven_by_table) into verify_key_columns, and an
+                explicit VERIFY_KEY_COLUMN that paired a passing mask check as
+                verify_key_column.
 promote-resolve pick the source env and catalog map for make promote-to from
                 FROM / CATALOG_MAP, else the destination's saved promote_from /
                 catalog_map; prints "<source> <map>".
@@ -30,6 +32,7 @@ if str(SHARED_ROOT) not in sys.path:
 import hcl2  # noqa: E402
 
 from access_tier_groups import _assignment_spans, _hcl_string, display_path  # noqa: E402
+from verify_effective_access import normalize_key_map  # noqa: E402
 
 RESERVED_ENVS = ("account", "data_access")
 # Env names are plain directory names under this cloud's envs/ (no paths).
@@ -54,17 +57,28 @@ def _saved(config: dict, name: str) -> str:
     return str(value or "").strip()
 
 
-def set_settings(path: Path, values: dict[str, str], comment: str) -> bool:
-    """Write string ``values`` into ``path``; returns False when already saved."""
+def _render(value: str | dict[str, str]) -> str:
+    if isinstance(value, dict):
+        rows = "".join(f"  {_hcl_string(k)} = {_hcl_string(v)}\n" for k, v in value.items())
+        return "{\n" + rows + "}" if rows else "{}"
+    return _hcl_string(value)
+
+
+def _current(config: dict, name: str, value: str | dict[str, str]):
+    return normalize_key_map(config.get(name)) if isinstance(value, dict) else _saved(config, name)
+
+
+def set_settings(path: Path, values: dict[str, str | dict[str, str]], comment: str) -> bool:
+    """Write string (or string-map) ``values`` into ``path``; False when already saved."""
     target = Path(path).resolve()
     text = target.read_text()
     before = _parse(text, target)
-    if all(_saved(before, name) == value for name, value in values.items()):
+    if all(_current(before, name, value) == value for name, value in values.items()):
         return False
     updated = text
     appended = []
     for name, value in values.items():
-        line = f"{name} = {_hcl_string(value)}"
+        line = f"{name} = {_render(value)}"
         spans = _assignment_spans(updated, name)
         if len(spans) > 1:
             raise ValueError(f"{name} is assigned more than once in {display_path(target)}")
@@ -102,7 +116,55 @@ def key_proven(result_file: Path | None, value: str) -> bool:
         return False
 
 
+def proven_table_keys(result_file: Path | None) -> dict[str, str]:
+    """{table: key} verify-access proved (every mask check on the table passed), if it passed."""
+    if result_file is None:
+        return {}
+    try:
+        result = json.loads(result_file.read_text())
+        if result.get("passed") is not True:
+            return {}
+        proven = result.get("mask_keys_proven_by_table") or {}
+        if not isinstance(proven, dict):
+            return {}
+        return {str(t).strip(): str(k).strip() for t, k in proven.items()
+                if isinstance(t, str) and isinstance(k, str) and t.strip() and k.strip()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def save_table_keys(env_file: Path, result_file: Path | None) -> int:
+    """Merge the per-table keys verify-access proved into verify_key_columns."""
+    proven = proven_table_keys(result_file)
+    if not proven:
+        return 0
+    if not env_file.is_file():
+        print(f"NOTE: {display_path(env_file)} not found; verify_key_columns not saved.")
+        return 0
+    try:
+        saved = normalize_key_map(_load(env_file).get("verify_key_columns"))
+        merged = {t: k for t, k in saved.items() if t.lower() not in {p.lower() for p in proven}}
+        merged.update(proven)
+        merged = dict(sorted(merged.items()))
+        changed = set_settings(
+            env_file, {"verify_key_columns": merged},
+            "Row-pairing key per masked table for verify-access (saved after a passing run).",
+        )
+    except ValueError as exc:
+        print(f"NOTE: verify_key_columns not saved: {exc}.")
+        return 0
+    if changed:
+        before = {t.lower(): k for t, k in saved.items()}
+        new = sorted(f"{t}={k}" for t, k in proven.items() if before.get(t.lower()) != k)
+        print(
+            f"Saved the proven row-pairing key per table as verify_key_columns in "
+            f"{display_path(env_file)} ({', '.join(new)}); promote carries it."
+        )
+    return 0
+
+
 def save_verify_key(env_file: Path, value: str, result_file: Path | None = None) -> int:
+    save_table_keys(env_file, result_file)
     value = value.strip()
     if not value:
         return 0

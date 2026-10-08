@@ -9,11 +9,11 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 make setup ENV=dev                   # then set genie_space_id in envs/dev/env.auto.tfvars
 make enable-classification ENV=dev   # or turn it on in the UI; wait for class.* tags
 make generate ENV=dev                # ONE run: imports the agent, finds its tables, drafts rules
-make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id   # key saved after a passing run
+make rehearse ENV=dev
 # prod (same pattern for stg or any env)
 make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_finance=prod_finance"   # saved; later just make promote-to ENV=prod
 make enable-classification ENV=prod
-make release ENV=prod                # key comes from dev
+make release ENV=prod
 make maintain ENV=prod
 ```
 
@@ -40,7 +40,7 @@ Finally, gather the inputs specific to this walkthrough:
 | **SQL warehouse id** (per Genie agent) | The serverless warehouse the Genie agent runs its SQL on — an existing warehouse's id, **or leave blank** to auto-create one. Set it on the agent's `genie_spaces` entry; agents can also share the environment-level warehouse as a fallback. |
 | **Curated Genie agent** | The agent you're shipping. In the Genie UI, open the agent, click **Configure**, and copy the **Agent ID** from **About this agent**. It is also in the URL (`.../genie/rooms/01ef7b3c2a4d5e6f`) and goes in `genie_spaces`; its tables are discovered automatically. |
 | **Access-tier group names** | Choose the IdP-synced groups from the shared prerequisite check, ordered most- to least-privileged; you enter them once, as `access_tier_groups` (Phase 0). Example: `payments_ops` = full/raw; `regional_analysts` = region-scoped + masked; `viewers` = least-privileged + all sensitive columns masked. The generated policies define the actual access, and each agent's tables are `SELECT`-granted only to the tiers authorized to run that agent (a table shared by several agents gets the union). |
-| **Row-pairing key** (`VERIFY_KEY_COLUMN`) | A stable, unique, **non-sensitive** (never masked) id column present on your masked tables (e.g. `customer_id`) — `verify-access` uses it to line up rows. Pass it to `make rehearse` once; it is saved after a passing run and promotion carries it to prod. [How to choose](../../docs/effective-access-verification.md#choosing-the-row-pairing-key-verify_key_column). |
+| **Row-pairing key** | Nothing to set. `verify-access` picks a key per masked table to line up rows across tiers (its primary key, else an untagged id-like column such as `customer_id`), proves it unique, non-null and unmasked, saves the proven keys after a passing run, and promotion carries them to prod. Override per table only if needed. [How it picks](../../docs/effective-access-verification.md#how-genierails-picks-the-row-pairing-key). |
 
 </details>
 
@@ -125,11 +125,11 @@ Re-running `make generate ENV=dev` keeps the reviewed rules in `envs/dev/generat
 
 **1d. Prove coverage, apply, and verify — one command.**
 ```bash
-make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id
+make rehearse ENV=dev
 ```
 `make rehearse` runs **live derive → validate-generated → coverage-gate → apply → verify-access** in order, stopping at the first failure. The last step, `verify-access`, proves masking *by effect*: it creates a test SP for each access tier, grants each test SP temporary `CAN_USE` on the selected warehouse, and confirms the unprivileged tier sees masked values while an authorized tier sees raw. No separate warehouse-permission command is required. There is no access flag to set: business `SELECT` and Genie run access are granted only when the coverage check passes, and dev keeps that access after rehearse (the masks protect the data either way).
 
-`VERIFY_KEY_COLUMN` is the single column used to pair rows across tiers ([how to choose](../../docs/effective-access-verification.md#choosing-the-row-pairing-key-verify_key_column)). Once verify-access proves a mask with it, it is saved as `verify_key_column` in `envs/dev/env.auto.tfvars`, so later runs can drop the flag and promotion carries it to prod. If you omit it the masking check is skipped, so always set it; for tables that don't share one key, pass a [`VERIFY_SPEC` JSON](../../docs/effective-access-verification.md) instead.
+To pair rows across tiers, `verify-access` picks a row-pairing key for each masked table: its single-column primary key, else an untagged id-like column (`<table>_id`, then `id`, then other `*_id`). It proves each key is unique, non-null and unmasked before relying on it, and prints which column it chose for each table (never values). After a passing run the proven keys are saved as `verify_key_columns` in `envs/dev/env.auto.tfvars`, and promotion carries them to prod. If a table has no provable key, the run names it and how to fix it; set its entry in `verify_key_columns` (or `VERIFY_KEY_COLUMN=<col>` for every table that has that column). [How it picks and how to override](../../docs/effective-access-verification.md#how-genierails-picks-the-row-pairing-key).
 
 </details>
 
@@ -150,7 +150,7 @@ make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_finance=prod_finance"
 Promotion creates `envs/prod/` with configuration templates. Fill in both files:
 
 - **`envs/prod/auth.auto.tfvars`** — the deployment SP `client_id` / `client_secret` + prod workspace host & id. You may reuse the dev SP when both workspaces are in the same Databricks account and it is authorized in prod; use a separate prod SP when your security policy requires environment isolation. Separate Databricks accounts require separate SPs.
-- **`envs/prod/env.auto.tfvars`** — don't recreate it; set `sql_warehouse_id` (or leave `""` to auto-create). Promotion has already written the safe classification and access defaults, and dev's `verify_key_column`.
+- **`envs/prod/env.auto.tfvars`** — don't recreate it; set `sql_warehouse_id` (or leave `""` to auto-create). Promotion has already written the safe classification and access defaults, and dev's proven row-pairing keys (`verify_key_columns`, renamed to prod's catalogs).
 
 Using the [sample environment](SAMPLE_ENV.md)? Seed the prod catalog with its tables now (`--skip-agent`; see SAMPLE_ENV.md).
 
@@ -207,12 +207,12 @@ Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` and re-run `make
 **Goal —** check live coverage, apply prod (masks first, then access), and confirm masking live.
 
 ```bash
-make release ENV=prod   # the verify key comes from dev
+make release ENV=prod
 ```
 
-`release` must prove every mask, so it needs the row-pairing key: the `verify_key_column` that dev's passing rehearse saved and promotion carried to prod (or set it in `envs/prod/env.auto.tfvars`). Without a key (or a `VERIFY_SPEC`), `release` refuses before it applies anything, instead of skipping the mask checks.
+`release` must prove every mask, and needs no key from you. It uses dev's proven keys that promotion carried over, and picks the rest the same way rehearse does. Before it applies anything it proves every masked table's key as the admin (`make verify-access-keys`: no test principals, no grants). If a table has no provable key, `release` refuses then and names the table, instead of skipping its mask checks ([override](../../docs/effective-access-verification.md#how-genierails-picks-the-row-pairing-key)).
 
-One command: placeholder guard → lock → live UC re-read/`derive-assignments` → validation → coverage check → promote the derived config into its Terraform layers → read-only `audit-rulebook` → all-layer apply → `verify-access`. The derivation reuses the exact rules you reviewed in dev and never calls a model; a promoted per-column override is merged strictest-wins with the native result, so it can strengthen but never weaken native protection. The audit runs before the access-granting apply, so drift or an audit error leaves existing access unchanged and blocks any new or wider business `SELECT` or Genie run access. There is no access flag to set or save: Terraform grants business `SELECT` and Genie run access only through the passing coverage check, and re-promoting never closes access that is already live.
+One command: placeholder guard → lock → live UC re-read/`derive-assignments` → validation → coverage check → promote the derived config into its Terraform layers → row-pairing key check (admin only) → read-only `audit-rulebook` → all-layer apply → `verify-access`. The derivation reuses the exact rules you reviewed in dev and never calls a model; a promoted per-column override is merged strictest-wins with the native result, so it can strengthen but never weaken native protection. The audit runs before the access-granting apply, so drift or an audit error leaves existing access unchanged and blocks any new or wider business `SELECT` or Genie run access. There is no access flag to set or save: Terraform grants business `SELECT` and Genie run access only through the passing coverage check, and re-promoting never closes access that is already live.
 
 **If the coverage check fails or `audit-rulebook` reports drift** — prod surfaced a sensitive tag your promoted rules don't cover (a type the classifier found only in prod, or a rule dropped in promotion). Nothing new was applied. This is a **rule change — made in dev, never hand-edited in prod**:
 

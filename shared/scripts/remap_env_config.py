@@ -29,6 +29,7 @@ from scripts.footprint import (
     resolve_footprint,
 )
 from scripts.remap_generated_config import remap_hcl
+from verify_effective_access import normalize_key_map
 from walkthrough_marker import PROMOTED_HEADER, follows_walkthrough
 
 try:
@@ -413,6 +414,13 @@ def main():
         _str(cfg.get("verify_key_column", ""))
         or _str(dest_cfg.get("verify_key_column", ""))
     )
+    # Per-table keys: the source's (tables remapped to the destination's
+    # catalogs, columns unchanged), else the destination's own.
+    source_key_map = normalize_key_map(cfg.get("verify_key_columns"))
+    promoted_key_map = (
+        {remap_table(table): column for table, column in source_key_map.items()}
+        if source_key_map else normalize_key_map(dest_cfg.get("verify_key_columns"))
+    )
 
     remapped_effective_tables = [remap_table(table) for table in tables_to_write]
     stale_discovered = [
@@ -572,6 +580,11 @@ def main():
         "  # empty means auto-create in dest workspace"
     )
     lines.append(f"verify_key_column = {json.dumps(promoted_verify_key)}")
+    if promoted_key_map:
+        lines.append("verify_key_columns = {")
+        lines.extend(f"  {json.dumps(table)} = {json.dumps(column)}"
+                     for table, column in sorted(promoted_key_map.items()))
+        lines.append("}")
     lines.append("")
     lines.append("# Safe production defaults. Business access is granted only through the")
     lines.append("# coverage check that make release runs; there is no access flag to set.")

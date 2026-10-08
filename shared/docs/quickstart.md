@@ -56,7 +56,7 @@ vi envs/dev/generated/masking_functions.sql
 
 make coverage-gate       # fails if any classified sensitive column has no protection ("says NO")
 make validate-generated
-make rehearse VERIFY_KEY_COLUMN=<key>   # apply (masks first; grants only if coverage passes), then prove masking as each tier
+make rehearse   # apply (masks first; grants only if coverage passes), then prove masking as each tier
 ```
 
 ## What happens end-to-end

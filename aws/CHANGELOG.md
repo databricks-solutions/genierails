@@ -19,6 +19,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **No row-pairing key to choose**: `verify-access` picks a provably safe key
+  per masked table: an explicit `verify_key_columns` entry, else
+  `VERIFY_KEY_COLUMN` / `verify_key_column` when the table has it, else its
+  single-column `PRIMARY KEY`, else an untagged, unmasked id-like column
+  (`<table>_id`, `id`, other `*_id`). Every key, an override included, must
+  prove unique, non-null and unmasked. A failing auto-pick falls through to
+  the next candidate; a failing override is reported. A table with nothing
+  provable is refused by name. `make rehearse ENV=dev` and `make release
+  ENV=prod` need no key flag. The proven keys are saved as
+  `verify_key_columns` after a pass, and promote carries them with table names
+  remapped. `make release` proves every masked table's key as the admin
+  (`make verify-access-keys`) before it applies any access, and no longer
+  refuses up front for want of a configured key.
 - **Withdrawing access never waits for the coverage check**: without a pass,
   Terraform withholds only new table `SELECT` grants and new Genie `CAN_RUN`
   groups; removals, unchanged access and other agents still apply, and `make`

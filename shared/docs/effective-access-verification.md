@@ -25,27 +25,40 @@ access tiers**:
 | **Row filter** | A restricted principal gets back **fewer rows** than an unrestricted principal. Equal/greater counts = the filter is not restricting (FAIL). |
 
 The comparison is done by *effect*: rather than assuming a mask function's exact
-output, the tool pairs each row (by a primary-key column) between a masked and an
-unmasked principal and asserts the masked tier's value differs from the **raw**
+output, the tool pairs each row (by a row-pairing key column it picks per table)
+between a masked and an unmasked principal and asserts the masked tier's value differs from the **raw**
 value the unmasked tier sees.
 
-### Choosing the row-pairing key (`VERIFY_KEY_COLUMN`)
+### How GenieRails picks the row-pairing key
 
-The key is how the tool knows two result rows, one per tier, are the *same* row. Pick a column that is:
+The key is how the tool knows two result rows, one per tier, are the *same* row. You don't choose it: for **each masked table**, `verify-access` picks one in this order and uses the first that is proven safe:
 
-- **Not sensitive and not masked.** It must read identically for every tier; a masked key can't pair rows. Never pick a column you want protected.
-- **Unique, non-NULL and stable per row**: an ID such as `customer_id`, `order_id` or `account_id`. The admin baseline samples rows and every tier reads those same rows by key; the tool checks the sampled keys are unique and non-NULL across the whole table, and a repeated, NULL or masked key makes the mask check INCONCLUSIVE (`row-pairing key <col> is not unique / has NULLs on <table>` or `... is masked for <tier> on <table>`), never a pass.
-- **Present on the tables you verify.** If your tables don't share one key column, use a [`VERIFY_SPEC`](#explicit-spec---spec) with a key per table.
+0. **Your override**, if any: the table's entry in `verify_key_columns`, else `VERIFY_KEY_COLUMN` / `verify_key_column` when the table has that column.
+1. The table's **single-column `PRIMARY KEY`** (read as the admin from `information_schema.table_constraints` / `key_column_usage`).
+2. Otherwise an **id-like column**: `<table singular>_id` (e.g. `customer_id` on `customers`), then `id`, then any other `*_id`; string/int/long types first, then alphabetical.
 
-If you omit it, the column-mask check is **skipped** (row filters are still checked) and the run can still exit 0, so masking has not been proven. Always set it.
+An automatic candidate is used only if it has **no tags** (none in the config's `tag_assignments`, none live in `system.information_schema.column_tags`, `class.*` included), is **not a masked column**, and has a type that compares exactly (string or integer; never float, decimal, date/time or binary). Every key, an override included, must then pass the same proof: the admin baseline samples rows, the sampled keys must be unique and non-NULL, and the admin proves across the whole table that each names exactly one row. A repeated, NULL or (for some tier) masked key never passes: it makes the mask check INCONCLUSIVE (`row-pairing key <col> is not unique / has NULLs on <table>` or `... is masked for <tier> on <table>`).
 
-Pass it once — `make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id` saves it to `envs/dev/env.auto.tfvars` once verify-access passes a mask check paired by it (so does `make release`; a row-filter-only pass saves nothing) — or set it there yourself. `make rehearse` / `make release` / `make verify-access` then use it without the flag, and promotion carries it to prod:
+If an automatic candidate fails its proof, the next one is tried. **An override that fails is reported, never silently replaced.** If nothing is provable, that table is refused with:
 
-```hcl
-verify_key_column = "customer_id"
+```text
+no provable row-pairing key for <table>; set verify_key_columns["<table>"] or VERIFY_KEY_COLUMN
 ```
 
-A `VERIFY_KEY_COLUMN=` on the command line overrides the saved value (and, after a passing rehearse/release, replaces it, with a note).
+`make release` treats that as blocking, and checks it **before** it applies anything: `make verify-access-keys` runs as the admin only (no test principals, no grants) right after release promotes the live-derived config. In `make rehearse` the table's masks show as NOT VERIFIED instead (an override that fails still blocks). The run prints each table's key and why it was chosen, e.g. `Row-pairing key for dev.sales.customers: customer_id (id-like column)`; it never prints key or row values.
+
+After a passing run, the key proven for each table is saved in `envs/<env>/env.auto.tfvars` (tables whose every mask check passed only), and promotion carries it to prod with the table names remapped to prod's catalogs:
+
+```hcl
+verify_key_columns = {
+  "dev.sales.customers" = "customer_id"
+  "dev.sales.payments"  = "payment_id"
+}
+```
+
+#### Overriding the pick
+
+Only needed when a table has no provable key or the pick is wrong for it. Add (or edit) the table's entry in `verify_key_columns`, or pass one column for every table that has it with `VERIFY_KEY_COLUMN=<col>` (saved as `verify_key_column` after a pass that proved a mask with it). Choose a column that is **not sensitive and never masked**, and **unique, non-NULL and stable** per row. A [`VERIFY_SPEC`](#explicit-spec---spec) `key_column` is an override for its table too.
 
 ### Inconclusive never passes
 
@@ -119,7 +132,7 @@ python3 verify_effective_access.py \
 Run **after `make apply`**, so the governance is deployed:
 
 ```bash
-make verify-access ENV=dev VERIFY_KEY_COLUMN=customer_id
+make verify-access ENV=dev
 ```
 
 Options (see `Makefile.shared`):
@@ -127,7 +140,7 @@ Options (see `Makefile.shared`):
 | Variable | Meaning |
 |---|---|
 | `ENV=<env>` | Workspace env whose `data_access` config to verify (default `dev`) |
-| `VERIFY_KEY_COLUMN=<c>` | Primary-key column used to pair rows across principals |
+| `VERIFY_KEY_COLUMN=<c>` | Optional override: the row-pairing key for every masked table that has this column (default: [picked per table](#how-genierails-picks-the-row-pairing-key)) |
 | `VERIFY_SPEC=<file.json>` | Explicit JSON spec instead of `--from-tfvars` derivation |
 | `WAREHOUSE_ID=<id>` | Pin a specific SQL warehouse |
 | `KEEP_PRINCIPALS=1` | Leave the provisioned test principals in place (debugging) |
@@ -146,8 +159,9 @@ passes* above), so it drops into a CI pipeline.
 
 ### Explicit spec (`--spec`)
 
-When the derived spec doesn't match your data (e.g. a different key column per
-table, or you want to hand-pick tiers), provide a JSON spec:
+When the derived spec doesn't match your data (e.g. you want to hand-pick
+tiers), provide a JSON spec. A check's `key_column` overrides the pick for its
+table; leave it out to have the key picked as above:
 
 ```json
 {
@@ -178,7 +192,9 @@ The **comparison and spec-derivation logic is pure** (no Databricks) and is
 covered by unit tests in `tests/test_verify_effective_access.py`, which feed
 mocked query results (masked vs. raw values, row counts) through the evaluators
 and assert PASS/FAIL/SKIP outcomes. These run in the standard `make test-unit` /
-`pytest shared/tests/` gate with no cluster.
+`pytest shared/tests/` gate with no cluster. Key picking and the per-check key
+proof run against a fake SQL warehouse (`tests/test_verify_key_autopick.py`,
+`tests/test_verify_key_pairing.py`).
 
 The **live layer** (`EffectiveAccessVerifier`, `verify_effective_access_live`)
 is exercised only against a real workspace and is guarded so unit runs never

@@ -86,6 +86,7 @@ def test_release_runs_unified_pipeline_in_order_and_writes_no_receipt(tmp_path):
         ["validate-generated", "ENV=prod"],
         ["coverage-gate", "ENV=prod"],
         _same_env_promote(env_dir),
+        ["verify-access-keys", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],
         ["audit-rulebook", "ENV=prod"],
         ["apply", "ENV=prod", "APPLY_FLAGS=", "_EXPOSURE_DERIVED=1"],
         ["verify-access", "ENV=prod", "VERIFY_REQUIRE_MASKS=1", "VERIFY_KEY_COLUMN=customer_id"],
@@ -191,7 +192,8 @@ def test_rulebook_drift_blocks_release_before_access_apply(tmp_path):
     result = _make("release", env_dir, stub, audit)
     assert result.returncode != 0
     names = [c[1] if c[0] == "--no-print-directory" else c[0] for c in _calls(log)]
-    assert names == ["derive-assignments", "validate-generated", "coverage-gate", "promote", "audit-rulebook"]
+    assert names == ["derive-assignments", "validate-generated", "coverage-gate", "promote",
+                     "verify-access-keys", "audit-rulebook"]
     assert "reported drift" in result.stderr
     assert "no new or wider business access was applied" in result.stderr
     assert (env_dir / "env.auto.tfvars").read_text() == RELEASED_ENV_FILE

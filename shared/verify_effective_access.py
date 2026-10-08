@@ -46,7 +46,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -165,6 +165,8 @@ class CheckResult:
 class EffectiveAccessReport:
     results: list[CheckResult] = field(default_factory=list)
     not_verified: list[CheckResult] = field(default_factory=list)
+    # table -> the key that paired every one of its passing mask checks
+    pairing_keys: dict[str, str] = field(default_factory=dict)
 
     def add(self, result: CheckResult) -> None:
         self.results.append(result)
@@ -208,14 +210,14 @@ class EffectiveAccessReport:
         if self.passed and self.not_verified:
             lines.append(
                 f"  RESULT: ROW FILTERS EFFECTIVE — {len(self.not_verified)} mask "
-                f"check(s) NOT VERIFIED (no key column; {c[PASS]} passed / {total})"
+                f"check(s) NOT VERIFIED (no row-pairing key; {c[PASS]} passed / {total})"
             )
         elif self.passed:
             lines.append(f"  RESULT: ALL EFFECTIVE ({c[PASS]} passed / {total})")
         elif not self.results and self.not_verified:
             lines.append(
                 f"  RESULT: MASKING NOT VERIFIED — {len(self.not_verified)} mask "
-                "check(s) skipped (no key column)"
+                "check(s) skipped (no row-pairing key)"
             )
         else:
             lines.append(
@@ -373,7 +375,7 @@ def derive_spec_from_config(
     # The all-users pseudo-group is never a provisionable tier; drop it from the
     # concrete group set (it is handled specially per-policy below).
     all_groups = [g for g in dict.fromkeys(all_groups) if g != ALL_USERS_GROUP]
-    key_by_table = dict(key_column_by_table or {})
+    key_by_table = {t.lower(): k for t, k in (key_column_by_table or {}).items() if k}
     spec = VerificationSpec()
     seen_masks: set[tuple[str, str]] = set()
     seen_filters: set[str] = set()
@@ -410,7 +412,7 @@ def derive_spec_from_config(
                 if sig in seen_masks or not masked:
                     continue
                 seen_masks.add(sig)
-                kc = key_by_table.get(c["table"], key_column)
+                kc = key_by_table.get(c["table"].lower(), key_column)
                 spec.column_masks.append(
                     ColumnMaskCheck(
                         table=c["table"],
@@ -479,9 +481,24 @@ def _errors_for(
     return {p: errors_by_principal[p] for p in principals if p in errors_by_principal}
 
 
-def _key_problem_message(check: ColumnMaskCheck, problem: str) -> str:
-    return (f"row-pairing key {check.key_column} {problem} on {check.table}; "
+def _pairing_key_problem(key_column: str, table: str, problem: str) -> str:
+    return (f"row-pairing key {key_column} {problem} on {table}; "
             "choose a unique, non-null, unmasked key")
+
+
+def _key_problem_message(check: ColumnMaskCheck, problem: str) -> str:
+    return _pairing_key_problem(check.key_column, check.table, problem)
+
+
+def sampled_keys_problem(key_column: str, table: str, principal: str, keys: Sequence[Any]) -> str:
+    """Why sampled keys cannot pair rows ("" if they can): a NULL or a repeat."""
+    if any(k is None for k in keys):
+        return _pairing_key_problem(
+            key_column, table, f"has NULLs ({sum(k is None for k in keys)} of {len(keys)} sampled rows for {principal})")
+    if len(set(keys)) != len(keys):
+        return _pairing_key_problem(
+            key_column, table, f"is not unique ({len(set(keys))} distinct keys in {len(keys)} sampled rows for {principal})")
+    return ""
 
 
 def sample_key_problem(check: ColumnMaskCheck, principal: str, rows: Any) -> str:
@@ -491,14 +508,7 @@ def sample_key_problem(check: ColumnMaskCheck, principal: str, rows: Any) -> str
     in the sample means two tiers can pair *different* rows under the same key,
     so a mask that is not applied can look applied. Values are never included.
     """
-    keys = [k for k, _ in _row_pairs(rows)]
-    if any(k is None for k in keys):
-        return _key_problem_message(
-            check, f"has NULLs ({sum(k is None for k in keys)} of {len(keys)} sampled rows for {principal})")
-    if len(set(keys)) != len(keys):
-        return _key_problem_message(
-            check, f"is not unique ({len(set(keys))} distinct keys in {len(keys)} sampled rows for {principal})")
-    return ""
+    return sampled_keys_problem(check.key_column, check.table, principal, [k for k, _ in _row_pairs(rows)])
 
 
 def key_masked_message(check: ColumnMaskCheck, principal: str) -> str:
@@ -803,6 +813,171 @@ def evaluate_effective_access(
 
 
 # ---------------------------------------------------------------------------
+# Row-pairing key selection (pure ranking; the live layer proves each pick)
+# ---------------------------------------------------------------------------
+# Each masked table gets its own key, in this order: (0) an explicit per-table
+# verify_key_columns entry (or a VERIFY_SPEC key_column), else the global
+# VERIFY_KEY_COLUMN / verify_key_column when the table has that column; (1) a
+# single-column PRIMARY KEY; (2) an id-like column. Auto-picked candidates must
+# be untagged, unmasked and of a type that pairs exactly; the first one the
+# admin proves unique and non-null is used. An explicit key that fails its
+# proof is reported, never silently replaced.
+KEY_SAMPLE_LIMIT = 25
+_PREFERRED_KEY_TYPES = {"STRING", "VARCHAR", "CHAR", "INT", "INTEGER", "LONG", "BIGINT"}
+_OTHER_KEY_TYPES = {"SHORT", "SMALLINT", "BYTE", "TINYINT"}
+# Auto-picked names come from live metadata and go into admin SQL: plain
+# identifiers only.
+_PLAIN_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+SOURCE_TABLE_KEY = "verify_key_columns"
+SOURCE_GLOBAL_KEY = "VERIFY_KEY_COLUMN"
+SOURCE_PRIMARY_KEY = "primary key"
+SOURCE_ID_LIKE = "id-like column"
+EXPLICIT_SOURCES = (SOURCE_TABLE_KEY, SOURCE_GLOBAL_KEY)
+
+
+@dataclass(frozen=True)
+class TableKeyFacts:
+    """Column metadata the admin reads for a table (never row values)."""
+    columns: tuple[tuple[str, str], ...]   # (name, data type), table order
+    primary_key: tuple[str, ...] = ()
+    tagged: frozenset[str] = frozenset()   # lower-case names of columns with any tag
+
+
+@dataclass
+class KeyPick:
+    """The row-pairing key chosen for one table, or why there is none."""
+    table: str
+    key: str = ""
+    source: str = ""
+    problem: str = ""
+
+    @property
+    def explicit(self) -> bool:
+        return self.source in EXPLICIT_SOURCES
+
+
+def no_key_message(table: str) -> str:
+    return (f'no provable row-pairing key for {table}; set verify_key_columns["{table}"] '
+            "or VERIFY_KEY_COLUMN")
+
+
+def _type_rank(data_type: str) -> Optional[int]:
+    """0 = preferred key type, 1 = acceptable, None = cannot pair exactly."""
+    base = re.split(r"[(<\s]", (data_type or "").strip().upper(), maxsplit=1)[0]
+    if base in _PREFERRED_KEY_TYPES:
+        return 0
+    if base in _OTHER_KEY_TYPES:
+        return 1
+    return None
+
+
+def _singular(name: str) -> str:
+    n = name.lower()
+    if n.endswith("ies") and len(n) > 3:
+        return n[:-3] + "y"
+    if n.endswith(("sses", "xes", "ches", "shes")):
+        return n[:-2]
+    if n.endswith("s") and not n.endswith("ss"):
+        return n[:-1]
+    return n
+
+
+def key_candidates(table: str, facts: TableKeyFacts, unsafe: Iterable[str] = ()) -> list[tuple[str, str]]:
+    """Auto-pick candidates for ``table``, best first, as (column, source) (pure).
+
+    ``unsafe`` names columns that must never pair rows (masked or tagged in the
+    config); columns tagged live are excluded too.
+    """
+    excluded = {c.lower() for c in unsafe} | set(facts.tagged)
+    types = {name.lower(): data_type for name, data_type in facts.columns}
+    names = {name.lower(): name for name, _ in facts.columns}
+
+    def usable(column: str) -> bool:
+        return (bool(_PLAIN_IDENTIFIER.fullmatch(column)) and column.lower() not in excluded
+                and _type_rank(types.get(column.lower(), "")) is not None)
+
+    out: list[tuple[str, str]] = []
+    if (len(facts.primary_key) == 1 and facts.primary_key[0].lower() in names
+            and usable(facts.primary_key[0])):
+        out.append((names[facts.primary_key[0].lower()], SOURCE_PRIMARY_KEY))
+    short = table.rsplit(".", 1)[-1].strip("`").lower()
+    preferred = {f"{_singular(short)}_id", f"{short}_id"}
+
+    def rank(column: str) -> tuple:
+        lower = column.lower()
+        tier = 0 if lower in preferred else 1 if lower == "id" else 2
+        return (tier, _type_rank(types[lower]), lower)
+
+    id_like = sorted((name for lower, name in names.items()
+                      if (lower == "id" or lower.endswith("_id")) and usable(name)), key=rank)
+    out.extend((name, SOURCE_ID_LIKE) for name in id_like if all(name != c for c, _ in out))
+    return out
+
+
+def unsafe_key_columns(checks: Sequence[ColumnMaskCheck],
+                       tagged_columns: Iterable[str] = ()) -> dict[str, set[str]]:
+    """Per lower-case table: the columns no key may use (masked here, or tagged in the config)."""
+    out: dict[str, set[str]] = {}
+    for c in checks:
+        out.setdefault(c.table.lower(), set()).add(c.column.lower())
+    for name in tagged_columns:
+        table, _, column = name.lower().rpartition(".")
+        if table in out:
+            out[table].add(column)
+    return out
+
+
+def pick_table_key(
+    table: str,
+    *,
+    explicit: str = "",
+    global_key: str = "",
+    facts: Optional[TableKeyFacts] = None,
+    facts_error: str = "",
+    unsafe: Iterable[str] = (),
+    prove: Any,
+    prove_explicit: bool = True,
+) -> KeyPick:
+    """Choose and prove ``table``'s row-pairing key.
+
+    ``prove(column)`` runs the admin proof (in-sample unique and non-null, then
+    the whole-table count) and returns "" or the reason it failed. Without
+    column metadata (``facts_error``) only an explicit key can be tried; the
+    global key then applies as it always did. With ``prove_explicit=False`` an
+    explicit key is taken unproven: the live run's per-check proof covers it
+    and, failing, reports it (an explicit key never falls through).
+    """
+    unsafe = {c.lower() for c in unsafe}
+
+    def explicit_pick(column: str, source: str) -> KeyPick:
+        if column.lower() in unsafe:
+            problem = f"row-pairing key {column} ({source}) is a masked column on {table}"
+        elif facts is not None and column.lower() not in {n.lower() for n, _ in facts.columns}:
+            problem = f"row-pairing key {column} ({source}) does not exist on {table}"
+        else:
+            problem = prove(column) if prove_explicit else ""
+        return KeyPick(table, "" if problem else column, source, problem)
+
+    if explicit.strip():
+        return explicit_pick(explicit.strip(), SOURCE_TABLE_KEY)
+    global_key = global_key.strip()
+    if facts is None:
+        if global_key:
+            return explicit_pick(global_key, SOURCE_GLOBAL_KEY)
+        return KeyPick(table, problem=f"{no_key_message(table)} (could not read its columns: {facts_error})")
+    if global_key and global_key.lower() in {n.lower() for n, _ in facts.columns}:
+        return explicit_pick(global_key, SOURCE_GLOBAL_KEY)
+    tried = []
+    for column, source in key_candidates(table, facts, unsafe):
+        problem = prove(column)
+        if not problem:
+            return KeyPick(table, column, source)
+        tried.append(f"{column}: {problem.split('; choose a unique')[0]}")
+    detail = f" (tried {'; '.join(tried)})" if tried else ""
+    return KeyPick(table, problem=no_key_message(table) + detail)
+
+
+# ---------------------------------------------------------------------------
 # Live workspace layer (guarded — requires databricks-sdk + a workspace)
 # ---------------------------------------------------------------------------
 def _require_live_enabled() -> None:
@@ -862,10 +1037,13 @@ class EffectiveAccessVerifier:
     """
 
     def __init__(self, auth: Mapping[str, str], warehouse_id: str = "",
-                 name_prefix: str = "genierails-verify"):
+                 name_prefix: str = "genierails-verify", *, admin_only: bool = False):
         _require_live_enabled()
         self.auth = dict(auth)
         self.warehouse_id = warehouse_id
+        # Admin-only runs (the pre-apply key check) grant nothing, so they may
+        # use a workspace warehouse before Terraform has created the env's own.
+        self.admin_only = admin_only
         self.name_prefix = name_prefix
         self._admin_ws = None
         self._account = None
@@ -906,6 +1084,14 @@ class EffectiveAccessVerifier:
         self._guard()
         if self.warehouse_id:
             return self.warehouse_id
+        if self.admin_only:
+            sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
+            from warehouse_utils import select_warehouse
+
+            chosen = select_warehouse([w for w in self.admin_ws.warehouses.list() if w.id])
+            if chosen is not None:
+                self.warehouse_id = chosen.id
+                return self.warehouse_id
         raise RuntimeError(
             "No SQL warehouse was resolved; pass --warehouse-id or configure one "
             "in env.auto.tfvars. Arbitrary workspace warehouse selection is disabled."
@@ -1110,22 +1296,76 @@ class EffectiveAccessVerifier:
         of the last sampled key can sit past the LIMIT. Returns "" when proven,
         else the reason (counts only, never key values).
         """
+        return self.prove_keys_unique(principal, check.table, check.key_column, keys)
+
+    def prove_keys_unique(self, principal: TestPrincipal, table: str, key_column: str,
+                          keys: Sequence[Any]) -> str:
+        """prove_key_unique for any (table, key column)."""
         self._guard()
-        where, params = _key_filter(check.key_column, keys)
+        where, params = _key_filter(key_column, keys)
         rows = self.run_query(
             self._ws_for(principal),
-            f"SELECT COUNT(*), COUNT(DISTINCT `{check.key_column}`), COUNT(`{check.key_column}`) "
-            f"FROM {check.table}{where}",
+            f"SELECT COUNT(*), COUNT(DISTINCT `{key_column}`), COUNT(`{key_column}`) "
+            f"FROM {table}{where}",
             params,
         )
         total, distinct, non_null = (int(v or 0) for v in (rows[0] if rows else (0, 0, 0)))
         if total == distinct == non_null == len(keys):
             return ""
-        return _key_problem_message(
-            check,
+        return _pairing_key_problem(
+            key_column, table,
             f"is not unique / has NULLs ({len(keys)} sampled keys match {total} rows, "
             f"{distinct} distinct, {non_null} non-null)",
         )
+
+    def prove_pairing_key(self, principal: TestPrincipal, table: str, key_column: str,
+                          limit: int = KEY_SAMPLE_LIMIT) -> str:
+        """Admin proof that ``key_column`` can pair ``table``'s rows ("" when proven).
+
+        Samples the lowest keys (NULLs sort first, so any NULL is sampled),
+        requires them unique and non-null, then proves across the whole table
+        that each names one row. Reasons carry counts only, never key values.
+        """
+        self._guard()
+        try:
+            rows = self.run_query(
+                self._ws_for(principal),
+                f"SELECT `{key_column}` FROM {table} ORDER BY `{key_column}` LIMIT {int(limit)}",
+            )
+            keys = [r[0] for r in rows if r]
+            if not keys:
+                return f"the admin baseline sees no rows of {table}, so rows cannot be paired by {key_column}"
+            return (sampled_keys_problem(key_column, table, principal.tier, keys)
+                    or self.prove_keys_unique(principal, table, key_column, keys))
+        except Exception as exc:
+            return f"could not prove row-pairing key {key_column} on {table}: {exc}"
+
+    def table_key_facts(self, principal: TestPrincipal, table: str) -> TableKeyFacts:
+        """Columns, PRIMARY KEY and tagged columns of ``table`` (read as the admin)."""
+        self._guard()
+        parts = [p.strip().strip("`").lower() for p in table.split(".")]
+        if len(parts) != 3 or not all(parts):
+            raise ValueError(f"{table} is not catalog.schema.table")
+        params = dict(zip(("c", "s", "t"), parts))
+        ws = self._ws_for(principal)
+        columns = tuple(
+            (str(r[0]), str(r[1] or "")) for r in self.run_query(ws, (
+                "SELECT column_name, data_type FROM system.information_schema.columns "
+                "WHERE table_catalog = :c AND table_schema = :s AND table_name = :t "
+                "ORDER BY ordinal_position"), params) if r)
+        if not columns:
+            raise RuntimeError(f"no columns of {table} are visible to the admin")
+        primary_key = tuple(str(r[0]) for r in self.run_query(ws, (
+            "SELECT k.column_name FROM system.information_schema.table_constraints c "
+            "JOIN system.information_schema.key_column_usage k "
+            "ON k.constraint_catalog = c.constraint_catalog AND k.constraint_schema = c.constraint_schema "
+            "AND k.constraint_name = c.constraint_name "
+            "WHERE c.constraint_type = 'PRIMARY KEY' AND c.table_catalog = :c "
+            "AND c.table_schema = :s AND c.table_name = :t ORDER BY k.ordinal_position"), params) if r)
+        tagged = frozenset(str(r[0]).lower() for r in self.run_query(ws, (
+            "SELECT DISTINCT column_name FROM system.information_schema.column_tags "
+            "WHERE catalog_name = :c AND schema_name = :s AND table_name = :t"), params) if r)
+        return TableKeyFacts(columns, primary_key, tagged)
 
     def count_rows_with_keys(
         self, principal: TestPrincipal, check: ColumnMaskCheck, keys: Sequence[Any],
@@ -1152,8 +1392,16 @@ def verify_effective_access_live(
     warehouse_id: str = "",
     keep_principals: bool = False,
     admin_tier: str = DEFAULT_ADMIN_TIER,
+    global_key: str = "",
+    unsafe_by_table: Optional[Mapping[str, set[str]]] = None,
+    require_keys: bool = False,
 ) -> EffectiveAccessReport:
     """Provision per-tier principals, run queries as each, and evaluate effects.
+
+    First, as the admin only, every masked table's row-pairing key is picked
+    and proven (see pick_table_key). A table with no provable key is NOT
+    VERIFIED, or blocking with ``require_keys`` (make release) or when an
+    explicit key failed; the rest are verified with their keys.
 
     Guarded: raises unless ``GENIERAILS_LIVE_VERIFY=1``.
     """
@@ -1171,6 +1419,23 @@ def verify_effective_access_live(
         client_secret=auth["client_secret"],
     )
     principals[admin_tier] = admin_principal
+
+    # Explicit keys are proven per check below (#90's checks), like auto picks.
+    picks = pick_pairing_keys(verifier, admin_principal, spec.column_masks, global_key=global_key,
+                              unsafe_by_table=unsafe_by_table, prove_explicit=False)
+    print_key_picks(picks)
+    keyed, blocking, not_verified = [], [], []
+    for check in spec.column_masks:
+        pick = picks[check.table.lower()]
+        if pick.key:
+            keyed.append(replace(check, key_column=check.key_column or pick.key))
+            continue
+        result = CheckResult("column-mask", check.describe(), INCONCLUSIVE, pick.problem,
+                             {"key_source": pick.source})
+        (blocking if require_keys or pick.explicit else not_verified).append(result)
+    spec = VerificationSpec(column_masks=keyed, row_filters=list(spec.row_filters))
+    if spec.is_empty():
+        return EffectiveAccessReport(results=blocking, not_verified=not_verified)
 
     try:
         for tier in sorted(spec.principals):
@@ -1276,16 +1541,140 @@ def verify_effective_access_live(
             row_counts[check.table] = per_principal_counts
             row_errors[check.table] = per_row_errors
 
-        return evaluate_effective_access(
+        report = evaluate_effective_access(
             spec, column_values, row_counts, column_errors, row_errors,
             pairing_problems=pairing_problems, unpaired=unpaired,
         )
+        report.results.extend(blocking)
+        report.not_verified.extend(not_verified)
+        report.pairing_keys = proven_keys_by_table(report, spec)
+        return report
     finally:
         if not keep_principals:
             for tier, p in principals.items():
                 if tier == admin_tier:
                     continue
                 verifier.deprovision_principal(p)
+
+
+def pick_pairing_keys(
+    verifier: "EffectiveAccessVerifier", principal: "TestPrincipal",
+    checks: Sequence[ColumnMaskCheck], *,
+    global_key: str = "", unsafe_by_table: Optional[Mapping[str, set[str]]] = None,
+    prove_explicit: bool = True,
+) -> dict[str, KeyPick]:
+    """Pick and prove a row-pairing key for every table with a mask check.
+
+    A check's own key_column (verify_key_columns or a VERIFY_SPEC) is the
+    explicit choice for its table. Admin-only: no test principal is needed,
+    and the verifier is only queried for a table that has no explicit key.
+    """
+    tables: dict[str, str] = {}
+    explicit: dict[str, str] = {}
+    for c in checks:
+        tables.setdefault(c.table.lower(), c.table)
+        if c.key_column and c.table.lower() not in explicit:
+            explicit[c.table.lower()] = c.key_column
+    picks: dict[str, KeyPick] = {}
+    for lower, table in tables.items():
+        facts, facts_error = None, ""
+        if lower not in explicit:
+            try:
+                facts = verifier.table_key_facts(principal, table)
+            except Exception as exc:
+                facts_error = str(exc)
+        picks[lower] = pick_table_key(
+            table, explicit=explicit.get(lower, ""), global_key=global_key,
+            facts=facts, facts_error=facts_error,
+            unsafe=(unsafe_by_table or {}).get(lower, ()),
+            prove=lambda column, t=table: verifier.prove_pairing_key(principal, t, column),
+            prove_explicit=prove_explicit,
+        )
+    return picks
+
+
+def print_key_picks(picks: Mapping[str, KeyPick]) -> None:
+    """One line per table: the key column and why it was chosen (no values)."""
+    for pick in picks.values():
+        if pick.key:
+            print(f"  Row-pairing key for {pick.table}: {pick.key} ({pick.source})")
+        else:
+            print(f"  Row-pairing key for {pick.table}: NONE — {pick.problem}")
+
+
+def proven_keys_by_table(report: EffectiveAccessReport, spec: VerificationSpec) -> dict[str, str]:
+    """Tables whose every mask check passed, with the key that paired them."""
+    status = {r.target: r.status for r in report.results}
+    by_table: dict[str, list[ColumnMaskCheck]] = {}
+    for check in spec.column_masks:
+        by_table.setdefault(check.table, []).append(check)
+    return {
+        table: checks[0].key_column
+        for table, checks in by_table.items()
+        if checks[0].key_column
+        and all(c.key_column == checks[0].key_column and status.get(c.describe()) == PASS for c in checks)
+    }
+
+
+def check_pairing_keys(
+    spec: VerificationSpec,
+    auth_file: Path,
+    *,
+    warehouse_id: str = "",
+    global_key: str = "",
+    unsafe_by_table: Optional[Mapping[str, set[str]]] = None,
+    admin_tier: str = DEFAULT_ADMIN_TIER,
+) -> dict[str, KeyPick]:
+    """Pick and prove every masked table's key as the admin only (no test
+    principals, no grants); make release runs this before it applies access."""
+    _require_live_enabled()
+    auth = load_auth(auth_file)
+    verifier = EffectiveAccessVerifier(auth, warehouse_id=warehouse_id, admin_only=True)
+    verifier.resolve_warehouse()
+    admin = TestPrincipal(tier=admin_tier, display_name="admin-baseline",
+                          application_id=auth["client_id"], client_secret=auth["client_secret"])
+    return pick_pairing_keys(verifier, admin, spec.column_masks, global_key=global_key,
+                             unsafe_by_table=unsafe_by_table)
+
+
+def normalize_key_map(value: Any) -> dict[str, str]:
+    """verify_key_columns as parsed from HCL: {"cat.sch.tbl": "col"}, blanks dropped."""
+    if isinstance(value, list):
+        value = value[0] if value else {}
+    if not isinstance(value, Mapping):
+        return {}
+    out = {}
+    for table, column in value.items():
+        table, column = str(table).strip().strip('"').strip(), _as_str(column)
+        if table and column:
+            out[table] = column
+    return out
+
+
+def load_key_map(env_file: Optional[Path]) -> dict[str, str]:
+    """The verify_key_columns setting of an env.auto.tfvars ({} when absent)."""
+    if env_file is None or not Path(env_file).is_file():
+        return {}
+    import hcl2
+
+    try:
+        with open(env_file) as f:
+            return normalize_key_map(hcl2.load(f).get("verify_key_columns"))
+    except Exception as exc:
+        raise ValueError(f"ERROR: cannot read verify_key_columns from {env_file}: {exc}") from exc
+
+
+def tagged_columns_from_tfvars(tfvars_file: Path) -> set[str]:
+    """Every tagged column of a data_access abac.auto.tfvars, lower-case cat.sch.tbl.col."""
+    import hcl2
+
+    with open(tfvars_file) as f:
+        tag_assignments = hcl2.load(f).get("tag_assignments", []) or []
+    return {
+        _as_str(item.get("entity_name")).lower()
+        for item in tag_assignments
+        if _as_str(item.get("entity_type")) == "columns"
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1384,30 +1773,42 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--account-tfvars", type=Path,
                    help="Optional account abac.auto.tfvars (source of group names).")
     p.add_argument("--key-column", default="",
-                   help="Primary-key column used to pair rows across principals.")
+                   help="Row-pairing key for every masked table that has this column "
+                        "(VERIFY_KEY_COLUMN / verify_key_column; optional).")
+    p.add_argument("--env-file", type=Path,
+                   help="env.auto.tfvars whose verify_key_columns map gives per-table keys.")
     p.add_argument("--auth-file", type=Path,
                    help="auth.auto.tfvars for the live workspace (required with --live).")
     p.add_argument("--warehouse-id", default="", help="SQL warehouse ID for queries.")
     p.add_argument("--live", action="store_true",
                    help=f"Run against a real workspace (also needs {LIVE_ENV_FLAG}=1).")
+    p.add_argument("--check-keys-only", action="store_true",
+                   help="As the admin only, pick and prove every masked table's row-pairing "
+                        "key and exit (no test principals, no grants; make release runs it "
+                        f"before applying). Needs --auth-file and {LIVE_ENV_FLAG}=1.")
     p.add_argument("--keep-principals", action="store_true",
                    help="Do not delete the provisioned test principals (debugging).")
     p.add_argument("--result-file", type=Path,
-                   help="After a --live run, write a JSON summary (passed, mask checks "
-                        "passed per key column) for tooling such as make rehearse/release.")
+                   help="After a --live run, write a JSON summary (passed, the proven "
+                        "row-pairing key per table) for tooling such as make rehearse/release.")
     p.add_argument("--print-spec", action="store_true",
                    help="Print the resolved spec and exit (no workspace needed).")
     p.add_argument("--require-mask-checks", action="store_true",
-                   help="Fail instead of skipping mask checks that have no key column "
-                        "(make release: production masking must be proven).")
+                   help="Fail instead of skipping a mask check whose table has no provable "
+                        "row-pairing key (make release: production masking must be proven).")
     return p
 
 
-def _load_spec_from_args(args) -> VerificationSpec:
+def _load_spec_from_args(args, key_map: Mapping[str, str]) -> VerificationSpec:
+    """The spec, each mask check keyed by its table's explicit key ("" = pick one live)."""
+    by_table = {t.lower(): k for t, k in key_map.items()}
     if args.spec:
         if not args.spec.is_file():
             raise SystemExit(f"ERROR: verification spec not found: {args.spec}")
-        return load_spec_from_file(args.spec)
+        spec = load_spec_from_file(args.spec)
+        spec.column_masks = [replace(c, key_column=c.key_column or by_table.get(c.table.lower(), ""))
+                             for c in spec.column_masks]
+        return spec
     if args.from_tfvars:
         if not args.from_tfvars.is_file():
             raise SystemExit(
@@ -1421,26 +1822,38 @@ def _load_spec_from_args(args) -> VerificationSpec:
                 "Run 'make promote' (or 'make apply', which promotes first) before "
                 "verify-access-spec."
             )
-        return load_spec_from_tfvars(
+        # Derived with the global key too, so a key tagged sensitive is refused
+        # up front; it then applies only to tables that have it (picked live).
+        spec = load_spec_from_tfvars(
             args.from_tfvars, args.account_tfvars, key_column=args.key_column,
+            key_column_by_table=key_map,
         )
+        spec.column_masks = [replace(c, key_column=by_table.get(c.table.lower(), ""))
+                             for c in spec.column_masks]
+        return spec
     raise SystemExit("Provide either --spec or --from-tfvars.")
 
 
-def write_result_file(path: Optional[Path], report: EffectiveAccessReport, spec: Any) -> None:
-    """Machine-readable proof of a live run: which key columns paired a passing mask check."""
+def write_result_file(path: Optional[Path], report: EffectiveAccessReport, spec: Any = None) -> None:
+    """Machine-readable proof of a live run: the key proven for each table.
+
+    ``mask_keys_proven_by_table`` lists only tables whose every mask check
+    passed; make saves it as verify_key_columns after a passing run.
+    """
     if path is None:
         return
-    key_by_target = {check.describe(): check.key_column for check in spec.column_masks}
+    checks = {check.describe(): check for check in getattr(spec, "column_masks", [])}
     by_key: dict[str, int] = {}
     for r in report.results:
-        if r.kind == "column-mask" and r.status == PASS and key_by_target.get(r.target):
-            key = key_by_target[r.target]
+        check = checks.get(r.target)
+        key = check and (report.pairing_keys.get(check.table) or check.key_column)
+        if r.kind == "column-mask" and r.status == PASS and key:
             by_key[key] = by_key.get(key, 0) + 1
     payload = {
         "passed": report.passed,
         "mask_checks_passed": sum(by_key.values()),
         "mask_checks_passed_by_key": by_key,
+        "mask_keys_proven_by_table": dict(sorted(report.pairing_keys.items())),
         "row_filter_checks_passed": sum(
             1 for r in report.results if r.kind == "row-filter" and r.status == PASS),
     }
@@ -1450,12 +1863,34 @@ def write_result_file(path: Optional[Path], report: EffectiveAccessReport, spec:
     os.replace(tmp, path)
 
 
+def _check_keys_only(args, spec: VerificationSpec, unsafe: Mapping[str, set[str]]) -> int:
+    if not spec.column_masks:
+        print("Row-pairing keys: no masked tables, so no key is needed.")
+        return 0
+    if not args.auth_file:
+        raise SystemExit("--auth-file is required with --check-keys-only.")
+    print("=== Row-pairing keys (admin check before any access is granted) ===")
+    picks = check_pairing_keys(spec, args.auth_file, warehouse_id=args.warehouse_id,
+                               global_key=args.key_column, unsafe_by_table=unsafe)
+    print_key_picks(picks)
+    missing = [p for p in picks.values() if not p.key]
+    if missing:
+        print(
+            f"ERROR: {len(missing)} masked table(s) have no provable row-pairing key, so their "
+            "masking could not be verified:\n" + "\n".join(f"  - {p.problem}" for p in missing),
+            file=sys.stderr,
+        )
+        return 2
+    print(f"All {len(picks)} masked table(s) have a proven row-pairing key.")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.result_file is not None:
         args.result_file.unlink(missing_ok=True)
     try:
-        spec = _load_spec_from_args(args)
+        spec = _load_spec_from_args(args, load_key_map(args.env_file))
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -1490,6 +1925,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             return 2
 
+    unsafe = unsafe_key_columns(
+        spec.column_masks, tagged_columns_from_tfvars(args.from_tfvars) if args.from_tfvars else ())
+    if args.check_keys_only:
+        return _check_keys_only(args, spec, unsafe)
+
     if spec.is_empty():
         # (issue 4) Deriving zero checks means we would verify nothing. That is
         # never a success — a passing gate here would be a false success.
@@ -1502,55 +1942,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 2
 
-    missing_key_checks = [check for check in spec.column_masks if not check.key_column]
-    if missing_key_checks:
-        print(
-            "SKIP: no verification key column is configured; skipping "
-            f"{len(missing_key_checks)} mask comparison(s) that require row pairing. "
-            "Row-filter checks will still run. Configure verify_key_column in "
-            "env.auto.tfvars or pass VERIFY_KEY_COLUMN=<col> to enable them."
-        )
-        if args.require_mask_checks:
-            print(
-                f"ERROR: {len(missing_key_checks)} mask check(s) have no key column, so masking "
-                "would NOT be verified. Set verify_key_column in env.auto.tfvars (or pass "
-                "VERIFY_KEY_COLUMN=<col> or VERIFY_SPEC=<file>). Refusing to report success.",
-                file=sys.stderr,
-            )
-            return 2
-
     if args.print_spec or not args.live:
         print("Resolved effective-access spec:")
         for c in spec.column_masks:
-            suffix = " — skipped (no key column)" if not c.key_column else ""
-            print(f"  [column-mask] {c.table}.{c.column} key={c.key_column!r} "
+            key = repr(c.key_column) if c.key_column else (
+                f"auto ({args.key_column!r} if the table has it, else its primary key "
+                "or an id-like column; picked and proven live)" if args.key_column.strip()
+                else "auto (primary key or an id-like column; picked and proven live)")
+            print(f"  [column-mask] {c.table}.{c.column} key={key} "
                   f"masked={list(c.masked_principals)} "
-                  f"unmasked={list(c.unmasked_principals)}{suffix}")
+                  f"unmasked={list(c.unmasked_principals)}")
         for r in spec.row_filters:
             print(f"  [row-filter]  {r.table} restricted={list(r.restricted_principals)} "
                   f"unrestricted={list(r.unrestricted_principals)}")
         if not args.live:
-            if missing_key_checks:
-                print(
-                    "\nWARNING: masking NOT verified for skipped checks; "
-                    "configure a key column to enable row pairing."
-                )
             print(f"\n(dry run — pass --live and set {LIVE_ENV_FLAG}=1 to execute against a workspace.)")
             return 0
-
-    skipped_results = [
-        CheckResult(
-            "column-mask", check.describe(), INCONCLUSIVE,
-            "masking NOT verified because no key column was configured for row pairing",
-        )
-        for check in missing_key_checks
-    ]
-    spec.column_masks = [check for check in spec.column_masks if check.key_column]
-    if spec.is_empty():
-        report = EffectiveAccessReport(not_verified=skipped_results)
-        print(report.summary())
-        write_result_file(args.result_file, report, spec)
-        return 0
 
     if not args.auth_file:
         raise SystemExit("--auth-file is required with --live.")
@@ -1558,11 +1965,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     report = verify_effective_access_live(
         spec, args.auth_file,
         warehouse_id=args.warehouse_id, keep_principals=args.keep_principals,
+        global_key=args.key_column, unsafe_by_table=unsafe,
+        require_keys=args.require_mask_checks,
     )
-    report.not_verified.extend(skipped_results)
     print(report.summary())
     write_result_file(args.result_file, report, spec)
-    return 0 if report.passed else 1
+    if report.passed:
+        return 0
+    # Only unkeyable masks and nothing else to check: NOT VERIFIED, as before
+    # (make release passes --require-mask-checks, which makes these blocking).
+    return 0 if not report.results and report.not_verified else 1
 
 
 if __name__ == "__main__":
