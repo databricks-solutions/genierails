@@ -636,7 +636,9 @@ class TestCliEmptySpec:
         with pytest.raises(SystemExit, match="itself classified sensitive/masked"):
             main(["--spec", str(spec_file)])
 
-    def test_main_keyless_skips_only_mask_comparisons(self, tmp_path, capsys):
+    # A keyless mask check is no longer skipped: its key is picked and proven
+    # live, per table, so the dry run says so instead of "skipped".
+    def test_main_keyless_check_is_picked_live(self, tmp_path, capsys):
         spec_file = tmp_path / "spec.json"
         spec_file.write_text(
             '{"column_masks": [{"table": "c.s.t", "column": "ssn", '
@@ -645,24 +647,20 @@ class TestCliEmptySpec:
         )
         assert main(["--spec", str(spec_file)]) == 0
         out = capsys.readouterr().out
-        assert "skipping 1 mask comparison" in out
-        assert "skipped (no key column)" in out
-        assert "masking NOT verified" in out
+        assert "key=auto (primary key or an id-like column; picked and proven live)" in out
+        assert "skipped" not in out
 
-    # make release passes --require-mask-checks: a keyless mask check must fail
-    # the run (before any workspace call), never let it report success.
-    def test_main_require_mask_checks_fails_keyless_before_going_live(self, tmp_path, capsys, monkeypatch):
-        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+    # make release passes --require-mask-checks: a keyless check is no longer
+    # refused up front (the key is picked live; a table with none is blocking).
+    def test_main_require_mask_checks_accepts_keyless_checks_for_live_picking(self, tmp_path, capsys):
         spec_file = tmp_path / "spec.json"
         spec_file.write_text(
             '{"column_masks": [{"table": "c.s.t", "column": "ssn", '
             '"masked_principals": ["Jr"], "unmasked_principals": ["Sr"]}], '
             '"row_filters": []}'
         )
-        rc = main(["--spec", str(spec_file), "--require-mask-checks", "--live",
-                   "--auth-file", str(tmp_path / "missing.auto.tfvars")])
-        assert rc == 2
-        assert "masking would NOT be verified" in capsys.readouterr().err
+        assert main(["--spec", str(spec_file), "--require-mask-checks", "--key-column", "id"]) == 0
+        assert "key=auto ('id' if the table has it" in capsys.readouterr().out
 
     # A mask verify-access can derive no check for must fail the strict run,
     # not leave it passing on the checks it could derive: "everyone except

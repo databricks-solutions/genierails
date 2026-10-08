@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Settings make saves into an env's env.auto.tfvars so later runs need fewer flags.
 
-verify-key      after a rehearse/release whose verify-access passed a mask check
-                paired by an explicit VERIFY_KEY_COLUMN (per its result file),
-                save it as verify_key_column.
+verify-key      after a rehearse/release whose verify-access passed, save the
+                row-pairing key it proved for each masked table (its result
+                file's mask_keys_proven_by_table) into verify_key_columns, and an
+                explicit VERIFY_KEY_COLUMN that paired a passing mask check as
+                verify_key_column.
 promote-resolve pick the source env and catalog map for make promote-to from
                 FROM / CATALOG_MAP, else the destination's saved promote_from /
                 catalog_map; prints "<source> <map>".
@@ -30,6 +32,7 @@ if str(SHARED_ROOT) not in sys.path:
 import hcl2  # noqa: E402
 
 from access_tier_groups import _assignment_spans, _hcl_string, display_path  # noqa: E402
+from verify_effective_access import normalize_key_map  # noqa: E402
 
 RESERVED_ENVS = ("account", "data_access")
 # Env names are plain directory names under this cloud's envs/ (no paths).
@@ -110,7 +113,96 @@ def key_proven(result_file: Path | None, value: str) -> bool:
         return False
 
 
+def _read_result(result_file: Path | None) -> dict:
+    if result_file is None:
+        return {}
+    try:
+        result = json.loads(result_file.read_text())
+    except (OSError, ValueError):
+        return {}
+    return result if isinstance(result, dict) else {}
+
+
+def _key_map(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {t.strip(): k.strip() for t, k in value.items()
+            if isinstance(t, str) and isinstance(k, str) and t.strip() and k.strip()}
+
+
+def proven_table_keys(result_file: Path | None) -> dict[str, str]:
+    """{table: key} for every masked table, when verify-access passed and proved
+    a key for each of them ({} otherwise: a partial proof is never saved)."""
+    result = _read_result(result_file)
+    proven = _key_map(result.get("mask_keys_proven_by_table"))
+    tables = result.get("masked_tables")
+    if (result.get("passed") is not True or result.get("mask_keys_complete") is not True
+            or not isinstance(tables, list) or not tables
+            or {str(t).lower() for t in tables} != {t.lower() for t in proven}):
+        return {}
+    return proven
+
+
+def _saved_record(result_file: Path) -> Path:
+    """What save_table_keys last wrote, so it can tell its own entries from yours."""
+    return result_file.with_name(".verify_key_columns.saved.json")
+
+
+def save_table_keys(env_file: Path, result_file: Path | None) -> int:
+    """Write verify_key_columns as exactly the keys this run proved.
+
+    Only after a run that proved a key for EVERY masked table. Entries for
+    tables that are no longer masked are dropped if this tool saved them, and
+    kept (with a note) if you wrote them; nothing is saved after a partial run.
+    """
+    result = _read_result(result_file)
+    proven = proven_table_keys(result_file)
+    if not proven:
+        tables = result.get("masked_tables") if isinstance(result.get("masked_tables"), list) else []
+        if tables:
+            missing = sorted(set(map(str, tables)) - set(_key_map(result.get("mask_keys_proven_by_table"))))
+            print("NOTE: verify_key_columns not saved: verify-access did not prove every masked "
+                  "table's row-pairing key" + (f" (unproven: {', '.join(missing)})" if missing else "")
+                  + "; fix them and re-run.")
+        return 0
+    if not env_file.is_file():
+        print(f"NOTE: {display_path(env_file)} not found; verify_key_columns not saved.")
+        return 0
+    record = _saved_record(result_file)
+    try:
+        ours = {t.lower(): k for t, k in _key_map(json.loads(record.read_text())).items()}
+    except (OSError, ValueError):
+        ours = {}
+    try:
+        saved = normalize_key_map(_load(env_file).get("verify_key_columns"))
+        proven_lower = {t.lower() for t in proven}
+        kept = {t: k for t, k in saved.items()
+                if t.lower() not in proven_lower and ours.get(t.lower()) != k}
+        dropped = sorted(t for t in saved if t.lower() not in proven_lower and t not in kept)
+        changed = set_settings(
+            env_file, {"verify_key_columns": dict(sorted({**kept, **proven}.items()))},
+            "Row-pairing key per masked table for verify-access (saved after a passing run).",
+        )
+    except ValueError as exc:
+        print(f"NOTE: verify_key_columns not saved: {exc}.")
+        return 0
+    record.write_text(json.dumps(dict(sorted(proven.items())), indent=2) + "\n")
+    if changed:
+        before = {t.lower(): k for t, k in saved.items()}
+        new = sorted(f"{t}={k}" for t, k in proven.items() if before.get(t.lower()) != k)
+        print(
+            f"Saved the proven row-pairing key per table as verify_key_columns in "
+            f"{display_path(env_file)}" + (f" ({', '.join(new)})" if new else "")
+            + (f"; removed stale {', '.join(dropped)}" if dropped else "") + "; promote carries it."
+        )
+    for table in sorted(kept):
+        print(f"NOTE: kept your verify_key_columns entry for {table} ({kept[table]}): it has no "
+              "masked column in this run; remove it if the table is no longer governed.")
+    return 0
+
+
 def save_verify_key(env_file: Path, value: str, result_file: Path | None = None) -> int:
+    save_table_keys(env_file, result_file)
     value = value.strip()
     if not value:
         return 0

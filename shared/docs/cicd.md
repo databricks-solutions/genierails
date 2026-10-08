@@ -95,7 +95,7 @@ After approval, deploy. **For prod, re-derive facts from prod's own classificati
 
 ```bash
 # prod facts: enable/wait for native classification first
-make release ENV=prod   # verify key: verify_key_column, promoted from dev
+make release ENV=prod   # row-pairing keys: picked per table and proven before apply
 ```
 
 `make release` re-derives assignments from prod's own tags (no LLM), validates, runs the coverage check and the rulebook audit, applies all layers in order (masks and policies before grants), then proves masking with `verify-access`. It never re-generates via the LLM. Terraform itself refuses new or wider business `SELECT` / Genie `CAN_RUN` without a recent passing coverage result, so no path can grant access past the gate. The shipped `.github/workflows/ci.yml` has no deployment job, so add one that runs this command; if you want a human approval before a deployment can add or widen access, give that job a protected `environment:`.

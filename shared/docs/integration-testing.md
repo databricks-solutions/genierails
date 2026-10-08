@@ -1017,7 +1017,7 @@ each, and asserts that a lower-tier principal sees the masked value while a
 higher-tier principal sees the raw value (and that row filters restrict rows):
 
 ```bash
-make verify-access ENV=dev VERIFY_KEY_COLUMN=customer_id
+make verify-access ENV=dev   # row-pairing key picked and proven per table
 ```
 
 The value-comparison logic ships with pure unit tests

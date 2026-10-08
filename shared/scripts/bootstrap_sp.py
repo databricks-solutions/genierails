@@ -205,6 +205,21 @@ def _has_effective_privilege(effective: Any, privilege_name: str) -> bool:
     )
 
 
+def _principal_has_effective_privilege(
+    effective: Any, principal_name: str, privilege_name: str
+) -> bool:
+    return any(
+        str(_value(assignment, "principal") or "").casefold()
+        == principal_name.casefold()
+        and any(
+            str(getattr(_value(privilege, "privilege"), "value",
+                        _value(privilege, "privilege"))).upper() == privilege_name
+            for privilege in _value(assignment, "privileges") or []
+        )
+        for assignment in _value(effective, "privilege_assignments") or []
+    )
+
+
 def _role_values(sp: Any) -> set[str]:
     roles = sp.get("roles", []) if isinstance(sp, dict) else getattr(sp, "roles", None) or []
     return {str(_value(role, "value")) for role in roles}
@@ -492,19 +507,34 @@ def _preflight(
             model_access, model_resource = "UC EXECUTE", foundation_model
             model_grant_needed = True
             inherited_execute = False
+            caller_function_effective = None
             try:
                 account_users_effective = workspace.grants.get_effective(
                     securable_type="function",
                     full_name=foundation_model,
                     principal="account users",
                 )
-                inherited_execute = _has_effective_privilege(
-                    account_users_effective, "EXECUTE"
+                inherited_execute = _principal_has_effective_privilege(
+                    account_users_effective, "account users", "EXECUTE"
                 )
             except Exception:
-                # If this inherited path cannot be inspected, caller authority below
-                # can still prove that a required grant is safe.
+                # Azure can deny inspecting another principal on system.ai even though
+                # the caller's own effective response exposes the inherited assignment.
                 pass
+            if not inherited_execute:
+                try:
+                    caller_function_effective = workspace.grants.get_effective(
+                        securable_type="function",
+                        full_name=foundation_model,
+                        principal=caller_name,
+                    )
+                    inherited_execute = _principal_has_effective_privilege(
+                        caller_function_effective, "account users", "EXECUTE"
+                    )
+                except Exception:
+                    # Caller authority below reports a clear failure if no other
+                    # read-only check proves that a grant is unnecessary.
+                    pass
             if not inherited_execute and existing_sp is not None:
                 client_id = str(_value(existing_sp, "application_id"))
                 try:
@@ -531,22 +561,25 @@ def _preflight(
                             f"{foundation_model!r} in workspace {workspace_id}. "
                             f"Cause: {_error_details(exc)}"
                         ) from exc
-                try:
-                    function_effective = workspace.grants.get_effective(
-                        securable_type="function",
-                        full_name=foundation_model,
-                        principal=caller_name,
-                    )
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"preflight failed in workspace {workspace_id}: could not inspect "
-                        f"effective grant rights and cannot prove MANAGE on function "
-                        f"{foundation_model!r}; caller lacks MANAGE unless this check "
-                        f"succeeds. Cause: {_error_details(exc)}"
-                    ) from exc
+                if caller_function_effective is None:
+                    try:
+                        caller_function_effective = workspace.grants.get_effective(
+                            securable_type="function",
+                            full_name=foundation_model,
+                            principal=caller_name,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"preflight failed in workspace {workspace_id}: could not "
+                            f"inspect effective grant rights and cannot prove MANAGE on "
+                            f"function {foundation_model!r}; caller lacks MANAGE unless "
+                            f"this check succeeds. Cause: {_error_details(exc)}"
+                        ) from exc
                 if (
                     function_owner.casefold() not in caller_principals
-                    and not _has_effective_privilege(function_effective, "MANAGE")
+                    and not _has_effective_privilege(
+                        caller_function_effective, "MANAGE"
+                    )
                 ):
                     raise RuntimeError(
                         f"preflight failed in workspace {workspace_id}: model access uses "
@@ -599,7 +632,16 @@ def _preflight(
             if model_access == "UC EXECUTE" and not model_grant_needed
             else model_access
         )
-        emit(f"PLAN RESOLVED workspace {workspace_id}: model access path {resolved_access}")
+        if model_access == "UC EXECUTE" and not model_grant_needed:
+            emit(
+                f"PLAN RESOLVED workspace {workspace_id}: model access UNCHANGED via "
+                f"{resolved_access}"
+            )
+        else:
+            emit(
+                f"PLAN RESOLVED workspace {workspace_id}: model access path "
+                f"{resolved_access}"
+            )
         emit(
             f"PREFLIGHT OK workspace {workspace_id} ({host}): authenticated as "
             f"{caller_name}; grant scope {securable_type} {full_name}; model access "

@@ -6235,7 +6235,6 @@ DEV_TO_PROD_TEMPLATE = MODULE_ROOT / "examples" / "dev_to_prod" / "env.auto.tfva
 # rename the space ("(dev_fin.finance)" -> "(prod_fin.finance)") consistently
 # with the remapped genie_space_configs keys (the PR #59 regression).
 CHAMPION_SPACE_TITLE = f"Champion Finance Analytics ({DEV_FIN_CAT}.finance)"
-CHAMPION_KEY_COLUMN = "customer_id"
 CHAMPION_TABLES = ("customers", "transactions", "credit_cards")
 
 # Opt-in only: seed class.* tags directly when native classification has not
@@ -6522,12 +6521,12 @@ def scenario_champion(
        3. make generate ENV=dev MODE=genie GENERATE_ARGS='--groups "..."' once;
           tables discovered from the agent alone; access_tier_groups persisted.
        4. make enable-classification ENV=dev (+ auto-tagging), wait for class.*.
-       5. make generate ENV=dev (no --groups); make rehearse ENV=dev
-          VERIFY_KEY_COLUMN=...; persist verify_key_column in dev.
+       5. make generate ENV=dev (no --groups); make rehearse ENV=dev (no
+          key flag: verify-access picks and saves verify_key_columns in dev).
        6. make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=...;
           assert the promoted prod env; fill prod auth + sql_warehouse_id.
        7. make enable-classification ENV=prod (+ auto-tagging), wait; make
-          release ENV=prod VERIFY_KEY_COLUMN=...; coverage check recorded
+          release ENV=prod (no key flag); coverage check recorded
           as passed, prod Genie agent exists, verify-access ALL EFFECTIVE.
        8. make maintain ENV=prod; the coverage check still passes.
        9. Teardown (always, unless --keep-data).
@@ -6630,14 +6629,17 @@ def scenario_champion(
         _assert_contains(gen_abac, "gr_treatment", "native-derived gr_treatment enforcement key")
 
         result = _champion_make(
-            "rehearse", f"ENV={dev_env}", f"VERIFY_KEY_COLUMN={CHAMPION_KEY_COLUMN}",
-            capture=True, retries=1, retry_delay_seconds=120,
+            "rehearse", f"ENV={dev_env}", capture=True, retries=1, retry_delay_seconds=120,
         )
         _assert_output(result, "RESULT: ALL EFFECTIVE", "dev rehearse verify-access")
         _assert_output(result, "[PASS] column-mask", "dev masking proven by effect")
         if "business_access_enabled" in _load_tfvars(dev_env_file):
             raise AssertionError("rehearse must not write the retired business_access_enabled in dev")
-        _set_tfvar(dev_env_file, "verify_key_column", f'"{CHAMPION_KEY_COLUMN}"')
+        dev_keys = _load_tfvars(dev_env_file).get("verify_key_columns") or {}
+        if not dev_keys or not set(dev_keys) <= set(dev_tables):
+            raise AssertionError(
+                f"rehearse saved no proven per-table row-pairing keys for {dev_tables}: {dev_keys!r}")
+        print(f"  {_green('PASS')}  dev verify_key_columns saved after the pass: {dev_keys}")
 
         # ── 6. Promote ───────────────────────────────────────────────────────
         _champion_phase(6, f"make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP={catalog_map}")
@@ -6651,7 +6653,8 @@ def scenario_champion(
             "access_tier_groups": prod_cfg.get("access_tier_groups") == tier_groups,
             "remapped catalog": set(prod_cfg.get("uc_tables") or []) == set(prod_tables),
             "no dev catalog": DEV_FIN_CAT not in prod_env_file.read_text(),
-            "verify_key_column": prod_cfg.get("verify_key_column") == CHAMPION_KEY_COLUMN,
+            "verify_key_columns": prod_cfg.get("verify_key_columns") == {
+                table.replace(f"{DEV_FIN_CAT}.", f"{PROD_FIN_CAT}.", 1): key for table, key in dev_keys.items()},
             "no business_access_enabled": "business_access_enabled" not in prod_cfg,
         }
         bad = [name for name, ok in checks.items() if not ok]
@@ -6678,8 +6681,7 @@ def scenario_champion(
         _force_account_reapply("champion prod release")
         lock = prod_dir / "generated" / ".governance.lock"
         result = _champion_make(
-            "release", f"ENV={prod_env}", f"VERIFY_KEY_COLUMN={CHAMPION_KEY_COLUMN}", capture=True,
-            retries=1, retry_delay_seconds=120,
+            "release", f"ENV={prod_env}", capture=True, retries=1, retry_delay_seconds=120,
         )
         _assert_output(result, "=== Release complete (prod) ===", "release completed")
         _assert_output(result, "RESULT: ALL EFFECTIVE", "prod verify-access")

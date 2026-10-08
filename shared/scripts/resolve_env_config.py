@@ -59,8 +59,13 @@ def resolve_warehouse(
     *,
     terraform_runner: Path | None = None,
     env_name: str = "",
+    allow_unset: bool = False,
 ) -> str:
-    """Resolve a warehouse deterministically, failing on per-space ambiguity."""
+    """Resolve a warehouse deterministically, failing on per-space ambiguity.
+
+    ``allow_unset`` returns "" instead of failing when nothing is configured or
+    applied yet (the admin-only key check before the first apply).
+    """
     if explicit.strip():
         return _valid_warehouse_id(explicit)
     config = load_hcl(env_dir / "env.auto.tfvars")
@@ -85,7 +90,7 @@ def resolve_warehouse(
     # subprocess is used: invoking terraform_layer.sh would run init and take a
     # lock that a timeout could strand.
     value = _warehouse_from_local_state(env_dir)
-    if value:
+    if value or allow_unset:
         return value
     raise ValueError(
         "no SQL warehouse could be resolved; set WAREHOUSE_ID, sql_warehouse_id, "
@@ -100,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--explicit", default="")
     parser.add_argument("--terraform-runner", type=Path)
     parser.add_argument("--env-name", default="")
+    parser.add_argument("--allow-unset", action="store_true",
+                        help="warehouse: print an empty line instead of failing when none is set yet.")
     args = parser.parse_args(argv)
     try:
         if args.setting == "verify-key":
@@ -108,6 +115,7 @@ def main(argv: list[str] | None = None) -> int:
             value = resolve_warehouse(
                 args.env_dir, args.explicit,
                 terraform_runner=args.terraform_runner, env_name=args.env_name,
+                allow_unset=args.allow_unset,
             )
     except ValueError as exc:
         parser.error(str(exc))

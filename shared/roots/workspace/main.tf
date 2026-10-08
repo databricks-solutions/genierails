@@ -548,6 +548,12 @@ variable "verify_key_column" {
   description = "Non-sensitive stable row identifier used only by effective-access verification tooling."
 }
 
+variable "verify_key_columns" {
+  type        = map(string)
+  default     = {}
+  description = "Per-table row-pairing key (\"catalog.schema.table\" = \"column\") used only by effective-access verification tooling; saved after a passing verify-access."
+}
+
 # Shared env.auto.tfvars is consumed by both workspace and data-access roots.
 # The coverage check reads acknowledgements only in data_access; declare it
 # here to avoid an undeclared-variable warning during a full apply.

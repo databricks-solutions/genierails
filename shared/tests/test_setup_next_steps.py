@@ -74,9 +74,9 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "GENERATE_ARGS" not in out
     assert "--groups" not in out
     assert "     (No agent yet? See ../shared/examples/dev_to_prod/SAMPLE_ENV.md)\n" in out
-    # rehearse saves the key itself; setup never asks for a hand edit.
-    assert "     The saved key (verify_key_column) is carried by promote; make release needs it.\n" in out
-    assert "Save the key as verify_key_column" not in out
+    # verify-access picks the key itself; setup never asks for one.
+    assert "     verify-access picks a row-pairing key per masked table; the proven keys are saved and promoted.\n" in out
+    assert "VERIFY_KEY_COLUMN" not in out and "verify_key_column" not in out
     # The champion flow needs only the agent ID; tables are discovered.
     assert "uc_tables" not in out
     assert "existing agent:" not in out
@@ -86,7 +86,7 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "     auto-tagging. Wait until the class.* tags appear.\n" in out
     assert "     Prefer a script? make enable-classification ENV=dev turns it on (you still review detections in the UI).\n" in out
     assert "  5. Run: make generate ENV=dev   (one run: imports the agent, finds its tables, drafts rules)\n" in out
-    assert "  6. Run: make rehearse ENV=dev VERIFY_KEY_COLUMN=<key_column>   (key saved after a passing run)\n" in out
+    assert "  6. Run: make rehearse ENV=dev\n" in out
     assert "business_access_enabled" not in out
     assert "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)\n" in out
     assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == ["1", "2", "3", "4", "5", "6"]
@@ -134,7 +134,7 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
         "envs/prod/auth.auto.tfvars",
         "In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on",
         "Prefer a script? make enable-classification ENV=prod turns it on",
-        "  5. Run: make release ENV=prod   (the verify key comes from dev)\n",
+        "  5. Run: make release ENV=prod\n",
         "make maintain ENV=prod",
     ]
     positions = [out.index(step) for step in order]
@@ -143,7 +143,8 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
     assert "make generate" not in out
     assert "VERIFY_KEY_COLUMN" not in out
     assert "DEST_CATALOG_MAP" not in out
-    assert "     Without a promoted verify_key_column, release refuses before applying.\n" in out
+    assert "     It proves a row-pairing key for every masked table before applying (no key to set).\n" in out
+    assert "VERIFY_KEY_COLUMN" not in out and "verify_key_column" not in out
     assert "Set business_access_enabled" not in out
     assert "business_access_enabled" not in out
     assert "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)\n" in out
