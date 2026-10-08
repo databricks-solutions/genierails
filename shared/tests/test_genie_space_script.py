@@ -168,17 +168,19 @@ if echo " $* " | grep -q " PUT "; then
   done
   printf '{}\n200'
 else
-  printf '%s\n200' '{"access_control_list":[{"group_name":"manual","display_name":"Manual Team","all_permissions":[{"permission_level":"CAN_RUN","inherited":false}]}]}'
+  printf '%s\n200' '{"access_control_list":[{"group_name":"configured","display_name":"Configured Team","all_permissions":[{"permission_level":"CAN_RUN","inherited":false}]},{"group_name":"manual","display_name":"Manual Team","all_permissions":[{"permission_level":"CAN_RUN","inherited":false}]}]}'
 fi
 ''')
     (bin_dir / "curl").chmod(0o755)
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
            "PUT_BODY": str(request_body), "DATABRICKS_HOST": "https://target",
            "DATABRICKS_TOKEN": "token", "GENIE_SPACE_OBJECT_ID": "adopted-space",
-           "GENIE_GROUPS_CSV": "", "GENIE_ALLOW_EMPTY_ACL": "1"}
+           "GENIE_GROUPS_CSV": "", "GENIE_CONFIGURED_GROUPS_CSV": "configured",
+           "GENIE_ALLOW_EMPTY_ACL": "1"}
     result = subprocess.run(["bash", str(SCRIPT), "set-acls"], env=env,
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "Removing configured Genie access: group:configured [Configured Team] (CAN_RUN) — not granted: CAN_RUN withheld until the coverage check passes" in result.stdout
     assert "Removing hand-added Genie access: group:manual [Manual Team] (CAN_RUN) — not in config" in result.stdout
     assert json.loads(request_body.read_text()) == {"access_control_list": []}
 

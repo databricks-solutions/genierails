@@ -83,6 +83,14 @@ locals {
     for k, v in var.genie_spaces : k => v
     if v.genie_space_id == "" && length(v.uc_tables) > 0
   }
+
+  # Keep the create-path ownership resources at their existing addresses when
+  # the same auto-created agent is subsequently configured by explicit ID.
+  created_handoff_spaces = {
+    for k, v in local.existing_spaces : k => v
+    if contains(keys(var.genie_space_acl_created_handoffs), k)
+  }
+  managed_created_spaces = merge(local.new_spaces, local.created_handoff_spaces)
 }
 
 resource "databricks_mws_permission_assignment" "group_assignments" {
@@ -124,7 +132,7 @@ resource "databricks_sql_endpoint" "warehouse" {
 resource "null_resource" "genie_space_acls" {
   for_each = {
     for k, v in local.existing_spaces : k => v
-    if contains(local.genie_space_acl_keys, k)
+    if contains(local.genie_space_acl_keys, k) && !contains(keys(var.genie_space_acl_created_handoffs), k)
   }
 
   triggers = {
@@ -136,12 +144,13 @@ resource "null_resource" "genie_space_acls" {
     command = var.genie_script_path == "" ? "true" : "${var.genie_script_path} set-acls"
 
     environment = {
-      DATABRICKS_HOST          = var.databricks_workspace_host
-      DATABRICKS_CLIENT_ID     = var.databricks_client_id
-      DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
-      GENIE_SPACE_OBJECT_ID    = each.value.genie_space_id
-      GENIE_GROUPS_CSV         = local.genie_space_acl_groups[each.key]
-      GENIE_ALLOW_EMPTY_ACL    = "1"
+      DATABRICKS_HOST             = var.databricks_workspace_host
+      DATABRICKS_CLIENT_ID        = var.databricks_client_id
+      DATABRICKS_CLIENT_SECRET    = var.databricks_client_secret
+      GENIE_SPACE_OBJECT_ID       = each.value.genie_space_id
+      GENIE_GROUPS_CSV            = local.genie_space_acl_groups[each.key]
+      GENIE_CONFIGURED_GROUPS_CSV = local.genie_space_groups[each.key]
+      GENIE_ALLOW_EMPTY_ACL       = "1"
     }
   }
 
@@ -168,6 +177,7 @@ resource "null_resource" "genie_space_acls" {
 # ACL resource. Still authoritative-sync an empty direct ACL so an adopted
 # agent cannot retain hand-added CAN_RUN. set-acls audits and prints every
 # removal and fails closed when it cannot read the current ACL.
+# Deliberately no destroy provisioner: this resource grants nothing, so there is nothing to revoke.
 resource "null_resource" "genie_space_acls_removal_only" {
   for_each = {
     for k, v in local.existing_spaces : k => v
@@ -185,12 +195,13 @@ resource "null_resource" "genie_space_acls_removal_only" {
     command = var.genie_script_path == "" ? "true" : "${var.genie_script_path} set-acls"
 
     environment = {
-      DATABRICKS_HOST          = var.databricks_workspace_host
-      DATABRICKS_CLIENT_ID     = var.databricks_client_id
-      DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
-      GENIE_SPACE_OBJECT_ID    = each.value.genie_space_id
-      GENIE_GROUPS_CSV         = ""
-      GENIE_ALLOW_EMPTY_ACL    = "1"
+      DATABRICKS_HOST             = var.databricks_workspace_host
+      DATABRICKS_CLIENT_ID        = var.databricks_client_id
+      DATABRICKS_CLIENT_SECRET    = var.databricks_client_secret
+      GENIE_SPACE_OBJECT_ID       = each.value.genie_space_id
+      GENIE_GROUPS_CSV            = ""
+      GENIE_CONFIGURED_GROUPS_CSV = local.genie_space_groups[each.key]
+      GENIE_ALLOW_EMPTY_ACL       = "1"
     }
   }
 
@@ -248,7 +259,7 @@ resource "null_resource" "genie_space_config_existing" {
 # trash it there before creating its replacement. No credential is kept here:
 # create gets them from variables, and trash reads the layer's auth file.
 resource "terraform_data" "genie_space" {
-  for_each = local.new_spaces
+  for_each = local.managed_created_spaces
 
   triggers_replace = {
     host = var.databricks_workspace_host
@@ -363,25 +374,27 @@ resource "null_resource" "genie_space_acls_created" {
   # Skip ACL setup when no groups are configured (e.g. self-service genie-only mode
   # where groups are managed by the governance team in a separate environment).
   for_each = {
-    for k, v in local.new_spaces : k => v
+    for k, v in local.managed_created_spaces : k => v
     if contains(local.genie_space_acl_keys, k)
   }
 
   triggers = {
     groups          = local.genie_space_acl_groups[each.key]
-    space_create_id = terraform_data.genie_space[each.key].id
+    space_create_id = try(var.genie_space_acl_created_handoffs[each.key].space_create_id, terraform_data.genie_space[each.key].id)
   }
 
   provisioner "local-exec" {
     command = "${var.genie_script_path} set-acls"
 
     environment = {
-      DATABRICKS_HOST          = var.databricks_workspace_host
-      DATABRICKS_CLIENT_ID     = var.databricks_client_id
-      DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
-      GENIE_ID_FILE            = "${var.genie_id_file_prefix}_${each.key}"
-      GENIE_GROUPS_CSV         = local.genie_space_acl_groups[each.key]
-      GENIE_ALLOW_EMPTY_ACL    = "1"
+      DATABRICKS_HOST             = var.databricks_workspace_host
+      DATABRICKS_CLIENT_ID        = var.databricks_client_id
+      DATABRICKS_CLIENT_SECRET    = var.databricks_client_secret
+      GENIE_ID_FILE               = "${var.genie_id_file_prefix}_${each.key}"
+      GENIE_SPACE_OBJECT_ID       = each.value.genie_space_id
+      GENIE_GROUPS_CSV            = local.genie_space_acl_groups[each.key]
+      GENIE_CONFIGURED_GROUPS_CSV = local.genie_space_groups[each.key]
+      GENIE_ALLOW_EMPTY_ACL       = "1"
     }
   }
 
@@ -405,6 +418,7 @@ resource "null_resource" "genie_space_acls_created" {
 # title-adopts an existing agent, this clears and reports its hand-added direct
 # ACL without ever granting the groups withheld above. A genuinely new agent
 # simply has an already-empty direct ACL.
+# Deliberately no destroy provisioner: this resource grants nothing, so there is nothing to revoke.
 resource "null_resource" "genie_space_acls_created_removal_only" {
   for_each = {
     for k, v in local.new_spaces : k => v
@@ -422,12 +436,13 @@ resource "null_resource" "genie_space_acls_created_removal_only" {
     command = "${var.genie_script_path} set-acls"
 
     environment = {
-      DATABRICKS_HOST          = var.databricks_workspace_host
-      DATABRICKS_CLIENT_ID     = var.databricks_client_id
-      DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
-      GENIE_ID_FILE            = "${var.genie_id_file_prefix}_${each.key}"
-      GENIE_GROUPS_CSV         = ""
-      GENIE_ALLOW_EMPTY_ACL    = "1"
+      DATABRICKS_HOST             = var.databricks_workspace_host
+      DATABRICKS_CLIENT_ID        = var.databricks_client_id
+      DATABRICKS_CLIENT_SECRET    = var.databricks_client_secret
+      GENIE_ID_FILE               = "${var.genie_id_file_prefix}_${each.key}"
+      GENIE_GROUPS_CSV            = ""
+      GENIE_CONFIGURED_GROUPS_CSV = local.genie_space_groups[each.key]
+      GENIE_ALLOW_EMPTY_ACL       = "1"
     }
   }
 

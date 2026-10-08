@@ -39,6 +39,16 @@ output "genie_space_acls_groups" {
   value       = local.genie_space_groups
 }
 
+output "genie_space_acls_created_groups" {
+  description = "Per-space groups held at the create-path ACL address, including verified create-to-ID handoffs."
+  value       = { for key, resource in null_resource.genie_space_acls_created : key => resource.triggers.groups }
+}
+
+output "genie_space_create_bindings" {
+  description = "Opaque create-resource IDs used by the root to retain a verified create-to-ID handoff."
+  value       = { for key, resource in terraform_data.genie_space : key => resource.id }
+}
+
 output "genie_space_can_run_withheld" {
   description = "Per-space CAN_RUN groups this plan withholds because opening them is blocked (genie_exposure_blocker or missing SELECT grants). Everything else in the change applies."
   value       = { for key, groups in local.genie_space_can_run_withheld : key => groups if length(groups) > 0 }
