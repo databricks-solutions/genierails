@@ -135,6 +135,9 @@ _prepare-env:
 		fi; \
 		if [ ! -e "$$env_dir/env.auto.tfvars" ]; then \
 			cp "$(SHARED_ROOT)/env.auto.tfvars.example" "$$env_dir/env.auto.tfvars"; \
+			if [ "$$env_name" = "prod" ]; then \
+				printf '\n# Promotion source and catalog renames; replace both catalog placeholders.\npromote_from = "dev"\ncatalog_map  = { "<dev_catalog>" = "<prod_catalog>" }\n' >> "$$env_dir/env.auto.tfvars"; \
+			fi; \
 			if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
 				printf "\n# Consume IdP-synced groups by default; set true for demo/greenfield creation.\nmanage_groups = false\n" >> "$$env_dir/env.auto.tfvars"; \
 			fi; \
@@ -225,9 +228,9 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "Workspace environment ready:          $(ENV_DIR)"; \
 		echo ""; \
 		echo "Next steps (production — walkthrough Phases 2-5; finish the dev rehearsal first):"; \
-		echo "  1. Promote the reviewed dev rules (rewrites $(_SETUP_ENV_REL)/env.auto.tfvars with safe prod defaults):"; \
-		echo "       make promote-to ENV=$(ENV) FROM=$(DEFAULT_ENV) CATALOG_MAP=\"<dev_catalog>=<prod_catalog>\""; \
-		echo "     (saved; later just: make promote-to ENV=$(ENV))"; \
+		echo "  1. Set promote_from and catalog_map in $(_SETUP_ENV_REL)/env.auto.tfvars, then run:"; \
+		echo "       make promote-to ENV=$(ENV)"; \
+		echo "     (FROM=/CATALOG_MAP= remain optional command-line overrides.)"; \
 		echo "  2. Edit $(_SETUP_ENV_REL)/auth.auto.tfvars — deployment SP client_id / client_secret + prod workspace host & id"; \
 		echo "  3. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — set sql_warehouse_id only (or leave \"\" to auto-create)"; \
 		echo "  4. Run: make enable-classification ENV=$(ENV)   (or turn it on in the UI);"; \
@@ -620,9 +623,8 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 
 # make promote-to ENV=<dest> [FROM=<src>] [CATALOG_MAP="a=b,..."] is a thin
 # wrapper over the cross-env promote above (same remap, validation and policy-name
-# protection). The first run needs FROM and CATALOG_MAP; after a successful
-# promote they are saved in the destination's env.auto.tfvars (promote_from /
-# catalog_map), so later runs need only ENV. Explicit values override and update
+# protection). promote_from and catalog_map live in the destination's
+# env.auto.tfvars. Explicit FROM/CATALOG_MAP values override and update
 # them. Only command-line FROM/CATALOG_MAP count, never ones leaked from the
 # shell, and every cross-env variable is passed explicitly to promote. Both the
 # source and the destination must be real directories directly under envs/
@@ -630,7 +632,7 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 _PROMOTE_TO_FROM = $(if $(filter command line,$(origin FROM)),$(FROM))
 _PROMOTE_TO_MAP = $(if $(filter command line,$(origin CATALOG_MAP)),$(CATALOG_MAP))
 
-promote-to: ## Promote rules into ENV: make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_cat=prod_cat" (saved; later just ENV=prod)
+promote-to: ## Promote configured rules into ENV: set envs/prod/env.auto.tfvars, then make promote-to ENV=prod
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); \
 	resolved="$$($(_SAVED_SETTINGS) promote-resolve --env "$(ENV)" --env-dir "$(ENV_DIR)" --envs-dir "$(CLOUD_ROOT)/envs" \

@@ -181,7 +181,7 @@ All nine fields are included in the `serialized_space` when a new Genie agent is
 | `make validate-generated` | Validate `envs/<env>/generated/` files after tuning |
 | `make validate` | Validate the selected split config (`account`, `data_access`, or `workspace`) |
 | `make promote` | Split `generated/` into account + data_access + workspace configs (same-env) |
-| `make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_catalog=prod_catalog"` | Cross-env promote: remap catalog references from dev to prod, then split; `FROM`/`CATALOG_MAP` are saved in prod, so a re-promote is `make promote-to ENV=prod` |
+| `make promote-to ENV=prod` | Cross-env promote: read `promote_from`/`catalog_map` from prod, remap catalog references, then split (`FROM=`/`CATALOG_MAP=` optionally override) |
 | `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_catalog=prod_catalog"` | The same cross-env promote with explicit arguments (nothing saved) |
 | `make plan` | Run `terraform plan` in the selected layer root |
 | `make apply` | For `ENV=<workspace>`: promote (same-env split), then apply account -> data_access -> workspace; new or wider business access is granted only when a recent coverage check passed |

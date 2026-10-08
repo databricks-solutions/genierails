@@ -124,8 +124,9 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
 
     assert "Next steps (production — walkthrough Phases 2-5; finish the dev rehearsal first):" in out
     order = [
-        'make promote-to ENV=prod FROM=dev CATALOG_MAP="<dev_catalog>=<prod_catalog>"\n',
-        "     (saved; later just: make promote-to ENV=prod)\n",
+        "Set promote_from and catalog_map in envs/prod/env.auto.tfvars",
+        'make promote-to ENV=prod\n',
+        "     (FROM=/CATALOG_MAP= remain optional command-line overrides.)\n",
         "envs/prod/auth.auto.tfvars",
         "make enable-classification ENV=prod",
         "  5. Run: make release ENV=prod   (the verify key comes from dev)\n",
@@ -146,6 +147,9 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
     assert "make certify" not in out
     assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == ["1", "2", "3", "4", "5", "6"]
     assert "shared/examples/dev_to_prod/README.md" in out
+    env_text = (tmp_path / cloud / "envs/prod/env.auto.tfvars").read_text()
+    assert 'promote_from = "dev"' in env_text
+    assert 'catalog_map  = { "<dev_catalog>" = "<prod_catalog>" }' in env_text
 
 
 @pytest.mark.parametrize("env", ["dev", "prod", "account"])

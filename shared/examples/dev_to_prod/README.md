@@ -11,7 +11,8 @@ make enable-classification ENV=dev   # or turn it on in the UI; wait for class.*
 make generate ENV=dev                # ONE run: imports the agent, finds its tables, drafts rules
 make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id   # key saved after a passing run
 # prod (same pattern for stg or any env)
-make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_finance=prod_finance"   # saved; later just make promote-to ENV=prod
+# Set promote_from/catalog_map in envs/prod/env.auto.tfvars first.
+make promote-to ENV=prod
 make enable-classification ENV=prod
 make release ENV=prod                # key comes from dev
 make maintain ENV=prod
@@ -141,16 +142,23 @@ make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id
 
 **Goal —** create the production configuration, add its credentials and settings, and copy the reviewed rules (masks, access policies, mappings) from dev.
 
-```bash
-make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_finance=prod_finance"
+```hcl
+promote_from = "dev"
+catalog_map  = { "<dev_catalog>" = "<prod_catalog>" } # replace both placeholders
 ```
 
-`CATALOG_MAP` renames each dev catalog to its prod name (`dev_finance=prod_finance`; comma-separate multiple). `FROM` and `CATALOG_MAP` are saved in `envs/prod/env.auto.tfvars` (`promote_from`, `catalog_map`), so a later re-promote is just `make promote-to ENV=prod`; passing either again overrides and updates it. The same pattern works for any chain, e.g. `make promote-to ENV=stg FROM=dev …` then `make promote-to ENV=prod FROM=stg …`.
+Then run:
 
-Promotion creates `envs/prod/` with configuration templates. Fill in both files:
+```bash
+make promote-to ENV=prod
+```
+
+`catalog_map` renames every source catalog to its target name; use one map entry per catalog. The legacy string form (`"dev_finance=prod_finance"`) remains readable. `FROM=` and `CATALOG_MAP=` are optional overrides and win for that successful promote, which saves the canonical map form back to the target. For a staging chain, set `promote_from = "dev"` in `envs/stg/env.auto.tfvars`, promote stg, then set `promote_from = "stg"` in `envs/prod/env.auto.tfvars` (with the corresponding catalog maps).
+
+`make setup ENV=prod` creates `envs/prod/` with configuration templates. Fill in both files before promotion:
 
 - **`envs/prod/auth.auto.tfvars`** — the deployment SP `client_id` / `client_secret` + prod workspace host & id. You may reuse the dev SP when both workspaces are in the same Databricks account and it is authorized in prod; use a separate prod SP when your security policy requires environment isolation. Separate Databricks accounts require separate SPs.
-- **`envs/prod/env.auto.tfvars`** — don't recreate it; set `sql_warehouse_id` (or leave `""` to auto-create). Promotion has already written the safe classification and access defaults, and dev's `verify_key_column`.
+- **`envs/prod/env.auto.tfvars`** — don't recreate it; replace the promotion placeholders and set `sql_warehouse_id` (or leave `""` to auto-create). A successful promotion writes safe classification/access defaults and dev's `verify_key_column` while preserving the target-owned promotion settings.
 
 Using the [sample environment](SAMPLE_ENV.md)? Seed the prod catalog with its tables now (`--skip-agent`; see SAMPLE_ENV.md).
 

@@ -44,7 +44,7 @@ make rehearse ENV=dev                    # apply (grants only if coverage passes
 ### Promote dev → prod
 
 ```bash
-make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_catalog=prod_catalog"   # saved; later: make promote-to ENV=prod
+make promote-to ENV=prod   # promote_from/catalog_map are in envs/prod/env.auto.tfvars
 
 vi envs/prod/auth.auto.tfvars             # enter prod workspace credentials
 
@@ -57,13 +57,19 @@ Promotion carries the reviewed **rules** (mapping, masks, policies, Genie config
 
 For multiple catalogs:
 
-```bash
-make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_fin=prod_fin,dev_clinical=prod_clinical"
+```hcl
+promote_from = "dev"
+catalog_map = {
+  "dev_fin"     = "prod_fin"
+  "dev_clinical" = "prod_clinical"
+}
 ```
 
-**How `CATALOG_MAP` works** (`DEST_CATALOG_MAP` in the older `make promote SOURCE_ENV=… DEST_ENV=…` form):
+Then run `make promote-to ENV=prod`. `FROM=`/`CATALOG_MAP=` remain optional overrides.
 
-- Comma-separated `src_catalog=dest_catalog` pairs
+**How `catalog_map` works** (`DEST_CATALOG_MAP` in the older `make promote SOURCE_ENV=… DEST_ENV=…` form):
+
+- An HCL map of source catalog to destination catalog (the saved legacy string form is accepted)
 - The promote command auto-detects all source catalog names from `genie_spaces[*].uc_tables`
 - Every detected catalog must have a mapping — the command fails clearly if any are missing
 
