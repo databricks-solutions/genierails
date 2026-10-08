@@ -350,7 +350,7 @@ for ace in body["access_control_list"]:
     if kind == "group" and principal in configured:
         for level in levels:
             if principal not in granted:
-                print(f"Removing configured Genie access: {label} ({level}) — not granted: CAN_RUN withheld until the coverage check passes")
+                print(f"Removing configured Genie access: {label} ({level}) — not granted: CAN_RUN withheld until the agent access checks pass")
             elif level != "CAN_RUN":
                 print(f"Changing configured Genie access: {label} ({level} -> CAN_RUN)")
         continue
@@ -886,13 +886,6 @@ revoke_genie_acls() {
     echo "No Genie CAN_RUN groups to revoke."
     return 0
   fi
-  # Native Terraform tests execute destroy provisioners during teardown but
-  # deliberately have no Databricks credentials. Production never sets this.
-  if [[ "${GENIERAILS_TERRAFORM_TEST:-0}" == "1" ]]; then
-    [[ -n "${GENIE_STUB_LOG:-}" ]] && printf 'revoke-acls space=%s id=%s revoke=%s\n' \
-      "${GENIE_SPACE_OBJECT_ID:-}" "${GENIE_ID_BASENAME:-}" "$groups" >> "$GENIE_STUB_LOG"
-    return 0
-  fi
   load_layer_auth
   local workspace_url="${DATABRICKS_HOST%/}"
   local space_id="${GENIE_SPACE_OBJECT_ID:-}"
@@ -956,9 +949,6 @@ print(json.dumps({"access_control_list": kept}))
 }
 
 trash_genie_space() {
-  if [[ "${GENIERAILS_TERRAFORM_TEST:-0}" == "1" ]]; then
-    return 0
-  fi
   load_layer_auth
 
   local auth_host="${DATABRICKS_HOST%/}"

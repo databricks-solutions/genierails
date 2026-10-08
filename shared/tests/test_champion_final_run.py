@@ -484,6 +484,7 @@ def test_existing_genie_state_migrates_without_trashing_the_agent(tmp_path):
     tf = WORKSPACE_TF.read_text()
     block = _resource_block(tf, 'resource "terraform_data" "genie_space" {')
     block = block.replace("local.managed_created_spaces", "local.new_spaces")
+    block = block.replace("var.genie_destroy_script", '"bash ../../scripts/genie_space.sh"')
     block = re.sub(r"\n  depends_on = \[.*?\n  \]\n", "\n", block, flags=re.S)
     stub = tmp_path / "stub.py"
     block = block.replace('"bash ../../scripts/genie_space.sh trash"', json.dumps(f"python3 {stub} trash"))
@@ -540,6 +541,7 @@ def test_state_loss_apply_adopts_existing_title_instead_of_posting(tmp_path):
     tf = WORKSPACE_TF.read_text()
     block = _resource_block(tf, 'resource "terraform_data" "genie_space" {')
     block = block.replace("local.managed_created_spaces", "local.new_spaces")
+    block = block.replace("var.genie_destroy_script", '"bash ../../scripts/genie_space.sh"')
     block = re.sub(r"\n  depends_on = \[.*?\n  \]\n", "\n", block, flags=re.S)
     root = tmp_path / "root"
     root.mkdir()
@@ -767,6 +769,7 @@ def test_migration_with_missing_id_file_fails_and_creates_nothing(tmp_path):
     tf = WORKSPACE_TF.read_text()
     block = _resource_block(tf, 'resource "terraform_data" "genie_space" {')
     block = block.replace("local.managed_created_spaces", "local.new_spaces")
+    block = block.replace("var.genie_destroy_script", '"bash ../../scripts/genie_space.sh"')
     block = re.sub(r"\n  depends_on = \[.*?\n  \]\n", "\n", block, flags=re.S)
     block = block.replace('"bash ../../scripts/genie_space.sh trash"', '"echo TRASH >> trash.log"')
     removed = re.search(r"removed \{\n  from = null_resource\.genie_space_create.*?\n\}\n", tf, re.S).group(0)

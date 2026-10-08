@@ -136,8 +136,14 @@ resource "null_resource" "genie_space_acls" {
   }
 
   triggers = {
-    space_id = each.value.genie_space_id
-    groups   = local.genie_space_acl_groups[each.key]
+    space_id       = each.value.genie_space_id
+    groups         = local.genie_space_acl_groups[each.key]
+    destroy_script = var.genie_destroy_script
+  }
+
+  lifecycle {
+    # Adding the test seam must not replace existing production ACL resources.
+    ignore_changes = [triggers["destroy_script"]]
   }
 
   provisioner "local-exec" {
@@ -162,7 +168,7 @@ resource "null_resource" "genie_space_acls" {
   # $LAYER_ENV_DIR/auth.auto.tfvars, so none is kept in state.
   provisioner "local-exec" {
     when    = destroy
-    command = "bash ../../scripts/genie_space.sh revoke-acls"
+    command = "${try(self.triggers.destroy_script, "bash ../../scripts/genie_space.sh")} revoke-acls"
 
     environment = {
       GENIE_SPACE_OBJECT_ID   = self.triggers.space_id
@@ -295,6 +301,7 @@ resource "terraform_data" "genie_space" {
 
     environment = {
       GENIE_ID_BASENAME   = basename(self.input.id_file)
+      GENIE_ID_FILE       = self.input.id_file
       GENIE_EXPECTED_HOST = self.triggers_replace.host
     }
   }
@@ -381,6 +388,12 @@ resource "null_resource" "genie_space_acls_created" {
   triggers = {
     groups          = local.genie_space_acl_groups[each.key]
     space_create_id = try(var.genie_space_acl_created_handoffs[each.key].space_create_id, terraform_data.genie_space[each.key].id)
+    destroy_script  = var.genie_destroy_script
+  }
+
+  lifecycle {
+    # Adding the test seam must not replace existing production ACL resources.
+    ignore_changes = [triggers["destroy_script"]]
   }
 
   provisioner "local-exec" {
@@ -403,7 +416,7 @@ resource "null_resource" "genie_space_acls_created" {
   # $LAYER_ENV_DIR/.genie_space_id.
   provisioner "local-exec" {
     when    = destroy
-    command = "bash ../../scripts/genie_space.sh revoke-acls"
+    command = "${try(self.triggers.destroy_script, "bash ../../scripts/genie_space.sh")} revoke-acls"
 
     environment = {
       GENIE_ID_BASENAME       = ".genie_space_id_${each.key}"

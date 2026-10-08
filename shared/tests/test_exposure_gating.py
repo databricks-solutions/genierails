@@ -49,7 +49,9 @@ def test_workspace_business_acls_follow_the_gate_not_a_flag():
     assert 'var.genie_exposure_blocker == ""' in withheld
     assert source.count("local.genie_space_acl_groups[each.key]") == 4  # triggers + set-acls, twice
     # Removing a group or space takes its CAN_RUN back.
-    assert source.count("bash ../../scripts/genie_space.sh revoke-acls") == 2
+    assert source.count('try(self.triggers.destroy_script, "bash ../../scripts/genie_space.sh")') == 2
+    variables = (SHARED / "modules/workspace/variables.tf").read_text()
+    assert re.search(r'variable "genie_destroy_script" \{.*?default\s*= "bash ../../scripts/genie_space.sh"', variables, re.S)
 
 
 def _guard_workspace_config(tmp_path, env_file, *make_args, environ=None, nested=False):
@@ -144,6 +146,7 @@ def test_genie_creation_replaces_only_on_host_and_keeps_no_credentials():
     assert "DATABRICKS_CLIENT_SECRET = var.databricks_client_secret" in resource
     assert "self.triggers_replace.client" not in resource and "self.input.client" not in resource
     assert 'command = "bash ../../scripts/genie_space.sh trash"' in resource
+    assert "GENIE_ID_FILE       = self.input.id_file" in resource
     assert re.search(r"GENIE_ID_BASENAME\s+= basename\(self\.input\.id_file\)", resource)
     assert "GENIE_EXPECTED_HOST = self.triggers_replace.host" in resource
     # The pre-migration resource is forgotten, never destroyed (that would trash the agent).
@@ -261,6 +264,7 @@ def _terraform_trigger_plan(tmp_path, changes):
     block = re.sub(r"\n  provisioner \"local-exec\" \{.*?\n  \}\n", "\n", block, flags=re.S)
     block = re.sub(r"\n  depends_on = \[.*?\n  \]\n", "\n", block, flags=re.S)
     block = re.sub(r"  for_each = local\.[a-z_]+\n", "", block)
+    block = block.replace("var.genie_destroy_script", '"bash ../../scripts/genie_space.sh"')
     block = block.replace("var.databricks_workspace_host", "var.host")
     block = block.replace("${var.genie_id_file_prefix}_${each.key}", "id")
     module = tmp_path / "trigger-plan"

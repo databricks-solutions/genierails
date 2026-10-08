@@ -265,7 +265,8 @@ def _revoke(tmp_path, groups, **env_extra):
 
 
 def test_revoke_acls_removes_only_the_groups_it_granted(tmp_path):
-    result = _revoke(tmp_path, "analysts,auditors")
+    # No ambient environment variable may turn the production revoke into a no-op.
+    result = _revoke(tmp_path, "analysts,auditors", GENIERAILS_TERRAFORM_TEST="1")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (tmp_path / "curl.log").read_text().split() == ["GET", "PUT"]
     kept = json.loads((tmp_path / "put.json").read_text())["access_control_list"]
@@ -319,6 +320,7 @@ def _acl_module(tmp_path):
     (root / "main.tf").write_text(
         'variable "spaces" { type = map(string) }\n'
         'variable "genie_script_path" { default = "" }\n'
+        'variable "genie_destroy_script" { default = "bash ../../scripts/genie_space.sh" }\n'
         'variable "genie_space_acl_created_handoffs" { default = {} }\n'
         'variable "databricks_workspace_host" { default = "https://ws" }\n'
         'variable "databricks_client_id" { default = "id" }\n'
