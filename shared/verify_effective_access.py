@@ -305,6 +305,16 @@ def resolve_columns_for_condition(
     return out
 
 
+def effective_mask_policies(fgac_policies: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """The column-mask policies that mask someone once exceptions are removed."""
+    return [
+        pol for pol in fgac_policies
+        if isinstance(pol, Mapping)
+        and _as_str(pol.get("policy_type")) == "POLICY_TYPE_COLUMN_MASK"
+        and set(_as_list(pol.get("to_principals"))) - set(_as_list(pol.get("except_principals")))
+    ]
+
+
 def required_mask_columns(
     fgac_policies: Sequence[Mapping[str, Any]],
     tag_assignments: Sequence[Mapping[str, Any]],
@@ -322,11 +332,7 @@ def required_mask_columns(
     """
     from validate_abac import column_mask_matches, condition_is_supported
 
-    effective = [
-        pol for pol in fgac_policies
-        if _as_str(pol.get("policy_type")) == "POLICY_TYPE_COLUMN_MASK"
-        and set(_as_list(pol.get("to_principals"))) - set(_as_list(pol.get("except_principals")))
-    ]
+    effective = effective_mask_policies(fgac_policies)
     # A condition the evaluator can't read (e.g. snake_case has_tag_value())
     # would match nothing and silently drop its mask from the coverage.
     unreadable = sorted(
@@ -1106,11 +1112,17 @@ def _tag_assignments(entity_type: str, entity: str, tags: Sequence[tuple[str, st
              "tag_value": value or "\x00"} for name, value in tags]
 
 
-def mask_policies_use_table_tags(mask_config: Optional[Mapping[str, Any]]) -> bool:
-    """Whether any column-mask policy's when_condition reads table tags."""
+def mask_policies_use_table_tags(mask_config: Optional[Mapping[str, Any]], table: str = "") -> bool:
+    """Whether a column-mask policy that can apply to ``table`` reads table tags.
+
+    Only policies the shared matcher would consider count: effective ones (not
+    every target excepted) scoped to ``table``'s catalog, with a when_condition.
+    """
+    from validate_abac import _catalog_matches
+
     return any(
-        _as_str(p.get("policy_type")) == "POLICY_TYPE_COLUMN_MASK" and _as_str(p.get("when_condition"))
-        for p in (mask_config or {}).get("fgac_policies") or [] if isinstance(p, Mapping)
+        _as_str(p.get("when_condition")) and _catalog_matches(dict(p), table)
+        for p in effective_mask_policies((mask_config or {}).get("fgac_policies") or [])
     )
 
 
@@ -1567,7 +1579,7 @@ class EffectiveAccessVerifier:
             "SELECT tag_name, tag_value FROM system.information_schema.table_tags "
             "WHERE lower(catalog_name) = :c AND lower(schema_name) = :s AND lower(table_name) = :t",
             {n: params[n] for n in ("c", "s", "t")},
-        ) if tags and mask_policies_use_table_tags(self.mask_config) else []
+        ) if tags and mask_policies_use_table_tags(self.mask_config, check.table) else []
         problem = key_tags_mask_problem(self.mask_config, check.table, check.key_column, tags,
                                         table_tags)
         if problem:

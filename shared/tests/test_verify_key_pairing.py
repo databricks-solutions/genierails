@@ -395,6 +395,48 @@ def test_table_tags_are_read_only_when_a_policy_needs_them(tmp_path, warehouse):
     assert not [s for s in wh.statements if "table_tags" in s[1]]
 
 
+@pytest.mark.parametrize("unrelated", [
+    {"catalog": "other_catalog"},           # another catalog's policy
+    {"except_principals": [JUNIOR]},        # every target excepted
+])
+def test_an_unrelated_when_condition_policy_reads_no_table_tags(tmp_path, warehouse, unrelated):
+    wh = warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags=CLASS_TAGS,
+                                 table_tags_error="PERMISSION_DENIED: table_tags"))
+    cfg = _mask_config()
+    cfg["fgac_policies"].append(cfg["fgac_policies"][0] | {
+        "name": "mask_ids", "match_condition": "hasTag('class.identifier')",
+        "when_condition": "hasTagValue('domain', 'customer')", **unrelated})
+    [result] = _verify_with_config(tmp_path, cfg, _check())
+    assert result.status == PASS, result.detail
+    assert not [s for s in wh.statements if "table_tags" in s[1]]
+
+
+def test_a_relevant_when_condition_policy_reads_table_tags_and_fails_closed(tmp_path, warehouse):
+    wh = warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags=CLASS_TAGS,
+                                 table_tags_error="PERMISSION_DENIED: table_tags"))
+    cfg = _mask_config()
+    cfg["fgac_policies"].append(cfg["fgac_policies"][0] | {
+        "name": "mask_ids", "catalog": "CAT", "match_condition": "hasTag('class.identifier')",
+        "when_condition": "hasTagValue('domain', 'customer')"})
+    [result] = _verify_with_config(tmp_path, cfg, _check())
+    assert result.status == INCONCLUSIVE
+    assert "could not read its column masks/tags" in result.detail
+    assert [t for t, sql, _ in wh.statements if "table_tags" in sql] == [DEFAULT_ADMIN_TIER]
+
+
+def test_mask_policies_use_table_tags_is_scoped_like_the_matcher():
+    policy = {"name": "m", "policy_type": "POLICY_TYPE_COLUMN_MASK", "catalog": "cat",
+              "to_principals": ["g"], "when_condition": "hasTag('domain')"}
+    use = lambda **kw: vea.mask_policies_use_table_tags(  # noqa: E731
+        {"fgac_policies": [policy | kw]}, TABLE)
+    assert use()
+    assert use(catalog="CAT")                               # catalog names are case-insensitive
+    assert not use(catalog="other")
+    assert not use(except_principals=["g"])
+    assert not use(when_condition="")
+    assert not use(policy_type="POLICY_TYPE_ROW_FILTER")
+
+
 def test_tfvars_and_live_paths_refuse_a_key_with_the_same_message(tmp_path, warehouse):
     tfvars = tmp_path / "abac.auto.tfvars"
     tfvars.write_text('''
