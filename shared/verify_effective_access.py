@@ -94,6 +94,10 @@ class ColumnMaskCheck:
     masked_principals: tuple[str, ...]
     unmasked_principals: tuple[str, ...]
     policy_name: str = ""
+    # catalog.schema.function the policy applies to the column alone (column
+    # masks bind no other arguments). With it, the admin baseline can tell a
+    # raw value the mask leaves unchanged (a fixed point) from a leak.
+    mask_function: str = ""
 
     def describe(self) -> str:
         return f"column-mask {self.table}.{self.column} (policy={self.policy_name or 'n/a'})"
@@ -369,6 +373,12 @@ def unchecked_mask_columns(
     return sorted(f"{t}.{c}" for t, c in required - covered)
 
 
+def _mask_function(policy: Mapping[str, Any]) -> str:
+    """The policy's catalog.schema.function, or "" if any part is missing."""
+    parts = [_as_str(policy.get(k)) for k in ("function_catalog", "function_schema", "function_name")]
+    return ".".join(parts) if all(parts) else ""
+
+
 def derive_spec_from_config(
     fgac_policies: Sequence[Mapping[str, Any]],
     tag_assignments: Sequence[Mapping[str, Any]],
@@ -439,6 +449,7 @@ def derive_spec_from_config(
                         masked_principals=masked,
                         unmasked_principals=tuple(unmasked),
                         policy_name=name,
+                        mask_function=_mask_function(pol),
                     )
                 )
 
@@ -550,9 +561,16 @@ def evaluate_column_mask_check(
     *,
     pairing_problem: str = "",
     unpaired: Optional[Mapping[str, str]] = None,
+    fixed_point_keys: Optional[Iterable[Any]] = None,
 ) -> CheckResult:
     """Prove a mask takes effect: masked tiers get a masked value, unmasked tiers
     get the *raw* value.
+
+    ``fixed_point_keys`` are rows whose raw value the mask function maps to
+    itself (e.g. a date already on 1 January under a year mask), as the admin
+    baseline evaluated it: such a row shows the same value masked or not, so
+    it can't demonstrate masking and is left out like a NULL raw value. With no
+    other row to compare, a tier is INCONCLUSIVE, never PASS.
 
     ``values_by_principal`` maps ``principal -> rows`` for this (table, column),
     where rows are the fetched ``(row_key, value)`` pairs (or a
@@ -659,14 +677,16 @@ def evaluate_column_mask_check(
             {"conflicts_by_principal": conflicts},
         )
 
-    # (issue 2) The raw baseline must contain at least one maskable value.
-    maskable_rows = {k for k, v in raw_by_row.items() if v not in (None, "")}
+    # (issue 2) The raw baseline must contain at least one maskable value: not
+    # NULL/empty, and not a value the mask leaves unchanged.
+    fixed_points = set(fixed_point_keys or ()) & set(raw_by_row)
+    maskable_rows = {k for k, v in raw_by_row.items() if v not in (None, "") and k not in fixed_points}
     if not maskable_rows:
         return CheckResult(
             "column-mask", target, INCONCLUSIVE,
-            "every raw value in the sample is NULL/empty — the dataset cannot "
-            "demonstrate that masking changes anything",
-            {"raw_rows": len(raw_by_row)},
+            ("every raw value in the sample is NULL/empty or one the mask leaves "
+             "unchanged — the dataset cannot demonstrate that masking changes anything"),
+            {"raw_rows": len(raw_by_row), "fixed_point_rows": len(fixed_points)},
         )
 
     leaks: dict[str, int] = {}
@@ -724,11 +744,14 @@ def evaluate_column_mask_check(
             {"per_principal_compared": per_principal_compared},
         )
 
+    skipped = (f"; {len(fixed_points)} row(s) whose raw value the mask leaves unchanged "
+               "were not compared") if fixed_points else ""
     return CheckResult(
         "column-mask", target, PASS,
         (f"masked principal(s) {masked_present} see a masked value that differs "
-         f"from the raw value seen by {unmasked_present} across {masked_ok} row(s)"),
-        {"masked_ok": masked_ok, "per_principal_compared": per_principal_compared},
+         f"from the raw value seen by {unmasked_present} across {masked_ok} row(s){skipped}"),
+        {"masked_ok": masked_ok, "per_principal_compared": per_principal_compared,
+         "fixed_point_rows": len(fixed_points)},
     )
 
 
@@ -826,6 +849,7 @@ def evaluate_effective_access(
     *,
     pairing_problems: Optional[Mapping[tuple, str]] = None,
     unpaired: Optional[Mapping[tuple, Mapping[str, str]]] = None,
+    fixed_points: Optional[Mapping[tuple, Iterable[Any]]] = None,
 ) -> EffectiveAccessReport:
     """Evaluate every check in the spec against collected observations (pure)."""
     report = EffectiveAccessReport()
@@ -837,6 +861,7 @@ def evaluate_effective_access(
             check, vals, errs,
             pairing_problem=(pairing_problems or {}).get(sig, ""),
             unpaired=(unpaired or {}).get(sig),
+            fixed_point_keys=(fixed_points or {}).get(sig),
         ))
     for check in spec.row_filters:
         counts = row_counts.get(check.table, {})
@@ -1580,6 +1605,28 @@ class EffectiveAccessVerifier:
             total += int(rows[0][0] or 0) if rows else 0
         return total
 
+    def fixed_point_keys(
+        self, principal: TestPrincipal, check: ColumnMaskCheck, keys: Sequence[Any],
+    ) -> set[Any]:
+        """Keys among ``keys`` whose raw value ``check.mask_function`` maps to itself.
+
+        Run as the admin baseline, which sees raw values. NULL-safe equality, so
+        a NULL raw value counts too (it is never compared anyway).
+        """
+        self._guard()
+        catalog, schema, name = table_parts(check.mask_function)
+        function = ".".join(quote_identifier(part) for part in (catalog, schema, name))
+        column, key = quote_identifier(check.column), quote_identifier(check.key_column)
+        found: set[Any] = set()
+        for batch in _key_batches(list(dict.fromkeys(keys))):
+            where, params = _key_filter(check.key_column, batch)
+            rows = self.run_query(
+                self._ws_for(principal),
+                f"SELECT {key} FROM {quote_table(check.table)}{where} AND ({function}({column}) <=> {column})",
+                params)
+            found.update(row[0] for row in rows)
+        return found
+
     def key_mask_metadata(self, principal: TestPrincipal, check: ColumnMaskCheck) -> list[str]:
         """What could mask the key column for some tier ([] when nothing can).
 
@@ -1704,6 +1751,7 @@ def verify_effective_access_live(
         column_values: dict[tuple, dict[str, list[tuple[Any, Any]]]] = {}
         column_errors: dict[tuple, dict[str, str]] = {}
         pairing_problems: dict[tuple, str] = {}
+        fixed_points: dict[tuple, set[Any]] = {}
         key_proofs: dict[tuple, str] = {}   # once per (table, key, read keys)
         key_metadata: dict[tuple, str] = {}  # once per (table, key)
         for check in spec.column_masks:
@@ -1796,6 +1844,14 @@ def verify_effective_access_live(
                     per_errors[tier] = str(exc)
                     print(f"    ({tier}) query FAILED for {check.table}.{check.column}: {exc}")
             column_values[sig] = per_principal
+            # (5) Rows the mask leaves unchanged can't show masking. If the
+            # admin can't evaluate the mask, every equal value stays a leak.
+            if check.mask_function and not per_errors:
+                try:
+                    fixed_points[sig] = verifier.fixed_point_keys(admin_principal, check, keys)
+                except Exception as exc:
+                    print(f"    (admin) could not evaluate {check.mask_function} on "
+                          f"{check.table}.{check.column}; an unchanged value counts as a leak: {exc}")
 
         row_counts: dict[str, dict[str, Optional[int]]] = {}
         row_errors: dict[str, dict[str, str]] = {}
@@ -1817,7 +1873,7 @@ def verify_effective_access_live(
 
         report = evaluate_effective_access(
             spec, column_values, row_counts, column_errors, row_errors,
-            pairing_problems=pairing_problems,
+            pairing_problems=pairing_problems, fixed_points=fixed_points,
         )
         report.results.extend(blocking)
         report.pairing_keys = proven_keys_by_table(report, spec)
@@ -1972,6 +2028,7 @@ def load_spec_from_file(path: Path) -> VerificationSpec:
             masked_principals=tuple(c.get("masked_principals", [])),
             unmasked_principals=tuple(c.get("unmasked_principals", [])),
             policy_name=c.get("policy_name", ""),
+            mask_function=c.get("mask_function", ""),
         ))
     for r in data.get("row_filters", []):
         spec.row_filters.append(RowFilterCheck(

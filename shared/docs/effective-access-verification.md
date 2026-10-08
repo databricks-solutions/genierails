@@ -21,7 +21,7 @@ access tiers**:
 
 | Check | Assertion |
 |---|---|
-| **Column mask** | A lower-tier principal sees a **masked** value while a higher-tier principal sees the **raw** value for the *same row*. Equal values = the mask did not take effect (a leak → FAIL). |
+| **Column mask** | A lower-tier principal sees a **masked** value while a higher-tier principal sees the **raw** value for the *same row*. Equal values = the mask did not take effect (a leak → FAIL), except on a row whose raw value the policy's mask function leaves unchanged (e.g. a date already on 1 January under a year mask): the admin evaluates the mask on the sampled raw values, and such rows are left out like NULL ones. If the mask can't be evaluated (unknown function, or the call fails), every equal value still counts as a leak. |
 | **Row filter** | A restricted principal gets back **fewer rows** than an unrestricted principal. Equal/greater counts = the filter is not restricting (FAIL). |
 
 The comparison is done by *effect*: rather than assuming a mask function's exact
