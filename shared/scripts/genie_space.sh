@@ -50,6 +50,8 @@
 #
 # Or set env and run: ./genie_space.sh create   or   ./genie_space.sh set-acls
 # Re-running create adopts the agent already named in GENIE_ID_FILE.
+# If that ID is absent or gone, create adopts the single target-workspace agent
+# whose title exactly matches (case-sensitively); ambiguous matches fail closed.
 # =============================================================================
 
 set -e
@@ -198,6 +200,85 @@ expand_tables() {
   echo "${expanded[*]}"
 }
 
+# Print IDs of all agents whose title exactly (case-sensitively) matches $3.
+# Listing is deliberately fail-closed: callers must not POST if any page cannot
+# be fetched or parsed, because an unseen page could contain the same agent.
+matching_space_ids_by_title() {
+  local workspace_url="$1" token="$2" title="$3"
+  local page_token="" response http_code response_body parsed next_token
+  local page_count=0 matches_file seen_tokens_file
+  matches_file=$(mktemp)
+  seen_tokens_file=$(mktemp)
+
+  while true; do
+    page_count=$((page_count + 1))
+    if [[ $page_count -gt 1000 ]]; then
+      rm -f "$matches_file" "$seen_tokens_file"
+      echo "ERROR: Genie agent listing exceeded 1000 pages; refusing to create because duplicate detection could not complete." >&2
+      return 1
+    fi
+    local curl_args=(-s -w "\n%{http_code}" -G
+      -H "${UA_HEADER}" -H "Authorization: Bearer ${token}")
+    if [[ -n "$page_token" ]]; then
+      curl_args+=(--data-urlencode "page_token=${page_token}")
+    fi
+    response=$(curl "${curl_args[@]}" "${workspace_url}/api/2.0/genie/spaces") || {
+      rm -f "$matches_file" "$seen_tokens_file"
+      echo "ERROR: Could not list Genie agents in ${workspace_url}; refusing to create because duplicate detection failed." >&2
+      return 1
+    }
+    http_code=$(printf '%s\n' "$response" | tail -n1)
+    response_body=$(printf '%s\n' "$response" | sed '$d')
+    if [[ "$http_code" != "200" ]]; then
+      rm -f "$matches_file" "$seen_tokens_file"
+      echo "ERROR: Could not list Genie agents in ${workspace_url} (HTTP ${http_code}); refusing to create because duplicate detection failed." >&2
+      return 1
+    fi
+
+    parsed=$(TITLE_TO_MATCH="$title" python3 -c '
+import json, os, sys
+try:
+    body = json.load(sys.stdin)
+    if not isinstance(body, dict) or not isinstance(body.get("spaces", []), list):
+        raise ValueError("response must contain a spaces list")
+    for space in body.get("spaces", []):
+        if not isinstance(space, dict):
+            raise ValueError("spaces entries must be objects")
+        space_id, space_title = space.get("space_id"), space.get("title")
+        if not isinstance(space_id, str) or not isinstance(space_title, str):
+            raise ValueError("each space must contain string space_id and title")
+        if space_title == os.environ["TITLE_TO_MATCH"]:
+            print("MATCH\t" + space_id)
+    token = body.get("next_page_token", "")
+    if token is None:
+        token = ""
+    if not isinstance(token, str):
+        raise ValueError("next_page_token must be a string")
+    print("NEXT\t" + token)
+except (ValueError, json.JSONDecodeError) as exc:
+    print(f"Malformed Genie list response: {exc}", file=sys.stderr)
+    sys.exit(1)
+' <<< "$response_body") || {
+      rm -f "$matches_file" "$seen_tokens_file"
+      echo "ERROR: Could not parse the Genie agent list from ${workspace_url}; refusing to create because duplicate detection failed." >&2
+      return 1
+    }
+    printf '%s\n' "$parsed" | sed -n 's/^MATCH\t//p' >> "$matches_file"
+    next_token=$(printf '%s\n' "$parsed" | sed -n 's/^NEXT\t//p' | tail -n1)
+    [[ -z "$next_token" ]] && break
+    if grep -Fqx -- "$next_token" "$seen_tokens_file"; then
+      rm -f "$matches_file" "$seen_tokens_file"
+      echo "ERROR: Genie agent listing repeated page token '${next_token}'; refusing to create because duplicate detection could not complete." >&2
+      return 1
+    fi
+    printf '%s\n' "$next_token" >> "$seen_tokens_file"
+    page_token="$next_token"
+  done
+
+  cat "$matches_file"
+  rm -f "$matches_file" "$seen_tokens_file"
+}
+
 # ---------- Set ACLs on a Genie agent (CAN_RUN for configured groups) ----------
 # Print the agent's current table identifiers as CSV.
 current_space_tables() {
@@ -301,7 +382,30 @@ create_genie_space() {
       echo "ERROR: Cannot check Genie agent ${existing_id} from ${GENIE_ID_FILE} (HTTP ${existing_code}); not creating a duplicate." >&2
       exit 1
     fi
-    echo "Genie agent ${existing_id} from ${GENIE_ID_FILE} no longer exists (HTTP 404); creating a new one."
+    echo "Genie agent ${existing_id} from ${GENIE_ID_FILE} no longer exists (HTTP 404); checking exact-title matches before creating."
+  fi
+
+  local title_matches
+  title_matches=$(matching_space_ids_by_title "$workspace_url" "$token" "$title") || exit 1
+  local matching_ids=()
+  while IFS= read -r matching_id; do
+    [[ -n "$matching_id" ]] && matching_ids+=("$matching_id")
+  done <<< "$title_matches"
+  if [[ ${#matching_ids[@]} -eq 1 ]]; then
+    if [[ -z "${GENIE_ID_FILE:-}" ]]; then
+      echo "ERROR: Found existing Genie agent ${matching_ids[0]} titled \"${title}\", but GENIE_ID_FILE is unset; refusing to create a duplicate." >&2
+      exit 1
+    fi
+    printf '%s\n' "${matching_ids[0]}" > "$GENIE_ID_FILE"
+    [[ -n "$adopt_marker" ]] && rm -f "$adopt_marker"
+    echo "Adopted existing Genie agent ${matching_ids[0]} titled \"${title}\" instead of creating a duplicate"
+    echo "Done. Genie agent ID: ${matching_ids[0]}"
+    return 0
+  elif [[ ${#matching_ids[@]} -gt 1 ]]; then
+    local ids_display
+    ids_display=$(printf '%s\n' "${matching_ids[@]}" | paste -sd, - | sed 's/,/, /g')
+    echo "ERROR: Multiple Genie agents have the exact title \"${title}\": ${ids_display}. Refusing to create a duplicate; set genie_space_id to the ID to manage." >&2
+    exit 1
   fi
 
   if [[ -z "${GENIE_TABLES_CSV:-}" ]]; then
@@ -328,14 +432,16 @@ create_genie_space() {
   tables_csv=$(IFS=','; echo "${sorted_identifiers[*]}")
 
   local create_body
-  create_body=$(python3 << PYEOF
+  create_body=$(python3 - "$warehouse_id" "$title" "$tables_csv" << 'PYEOF'
 import json
+import sys
 
-tables = [{"identifier": t} for t in sorted("${tables_csv}".split(",")) if t]
+warehouse_id, title, tables_csv = sys.argv[1:]
+tables = [{"identifier": t} for t in sorted(tables_csv.split(",")) if t]
 space = {"version": 2, "data_sources": {"tables": tables}}
 body = {
-    "warehouse_id": "${warehouse_id}",
-    "title": "${title}",
+    "warehouse_id": warehouse_id,
+    "title": title,
     "serialized_space": json.dumps(space, separators=(',', ':'))
 }
 print(json.dumps(body))

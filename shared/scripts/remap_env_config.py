@@ -171,9 +171,11 @@ def main():
         sys.exit(1)
     generated_path = os.path.join(source_env_dir, "generated", "abac.auto.tfvars")
     id_to_name = {}
+    source_space_configs = {}
     if os.path.exists(generated_path):
         generated_cfg = hcl2.load(open(generated_path))
         id_to_name = generated_cfg.get("genie_space_id_to_name") or {}
+        source_space_configs = generated_cfg.get("genie_space_configs") or {}
 
     # Load source auth for API queries
     auth_cfg = {}
@@ -318,6 +320,27 @@ def main():
             )
         print("       Give them names that stay distinct after DEST_CATALOG_MAP, then re-promote.")
         sys.exit(1)
+
+    # The API identity guard uses the title users see, which is an explicit
+    # genie_space_configs title when present and the canonical space name
+    # otherwise. Validate those effective titles after catalog remapping. Title
+    # identity is exact and case-sensitive, matching genie_space.sh.
+    effective_titles: dict[str, list[str]] = {}
+    for name in canonical_names:
+        explicit_title = _str((source_space_configs.get(name) or {}).get("title", ""))
+        effective_title = remap_name(explicit_title or name)
+        effective_titles.setdefault(effective_title, []).append(name)
+    duplicate_titles = {
+        title: owners for title, owners in effective_titles.items() if len(owners) > 1
+    }
+    if duplicate_titles:
+        for title, owners in sorted(duplicate_titles.items()):
+            print(
+                f"ERROR: Genie spaces {owners[0]!r} and {owners[1]!r} "
+                f"would have the same effective destination title {title!r}."
+            )
+        print("       Set distinct config.title values (or names) before promoting. Nothing was written.")
+        sys.exit(1)
     # Distinct names can still normalize to one Terraform for_each key
     # (e.g. "x (prod.demo)" and "x prod demo"); refuse keys the rename merges.
     by_key: dict[str, list[str]] = {}
@@ -406,11 +429,30 @@ def main():
             f"({len(preserved_acknowledged)} column(s))"
         )
 
-    dest_spaces_by_name = {
-        _str(space.get("name", "")): space
-        for space in dest_cfg.get("genie_spaces", [])
-        if _str(space.get("name", ""))
+    dest_spaces = dest_cfg.get("genie_spaces", [])
+    source_space_ids = {
+        _str(space.get("genie_space_id", ""))
+        for space in spaces
+        if _str(space.get("genie_space_id", ""))
     }
+
+    def matching_dest_space(name: str) -> dict:
+        """Match the promoted name first, then its Terraform normalized key."""
+        exact = [space for space in dest_spaces if _str(space.get("name", "")) == name]
+        if len(exact) == 1:
+            return exact[0]
+        keyed = [
+            space for space in dest_spaces
+            if _str(space.get("name", ""))
+            and _space_key(_str(space.get("name", ""))) == _space_key(name)
+        ]
+        if len(keyed) > 1:
+            print(
+                f"ERROR: Multiple destination Genie spaces match promoted space {name!r} "
+                f"under Terraform key {_space_key(name)!r}; nothing was written."
+            )
+            sys.exit(1)
+        return keyed[0] if keyed else {}
 
     # Build dest env.auto.tfvars. The complete promoted union is top-level so
     # Terraform, classification, derive-assignments, and release share it.
@@ -425,12 +467,27 @@ def main():
 
         lines.append("  {")
         lines.append(f"    name             = {json.dumps(name)}")
-        lines.append(f'    genie_space_id   = ""')
+        dest_space = matching_dest_space(name)
+        # IDs belong to a workspace. Preserve only an explicitly attached
+        # destination ID; never copy the source environment's ID.
+        destination_space_id = _str(dest_space.get("genie_space_id", ""))
+        if destination_space_id and destination_space_id in source_space_ids:
+            print(
+                f"ERROR: Destination Genie space {name!r} has genie_space_id "
+                f"{destination_space_id!r}, which is also configured in the source "
+                "environment. Refusing to preserve a source-workspace ID; nothing was written."
+            )
+            sys.exit(1)
+        lines.append(f"    genie_space_id   = {json.dumps(destination_space_id)}")
         lines.append(f'    uc_tables = [')
         for t in remapped_tables:
             lines.append(f'      "{t}",')
         lines.append(f'    ]')
-        dest_space = dest_spaces_by_name.get(name, {})
+        if destination_space_id:
+            print(
+                f"  Preserved destination Genie space {name!r} "
+                f"genie_space_id={destination_space_id!r}"
+            )
         if "sql_warehouse_id" in dest_space:
             space_warehouse = _str(dest_space.get("sql_warehouse_id", ""))
             lines.append(f"    sql_warehouse_id = {json.dumps(space_warehouse)}")

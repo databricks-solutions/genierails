@@ -118,6 +118,74 @@ def test_id_only_spaces_promote_with_distinct_canonical_titles(tmp_path, monkeyp
     ]
 
 
+def test_repromotion_preserves_destination_id_by_promoted_name_and_never_source_id(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    dest.mkdir()
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "Agent (dev_cat.s)", genie_space_id = "dev-id", '
+        'uc_tables = ["dev_cat.s.t"] }]\n'
+    )
+    (dest / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "Agent (prod_cat.s)", genie_space_id = "prod-id" }]\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev_cat=prod_cat"
+    ])
+    remap_env_config.main()
+    space = hcl2.load((dest / "env.auto.tfvars").open())["genie_spaces"][0]
+    assert space["genie_space_id"] == "prod-id"
+    assert "dev-id" not in (dest / "env.auto.tfvars").read_text()
+
+
+def test_repromotion_refuses_destination_id_copied_from_source(
+    tmp_path, monkeypatch, capsys
+):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    dest.mkdir()
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "Agent", genie_space_id = "dev-id", '
+        'uc_tables = ["dev.s.t"] }]\n'
+    )
+    original = (
+        'genie_spaces = [{ name = "Agent", genie_space_id = "dev-id" }]\n'
+        'sql_warehouse_id = "prod-wh"\n'
+    )
+    (dest / "env.auto.tfvars").write_text(original)
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    with pytest.raises(SystemExit) as exc:
+        remap_env_config.main()
+    assert exc.value.code == 1
+    output = capsys.readouterr().out
+    assert "which is also configured in the source environment" in output
+    assert "nothing was written" in output
+    assert (dest / "env.auto.tfvars").read_text() == original
+
+
+def test_first_promotion_never_copies_source_genie_space_id(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "Agent", genie_space_id = "dev-id", '
+        'uc_tables = ["dev.s.t"] }]\n'
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    remap_env_config.main()
+    space = hcl2.load((dest / "env.auto.tfvars").open())["genie_spaces"][0]
+    assert space["genie_space_id"] == ""
+    assert "dev-id" not in (dest / "env.auto.tfvars").read_text()
+
+
 def test_promotion_carries_user_acl_overrides_including_explicit_empty(tmp_path, monkeypatch):
     source = tmp_path / "dev"
     dest = tmp_path / "prod"
@@ -159,6 +227,34 @@ def test_duplicate_resolved_titles_fail_loud(tmp_path, monkeypatch, capsys):
         remap_env_config.main()
     assert exc.value.code == 1
     assert "same canonical name" in capsys.readouterr().out
+    assert not (dest / "env.auto.tfvars").exists()
+
+
+def test_duplicate_effective_titles_after_remap_fail_before_write(
+    tmp_path, monkeypatch, capsys
+):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    (source / "generated").mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text('''genie_spaces = [
+  { name = "Payments", uc_tables = ["dev.s.pay"] },
+  { name = "Orders", uc_tables = ["dev.s.orders"] },
+]
+''')
+    (source / "generated" / "abac.auto.tfvars").write_text('''genie_space_configs = {
+  Payments = { title = "Shared (prod.s)" }
+  Orders = { title = "Shared (dev.s)" }
+}
+''')
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+    with pytest.raises(SystemExit) as exc:
+        remap_env_config.main()
+    assert exc.value.code == 1
+    output = capsys.readouterr().out
+    assert "'Payments' and 'Orders'" in output
+    assert "same effective destination title 'Shared (prod.s)'" in output
     assert not (dest / "env.auto.tfvars").exists()
 
 
