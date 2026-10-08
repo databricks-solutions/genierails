@@ -216,7 +216,7 @@ locals {
   created_acl_handoffs = {
     for key, handoff in local.created_acl_handoff_candidates : key => handoff
     if fileexists("${var.env_dir}/.genie_space_id_${key}")
-    && try(trimspace(file("${var.env_dir}/.genie_space_id_${key}")), "") == local.merged_spaces[key].genie_space_id
+    && (fileexists("${var.env_dir}/.genie_space_id_${key}") ? try(trimspace(file("${var.env_dir}/.genie_space_id_${key}")), "") == local.merged_spaces[key].genie_space_id : true)
   }
   applied_can_run_groups = {
     for key, space in local.merged_spaces : key => [

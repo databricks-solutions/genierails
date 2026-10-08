@@ -126,7 +126,8 @@ def test_migration_id_file_adopt_remains_created_and_trash_deletes(tmp_path):
     env = {**os.environ, "PATH": f"{tmp_path / 'bin'}:{os.environ['PATH']}",
            "CALLS": str(tmp_path / "calls.jsonl"), "PAGES": "[]",
            "DATABRICKS_HOST": "https://target", "DATABRICKS_TOKEN": "token",
-           "GENIE_ID_FILE": str(id_file)}
+           # Even the old bypass name must not suppress the production DELETE.
+           "GENIE_ID_FILE": str(id_file), "GENIERAILS_TERRAFORM_TEST": "1"}
     destroyed = subprocess.run(["bash", str(SCRIPT), "trash"], env=env,
                                capture_output=True, text=True)
     assert destroyed.returncode == 0, destroyed.stdout + destroyed.stderr
@@ -180,7 +181,7 @@ fi
     result = subprocess.run(["bash", str(SCRIPT), "set-acls"], env=env,
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Removing configured Genie access: group:configured [Configured Team] (CAN_RUN) — not granted: CAN_RUN withheld until the coverage check passes" in result.stdout
+    assert "Removing configured Genie access: group:configured [Configured Team] (CAN_RUN) — not granted: CAN_RUN withheld until the agent access checks pass" in result.stdout
     assert "Removing hand-added Genie access: group:manual [Manual Team] (CAN_RUN) — not in config" in result.stdout
     assert json.loads(request_body.read_text()) == {"access_control_list": []}
 

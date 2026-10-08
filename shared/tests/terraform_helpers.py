@@ -79,7 +79,6 @@ def tf_env(tmp_path: Path, plugin_cache: Path | None = None, **extra: str) -> di
         **os.environ,
         "TF_DATA_DIR": str(tmp_path / ".terraform"),
         "TF_IN_AUTOMATION": "1",
-        "GENIERAILS_TERRAFORM_TEST": "1",
         **extra,
     }
     if plugin_cache is not None:
