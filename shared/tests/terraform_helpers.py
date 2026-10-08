@@ -75,7 +75,13 @@ def session_plugin_cache() -> Path:
 
 
 def tf_env(tmp_path: Path, plugin_cache: Path | None = None, **extra: str) -> dict:
-    env = {**os.environ, "TF_DATA_DIR": str(tmp_path / ".terraform"), "TF_IN_AUTOMATION": "1", **extra}
+    env = {
+        **os.environ,
+        "TF_DATA_DIR": str(tmp_path / ".terraform"),
+        "TF_IN_AUTOMATION": "1",
+        "GENIERAILS_TERRAFORM_TEST": "1",
+        **extra,
+    }
     if plugin_cache is not None:
         env["TF_PLUGIN_CACHE_DIR"] = str(plugin_cache)
     env.setdefault("TF_PLUGIN_CACHE_DIR", str(session_plugin_cache()))

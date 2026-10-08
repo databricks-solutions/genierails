@@ -319,12 +319,14 @@ def _acl_module(tmp_path):
     (root / "main.tf").write_text(
         'variable "spaces" { type = map(string) }\n'
         'variable "genie_script_path" { default = "" }\n'
+        'variable "genie_space_acl_created_handoffs" { default = {} }\n'
         'variable "databricks_workspace_host" { default = "https://ws" }\n'
         'variable "databricks_client_id" { default = "id" }\n'
         'variable "databricks_client_secret" {\n  default   = "s"\n  sensitive = true\n}\n'
         "locals {\n"
         '  existing_spaces        = { for key, groups in var.spaces : key => { genie_space_id = "id-${key}", name = key } }\n'
         "  genie_space_acl_keys   = keys(var.spaces)\n"
+        "  genie_space_groups     = var.spaces\n"
         "  genie_space_acl_groups = var.spaces\n"
         "}\n" + block
     )

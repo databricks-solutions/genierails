@@ -197,6 +197,19 @@ locals {
   # exactly one current object counts as nothing applied.
   _applied_candidates = { for instance in local._state_instances : "${instance.name}|${instance.key}" => instance.attrs... }
   _applied            = { for key, attrs in local._applied_candidates : key => attrs[0] if length(attrs) == 1 }
+  created_acl_handoffs = {
+    for key, space in local.merged_spaces : key => {
+      space_create_id = local._applied["genie_space_acls_created|${key}"].triggers.space_create_id
+      groups          = local._applied["genie_space_acls_created|${key}"].triggers.groups
+    }
+    if space.genie_space_id != ""
+    && try(local._applied["genie_space_acls_created|${key}"].triggers.space_create_id, "") != ""
+    && try(local._applied["genie_space_acls_created|${key}"].triggers.space_create_id, "") == try(local._applied["genie_space|${key}"].id, "-")
+    && try(local._applied["genie_space|${key}"].triggers_replace.value.host, local._applied["genie_space|${key}"].triggers_replace.host, "") == var.databricks_workspace_host
+    && try(local._applied["genie_space|${key}"].input.value.id_file, local._applied["genie_space|${key}"].input.id_file, "") == "${var.env_dir}/.genie_space_id_${key}"
+    && fileexists("${var.env_dir}/.genie_space_id_${key}")
+    && try(trimspace(file("${var.env_dir}/.genie_space_id_${key}")), "") == space.genie_space_id
+  }
   applied_can_run_groups = {
     for key, space in local.merged_spaces : key => [
       for group in split(",", (
@@ -204,7 +217,7 @@ locals {
         ? (
           try(local._applied["genie_space_acls|${key}"].triggers.space_id, "") == space.genie_space_id
           ? try(local._applied["genie_space_acls|${key}"].triggers.groups, "")
-          : ""
+          : try(local.created_acl_handoffs[key].groups, "")
         )
         : (
           try(local._applied["genie_space_acls_created|${key}"].triggers.space_create_id, "") != ""
@@ -612,23 +625,24 @@ module "workspace" {
     databricks.workspace = databricks.workspace
   }
 
-  databricks_account_id        = var.databricks_account_id
-  databricks_client_id         = var.databricks_client_id
-  databricks_client_secret     = var.databricks_client_secret
-  databricks_workspace_id      = var.databricks_workspace_id
-  databricks_workspace_host    = var.databricks_workspace_host
-  genie_only                   = var.genie_only
-  manage_groups                = var.manage_groups
-  groups                       = var.groups
-  genie_exposure_blocker       = local.genie_exposure_blocker
-  genie_space_missing_grants   = local.genie_space_missing_grants
-  genie_space_can_run_widening = local.genie_space_can_run_widening
-  sql_warehouse_id             = var.sql_warehouse_id
-  warehouse_name               = var.warehouse_name
-  retain_auto_warehouse        = local.retain_auto_warehouse
-  genie_spaces                 = local.merged_spaces
-  genie_id_file_prefix         = "${var.env_dir}/.genie_space_id"
-  genie_script_path            = "${local.project_root}/scripts/genie_space.sh"
+  databricks_account_id            = var.databricks_account_id
+  databricks_client_id             = var.databricks_client_id
+  databricks_client_secret         = var.databricks_client_secret
+  databricks_workspace_id          = var.databricks_workspace_id
+  databricks_workspace_host        = var.databricks_workspace_host
+  genie_only                       = var.genie_only
+  manage_groups                    = var.manage_groups
+  groups                           = var.groups
+  genie_exposure_blocker           = local.genie_exposure_blocker
+  genie_space_missing_grants       = local.genie_space_missing_grants
+  genie_space_can_run_widening     = local.genie_space_can_run_widening
+  genie_space_acl_created_handoffs = local.created_acl_handoffs
+  sql_warehouse_id                 = var.sql_warehouse_id
+  warehouse_name                   = var.warehouse_name
+  retain_auto_warehouse            = local.retain_auto_warehouse
+  genie_spaces                     = local.merged_spaces
+  genie_id_file_prefix             = "${var.env_dir}/.genie_space_id"
+  genie_script_path                = "${local.project_root}/scripts/genie_space.sh"
 }
 
 # ── Outputs ───────────────────────────────────────────────────────────────────
@@ -659,6 +673,14 @@ output "genie_space_acls_applied" {
 
 output "genie_space_acls_groups" {
   value = module.workspace.genie_space_acls_groups
+}
+
+output "genie_space_acls_created_groups" {
+  value = module.workspace.genie_space_acls_created_groups
+}
+
+output "genie_space_acl_created_handoffs" {
+  value = local.created_acl_handoffs
 }
 
 output "genie_space_can_run_withheld" {
