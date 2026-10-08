@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "modules/data_access"))
 
 import generate_abac
 from normalize_masking_sql import normalized_definitions
+from sql_tokenizer import SqlTokenizeError
 
 
 def test_masking_normalization_ignores_comments_whitespace_and_order():
@@ -33,6 +34,9 @@ def test_masking_normalization_detects_real_body_change():
     ("LANGUAGE PYTHON AS $$\n  return v\n$$", "LANGUAGE PYTHON AS $$\n    return v\n$$"),
     ("LANGUAGE PYTHON AS $$return v--1$$", "LANGUAGE PYTHON AS $$return v--2$$"),
     (r"RETURN 'it\' -- AAA'", r"RETURN 'it\' -- BBB'"),
+    ("LANGUAGE PYTHON AS $py$\nreturn '***'\n$py$", "LANGUAGE PYTHON AS $py$\n    return '***'\n$py$"),
+    ("LANGUAGE PYTHON AS $py$return v--1$py$", "LANGUAGE PYTHON AS $py$return v--2$py$"),
+    ("LANGUAGE PYTHON AS $PY$\nreturn '***'\n$PY$", "LANGUAGE PYTHON AS $PY$\n  return '***'\n$PY$"),
 ])
 def test_masking_normalization_never_collapses_real_changes(before, after):
     prefix = "CREATE OR REPLACE FUNCTION cat.sch.mask(v STRING) RETURNS STRING "
@@ -45,6 +49,30 @@ def test_non_function_statements_are_hashed_and_bound_function_reordering():
     changed_set = reordered.replace("'UTC'", "'Australia/Melbourne'")
     assert normalized_definitions(first) == normalized_definitions(reordered)
     assert normalized_definitions(reordered) != normalized_definitions(changed_set)
+
+
+def test_duplicate_logical_function_names_keep_file_order():
+    prefix = "USE CATALOG cat; USE SCHEMA sch; "
+    definitions = [
+        "CREATE FUNCTION mask() RETURNS INT RETURN 1;",
+        "CREATE FUNCTION `mask`() RETURNS INT RETURN 2;",
+        "CREATE FUNCTION cat.sch.mask() RETURNS INT RETURN 3;",
+    ]
+    assert normalized_definitions(prefix + " ".join(definitions)) != normalized_definitions(
+        prefix + " ".join(reversed(definitions))
+    )
+
+
+def test_backslash_continued_line_comment_fails_closed():
+    sql = "CREATE FUNCTION mask() RETURNS STRING RETURN 'x'; -- continued\\\nRETURN 'value -- hidden';"
+    with pytest.raises(SqlTokenizeError, match="backslash-continued"):
+        normalized_definitions(sql)
+
+
+@pytest.mark.parametrize("sql", ["SELECT $;", "SELECT $py$unclosed;"])
+def test_invalid_dollar_quote_fails_closed(sql):
+    with pytest.raises(SqlTokenizeError):
+        normalized_definitions(sql)
 
 
 def test_coverage_fingerprint_hashes_the_raw_masking_file():

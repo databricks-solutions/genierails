@@ -26,8 +26,8 @@ def _statements(tokens: list[str]) -> list[list[str]]:
     return statements
 
 
-def _function_name(statement: list[str]) -> str | None:
-    """Return a CREATE FUNCTION sort key, or None for every other statement."""
+def _function_name(statement: list[str]) -> tuple[str, str] | None:
+    """Return full and last-name sort keys, or None for another statement."""
     try:
         create = statement.index("create")
     except ValueError:
@@ -42,26 +42,33 @@ def _function_name(statement: list[str]) -> str | None:
     while cursor < len(statement) and statement[cursor] != "(":
         name.append(statement[cursor])
         cursor += 1
-    return "".join(name) if name and cursor < len(statement) else None
+    if not name or cursor >= len(statement):
+        return None
+    full_name = "".join(name)
+    last_dot = max((index for index, token in enumerate(name) if token == "."), default=-1)
+    last_name = "".join(name[last_dot + 1:]).strip("`").lower()
+    return full_name, last_name
 
 
 def normalized_tokens(sql_text: str) -> list[list[str]]:
     """Normalize only consecutive function order; retain every statement/token."""
     statements = _statements(sql_tokens(sql_text))
     normalized: list[list[str]] = []
-    run: list[tuple[str, list[str]]] = []
+    run: list[tuple[str, str, list[str]]] = []
 
     def flush() -> None:
-        normalized.extend(statement for _name, statement in sorted(run, key=lambda item: item[0]))
+        duplicate_logical_name = len({last_name for _full, last_name, _statement in run}) != len(run)
+        ordered = run if duplicate_logical_name else sorted(run, key=lambda item: item[0])
+        normalized.extend(statement for _full, _last, statement in ordered)
         run.clear()
 
     for statement in statements:
-        name = _function_name(statement)
-        if name is None:
+        names = _function_name(statement)
+        if names is None:
             flush()
             normalized.append(statement)
         else:
-            run.append((name, statement))
+            run.append((*names, statement))
     flush()
     return normalized
 

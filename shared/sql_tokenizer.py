@@ -19,6 +19,9 @@ def sql_tokens(sql: str) -> list[str]:
             i += 1
         elif sql.startswith("--", i):
             end = sql.find("\n", i)
+            comment = sql[i:] if end < 0 else sql[i:end]
+            if comment.endswith("\\"):
+                raise SqlTokenizeError("backslash-continued -- comment")
             i = n if end < 0 else end + 1
         elif sql.startswith("/*", i):
             depth, j = 1, i + 2
@@ -32,12 +35,18 @@ def sql_tokens(sql: str) -> list[str]:
             if depth:
                 raise SqlTokenizeError("unterminated /* comment")
             i = j
-        elif sql.startswith("$$", i):
-            end = sql.find("$$", i + 2)
+        elif ch == "$":
+            tag_end = i + 1
+            while tag_end < n and sql[tag_end].isalpha() and sql[tag_end].isascii():
+                tag_end += 1
+            if tag_end >= n or sql[tag_end] != "$":
+                raise SqlTokenizeError("$ is not a valid dollar-quote opener")
+            tag = sql[i:tag_end + 1]
+            end = sql.find(tag, tag_end + 1)
             if end < 0:
-                raise SqlTokenizeError("unterminated $$ body")
-            tokens.append(sql[i:end + 2])
-            i = end + 2
+                raise SqlTokenizeError(f"unterminated {tag} body")
+            tokens.append(sql[i:end + len(tag)])
+            i = end + len(tag)
         elif ch in "'\"`":
             backslash = ch != "`" and not (i > 0 and sql[i - 1] in "rR" and tokens[-1:] == ["r"])
             j = i + 1
