@@ -1,8 +1,10 @@
 """Regression tests for Terraform CLI argument precedence in the layer runner."""
 
 import os
+import signal
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -139,3 +141,89 @@ def test_other_init_failures_still_fail(tmp_path):
     assert "Failed to query available provider packages" in result.stderr
     assert [shlex.split(line)[0] for line in log.read_text().splitlines()] == ["init"]
     assert not (tmp_path / "project" / "roots" / "workspace" / ".terraform-init.lock.d").exists()
+
+
+def _locking_runner(tmp_path):
+    runner, env, log = _runner_with_stale_lock(tmp_path, "unused")
+    terraform = Path(env["PATH"].split(os.pathsep)[0]) / "terraform"
+    terraform.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> \"{log}\"\n"
+        'if [ "$1" = init ]; then sleep "${FAKE_INIT_SLEEP:-0}"; fi\n'
+    )
+    return runner, env
+
+
+def test_killed_init_holder_is_reclaimed(tmp_path):
+    runner, env = _locking_runner(tmp_path)
+    holder_env = {**env, "FAKE_INIT_SLEEP": "30"}
+    holder = subprocess.Popen([runner, "workspace", "dev", "plan"], env=holder_env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              start_new_session=True)
+    owner = tmp_path / "project/roots/workspace/.terraform-init.lock.d/owner"
+    for _ in range(100):
+        if owner.exists():
+            break
+        time.sleep(0.02)
+    assert owner.exists()
+    os.killpg(holder.pid, signal.SIGKILL)
+    holder.wait(timeout=5)
+    result = subprocess.run([runner, "workspace", "dev", "plan"], env=env,
+                            text=True, capture_output=True, timeout=5)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "reclaiming stale Terraform init lock" in result.stderr
+
+
+def test_live_init_holder_is_never_stolen_and_wait_times_out(tmp_path):
+    runner, env = _locking_runner(tmp_path)
+    holder = subprocess.Popen([runner, "workspace", "dev", "plan"],
+                              env={**env, "FAKE_INIT_SLEEP": "30"},
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                              start_new_session=True)
+    owner = tmp_path / "project/roots/workspace/.terraform-init.lock.d/owner"
+    for _ in range(100):
+        if owner.exists():
+            break
+        time.sleep(0.02)
+    result = subprocess.run([runner, "workspace", "dev", "plan"],
+                            env={**env, "INIT_LOCK_TIMEOUT_SECONDS": "1"},
+                            text=True, capture_output=True, timeout=5)
+    assert result.returncode != 0
+    assert "Timed out after 1s" in result.stderr
+    assert str(owner.parent) in result.stderr
+    assert "rm -rf" in result.stderr
+    assert holder.poll() is None
+    os.killpg(holder.pid, signal.SIGTERM)
+    holder.wait(timeout=5)
+
+
+def test_concurrent_waiters_atomically_reclaim_one_dead_owner(tmp_path):
+    runner, env = _locking_runner(tmp_path)
+    bin_dir = Path(env["PATH"].split(os.pathsep)[0])
+    guard = tmp_path / "init-active"
+    overlap = tmp_path / "init-overlap"
+    terraform = bin_dir / "terraform"
+    terraform.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = init ]; then\n'
+        f'  if ! mkdir "{guard}" 2>/dev/null; then touch "{overlap}"; fi\n'
+        "  sleep 0.02\n"
+        f'  rmdir "{guard}" 2>/dev/null || true\n'
+        "fi\n"
+    )
+    lock = tmp_path / "project/roots/workspace/.terraform-init.lock.d"
+    for _trial in range(20):
+        lock.mkdir()
+        (lock / "owner").write_text(
+            f"pid=99999999\nhost={subprocess.check_output(['hostname'], text=True).strip()}\n"
+            "started_at=2000-01-01T00:00:00Z\n"
+        )
+        runners = [
+            subprocess.Popen([runner, "workspace", f"dev-{index}", "plan"], env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            for index in range(6)
+        ]
+        results = [process.communicate(timeout=15) + (process.returncode,) for process in runners]
+        assert all(returncode == 0 for _stdout, _stderr, returncode in results), results
+        assert not overlap.exists(), results
+        assert not lock.exists()

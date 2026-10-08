@@ -7,6 +7,8 @@ from pathlib import Path
 import hcl2
 import pytest
 
+from tests.terraform_helpers import shared_copy, tf, tf_env, tf_init
+
 
 MAIN_TF = Path(__file__).parents[1] / "modules" / "data_access" / "main.tf"
 WORKSPACE_MAIN_TF = Path(__file__).parents[1] / "modules" / "workspace" / "main.tf"
@@ -459,16 +461,11 @@ def _verbose_runs(output: str) -> dict[str, str]:
 
 @pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
 def test_reapplying_unchanged_inputs_keeps_the_wait_and_every_grant_mask_and_policy(tmp_path):
-    root = MAIN_TF.parent
-    env = {**os.environ, "TF_DATA_DIR": str(tmp_path / ".terraform"), "TF_IN_AUTOMATION": "1"}
-    init = subprocess.run(["terraform", "init", "-backend=false", "-input=false"],
-                          cwd=root, env=env, text=True, capture_output=True)
-    assert init.returncode == 0, init.stdout + init.stderr
-    result = subprocess.run(
-        ["terraform", "test", "-no-color", "-verbose",
-         "-filter=tests/policy_enforcement_wait.tftest.hcl"],
-        cwd=root, env=env, text=True, capture_output=True,
-    )
+    root = shared_copy(tmp_path) / "modules" / "data_access"
+    env = tf_env(tmp_path)
+    tf_init(root, env=env)
+    result = tf(root, "test", "-no-color", "-verbose",
+                "-filter=tests/policy_enforcement_wait.tftest.hcl", env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     runs = _verbose_runs(result.stdout)
 
@@ -498,13 +495,10 @@ def test_reapplying_unchanged_inputs_keeps_the_wait_and_every_grant_mask_and_pol
     ("workspace", "tests/genie_exposure_precondition.tftest.hcl", "replan_unchanged_acl_after_the_gate_expires"),
 ])
 def test_unchanged_access_replans_without_changes_after_the_gate_expires(tmp_path, module, test_file, run):
-    root = MAIN_TF.parents[1] / module
-    env = {**os.environ, "TF_DATA_DIR": str(tmp_path / ".terraform"), "TF_IN_AUTOMATION": "1"}
-    init = subprocess.run(["terraform", "init", "-backend=false", "-input=false"],
-                          cwd=root, env=env, text=True, capture_output=True)
-    assert init.returncode == 0, init.stdout + init.stderr
-    result = subprocess.run(["terraform", "test", "-no-color", "-verbose", f"-filter={test_file}"],
-                            cwd=root, env=env, text=True, capture_output=True)
+    root = shared_copy(tmp_path) / "modules" / module
+    env = tf_env(tmp_path)
+    tf_init(root, env=env)
+    result = tf(root, "test", "-no-color", "-verbose", f"-filter={test_file}", env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     section = _verbose_runs(result.stdout)[run]
     assert section.startswith("pass")

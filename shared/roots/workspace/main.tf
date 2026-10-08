@@ -129,11 +129,12 @@ locals {
       : s.genie_space_id)
       : "${s.name != "" ? trim(replace(lower(s.name), "/[^a-z0-9]+/", "_"), "_") : s.genie_space_id}--${s.genie_space_id != "" ? s.genie_space_id : idx}"
       ) => {
-      name             = local.canonical_space_names[idx]
-      genie_space_id   = s.genie_space_id
-      sql_warehouse_id = s.sql_warehouse_id != "" ? s.sql_warehouse_id : var.sql_warehouse_id
-      uc_tables        = s.uc_tables
-      config           = try(local.effective_genie_space_configs[local.canonical_space_names[idx]], local.empty_genie_config)
+      name                        = local.canonical_space_names[idx]
+      genie_space_id              = s.genie_space_id
+      sql_warehouse_id            = s.sql_warehouse_id != "" ? s.sql_warehouse_id : var.sql_warehouse_id
+      configured_sql_warehouse_id = s.sql_warehouse_id
+      uc_tables                   = s.uc_tables
+      config                      = try(local.effective_genie_space_configs[local.canonical_space_names[idx]], local.empty_genie_config)
     }
   }
 
@@ -173,6 +174,12 @@ locals {
   # always plans, and an unchanged ACL never errors once the gate expires.
   # Unreadable state means nothing is on record (fail closed).
   _own_state = fileexists("${var.env_dir}/terraform.tfstate") ? try(jsondecode(file("${var.env_dir}/terraform.tfstate")), null) : null
+  retain_auto_warehouse = anytrue([
+    for resource in try(local._own_state.resources, []) :
+    try(resource.module, "") == "module.workspace" &&
+    try(resource.type, "") == "databricks_sql_endpoint" &&
+    try(resource.name, "") == "warehouse" && length(try(resource.instances, [])) > 0
+  ])
   _state_instances = flatten([
     for resource in try(local._own_state.resources, []) : [
       for instance in try(resource.instances, []) : {
@@ -618,6 +625,7 @@ module "workspace" {
   genie_space_can_run_widening = local.genie_space_can_run_widening
   sql_warehouse_id             = var.sql_warehouse_id
   warehouse_name               = var.warehouse_name
+  retain_auto_warehouse        = local.retain_auto_warehouse
   genie_spaces                 = local.merged_spaces
   genie_id_file_prefix         = "${var.env_dir}/.genie_space_id"
   genie_script_path            = "${local.project_root}/scripts/genie_space.sh"
@@ -653,6 +661,19 @@ output "genie_space_acls_groups" {
   value = module.workspace.genie_space_acls_groups
 }
 
+output "genie_space_can_run_withheld" {
+  description = "Per Genie agent key: CAN_RUN groups this plan withholds (blocked exposure); the rest of the change applies."
+  value       = module.workspace.genie_space_can_run_withheld
+}
+
+# A raw terraform run that withholds CAN_RUN still applies; say so.
+check "genie_can_run_withheld" {
+  assert {
+    condition     = length(module.workspace.genie_space_can_run_withheld) == 0
+    error_message = "Genie CAN_RUN withheld (${join("; ", [for key, groups in module.workspace.genie_space_can_run_withheld : "${key}: ${join(", ", groups)}"])}): ${local.genie_exposure_blocker != "" ? local.genie_exposure_blocker : "the data_access state lacks the SELECT grants those groups need"}. Removing or keeping CAN_RUN still applies. Apply governance first through make (make apply, make release or make apply-governance), which runs the coverage check and applies data_access before Genie ACLs."
+  }
+}
+
 output "genie_space_missing_grants" {
   description = "Per Genie agent: <table>|<group> SELECT grants its CAN_RUN groups need that the data_access state doesn't have. Any entry blocks that agent's non-empty CAN_RUN."
   value       = local.genie_space_missing_grants
@@ -661,6 +682,11 @@ output "genie_space_missing_grants" {
 output "genie_space_can_run_widening" {
   description = "Per Genie agent: CAN_RUN groups its ACL adds beyond what the last apply left in place. Only these need the coverage check and the agent's grants."
   value       = local.genie_space_can_run_widening
+}
+
+output "genie_existing_space_warehouse_intent" {
+  description = "Per attached agent, the raw per-space warehouse update intent."
+  value       = module.workspace.genie_existing_space_warehouse_intent
 }
 
 output "genie_exposure_blocker" {

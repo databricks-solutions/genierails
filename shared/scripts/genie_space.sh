@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Genie agent: create / update-config / set-acls / trash
+# Genie agent: create / update-config / set-acls / revoke-acls / trash
 # =============================================================================
 # Commands:
 #   create        Create a minimal Genie agent (tables + warehouse + title).
@@ -9,6 +9,11 @@
 #                 Reads space_id from GENIE_ID_FILE.
 #   set-acls      Set CAN_RUN on a Genie agent for the configured groups.
 #                 Reads space_id from GENIE_SPACE_OBJECT_ID or GENIE_ID_FILE.
+#   revoke-acls   Remove the groups in GENIE_REVOKE_GROUPS_CSV from a Genie
+#                 agent's direct ACL, keeping every other direct entry (and
+#                 inherited ones, e.g. workspace admins). Run by Terraform when
+#                 an ACL it set is destroyed. Reads space_id from
+#                 GENIE_SPACE_OBJECT_ID or $LAYER_ENV_DIR/$GENIE_ID_BASENAME.
 #   trash         Move a Genie agent to trash. Reads space_id from GENIE_ID_FILE.
 #
 # Authentication (in order of precedence):
@@ -40,10 +45,13 @@
 # Usage:
 #   ./genie_space.sh create [workspace_url] [token] [title] [warehouse_id]
 #   ./genie_space.sh set-acls [workspace_url] [token] [space_id]
+#   ./genie_space.sh revoke-acls
 #   ./genie_space.sh trash
 #
 # Or set env and run: ./genie_space.sh create   or   ./genie_space.sh set-acls
 # Re-running create adopts the agent already named in GENIE_ID_FILE.
+# If that ID is absent or gone, create adopts the single target-workspace agent
+# whose title exactly matches (case-sensitively); ambiguous matches fail closed.
 # =============================================================================
 
 set -e
@@ -53,6 +61,7 @@ UA_HEADER="User-Agent: genierails/0.1.0"
 usage() {
   echo "Usage: $0 create [workspace_url] [token] [title] [warehouse_id]"
   echo "       $0 set-acls [workspace_url] [token] [space_id]"
+  echo "       $0 revoke-acls"
   echo "       $0 trash"
   echo "  Or set DATABRICKS_HOST + DATABRICKS_TOKEN (or DATABRICKS_CLIENT_ID + DATABRICKS_CLIENT_SECRET)"
   echo "  For create: set GENIE_WAREHOUSE_ID; for set-acls: set GENIE_SPACE_OBJECT_ID"
@@ -191,6 +200,85 @@ expand_tables() {
   echo "${expanded[*]}"
 }
 
+# Print IDs of all agents whose title exactly (case-sensitively) matches $3.
+# Listing is deliberately fail-closed: callers must not POST if any page cannot
+# be fetched or parsed, because an unseen page could contain the same agent.
+matching_space_ids_by_title() {
+  local workspace_url="$1" token="$2" title="$3"
+  local page_token="" response http_code response_body parsed next_token
+  local page_count=0 matches_file seen_tokens_file
+  matches_file=$(mktemp)
+  seen_tokens_file=$(mktemp)
+
+  while true; do
+    page_count=$((page_count + 1))
+    if [[ $page_count -gt 1000 ]]; then
+      rm -f "$matches_file" "$seen_tokens_file"
+      echo "ERROR: Genie agent listing exceeded 1000 pages; refusing to create because duplicate detection could not complete." >&2
+      return 1
+    fi
+    local curl_args=(-s -w "\n%{http_code}" -G
+      -H "${UA_HEADER}" -H "Authorization: Bearer ${token}")
+    if [[ -n "$page_token" ]]; then
+      curl_args+=(--data-urlencode "page_token=${page_token}")
+    fi
+    response=$(curl "${curl_args[@]}" "${workspace_url}/api/2.0/genie/spaces") || {
+      rm -f "$matches_file" "$seen_tokens_file"
+      echo "ERROR: Could not list Genie agents in ${workspace_url}; refusing to create because duplicate detection failed." >&2
+      return 1
+    }
+    http_code=$(printf '%s\n' "$response" | tail -n1)
+    response_body=$(printf '%s\n' "$response" | sed '$d')
+    if [[ "$http_code" != "200" ]]; then
+      rm -f "$matches_file" "$seen_tokens_file"
+      echo "ERROR: Could not list Genie agents in ${workspace_url} (HTTP ${http_code}); refusing to create because duplicate detection failed." >&2
+      return 1
+    fi
+
+    parsed=$(TITLE_TO_MATCH="$title" python3 -c '
+import json, os, sys
+try:
+    body = json.load(sys.stdin)
+    if not isinstance(body, dict) or not isinstance(body.get("spaces", []), list):
+        raise ValueError("response must contain a spaces list")
+    for space in body.get("spaces", []):
+        if not isinstance(space, dict):
+            raise ValueError("spaces entries must be objects")
+        space_id, space_title = space.get("space_id"), space.get("title")
+        if not isinstance(space_id, str) or not isinstance(space_title, str):
+            raise ValueError("each space must contain string space_id and title")
+        if space_title == os.environ["TITLE_TO_MATCH"]:
+            print("MATCH\t" + space_id)
+    token = body.get("next_page_token", "")
+    if token is None:
+        token = ""
+    if not isinstance(token, str):
+        raise ValueError("next_page_token must be a string")
+    print("NEXT\t" + token)
+except (ValueError, json.JSONDecodeError) as exc:
+    print(f"Malformed Genie list response: {exc}", file=sys.stderr)
+    sys.exit(1)
+' <<< "$response_body") || {
+      rm -f "$matches_file" "$seen_tokens_file"
+      echo "ERROR: Could not parse the Genie agent list from ${workspace_url}; refusing to create because duplicate detection failed." >&2
+      return 1
+    }
+    printf '%s\n' "$parsed" | sed -n 's/^MATCH\t//p' >> "$matches_file"
+    next_token=$(printf '%s\n' "$parsed" | sed -n 's/^NEXT\t//p' | tail -n1)
+    [[ -z "$next_token" ]] && break
+    if grep -Fqx -- "$next_token" "$seen_tokens_file"; then
+      rm -f "$matches_file" "$seen_tokens_file"
+      echo "ERROR: Genie agent listing repeated page token '${next_token}'; refusing to create because duplicate detection could not complete." >&2
+      return 1
+    fi
+    printf '%s\n' "$next_token" >> "$seen_tokens_file"
+    page_token="$next_token"
+  done
+
+  cat "$matches_file"
+  rm -f "$matches_file" "$seen_tokens_file"
+}
+
 # ---------- Set ACLs on a Genie agent (CAN_RUN for configured groups) ----------
 # Print the agent's current table identifiers as CSV.
 current_space_tables() {
@@ -225,6 +313,60 @@ set_genie_acls() {
 
   local body="{\"access_control_list\": ${access_control}}"
   local path="/api/2.0/permissions/genie/${space_id}"
+
+  # PUT is intentionally authoritative. Read first so every direct grant that
+  # config will remove is visible; inherited grants are not part of PUT.
+  local current current_code current_body
+  current=$(curl -s -w "\n%{http_code}" \
+    -H "${UA_HEADER}" -H "Authorization: Bearer ${token}" \
+    "${workspace_url}${path}") || current=""
+  current_code=$(printf '%s\n' "$current" | tail -n1)
+  current_body=$(printf '%s\n' "$current" | sed '$d')
+  local acl_audit=""
+  if [[ "$current_code" == "200" ]]; then
+    if ! acl_audit=$(CONFIGURED_GROUPS="$GENIE_GROUPS_CSV" python3 -c '
+import json, os, sys
+configured = {g for g in os.environ.get("CONFIGURED_GROUPS", "").split(",") if g}
+body = json.load(sys.stdin)
+if not isinstance(body, dict) or not isinstance(body.get("access_control_list"), list):
+    raise ValueError("response must contain access_control_list")
+for ace in body["access_control_list"]:
+    if not isinstance(ace, dict) or not isinstance(ace.get("all_permissions"), list):
+        raise ValueError("each ACL entry must contain all_permissions")
+    direct = [p for p in ace["all_permissions"] if isinstance(p, dict) and not p.get("inherited")]
+    if not direct:
+        continue
+    fields = (("group", "group_name"), ("user", "user_name"), ("sp", "service_principal_name"))
+    kind, field = next(((kind, field) for kind, field in fields if ace.get(field)), (None, None))
+    if not field:
+        raise ValueError("ACL entry has no supported principal")
+    principal = ace[field]
+    display = ace.get("display_name")
+    label = f"{kind}:{principal}" + (f" [{display}]" if display and display != principal else "")
+    levels = sorted({p.get("permission_level", "UNKNOWN") for p in direct})
+    if kind == "group" and principal in configured:
+        for level in levels:
+            if level != "CAN_RUN":
+                print(f"Changing configured Genie access: {label} ({level} -> CAN_RUN)")
+        continue
+    for level in levels:
+        print(f"Removing hand-added Genie access: {label} ({level}) — not in config")
+' <<< "$current_body"); then
+      if [[ "${GENIE_ACL_FORCE:-0}" != "1" ]]; then
+        echo "ERROR: Could not parse current Genie ACL for ${space_id}; refusing authoritative PUT because removals cannot be audited. Set GENIE_ACL_FORCE=1 to override." >&2
+        exit 1
+      fi
+      echo "WARNING: GENIE_ACL_FORCE=1: current Genie ACL for ${space_id} could not be parsed; proceeding with authoritative PUT without a complete removal audit." >&2
+    else
+      [[ -n "$acl_audit" ]] && printf '%s\n' "$acl_audit"
+    fi
+  else
+    if [[ "${GENIE_ACL_FORCE:-0}" != "1" ]]; then
+      echo "ERROR: Could not read current Genie ACL for ${space_id} (HTTP ${current_code:-unknown}); refusing authoritative PUT because removals cannot be audited. Set GENIE_ACL_FORCE=1 to override." >&2
+      exit 1
+    fi
+    echo "WARNING: GENIE_ACL_FORCE=1: current Genie ACL for ${space_id} returned HTTP ${current_code:-unknown}; proceeding with authoritative PUT without a complete removal audit." >&2
+  fi
 
   echo "Putting permissions on Genie agent ${space_id} for groups: ${GENIE_GROUPS[*]}"
   local response
@@ -262,9 +404,10 @@ create_genie_space() {
   # Adoption required (GENIE_ADOPT_REQUIRED=1, or the marker that
   # genie_adopt_preflight.py --arm writes during the migration) accepts only
   # HTTP 200 and never creates.
-  local adopt_marker="" adopt_required=""
+  local adopt_marker="" adopted_marker="" adopt_required=""
   if [[ -n "${GENIE_ID_FILE:-}" ]]; then
     adopt_marker="$(dirname "${GENIE_ID_FILE}")/.genie_adopt_required_$(basename "${GENIE_ID_FILE}" | sed 's/^\.genie_space_id_//')"
+    adopted_marker="$(dirname "${GENIE_ID_FILE}")/.genie_adopted_$(basename "${GENIE_ID_FILE}" | sed 's/^\.genie_space_id_//')"
   fi
   if [[ "${GENIE_ADOPT_REQUIRED:-}" == "1" || ( -n "$adopt_marker" && -f "$adopt_marker" ) ]]; then
     adopt_required=1
@@ -294,7 +437,31 @@ create_genie_space() {
       echo "ERROR: Cannot check Genie agent ${existing_id} from ${GENIE_ID_FILE} (HTTP ${existing_code}); not creating a duplicate." >&2
       exit 1
     fi
-    echo "Genie agent ${existing_id} from ${GENIE_ID_FILE} no longer exists (HTTP 404); creating a new one."
+    echo "Genie agent ${existing_id} from ${GENIE_ID_FILE} no longer exists (HTTP 404); checking exact-title matches before creating."
+  fi
+
+  local title_matches
+  title_matches=$(matching_space_ids_by_title "$workspace_url" "$token" "$title") || exit 1
+  local matching_ids=()
+  while IFS= read -r matching_id; do
+    [[ -n "$matching_id" ]] && matching_ids+=("$matching_id")
+  done <<< "$title_matches"
+  if [[ ${#matching_ids[@]} -eq 1 ]]; then
+    if [[ -z "${GENIE_ID_FILE:-}" ]]; then
+      echo "ERROR: Found existing Genie agent ${matching_ids[0]} titled \"${title}\", but GENIE_ID_FILE is unset; refusing to create a duplicate." >&2
+      exit 1
+    fi
+    printf '%s\n' "${matching_ids[0]}" > "$GENIE_ID_FILE"
+    [[ -n "$adopt_marker" ]] && rm -f "$adopt_marker"
+    [[ -n "$adopted_marker" ]] && : > "$adopted_marker"
+    echo "Adopted existing Genie agent ${matching_ids[0]} titled \"${title}\" instead of creating a duplicate"
+    echo "Done. Genie agent ID: ${matching_ids[0]}"
+    return 0
+  elif [[ ${#matching_ids[@]} -gt 1 ]]; then
+    local ids_display
+    ids_display=$(printf '%s\n' "${matching_ids[@]}" | paste -sd, - | sed 's/,/, /g')
+    echo "ERROR: Multiple Genie agents have the exact title \"${title}\": ${ids_display}. Refusing to create a duplicate; set genie_space_id to the ID to manage." >&2
+    exit 1
   fi
 
   if [[ -z "${GENIE_TABLES_CSV:-}" ]]; then
@@ -321,14 +488,16 @@ create_genie_space() {
   tables_csv=$(IFS=','; echo "${sorted_identifiers[*]}")
 
   local create_body
-  create_body=$(python3 << PYEOF
+  create_body=$(python3 - "$warehouse_id" "$title" "$tables_csv" << 'PYEOF'
 import json
+import sys
 
-tables = [{"identifier": t} for t in sorted("${tables_csv}".split(",")) if t]
+warehouse_id, title, tables_csv = sys.argv[1:]
+tables = [{"identifier": t} for t in sorted(tables_csv.split(",")) if t]
 space = {"version": 2, "data_sources": {"tables": tables}}
 body = {
-    "warehouse_id": "${warehouse_id}",
-    "title": "${title}",
+    "warehouse_id": warehouse_id,
+    "title": title,
     "serialized_space": json.dumps(space, separators=(',', ':'))
 }
 print(json.dumps(body))
@@ -377,6 +546,7 @@ PYEOF
 
   if [[ -n "${GENIE_ID_FILE:-}" ]]; then
     echo "$space_id" > "$GENIE_ID_FILE"
+    [[ -n "$adopted_marker" ]] && rm -f "$adopted_marker"
     echo "Space ID saved to ${GENIE_ID_FILE}"
   fi
 
@@ -410,6 +580,28 @@ update_genie_config() {
     echo "ERROR: No Genie agent ID available for update-config." >&2
     echo "  Set GENIE_SPACE_OBJECT_ID (for existing spaces) or ensure GENIE_ID_FILE exists (for auto-created spaces)." >&2
     exit 1
+  fi
+
+  # Only offer a warehouse change when config explicitly selected one, and
+  # only when it differs from the live attachment. This keeps unrelated config
+  # updates from resetting adopted or hand-adjusted agents.
+  local adopted_marker=""
+  if [[ -n "${GENIE_ID_FILE:-}" ]]; then
+    adopted_marker="$(dirname "${GENIE_ID_FILE}")/.genie_adopted_$(basename "${GENIE_ID_FILE}" | sed 's/^\.genie_space_id_//')"
+  fi
+  if [[ -n "${GENIE_WAREHOUSE_ID:-}" ]] && { [[ "${GENIE_WAREHOUSE_EXPLICIT:-0}" == "1" ]] || { [[ "${GENIE_WAREHOUSE_CREATED_DEFAULT:-0}" == "1" ]] && [[ ! -f "$adopted_marker" ]]; }; }; then
+    local current_agent current_warehouse
+    current_agent=$(curl -sf -H "${UA_HEADER}" -H "Authorization: Bearer ${token}" \
+      "${workspace_url}/api/2.0/genie/spaces/${space_id}") || {
+      echo "ERROR: could not read Genie agent ${space_id} to compare its warehouse." >&2
+      exit 1
+    }
+    current_warehouse=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("warehouse_id", ""))' <<< "$current_agent") || exit 1
+    if [[ "$current_warehouse" == "$GENIE_WAREHOUSE_ID" ]]; then
+      unset GENIE_WAREHOUSE_ID
+    fi
+  else
+    unset GENIE_WAREHOUSE_ID
   fi
 
   # An agent attached by genie_space_id alone keeps the tables it already has
@@ -662,9 +854,9 @@ PYEOF
 }
 
 # ---------- Trash (delete) a Genie agent ----------
-trash_genie_space() {
-  # Destroy provisioners can outlive the worktree that created their state.
-  # Resolve the current environment path and credentials at execution time.
+# Destroy provisioners can outlive the worktree that created their state.
+# Resolve the current environment path and credentials at execution time.
+load_layer_auth() {
   if [[ -n "${LAYER_ENV_DIR:-}" ]]; then
     if [[ -n "${GENIE_ID_BASENAME:-}" ]]; then
       GENIE_ID_FILE="${LAYER_ENV_DIR}/${GENIE_ID_BASENAME}"
@@ -677,6 +869,82 @@ trash_genie_space() {
       export DATABRICKS_HOST DATABRICKS_CLIENT_ID DATABRICKS_CLIENT_SECRET
     fi
   fi
+}
+
+# Remove only the groups this tool granted (GENIE_REVOKE_GROUPS_CSV) from the
+# agent's direct ACL. The permissions API has no per-entry delete, so PUT the
+# direct entries that remain; inherited ones (workspace admins) and the owner
+# aren't direct entries to PUT, and are left as they are.
+revoke_genie_acls() {
+  local groups="${GENIE_REVOKE_GROUPS_CSV:-}"
+  if [[ -z "${groups//,/}" ]]; then
+    echo "No Genie CAN_RUN groups to revoke."
+    return 0
+  fi
+  load_layer_auth
+  local workspace_url="${DATABRICKS_HOST%/}"
+  local space_id="${GENIE_SPACE_OBJECT_ID:-}"
+  if [[ -z "$space_id" && -n "${GENIE_ID_FILE:-}" && -f "${GENIE_ID_FILE}" ]]; then
+    space_id=$(tr -d '[:space:]' < "${GENIE_ID_FILE}")
+  fi
+  if [[ -z "$space_id" ]]; then
+    echo "ERROR: Cannot identify the Genie agent to revoke CAN_RUN (${groups}) on: no GENIE_SPACE_OBJECT_ID and no ID file at ${GENIE_ID_FILE:-<not set>}." >&2
+    echo "  Remove those groups from the agent's permissions by hand." >&2
+    exit 1
+  fi
+  if [[ -z "$workspace_url" ]]; then
+    echo "ERROR: Need workspace URL to revoke CAN_RUN on Genie agent ${space_id}. Set DATABRICKS_HOST or LAYER_ENV_DIR." >&2
+    exit 1
+  fi
+  local token
+  token=$(resolve_token "$workspace_url" "") || exit 1
+
+  local path="/api/2.0/permissions/genie/${space_id}"
+  local response http_code body
+  response=$(curl -s -w "\n%{http_code}" -H "${UA_HEADER}" -H "Authorization: Bearer ${token}" "${workspace_url}${path}")
+  http_code=$(echo "$response" | tail -n1)
+  body=$(echo "$response" | sed '$d')
+  if [[ "$http_code" == "404" ]]; then
+    echo "Genie agent ${space_id} not found; no CAN_RUN left to revoke."
+    return 0
+  fi
+  if [[ "$http_code" != "200" ]]; then
+    echo "ERROR: Could not read permissions of Genie agent ${space_id} (HTTP ${http_code}): ${body}" >&2
+    exit 1
+  fi
+  local remaining
+  remaining=$(printf '%s' "$body" | GROUPS_CSV="$groups" python3 -c '
+import json, os, sys
+revoke = {g for g in os.environ["GROUPS_CSV"].split(",") if g}
+kept = []
+for entry in json.load(sys.stdin).get("access_control_list") or []:
+    if entry.get("group_name") in revoke:
+        continue
+    principal = {k: entry[k] for k in ("user_name", "group_name", "service_principal_name") if entry.get(k)}
+    for permission in entry.get("all_permissions") or []:
+        level = permission.get("permission_level")
+        if not permission.get("inherited") and level and level != "IS_OWNER" and principal:
+            kept.append({**principal, "permission_level": level})
+print(json.dumps({"access_control_list": kept}))
+') || { echo "ERROR: Could not parse permissions of Genie agent ${space_id}." >&2; exit 1; }
+
+  echo "Revoking Genie CAN_RUN on agent ${space_id} for groups: ${groups//,/ }"
+  response=$(curl -s -w "\n%{http_code}" -X PUT -H "${UA_HEADER}" -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" -d "${remaining}" "${workspace_url}${path}")
+  http_code=$(echo "$response" | tail -n1)
+  if [[ "$http_code" == "404" ]]; then
+    echo "Genie agent ${space_id} not found; no CAN_RUN left to revoke."
+    return 0
+  fi
+  if [[ "$http_code" != "200" && "$http_code" != "201" ]]; then
+    echo "ERROR: Revoking CAN_RUN on Genie agent ${space_id} failed (HTTP ${http_code}): $(echo "$response" | sed '$d')" >&2
+    exit 1
+  fi
+  echo "Genie agent CAN_RUN revoked."
+}
+
+trash_genie_space() {
+  load_layer_auth
 
   local auth_host="${DATABRICKS_HOST%/}"
   local expected_host="${GENIE_EXPECTED_HOST:-}"
@@ -704,6 +972,16 @@ trash_genie_space() {
     echo "ERROR: Cannot identify Genie agent to trash: ID file missing or empty at ${GENIE_ID_FILE:-<not set>}." >&2
     echo "Refusing to continue because this would orphan the live space." >&2
     exit 1
+  fi
+
+  local adopted_marker=""
+  if [[ -n "${GENIE_ID_FILE:-}" ]]; then
+    adopted_marker="$(dirname "${GENIE_ID_FILE}")/.genie_adopted_$(basename "${GENIE_ID_FILE}" | sed 's/^\.genie_space_id_//')"
+  fi
+  if [[ -n "$adopted_marker" && -f "$adopted_marker" ]]; then
+    echo "Unmanaging adopted Genie agent ${space_id}; leaving the agent in place."
+    rm -f "${GENIE_ID_FILE}" "$adopted_marker"
+    return 0
   fi
 
   local token
@@ -806,6 +1084,9 @@ elif [[ "$COMMAND" == "set-acls" ]]; then
   fi
 
   set_genie_acls "$WORKSPACE_URL" "$TOKEN" "$SPACE_ID"
+
+elif [[ "$COMMAND" == "revoke-acls" ]]; then
+  revoke_genie_acls
 
 elif [[ "$COMMAND" == "trash" ]]; then
   trash_genie_space

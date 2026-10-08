@@ -722,6 +722,8 @@ def _clean_env():
 @pytest.fixture
 def real_cloud(tmp_path):
     if shutil.which("make") is None:
+        if os.environ.get("REQUIRE_TERRAFORM_TESTS") == "1":
+            pytest.fail("REQUIRE_TERRAFORM_TESTS=1 but make is not installed")
         pytest.skip("make not installed")
     cloud_root = tmp_path / "aws"
     cloud_root.mkdir()

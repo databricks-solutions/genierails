@@ -18,6 +18,8 @@ from pathlib import Path
 import pytest
 
 import deploy_masking_functions as dmf
+from tests.terraform_helpers import skip_if_providers_unavailable as _skip_if_providers_unavailable  # noqa: E402
+from tests.terraform_helpers import tf as _tf  # noqa: E402
 import generate_abac
 
 SHARED = Path(__file__).parents[1]
@@ -270,20 +272,6 @@ def _pre_drop_split_module() -> str:
             pytest.fail(message)
         pytest.skip(message)
     return show.stdout
-
-
-def _skip_if_providers_unavailable(init: subprocess.CompletedProcess) -> None:
-    if init.returncode == 0:
-        return
-    if os.environ.get("REQUIRE_TERRAFORM_TESTS") != "1" and (
-            "Failed to query available provider packages" in init.stderr or "could not connect" in init.stderr):
-        pytest.skip("hashicorp/null provider not downloadable (offline)")
-    raise AssertionError(init.stdout + init.stderr)
-
-
-def _tf(root: Path, *args: str, env: dict) -> subprocess.CompletedProcess:
-    return subprocess.run(["terraform", *args], cwd=root, text=True,
-                          capture_output=True, env=env, timeout=300)
 
 
 def _plan_actions(root: Path, tfvars: dict, env: dict) -> dict:
@@ -545,6 +533,62 @@ def test_existing_genie_state_migrates_without_trashing_the_agent(tmp_path):
     }
 
 
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_state_loss_apply_adopts_existing_title_instead_of_posting(tmp_path):
+    """No Terraform state or ID file: target title identity still prevents a duplicate."""
+    tf = WORKSPACE_TF.read_text()
+    block = _resource_block(tf, 'resource "terraform_data" "genie_space" {')
+    block = re.sub(r"\n  depends_on = \[.*?\n  \]\n", "\n", block, flags=re.S)
+    root = tmp_path / "root"
+    root.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "curl.log"
+    (bin_dir / "curl").write_text(f'''#!/bin/bash
+echo "$*" >> {calls}
+if [[ " $* " == *" POST "* ]]; then printf '{{"space_id":"duplicate"}}\\n201'; exit 0; fi
+if [[ " $* " == *"/api/2.0/genie/spaces"* ]]; then
+  printf '{{"spaces":[{{"space_id":"existing-by-title","title":"Agent"}}]}}\\n200'; exit 0
+fi
+printf '{{}}\\n200'
+''')
+    (bin_dir / "curl").chmod(0o755)
+    prefix = tmp_path / ".genie_space_id"
+    (root / "main.tf").write_text(
+        'variable "databricks_workspace_host" {}\n'
+        'variable "databricks_client_id" {}\n'
+        'variable "databricks_client_secret" { sensitive = true }\n'
+        'variable "genie_id_file_prefix" {}\nvariable "genie_script_path" {}\n'
+        'locals {\n  shared_warehouse_id = "wh"\n'
+        '  new_spaces = {\n    agent = {\n      uc_tables = ["c.s.t"]\n'
+        '      sql_warehouse_id = ""\n      name = "Agent"\n'
+        '      config = { title = "" }\n    }\n  }\n}\n' + block
+    )
+    tfvars = {
+        "databricks_workspace_host": "https://target",
+        "databricks_client_id": "client",
+        "databricks_client_secret": "secret",
+        "genie_id_file_prefix": str(prefix),
+        "genie_script_path": f"bash {GENIE_SCRIPT}",
+    }
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "DATABRICKS_TOKEN": "token",
+        "TF_IN_AUTOMATION": "1",
+    }
+    init = _tf(root, "init", "-input=false", env=env)
+    _skip_if_providers_unavailable(init)
+    assert _plan_actions(root, tfvars, env) == {
+        'terraform_data.genie_space["agent"]': ["create"]
+    }
+    var_args = [f"-var={key}={value}" for key, value in tfvars.items()]
+    apply = _tf(root, "apply", "-input=false", "-auto-approve", *var_args, env=env)
+    assert apply.returncode == 0, apply.stdout + apply.stderr
+    assert (tmp_path / ".genie_space_id_agent").read_text().strip() == "existing-by-title"
+    assert not any(" POST " in f" {line} " for line in calls.read_text().splitlines())
+
+
 # ── Adoption required during the migration (missing ID / 404 / auth) ────────
 
 from scripts import genie_adopt_preflight as gap  # noqa: E402
@@ -688,6 +732,18 @@ def test_make_runs_the_preflight_before_any_layer_is_applied():
     assert workspace.index('"$(GENIE_ADOPT_PREFLIGHT_SCRIPT)"') < workspace.index("apply -parallelism=1")
     assert "GENIE_ADOPT_PREFLIGHT_SCRIPT ?= $(SHARED_ROOT)/scripts/genie_adopt_preflight.py" in makefile
     assert "\ngenie-adopt-preflight: " in makefile
+
+
+def test_combined_apply_never_skips_data_access_before_workspace_can_run():
+    makefile = (SHARED / "Makefile.shared").read_text()
+    apply = makefile[makefile.index("\napply: "):]
+    apply = apply[: apply.index("\n\n")]
+    data_access = (
+        '_apply-layer LAYER=data_access TARGET_ENV=$(ENV) '
+        'LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" FORCE_APPLY=1'
+    )
+    assert data_access in apply
+    assert apply.index(data_access) < apply.index("LAYER=workspace")
 
 
 def test_no_saved_plan_file_is_written_by_the_product():

@@ -88,7 +88,7 @@ def test_release_runs_unified_pipeline_in_order_and_writes_no_receipt(tmp_path):
         _same_env_promote(env_dir),
         ["audit-rulebook", "ENV=prod"],
         ["apply", "ENV=prod", "APPLY_FLAGS=", "_EXPOSURE_DERIVED=1"],
-        ["verify-access", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],
+        ["verify-access", "ENV=prod", "VERIFY_REQUIRE_MASKS=1", "VERIFY_KEY_COLUMN=customer_id"],
     ]
     # No gate to open or persist: release neither passes nor writes it. The
     # stubbed verify-access proves no mask check, so the key isn't saved either.
@@ -130,10 +130,23 @@ def test_maintain_remains_governance_only_and_writes_no_receipt(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     names = [c[1] if c[0] == "--no-print-directory" else c[0] for c in _calls(log)]
     names = [name for name in names if name != "_guarded-bootstrap"]
+    # Like release, the rulebook is audited before anything is applied.
     assert names == ["audit-schema", "derive-assignments", "coverage-gate",
-                     "validate-generated", "apply-governance", "audit-rulebook"]
+                     "validate-generated", "audit-rulebook", "apply-governance"]
     assert "apply" not in names and "verify-access" not in names
     assert not list(env_dir.rglob(".certified*"))
+
+
+@pytest.mark.parametrize("audit_rc, says", [(1, "reported drift"), (2, "failed (error, not drift)")])
+def test_maintain_rulebook_drift_or_error_stops_before_apply(tmp_path, audit_rc, says):
+    env_dir = _env_dir(tmp_path)
+    stub, log, audit = _stub(tmp_path, on={"audit-rulebook": f"exit {audit_rc}"})
+    result = _make("maintain", env_dir, stub, audit)
+    assert result.returncode != 0
+    names = [c[1] if c[0] == "--no-print-directory" else c[0] for c in _calls(log)]
+    assert names[-1] == "audit-rulebook" and "apply-governance" not in names
+    assert f"maintain: audit-rulebook {says}" in result.stderr
+    assert "governance was not applied" in result.stderr
 
 
 def test_lock_is_exclusive_and_stale_lock_is_reclaimed(tmp_path):
@@ -259,14 +272,16 @@ def test_every_in_recipe_same_env_promote_clears_cross_env_variables():
 
 
 def test_release_without_key_still_calls_verify_access(tmp_path):
+    # No column masks to pair rows for, so no key is needed; verify-access
+    # still runs, and strictly (test_release_mask_proof covers masks).
     env_dir = _env_dir(tmp_path)
     stub, log, audit = _stub(tmp_path)
     result = _make("release", env_dir, stub, audit)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert _calls(log)[-1] == ["verify-access", "ENV=prod"]
+    assert _calls(log)[-1] == ["verify-access", "ENV=prod", "VERIFY_REQUIRE_MASKS=1"]
 
 
-@pytest.mark.parametrize("target", ["release", "certify", "maintain"])
+@pytest.mark.parametrize("target", ["release", "maintain"])
 def test_placeholder_genie_space_id_refuses_before_lock(tmp_path, target):
     env_dir = _env_dir(tmp_path)
     (env_dir / "generated").rmdir()
@@ -296,19 +311,12 @@ def test_placeholder_error_is_not_hidden_by_a_held_lock(tmp_path):
     lock.release_lock(env_dir, os.getpid())
 
 
-@pytest.mark.parametrize("target", ["release", "certify", "maintain"])
+@pytest.mark.parametrize("target", ["release", "maintain"])
 def test_targets_refuse_while_env_lock_is_held(tmp_path, target):
     env_dir = _env_dir(tmp_path)
     assert lock.acquire_lock(env_dir, os.getpid(), "maintain")[0]
     stub, log, audit = _stub(tmp_path)
-    if target == "certify":
-        result = subprocess.run(
-            ["make", target, "ENV=prod", f"ENV_DIR={env_dir}",
-             f"AUDIT_SCHEMA_SCRIPT={audit}"], cwd=CLOUD_ROOT,
-            text=True, capture_output=True, env=_env(),
-        )
-    else:
-        result = _make(target, env_dir, stub, audit)
+    result = _make(target, env_dir, stub, audit)
     assert result.returncode != 0
     assert not _calls(log)
     assert "held by make maintain" in result.stderr
@@ -529,21 +537,3 @@ def test_no_retired_flag_means_no_warning_through_nested_apply(tmp_path, target,
     assert warnings == []
 
 
-def test_certify_hands_the_caller_apply_flags_to_release_for_the_warning(tmp_path):
-    # certify re-enters make for release; the release (covered above) then
-    # warns from the inherited GENIERAILS_APPLY_FLAGS.
-    env_dir = tmp_path / "prod"
-    (env_dir / "generated").mkdir(parents=True)
-    (env_dir / "env.auto.tfvars").write_text('sql_warehouse_id = ""\n')
-    seen = tmp_path / "seen"
-    stub = tmp_path / "make-stub"
-    stub.write_text(f"#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"$GENIERAILS_APPLY_FLAGS\" >> '{seen}'\nexit 0\n")
-    stub.chmod(0o755)
-    result = subprocess.run(
-        ["make", "certify", "ENV=prod", f"ENV_DIR={env_dir}", f"MAKE={stub}",
-         "APPLY_FLAGS=-var business_access_enabled=false"],
-        cwd=CLOUD_ROOT, text=True, capture_output=True, env=_env(),
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert seen.read_text().splitlines() == [
-        "--no-print-directory release ENV=prod|-var business_access_enabled=false"]

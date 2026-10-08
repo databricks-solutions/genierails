@@ -6,6 +6,8 @@ import subprocess
 
 import pytest
 
+from tests.terraform_helpers import tf, tf_init
+
 
 SHARED = Path(__file__).parents[1]
 
@@ -35,11 +37,19 @@ def test_retired_flag_is_declared_deprecated_in_the_roots_only_and_never_read():
 def test_workspace_business_acls_follow_the_gate_not_a_flag():
     source = (SHARED / "modules/workspace/main.tf").read_text()
 
-    # Same for_each keys as before the retirement, minus the flag.
-    assert source.count("if contains(keys(local.genie_space_groups), k)") == 2
-    assert source.count('GENIE_ALLOW_EMPTY_ACL    = "1"') == 2
-    # Opening or widening CAN_RUN still needs the coverage gate.
-    assert source.count("var.genie_exposure_blocker == \"\"") == 2
+    # Same for_each keys as before the retirement, minus the flag (and minus
+    # a space whose every group is withheld).
+    assert source.count("if contains(local.genie_space_acl_keys, k)") == 2
+    # Two grant-bearing resources plus two removal-only resources for the
+    # fully-withheld adopted-agent paths must all permit an empty exact sync.
+    assert source.count('GENIE_ALLOW_EMPTY_ACL    = "1"') == 4
+    # Opening or widening CAN_RUN still needs the coverage gate: without it
+    # the new groups are withheld from both ACL resources.
+    withheld = source[source.index("  genie_space_can_run_withheld = {"):source.index("  genie_space_acl_groups = {")]
+    assert 'var.genie_exposure_blocker == ""' in withheld
+    assert source.count("local.genie_space_acl_groups[each.key]") == 4  # triggers + set-acls, twice
+    # Removing a group or space takes its CAN_RUN back.
+    assert source.count("bash ../../scripts/genie_space.sh revoke-acls") == 2
 
 
 def _guard_workspace_config(tmp_path, env_file, *make_args, environ=None, nested=False):
@@ -261,22 +271,23 @@ def _terraform_trigger_plan(tmp_path, changes):
         'variable "client_secret" {\n  type = string\n  sensitive = true\n}\n'
         + block
     )
-    env = {**os.environ, "TF_IN_AUTOMATION": "1"}
+    env = {**os.environ, "TF_IN_AUTOMATION": "1", "TF_DATA_DIR": str(tmp_path / ".terraform")}
     base = ["-var=host=https://w1", "-var=client_id=old", "-var=client_secret=old"]
-    subprocess.run(["terraform", "init", "-backend=false", "-input=false"], cwd=module,
-                   env=env, check=True, capture_output=True, text=True)
-    subprocess.run(["terraform", "apply", "-auto-approve", "-input=false", *base],
-                   cwd=module, env=env, check=True, capture_output=True, text=True)
+
+    def run(*args):
+        result = tf(module, *args, env=env)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result
+
+    tf_init(module, env=env)
+    run("apply", "-auto-approve", "-input=false", *base)
     assert '"old"' not in (module / "terraform.tfstate").read_text()  # no credential in state
     args = {"host": "https://w1", "client_id": "old", "client_secret": "old", **changes}
     plan = module / "plan.bin"  # embeds prior state: owner-only, then deleted
     try:
-        subprocess.run(["terraform", "plan", "-input=false", f"-out={plan}",
-                        *[f"-var={key}={value}" for key, value in args.items()]],
-                       cwd=module, env=env, check=True, capture_output=True, text=True)
+        run("plan", "-input=false", f"-out={plan}", *[f"-var={key}={value}" for key, value in args.items()])
         plan.chmod(0o600)
-        shown = subprocess.run(["terraform", "show", "-json", str(plan)], cwd=module,
-                               env=env, check=True, capture_output=True, text=True)
+        shown = run("show", "-json", str(plan))
     finally:
         plan.unlink(missing_ok=True)
     return json.loads(shown.stdout)["resource_changes"][0]["change"]["actions"]

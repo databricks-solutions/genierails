@@ -291,6 +291,64 @@ def resolve_columns_for_condition(
     return out
 
 
+def required_mask_columns(
+    fgac_policies: Sequence[Mapping[str, Any]],
+    tag_assignments: Sequence[Mapping[str, Any]],
+) -> set[tuple[str, str]]:
+    """Every (table, column) a column mask actually applies to (pure).
+
+    The coverage a verification must prove, whatever principals a check could
+    use (derive_spec_from_config drops a mask whose masked tier set comes out
+    empty, e.g. "account users" with no concrete groups, so it can't be the
+    measure). Resolved as Terraform/Unity Catalog applies the policies, with
+    validate_abac's evaluator: policies that target someone once the
+    exceptions are removed, scoped to the policy's catalog, the full
+    match_condition against each column's tags (hasTagValue, hasTag, AND, OR,
+    parentheses) and when_condition against its table's tags.
+    """
+    from validate_abac import column_mask_matches, condition_is_supported
+
+    effective = [
+        pol for pol in fgac_policies
+        if _as_str(pol.get("policy_type")) == "POLICY_TYPE_COLUMN_MASK"
+        and set(_as_list(pol.get("to_principals"))) - set(_as_list(pol.get("except_principals")))
+    ]
+    # A condition the evaluator can't read (e.g. snake_case has_tag_value())
+    # would match nothing and silently drop its mask from the coverage.
+    unreadable = sorted(
+        f"{_as_str(pol.get('name')) or '<unnamed>'}: {cond!r}"
+        for pol in effective
+        for cond in (_as_str(pol.get("match_condition")), _as_str(pol.get("when_condition")))
+        if not condition_is_supported(cond)
+    )
+    if unreadable:
+        raise ValueError("cannot tell which columns these column masks apply to (only hasTagValue, "
+                         "hasTag, AND, OR and parentheses are understood): " + "; ".join(unreadable))
+    columns = column_mask_matches({"fgac_policies": list(effective), "tag_assignments": list(tag_assignments)})
+    return {
+        (table.lower(), column.lower())
+        for table, _, column in (name.rpartition(".") for name in columns)
+    }
+
+
+def required_mask_columns_from_tfvars(tfvars_file: Path) -> set[tuple[str, str]]:
+    """required_mask_columns of a data_access abac.auto.tfvars."""
+    import hcl2
+
+    with open(tfvars_file) as f:
+        data = hcl2.load(f)
+    return required_mask_columns(data.get("fgac_policies", []) or [], data.get("tag_assignments", []) or [])
+
+
+def unchecked_mask_columns(
+    required: set[tuple[str, str]], checks: Sequence["ColumnMaskCheck"], *, keyed_only: bool = True,
+) -> list[str]:
+    """Required masked columns no (keyed) check covers, as "table.column"."""
+    covered = {(c.table.lower(), c.column.lower()) for c in checks
+               if not keyed_only or c.key_column.strip()}
+    return sorted(f"{t}.{c}" for t, c in required - covered)
+
+
 def derive_spec_from_config(
     fgac_policies: Sequence[Mapping[str, Any]],
     tag_assignments: Sequence[Mapping[str, Any]],
@@ -1137,6 +1195,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         "passed per key column) for tooling such as make rehearse/release.")
     p.add_argument("--print-spec", action="store_true",
                    help="Print the resolved spec and exit (no workspace needed).")
+    p.add_argument("--require-mask-checks", action="store_true",
+                   help="Fail instead of skipping mask checks that have no key column "
+                        "(make release: production masking must be proven).")
     return p
 
 
@@ -1208,6 +1269,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             + ". Configure a non-sensitive stable row identifier."
         )
 
+    if args.require_mask_checks and args.from_tfvars:
+        # Every tagged masked column must have a check; a mask that yields
+        # none (no concrete masked tier) must not leave the run "passing".
+        try:
+            required = required_mask_columns_from_tfvars(args.from_tfvars)
+        except ValueError as exc:
+            print(f"ERROR: {exc}. Refusing to report success.", file=sys.stderr)
+            return 2
+        unchecked = unchecked_mask_columns(required, spec.column_masks, keyed_only=False)
+        if unchecked:
+            print(
+                f"ERROR: {len(unchecked)} masked column(s) produce no effective-access check, so their "
+                f"masking would NOT be verified: {', '.join(unchecked)}. Their policies have no "
+                "concrete masked group to test (e.g. 'account users' with no groups in the account "
+                "config). Refusing to report success.",
+                file=sys.stderr,
+            )
+            return 2
+
     if spec.is_empty():
         # (issue 4) Deriving zero checks means we would verify nothing. That is
         # never a success — a passing gate here would be a false success.
@@ -1228,6 +1308,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "Row-filter checks will still run. Configure verify_key_column in "
             "env.auto.tfvars or pass VERIFY_KEY_COLUMN=<col> to enable them."
         )
+        if args.require_mask_checks:
+            print(
+                f"ERROR: {len(missing_key_checks)} mask check(s) have no key column, so masking "
+                "would NOT be verified. Set verify_key_column in env.auto.tfvars (or pass "
+                "VERIFY_KEY_COLUMN=<col> or VERIFY_SPEC=<file>). Refusing to report success.",
+                file=sys.stderr,
+            )
+            return 2
 
     if args.print_spec or not args.live:
         print("Resolved effective-access spec:")

@@ -136,6 +136,33 @@ def test_apply_layer_real_path_keeps_command_and_fingerprint_behavior(tmp_path):
     assert (env_dir / ".test.apply.sha").read_text().strip()
 
 
+def test_force_apply_bypasses_a_matching_input_fingerprint(tmp_path):
+    env_dir = tmp_path / "env"
+    env_dir.mkdir()
+    (env_dir / "abac.auto.tfvars").write_text("# present\n")
+    runner_log = tmp_path / "runner.log"
+    runner = tmp_path / "record-runner"
+    runner.write_text("#!/bin/sh\n" f"printf '%s\\n' \"$*\" >> \"{runner_log}\"\n")
+    runner.chmod(0o755)
+    command = [
+        "make", "--no-print-directory", "_apply-layer", "LAYER=test", "TARGET_ENV=dev",
+        f"LAYER_ENV_DIR={env_dir}", f"ROOT_RUNNER={runner}",
+    ]
+    first = subprocess.run(command, cwd=CLOUD_ROOT, text=True, capture_output=True, env=_clean_env())
+    assert first.returncode == 0, first.stdout + first.stderr
+    second = subprocess.run(command, cwd=CLOUD_ROOT, text=True, capture_output=True, env=_clean_env())
+    assert "Skipping terraform apply" in second.stdout
+
+    forced = subprocess.run(command + ["FORCE_APPLY=1"], cwd=CLOUD_ROOT, text=True,
+                            capture_output=True, env=_clean_env())
+    assert forced.returncode == 0, forced.stdout + forced.stderr
+    assert "Skipping terraform apply" not in forced.stdout
+    assert runner_log.read_text().splitlines() == [
+        "test dev apply -parallelism=1 -auto-approve",
+        "test dev apply -parallelism=1 -auto-approve",
+    ]
+
+
 def test_plan_real_target_skips_layers_with_missing_configs(tmp_path):
     env_dir = tmp_path / "env"
     account_dir = tmp_path / "account"
@@ -234,7 +261,7 @@ def test_plan_real_target_runs_configured_workspace_layers(tmp_path):
     # No flag makes the gate "not required" any more: it always runs.
     assert "not required" not in result.stdout
     assert "=== Coverage Check (data_access:dev) ===" in result.stdout
-    assert "Proceeding only because this change adds no SELECT grant" in result.stderr
+    assert "Proceeding because this change weakens the protection" in result.stderr
 
 
 @pytest.mark.parametrize("configured", [False, True])

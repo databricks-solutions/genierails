@@ -67,7 +67,7 @@ cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfva
 access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
 ```
 
-Every `make generate` reads `access_tier_groups`, and promotion carries it to prod, so you never retype the groups. (Prefer the CLI? Leave it `[]` and pass `GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'` once — the first run saves it there. A later `--groups` that differs applies to that run only and prints how to update the setting.)
+Every later `make generate` reads `access_tier_groups`. The first promote seeds it in prod; re-promotes preserve prod's reviewed value. To change prod tiers or a space's `acl_groups`, edit `envs/prod/env.auto.tfvars` in a PR and let the pipeline apply it. (Prefer the CLI? Leave it `[]` and pass `GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'` once — the first run saves it there. A later `--groups` that differs applies to that run only and prints how to update the setting.)
 
 No `uc_tables` needed: the agent's tables are discovered from its ID. *No agent yet?* Use the [Sample Environment Setup](SAMPLE_ENV.md).
 
@@ -210,6 +210,8 @@ Set `enable_auto_tagging = true` in `envs/prod/env.auto.tfvars` and re-run `make
 make release ENV=prod   # the verify key comes from dev
 ```
 
+`release` must prove every mask, so it needs the row-pairing key: the `verify_key_column` that dev's passing rehearse saved and promotion carried to prod (or set it in `envs/prod/env.auto.tfvars`). Without a key (or a `VERIFY_SPEC`), `release` refuses before it applies anything, instead of skipping the mask checks.
+
 One command: placeholder guard → lock → live UC re-read/`derive-assignments` → validation → coverage check → promote the derived config into its Terraform layers → read-only `audit-rulebook` → all-layer apply → `verify-access`. The derivation reuses the exact rules you reviewed in dev and never calls a model; a promoted per-column override is merged strictest-wins with the native result, so it can strengthen but never weaken native protection. The audit runs before the access-granting apply, so drift or an audit error leaves existing access unchanged and blocks any new or wider business `SELECT` or Genie run access. There is no access flag to set or save: Terraform grants business `SELECT` and Genie run access only through the passing coverage check, and re-promoting never closes access that is already live.
 
 **If the coverage check fails or `audit-rulebook` reports drift** — prod surfaced a sensitive tag your promoted rules don't cover (a type the classifier found only in prod, or a rule dropped in promotion). Nothing new was applied. This is a **rule change — made in dev, never hand-edited in prod**:
@@ -254,13 +256,13 @@ ENVS_DIR="$PWD/envs" ../shared/scripts/terraform_layer.sh workspace prod output 
 **Goal —** catch sensitive data that arrives after go-live. Run this on a schedule (cron or CI):
 
 ```bash
-make maintain ENV=prod   # audit-schema → derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook
+make maintain ENV=prod   # audit-schema → derive-assignments → coverage-gate → validate-generated → audit-rulebook → apply-governance
 ```
 
-It protects newly tagged columns using prod's own `class.*` tags. It never changes business access or the Genie agent.
+It protects newly tagged columns using prod's own `class.*` tags, and audits the rulebook before it applies anything. It reconciles governance, including `SELECT` for tables already covered by the passing coverage check; it never widens access past that check or changes the Genie agent. When generated inputs are unchanged, the apply is skipped, so `maintain` does not repair grants revoked outside Terraform.
 
 - **Stops at `audit-schema`** — a sensitive-looking column has no `class.*` tag yet. Review it in native classification (`make enable-classification ENV=prod`) or tag it in Unity Catalog, then re-run `make maintain ENV=prod`.
-- **Stops at `coverage-gate` or `audit-rulebook`** — prod has a tag your rules don't cover. Add the rule in dev, rehearse, and `make promote-to ENV=prod` before running `make release ENV=prod` again.
+- **Stops at `coverage-gate` or `audit-rulebook`** (before applying anything) — prod has a tag your rules don't cover. Add the rule in dev, rehearse, and `make promote-to ENV=prod` before running `make release ENV=prod` again.
 
 A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog granted nothing you didn't ask for). For your most sensitive data, prefer "locked down until proven safe" over "open until tagged."
 

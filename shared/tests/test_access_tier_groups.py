@@ -453,7 +453,7 @@ def test_promote_without_the_setting_writes_none(tmp_path, monkeypatch):
     assert "access_tier_groups" not in text
 
 
-def test_promote_overrides_differing_dest_tiers_with_the_reviewed_ones(tmp_path, monkeypatch):
+def test_repromote_preserves_differing_destination_tiers(tmp_path, monkeypatch):
     source = tmp_path / "dev"
     dest = tmp_path / "prod"
     source.mkdir()
@@ -465,7 +465,7 @@ def test_promote_overrides_differing_dest_tiers_with_the_reviewed_ones(tmp_path,
     (dest / "env.auto.tfvars").write_text('access_tier_groups = ["stale"]\n')
     _promote(monkeypatch, source, dest)
 
-    assert hcl2.loads((dest / "env.auto.tfvars").read_text())["access_tier_groups"] == ["a", "b"]
+    assert hcl2.loads((dest / "env.auto.tfvars").read_text())["access_tier_groups"] == ["stale"]
 
 
 def test_promote_rejects_a_malformed_source_setting(tmp_path, monkeypatch, capsys):

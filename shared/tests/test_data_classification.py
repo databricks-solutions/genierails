@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+from tests.terraform_helpers import shared_copy, tf, tf_env, tf_init
+
 
 SHARED = Path(__file__).parents[1]
 MODULE_MAIN = SHARED / "modules/data_access/main.tf"
@@ -78,21 +80,16 @@ def test_auto_tagging_true_emits_configs_for_dev_to_prod_types():
     assert 'auto_tagging_mode  = "AUTO_TAGGING_ENABLED"' in source
 
 
-def test_auto_tagging_opt_in_plan_covers_default_off_and_enabled_configs():
-    init = subprocess.run(
-        ["terraform", "init", "-backend=false", "-input=false"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-    )
-    assert init.returncode == 0, init.stdout + init.stderr
+def _terraform_test(tmp_path, *args):
+    """terraform test in a copy of the data_access root (never the real one)."""
+    root = shared_copy(tmp_path) / "roots" / "data_access"
+    env = tf_env(tmp_path)
+    tf_init(root, env=env)
+    return tf(root, "test", *args, env=env)
 
-    plan_test = subprocess.run(
-        ["terraform", "test", "-no-color", "-filter=tests/auto_tagging_opt_in.tftest.hcl"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-    )
+
+def test_auto_tagging_opt_in_plan_covers_default_off_and_enabled_configs(tmp_path):
+    plan_test = _terraform_test(tmp_path, '-no-color', '-filter=tests/auto_tagging_opt_in.tftest.hcl')
     assert plan_test.returncode == 0, plan_test.stdout + plan_test.stderr
     assert 'run "classification_scans_without_auto_tagging"... pass' in plan_test.stdout
     assert 'run "auto_tagging_emits_all_dev_to_prod_classifier_types"... pass' in plan_test.stdout
@@ -135,39 +132,13 @@ def test_classification_and_grant_footprints_are_independent():
     assert "classification_uc_tables" not in grant_section
 
 
-def test_full_apply_plan_unions_space_and_discovered_tables_into_grants():
-    init = subprocess.run(
-        ["terraform", "init", "-backend=false", "-input=false"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-    )
-    assert init.returncode == 0, init.stdout + init.stderr
-
-    plan_test = subprocess.run(
-        ["terraform", "test", "-filter=tests/grant_isolation.tftest.hcl"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-    )
+def test_full_apply_plan_unions_space_and_discovered_tables_into_grants(tmp_path):
+    plan_test = _terraform_test(tmp_path, '-filter=tests/grant_isolation.tftest.hcl')
     assert plan_test.returncode == 0, plan_test.stdout + plan_test.stderr
 
 
-def test_classification_plan_unions_live_scope_and_second_env_cannot_shrink_it():
-    init = subprocess.run(
-        ["terraform", "init", "-backend=false", "-input=false"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-    )
-    assert init.returncode == 0, init.stdout + init.stderr
-
-    plan_test = subprocess.run(
-        ["terraform", "test", "-filter=tests/classification_scope_union.tftest.hcl"],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-    )
+def test_classification_plan_unions_live_scope_and_second_env_cannot_shrink_it(tmp_path):
+    plan_test = _terraform_test(tmp_path, '-filter=tests/classification_scope_union.tftest.hcl')
     assert plan_test.returncode == 0, plan_test.stdout + plan_test.stderr
 
 

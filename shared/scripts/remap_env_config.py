@@ -115,14 +115,16 @@ def _deployed_space_keys(dest_env_dir: str) -> dict[str, list[str]]:
     return keys
 
 
-def _promoted_access_tier_groups(cfg: dict, source_env_dir: str) -> list[str]:
-    """Carry the source's access_tier_groups so prod consumes the same tiers."""
+def _promoted_access_tier_groups(cfg: dict, source_env_dir: str, dest_cfg: dict) -> list[str]:
+    """Preserve destination tiers on re-promote; seed them from source initially."""
     shared_root = str(Path(__file__).resolve().parent.parent)
     if shared_root not in sys.path:
         sys.path.insert(0, shared_root)
     from access_tier_groups import promoted_lines
 
     try:
+        if "access_tier_groups" in dest_cfg:
+            return ["", "access_tier_groups = " + json.dumps(dest_cfg["access_tier_groups"])]
         return promoted_lines(cfg, Path(source_env_dir) / "env.auto.tfvars")
     except ValueError as e:
         print(f"ERROR: {e}")
@@ -171,9 +173,11 @@ def main():
         sys.exit(1)
     generated_path = os.path.join(source_env_dir, "generated", "abac.auto.tfvars")
     id_to_name = {}
+    source_space_configs = {}
     if os.path.exists(generated_path):
         generated_cfg = hcl2.load(open(generated_path))
         id_to_name = generated_cfg.get("genie_space_id_to_name") or {}
+        source_space_configs = generated_cfg.get("genie_space_configs") or {}
 
     # Load source auth for API queries
     auth_cfg = {}
@@ -318,6 +322,27 @@ def main():
             )
         print("       Give them names that stay distinct after DEST_CATALOG_MAP, then re-promote.")
         sys.exit(1)
+
+    # The API identity guard uses the title users see, which is an explicit
+    # genie_space_configs title when present and the canonical space name
+    # otherwise. Validate those effective titles after catalog remapping. Title
+    # identity is exact and case-sensitive, matching genie_space.sh.
+    effective_titles: dict[str, list[str]] = {}
+    for name in canonical_names:
+        explicit_title = _str((source_space_configs.get(name) or {}).get("title", ""))
+        effective_title = remap_name(explicit_title or name)
+        effective_titles.setdefault(effective_title, []).append(name)
+    duplicate_titles = {
+        title: owners for title, owners in effective_titles.items() if len(owners) > 1
+    }
+    if duplicate_titles:
+        for title, owners in sorted(duplicate_titles.items()):
+            print(
+                f"ERROR: Genie spaces {owners[0]!r} and {owners[1]!r} "
+                f"would have the same effective destination title {title!r}."
+            )
+        print("       Set distinct config.title values (or names) before promoting. Nothing was written.")
+        sys.exit(1)
     # Distinct names can still normalize to one Terraform for_each key
     # (e.g. "x (prod.demo)" and "x prod demo"); refuse keys the rename merges.
     by_key: dict[str, list[str]] = {}
@@ -355,6 +380,12 @@ def main():
         id_file = Path(dest_env_dir) / f".genie_space_id_{old_key}"
         if id_file.exists():
             print(f"         mv '{id_file}' '{id_file.with_name(f'.genie_space_id_{new_key}')}'")
+        adopted_marker = Path(dest_env_dir) / f".genie_adopted_{old_key}"
+        if adopted_marker.exists():
+            print(
+                f"         mv '{adopted_marker}' "
+                f"'{adopted_marker.with_name(f'.genie_adopted_{new_key}')}'"
+            )
         sys.exit(1)
 
     # Preserve destination-owned settings across remediation re-promotions.
@@ -412,11 +443,30 @@ def main():
             f"({len(preserved_acknowledged)} column(s))"
         )
 
-    dest_spaces_by_name = {
-        _str(space.get("name", "")): space
-        for space in dest_cfg.get("genie_spaces", [])
-        if _str(space.get("name", ""))
+    dest_spaces = dest_cfg.get("genie_spaces", [])
+    source_space_ids = {
+        _str(space.get("genie_space_id", ""))
+        for space in spaces
+        if _str(space.get("genie_space_id", ""))
     }
+
+    def matching_dest_space(name: str) -> dict:
+        """Match the promoted name first, then its Terraform normalized key."""
+        exact = [space for space in dest_spaces if _str(space.get("name", "")) == name]
+        if len(exact) == 1:
+            return exact[0]
+        keyed = [
+            space for space in dest_spaces
+            if _str(space.get("name", ""))
+            and _space_key(_str(space.get("name", ""))) == _space_key(name)
+        ]
+        if len(keyed) > 1:
+            print(
+                f"ERROR: Multiple destination Genie spaces match promoted space {name!r} "
+                f"under Terraform key {_space_key(name)!r}; nothing was written."
+            )
+            sys.exit(1)
+        return keyed[0] if keyed else {}
 
     # Build dest env.auto.tfvars. The complete promoted union is top-level so
     # Terraform, classification, derive-assignments, and release share it.
@@ -431,12 +481,27 @@ def main():
 
         lines.append("  {")
         lines.append(f"    name             = {json.dumps(name)}")
-        lines.append(f'    genie_space_id   = ""')
+        dest_space = matching_dest_space(name)
+        # IDs belong to a workspace. Preserve only an explicitly attached
+        # destination ID; never copy the source environment's ID.
+        destination_space_id = _str(dest_space.get("genie_space_id", ""))
+        if destination_space_id and destination_space_id in source_space_ids:
+            print(
+                f"ERROR: Destination Genie space {name!r} has genie_space_id "
+                f"{destination_space_id!r}, which is also configured in the source "
+                "environment. Refusing to preserve a source-workspace ID; nothing was written."
+            )
+            sys.exit(1)
+        lines.append(f"    genie_space_id   = {json.dumps(destination_space_id)}")
         lines.append(f'    uc_tables = [')
         for t in remapped_tables:
             lines.append(f'      "{t}",')
         lines.append(f'    ]')
-        dest_space = dest_spaces_by_name.get(name, {})
+        if destination_space_id:
+            print(
+                f"  Preserved destination Genie space {name!r} "
+                f"genie_space_id={destination_space_id!r}"
+            )
         if "sql_warehouse_id" in dest_space:
             space_warehouse = _str(dest_space.get("sql_warehouse_id", ""))
             lines.append(f"    sql_warehouse_id = {json.dumps(space_warehouse)}")
@@ -444,8 +509,13 @@ def main():
                 f"  Preserved destination Genie space {name!r} "
                 f"sql_warehouse_id={space_warehouse!r}"
             )
-        if "acl_groups" in space:
-            acl_groups = space["acl_groups"]
+        # An existing destination space owns its ACL intent, including deliberate
+        # omission (derive from destination policy) and explicit []. First promote
+        # seeds from the source; later ACL changes are reviewed directly in prod.
+        is_repromote = bool(dest_space)
+        acl_source = dest_space if is_repromote else space
+        if "acl_groups" in acl_source:
+            acl_groups = acl_source["acl_groups"]
             if acl_groups is not None and (
                 not isinstance(acl_groups, list) or not all(
                     isinstance(group, str) for group in acl_groups
@@ -459,6 +529,36 @@ def main():
             if acl_groups is not None:
                 rendered_acl = ", ".join(json.dumps(group) for group in acl_groups)
                 lines.append(f"    acl_groups       = [{rendered_acl}]")
+        if is_repromote:
+            if "acl_groups" in dest_space:
+                print(
+                    f"  Preserved destination Genie space {name!r} "
+                    f"acl_groups={dest_space['acl_groups']!r}"
+                )
+            else:
+                print(
+                    f"  Preserved destination Genie space {name!r} omitted acl_groups "
+                    "(destination policy derivation remains authoritative)"
+                )
+            source_acl = space.get("acl_groups")
+            dest_acl = dest_space.get("acl_groups")
+            if isinstance(source_acl, list) and isinstance(dest_acl, list):
+                added = sorted(set(source_acl) - set(dest_acl))
+                revoked = sorted(set(dest_acl) - set(source_acl))
+                if added or revoked:
+                    print(
+                        f"  Genie ACL diff for {name!r} (dev vs prod): "
+                        f"added in dev={added!r}; revoked in dev={revoked!r}. "
+                        "To change prod, edit envs/prod/env.auto.tfvars in a PR."
+                    )
+            elif source_acl != dest_acl:
+                source_display = repr(source_acl) if isinstance(source_acl, list) else "<derived>"
+                dest_display = repr(dest_acl) if isinstance(dest_acl, list) else "<derived>"
+                print(
+                    f"  Genie ACL diff for {name!r} (dev vs prod): "
+                    f"dev={source_display}; prod={dest_display}. "
+                    "To change prod, edit envs/prod/env.auto.tfvars in a PR."
+                )
         lines.append("  },")
     lines.append("]")
     lines.append("")
@@ -483,7 +583,7 @@ def main():
         lines.append("coverage_acknowledged_columns = [")
         lines.extend(f"  {json.dumps(column)}," for column in preserved_acknowledged)
         lines.append("]")
-    lines.extend(_promoted_access_tier_groups(cfg, source_env_dir))
+    lines.extend(_promoted_access_tier_groups(cfg, source_env_dir, dest_cfg))
     if preserved_promote:
         lines.append("")
         lines.append("# Saved by make promote-to (source env + catalog map for the next promote).")

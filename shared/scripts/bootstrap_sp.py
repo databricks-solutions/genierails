@@ -25,7 +25,12 @@ class Config:
     yes: bool = False
     rotate_secret: bool = False
     model_endpoint: str = MODEL_ENDPOINT
+    target_catalogs: tuple[str, ...] = ()
+    # Kept for callers constructing Config directly; CLI input is normalized above.
     target_catalog: str | None = None
+
+    def catalog_for(self, workspace_index: int) -> str | None:
+        return self.target_catalogs[workspace_index] if self.target_catalogs else self.target_catalog
 
 
 def _workspace_ids(value: str) -> tuple[int, ...]:
@@ -62,7 +67,9 @@ def parser() -> argparse.ArgumentParser:
                          "for Foundation Model API endpoints; env: MODEL_ENDPOINT)"))
     p.add_argument(
         "--target-catalog",
-        help="existing catalog to grant USE_CATALOG, USE_SCHEMA, MANAGE, and APPLY_TAG",
+        help=("existing catalog to grant USE_CATALOG, USE_SCHEMA, MANAGE, and APPLY_TAG; "
+              "supply one value for every workspace or comma-separated values matching "
+              "--workspace-id"),
     )
     return p
 
@@ -73,12 +80,13 @@ def _plan(cfg: Config, emit: Callable[[str], None]) -> None:
     emit(f"  service principal: {cfg.sp_name!r} (create or reuse by exact display name)")
     emit("  grant: Account Admin (account_admin role on the service principal)")
     emit("  grant: account tag-policy creator and manager roles")
-    for workspace_id in cfg.workspace_ids:
+    for workspace_index, workspace_id in enumerate(cfg.workspace_ids):
+        target_catalog = cfg.catalog_for(workspace_index)
         emit(f"  workspace {workspace_id}: grant ADMIN")
-        if cfg.target_catalog:
+        if target_catalog:
             emit(
                 f"  workspace {workspace_id}: grant USE_CATALOG + USE_SCHEMA + "
-                f"MANAGE + APPLY_TAG on catalog {cfg.target_catalog}"
+                f"MANAGE + APPLY_TAG on catalog {target_catalog}"
             )
         else:
             emit(f"  workspace {workspace_id}: grant CREATE_CATALOG on its metastore")
@@ -154,6 +162,27 @@ def _workspace_profiles(value: str | None, workspace_count: int) -> tuple[str, .
     return profiles
 
 
+def _target_catalogs(value: str | None, workspace_count: int) -> tuple[str, ...]:
+    if not value:
+        return ()
+    raw_catalogs = value.split(",")
+    if any(not item.strip() for item in raw_catalogs):
+        raise ValueError(
+            "--target-catalog contains an empty catalog name; remove the extra comma "
+            "or supply one non-empty catalog per workspace"
+        )
+    catalogs = tuple(item.strip() for item in raw_catalogs)
+    if len(catalogs) == 1:
+        return catalogs * workspace_count
+    if len(catalogs) != workspace_count:
+        raise ValueError(
+            f"--target-catalog supplied {len(catalogs)} catalog(s) for "
+            f"{workspace_count} workspace ID(s); supply one catalog for all workspaces "
+            "or exactly one catalog per workspace"
+        )
+    return catalogs
+
+
 def _value(obj: Any, name: str) -> Any:
     return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
 
@@ -190,18 +219,38 @@ def _workspace_host(account: Any, workspace_id: int) -> str:
     )
     if not host:
         deployment_name = _value(workspace, "deployment_name")
+        account_host = _normalize_host(_value(_value(account, "config"), "host"))
         cloud = str(_value(workspace, "cloud") or "").lower()
+        azure_suffix = ""
+        if (
+            "azure" in cloud
+            or "azuredatabricks" in account_host
+            or account_host.endswith("accounts.databricks.azure.cn")
+            or account_host.endswith("accounts.azure.cn")
+        ):
+            azure_suffix = (
+                "azuredatabricks.us" if account_host.endswith("azuredatabricks.us")
+                else "databricks.azure.cn" if account_host.endswith("azure.cn")
+                else "azuredatabricks.net"
+            )
         if deployment_name:
             deployment_name = str(deployment_name)
             if (
                 ".azuredatabricks.net" in deployment_name
+                or ".azuredatabricks.us" in deployment_name
+                or ".databricks.azure.cn" in deployment_name
                 or ".cloud.databricks.com" in deployment_name
             ):
                 host = deployment_name
-            elif "azure" in cloud:
-                host = f"{deployment_name}.azuredatabricks.net"
+            elif azure_suffix:
+                host = f"{deployment_name}.{azure_suffix}"
             else:
                 host = f"{deployment_name}.cloud.databricks.com"
+        elif azure_suffix:
+            raise ValueError(
+                f"workspace {workspace_id} metadata has no workspace_url or deployment_name; "
+                "ensure the account Workspace API returns one of those fields before running bootstrap"
+            )
         else:
             host = f"dbc-{workspace_id}.cloud.databricks.com"
     host = str(host)
@@ -260,6 +309,15 @@ def _is_permission_denied(exc: Exception) -> bool:
     )
 
 
+def _credentials_absent(exc: Exception) -> bool:
+    message = str(exc).casefold()
+    return (
+        "cannot configure default credentials" in message
+        or "profile" in message and ("not found" in message or "does not exist" in message)
+        or "no credentials" in message
+    )
+
+
 def _authenticate_workspaces(
     cfg: Config,
     account: Any,
@@ -285,115 +343,283 @@ def _authenticate_workspaces(
     return resolved
 
 
+@dataclasses.dataclass(frozen=True)
+class WorkspacePreflight:
+    workspace: Any
+    host: str
+    metastore_id: str
+    target_catalog: str | None
+    model_access: str
+    model_resource: str
+    model_grant_needed: bool
+
+
+def _caller_context(workspace: Any) -> tuple[str, set[str], bool]:
+    caller = workspace.current_user.me()
+    caller_name = str(_value(caller, "user_name"))
+    groups = _value(caller, "groups") or []
+    principals = {caller_name}
+    for group in groups:
+        principals.update(
+            str(value) for value in (_value(group, "display"), _value(group, "value"))
+            if value
+        )
+    return (
+        caller_name,
+        {principal.casefold() for principal in principals},
+        any(str(_value(group, "display")).casefold() == "admins" for group in groups),
+    )
+
+
+def _preflight(
+    cfg: Config,
+    workspaces: dict[int, tuple[Any, str]],
+    emit: Callable[[str], None],
+    existing_sp: Any | None = None,
+) -> dict[int, WorkspacePreflight]:
+    results = {}
+    for workspace_index, workspace_id in enumerate(cfg.workspace_ids):
+        workspace, host = workspaces[workspace_id]
+        target_catalog = cfg.catalog_for(workspace_index)
+        caller_name, caller_principals, is_workspace_admin = _caller_context(workspace)
+        assignment = workspace.metastores.current()
+        metastore_id = str(_value(assignment, "metastore_id") or "")
+        if not metastore_id:
+            raise RuntimeError(
+                f"preflight failed in workspace {workspace_id} ({host}): no metastore is "
+                "assigned; cannot grant catalog privileges"
+            )
+        metastore_owner = "<unavailable>"
+        try:
+            metastore_owner = str(_value(workspace.metastores.get(metastore_id), "owner"))
+        except Exception as exc:
+            if not _is_permission_denied(exc):
+                raise RuntimeError(
+                    f"preflight failed in workspace {workspace_id}: could not inspect "
+                    f"metastore owner. Cause: {_error_details(exc)}"
+                ) from exc
+
+        securable_type = "catalog" if target_catalog else "metastore"
+        full_name = target_catalog or metastore_id
+        scope_owner = metastore_owner
+        if target_catalog:
+            try:
+                scope_owner = str(_value(workspace.catalogs.get(target_catalog), "owner"))
+            except Exception as exc:
+                if _is_not_found(exc):
+                    raise RuntimeError(
+                        f"preflight failed: catalog {target_catalog!r} was not found in "
+                        f"workspace {workspace_id} ({host}). Cause: {_error_details(exc)}"
+                    ) from exc
+                raise RuntimeError(
+                    f"preflight failed for catalog {target_catalog!r} in workspace "
+                    f"{workspace_id}: caller lacks grant authority or it cannot be inspected. "
+                    f"Cause: {_error_details(exc)}"
+                ) from exc
+
+        workspace_admin_owner = bool(
+            target_catalog
+            and scope_owner.casefold().startswith("_workspace_admins_")
+            and scope_owner.casefold().endswith(f"_{workspace_id}")
+            and is_workspace_admin
+        )
+        owns_scope = (
+            scope_owner.casefold() in caller_principals
+            or metastore_owner.casefold() in caller_principals
+            or workspace_admin_owner
+        )
+        can_manage = False
+        if not owns_scope and target_catalog:
+            try:
+                effective = workspace.grants.get_effective(
+                    securable_type=securable_type,
+                    full_name=full_name,
+                    principal=caller_name,
+                )
+                can_manage = _has_effective_privilege(effective, "MANAGE")
+            except Exception as exc:
+                raise RuntimeError(
+                    f"preflight failed in workspace {workspace_id}: could not inspect "
+                    f"effective grant rights and cannot prove MANAGE on "
+                    f"{securable_type} {full_name!r}; caller lacks MANAGE unless this "
+                    "check succeeds. "
+                    f"Cause: {_error_details(exc)}"
+                ) from exc
+        if not (owns_scope or can_manage):
+            if not target_catalog:
+                raise RuntimeError(
+                    f"preflight failed in workspace {workspace_id}: caller "
+                    f"{caller_name!r} cannot grant CREATE CATALOG on metastore "
+                    f"{metastore_id!r}; metastore owner is {metastore_owner!r}. Have the "
+                    "metastore owner run bootstrap or grant CREATE CATALOG to the "
+                    "deployment service principal. Nothing was changed."
+                )
+            requested = (
+                "USE CATALOG, USE SCHEMA, MANAGE, and APPLY TAG"
+                if target_catalog else "CREATE CATALOG"
+            )
+            owner_label = "catalog owner" if target_catalog else "metastore owner"
+            raise RuntimeError(
+                f"preflight failed in workspace {workspace_id}: caller {caller_name!r} "
+                f"cannot grant {requested} on {securable_type} {full_name!r}; "
+                f"{owner_label} is {scope_owner!r}, metastore owner is "
+                f"{metastore_owner!r}, and the caller lacks effective MANAGE. Have the "
+                f"{owner_label} run bootstrap or grant the required privilege to the "
+                "deployment service principal. Nothing was changed."
+            )
+
+        try:
+            endpoint = workspace.api_client.do(
+                "GET", f"/api/2.0/serving-endpoints/{cfg.model_endpoint}"
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"could not resolve serving endpoint {cfg.model_endpoint!r} in workspace "
+                f"{workspace_id} ({host}) during preflight. Cause: {_error_details(exc)}"
+            ) from exc
+        endpoint_id = _value(endpoint, "id")
+        foundation_model = _foundation_model_name(endpoint)
+        is_foundation_model_api = (
+            str(_value(endpoint, "endpoint_type") or "").upper() == "FOUNDATION_MODEL_API"
+            or (not endpoint_id and foundation_model is not None)
+        )
+        if is_foundation_model_api:
+            if not foundation_model:
+                raise RuntimeError(
+                    f"preflight failed: Foundation Model API endpoint {cfg.model_endpoint!r} "
+                    f"in workspace {workspace_id} has no backing UC function"
+                )
+            model_access, model_resource = "UC EXECUTE", foundation_model
+            model_grant_needed = True
+            inherited_execute = False
+            try:
+                account_users_effective = workspace.grants.get_effective(
+                    securable_type="function",
+                    full_name=foundation_model,
+                    principal="account users",
+                )
+                inherited_execute = _has_effective_privilege(
+                    account_users_effective, "EXECUTE"
+                )
+            except Exception:
+                # If this inherited path cannot be inspected, caller authority below
+                # can still prove that a required grant is safe.
+                pass
+            if not inherited_execute and existing_sp is not None:
+                client_id = str(_value(existing_sp, "application_id"))
+                try:
+                    sp_effective = workspace.grants.get_effective(
+                        securable_type="function",
+                        full_name=foundation_model,
+                        principal=client_id,
+                    )
+                    inherited_execute = _has_effective_privilege(sp_effective, "EXECUTE")
+                except Exception:
+                    pass
+            if inherited_execute:
+                model_grant_needed = False
+            elif metastore_owner.casefold() not in caller_principals:
+                function_owner = "<unavailable>"
+                try:
+                    function_owner = str(
+                        _value(workspace.functions.get(foundation_model), "owner")
+                    )
+                except Exception as exc:
+                    if not _is_permission_denied(exc):
+                        raise RuntimeError(
+                            f"preflight failed: cannot inspect owner of UC function "
+                            f"{foundation_model!r} in workspace {workspace_id}. "
+                            f"Cause: {_error_details(exc)}"
+                        ) from exc
+                try:
+                    function_effective = workspace.grants.get_effective(
+                        securable_type="function",
+                        full_name=foundation_model,
+                        principal=caller_name,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"preflight failed in workspace {workspace_id}: could not inspect "
+                        f"effective grant rights and cannot prove MANAGE on function "
+                        f"{foundation_model!r}; caller lacks MANAGE unless this check "
+                        f"succeeds. Cause: {_error_details(exc)}"
+                    ) from exc
+                if (
+                    function_owner.casefold() not in caller_principals
+                    and not _has_effective_privilege(function_effective, "MANAGE")
+                ):
+                    raise RuntimeError(
+                        f"preflight failed in workspace {workspace_id}: model access uses "
+                        f"UC EXECUTE on function {foundation_model!r}, but caller "
+                        f"{caller_name!r} is not its owner ({function_owner!r}), is not "
+                        f"metastore owner ({metastore_owner!r}), and lacks effective "
+                        "MANAGE. Have the function or metastore owner grant EXECUTE to "
+                        "the deployment service principal. Nothing was changed."
+                    )
+        else:
+            if not endpoint_id:
+                raise RuntimeError(
+                    f"could not resolve serving endpoint {cfg.model_endpoint!r} in workspace "
+                    f"{workspace_id} ({host}) during preflight: endpoint lookup returned no ID"
+                )
+            model_access, model_resource = "CAN_QUERY", str(endpoint_id)
+            model_grant_needed = True
+            if not is_workspace_admin:
+                permissions = workspace.api_client.do(
+                    "GET", f"/api/2.0/permissions/serving-endpoints/{endpoint_id}"
+                )
+                can_manage_endpoint = False
+                for entry in _value(permissions, "access_control_list") or []:
+                    principal = next((
+                        _value(entry, name) for name in (
+                            "user_name", "group_name", "service_principal_name"
+                        ) if _value(entry, name)
+                    ), None)
+                    levels = [_value(entry, "permission_level")]
+                    levels.extend(
+                        _value(item, "permission_level")
+                        for item in (_value(entry, "all_permissions") or [])
+                    )
+                    if (
+                        str(principal).casefold() in caller_principals
+                        and any(str(level).upper() == "CAN_MANAGE" for level in levels)
+                    ):
+                        can_manage_endpoint = True
+                        break
+                if not can_manage_endpoint:
+                    raise RuntimeError(
+                        f"preflight failed in workspace {workspace_id}: model access uses "
+                        f"CAN_QUERY on endpoint {cfg.model_endpoint!r}, but caller "
+                        f"{caller_name!r} is not a workspace admin and lacks CAN_MANAGE. "
+                        "Have an endpoint manager grant CAN_QUERY to the deployment "
+                        "service principal. Nothing was changed."
+                    )
+        resolved_access = (
+            f"{model_access} (inherited)"
+            if model_access == "UC EXECUTE" and not model_grant_needed
+            else model_access
+        )
+        emit(f"PLAN RESOLVED workspace {workspace_id}: model access path {resolved_access}")
+        emit(
+            f"PREFLIGHT OK workspace {workspace_id} ({host}): authenticated as "
+            f"{caller_name}; grant scope {securable_type} {full_name}; model access "
+            f"{resolved_access} on {cfg.model_endpoint}"
+        )
+        results[workspace_id] = WorkspacePreflight(
+            workspace, host, metastore_id, target_catalog, model_access, model_resource,
+            model_grant_needed,
+        )
+    return results
+
+
 def _preflight_target_catalog(
     cfg: Config,
     account: Any,
     workspace_client: Callable[..., Any],
 ) -> None:
-    if not cfg.target_catalog:
-        return
-    for workspace_index, workspace_id in enumerate(cfg.workspace_ids):
-        authority_message = (
-            f"preflight failed for catalog {cfg.target_catalog!r} in workspace "
-            f"{workspace_id}: the catalog is unavailable or the bootstrap caller lacks "
-            "grant authority. Have the catalog owner run bootstrap or grant the deployment "
-            "service principal USE CATALOG, USE SCHEMA, MANAGE, and APPLY TAG."
-        )
-        # Keep account lookup failures distinct from workspace client/auth failures.
-        host = _workspace_host(account, workspace_id)
-        try:
-            workspace = (
-                workspace_client(host, workspace_index)
-                if workspace_index else workspace_client(host)
-            )
-            catalog = workspace.catalogs.get(cfg.target_catalog)
-            caller = workspace.current_user.me()
-            caller_name = str(_value(caller, "user_name"))
-            caller_groups = _value(caller, "groups") or []
-            caller_principals = {caller_name}
-            for group in caller_groups:
-                caller_principals.update(
-                    str(value) for value in (
-                        _value(group, "display"),
-                        _value(group, "value"),
-                    ) if value
-                )
-            caller_principals = {principal.casefold() for principal in caller_principals}
-            catalog_owner = str(_value(catalog, "owner"))
-            assignment = workspace.metastores.current()
-            metastore_owner = "<unavailable>"
-            metastore_id = _value(assignment, "metastore_id")
-            if metastore_id:
-                try:
-                    metastore = workspace.metastores.get(str(metastore_id))
-                    metastore_owner = str(_value(metastore, "owner"))
-                except Exception as exc:
-                    if not _is_permission_denied(exc):
-                        raise
-            normalized_catalog_owner = catalog_owner.casefold()
-            is_workspace_admin = any(
-                str(_value(group, "display")).casefold() == "admins"
-                for group in caller_groups
-            )
-            workspace_admin_owner = (
-                normalized_catalog_owner.startswith("_workspace_admins_")
-                and normalized_catalog_owner.endswith(f"_{workspace_id}")
-                and is_workspace_admin
-            )
-            owns_scope = (
-                normalized_catalog_owner in caller_principals
-                or metastore_owner.casefold() in caller_principals
-                or workspace_admin_owner
-            )
-        except Exception as exc:
-            if _is_auth_error(exc):
-                message = (
-                    f"cannot authenticate to workspace {workspace_id} ({host}). Run: "
-                    f"databricks auth login --host {host} (or pass WORKSPACE_PROFILE)."
-                )
-            elif _is_not_found(exc):
-                message = (
-                    f"preflight failed: catalog {cfg.target_catalog!r} was not found in "
-                    f"workspace {workspace_id} ({host})."
-                )
-            else:
-                message = authority_message
-            raise RuntimeError(f"{message} Cause: {_error_details(exc)}") from exc
-
-        if owns_scope:
-            continue
-
-        authority_message = (
-            f"preflight failed for catalog {cfg.target_catalog!r} in workspace "
-            f"{workspace_id}: caller {caller_name!r} is not the catalog owner "
-            f"({catalog_owner}), metastore owner ({metastore_owner}), and lacks MANAGE on "
-            f"{cfg.target_catalog!r}. Have the catalog owner run bootstrap or grant the "
-            "deployment service principal USE CATALOG, USE SCHEMA, MANAGE, and APPLY TAG."
-        )
-
-        try:
-            effective = workspace.grants.get_effective(
-                securable_type="catalog",
-                full_name=cfg.target_catalog,
-                principal=caller_name,
-            )
-            can_manage = any(
-                str(getattr(_value(privilege, "privilege"), "value",
-                            _value(privilege, "privilege"))) == "MANAGE"
-                for assignment in effective.privilege_assignments or []
-                for privilege in assignment.privileges or []
-            )
-        except Exception as exc:
-            if _is_auth_error(exc):
-                raise RuntimeError(
-                    f"cannot authenticate to workspace {workspace_id} ({host}). Run: "
-                    f"databricks auth login --host {host} (or pass WORKSPACE_PROFILE). "
-                    f"Cause: {_error_details(exc)}"
-                ) from exc
-            raise RuntimeError(f"{authority_message} Cause: {_error_details(exc)}") from exc
-
-        if not can_manage:
-            raise RuntimeError(authority_message)
+    """Compatibility shim for direct callers; the complete preflight is used by bootstrap."""
+    workspaces = _authenticate_workspaces(cfg, account, workspace_client)
+    _preflight(cfg, workspaces, lambda _line: None)
 
 
 def _grant_tag_policy_roles(account: Any, cfg: Config, client_id: str) -> bool:
@@ -428,24 +654,36 @@ def bootstrap(
     ask: Callable[[str], str] = input,
 ) -> int:
     _plan(cfg, emit)
-    if cfg.dry_run:
-        emit("DRY RUN: no API calls were made.")
-        return 0
-    if not cfg.yes and ask("Apply these admin grants? Type 'yes' to continue: ").strip().lower() != "yes":
+    if (not cfg.dry_run and not cfg.yes
+            and ask("Apply these admin grants? Type 'yes' to continue: ").strip().lower() != "yes"):
         emit("Aborted; no changes were made.")
         return 1
 
-    account, workspace_client = (client_factory or _clients)(cfg)
-    workspaces = _authenticate_workspaces(cfg, account, workspace_client)
-
-    def authenticated_workspace(_host: str, index: int = 0) -> Any:
-        return workspaces[cfg.workspace_ids[index]][0]
-
-    _preflight_target_catalog(cfg, account, authenticated_workspace)
-    escaped_name = cfg.sp_name.replace('"', '\\"')
-    existing = list(account.service_principals.list(filter=f'displayName eq "{escaped_name}"'))
+    try:
+        account, workspace_client = (client_factory or _clients)(cfg)
+        escaped_name = cfg.sp_name.replace('"', '\\"')
+        existing = list(
+            account.service_principals.list(filter=f'displayName eq "{escaped_name}"')
+        )
+    except Exception as exc:
+        if cfg.dry_run and _credentials_absent(exc):
+            emit(
+                "DRY RUN OFFLINE: credentials are absent, so no API calls could be made; "
+                "hosts, authentication, endpoint presence/access path, and grant rights "
+                "were not verified."
+            )
+            return 0
+        raise
     if len(existing) > 1:
         raise RuntimeError(f"multiple service principals have display name {cfg.sp_name!r}")
+
+    workspaces = _authenticate_workspaces(cfg, account, workspace_client)
+    preflight = _preflight(
+        cfg, workspaces, emit, existing_sp=existing[0] if existing else None
+    )
+    if cfg.dry_run:
+        emit("DRY RUN: read-only preflight passed; no changes were made.")
+        return 0
     created = not existing
     sp = existing[0] if existing else account.service_principals.create(
         display_name=cfg.sp_name, active=True
@@ -497,12 +735,14 @@ def bootstrap(
             permissions=[WorkspacePermission.ADMIN],
         )
         emit(f"GRANTED workspace {workspace_id}: ADMIN")
-        w, host = workspaces[workspace_id]
-        if cfg.target_catalog:
+        checked = preflight[workspace_id]
+        w, host = checked.workspace, checked.host
+        target_catalog = checked.target_catalog
+        if target_catalog:
             try:
                 w.grants.update(
                     securable_type="catalog",
-                    full_name=cfg.target_catalog,
+                    full_name=target_catalog,
                     changes=[PermissionsChange(
                         principal=client_id,
                         add=[
@@ -516,7 +756,7 @@ def bootstrap(
             except Exception as exc:
                 raise RuntimeError(
                     f"could not grant USE_CATALOG + USE_SCHEMA + MANAGE + APPLY_TAG on "
-                    f"catalog {cfg.target_catalog!r} "
+                    f"catalog {target_catalog!r} "
                     f"in workspace {workspace_id}. The bootstrap caller lacks authority or "
                     "the catalog is unavailable; have the catalog owner grant the deployment "
                     f"service principal {client_id!r} USE CATALOG, USE SCHEMA, MANAGE, and "
@@ -524,10 +764,10 @@ def bootstrap(
                 ) from exc
             emit(
                 f"GRANTED workspace {workspace_id}: USE_CATALOG + USE_SCHEMA + MANAGE + "
-                f"APPLY_TAG on catalog {cfg.target_catalog}"
+                f"APPLY_TAG on catalog {target_catalog}"
             )
         else:
-            metastore_id = str(_value(w.metastores.current(), "metastore_id"))
+            metastore_id = checked.metastore_id
             w.grants.update(
                 securable_type="metastore",
                 full_name=metastore_id,
@@ -539,33 +779,16 @@ def bootstrap(
                 f"GRANTED workspace {workspace_id}: CREATE_CATALOG on metastore "
                 f"{metastore_id}"
             )
-        try:
-            endpoint = w.api_client.do(
-                "GET", f"/api/2.0/serving-endpoints/{cfg.model_endpoint}"
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                f"could not resolve serving endpoint {cfg.model_endpoint!r} in workspace "
-                f"{workspace_id} ({host}). Cause: {_error_details(exc)}"
-            ) from exc
-        endpoint_id = _value(endpoint, "id")
-        foundation_model = _foundation_model_name(endpoint)
-        is_foundation_model_api = (
-            str(_value(endpoint, "endpoint_type") or "").upper()
-            == "FOUNDATION_MODEL_API"
-            or (not endpoint_id and foundation_model is not None)
-        )
-        if is_foundation_model_api and not foundation_model:
-            if not endpoint_id:
-                raise RuntimeError(
-                    f"could not resolve serving endpoint {cfg.model_endpoint!r} in workspace "
-                    f"{workspace_id} ({host}): the endpoint lookup returned no ID"
+        endpoint_id = checked.model_resource if checked.model_access == "CAN_QUERY" else None
+        foundation_model = checked.model_resource if checked.model_access == "UC EXECUTE" else None
+        if checked.model_access == "UC EXECUTE":
+            if not checked.model_grant_needed:
+                emit(
+                    f"UNCHANGED workspace {workspace_id}: EXECUTE on {foundation_model} "
+                    f"(query access for {cfg.model_endpoint})"
                 )
-            raise RuntimeError(
-                f"could not resolve the Unity Catalog function backing Foundation Model "
-                f"API endpoint {cfg.model_endpoint!r} in workspace {workspace_id} ({host})"
-            )
-        if is_foundation_model_api:
+                workspace_summaries.append((workspace_id, host))
+                continue
             try:
                 effective = w.grants.get_effective(
                     securable_type="function",
@@ -641,7 +864,7 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         yes=args.yes,
         rotate_secret=args.rotate_secret,
         model_endpoint=args.model_endpoint,
-        target_catalog=args.target_catalog,
+        target_catalogs=_target_catalogs(args.target_catalog, len(args.workspace_id)),
     )
 
 

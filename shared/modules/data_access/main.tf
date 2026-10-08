@@ -158,11 +158,20 @@ locals {
 
   # Keeping or revoking SELECT never needs the gate. A grant that the last
   # apply already made (var.applied_table_grants, from this layer's state)
-  # stays plannable whatever the gate says, as long as everything that
-  # protects it (tags, policies, masks, DDL, acknowledgements, max age) is
-  # exactly what that apply recorded: then nothing about the exposure changed.
-  # New grants, or existing ones whose protection changed (a mask removed,
-  # tags re-derived), still need a current pass.
+  # stays plannable whatever the gate says, as long as nothing that protects
+  # it was weakened since that apply (var.applied_protection): no tag
+  # assignment or ABAC policy removed or changed (beyond dropping principals
+  # that no longer hold a grant), the masking SQL unchanged, no new
+  # acknowledgement and no higher max age. Added tags or policies and a
+  # re-read DDL only add protection (or record what is already live), so they
+  # don't hold up a revoke. A kept grant whose protection was weakened still
+  # needs a current pass, and fails the plan without one.
+  #
+  # New grants are never planned without a pass: they are withheld (left out
+  # of table_access) rather than failing the plan, so the removals and kept
+  # grants in the same change still apply. make reports what was withheld and
+  # exits non-zero; a raw terraform run of the root gets the
+  # business_select_withheld warning.
   coverage_gate_protection = sha256(jsonencode({
     version         = 1
     deployment      = var.deployment_binding
@@ -173,14 +182,55 @@ locals {
     acknowledged    = sort(distinct([for column in var.coverage_acknowledged_columns : lower(column)]))
     max_age         = var.coverage_gate_max_age
   }))
+  coverage_gate_protection_parts = {
+    version         = 1
+    deployment      = var.deployment_binding
+    tag_assignments = sort(keys(local.tag_assignment_map))
+    # Principals apart: dropping one from a policy weakens nothing once it
+    # holds no grant (the usual way a group's access is withdrawn).
+    fgac_policies = {
+      for name, policy in local.fgac_policy_map : name => {
+        rest   = sha256(jsonencode(merge(policy, { to_principals = [], except_principals = [] })))
+        to     = sort(distinct(policy.to_principals))
+        except = sort(distinct(policy.except_principals))
+      }
+    }
+    masking_sql  = filesha256(var.masking_sql_file)
+    acknowledged = sort(distinct([for column in var.coverage_acknowledged_columns : lower(column)]))
+    max_age      = var.coverage_gate_max_age
+  }
   _protection_unchanged = (
     var.applied_protection_fingerprint != ""
     && var.applied_protection_fingerprint == local.coverage_gate_protection
   )
-  table_grants_needing_gate = sort([
-    for pair in local.table_access_pairs : "${pair.table}|${pair.principal}"
-    if !(local._protection_unchanged && contains(var.applied_table_grants, "${pair.table}|${pair.principal}"))
-  ])
+  # Anything malformed or missing in the applied record counts as weakened.
+  _granted_principals = toset([for pair in local.table_access_pairs : pair.principal])
+  _protection_not_weakened = try(
+    var.applied_protection.version == local.coverage_gate_protection_parts.version
+    && var.applied_protection.deployment == var.deployment_binding
+    && length(setsubtract(toset(var.applied_protection.tag_assignments), toset(local.coverage_gate_protection_parts.tag_assignments))) == 0
+    && alltrue([
+      for name, applied in var.applied_protection.fgac_policies :
+      try(local.coverage_gate_protection_parts.fgac_policies[name].rest, "") == applied.rest
+      && length(setintersection(local._granted_principals, setsubtract(toset(applied.to), toset(try(local.coverage_gate_protection_parts.fgac_policies[name].to, []))))) == 0
+      && length(setintersection(local._granted_principals, setsubtract(toset(try(local.coverage_gate_protection_parts.fgac_policies[name].except, [])), toset(applied.except)))) == 0
+    ])
+    && var.applied_protection.masking_sql == local.coverage_gate_protection_parts.masking_sql
+    && length(setsubtract(toset(local.coverage_gate_protection_parts.acknowledged), toset(var.applied_protection.acknowledged))) == 0
+    && timecmp(timeadd("2000-01-01T00:00:00Z", var.coverage_gate_max_age), timeadd("2000-01-01T00:00:00Z", var.applied_protection.max_age)) <= 0,
+    false
+  )
+  _protection_kept = local._protection_unchanged || local._protection_not_weakened
+
+  table_grant_keys = sort([for pair in local.table_access_pairs : "${pair.table}|${pair.principal}"])
+  table_grants_new = [for key in local.table_grant_keys : key if !contains(var.applied_table_grants, key)]
+  table_grants_needing_gate = [
+    for key in local.table_grant_keys : key
+    if !(local._protection_kept && contains(var.applied_table_grants, key))
+  ]
+  # Kept grants that need a pass: the plan fails without one.
+  table_grants_blocking = [for key in local.table_grants_needing_gate : key if contains(var.applied_table_grants, key)]
+  table_grants_withheld = local.coverage_gate_status == "pass" ? [] : local.table_grants_new
 }
 
 # Shared with the workspace layer's CAN_RUN check; no resources.
@@ -288,9 +338,11 @@ resource "databricks_grant" "schema_access" {
 resource "databricks_grant" "table_access" {
   # Same addresses and keys as when this was held behind the retired
   # business_access_enabled flag, so already-released grants are never rebuilt.
+  # New grants only with a pass (see table_grants_withheld).
   for_each = {
     for pair in local.table_access_pairs :
     "${pair.table}|${pair.principal}" => { table = pair.table, group = pair.principal }
+    if local.coverage_gate_status == "pass" || contains(var.applied_table_grants, "${pair.table}|${pair.principal}")
   }
 
   provider   = databricks.workspace
@@ -307,19 +359,20 @@ resource "databricks_grant" "table_access" {
     time_sleep.wait_for_policy_enforcement,
   ]
 
-  # Checked for every planned instance, so neither a raw terraform run nor
-  # terraform_layer.sh can add a grant (or keep one whose protection changed)
-  # without a current pass. Removed grants are never checked.
+  # New grants never reach this without a pass (for_each above). Checked for
+  # every planned instance, so neither a raw terraform run nor
+  # terraform_layer.sh can keep a grant whose protection was weakened without
+  # a current pass. Removed grants are never checked.
   lifecycle {
     precondition {
       condition     = local.coverage_gate_status == "pass" || !contains(local.table_grants_needing_gate, each.key)
-      error_message = "Coverage check ${local.coverage_gate_status}: ${local.coverage_gate_problem}. Business SELECT grants are blocked. Terraform can't re-read Unity Catalog, so run this layer through make (make apply, make plan, make release or make maintain ENV=${basename(dirname(dirname(var.coverage_gate_file)))}), which refreshes live tags and DDL, then runs the coverage check."
+      error_message = "Coverage check ${local.coverage_gate_status}: ${local.coverage_gate_problem}. Business SELECT grants already in place would be kept with weaker protection than their last checked apply (a tag assignment, ABAC policy or mask removed or changed, an acknowledgement added or coverage_gate_max_age raised), or with protection this layer's state doesn't record, which needs a passing check. Terraform can't re-read Unity Catalog, so run this layer through make (make apply, make plan, make release or make maintain ENV=${basename(dirname(dirname(var.coverage_gate_file)))}), which refreshes live tags and DDL, then runs the coverage check."
     }
   }
 }
 
 resource "databricks_sql_endpoint" "warehouse" {
-  count = var.sql_warehouse_id != "" ? 0 : 1
+  count = var.sql_warehouse_id == "" || var.retain_auto_warehouse ? 1 : 0
 
   provider         = databricks.workspace
   name             = var.warehouse_name

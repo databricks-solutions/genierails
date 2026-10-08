@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.terraform_helpers import tf, tf_env, tf_init
+
 ROOT = Path(__file__).parents[2]
 SHARED = ROOT / "shared"
 # origin/main before the retirement: #70 masks-before-grants, #71 coverage
@@ -33,9 +35,12 @@ SPACE_CONFIG = (
     "benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], "
     'acl_groups = ["analysts"] }'
 )
+# A non-empty description makes the legacy module manage the attached agent's
+# config, so the upgrade plan exposes the new warehouse trigger behavior.
+ATTACHED_SPACE_CONFIG = SPACE_CONFIG.replace('description = ""', 'description = "attached"')
 WORKSPACE_SPACES = (
     "{ "
-    f'sales = {{ name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], {SPACE_CONFIG} }}, '
+    f'sales = {{ name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], {ATTACHED_SPACE_CONFIG} }}, '
     f'ops = {{ name = "Ops", genie_space_id = "", sql_warehouse_id = "warehouse", uc_tables = ["cat.sch.customers"], {SPACE_CONFIG} }} '
     "}"
 )
@@ -197,11 +202,14 @@ PROVIDERS_TIME
   }
 }
 
-run "never_released_upgrade_without_a_current_gate_refuses_select" {
-  state_key       = "closed"
-  command         = plan
+run "never_released_upgrade_without_a_current_gate_withholds_select" {
+  state_key = "closed"
+  command   = plan
 PROVIDERS_TIME
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0 && length(output.withheld_table_grants.grants) == 1
+    error_message = "without a current pass the first grant must be withheld"
+  }
 }
 
 run "gate_passes_again" {
@@ -334,7 +342,7 @@ PROVIDERS_NULL
   }
 }
 
-run "never_released_upgrade_while_blocked_refuses_can_run" {
+run "never_released_upgrade_while_blocked_withholds_can_run" {
   state_key = "closed"
   command   = plan
 PROVIDERS_NULL
@@ -343,7 +351,10 @@ PROVIDERS_NULL
     genie_space_can_run_widening = { sales = ["analysts"], ops = ["analysts"] }
     genie_space_missing_grants   = { sales = [], ops = [] }
   }
-  expect_failures = [null_resource.genie_space_acls, null_resource.genie_space_acls_created]
+  assert {
+    condition     = length(null_resource.genie_space_acls) == 0 && length(null_resource.genie_space_acls_created) == 0 && length(output.genie_space_can_run_withheld) == 2
+    error_message = "while blocked, both agents' CAN_RUN must be withheld"
+  }
 }
 
 run "never_released_upgrade_grants_through_the_gate" {
@@ -419,12 +430,9 @@ def _upgrade_runs(tmp_path: Path, module: str, test_body: str) -> dict[str, str]
     for existing in (root / "tests").glob("*.tftest.hcl"):
         existing.unlink()
     (root / "tests/upgrade.tftest.hcl").write_text(test_body)
-    env = {**os.environ, "TF_DATA_DIR": str(tmp_path / ".terraform"), "TF_IN_AUTOMATION": "1"}
-    init = subprocess.run(["terraform", "init", "-backend=false", "-input=false"],
-                          cwd=root, env=env, text=True, capture_output=True)
-    assert init.returncode == 0, init.stdout + init.stderr
-    result = subprocess.run(["terraform", "test", "-no-color", "-verbose"],
-                            cwd=root, env=env, text=True, capture_output=True)
+    env = tf_env(tmp_path)
+    tf_init(root, env=env)
+    result = tf(root, "test", "-no-color", "-verbose", env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     runs = _sections(result.stdout)
     assert all(section.startswith("pass") for section in runs.values()), result.stdout
@@ -438,7 +446,9 @@ def _changes(section: str) -> set[tuple[str, str]]:
 def _assert_no_change(section: str, *also_allowed: str, added: frozenset = frozenset()) -> None:
     """No resource change at all but creating `added` addresses. The only
     output changes allowed are the data_access outputs dropping their
-    business_access_enabled key (plus also_allowed)."""
+    business_access_enabled key, needs_gate turning false for grants already
+    in place, and output attributes that are only added (what protects the
+    grants, what is withheld), plus also_allowed."""
     assert _changes(section) == {(address, "will be created") for address in added}, section
     if "No changes. Your infrastructure matches the configuration." in section:
         return
@@ -447,11 +457,13 @@ def _assert_no_change(section: str, *also_allowed: str, added: frozenset = froze
         section = section.partition("Changes to Outputs:")[2]
     else:
         assert "without changing any real infrastructure" in section, section
-    diff = [line.strip() for line in section.splitlines() if re.match(r"\s+[-+~] ", line)]
-    assert diff and set(diff) <= {
+    # Additions (+) are allowed; every removal or change must be one of these.
+    diff = [line.strip() for line in section.splitlines() if re.match(r"\s+[-~] ", line)]
+    assert set(diff) <= {
         "~ coverage_gate                         = {",
         "~ coverage_gate_inputs                  = {",
         "- business_access_enabled = true",
+        "~ needs_gate              = true -> false",
         *also_allowed,
     }, section
 
@@ -468,9 +480,9 @@ def test_released_data_access_state_plans_no_change_after_the_retirement(tmp_pat
                       '~ status                  = "pass" -> "expired"',
                       "~ needs_gate              = true -> false", added=drop)
 
-    # Never released: refused without a pass; with one, only business SELECT
+    # Never released: withheld without a pass; with one, only business SELECT
     # (and the drop resource) is added and nothing is destroyed or replaced.
-    assert runs["never_released_upgrade_without_a_current_gate_refuses_select"].startswith("pass")
+    assert runs["never_released_upgrade_without_a_current_gate_withholds_select"].startswith("pass")
     assert _changes(runs["never_released_upgrade_grants_through_the_gate"]) == {
         ('databricks_grant.table_access["cat.sch.customers|analysts"]', "will be created"),
         ("terraform_data.masking_functions_drop", "will be created"),
@@ -480,15 +492,32 @@ def test_released_data_access_state_plans_no_change_after_the_retirement(tmp_pat
 def test_released_workspace_state_plans_no_change_after_the_retirement(tmp_path):
     runs = _upgrade_runs(tmp_path, "workspace", WORKSPACE_TEST)
 
-    # Released env: both Genie agents and both CAN_RUN ACLs (existing and
-    # created agent) stay exactly as applied, also while exposure is blocked.
-    _assert_no_change(runs["released_upgrade_plan"])
-    _assert_no_change(runs["released_upgrade_plan_while_exposure_is_blocked"])
+    # Adding the effective warehouse to config triggers causes one safe
+    # in-place update of the created agent; agents and ACLs are never replaced.
+    warehouse_refresh = {
+        ('null_resource.genie_space_config["ops"]', "will be updated in-place"),
+        ('null_resource.genie_space_config_existing["sales"]', "will be updated in-place"),
+    }
+    assert _changes(runs["released_upgrade_plan"]) == warehouse_refresh
+    assert _changes(runs["released_upgrade_plan_while_exposure_is_blocked"]) == warehouse_refresh
+    # The module's top-level warehouse is only a creation default. The attached
+    # sales agent has no raw per-space override, so its trigger remains empty
+    # and update-config receives no warehouse to send.
+    module_source = (SHARED / "modules/workspace/main.tf").read_text()
+    existing_block = module_source[
+        module_source.index('resource "null_resource" "genie_space_config_existing"'):
+        module_source.index("# ── New spaces: create")
+    ]
+    assert "GENIE_WAREHOUSE_ID       = self.triggers.warehouse_id" in existing_block
+    assert "GENIE_WAREHOUSE_EXPLICIT = self.triggers.warehouse_explicit" in existing_block
+    assert "GENIE_WAREHOUSE_ID       = each.value.sql_warehouse_id" not in existing_block
 
-    # Never released: refused while blocked; once the gate allows it, only the
+    # Never released: withheld while blocked; once the gate allows it, only the
     # CAN_RUN ACLs are added and no agent is replaced.
-    assert runs["never_released_upgrade_while_blocked_refuses_can_run"].startswith("pass")
+    assert runs["never_released_upgrade_while_blocked_withholds_can_run"].startswith("pass")
     assert _changes(runs["never_released_upgrade_grants_through_the_gate"]) == {
         ('null_resource.genie_space_acls["sales"]', "will be created"),
         ('null_resource.genie_space_acls_created["ops"]', "will be created"),
+        ('null_resource.genie_space_config["ops"]', "will be updated in-place"),
+        ('null_resource.genie_space_config_existing["sales"]', "will be updated in-place"),
     }

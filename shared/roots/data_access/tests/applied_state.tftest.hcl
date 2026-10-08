@@ -1,9 +1,11 @@
 # The root's reading of its own state (what the last apply left in place),
 # in the shape Terraform writes it. Only a current, successfully applied grant
-# recorded for this deployment (workspace host + ID) with unchanged protection
-# exempts it from the gate (needs_gate = false); deposed, tainted, foreign or
-# pre-binding records exempt nothing. Runs plan with a passing gate so the
-# plan succeeds and needs_gate can be read.
+# recorded for this deployment (workspace host + ID) is kept, and with
+# unchanged protection is exempt from the gate (needs_gate = false); deposed,
+# tainted, foreign or pre-binding records count as not applied (a new grant,
+# in new_grants), and an applied grant without a recorded protection needs
+# the gate. Runs plan with a passing gate so the plan succeeds and the gate
+# inputs can be read.
 
 mock_provider "databricks" {}
 mock_provider "null" {}
@@ -39,6 +41,7 @@ run "gate_inputs" {
   plan_options {
     mode = refresh-only
   }
+  expect_failures = [check.business_select_withheld]
 }
 
 run "gate_inputs_elsewhere" {
@@ -46,6 +49,7 @@ run "gate_inputs_elsewhere" {
   plan_options {
     mode = refresh-only
   }
+  expect_failures = [check.business_select_withheld]
   variables {
     databricks_workspace_host = "https://other.invalid"
   }
@@ -67,7 +71,7 @@ run "current_grant_for_this_deployment_is_kept__state" {
 run "current_grant_for_this_deployment_is_kept" {
   command = plan
   assert {
-    condition     = output.coverage_gate_inputs.needs_gate == false
+    condition     = output.coverage_gate_inputs.needs_gate == false && length(output.coverage_gate_inputs.new_grants) == 0
     error_message = "a current grant recorded for this deployment with unchanged protection needs no gate"
   }
 }
@@ -88,7 +92,7 @@ run "deposed_grant_is_not_applied__state" {
 run "deposed_grant_is_not_applied" {
   command = plan
   assert {
-    condition     = output.coverage_gate_inputs.needs_gate == true
+    condition     = contains(output.coverage_gate_inputs.new_grants, "cat.sch.customers|analysts")
     error_message = "a deposed object left by a failed replacement is not an applied grant"
   }
 }
@@ -109,7 +113,7 @@ run "current_and_deposed_together_still_count_once__state" {
 run "current_and_deposed_together_still_count_once" {
   command = plan
   assert {
-    condition     = output.coverage_gate_inputs.needs_gate == false
+    condition     = output.coverage_gate_inputs.needs_gate == false && length(output.coverage_gate_inputs.new_grants) == 0
     error_message = "a current object next to a deposed one is still the applied grant (no duplicate-key error)"
   }
 }
@@ -130,7 +134,7 @@ run "tainted_grant_is_not_applied__state" {
 run "tainted_grant_is_not_applied" {
   command = plan
   assert {
-    condition     = output.coverage_gate_inputs.needs_gate == true
+    condition     = contains(output.coverage_gate_inputs.new_grants, "cat.sch.customers|analysts")
     error_message = "a tainted grant is not an applied grant"
   }
 }
@@ -151,7 +155,7 @@ run "state_copied_from_another_host_is_not_applied__state" {
 run "state_copied_from_another_host_is_not_applied" {
   command = plan
   assert {
-    condition     = output.coverage_gate_inputs.needs_gate == true
+    condition     = contains(output.coverage_gate_inputs.new_grants, "cat.sch.customers|analysts")
     error_message = "a state recorded for another workspace host exempts nothing"
   }
 }
@@ -172,7 +176,7 @@ run "foreign_binding_alone_exempts_nothing__state" {
 run "foreign_binding_alone_exempts_nothing" {
   command = plan
   assert {
-    condition     = output.coverage_gate_inputs.needs_gate == true
+    condition     = contains(output.coverage_gate_inputs.new_grants, "cat.sch.customers|analysts")
     error_message = "the deployment binding is checked on its own, even if the protection matches"
   }
 }
@@ -193,7 +197,7 @@ run "state_from_before_the_binding_is_not_applied__state" {
 run "state_from_before_the_binding_is_not_applied" {
   command = plan
   assert {
-    condition     = output.coverage_gate_inputs.needs_gate == true
+    condition     = contains(output.coverage_gate_inputs.new_grants, "cat.sch.customers|analysts")
     error_message = "a state written before the deployment binding existed exempts nothing"
   }
 }

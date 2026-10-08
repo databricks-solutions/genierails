@@ -35,13 +35,36 @@ output "genie_space_acls_applied" {
 }
 
 output "genie_space_acls_groups" {
-  description = "Per-space groups granted CAN_RUN on each Genie agent."
+  description = "Per-space groups the config grants CAN_RUN on each Genie agent (before any are withheld)."
   value       = local.genie_space_groups
+}
+
+output "genie_space_can_run_withheld" {
+  description = "Per-space CAN_RUN groups this plan withholds because opening them is blocked (genie_exposure_blocker or missing SELECT grants). Everything else in the change applies."
+  value       = { for key, groups in local.genie_space_can_run_withheld : key => groups if length(groups) > 0 }
+}
+
+output "genie_space_acl_removal_only" {
+  description = "Space keys whose desired CAN_RUN is fully withheld but whose direct ACL is still synced empty to remove hand-added access."
+  value = sort(concat(
+    keys(null_resource.genie_space_acls_removal_only),
+    keys(null_resource.genie_space_acls_created_removal_only),
+  ))
 }
 
 output "genie_spaces_created" {
   description = "Set of Genie agent keys that were auto-created (genie_space_id was empty)."
   value       = keys(terraform_data.genie_space)
+}
+
+output "genie_existing_space_warehouse_intent" {
+  description = "Per attached agent, the raw per-space warehouse trigger and whether it is explicit."
+  value = {
+    for key, resource in null_resource.genie_space_config_existing : key => {
+      warehouse_id       = resource.triggers.warehouse_id
+      warehouse_explicit = resource.triggers.warehouse_explicit
+    }
+  }
 }
 
 output "genie_groups_csv" {

@@ -103,6 +103,12 @@ variable "deployment_binding" {
   description = "Identity of this deployment (hash of workspace host and ID), recorded with the applied protection so a state from another deployment exempts nothing."
 }
 
+variable "applied_protection" {
+  type        = any
+  default     = null
+  description = "coverage_gate.protection the last apply recorded in this layer's state (what protected its grants, part by part); null when unknown. A kept grant needs no pass unless this change removes or changes part of it."
+}
+
 variable "applied_protection_fingerprint" {
   type        = string
   default     = ""
@@ -173,6 +179,12 @@ variable "sql_warehouse_id" {
   type        = string
   default     = ""
   description = "Existing SQL warehouse ID to reuse for governance execution."
+}
+
+variable "retain_auto_warehouse" {
+  type        = bool
+  default     = false
+  description = "Keep a previously auto-created warehouse managed after selecting an explicit warehouse."
 }
 
 variable "warehouse_name" {
