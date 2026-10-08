@@ -40,7 +40,9 @@ def test_workspace_business_acls_follow_the_gate_not_a_flag():
     # Same for_each keys as before the retirement, minus the flag (and minus
     # a space whose every group is withheld).
     assert source.count("if contains(local.genie_space_acl_keys, k)") == 2
-    assert source.count('GENIE_ALLOW_EMPTY_ACL    = "1"') == 2
+    # Two grant-bearing resources plus two removal-only resources for the
+    # fully-withheld adopted-agent paths must all permit an empty exact sync.
+    assert source.count('GENIE_ALLOW_EMPTY_ACL    = "1"') == 4
     # Opening or widening CAN_RUN still needs the coverage gate: without it
     # the new groups are withheld from both ACL resources.
     withheld = source[source.index("  genie_space_can_run_withheld = {"):source.index("  genie_space_acl_groups = {")]

@@ -51,6 +51,10 @@ run "blocked_exposure_withholds_can_run_on_existing_space" {
     condition     = !output.genie_space_acls_applied && toset(output.genie_space_can_run_withheld["sales"]) == toset(["analysts"])
     error_message = "blocked exposure must withhold CAN_RUN on an existing space"
   }
+  assert {
+    condition     = toset(output.genie_space_acl_removal_only) == toset(["sales"])
+    error_message = "fully withheld existing/adopted agents must still sync an empty ACL to remove hand-added access"
+  }
 }
 
 run "blocked_exposure_withholds_can_run_on_new_space" {
@@ -77,6 +81,10 @@ run "blocked_exposure_withholds_can_run_on_new_space" {
   assert {
     condition     = !output.genie_space_acls_applied && toset(output.genie_space_can_run_withheld["sales"]) == toset(["analysts"])
     error_message = "blocked exposure must withhold CAN_RUN on a new space"
+  }
+  assert {
+    condition     = toset(output.genie_space_acl_removal_only) == toset(["sales"])
+    error_message = "a title-adopted agent on the create path must still remove hand-added access while all grants are withheld"
   }
 }
 

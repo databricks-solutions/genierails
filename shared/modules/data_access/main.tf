@@ -372,7 +372,7 @@ resource "databricks_grant" "table_access" {
 }
 
 resource "databricks_sql_endpoint" "warehouse" {
-  count = var.sql_warehouse_id != "" ? 0 : 1
+  count = var.sql_warehouse_id == "" || var.retain_auto_warehouse ? 1 : 0
 
   provider         = databricks.workspace
   name             = var.warehouse_name

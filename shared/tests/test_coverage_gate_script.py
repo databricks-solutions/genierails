@@ -334,6 +334,9 @@ def test_validator_timeout_records_failed_gate(env_dir, stub_runner, tmp_path, m
     runner, _log = stub_runner(_inputs())
     validator = tmp_path / "slow-validator.py"
     validator.write_text("import time\ntime.sleep(30)\n")
+    # Isolate the validator timeout: the same short global timeout must not
+    # race the unrelated console fixture on a loaded test host.
+    monkeypatch.setattr(cg, "query_inputs", lambda *_args, **_kwargs: _inputs())
     monkeypatch.setattr(cg, "VALIDATOR", validator)
     monkeypatch.setattr(cg, "SUBPROCESS_TIMEOUT", 1)
     assert cg.run_gate(env_dir, "prod", runner, "", False) == 1

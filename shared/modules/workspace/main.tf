@@ -106,7 +106,7 @@ resource "databricks_entitlements" "group_entitlements" {
 }
 
 resource "databricks_sql_endpoint" "warehouse" {
-  count = var.sql_warehouse_id != "" ? 0 : 1
+  count = var.sql_warehouse_id == "" || var.retain_auto_warehouse ? 1 : 0
 
   provider         = databricks.workspace
   name             = var.warehouse_name
@@ -164,21 +164,56 @@ resource "null_resource" "genie_space_acls" {
   depends_on = [databricks_mws_permission_assignment.group_assignments]
 }
 
+# If every desired group is withheld, there is deliberately no grant-bearing
+# ACL resource. Still authoritative-sync an empty direct ACL so an adopted
+# agent cannot retain hand-added CAN_RUN. set-acls audits and prints every
+# removal and fails closed when it cannot read the current ACL.
+resource "null_resource" "genie_space_acls_removal_only" {
+  for_each = {
+    for k, v in local.existing_spaces : k => v
+    if lookup(local.genie_space_groups, k, "") != ""
+    && lookup(local.genie_space_acl_groups, k, "") == ""
+  }
+
+  triggers = {
+    space_id = each.value.genie_space_id
+    groups   = ""
+    withheld = join(",", local.genie_space_can_run_withheld[each.key])
+  }
+
+  provisioner "local-exec" {
+    command = var.genie_script_path == "" ? "true" : "${var.genie_script_path} set-acls"
+
+    environment = {
+      DATABRICKS_HOST          = var.databricks_workspace_host
+      DATABRICKS_CLIENT_ID     = var.databricks_client_id
+      DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
+      GENIE_SPACE_OBJECT_ID    = each.value.genie_space_id
+      GENIE_GROUPS_CSV         = ""
+      GENIE_ALLOW_EMPTY_ACL    = "1"
+    }
+  }
+
+  depends_on = [databricks_mws_permission_assignment.group_assignments]
+}
+
 # ── Existing spaces: apply config (when genie_space_configs is defined) ───────
 
 resource "null_resource" "genie_space_config_existing" {
   for_each = local.existing_spaces_with_config
 
   triggers = {
-    space_id        = each.value.genie_space_id
-    description     = each.value.config.description
-    questions       = jsonencode(each.value.config.sample_questions)
-    instructions    = each.value.config.instructions
-    benchmarks      = jsonencode(each.value.config.benchmarks)
-    sql_filters     = jsonencode(each.value.config.sql_filters)
-    sql_measures    = jsonencode(each.value.config.sql_measures)
-    sql_expressions = jsonencode(each.value.config.sql_expressions)
-    join_specs      = jsonencode(each.value.config.join_specs)
+    space_id           = each.value.genie_space_id
+    description        = each.value.config.description
+    questions          = jsonencode(each.value.config.sample_questions)
+    instructions       = each.value.config.instructions
+    benchmarks         = jsonencode(each.value.config.benchmarks)
+    sql_filters        = jsonencode(each.value.config.sql_filters)
+    sql_measures       = jsonencode(each.value.config.sql_measures)
+    sql_expressions    = jsonencode(each.value.config.sql_expressions)
+    join_specs         = jsonencode(each.value.config.join_specs)
+    warehouse_id       = each.value.configured_sql_warehouse_id == null ? "" : each.value.configured_sql_warehouse_id
+    warehouse_explicit = (each.value.configured_sql_warehouse_id == null ? "" : each.value.configured_sql_warehouse_id) != "" ? "1" : "0"
   }
 
   provisioner "local-exec" {
@@ -199,6 +234,8 @@ resource "null_resource" "genie_space_config_existing" {
       GENIE_SQL_EXPRESSIONS    = jsonencode(each.value.config.sql_expressions)
       GENIE_SQL_MEASURES       = jsonencode(each.value.config.sql_measures)
       GENIE_JOIN_SPECS         = jsonencode(each.value.config.join_specs)
+      GENIE_WAREHOUSE_ID       = self.triggers.warehouse_id
+      GENIE_WAREHOUSE_EXPLICIT = self.triggers.warehouse_explicit
     }
   }
 
@@ -285,6 +322,7 @@ resource "null_resource" "genie_space_config" {
     sql_measures    = jsonencode(each.value.config.sql_measures)
     sql_expressions = jsonencode(each.value.config.sql_expressions)
     join_specs      = jsonencode(each.value.config.join_specs)
+    warehouse_id    = each.value.sql_warehouse_id != "" ? each.value.sql_warehouse_id : local.shared_warehouse_id
     space_create_id = terraform_data.genie_space[each.key].id
   }
 
@@ -302,19 +340,21 @@ resource "null_resource" "genie_space_config" {
         ? each.value.sql_warehouse_id
         : local.shared_warehouse_id
       )
-      GENIE_TITLE            = each.value.config.title != "" ? each.value.config.title : each.value.name
-      GENIE_DESCRIPTION      = each.value.config.description
-      GENIE_SAMPLE_QUESTIONS = jsonencode(each.value.config.sample_questions)
-      GENIE_INSTRUCTIONS     = each.value.config.instructions
-      GENIE_BENCHMARKS       = jsonencode(each.value.config.benchmarks)
-      GENIE_SQL_FILTERS      = jsonencode(each.value.config.sql_filters)
-      GENIE_SQL_EXPRESSIONS  = jsonencode(each.value.config.sql_expressions)
-      GENIE_SQL_MEASURES     = jsonencode(each.value.config.sql_measures)
-      GENIE_JOIN_SPECS       = jsonencode(each.value.config.join_specs)
+      GENIE_WAREHOUSE_EXPLICIT        = (each.value.configured_sql_warehouse_id == null ? "" : each.value.configured_sql_warehouse_id) != "" ? "1" : "0"
+      GENIE_WAREHOUSE_CREATED_DEFAULT = "1"
+      GENIE_TITLE                     = each.value.config.title != "" ? each.value.config.title : each.value.name
+      GENIE_DESCRIPTION               = each.value.config.description
+      GENIE_SAMPLE_QUESTIONS          = jsonencode(each.value.config.sample_questions)
+      GENIE_INSTRUCTIONS              = each.value.config.instructions
+      GENIE_BENCHMARKS                = jsonencode(each.value.config.benchmarks)
+      GENIE_SQL_FILTERS               = jsonencode(each.value.config.sql_filters)
+      GENIE_SQL_EXPRESSIONS           = jsonencode(each.value.config.sql_expressions)
+      GENIE_SQL_MEASURES              = jsonencode(each.value.config.sql_measures)
+      GENIE_JOIN_SPECS                = jsonencode(each.value.config.join_specs)
     }
   }
 
-  depends_on = [terraform_data.genie_space]
+  depends_on = [terraform_data.genie_space, databricks_sql_endpoint.warehouse]
 }
 
 # ── New spaces: apply ACLs ────────────────────────────────────────────────────
@@ -355,6 +395,39 @@ resource "null_resource" "genie_space_acls_created" {
     environment = {
       GENIE_ID_BASENAME       = ".genie_space_id_${each.key}"
       GENIE_REVOKE_GROUPS_CSV = self.triggers.groups
+    }
+  }
+
+  depends_on = [terraform_data.genie_space]
+}
+
+# Same removal-only sync for spaces reached through the create path. If create
+# title-adopts an existing agent, this clears and reports its hand-added direct
+# ACL without ever granting the groups withheld above. A genuinely new agent
+# simply has an already-empty direct ACL.
+resource "null_resource" "genie_space_acls_created_removal_only" {
+  for_each = {
+    for k, v in local.new_spaces : k => v
+    if lookup(local.genie_space_groups, k, "") != ""
+    && lookup(local.genie_space_acl_groups, k, "") == ""
+  }
+
+  triggers = {
+    groups          = ""
+    withheld        = join(",", local.genie_space_can_run_withheld[each.key])
+    space_create_id = terraform_data.genie_space[each.key].id
+  }
+
+  provisioner "local-exec" {
+    command = "${var.genie_script_path} set-acls"
+
+    environment = {
+      DATABRICKS_HOST          = var.databricks_workspace_host
+      DATABRICKS_CLIENT_ID     = var.databricks_client_id
+      DATABRICKS_CLIENT_SECRET = var.databricks_client_secret
+      GENIE_ID_FILE            = "${var.genie_id_file_prefix}_${each.key}"
+      GENIE_GROUPS_CSV         = ""
+      GENIE_ALLOW_EMPTY_ACL    = "1"
     }
   }
 

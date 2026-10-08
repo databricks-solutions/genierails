@@ -35,9 +35,12 @@ SPACE_CONFIG = (
     "benchmarks = [], sql_filters = [], sql_expressions = [], sql_measures = [], join_specs = [], "
     'acl_groups = ["analysts"] }'
 )
+# A non-empty description makes the legacy module manage the attached agent's
+# config, so the upgrade plan exposes the new warehouse trigger behavior.
+ATTACHED_SPACE_CONFIG = SPACE_CONFIG.replace('description = ""', 'description = "attached"')
 WORKSPACE_SPACES = (
     "{ "
-    f'sales = {{ name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], {SPACE_CONFIG} }}, '
+    f'sales = {{ name = "Sales", genie_space_id = "space-1", sql_warehouse_id = "warehouse", uc_tables = [], {ATTACHED_SPACE_CONFIG} }}, '
     f'ops = {{ name = "Ops", genie_space_id = "", sql_warehouse_id = "warehouse", uc_tables = ["cat.sch.customers"], {SPACE_CONFIG} }} '
     "}"
 )
@@ -489,10 +492,25 @@ def test_released_data_access_state_plans_no_change_after_the_retirement(tmp_pat
 def test_released_workspace_state_plans_no_change_after_the_retirement(tmp_path):
     runs = _upgrade_runs(tmp_path, "workspace", WORKSPACE_TEST)
 
-    # Released env: both Genie agents and both CAN_RUN ACLs (existing and
-    # created agent) stay exactly as applied, also while exposure is blocked.
-    _assert_no_change(runs["released_upgrade_plan"])
-    _assert_no_change(runs["released_upgrade_plan_while_exposure_is_blocked"])
+    # Adding the effective warehouse to config triggers causes one safe
+    # in-place update of the created agent; agents and ACLs are never replaced.
+    warehouse_refresh = {
+        ('null_resource.genie_space_config["ops"]', "will be updated in-place"),
+        ('null_resource.genie_space_config_existing["sales"]', "will be updated in-place"),
+    }
+    assert _changes(runs["released_upgrade_plan"]) == warehouse_refresh
+    assert _changes(runs["released_upgrade_plan_while_exposure_is_blocked"]) == warehouse_refresh
+    # The module's top-level warehouse is only a creation default. The attached
+    # sales agent has no raw per-space override, so its trigger remains empty
+    # and update-config receives no warehouse to send.
+    module_source = (SHARED / "modules/workspace/main.tf").read_text()
+    existing_block = module_source[
+        module_source.index('resource "null_resource" "genie_space_config_existing"'):
+        module_source.index("# ── New spaces: create")
+    ]
+    assert "GENIE_WAREHOUSE_ID       = self.triggers.warehouse_id" in existing_block
+    assert "GENIE_WAREHOUSE_EXPLICIT = self.triggers.warehouse_explicit" in existing_block
+    assert "GENIE_WAREHOUSE_ID       = each.value.sql_warehouse_id" not in existing_block
 
     # Never released: withheld while blocked; once the gate allows it, only the
     # CAN_RUN ACLs are added and no agent is replaced.
@@ -500,4 +518,6 @@ def test_released_workspace_state_plans_no_change_after_the_retirement(tmp_path)
     assert _changes(runs["never_released_upgrade_grants_through_the_gate"]) == {
         ('null_resource.genie_space_acls["sales"]', "will be created"),
         ('null_resource.genie_space_acls_created["ops"]', "will be created"),
+        ('null_resource.genie_space_config["ops"]', "will be updated in-place"),
+        ('null_resource.genie_space_config_existing["sales"]', "will be updated in-place"),
     }

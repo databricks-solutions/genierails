@@ -69,14 +69,21 @@ variable "warehouse_name" {
   description = "Name of the auto-created serverless warehouse."
 }
 
+variable "retain_auto_warehouse" {
+  type        = bool
+  default     = false
+  description = "Keep a previously auto-created warehouse managed while agents transition to an explicit warehouse."
+}
+
 # ── Multi-space Genie variables ───────────────────────────────────────────────
 
 variable "genie_spaces" {
   type = map(object({
-    name             = string
-    genie_space_id   = string
-    sql_warehouse_id = string
-    uc_tables        = list(string)
+    name                        = string
+    genie_space_id              = string
+    sql_warehouse_id            = string
+    configured_sql_warehouse_id = optional(string, "")
+    uc_tables                   = list(string)
     config = object({
       title            = string
       description      = string

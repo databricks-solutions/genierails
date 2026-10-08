@@ -86,7 +86,13 @@ locals {
     workspace_host = lower(trimsuffix(trimspace(var.databricks_workspace_host), "/"))
     workspace_id   = trimspace(var.databricks_workspace_id)
   }))
-  _own_state       = fileexists("${var.env_dir}/terraform.tfstate") ? try(jsondecode(file("${var.env_dir}/terraform.tfstate")), null) : null
+  _own_state = fileexists("${var.env_dir}/terraform.tfstate") ? try(jsondecode(file("${var.env_dir}/terraform.tfstate")), null) : null
+  retain_auto_warehouse = anytrue([
+    for resource in try(local._own_state.resources, []) :
+    try(resource.module, "") == "module.data_access" &&
+    try(resource.type, "") == "databricks_sql_endpoint" &&
+    try(resource.name, "") == "warehouse" && length(try(resource.instances, [])) > 0
+  ])
   _applied_record  = try(local._own_state.outputs.coverage_gate.value, null)
   _state_is_for_us = try(tostring(local._applied_record.deployment_binding), "") == local.deployment_binding
   applied_table_grants = local._state_is_for_us ? flatten([
@@ -396,6 +402,7 @@ module "data_access" {
   fgac_policies                   = var.fgac_policies
   sql_warehouse_id                = var.sql_warehouse_id
   warehouse_name                  = var.warehouse_name
+  retain_auto_warehouse           = local.retain_auto_warehouse
   masking_sql_file                = "${var.env_dir}/masking_functions.sql"
   deploy_masking_script           = "${local.project_root}/deploy_masking_functions.py"
   auth_file                       = "${var.env_dir}/auth.auto.tfvars"

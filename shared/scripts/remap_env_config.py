@@ -115,14 +115,16 @@ def _deployed_space_keys(dest_env_dir: str) -> dict[str, list[str]]:
     return keys
 
 
-def _promoted_access_tier_groups(cfg: dict, source_env_dir: str) -> list[str]:
-    """Carry the source's access_tier_groups so prod consumes the same tiers."""
+def _promoted_access_tier_groups(cfg: dict, source_env_dir: str, dest_cfg: dict) -> list[str]:
+    """Preserve destination tiers on re-promote; seed them from source initially."""
     shared_root = str(Path(__file__).resolve().parent.parent)
     if shared_root not in sys.path:
         sys.path.insert(0, shared_root)
     from access_tier_groups import promoted_lines
 
     try:
+        if "access_tier_groups" in dest_cfg:
+            return ["", "access_tier_groups = " + json.dumps(dest_cfg["access_tier_groups"])]
         return promoted_lines(cfg, Path(source_env_dir) / "env.auto.tfvars")
     except ValueError as e:
         print(f"ERROR: {e}")
@@ -378,6 +380,12 @@ def main():
         id_file = Path(dest_env_dir) / f".genie_space_id_{old_key}"
         if id_file.exists():
             print(f"         mv '{id_file}' '{id_file.with_name(f'.genie_space_id_{new_key}')}'")
+        adopted_marker = Path(dest_env_dir) / f".genie_adopted_{old_key}"
+        if adopted_marker.exists():
+            print(
+                f"         mv '{adopted_marker}' "
+                f"'{adopted_marker.with_name(f'.genie_adopted_{new_key}')}'"
+            )
         sys.exit(1)
 
     # Preserve destination-owned settings across remediation re-promotions.
@@ -495,8 +503,13 @@ def main():
                 f"  Preserved destination Genie space {name!r} "
                 f"sql_warehouse_id={space_warehouse!r}"
             )
-        if "acl_groups" in space:
-            acl_groups = space["acl_groups"]
+        # An existing destination space owns its ACL intent, including deliberate
+        # omission (derive from destination policy) and explicit []. First promote
+        # seeds from the source; later ACL changes are reviewed directly in prod.
+        is_repromote = bool(dest_space)
+        acl_source = dest_space if is_repromote else space
+        if "acl_groups" in acl_source:
+            acl_groups = acl_source["acl_groups"]
             if acl_groups is not None and (
                 not isinstance(acl_groups, list) or not all(
                     isinstance(group, str) for group in acl_groups
@@ -510,6 +523,36 @@ def main():
             if acl_groups is not None:
                 rendered_acl = ", ".join(json.dumps(group) for group in acl_groups)
                 lines.append(f"    acl_groups       = [{rendered_acl}]")
+        if is_repromote:
+            if "acl_groups" in dest_space:
+                print(
+                    f"  Preserved destination Genie space {name!r} "
+                    f"acl_groups={dest_space['acl_groups']!r}"
+                )
+            else:
+                print(
+                    f"  Preserved destination Genie space {name!r} omitted acl_groups "
+                    "(destination policy derivation remains authoritative)"
+                )
+            source_acl = space.get("acl_groups")
+            dest_acl = dest_space.get("acl_groups")
+            if isinstance(source_acl, list) and isinstance(dest_acl, list):
+                added = sorted(set(source_acl) - set(dest_acl))
+                revoked = sorted(set(dest_acl) - set(source_acl))
+                if added or revoked:
+                    print(
+                        f"  Genie ACL diff for {name!r} (dev vs prod): "
+                        f"added in dev={added!r}; revoked in dev={revoked!r}. "
+                        "To change prod, edit envs/prod/env.auto.tfvars in a PR."
+                    )
+            elif source_acl != dest_acl:
+                source_display = repr(source_acl) if isinstance(source_acl, list) else "<derived>"
+                dest_display = repr(dest_acl) if isinstance(dest_acl, list) else "<derived>"
+                print(
+                    f"  Genie ACL diff for {name!r} (dev vs prod): "
+                    f"dev={source_display}; prod={dest_display}. "
+                    "To change prod, edit envs/prod/env.auto.tfvars in a PR."
+                )
         lines.append("  },")
     lines.append("]")
     lines.append("")
@@ -534,7 +577,7 @@ def main():
         lines.append("coverage_acknowledged_columns = [")
         lines.extend(f"  {json.dumps(column)}," for column in preserved_acknowledged)
         lines.append("]")
-    lines.extend(_promoted_access_tier_groups(cfg, source_env_dir))
+    lines.extend(_promoted_access_tier_groups(cfg, source_env_dir, dest_cfg))
 
     # Write
     os.makedirs(dest_env_dir, exist_ok=True)

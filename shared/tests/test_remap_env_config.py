@@ -8,6 +8,47 @@ import pytest
 from scripts import remap_env_config
 
 
+def test_repromote_preserves_destination_space_acl_and_access_tiers(tmp_path, monkeypatch, capsys):
+    source, dest = tmp_path / "dev", tmp_path / "prod"
+    source.mkdir(); dest.mkdir()
+    (source / "env.auto.tfvars").write_text('''
+genie_spaces = [{ name = "Sales" uc_tables = ["dev.s.t"] acl_groups = ["dev-users"] }]
+uc_tables = ["dev.s.t"]
+access_tier_groups = ["dev-admin", "dev-users"]
+''')
+    (dest / "env.auto.tfvars").write_text('''
+genie_spaces = [{ name = "Sales" uc_tables = ["prod.s.t"] acl_groups = ["prod-only"] }]
+uc_tables = ["prod.s.t"]
+access_tier_groups = ["prod-admin", "prod-only"]
+''')
+    monkeypatch.setattr(sys, "argv", ["remap_env_config.py", str(source), str(dest), "dev=prod"])
+    remap_env_config.main()
+    import hcl2
+    result = hcl2.load((dest / "env.auto.tfvars").open())
+    assert result["genie_spaces"][0]["acl_groups"] == ["prod-only"]
+    assert result["access_tier_groups"] == ["prod-admin", "prod-only"]
+    output = capsys.readouterr().out
+    assert "Preserved destination Genie space 'Sales' acl_groups=['prod-only']" in output
+    assert "added in dev=['dev-users']; revoked in dev=['prod-only']" in output
+    assert "edit envs/prod/env.auto.tfvars in a PR" in output
+
+
+def test_repromote_preserves_destination_acl_omission(tmp_path, monkeypatch, capsys):
+    source, dest = tmp_path / "dev", tmp_path / "prod"
+    source.mkdir(); dest.mkdir()
+    (source / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "Sales" uc_tables = ["dev.s.t"] acl_groups = ["dev-users"] }]\n'
+    )
+    (dest / "env.auto.tfvars").write_text(
+        'genie_spaces = [{ name = "Sales" uc_tables = ["prod.s.t"] }]\n'
+    )
+    monkeypatch.setattr(sys, "argv", ["remap_env_config.py", str(source), str(dest), "dev=prod"])
+    remap_env_config.main()
+    result = hcl2.load((dest / "env.auto.tfvars").open())
+    assert "acl_groups" not in result["genie_spaces"][0]
+    assert "omitted acl_groups" in capsys.readouterr().out
+
+
 def test_table_only_promotion_preserves_and_remaps_top_level_uc_tables(tmp_path, monkeypatch):
     source = tmp_path / "dev"
     dest = tmp_path / "prod"
@@ -647,6 +688,7 @@ def _deployed_state(dest, key):
         for name in ("genie_space_create", "genie_space_config")
     ]}))
     (dest / f".genie_space_id_{key}").write_text("01live\n")
+    (dest / f".genie_adopted_{key}").touch()
 
 
 def test_rename_of_an_already_deployed_space_refuses_with_state_mv_guidance(
@@ -674,6 +716,7 @@ def test_rename_of_an_already_deployed_space_refuses_with_state_mv_guidance(
             f"'module.workspace.null_resource.{name}[\"walkthrough_prod_cat_demo\"]'"
         ) in out
     assert ".genie_space_id_walkthrough_prod_cat_demo" in out
+    assert ".genie_adopted_walkthrough_prod_cat_demo" in out
     assert (dest / "env.auto.tfvars").read_text() == "business_access_enabled = true\n"
 
 

@@ -181,6 +181,12 @@ variable "sql_warehouse_id" {
   description = "Existing SQL warehouse ID to reuse for governance execution."
 }
 
+variable "retain_auto_warehouse" {
+  type        = bool
+  default     = false
+  description = "Keep a previously auto-created warehouse managed after selecting an explicit warehouse."
+}
+
 variable "warehouse_name" {
   type        = string
   default     = "ABAC Serverless Warehouse"

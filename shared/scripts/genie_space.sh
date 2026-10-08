@@ -314,6 +314,60 @@ set_genie_acls() {
   local body="{\"access_control_list\": ${access_control}}"
   local path="/api/2.0/permissions/genie/${space_id}"
 
+  # PUT is intentionally authoritative. Read first so every direct grant that
+  # config will remove is visible; inherited grants are not part of PUT.
+  local current current_code current_body
+  current=$(curl -s -w "\n%{http_code}" \
+    -H "${UA_HEADER}" -H "Authorization: Bearer ${token}" \
+    "${workspace_url}${path}") || current=""
+  current_code=$(printf '%s\n' "$current" | tail -n1)
+  current_body=$(printf '%s\n' "$current" | sed '$d')
+  local acl_audit=""
+  if [[ "$current_code" == "200" ]]; then
+    if ! acl_audit=$(CONFIGURED_GROUPS="$GENIE_GROUPS_CSV" python3 -c '
+import json, os, sys
+configured = {g for g in os.environ.get("CONFIGURED_GROUPS", "").split(",") if g}
+body = json.load(sys.stdin)
+if not isinstance(body, dict) or not isinstance(body.get("access_control_list"), list):
+    raise ValueError("response must contain access_control_list")
+for ace in body["access_control_list"]:
+    if not isinstance(ace, dict) or not isinstance(ace.get("all_permissions"), list):
+        raise ValueError("each ACL entry must contain all_permissions")
+    direct = [p for p in ace["all_permissions"] if isinstance(p, dict) and not p.get("inherited")]
+    if not direct:
+        continue
+    fields = (("group", "group_name"), ("user", "user_name"), ("sp", "service_principal_name"))
+    kind, field = next(((kind, field) for kind, field in fields if ace.get(field)), (None, None))
+    if not field:
+        raise ValueError("ACL entry has no supported principal")
+    principal = ace[field]
+    display = ace.get("display_name")
+    label = f"{kind}:{principal}" + (f" [{display}]" if display and display != principal else "")
+    levels = sorted({p.get("permission_level", "UNKNOWN") for p in direct})
+    if kind == "group" and principal in configured:
+        for level in levels:
+            if level != "CAN_RUN":
+                print(f"Changing configured Genie access: {label} ({level} -> CAN_RUN)")
+        continue
+    for level in levels:
+        print(f"Removing hand-added Genie access: {label} ({level}) — not in config")
+' <<< "$current_body"); then
+      if [[ "${GENIE_ACL_FORCE:-0}" != "1" ]]; then
+        echo "ERROR: Could not parse current Genie ACL for ${space_id}; refusing authoritative PUT because removals cannot be audited. Set GENIE_ACL_FORCE=1 to override." >&2
+        exit 1
+      fi
+      echo "WARNING: GENIE_ACL_FORCE=1: current Genie ACL for ${space_id} could not be parsed; proceeding with authoritative PUT without a complete removal audit." >&2
+    else
+      [[ -n "$acl_audit" ]] && printf '%s\n' "$acl_audit"
+    fi
+  else
+    if [[ "${GENIE_ACL_FORCE:-0}" != "1" ]]; then
+      echo "ERROR: Could not read current Genie ACL for ${space_id} (HTTP ${current_code:-unknown}); refusing authoritative PUT because removals cannot be audited. Set GENIE_ACL_FORCE=1 to override." >&2
+      exit 1
+    fi
+    echo "WARNING: GENIE_ACL_FORCE=1: current Genie ACL for ${space_id} returned HTTP ${current_code:-unknown}; proceeding with authoritative PUT without a complete removal audit." >&2
+  fi
+
   echo "Putting permissions on Genie agent ${space_id} for groups: ${GENIE_GROUPS[*]}"
   local response
   response=$(curl -s -w "\n%{http_code}" -X PUT \
@@ -350,9 +404,10 @@ create_genie_space() {
   # Adoption required (GENIE_ADOPT_REQUIRED=1, or the marker that
   # genie_adopt_preflight.py --arm writes during the migration) accepts only
   # HTTP 200 and never creates.
-  local adopt_marker="" adopt_required=""
+  local adopt_marker="" adopted_marker="" adopt_required=""
   if [[ -n "${GENIE_ID_FILE:-}" ]]; then
     adopt_marker="$(dirname "${GENIE_ID_FILE}")/.genie_adopt_required_$(basename "${GENIE_ID_FILE}" | sed 's/^\.genie_space_id_//')"
+    adopted_marker="$(dirname "${GENIE_ID_FILE}")/.genie_adopted_$(basename "${GENIE_ID_FILE}" | sed 's/^\.genie_space_id_//')"
   fi
   if [[ "${GENIE_ADOPT_REQUIRED:-}" == "1" || ( -n "$adopt_marker" && -f "$adopt_marker" ) ]]; then
     adopt_required=1
@@ -398,6 +453,7 @@ create_genie_space() {
     fi
     printf '%s\n' "${matching_ids[0]}" > "$GENIE_ID_FILE"
     [[ -n "$adopt_marker" ]] && rm -f "$adopt_marker"
+    [[ -n "$adopted_marker" ]] && : > "$adopted_marker"
     echo "Adopted existing Genie agent ${matching_ids[0]} titled \"${title}\" instead of creating a duplicate"
     echo "Done. Genie agent ID: ${matching_ids[0]}"
     return 0
@@ -490,6 +546,7 @@ PYEOF
 
   if [[ -n "${GENIE_ID_FILE:-}" ]]; then
     echo "$space_id" > "$GENIE_ID_FILE"
+    [[ -n "$adopted_marker" ]] && rm -f "$adopted_marker"
     echo "Space ID saved to ${GENIE_ID_FILE}"
   fi
 
@@ -523,6 +580,28 @@ update_genie_config() {
     echo "ERROR: No Genie agent ID available for update-config." >&2
     echo "  Set GENIE_SPACE_OBJECT_ID (for existing spaces) or ensure GENIE_ID_FILE exists (for auto-created spaces)." >&2
     exit 1
+  fi
+
+  # Only offer a warehouse change when config explicitly selected one, and
+  # only when it differs from the live attachment. This keeps unrelated config
+  # updates from resetting adopted or hand-adjusted agents.
+  local adopted_marker=""
+  if [[ -n "${GENIE_ID_FILE:-}" ]]; then
+    adopted_marker="$(dirname "${GENIE_ID_FILE}")/.genie_adopted_$(basename "${GENIE_ID_FILE}" | sed 's/^\.genie_space_id_//')"
+  fi
+  if [[ -n "${GENIE_WAREHOUSE_ID:-}" ]] && { [[ "${GENIE_WAREHOUSE_EXPLICIT:-0}" == "1" ]] || { [[ "${GENIE_WAREHOUSE_CREATED_DEFAULT:-0}" == "1" ]] && [[ ! -f "$adopted_marker" ]]; }; }; then
+    local current_agent current_warehouse
+    current_agent=$(curl -sf -H "${UA_HEADER}" -H "Authorization: Bearer ${token}" \
+      "${workspace_url}/api/2.0/genie/spaces/${space_id}") || {
+      echo "ERROR: could not read Genie agent ${space_id} to compare its warehouse." >&2
+      exit 1
+    }
+    current_warehouse=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("warehouse_id", ""))' <<< "$current_agent") || exit 1
+    if [[ "$current_warehouse" == "$GENIE_WAREHOUSE_ID" ]]; then
+      unset GENIE_WAREHOUSE_ID
+    fi
+  else
+    unset GENIE_WAREHOUSE_ID
   fi
 
   # An agent attached by genie_space_id alone keeps the tables it already has
@@ -893,6 +972,16 @@ trash_genie_space() {
     echo "ERROR: Cannot identify Genie agent to trash: ID file missing or empty at ${GENIE_ID_FILE:-<not set>}." >&2
     echo "Refusing to continue because this would orphan the live space." >&2
     exit 1
+  fi
+
+  local adopted_marker=""
+  if [[ -n "${GENIE_ID_FILE:-}" ]]; then
+    adopted_marker="$(dirname "${GENIE_ID_FILE}")/.genie_adopted_$(basename "${GENIE_ID_FILE}" | sed 's/^\.genie_space_id_//')"
+  fi
+  if [[ -n "$adopted_marker" && -f "$adopted_marker" ]]; then
+    echo "Unmanaging adopted Genie agent ${space_id}; leaving the agent in place."
+    rm -f "${GENIE_ID_FILE}" "$adopted_marker"
+    return 0
   fi
 
   local token
