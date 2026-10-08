@@ -185,6 +185,18 @@ def _semantic_from_tag(tag_name: str, tag_value: str) -> str | None:
     return None
 
 
+def sensitive_class_semantic(tag_name: str, tag_value: str) -> str | None:
+    """The semantic of a native ``class.*`` tag that marks sensitive data, else None.
+
+    Sensitive means a semantic GenieRails governs (``_CLASS_TO_GOVERNED``: PII
+    such as email, phone, SSN/national IDs, name, address, date of birth, bank
+    account, and PCI card data). Unmapped semantics (e.g. an identifier type)
+    and non-class tags return None.
+    """
+    semantic = _semantic_from_tag(tag_name, tag_value)
+    return semantic if semantic and semantic in _CLASS_TO_GOVERNED else None
+
+
 class ClassificationSource(SensitivitySource):
     """Sensitivity findings sourced from native UC Data Classification.
 

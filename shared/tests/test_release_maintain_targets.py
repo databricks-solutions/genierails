@@ -82,6 +82,7 @@ def test_release_runs_unified_pipeline_in_order_and_writes_no_receipt(tmp_path):
     result = _make("release", env_dir, stub, audit, "VERIFY_KEY_COLUMN= customer_id ")
     assert result.returncode == 0, result.stdout + result.stderr
     assert _calls(log) == [
+        ["--no-print-directory", "_verify-access-keys-readonly", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],
         ["derive-assignments", "ENV=prod"],
         ["validate-generated", "ENV=prod"],
         ["coverage-gate", "ENV=prod"],
@@ -105,7 +106,7 @@ def test_release_coverage_failure_never_applies(tmp_path):
     result = _make("release", env_dir, stub, audit)
     assert result.returncode != 0
     assert [c[0] if c[0] != "--no-print-directory" else c[1] for c in _calls(log)] == [
-        "derive-assignments", "validate-generated", "coverage-gate"]
+        "_verify-access-keys-readonly", "derive-assignments", "validate-generated", "coverage-gate"]
     assert (env_dir / "env.auto.tfvars").read_text() == RELEASED_ENV_FILE
     assert not list(env_dir.rglob(".certified*"))
 
@@ -192,8 +193,8 @@ def test_rulebook_drift_blocks_release_before_access_apply(tmp_path):
     result = _make("release", env_dir, stub, audit)
     assert result.returncode != 0
     names = [c[1] if c[0] == "--no-print-directory" else c[0] for c in _calls(log)]
-    assert names == ["derive-assignments", "validate-generated", "coverage-gate", "promote",
-                     "verify-access-keys", "audit-rulebook"]
+    assert names == ["_verify-access-keys-readonly", "derive-assignments", "validate-generated",
+                     "coverage-gate", "promote", "verify-access-keys", "audit-rulebook"]
     assert "reported drift" in result.stderr
     assert "no new or wider business access was applied" in result.stderr
     assert (env_dir / "env.auto.tfvars").read_text() == RELEASED_ENV_FILE
@@ -320,7 +321,9 @@ def test_targets_refuse_while_env_lock_is_held(tmp_path, target):
     stub, log, audit = _stub(tmp_path)
     result = _make(target, env_dir, stub, audit)
     assert result.returncode != 0
-    assert not _calls(log)
+    # Only release's read-only key check runs before the lock; nothing after it.
+    assert _calls(log) == ([["--no-print-directory", "_verify-access-keys-readonly", "ENV=prod"]]
+                           if target == "release" else [])
     assert "held by make maintain" in result.stderr
     assert (env_dir / lock.LOCK_RELPATH).exists()
     lock.release_lock(env_dir, os.getpid())
@@ -359,7 +362,8 @@ def test_malformed_lock_is_treated_as_held(tmp_path, content):
     path.write_text(content)
     stub, log, audit = _stub(tmp_path)
     result = _make("release", env_dir, stub, audit)
-    assert result.returncode != 0 and not _calls(log)
+    assert result.returncode != 0
+    assert _calls(log) == [["--no-print-directory", "_verify-access-keys-readonly", "ENV=prod"]]
     assert "cannot determine the owner" in result.stderr
     assert path.read_text() == content
 

@@ -113,50 +113,91 @@ def key_proven(result_file: Path | None, value: str) -> bool:
         return False
 
 
-def proven_table_keys(result_file: Path | None) -> dict[str, str]:
-    """{table: key} verify-access proved (every mask check on the table passed), if it passed."""
+def _read_result(result_file: Path | None) -> dict:
     if result_file is None:
         return {}
     try:
         result = json.loads(result_file.read_text())
-        if result.get("passed") is not True:
-            return {}
-        proven = result.get("mask_keys_proven_by_table") or {}
-        if not isinstance(proven, dict):
-            return {}
-        return {str(t).strip(): str(k).strip() for t, k in proven.items()
-                if isinstance(t, str) and isinstance(k, str) and t.strip() and k.strip()}
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, ValueError):
         return {}
+    return result if isinstance(result, dict) else {}
+
+
+def _key_map(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {t.strip(): k.strip() for t, k in value.items()
+            if isinstance(t, str) and isinstance(k, str) and t.strip() and k.strip()}
+
+
+def proven_table_keys(result_file: Path | None) -> dict[str, str]:
+    """{table: key} for every masked table, when verify-access passed and proved
+    a key for each of them ({} otherwise: a partial proof is never saved)."""
+    result = _read_result(result_file)
+    proven = _key_map(result.get("mask_keys_proven_by_table"))
+    tables = result.get("masked_tables")
+    if (result.get("passed") is not True or result.get("mask_keys_complete") is not True
+            or not isinstance(tables, list) or not tables
+            or {str(t).lower() for t in tables} != {t.lower() for t in proven}):
+        return {}
+    return proven
+
+
+def _saved_record(result_file: Path) -> Path:
+    """What save_table_keys last wrote, so it can tell its own entries from yours."""
+    return result_file.with_name(".verify_key_columns.saved.json")
 
 
 def save_table_keys(env_file: Path, result_file: Path | None) -> int:
-    """Merge the per-table keys verify-access proved into verify_key_columns."""
+    """Write verify_key_columns as exactly the keys this run proved.
+
+    Only after a run that proved a key for EVERY masked table. Entries for
+    tables that are no longer masked are dropped if this tool saved them, and
+    kept (with a note) if you wrote them; nothing is saved after a partial run.
+    """
+    result = _read_result(result_file)
     proven = proven_table_keys(result_file)
     if not proven:
+        tables = result.get("masked_tables") if isinstance(result.get("masked_tables"), list) else []
+        if tables:
+            missing = sorted(set(map(str, tables)) - set(_key_map(result.get("mask_keys_proven_by_table"))))
+            print("NOTE: verify_key_columns not saved: verify-access did not prove every masked "
+                  "table's row-pairing key" + (f" (unproven: {', '.join(missing)})" if missing else "")
+                  + "; fix them and re-run.")
         return 0
     if not env_file.is_file():
         print(f"NOTE: {display_path(env_file)} not found; verify_key_columns not saved.")
         return 0
+    record = _saved_record(result_file)
+    try:
+        ours = {t.lower(): k for t, k in _key_map(json.loads(record.read_text())).items()}
+    except (OSError, ValueError):
+        ours = {}
     try:
         saved = normalize_key_map(_load(env_file).get("verify_key_columns"))
-        merged = {t: k for t, k in saved.items() if t.lower() not in {p.lower() for p in proven}}
-        merged.update(proven)
-        merged = dict(sorted(merged.items()))
+        proven_lower = {t.lower() for t in proven}
+        kept = {t: k for t, k in saved.items()
+                if t.lower() not in proven_lower and ours.get(t.lower()) != k}
+        dropped = sorted(t for t in saved if t.lower() not in proven_lower and t not in kept)
         changed = set_settings(
-            env_file, {"verify_key_columns": merged},
+            env_file, {"verify_key_columns": dict(sorted({**kept, **proven}.items()))},
             "Row-pairing key per masked table for verify-access (saved after a passing run).",
         )
     except ValueError as exc:
         print(f"NOTE: verify_key_columns not saved: {exc}.")
         return 0
+    record.write_text(json.dumps(dict(sorted(proven.items())), indent=2) + "\n")
     if changed:
         before = {t.lower(): k for t, k in saved.items()}
         new = sorted(f"{t}={k}" for t, k in proven.items() if before.get(t.lower()) != k)
         print(
             f"Saved the proven row-pairing key per table as verify_key_columns in "
-            f"{display_path(env_file)} ({', '.join(new)}); promote carries it."
+            f"{display_path(env_file)}" + (f" ({', '.join(new)})" if new else "")
+            + (f"; removed stale {', '.join(dropped)}" if dropped else "") + "; promote carries it."
         )
+    for table in sorted(kept):
+        print(f"NOTE: kept your verify_key_columns entry for {table} ({kept[table]}): it has no "
+              "masked column in this run; remove it if the table is no longer governed.")
     return 0
 
 

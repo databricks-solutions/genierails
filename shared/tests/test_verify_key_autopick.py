@@ -118,6 +118,8 @@ class FakeWarehouse:
                 return [[name, data_type] for name, data_type in table.columns]
             if "table_constraints" in sql:
                 return [[c] for c in table.pk]
+            if "SELECT column_name, tag_name, tag_value FROM system.information_schema.column_tags" in sql:
+                return [[c, n, v] for c, tags in table.tags.items() for n, v in tags]
         m = re.fullmatch(
             r"SELECT (\w+), (\w+) FROM (\S+)(?: WHERE (\w+) IN \(([^)]*)\))? "
             r"ORDER BY (\w+|\w+ IS NULL DESC, xxhash64\(:salt, \w+\)) LIMIT (\d+)", sql)
@@ -278,7 +280,7 @@ def test_id_like_tie_break_table_singular_then_id_then_other_ids_by_type_then_na
 
 
 @pytest.mark.parametrize("table, expected", [
-    ("c.s.customers", "customer_id"), ("c.s.addresses", "address_id"), ("c.s.categories", "category_id"),
+    ("c.s.customers", "customer_id"), ("c.s.branches", "branch_id"), ("c.s.categories", "category_id"),
     ("c.s.boxes", "box_id"), ("c.s.customer", "customer_id"),
 ])
 def test_singular_table_names(table, expected):
@@ -399,6 +401,54 @@ def test_a_mask_relevant_live_tag_is_named_when_nothing_else_is_left(warehouse, 
             "policy matches) on cat.sch.notes") in capsys.readouterr().err
 
 
+def _people(pk, extra_cols=(), tags=None):
+    cols = [("email", "STRING"), ("ssn", "STRING"), ("contact_ref", "STRING"), ("secret", "STRING"), *extra_cols]
+    rows = [{c: f"{c.upper()}-{i:04d}" for c, _ in cols} for i in range(30)]
+    return {"cat.sch.people": Table(cols, rows, pk=[pk], tags=tags or {})}
+
+
+@pytest.mark.parametrize("pk, tags", [
+    ("email", {}),                                                       # unique, unmasked, untagged PK
+    ("ssn", {}),
+    ("contact_ref", {"contact_ref": [("class.email_address", None)]}),   # PII by its live class.* tag
+])
+def test_a_sensitive_primary_key_is_never_auto_picked(warehouse, tmp_path, capsys, pk, tags):
+    warehouse(FakeWarehouse(_people(pk, tags=tags)))
+    assert _main(tmp_path, "--check-keys-only", masked={"cat.sch.people": "secret"}) == 2   # nothing else: refuse
+    captured = capsys.readouterr()
+    assert no_key_message("cat.sch.people") in captured.err
+    assert f"cat.sch.people: {pk} (" not in captured.out
+
+    warehouse(FakeWarehouse(_people(pk, extra_cols=[("person_id", "STRING")], tags=tags)))
+    assert _main(tmp_path, "--check-keys-only", masked={"cat.sch.people": "secret"}) == 0   # falls through
+    assert "Row-pairing key for cat.sch.people: person_id (id-like column)" in capsys.readouterr().out
+
+
+def test_a_pii_class_tag_in_the_config_also_rules_a_candidate_out(warehouse, tmp_path, capsys):
+    warehouse(FakeWarehouse(_people("contact_ref", extra_cols=[("person_id", "STRING")])))
+    assert _main(tmp_path, "--check-keys-only", masked={"cat.sch.people": "secret"},
+                 extra_tags=[("cat.sch.people.contact_ref", "class.phone_number", "")]) == 0
+    assert "Row-pairing key for cat.sch.people: person_id (id-like column)" in capsys.readouterr().out
+
+
+def test_sensitive_key_reason_uses_the_coverage_and_classification_rules():
+    assert vea.sensitive_key_reason("email") == "its name looks sensitive (email)"
+    assert vea.sensitive_key_reason("ref", [("class.us_ssn", "")]) == "it is classified sensitive (class.us_ssn)"
+    assert vea.sensitive_key_reason("customer_id", [("class.customer_identifier", "")]) == ""
+    assert vea.sensitive_key_reason("total_amount") == ""        # first exposure doesn't block on amounts
+
+
+def test_a_sensitive_override_is_used_with_a_warning(warehouse, tmp_path, capsys):
+    warehouse(FakeWarehouse(_people("email")))
+    env_text = 'verify_key_columns = { "cat.sch.people" = "email" }\n'
+    assert _main(tmp_path, "--check-keys-only", masked={"cat.sch.people": "secret"}, env_text=env_text) == 0
+    out = capsys.readouterr().out
+    assert "Row-pairing key for cat.sch.people: email (verify_key_columns)" in out
+    assert ("WARNING: row-pairing key email (verify_key_columns) on cat.sch.people is used as you set it, "
+            "but its name looks sensitive (email); prefer a non-sensitive id") in out
+    assert "EMAIL-00" not in out
+
+
 def test_class_only_tags_do_not_disqualify_a_candidate(warehouse, tmp_path, capsys):
     tables = sample_tables()
     for t in tables.values():
@@ -492,7 +542,8 @@ def test_a_missing_explicit_key_is_reported_not_replaced(warehouse, tmp_path, ca
     env_text = 'verify_key_columns = { "CAT.SCH.NOTES" = "no_such_col" }\n'
     assert _main(tmp_path, "--check-keys-only", env_text=env_text) == 2
     out = capsys.readouterr().out
-    assert "Row-pairing key for cat.sch.notes: NONE — could not prove row-pairing key no_such_col" in out
+    assert ("Row-pairing key for cat.sch.notes: NONE — row-pairing key no_such_col (verify_key_columns) "
+            "does not exist on cat.sch.notes") in out
 
 
 def test_global_key_is_used_where_present_and_auto_elsewhere(warehouse, tmp_path, capsys):
@@ -559,7 +610,7 @@ def test_mixed_tables_with_different_keys_and_a_leak_still_fails(warehouse, tmp_
     _assert_no_values(captured.out + captured.err, wh.tables)
 
 
-def test_an_unkeyable_table_blocks_release_but_is_not_verified_in_rehearse(warehouse, tmp_path, capsys):
+def test_an_unkeyable_table_fails_release_and_rehearse_and_never_writes_a_pass(warehouse, tmp_path, capsys):
     tables = sample_tables()
     tables["cat.sch.notes"] = Table([("body", "STRING"), ("free_text", "STRING")],
                                     [{"body": "b", "free_text": "f"}],
@@ -569,10 +620,14 @@ def test_an_unkeyable_table_blocks_release_but_is_not_verified_in_rehearse(wareh
     out = capsys.readouterr().out
     assert "✗ [INCONCLUSIVE] column-mask cat.sch.notes.free_text" in out
     assert no_key_message("cat.sch.notes") in out
-    assert _main(tmp_path, "--live") == 0                           # rehearse: reported, not blocking
+    result = tmp_path / "result.json"
+    assert _main(tmp_path, "--live", "--result-file", str(result)) == 1   # rehearse fails too
     out = capsys.readouterr().out
-    assert "! [NOT VERIFIED] column-mask cat.sch.notes.free_text" in out
-    assert "2 passed" in out
+    assert "✗ [INCONCLUSIVE] column-mask cat.sch.notes.free_text" in out
+    assert no_key_message("cat.sch.notes") in out and "NOT VERIFIED" in out
+    proof = json.loads(result.read_text())
+    assert proof["passed"] is False and proof["mask_keys_complete"] is False
+    assert "cat.sch.notes" in proof["masked_tables"] and "cat.sch.notes" not in proof["mask_keys_proven_by_table"]
     _assert_no_values(out, wh.tables)
 
 
@@ -640,38 +695,66 @@ def test_dry_run_names_the_keys_it_will_pick(tmp_path, capsys):
 
 # ── 4. saving the proven map ────────────────────────────────────────────────
 
-def _proof(tmp_path, **payload):
-    path = tmp_path / ".verify_access.json"
-    path.write_text(json.dumps({"passed": True, "mask_checks_passed_by_key": {}, **payload}))
+def _proof(tmp_path, proven=None, *, masked=None, passed=True, **payload):
+    proven = proven or {}
+    masked = sorted(proven) if masked is None else masked
+    path = tmp_path / "generated" / ".verify_access.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({
+        "passed": passed, "masked_tables": masked,
+        "mask_keys_complete": passed and set(masked) <= set(proven),
+        "mask_checks_passed_by_key": {}, "mask_keys_proven_by_table": proven, **payload}))
     return path
 
 
-def test_map_is_saved_only_after_a_passing_proof(tmp_path, capsys):
+PROVEN_MAP = {"cat.sch.customers": "customer_id", "cat.sch.notes": "note_id"}
+
+
+def test_map_is_saved_only_after_every_masked_table_was_proven(tmp_path, capsys):
     env = _env_file(tmp_path, "# keep\nx = 1\n")
-    proven = {"cat.sch.customers": "customer_id", "cat.sch.notes": "note_id"}
-    for payload in ({"passed": False, "mask_keys_proven_by_table": proven}, {"mask_keys_proven_by_table": {}},
-                    {"mask_keys_proven_by_table": ["bad"]}, {}):
-        saved_settings.save_verify_key(env, "", _proof(tmp_path, **payload))
+    for make_proof in (lambda: _proof(tmp_path, PROVEN_MAP, passed=False),
+                       lambda: _proof(tmp_path, {"cat.sch.customers": "customer_id"}, masked=sorted(PROVEN_MAP)),
+                       lambda: _proof(tmp_path, {}, masked=[]), lambda: None):
+        saved_settings.save_verify_key(env, "", make_proof())
         assert env.read_text() == "# keep\nx = 1\n"
-    saved_settings.save_verify_key(env, "", None)
+    assert "verify_key_columns not saved: verify-access did not prove every masked table's row-pairing " \
+           "key (unproven: cat.sch.notes)" in capsys.readouterr().out
+    # A hand-edited result that claims completeness for a partial map is not trusted either.
+    bad = _proof(tmp_path, {"cat.sch.customers": "customer_id"}, masked=sorted(PROVEN_MAP))
+    bad.write_text(bad.read_text().replace('"mask_keys_complete": false', '"mask_keys_complete": true'))
+    saved_settings.save_verify_key(env, "", bad)
     assert env.read_text() == "# keep\nx = 1\n"
 
-    saved_settings.save_verify_key(env, "", _proof(tmp_path, mask_keys_proven_by_table=proven))
-    assert hcl2.loads(env.read_text())["verify_key_columns"] == proven
+    saved_settings.save_verify_key(env, "", _proof(tmp_path, PROVEN_MAP))
+    assert hcl2.loads(env.read_text())["verify_key_columns"] == PROVEN_MAP
     assert env.read_text().startswith("# keep\nx = 1\n")
     assert "Saved the proven row-pairing key per table as verify_key_columns" in capsys.readouterr().out
-    # Idempotent; later proofs merge per table and keep other tables' keys.
-    saved_settings.save_verify_key(env, "", _proof(tmp_path, mask_keys_proven_by_table=proven))
+    saved_settings.save_verify_key(env, "", _proof(tmp_path, PROVEN_MAP))      # idempotent
     assert "Saved" not in capsys.readouterr().out
-    saved_settings.save_verify_key(env, "", _proof(tmp_path, mask_keys_proven_by_table={"cat.sch.payments": "payment_id"}))
-    assert hcl2.loads(env.read_text())["verify_key_columns"] == {**proven, "cat.sch.payments": "payment_id"}
     assert "verify_key_column " not in env.read_text()   # no explicit key: the legacy setting is untouched
+
+
+def test_saving_replaces_the_map_and_drops_only_its_own_stale_entries(tmp_path, capsys):
+    env = _env_file(tmp_path, "")
+    saved_settings.save_verify_key(env, "", _proof(tmp_path, PROVEN_MAP))
+    # The user adds an override for a table this run no longer masks.
+    env.write_text(env.read_text().replace('"cat.sch.notes" = "note_id"',
+                                           '"cat.sch.notes" = "note_id"\n  "cat.sch.legacy" = "legacy_id"'))
+    capsys.readouterr()
+    # notes is no longer masked; payments is new.
+    saved_settings.save_verify_key(env, "", _proof(tmp_path, {"cat.sch.customers": "customer_id",
+                                                               "cat.sch.payments": "payment_id"}))
+    out = capsys.readouterr().out
+    assert hcl2.loads(env.read_text())["verify_key_columns"] == {
+        "cat.sch.customers": "customer_id", "cat.sch.payments": "payment_id",
+        "cat.sch.legacy": "legacy_id"}                       # the user's entry is kept...
+    assert "removed stale cat.sch.notes" in out              # ...the one this tool saved is not
+    assert "kept your verify_key_columns entry for cat.sch.legacy (legacy_id)" in out
 
 
 def test_legacy_explicit_key_is_still_saved(tmp_path):
     env = _env_file(tmp_path, 'verify_key_column = ""\n')
-    proof = _proof(tmp_path, mask_checks_passed_by_key={"customer_id": 2},
-                   mask_keys_proven_by_table={"cat.sch.customers": "customer_id"})
+    proof = _proof(tmp_path, {"cat.sch.customers": "customer_id"}, mask_checks_passed_by_key={"customer_id": 2})
     saved_settings.save_verify_key(env, "customer_id", proof)
     cfg = hcl2.loads(env.read_text())
     assert cfg["verify_key_column"] == "customer_id"
@@ -716,6 +799,7 @@ def _run_make(tmp_path, target, env_name, *extra, result=None, fail=None, cloud=
 
 
 PROVEN = {"passed": True, "mask_checks_passed": 3, "mask_checks_passed_by_key": {"customer_id": 1},
+          "masked_tables": ["dev_cat.sch.customers", "dev_cat.sch.notes"], "mask_keys_complete": True,
           "mask_keys_proven_by_table": {"dev_cat.sch.customers": "customer_id", "dev_cat.sch.notes": "note_id"},
           "row_filter_checks_passed": 0}
 

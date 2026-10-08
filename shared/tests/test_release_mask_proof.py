@@ -208,13 +208,27 @@ def test_release_checks_before_locking_again_before_applying_then_proves_keys(tm
     result = _release(env, overrides)
     assert result.returncode == 0, result.stdout + result.stderr
     names = _names(log)
-    assert names[:3] == ["release-helper require-mask-proof", "lock lock", "release-helper clear-old-receipts"], names
+    assert names[:4] == ["release-helper require-mask-proof", "make _verify-access-keys-readonly",
+                         "lock lock", "release-helper clear-old-receipts"], names
     promote = names.index("make promote")
     assert names[promote + 1] == "release-helper require-mask-proof", names  # re-check on the derived config
     assert names[promote + 2] == "make verify-access-keys", names  # admin key proof before any apply
     assert names.index("make apply") > promote + 2
     assert names[-2:] == ["make verify-access", "lock unlock"], names
     assert "VERIFY_REQUIRE_MASKS=1" in _calls(log)[-2]
+
+
+def test_an_unprovable_key_refuses_before_the_lock_and_applies_nothing(tmp_path):
+    env = _env(tmp_path)
+    log, overrides = _recorders(tmp_path)
+    failing = tmp_path / "make-stub"
+    failing.write_text(f"#!/bin/sh\nprintf 'make %s\\n' \"$*\" >> '{log}'\n"
+                       '[ "$2" = "_verify-access-keys-readonly" ] && exit 2\nexit 0\n')
+    result = _release(env, overrides)
+    assert result.returncode != 0
+    assert _names(log) == ["release-helper require-mask-proof", "make _verify-access-keys-readonly"]
+    assert "nothing was applied and the lock was not taken" in result.stderr
+    assert not (env / "generated" / ".governance.lock").exists()
 
 
 def test_release_verifies_strictly():
