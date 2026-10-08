@@ -48,6 +48,10 @@ DERIVE_ASSIGNMENTS_SCRIPT ?= $(SHARED_ROOT)/scripts/derive_assignments.py
 # Live-API steps of _apply-layer; overridable so tests never reach Databricks.
 IMPORT_EXISTING_SCRIPT ?= $(SHARED_ROOT)/scripts/import_existing.sh
 GENIE_ADOPT_PREFLIGHT_SCRIPT ?= $(SHARED_ROOT)/scripts/genie_adopt_preflight.py
+# Every Genie agent GenieRails created must still have its ID file (state has
+# no agent ID). Runs first on the workspace path of _apply-layer (fails) and
+# _plan-layer (--warn), before any early exit. Local unless a file is missing.
+_GENIE_ID_FILE_CHECK = python3 "$(GENIE_ADOPT_PREFLIGHT_SCRIPT)" "$$env_dir" --id-files --env-name "$$target_env" --runner "$(ROOT_RUNNER)"
 # Optional: override the 'country' field in env.auto.tfvars for this invocation.
 # Comma-separated region codes. Normally set once in env.auto.tfvars.
 # Example: make generate COUNTRY=ANZ   (Australia & NZ)
@@ -549,6 +553,7 @@ maintain: _guard-genie-placeholder ## Reconcile governance (including existing c
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,maintain); \
 	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
 	$(MAKE) --no-print-directory _guarded-bootstrap _guard-workspace-target ENV="$(ENV)" || exit 1; \
+	python3 "$(GENIE_ADOPT_PREFLIGHT_SCRIPT)" "$(ENV_DIR)" --id-files --warn; \
 	echo "=== Schema Drift Audit ($(ENV)) ==="; \
 	(cd "$(ENV_DIR)" && python3 "$(AUDIT_SCHEMA_SCRIPT)"); audit_rc=$$?; \
 	if [ $$audit_rc -ne 0 ]; then \
@@ -708,6 +713,7 @@ _prepare-classification:
 _plan-layer:
 	@set -e; $(_DRY_RUN_GUARD); layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	env_dir="$(LAYER_ENV_DIR)"; \
+	if [ "$$layer" = "workspace" ]; then $(_GENIE_ID_FILE_CHECK) --warn; fi; \
 	if [ ! -f "$$env_dir/abac.auto.tfvars" ]; then \
 		echo "=== Skipping terraform plan ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
 		exit 0; \
@@ -748,6 +754,7 @@ _apply-layer:
 	@set -e; $(_DRY_RUN_GUARD); layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	env_dir="$(LAYER_ENV_DIR)"; \
 	apply_flags="$(if $(filter data_access workspace,$(LAYER)),$(APPLY_FLAGS),)"; \
+	if [ "$$layer" = "workspace" ]; then $(_GENIE_ID_FILE_CHECK); fi; \
 	if [ "$$layer" = "data_access" ]; then $(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$$env_dir")" IMPORT_CLASSIFICATION=1; fi; \
 	if [ ! -f "$$env_dir/abac.auto.tfvars" ]; then \
 		echo "=== Skipping terraform apply ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
