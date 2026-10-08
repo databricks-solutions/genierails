@@ -373,6 +373,137 @@ def unchecked_mask_columns(
     return sorted(f"{t}.{c}" for t, c in required - covered)
 
 
+# Fixed-point exclusion (a raw value the mask maps to itself is not compared)
+# applies only to a mask proven caller-independent and only within bounds, so a
+# near-identity mask can't pass on a handful of changed rows. Any doubt keeps
+# the strict rule: a masked value equal to the raw value is a leak.
+FIXED_POINT_MIN_COMPARED = 5
+FIXED_POINT_MAX_SHARE = 0.10
+
+# Deterministic, caller-independent scalar builtins a fixed-point-eligible mask
+# may call. Anything else (a UDF, an unknown function, identity/session/time
+# or random functions) keeps the strict rule.
+FIXED_POINT_SAFE_CALLS = frozenset({
+    "abs", "array_join", "bround", "cast", "ceil", "ceiling", "char_length", "character_length",
+    "coalesce", "concat", "concat_ws", "date_format", "date_trunc", "day", "dayofmonth",
+    "dayofweek", "dayofyear", "element_at", "floor", "greatest", "hash", "hex", "hour", "if",
+    "ifnull", "initcap", "instr", "isnotnull", "isnull", "last_day", "lcase", "least", "left",
+    "length", "locate", "lower", "lpad", "ltrim", "make_date", "mask", "md5", "minute", "mod",
+    "month", "nullif", "nvl", "nvl2", "overlay", "pmod", "position", "quarter", "regexp_extract",
+    "regexp_replace", "repeat", "replace", "reverse", "right", "round", "rpad", "rtrim", "second",
+    "sha1", "sha2", "sign", "size", "split", "split_part", "substr", "substring",
+    "substring_index", "to_date", "transform", "translate", "trim", "trunc", "try_cast", "ucase",
+    "upper", "weekofyear", "xxhash64", "year",
+})
+# Words that may precede "(" without being a call.
+_SQL_WORDS_BEFORE_PAREN = frozenset({"and", "or", "not", "in", "when", "then", "else", "case",
+                                     "is", "like", "rlike", "ilike", "between", "return"})
+_CALLER_OR_SESSION_WORDS = frozenset({"user", "session_user", "current_user", "current_role",
+                                      "is_member", "is_account_group_member", "is_role_member",
+                                      "now", "rand", "randn", "random", "uuid", "shuffle", "secret",
+                                      "select", "from", "localtimestamp", "input_file_name"})
+
+
+def fixed_point_function_problem(
+    *, routine_body: Any, external_language: Any, is_deterministic: Any, sql_data_access: Any,
+    definition: Any, parameters: int,
+) -> str:
+    """Why a mask function's fixed points can't be trusted ("" when they can).
+
+    Pure. The function must be a deterministic, one-argument SQL function
+    whose body reads no data and calls only FIXED_POINT_SAFE_CALLS: a body
+    that depends on the caller (current_user, is_member, ...), the session or
+    time, or calls a UDF could be the identity for the admin but not for a
+    tier, so its "fixed points" would hide a leak.
+    """
+    from sql_tokenizer import SqlTokenizeError, sql_tokens
+
+    if str(routine_body or "").upper() != "SQL" or str(external_language or "").upper() not in ("", "SQL", "NONE"):
+        return f"the mask function is not a SQL function (body {routine_body!r}, language {external_language!r})"
+    if str(is_deterministic or "").lower() not in ("true", "yes"):
+        return "the mask function is not declared deterministic"
+    if str(sql_data_access or "").upper() in ("READS_SQL_DATA", "MODIFIES_SQL_DATA"):
+        return "the mask function reads or modifies data"
+    if parameters != 1:
+        return f"the mask function takes {parameters} arguments, not exactly one"
+    if not isinstance(definition, str) or not definition.strip():
+        return "the mask function's definition could not be read"
+    try:
+        tokens = sql_tokens(definition)
+    except SqlTokenizeError as exc:
+        return f"the mask function's definition could not be parsed ({exc})"
+    for i, token in enumerate(tokens):
+        if token.startswith("$"):
+            return "the mask function's definition embeds another language"
+        if token in _CALLER_OR_SESSION_WORDS or token.startswith(("current_", "session_", "is_")):
+            return f"the mask function depends on the caller, session or time ({token})"
+        if i + 1 < len(tokens) and tokens[i + 1] == "(" and re.fullmatch(r"[a-z_][a-z0-9_]*", token):
+            if i > 0 and tokens[i - 1] == ".":
+                return "the mask function calls another (qualified) function"
+            if token not in _SQL_WORDS_BEFORE_PAREN and token not in FIXED_POINT_SAFE_CALLS:
+                return f"the mask function calls {token}(), which is not a known caller-independent builtin"
+    return ""
+
+
+def _live_policy_targets(policy: Mapping[str, Any], principals: Iterable[str]) -> bool:
+    """Whether a live policy applies to every one of ``principals``."""
+    targets = {str(p) for p in policy.get("to_principals") or []}
+    excepted = {str(p) for p in policy.get("except_principals") or []}
+    return all((ALL_USERS_GROUP in targets or p in targets) and p not in excepted for p in principals)
+
+
+def live_mask_problem(check: "ColumnMaskCheck", policies: Sequence[Mapping[str, Any]],
+                      column_tags: Sequence[tuple[str, str]], table_tags: Sequence[tuple[str, str]],
+                      direct_masks: int) -> str:
+    """Why the live mask on the column isn't proven to be ``check.mask_function`` ("" if it is).
+
+    Pure. ABAC masks don't show in information_schema.column_masks, so the
+    live mask is the one live column-mask policy whose match condition the
+    column's live tags satisfy (and when_condition its table's tags). It must
+    be the only mask on the column (no directly attached one), call exactly
+    the configured function with no extra USING arguments, and apply to every
+    masked tier.
+    """
+    from validate_abac import _condition_matches_tags, condition_is_supported
+
+    if direct_masks:
+        return f"{direct_masks} column mask(s) are attached to the column directly"
+
+    def tag_map(rows):
+        out: dict[str, set[str]] = {}
+        for name, value in rows:
+            out.setdefault(name, set()).add(value)
+        return out
+
+    col_tags, tbl_tags = tag_map(column_tags), tag_map(table_tags)
+    matching = []
+    for policy in policies:
+        if policy.get("policy_type") != "POLICY_TYPE_COLUMN_MASK":
+            continue
+        mask = policy.get("column_mask") or {}
+        conditions = [policy.get("when_condition") or ""] + [
+            m.get("condition") or "" for m in policy.get("match_columns") or []]
+        if not all(condition_is_supported(c) for c in conditions):
+            return f"live policy {policy.get('name')!r} has a condition the verifier can't evaluate"
+        if policy.get("when_condition") and not _condition_matches_tags(policy["when_condition"], tbl_tags):
+            continue
+        if any(m.get("alias") == mask.get("on_column") and _condition_matches_tags(m.get("condition") or "", col_tags)
+               for m in policy.get("match_columns") or []):
+            matching.append(policy)
+    if len(matching) != 1:
+        return f"{len(matching)} live column-mask policies resolve for the column, not exactly one"
+    policy = matching[0]
+    mask = policy.get("column_mask") or {}
+    if str(mask.get("function_name") or "").lower() != check.mask_function.lower():
+        return (f"the live policy {policy.get('name')!r} applies {mask.get('function_name')!r}, "
+                f"not the configured {check.mask_function!r}")
+    if mask.get("using"):
+        return f"the live policy {policy.get('name')!r} passes extra USING arguments to the mask"
+    if not _live_policy_targets(policy, check.masked_principals):
+        return f"the live policy {policy.get('name')!r} does not apply to every masked tier"
+    return ""
+
+
 def _mask_function(policy: Mapping[str, Any]) -> str:
     """The policy's catalog.schema.function, or "" if any part is missing."""
     parts = [_as_str(policy.get(k)) for k in ("function_catalog", "function_schema", "function_name")]
@@ -692,8 +823,10 @@ def evaluate_column_mask_check(
     leaks: dict[str, int] = {}
     masked_ok = 0
     per_principal_compared: dict[str, int] = {}
+    per_principal_fixed: dict[str, int] = {}
     for mp in masked_present:
         compared_here = 0
+        per_principal_fixed[mp] = sum(1 for k in values_by_principal[mp] if k in fixed_points)
         for row_key, val in values_by_principal[mp].items():
             if row_key not in maskable_rows:
                 continue
@@ -731,6 +864,25 @@ def evaluate_column_mask_check(
              f"could not be verified for them (rows by key {check.key_column}): {unbaselined}"),
             {"unbaselined_by_principal": unbaselined,
              "per_principal_compared": per_principal_compared},
+        )
+
+    # Excluding fixed points must not let a near-identity mask pass: a tier
+    # that had any needs FIXED_POINT_MIN_COMPARED compared rows, and fixed
+    # points may be at most FIXED_POINT_MAX_SHARE of its sampled rows.
+    unbounded = {
+        mp: f"{per_principal_compared[mp]} compared, {fixed} unchanged of {len(values_by_principal[mp])} sampled"
+        for mp, fixed in per_principal_fixed.items()
+        if fixed and (per_principal_compared[mp] < FIXED_POINT_MIN_COMPARED
+                      or fixed > FIXED_POINT_MAX_SHARE * len(values_by_principal[mp]))
+    }
+    if unbounded:
+        return CheckResult(
+            "column-mask", target, INCONCLUSIVE,
+            (f"too many sampled rows have a value the mask leaves unchanged to prove masking "
+             f"(needs at least {FIXED_POINT_MIN_COMPARED} compared rows and at most "
+             f"{FIXED_POINT_MAX_SHARE:.0%} unchanged per tier): {unbounded}"),
+            {"per_principal_compared": per_principal_compared,
+             "fixed_point_rows_by_principal": per_principal_fixed},
         )
 
     # (issue 2) Every masked principal must have actually been compared on a
@@ -1605,6 +1757,71 @@ class EffectiveAccessVerifier:
             total += int(rows[0][0] or 0) if rows else 0
         return total
 
+    def run_api(self, ws, path: str, query: Optional[Mapping[str, Any]] = None) -> Mapping[str, Any]:
+        """GET a Databricks REST path as ``ws`` (the admin baseline)."""
+        return ws.api_client.do("GET", path, query=dict(query or {}))
+
+    def table_policies(self, principal: TestPrincipal, table: str) -> list[Mapping[str, Any]]:
+        """Every live ABAC policy on ``table``, including inherited ones (all pages)."""
+        self._guard()
+        catalog, schema, name = table_parts(table)
+        policies: list[Mapping[str, Any]] = []
+        token = ""
+        for _ in range(100):
+            query = {"include_inherited": "true", **({"page_token": token} if token else {})}
+            page = self.run_api(self._ws_for(principal),
+                                f"/api/2.1/unity-catalog/policies/TABLE/{catalog}.{schema}.{name}", query)
+            policies += list(page.get("policies") or [])
+            token = page.get("next_page_token") or ""
+            if not token:
+                return policies
+        raise RuntimeError(f"too many pages of policies on {table}")
+
+    def fixed_point_problem(self, principal: TestPrincipal, check: ColumnMaskCheck,
+                            policies: Sequence[Mapping[str, Any]]) -> str:
+        """Why fixed points can't be excluded for ``check`` ("" when they can).
+
+        Run as the admin. The live mask on the column must be exactly the
+        configured function with no extra arguments (live_mask_problem), and
+        that function caller-independent (fixed_point_function_problem).
+        """
+        self._guard()
+        fn_catalog, fn_schema, fn_name = table_parts(check.mask_function)
+        catalog, schema, table = table_parts(check.table)
+        quote_identifier(check.column)
+        ws = self._ws_for(principal)
+        col = {"c": catalog.lower(), "s": schema.lower(), "t": table.lower(), "k": check.column.lower()}
+        where = ("WHERE lower({0}) = :c AND lower({1}) = :s "
+                 "AND lower(table_name) = :t AND lower(column_name) = :k")
+        rows = self.run_query(ws, "SELECT COUNT(*) FROM system.information_schema.column_masks "
+                              + where.format("table_catalog", "table_schema"), col)
+        direct = int(rows[0][0] or 0) if rows else 0
+        column_tags = [(str(r[0]), "" if r[1] is None else str(r[1])) for r in self.run_query(
+            ws, "SELECT tag_name, tag_value FROM system.information_schema.column_tags "
+            + where.format("catalog_name", "schema_name"), col) if r]
+        table_tags = [(str(r[0]), "" if r[1] is None else str(r[1])) for r in self.run_query(
+            ws, "SELECT tag_name, tag_value FROM system.information_schema.table_tags "
+            "WHERE lower(catalog_name) = :c AND lower(schema_name) = :s AND lower(table_name) = :t",
+            {n: col[n] for n in ("c", "s", "t")}) if r] if any(p.get("when_condition") for p in policies) else []
+        problem = live_mask_problem(check, policies, column_tags, table_tags, direct)
+        if problem:
+            return problem
+        fn = {"c": fn_catalog.lower(), "s": fn_schema.lower(), "n": fn_name.lower()}
+        routines = self.run_query(
+            ws, "SELECT routine_body, external_language, is_deterministic, sql_data_access, "
+            "routine_definition FROM system.information_schema.routines WHERE lower(routine_catalog) = :c "
+            "AND lower(routine_schema) = :s AND lower(routine_name) = :n", fn)
+        if len(routines) != 1:
+            return f"{len(routines)} routines named {check.mask_function}, not exactly one"
+        params = self.run_query(
+            ws, "SELECT COUNT(*) FROM system.information_schema.parameters WHERE lower(specific_catalog) = :c "
+            "AND lower(specific_schema) = :s AND lower(specific_name) = :n", fn)
+        body, language, deterministic, data_access, definition = routines[0]
+        return fixed_point_function_problem(
+            routine_body=body, external_language=language, is_deterministic=deterministic,
+            sql_data_access=data_access, definition=definition,
+            parameters=int(params[0][0] or 0) if params else 0)
+
     def fixed_point_keys(
         self, principal: TestPrincipal, check: ColumnMaskCheck, keys: Sequence[Any],
     ) -> set[Any]:
@@ -1752,6 +1969,7 @@ def verify_effective_access_live(
         column_errors: dict[tuple, dict[str, str]] = {}
         pairing_problems: dict[tuple, str] = {}
         fixed_points: dict[tuple, set[Any]] = {}
+        table_policies: dict[str, list[Mapping[str, Any]]] = {}
         key_proofs: dict[tuple, str] = {}   # once per (table, key, read keys)
         key_metadata: dict[tuple, str] = {}  # once per (table, key)
         for check in spec.column_masks:
@@ -1844,13 +2062,20 @@ def verify_effective_access_live(
                     per_errors[tier] = str(exc)
                     print(f"    ({tier}) query FAILED for {check.table}.{check.column}: {exc}")
             column_values[sig] = per_principal
-            # (5) Rows the mask leaves unchanged can't show masking. If the
-            # admin can't evaluate the mask, every equal value stays a leak.
+            # (5) Rows the mask leaves unchanged can't show masking, but only
+            # for the live mask proven to be the configured, caller-independent
+            # function. Any doubt or error: every equal value stays a leak.
             if check.mask_function and not per_errors:
                 try:
-                    fixed_points[sig] = verifier.fixed_point_keys(admin_principal, check, keys)
+                    if check.table not in table_policies:
+                        table_policies[check.table] = verifier.table_policies(admin_principal, check.table)
+                    why = verifier.fixed_point_problem(admin_principal, check, table_policies[check.table])
+                    if why:
+                        print(f"    {check.table}.{check.column}: an unchanged value counts as a leak ({why})")
+                    else:
+                        fixed_points[sig] = verifier.fixed_point_keys(admin_principal, check, keys)
                 except Exception as exc:
-                    print(f"    (admin) could not evaluate {check.mask_function} on "
+                    print(f"    (admin) could not check {check.mask_function} on "
                           f"{check.table}.{check.column}; an unchanged value counts as a leak: {exc}")
 
         row_counts: dict[str, dict[str, Optional[int]]] = {}
