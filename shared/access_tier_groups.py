@@ -102,8 +102,8 @@ def _code_mask(text: str) -> tuple[list[bool], set[int]]:
     return mask, comments
 
 
-def _assignment_spans(text: str) -> list[tuple[int, int]]:
-    """Return (start, end) of every top-level ``access_tier_groups = <value>``."""
+def _assignment_spans(text: str, setting: str = SETTING) -> list[tuple[int, int]]:
+    """Return (start, end) of every top-level ``<setting> = <value>``."""
     mask, comments = _code_mask(text)
     n = len(text)
     spans: list[tuple[int, int]] = []
@@ -120,18 +120,18 @@ def _assignment_spans(text: str) -> list[tuple[int, int]]:
             depth -= 1
         elif (
             depth == 0
-            and text.startswith(SETTING, i)
+            and text.startswith(setting, i)
             and (i == 0 or text[i - 1] not in _IDENT_CHARS)
-            and (i + len(SETTING) >= n or text[i + len(SETTING)] not in _IDENT_CHARS)
+            and (i + len(setting) >= n or text[i + len(setting)] not in _IDENT_CHARS)
         ):
-            j = i + len(SETTING)
+            j = i + len(setting)
             while j < n and text[j] in " \t":
                 j += 1
             if j < n and text[j] == "=" and text[j + 1 : j + 2] != "=":
                 j += 1
                 while j < n and text[j] in " \t":
                     j += 1
-                end = _value_end(text, mask, comments, j)
+                end = _value_end(text, mask, comments, j, setting)
                 spans.append((i, end))
                 i = end
                 continue
@@ -139,7 +139,9 @@ def _assignment_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _value_end(text: str, mask: list[bool], comments: set[int], start: int) -> int:
+def _value_end(
+    text: str, mask: list[bool], comments: set[int], start: int, setting: str = SETTING
+) -> int:
     """End offset of the HCL value starting at ``start``."""
     n = len(text)
     if start < n and mask[start] and text[start] in _OPEN:
@@ -153,7 +155,7 @@ def _value_end(text: str, mask: list[bool], comments: set[int], start: int) -> i
                 depth -= 1
                 if depth == 0:
                     return k + 1
-        raise ValueError(f"unterminated {SETTING} value")
+        raise ValueError(f"unterminated {setting} value")
     # Scalar (null, a string, ...): up to the end of the line or a comment.
     end = start
     while end < n and text[end] != "\n" and end not in comments:

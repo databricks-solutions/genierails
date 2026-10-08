@@ -44,14 +44,13 @@ make rehearse ENV=dev                    # apply (grants only if coverage passes
 ### Promote dev → prod
 
 ```bash
-make promote SOURCE_ENV=dev DEST_ENV=prod \
-  DEST_CATALOG_MAP="dev_catalog=prod_catalog"
+make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_catalog=prod_catalog"   # saved; later: make promote-to ENV=prod
 
 vi envs/prod/auth.auto.tfvars             # enter prod workspace credentials
 
 # prod re-derives its OWN facts — never re-run generate in prod
 make enable-classification ENV=prod       # or the Databricks UI (recommended); then wait for prod class.* tags
-make release ENV=prod VERIFY_KEY_COLUMN=<key>   # derive (no LLM) → validate → coverage check → audit → apply → verify-access
+make release ENV=prod                     # derive (no LLM) → validate → coverage check → audit → apply → verify-access
 ```
 
 Promotion carries the reviewed **rules** (mapping, masks, policies, Genie config) — *not* dev's tag assignments. Prod establishes its own facts from its own classification scan, so dev data never decides what's protected in prod.
@@ -59,11 +58,10 @@ Promotion carries the reviewed **rules** (mapping, masks, policies, Genie config
 For multiple catalogs:
 
 ```bash
-make promote SOURCE_ENV=dev DEST_ENV=prod \
-  DEST_CATALOG_MAP="dev_fin=prod_fin,dev_clinical=prod_clinical"
+make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_fin=prod_fin,dev_clinical=prod_clinical"
 ```
 
-**How `DEST_CATALOG_MAP` works:**
+**How `CATALOG_MAP` works** (`DEST_CATALOG_MAP` in the older `make promote SOURCE_ENV=… DEST_ENV=…` form):
 
 - Comma-separated `src_catalog=dest_catalog` pairs
 - The promote command auto-detects all source catalog names from `genie_spaces[*].uc_tables`

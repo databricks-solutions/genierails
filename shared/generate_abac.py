@@ -7360,6 +7360,18 @@ def champion_genie_next_steps(env_name: str) -> list[str]:
     ]
 
 
+def native_classification_stop(error: Exception, table_refs: list[str], env_name: str) -> list[str]:
+    """Fail-closed stop (before any model call) when class.* tags can't be read."""
+    lines = [f"ERROR: {error}"]
+    if table_refs:
+        lines.append(f"  Tables found ({len(table_refs)}): {', '.join(table_refs)} (saved). No model was called.")
+    return lines + [
+        f"  Next: enable classification (make enable-classification ENV={env_name}, or the UI),",
+        f"  wait for class.* tags, then re-run make generate ENV={env_name}.",
+        "  Re-run with --allow-llm-sensitivity only to explicitly accept LLM/DDL inference.",
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate ABAC configuration from table DDL using AI",
@@ -8034,6 +8046,24 @@ def main():
         print(prompt)
         sys.exit(0)
 
+    # Resolve the sensitivity source before any model call. When classification
+    # is enabled, native class.* is required unless the operator explicitly opts
+    # out; a footprint whose tags haven't landed yet stops here, with the agent's
+    # discovered tables already persisted above and no model call spent.
+    classification_source = None
+    if args.mode != "genie":
+        native_expected = bool(auth_cfg.get("enable_classification"))
+        try:
+            classification_source = _fetch_live_classification_source(
+                table_refs,
+                auth_cfg,
+                require_native=native_expected and not args.allow_llm_sensitivity,
+            )
+        except NativeClassificationRequiredError as exc:
+            for line in native_classification_stop(exc, table_refs or [], WORK_DIR.name):
+                print(line)
+            sys.exit(1)
+
     # ── Reviewed rules from a prior run stick (additive merge after drafting) ──
     # The assembled generated/ draft is the reviewed rule set, also in --space
     # mode. Genie mode drafts no rules, so it has nothing to merge.
@@ -8372,23 +8402,6 @@ Before you apply, tune for your business roles, security requirements, and Genie
         )
         if n_overlay_fns:
             print(f"  Auto-fixed: injected {n_overlay_fns} overlay-provided masking function(s)")
-
-        # Resolve the sensitivity source once. When classification is enabled,
-        # native class.* is required unless the operator explicitly opts out.
-        native_expected = bool(auth_cfg.get("enable_classification"))
-        try:
-            classification_source = (
-                _fetch_live_classification_source(
-                    table_refs,
-                    auth_cfg,
-                    require_native=native_expected and not args.allow_llm_sensitivity,
-                )
-                if args.mode != "genie" else None
-            )
-        except NativeClassificationRequiredError as exc:
-            print(f"ERROR: {exc}")
-            print("  Re-run with --allow-llm-sensitivity only to explicitly accept LLM/DDL inference.")
-            sys.exit(1)
 
         # Skip PII autofix in genie mode — tag_assignments are managed by the governance team
         if args.mode != "genie":

@@ -1190,6 +1190,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help=f"Run against a real workspace (also needs {LIVE_ENV_FLAG}=1).")
     p.add_argument("--keep-principals", action="store_true",
                    help="Do not delete the provisioned test principals (debugging).")
+    p.add_argument("--result-file", type=Path,
+                   help="After a --live run, write a JSON summary (passed, mask checks "
+                        "passed per key column) for tooling such as make rehearse/release.")
     p.add_argument("--print-spec", action="store_true",
                    help="Print the resolved spec and exit (no workspace needed).")
     p.add_argument("--require-mask-checks", action="store_true",
@@ -1222,8 +1225,33 @@ def _load_spec_from_args(args) -> VerificationSpec:
     raise SystemExit("Provide either --spec or --from-tfvars.")
 
 
+def write_result_file(path: Optional[Path], report: EffectiveAccessReport, spec: Any) -> None:
+    """Machine-readable proof of a live run: which key columns paired a passing mask check."""
+    if path is None:
+        return
+    key_by_target = {check.describe(): check.key_column for check in spec.column_masks}
+    by_key: dict[str, int] = {}
+    for r in report.results:
+        if r.kind == "column-mask" and r.status == PASS and key_by_target.get(r.target):
+            key = key_by_target[r.target]
+            by_key[key] = by_key.get(key, 0) + 1
+    payload = {
+        "passed": report.passed,
+        "mask_checks_passed": sum(by_key.values()),
+        "mask_checks_passed_by_key": by_key,
+        "row_filter_checks_passed": sum(
+            1 for r in report.results if r.kind == "row-filter" and r.status == PASS),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n")
+    os.replace(tmp, path)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.result_file is not None:
+        args.result_file.unlink(missing_ok=True)
     try:
         spec = _load_spec_from_args(args)
     except ValueError as exc:
@@ -1319,6 +1347,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if spec.is_empty():
         report = EffectiveAccessReport(not_verified=skipped_results)
         print(report.summary())
+        write_result_file(args.result_file, report, spec)
         return 0
 
     if not args.auth_file:
@@ -1330,6 +1359,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     report.not_verified.extend(skipped_results)
     print(report.summary())
+    write_result_file(args.result_file, report, spec)
     return 0 if report.passed else 1
 
 

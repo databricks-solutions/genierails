@@ -14,7 +14,7 @@ Use this split of responsibilities:
   - commit the reviewed config changes
 - CI workflow:
   - validate committed config **and run `make coverage-gate`** (block the build if any classified sensitive column has no covering mask)
-  - for prod: enable/wait for native classification, then `make derive-assignments ENV=prod` (re-derive facts from prod's own tags — no LLM), then `make coverage-gate ENV=prod`
+  - for prod: enable/wait for native classification; `make release ENV=prod` re-derives facts from prod's own tags (no LLM) and runs the coverage check itself
   - run `make plan`, then on approved branches `make release ENV=prod` (re-derive → validate → coverage check → rulebook audit → apply → verify-access, under a lock)
   - the shipped `.github/workflows/ci.yml` only runs tests and validation; to deploy from CI, add your own deployment job that runs `make release ENV=prod`, and if you need a human approval before business users get access, attach a protected `environment:` (approval rule) to that job. There is no separate exposure switch
 
@@ -95,7 +95,7 @@ After approval, deploy. **For prod, re-derive facts from prod's own classificati
 
 ```bash
 # prod facts: enable/wait for native classification first
-make release ENV=prod VERIFY_KEY_COLUMN=<key>
+make release ENV=prod   # verify key: verify_key_column, promoted from dev
 ```
 
 `make release` re-derives assignments from prod's own tags (no LLM), validates, runs the coverage check and the rulebook audit, applies all layers in order (masks and policies before grants), then proves masking with `verify-access`. It never re-generates via the LLM. Terraform itself refuses new or wider business `SELECT` / Genie `CAN_RUN` without a recent passing coverage result, so no path can grant access past the gate. The shipped `.github/workflows/ci.yml` has no deployment job, so add one that runs this command; if you want a human approval before a deployment can add or widen access, give that job a protected `environment:`.
@@ -111,12 +111,12 @@ Recommended for most teams.
 1. A developer runs:
 
    ```bash
-   make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_catalog=prod_catalog"
+   make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_catalog=prod_catalog"   # saved; later: make promote-to ENV=prod
    ```
 
 2. The promoted config is reviewed and committed
-3. CI enables/waits for prod native classification, runs `make derive-assignments ENV=prod`, then `make coverage-gate ENV=prod` and `make plan ENV=prod`
-4. After approval, CI runs `make release ENV=prod VERIFY_KEY_COLUMN=<key>`
+3. CI enables/waits for prod native classification, then runs `make plan ENV=prod` (it re-reads live tags and runs the coverage check)
+4. After approval, CI runs `make release ENV=prod`; if its coverage check fails, fix the rules in dev and re-promote
 
 This is the best model when you want promotion to stay explicit and reviewable in Git.
 
@@ -174,7 +174,7 @@ make audit-schema ENV=prod
 
 This exits `1` if untagged sensitive columns are found (forward drift) or if existing tag assignments reference deleted columns (reverse drift). Use GitHub's built-in failed-run notifications to alert when drift is detected.
 
-When drift is found, prefer letting native classification tag the new columns, then re-derive deterministically with `make derive-assignments ENV=prod` (reuses the promoted rules, no LLM). `make generate-delta` is an exceptional/legacy remediation that invokes the LLM — it is not the routine dev-to-prod path.
+When drift is found, prefer letting native classification tag the new columns, then re-derive deterministically with `make maintain ENV=prod` (runs `derive-assignments`, reusing the promoted rules, no LLM). `make generate-delta` is an exceptional/legacy remediation that invokes the LLM — it is not the routine dev-to-prod path.
 
 ---
 

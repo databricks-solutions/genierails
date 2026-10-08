@@ -13,7 +13,7 @@ Lookup companion to the **[Dev-to-Prod Walkthrough](README.md)**: the full comma
 | Table `SELECT` grant | **only after the masks exist and a recent coverage check passes** for it |
 | Genie run permission (`CAN_RUN`) | **only once its groups' `SELECT` grants are applied** through that check |
 | Workspace assignment + consume entitlement | applied on **every** apply (harmless without `SELECT`/`CAN_RUN`) |
-| Warehouse `CAN_USE` | **not managed by GenieRails** — you grant it (Phase 5) |
+| Warehouse `CAN_USE` | **not managed by GenieRails** — you grant it (Phase 4) |
 
 So "expose last" isn't a policy you hope holds — there is simply no new or wider `SELECT` or `CAN_RUN` without a passing check. There is no on/off flag: the old `business_access_enabled` setting is deprecated and ignored (make warns while it is set; `false` does **not** revoke access). To withdraw access, remove the groups or `acl_groups` entries (or the agent) and apply: that revokes their `SELECT` and the Genie `CAN_RUN` GenieRails granted them, and never waits for the coverage check (other direct entries and inherited permissions on the agent are left alone).
 
@@ -38,23 +38,24 @@ So "expose last" isn't a policy you hope holds — there is simply no new or wid
 | Command | Phase | What it does |
 |---|---|---|
 | `make setup` / `make init-env ENV=<e>` | 0 | Create local env dirs + default config files (no Databricks calls) |
-| `make enable-classification ENV=<e>` | 1/3 | Turn on UC Data Classification (scanning) — as-code alternative to the Databricks UI (recommended); auto-tagging is opt-in |
-| `make generate ENV=<e>` | 1 | (dev) Draft masks + access rules from the model and derive one `gr_treatment`/column from native `class.*` (fail-closed); groups come from `access_tier_groups` in `env.auto.tfvars` (or `GENERATE_ARGS='--groups "..."'`, saved there on first use). Re-runs keep reviewed rules and add rules only for uncovered columns; `GENERATE_ARGS='--allow-rule-changes'` accepts the model's changes |
-| `make derive-assignments ENV=<e>` | 4 | (prod) Re-derive **only** `tag_assignments` from live `class.*`, reusing the promoted rules unchanged — no model call (fail-closed; requires a prior `promote`) |
-| `make coverage-gate ENV=<e>` | 1/4 | Fail if any tagged-sensitive column has no mask (the "says NO" check). Every plan/apply also runs it against live tags |
-| `make validate-generated ENV=<e>` | 1/4 | Static validation incl. the one-mask-per-column guard |
-| `make apply ENV=<e>` | 1/5 | Full stack (account → data_access → workspace; auto-promotes same-env first); creates the Genie agent; grants business access only through the coverage check |
+| `make enable-classification ENV=<e>` | 1/3 | Turn on UC Data Classification (scanning) for the footprint — an agent set only by ID has its tables found first (read-only, no model call); auto-tagging is opt-in. Or use the Databricks UI |
+| `make generate ENV=<e>` | 1 | (dev) One run: import the agent's config, find its tables, draft masks + access rules from the model, and derive one `gr_treatment`/column from native `class.*` (fail-closed: without `class.*` tags it stops before any model call); groups come from `access_tier_groups` in `env.auto.tfvars` (or `GENERATE_ARGS='--groups "..."'`, saved there on first use). Re-runs keep reviewed rules and add rules only for uncovered columns; `GENERATE_ARGS='--allow-rule-changes'` accepts the model's changes |
+| `make derive-assignments ENV=<e>` | 4/5 | Re-derive **only** `tag_assignments` from live `class.*`, reusing the promoted rules unchanged — no model call (fail-closed). `release` and `maintain` run it for you |
+| `make coverage-gate ENV=<e>` | 1/4/5 | Fail if any tagged-sensitive column has no mask (the "says NO" check). Every plan/apply also runs it against live tags |
+| `make validate-generated ENV=<e>` | 1/4/5 | Static validation incl. the one-mask-per-column guard |
+| `make apply ENV=<e>` | 1/4 | Full stack (account → data_access → workspace; auto-promotes same-env first); creates the Genie agent; grants business access only through the coverage check |
 | `make apply-governance ENV=<e>` | — | Governance-team command: enforcement only (account + data_access); no Genie agent |
 | `make genie-adopt-preflight ENV=<e>` | — | Read-only. Before the one-time upgrade to secret-free Genie state, checks that every Genie agent created by an earlier version can be adopted with its current ID (ID file, workspace, GET 200). `make apply` runs it first and stops if any agent fails. |
-| `make rehearse ENV=dev VERIFY_KEY_COLUMN=<pk>` | 1 | (dev) live derive → validate-generated → coverage-gate → apply → verify-access, stopping at the first failure |
-| `make release ENV=prod VERIFY_KEY_COLUMN=<pk>` | 5 | (prod) Placeholder guard → lock → live derive → validate → coverage → promote → read-only rulebook audit → all-layer apply → `verify-access` |
-| `make maintain ENV=prod` | 6 | (prod, scheduled) audit-schema → derive-assignments → coverage-gate → validate-generated → audit-rulebook → apply-governance; reconciles governance including SELECT for already-covered tables, never widens access past a passing coverage check, and never changes Genie. Skips unchanged inputs, so it does not repair grants revoked outside Terraform |
-| `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_cat=prod_cat"` | 2 | Promote **rules only** (leaves tag assignments behind); creates + writes prod `env.auto.tfvars`. Policy names take the prod catalog (`gr_mask_<prod_catalog>_<treatment>`) only when a read-only policy listing of the prod catalog (prod `auth.auto.tfvars`) shows neither the old nor the new name and prod's state doesn't hold the old key; otherwise it keeps its name, since renaming a live policy would drop and recreate it |
-| `make verify-access ENV=<e> VERIFY_KEY_COLUMN=<pk>` | 1/5 | Prove masking by querying as per-tier test principals (**needs the business grants applied**) |
-| `make audit-rulebook ENV=<e>` | 4/6 | Drift check — tags with no covering rule |
-| `make audit-schema ENV=<e>` | 6 | Untagged-column audit (also the first step of `make maintain`) |
+| `make rehearse ENV=dev VERIFY_KEY_COLUMN=<pk>` | 1 | (dev) live derive → validate-generated → coverage-gate → apply → verify-access, stopping at the first failure; the key is saved as `verify_key_column` after a pass |
+| `make release ENV=prod` | 4 | (prod) Placeholder guard → lock → live derive → validate → coverage → promote → read-only rulebook audit → all-layer apply → `verify-access` (key from dev's promoted `verify_key_column`) |
+| `make maintain ENV=prod` | 5 | (prod, scheduled) audit-schema → derive-assignments → coverage-gate → validate-generated → audit-rulebook → apply-governance; reconciles governance including SELECT for already-covered tables, never widens access past a passing coverage check, and never changes Genie. Skips unchanged inputs, so it does not repair grants revoked outside Terraform |
+| `make promote-to ENV=prod FROM=dev CATALOG_MAP="dev_cat=prod_cat"` | 2 | Promote **rules only** (leaves tag assignments behind); creates + writes prod `env.auto.tfvars`, saving `FROM`/`CATALOG_MAP` there (`promote_from`/`catalog_map`) so a re-promote is just `make promote-to ENV=prod`. Policy names take the prod catalog (`gr_mask_<prod_catalog>_<treatment>`) only when a read-only policy listing of the prod catalog (prod `auth.auto.tfvars`) shows neither the old nor the new name and prod's state doesn't hold the old key; otherwise it keeps its name, since renaming a live policy would drop and recreate it |
+| `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP="dev_cat=prod_cat"` | — | The same promotion with explicit arguments every time (nothing saved); `make promote ENV=<e>` alone splits `generated/` into layers |
+| `make verify-access ENV=<e> VERIFY_KEY_COLUMN=<pk>` | 1/4 | Prove masking by querying as per-tier test principals (**needs the business grants applied**) |
+| `make audit-rulebook ENV=<e>` | 4/5 | Drift check — tags with no covering rule |
+| `make audit-schema ENV=<e>` | 5 | Untagged-column audit (also the first step of `make maintain`) |
 | `make generate-delta ENV=<e>` | — | [Legacy] model-based incremental tag assignments; the champion flow uses `make maintain` instead |
-| `make evidence ENV=<e>` | 5 | Compliance evidence record (`GENIERAILS_EVIDENCE_INTEGRATION=1` + `WAREHOUSE_ID`) |
+| `make evidence ENV=<e>` | 4 | Compliance evidence record (`GENIERAILS_EVIDENCE_INTEGRATION=1` + `WAREHOUSE_ID`) |
 
 Successful validation reports are compact by default. Add `VERBOSE=1` to a
 `make` command to restore the full PASS reports and informational detail;

@@ -65,22 +65,24 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "Edit envs/account/env.auto.tfvars" not in out
     assert (
         "  3. Edit envs/dev/env.auto.tfvars — set genie_space_id to your Genie agent ID and\n"
-        "     access_tier_groups to your IdP groups, most to least privileged, then run:\n"
-        "       make generate ENV=dev MODE=genie   (imports the agent and discovers its tables; drafts no rules)\n"
+        "     access_tier_groups to your IdP groups, most to least privileged\n"
     ) in out
+    # One plain generate imports the agent; no separate MODE=genie step.
+    assert "MODE=genie" not in out
     # access_tier_groups makes --groups unnecessary on every champion command.
     assert "GENERATE_ARGS" not in out
     assert "--groups" not in out
-    assert "       (No agent yet? See ../shared/examples/dev_to_prod/SAMPLE_ENV.md)\n" in out
+    assert "     (No agent yet? See ../shared/examples/dev_to_prod/SAMPLE_ENV.md)\n" in out
+    # rehearse saves the key itself; setup never asks for a hand edit.
+    assert "     The saved key (verify_key_column) is carried by promote; make release needs it.\n" in out
+    assert "Save the key as verify_key_column" not in out
     # The champion flow needs only the agent ID; tables are discovered.
     assert "uc_tables" not in out
     assert "existing agent:" not in out
     assert "pick one" not in out
-    assert "make enable-classification ENV=dev" in out
-    assert "  4. Enable classification" in out
-    assert "  5. Run: make generate ENV=dev   (drafts masks and rules from the class.* tags)\n" in out
-    assert "make rehearse ENV=dev VERIFY_KEY_COLUMN=" in out
-    assert "  6. Run: make rehearse" in out
+    assert "  4. Run: make enable-classification ENV=dev   (or turn it on in the UI);\n" in out
+    assert "  5. Run: make generate ENV=dev   (one run: imports the agent, finds its tables, drafts rules)\n" in out
+    assert "  6. Run: make rehearse ENV=dev VERIFY_KEY_COLUMN=<key_column>   (key saved after a passing run)\n" in out
     assert "business_access_enabled" not in out
     assert "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)\n" in out
     assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == ["1", "2", "3", "4", "5", "6"]
@@ -94,7 +96,6 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
         out.index("envs/dev/auth.auto.tfvars")
         < out.index("set genie_space_id")
         < out.index("access_tier_groups")
-        < out.index("MODE=genie")
         < out.index("SAMPLE_ENV.md")
         < out.index("enable-classification")
         < out.rindex("make generate")
@@ -121,18 +122,22 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
     assert result.returncode == 0, result.stderr
     out = result.stdout
 
-    assert "Next steps (production — walkthrough Phases 2-6; finish the dev rehearsal first):" in out
+    assert "Next steps (production — walkthrough Phases 2-5; finish the dev rehearsal first):" in out
     order = [
-        "make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=",
+        'make promote-to ENV=prod FROM=dev CATALOG_MAP="<dev_catalog>=<prod_catalog>"\n',
+        "     (saved; later just: make promote-to ENV=prod)\n",
         "envs/prod/auth.auto.tfvars",
         "make enable-classification ENV=prod",
-        "make release ENV=prod VERIFY_KEY_COLUMN=",
+        "  5. Run: make release ENV=prod   (the verify key comes from dev)\n",
         "make maintain ENV=prod",
     ]
     positions = [out.index(step) for step in order]
     assert positions == sorted(positions)
     assert "make rehearse" not in out
     assert "make generate" not in out
+    assert "VERIFY_KEY_COLUMN" not in out
+    assert "DEST_CATALOG_MAP" not in out
+    assert "     Without a promoted verify_key_column, release refuses before applying.\n" in out
     assert "Set business_access_enabled" not in out
     assert "business_access_enabled" not in out
     assert "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)\n" in out

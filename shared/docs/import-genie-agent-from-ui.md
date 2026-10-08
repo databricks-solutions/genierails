@@ -39,22 +39,16 @@ genie_spaces = [
 <details>
 <summary><strong>Step 2 — Import configuration and discover tables</strong></summary>
 
-Run Genie-only generation once to import the supported agent configuration and discover its tables. It needs your existing access-tier groups, most-privileged first — set them once in the same file:
+In the [dev-to-prod walkthrough](../examples/dev_to_prod/README.md) there is no separate import step: `make enable-classification ENV=dev` discovers the agent's tables from its ID (read-only), and `make generate ENV=dev` imports its configuration, finds its tables, and drafts the rules in one run. Generation needs your existing access-tier groups, most-privileged first — set them once in the same file:
 
 ```hcl
 # envs/dev/env.auto.tfvars
 access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
 ```
 
-```bash
-make generate ENV=dev MODE=genie
-```
-
 Every mode of `make generate` (full, `MODE=genie`, `MODE=governance`, `SPACE=...`) reads `access_tier_groups`. Alternatively leave it unset and pass `GENERATE_ARGS='--groups "payments_ops,regional_analysts,viewers"'` once; the first explicit `--groups` is saved to `access_tier_groups`. A later `--groups` that differs is used for that run only, with a warning — it never rewrites the saved order.
 
-`MODE=genie` deliberately skips governance generation at this stage, so native
-classification does not need to have finished yet. Phase 1 later runs normal
-generation after reviewed `class.*` tags are available.
+To import the agent without drafting governance (for example a [self-service Genie](self-service-genie.md) team), run `make generate ENV=dev MODE=genie`. It skips governance generation, so native classification does not need to have finished.
 
 Generation writes the aggregate table list to the tool-owned
 `envs/dev/data_access/discovered_uc_tables.auto.tfvars`. Terraform automatically
@@ -75,7 +69,7 @@ treating a failed lookup as a legitimate removal.
 <details>
 <summary><strong>Step 3 — Continue through dev-to-prod</strong></summary>
 
-Continue at [Phase 1 of the dev-to-prod walkthrough](../examples/dev_to_prod/README.md#phase-1--dev-scan-draft-and-test-rules). The remaining workflow is unchanged: classify, generate, validate coverage, promote, re-derive in production, and expose last.
+Continue at [Phase 1 of the dev-to-prod walkthrough](../examples/dev_to_prod/README.md#phase-1--dev-scan-draft-and-test-rules). The remaining workflow is unchanged: classify, generate, rehearse, promote, and release (which re-derives in production and exposes last).
 
 For an imported agent:
 

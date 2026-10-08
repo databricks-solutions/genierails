@@ -33,10 +33,17 @@ def main() -> int:
     except FootprintError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-    if not tables:
+    # An agent configured only by ID is fine: enable-classification discovers
+    # its tables next (scripts/discover_agent_tables.py).
+    agent_ids = [
+        space.get("genie_space_id")
+        for space in config.get("genie_spaces") or []
+        if isinstance(space, dict) and str(space.get("genie_space_id") or "").strip()
+    ]
+    if not tables and not agent_ids:
         print(
-            "ERROR: define uc_tables (top-level or in genie_spaces), or import "
-            f"a Genie agent to populate discovered_uc_tables in {path.parent}",
+            "ERROR: define uc_tables (top-level or in genie_spaces), or set a Genie "
+            f"agent's genie_space_id (its tables are discovered) in {path}",
             file=sys.stderr,
         )
         return 1

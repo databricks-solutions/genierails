@@ -509,8 +509,9 @@ def test_template_ships_an_empty_access_tier_groups_line_next_to_the_agent():
     )
     assert "MOST to LEAST" in text
     assert "--groups \"payments_ops" not in text.split("GREENFIELD SEQUENCE")[1]
-    assert "#   make generate ENV=dev MODE=genie\n" in text
-    assert "#   make generate ENV=dev\n" in text
+    greenfield = text.split("GREENFIELD SEQUENCE")[1]
+    assert "MODE=genie" not in greenfield
+    assert "#   make generate ENV=dev                 # ONE run: imports the agent, finds its tables, drafts rules\n" in greenfield
 
 
 def test_champion_docs_drop_generate_args_from_generate_commands():
@@ -519,10 +520,12 @@ def test_champion_docs_drop_generate_args_from_generate_commands():
 
     for text in (readme, import_doc):
         assert 'access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]' in text
-        assert "\nmake generate ENV=dev MODE=genie\n" in text
+        assert "make generate ENV=dev" in text
         generate_lines = [
-            line for line in text.splitlines() if line.startswith("make generate")
+            line for line in text.splitlines() if "make generate" in line and "`" not in line
         ]
-        assert generate_lines
         assert not any("GENERATE_ARGS" in line for line in generate_lines)
+    # The champion walkthrough has one plain generate; MODE=genie stays for other flows.
     assert "\nmake generate ENV=dev\n" in readme
+    assert "MODE=genie" not in readme
+    assert "`make generate ENV=dev MODE=genie`" in import_doc
