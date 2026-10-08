@@ -686,16 +686,29 @@ def test_fmapi_with_inherited_execute_is_unchanged_without_permissions_patch(
     workspace.functions.get.return_value = SimpleNamespace(owner="System user")
 
     def effective(*, principal, **_kwargs):
-        has_execute = (
-            principal == "client-123"
-            or execute_source == "account users" and principal == "account users"
-        )
-        privileges = (
-            [SimpleNamespace(privilege=Privilege.EXECUTE)] if has_execute else []
-        )
-        return SimpleNamespace(privilege_assignments=[SimpleNamespace(
-            privileges=privileges
-        )])
+        if principal == "account users" and execute_source == "account users":
+            raise PermissionDenied(
+                "User does not have READ METADATA on Routine or Model"
+            )
+        if principal == "caller@example.com" and execute_source == "account users":
+            # Exact shape observed from Azure: querying the caller succeeds and
+            # identifies the inherited account-users assignment and its ancestor.
+            return {
+                "privilege_assignments": [{
+                    "principal": "account users",
+                    "privileges": [{
+                        "inherited_from_name": "system.ai",
+                        "inherited_from_type": "SCHEMA",
+                        "privilege": "EXECUTE",
+                    }],
+                }],
+            }
+        if principal == "client-123" and execute_source == "reused sp":
+            return SimpleNamespace(privilege_assignments=[SimpleNamespace(
+                principal="client-123",
+                privileges=[SimpleNamespace(privilege=Privilege.EXECUTE)],
+            )])
+        return SimpleNamespace(privilege_assignments=[])
 
     workspace.grants.get_effective.side_effect = effective
     dry_output = []
@@ -711,7 +724,10 @@ def test_fmapi_with_inherited_execute_is_unchanged_without_permissions_patch(
                    target_catalog="existing_catalog"),
               client_factory=factory, emit=output.append)
 
-    assert any("UC EXECUTE (inherited)" in line for line in dry_output)
+    assert any(
+        "model access UNCHANGED via UC EXECUTE (inherited)" in line
+        for line in dry_output
+    )
     function_updates = [item for item in workspace.grants.update.call_args_list
                         if item.kwargs["securable_type"] == "function"]
     assert function_updates == []
