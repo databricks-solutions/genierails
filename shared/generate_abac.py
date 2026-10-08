@@ -929,6 +929,96 @@ def format_genie_space_configs_hcl(configs: dict[str, dict]) -> str:
     return "\n".join(lines)
 
 
+_REVIEWED_GENIE_FIELDS = (
+    "benchmarks", "sql_filters", "sql_expressions", "sql_measures", "join_specs",
+)
+
+
+def keep_reviewed_genie_content(path: Path, fresh: dict[str, dict]) -> list[str]:
+    """Keep reviewed benchmark/snippet values when refreshing an imported agent.
+
+    The API is a seed, not authority over reviewed code. New spaces/fields are
+    still imported, while an existing field remains untouched (including user
+    additions) just like reviewed governance rules.
+    """
+    if not path.exists():
+        return []
+    try:
+        existing = _load_tfvars(path, "reviewed Genie config", strict=True)
+    except (ValueError, OSError):
+        return []
+    existing_spaces = existing.get("genie_space_configs") or {}
+    kept = []
+    for name, config in fresh.items():
+        reviewed = existing_spaces.get(name) if isinstance(existing_spaces, dict) else None
+        if not isinstance(reviewed, dict):
+            continue
+        for field in _REVIEWED_GENIE_FIELDS:
+            if field in reviewed:
+                config[field] = reviewed[field]
+                kept.append(f"{name}.{field}")
+    return kept
+
+
+def _hcl_value_end(text: str, start: int) -> int:
+    """End of one quoted or balanced HCL value (comments/strings preserved)."""
+    opener = text[start]
+    if opener not in "[{\"":
+        return text.find("\n", start) if "\n" in text[start:] else len(text)
+    closer = {
+        "[": "]", "{": "}", '"': '"',
+    }[opener]
+    top_quote = opener == '"'
+    depth, escaped, quoted = 0, False, top_quote
+    for index in range(start, len(text)):
+        char = text[index]
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"' and index > start:
+                if top_quote:
+                    return index + 1
+                quoted = False
+            continue
+        if char == '"':
+            quoted = True
+        elif char == opener:
+            depth += 1
+        elif char == closer:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return len(text)
+
+
+def _space_field_span(text: str, space_name: str, field: str) -> tuple[int, int] | None:
+    space = re.search(rf"(?m)^  {re.escape(_hcl_str(space_name))}\s*=\s*\{{", text)
+    if not space:
+        return None
+    space_end = _hcl_value_end(text, space.end() - 1)
+    match = re.search(rf"(?m)^    {re.escape(field)}\s*=\s*", text[space.start():space_end])
+    if not match:
+        return None
+    start = space.start() + match.start()
+    value_start = space.start() + match.end()
+    end = _hcl_value_end(text, value_start)
+    return start, end
+
+
+def restore_reviewed_genie_text(existing: str, rendered: str, spaces: list[str]) -> str:
+    """Restore reviewed fields verbatim after rendering refreshed API config."""
+    for name in spaces:
+        for field in _REVIEWED_GENIE_FIELDS:
+            old_span = _space_field_span(existing, name, field)
+            new_span = _space_field_span(rendered, name, field)
+            if old_span and new_span:
+                old = existing[old_span[0]:old_span[1]]
+                rendered = rendered[:new_span[0]] + old + rendered[new_span[1]:]
+    return rendered
+
+
 def format_string_map_hcl(name: str, values: dict[str, str]) -> str:
     """Render a deterministic tool-owned string map."""
     lines = [f"{name} = {{"]
@@ -8318,11 +8408,26 @@ Before you apply, tune for your business roles, security requirements, and Genie
         # block with the verbatim parse from the Genie agent API.
         # Skip in governance mode — genie_space_configs is managed by BU teams.
         if api_genie_configs and args.mode != "governance":
+            reviewed_genie_text = (
+                (out_dir / "abac.auto.tfvars").read_text()
+                if (out_dir / "abac.auto.tfvars").exists() else ""
+            )
+            kept_genie_fields = keep_reviewed_genie_content(
+                out_dir / "abac.auto.tfvars", api_genie_configs
+            )
+            if kept_genie_fields:
+                print(
+                    "  Kept reviewed Genie benchmarks/snippets: "
+                    + ", ".join(kept_genie_fields)
+                )
             hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_configs")
             injected_hcl = (
                 "\n# genie_space_configs parsed verbatim from the existing Genie agent(s).\n"
                 "# Edit here to manage space config as code; make apply pushes changes back.\n"
                 + format_genie_space_configs_hcl(api_genie_configs)
+            )
+            injected_hcl = restore_reviewed_genie_text(
+                reviewed_genie_text, injected_hcl, list(api_genie_configs)
             )
             hcl_block = hcl_block.rstrip() + "\n" + injected_hcl + "\n"
             print(

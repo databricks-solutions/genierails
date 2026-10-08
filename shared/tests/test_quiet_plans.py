@@ -1,0 +1,90 @@
+import copy
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "modules/data_access"))
+
+import generate_abac
+from normalize_masking_sql import normalized_definitions
+
+
+def test_masking_normalization_ignores_comments_whitespace_and_order():
+    first = """-- generated\nUSE CATALOG cat;\nUSE SCHEMA sch;\nCREATE OR REPLACE FUNCTION beta(v STRING) RETURNS STRING RETURN v;\n/* note */\nCREATE OR REPLACE FUNCTION alpha(v STRING)\nRETURNS STRING RETURN CONCAT(v, ' x ');\n"""
+    second = """USE CATALOG cat;\nUSE SCHEMA sch;\n-- reordered\nCREATE OR REPLACE FUNCTION alpha ( v STRING ) RETURNS STRING RETURN CONCAT ( v , ' x ' ) ;\nCREATE OR REPLACE FUNCTION beta(v STRING) RETURNS STRING RETURN v;\n"""
+    assert normalized_definitions(first) == normalized_definitions(second)
+
+
+def test_masking_normalization_detects_real_body_change():
+    before = "CREATE OR REPLACE FUNCTION mask(v STRING) RETURNS STRING RETURN 'x';\n"
+    after = "CREATE OR REPLACE FUNCTION mask(v STRING) RETURNS STRING RETURN 'y';\n"
+    assert normalized_definitions(before) != normalized_definitions(after)
+
+
+def test_masking_replacement_path_never_drops():
+    source = (Path(__file__).parents[1] / "modules/data_access/main.tf").read_text()
+    replacement = source[source.index('resource "terraform_data" "masking_functions" {'):
+                         source.index('resource "terraform_data" "masking_functions_drop" {')]
+    assert "--drop" not in replacement
+    assert "normalized_masking_sql.result.hash" in replacement
+
+
+def test_reviewed_genie_benchmarks_and_snippets_stick(tmp_path):
+    path = tmp_path / "abac.auto.tfvars"
+    reviewed = {
+        "benchmarks": [{"question": "reviewed", "sql": "SELECT 1"}],
+        "sql_filters": [{"sql": "x = 1", "display_name": "mine"}],
+        "sql_measures": [{"alias": "mine", "sql": "SUM(x)"}],
+    }
+    path.write_text(generate_abac.format_genie_space_configs_hcl({"Sales": reviewed}) + "\n")
+    fresh = {"Sales": {
+        "title": "Sales",
+        "benchmarks": [{"question": "api", "sql": "SELECT 2"}],
+        "sql_filters": [{"sql": "x = 2"}],
+        "sql_expressions": [{"alias": "new", "sql": "x + 1"}],
+    }}
+    kept = generate_abac.keep_reviewed_genie_content(path, fresh)
+    assert fresh["Sales"]["benchmarks"] == reviewed["benchmarks"]
+    assert fresh["Sales"]["sql_filters"][0]["sql"] == "x = 1"
+    assert fresh["Sales"]["sql_filters"][0]["display_name"] == "mine"
+    assert fresh["Sales"]["sql_measures"][0]["sql"] == "SUM(x)"
+    assert fresh["Sales"]["sql_expressions"] == [{"alias": "new", "sql": "x + 1"}]
+    assert kept == ["Sales.benchmarks", "Sales.sql_filters", "Sales.sql_measures"]
+
+
+def test_reviewed_genie_fields_are_restored_byte_for_byte():
+    existing = '''genie_space_configs = {
+  "Sales" = {
+    benchmarks = [ # reviewed spacing/comment
+      { question = "mine", sql = "SELECT 1" },
+    ]
+    sql_filters = [{ sql = "x = 1", display_name = "user edit" }]
+  }
+}
+'''
+    rendered = generate_abac.format_genie_space_configs_hcl({"Sales": {
+        "benchmarks": [{"question": "api", "sql": "SELECT 2"}],
+        "sql_filters": [{"sql": "x = 2", "display_name": "api"}],
+    }})
+    restored = generate_abac.restore_reviewed_genie_text(existing, rendered, ["Sales"])
+    for field in ("benchmarks", "sql_filters"):
+        old = generate_abac._space_field_span(existing, "Sales", field)
+        new = generate_abac._space_field_span(restored, "Sales", field)
+        assert existing[old[0]:old[1]] == restored[new[0]:new[1]]
+
+
+def test_discovery_explicit_tables_explains_skip(tmp_path):
+    env = tmp_path / "dev"
+    env.mkdir()
+    (env / "env.auto.tfvars").write_text(
+        'enable_classification = true\nuc_tables = ["cat.sch.table"]\n'
+        'genie_spaces = [{ genie_space_id = "space", uc_tables = ["cat.sch.table"] }]\n'
+    )
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).parents[1] / "scripts/discover_agent_tables.py"), str(env)],
+        text=True, capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "Using listed uc_tables instead of discovering tables from genie_space_id.\n"

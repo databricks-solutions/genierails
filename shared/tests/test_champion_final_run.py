@@ -215,6 +215,13 @@ OLD_STATE = {
 
 def _masking_root(tf: str) -> str:
     """A root holding the masking blocks of module source `tf`, fed fixture values."""
+    normalizer = ""
+    if 'data "external" "normalized_masking_sql" {' in tf:
+        normalizer = _resource_block(tf, 'data "external" "normalized_masking_sql" {')
+        normalizer = normalizer.replace(
+            '${path.module}/normalize_masking_sql.py',
+            str(SHARED / "modules/data_access/normalize_masking_sql.py"),
+        )
     blocks = "\n".join(
         re.sub(r"\n  depends_on = \[.*?\n  \]\n", "\n", _resource_block(tf, header), flags=re.S)
         for header in ('resource "terraform_data" "masking_functions" {',
@@ -224,11 +231,16 @@ def _masking_root(tf: str) -> str:
     return (
         'terraform {\n  required_providers {\n'
         '    null = { source = "hashicorp/null", version = "~> 3.2" }\n  }\n}\n'
+        if not normalizer else
+        'terraform {\n  required_providers {\n'
+        '    null = { source = "hashicorp/null", version = "~> 3.2" }\n'
+        '    external = { source = "hashicorp/external", version = "~> 2.3" }\n  }\n}\n'
+    ) + (
         'variable "masking_sql_file" {}\nvariable "deploy_masking_script" {}\n'
         'variable "auth_file" {}\nvariable "databricks_workspace_host" {}\n'
         'variable "databricks_client_id" {}\n'
         'locals {\n  effective_warehouse_id = "wh"\n}\n'
-        + blocks + "\n" + removed
+        + normalizer + "\n" + blocks + "\n" + removed
     )
 
 
@@ -341,7 +353,11 @@ def test_upgraded_masking_state_survives_a_sql_change_without_dropping(tmp_path)
 
     # Upgrade to this code on the same state, with a changed SQL (sql_hash).
     (root / "main.tf").write_text(_masking_root(MODULE_TF.read_text()))
-    (env_dir / "masking_functions.sql").write_text("-- sql with one more function\n")
+    (env_dir / "masking_functions.sql").write_text(
+        "CREATE OR REPLACE FUNCTION cat.sch.mask(v STRING) RETURNS STRING RETURN 'one';\n"
+    )
+    init = _tf(root, "init", "-input=false", "-upgrade", env=env)
+    assert init.returncode == 0, init.stdout + init.stderr
     actions = _plan_actions(root, tfvars, env)
     apply = _tf(root, "apply", "-input=false", "-auto-approve", *var_args, env=env)
     assert apply.returncode == 0, apply.stdout + apply.stderr
@@ -354,7 +370,9 @@ def test_upgraded_masking_state_survives_a_sql_change_without_dropping(tmp_path)
 
     # Later SQL changes stay drop-free; a new host (or warehouse, script,
     # file) updates the drop's settings in place.
-    (env_dir / "masking_functions.sql").write_text("-- sql changed again\n")
+    (env_dir / "masking_functions.sql").write_text(
+        "CREATE OR REPLACE FUNCTION cat.sch.mask(v STRING) RETURNS STRING RETURN 'two';\n"
+    )
     apply = _tf(root, "apply", "-input=false", "-auto-approve", *var_args, env=env)
     assert apply.returncode == 0, apply.stdout + apply.stderr
     assert _plan_actions(root, {**tfvars, "databricks_workspace_host": "https://other.invalid"}, env) == {
