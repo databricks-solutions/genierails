@@ -135,8 +135,8 @@ _prepare-env:
 		fi; \
 		if [ ! -e "$$env_dir/env.auto.tfvars" ]; then \
 			cp "$(SHARED_ROOT)/env.auto.tfvars.example" "$$env_dir/env.auto.tfvars"; \
-			if [ "$$env_name" = "prod" ]; then \
-				printf '\n# Promotion source and catalog renames; replace both catalog placeholders.\npromote_from = "dev"\ncatalog_map  = { "<dev_catalog>" = "<prod_catalog>" }\n' >> "$$env_dir/env.auto.tfvars"; \
+			if [ "$${_SEED_PROMOTION_SETTINGS:-1}" != 0 ] && [ "$$env_name" != "$(ACCOUNT_ENV)" ] && [ "$$env_name" != "$(DEFAULT_ENV)" ]; then \
+				printf '\n# Promotion source and catalog renames; replace both catalog placeholders.\npromote_from = "$(DEFAULT_ENV)"\ncatalog_map  = { "<$(DEFAULT_ENV)_catalog>" = "<%s_catalog>" }\n' "$$env_name" >> "$$env_dir/env.auto.tfvars"; \
 			fi; \
 			if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
 				printf "\n# Consume IdP-synced groups by default; set true for demo/greenfield creation.\nmanage_groups = false\n" >> "$$env_dir/env.auto.tfvars"; \
@@ -232,7 +232,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "       make promote-to ENV=$(ENV)"; \
 		echo "     (FROM=/CATALOG_MAP= remain optional command-line overrides.)"; \
 		echo "  2. Edit $(_SETUP_ENV_REL)/auth.auto.tfvars — deployment SP client_id / client_secret + prod workspace host & id"; \
-		echo "  3. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — set sql_warehouse_id only (or leave \"\" to auto-create)"; \
+		echo "  3. In $(_SETUP_ENV_REL)/env.auto.tfvars, also set sql_warehouse_id (or leave \"\" to auto-create)"; \
 		echo "  4. Run: make enable-classification ENV=$(ENV)   (or turn it on in the UI);"; \
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
 		echo "  5. Run: make release ENV=$(ENV)   (the verify key comes from dev)"; \
@@ -562,7 +562,7 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 		fi; \
 		python3 "$(SHARED_ROOT)/scripts/validate_catalog_map.py" "$(SOURCE_ENV_DIR)" "$(DEST_CATALOG_MAP)" || exit 1; \
 		echo "=== Cross-env promote: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
-		$(MAKE) --no-print-directory _prepare-env ENV="$(DEST_ENV)" ENV_DIR="$(DEST_ENV_DIR)"; \
+		_SEED_PROMOTION_SETTINGS=0 $(MAKE) --no-print-directory _prepare-env ENV="$(DEST_ENV)" ENV_DIR="$(DEST_ENV_DIR)"; \
 		dest_env_dir="$(DEST_ENV_DIR)"; \
 		acl_ok=0; trap 'if [ "$$acl_ok" != 1 ]; then rm -f "$$dest_env_dir/generated/genie_space_derived_acl_groups.auto.tfvars" "$$dest_env_dir/$(DATA_ACCESS_SUBDIR)/abac.auto.tfvars" "$$dest_env_dir/abac.auto.tfvars"; fi' EXIT; \
 		python3 "$(SHARED_ROOT)/scripts/remap_env_config.py" "$(SOURCE_ENV_DIR)" "$$dest_env_dir" "$(DEST_CATALOG_MAP)" || exit 1; \

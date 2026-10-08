@@ -425,7 +425,12 @@ def test_promote_to_command_line_overrides_win_over_template_values(promote_clou
 
 
 @pytest.mark.parametrize(("settings", "message"), [
-    ('promote_from = "dev"\ncatalog_map = { "<dev_catalog>" = "<prod_catalog>" }\n', "template placeholder"),
+    ('promote_from = "dev"\ncatalog_map = { "paycat" = "<stg_catalog>" }\n', "unfilled <...> placeholder"),
+    ('promote_from = "dev"\ncatalog_map = { "paycat" = "<PROD_CATALOG>" }\n', "unfilled <...> placeholder"),
+    ('promote_from = "dev"\ncatalog_map = { "paycat" = "<prod-catalog>" }\n', "unfilled <...> placeholder"),
+    ('promote_from = "dev"\ncatalog_map = { "<stg_catalog>" = "ppay" }\n', "unfilled <...> placeholder"),
+    ('promote_from = "dev"\ncatalog_map = { "paycat" = "prod-catalog" }\n', "not a valid UC identifier"),
+    ('promote_from = "dev"\ncatalog_map = { "pay.cat" = "ppay" }\n', "not a valid UC identifier"),
     ('promote_from = "dev"\ncatalog_map = { "other" = "ppay" }\n', "unknown source catalog(s): other"),
     ('promote_from = "dev"\ncatalog_map = { "paycat" = "same", "other" = "same" }\n', "more than one source catalog to: same"),
     ('catalog_map = { "paycat" = "ppay" }\n', "promote_from in envs/prod/env.auto.tfvars is missing"),
@@ -440,6 +445,23 @@ def test_promote_to_saved_setting_refusals_write_nothing(promote_cloud, settings
     assert message in result.stdout + result.stderr
     assert _snapshot(promote_cloud.envs) == before
     assert sorted(path.name for path in prod.iterdir()) == ["env.auto.tfvars"]
+
+
+def test_promote_resolve_falls_back_to_generated_tag_assignments(tmp_path):
+    envs = tmp_path / "envs"
+    dev = envs / "dev"
+    prod = envs / "prod"
+    (dev / "generated").mkdir(parents=True)
+    prod.mkdir()
+    (dev / "env.auto.tfvars").write_text("genie_spaces = []\nuc_tables = []\n")
+    (dev / "generated/abac.auto.tfvars").write_text(
+        'tag_assignments = [{ entity_name = "paycat.s.t", tag_name = "class.us_ssn", tag_value = "true" }]\n'
+    )
+    (prod / "env.auto.tfvars").write_text(
+        'promote_from = "dev"\ncatalog_map = { "paycat" = "ppay" }\n'
+    )
+
+    assert saved_settings.resolve_promote("prod", prod, envs, "", "") == "dev paycat=ppay"
 
 
 def test_promote_to_first_use_saves_from_and_map_in_the_destination_only(promote_cloud):
@@ -659,8 +681,8 @@ def test_promote_to_is_exactly_the_legacy_cross_env_promote(tmp_path):
     legacy_prod = hcl2.loads(legacy_tree.pop("prod/env.auto.tfvars"))
     assert wrapper_prod.pop("promote_from") == "dev"
     assert wrapper_prod.pop("catalog_map") == {"paycat": "ppay"}
-    legacy_prod.pop("promote_from")
-    legacy_prod.pop("catalog_map")
+    assert "promote_from" not in legacy_prod
+    assert "catalog_map" not in legacy_prod
     assert wrapper_prod == legacy_prod
     assert wrapper_tree == legacy_tree
     assert wrapper_out.startswith(legacy_out)

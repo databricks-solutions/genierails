@@ -152,6 +152,15 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
     assert 'catalog_map  = { "<dev_catalog>" = "<prod_catalog>" }' in env_text
 
 
+@pytest.mark.parametrize("cloud", CLOUDS)
+def test_setup_non_default_env_seeds_promotion_settings(cloud, tmp_path):
+    result = _make(cloud, tmp_path, "setup", "ENV=stg")
+    assert result.returncode == 0, result.stderr
+    env_text = (tmp_path / cloud / "envs/stg/env.auto.tfvars").read_text()
+    assert 'promote_from = "dev"' in env_text
+    assert 'catalog_map  = { "<dev_catalog>" = "<stg_catalog>" }' in env_text
+
+
 @pytest.mark.parametrize("env", ["dev", "prod", "account"])
 def test_setup_mentions_only_existing_make_targets(env, tmp_path):
     result = _make("aws", tmp_path, "setup", f"ENV={env}")

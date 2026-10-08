@@ -34,6 +34,7 @@ from access_tier_groups import _assignment_spans, _hcl_string, display_path  # n
 RESERVED_ENVS = ("account", "data_access")
 # Env names are plain directory names under this cloud's envs/ (no paths).
 ENV_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
+UC_CATALOG_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _parse(text: str, path: Path) -> dict:
@@ -167,8 +168,16 @@ def catalog_map_dict(value: object) -> dict[str, str]:
     pairs: dict[str, str] = {}
     for raw_src, raw_dest in raw_pairs:
         src, dest = str(raw_src).strip(), str(raw_dest).strip()
+        if any(char in src + dest for char in "<>"):
+            raise ValueError("catalog_map contains an unfilled <...> placeholder")
         if not src or not dest or any(c.isspace() for c in src + dest):
             raise ValueError(f"catalog_map entry {src + '=' + dest!r} is not <src_catalog>=<dest_catalog>")
+        invalid = [name for name in (src, dest) if not UC_CATALOG_NAME.fullmatch(name)]
+        if invalid:
+            raise ValueError(
+                f"catalog_map catalog name {invalid[0]!r} is not a valid UC identifier "
+                "(letters, digits and underscores; must not start with a digit)"
+            )
         if src in pairs:
             raise ValueError(f"catalog_map maps {src!r} more than once")
         pairs[src] = dest
@@ -177,8 +186,6 @@ def catalog_map_dict(value: object) -> dict[str, str]:
     duplicates = sorted({dest for dest in pairs.values() if list(pairs.values()).count(dest) > 1})
     if duplicates:
         raise ValueError(f"catalog_map maps more than one source catalog to: {', '.join(duplicates)}")
-    if any("<dev_catalog>" in item or "<prod_catalog>" in item for pair in pairs.items() for item in pair):
-        raise ValueError("catalog_map still contains the template placeholder <dev_catalog>/<prod_catalog>")
     return pairs
 
 
@@ -201,6 +208,22 @@ def validate_source_catalogs(source_dir: Path, catalog_map: str, env_file: Path)
     except FootprintError as exc:
         raise ValueError(str(exc)) from exc
     catalogs = sorted({table.split(".", 1)[0] for table in tables if table.count(".") >= 2})
+    if not catalogs:
+        for subdir in ("generated", "data_access"):
+            config_path = source_dir / subdir / "abac.auto.tfvars"
+            if not config_path.is_file():
+                continue
+            try:
+                config = _load(config_path)
+            except ValueError:
+                continue
+            catalogs = sorted({
+                str(assignment.get("entity_name") or "").split(".", 1)[0]
+                for assignment in config.get("tag_assignments") or []
+                if str(assignment.get("entity_name") or "").count(".") >= 2
+            } - {""})
+            if catalogs:
+                break
     if not catalogs:
         raise ValueError(f"no catalogs are used by source env {source_dir.name!r}; run make generate first")
     pairs = catalog_map_dict(catalog_map)
@@ -283,12 +306,17 @@ def resolve_promote(env: str, env_dir: Path, envs_dir: Path, source: str, catalo
     validate_source_catalogs(source_dir, catalog_map, env_file)
     try:
         normalized_saved_map = normalize_catalog_map(saved_map) if saved_map else ""
+        saved_map_display = repr(normalized_saved_map)
     except ValueError:
         # An explicit valid CATALOG_MAP overrides even a stale/template saved value.
-        normalized_saved_map = repr(saved_map)
-    for name, given, kept in (("FROM", source, saved_from), ("CATALOG_MAP", catalog_map, normalized_saved_map)):
+        normalized_saved_map = str(saved_map)
+        saved_map_display = normalized_saved_map
+    for name, given, kept, kept_display in (
+        ("FROM", source, saved_from, repr(saved_from)),
+        ("CATALOG_MAP", catalog_map, normalized_saved_map, saved_map_display),
+    ):
         if kept and given != kept:
-            print(f"  {name}={given} overrides the saved {kept!r}; saved after a successful promote.", file=sys.stderr)
+            print(f"  {name}={given} overrides the saved {kept_display}; saved after a successful promote.", file=sys.stderr)
     if reused:
         print(
             f"  Using saved {' and '.join(reused)} from {display_path(env_file)}: "
