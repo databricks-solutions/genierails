@@ -34,7 +34,7 @@ value the unmasked tier sees.
 The key is how the tool knows two result rows, one per tier, are the *same* row. Pick a column that is:
 
 - **Not sensitive and not masked.** It must read identically for every tier; a masked key can't pair rows. Never pick a column you want protected.
-- **Unique and stable per row**: an ID such as `customer_id`, `order_id` or `account_id`.
+- **Unique, non-NULL and stable per row**: an ID such as `customer_id`, `order_id` or `account_id`. The admin baseline samples rows and every tier reads those same rows by key; the tool checks the sampled keys are unique and non-NULL across the whole table, and a repeated, NULL or masked key makes the mask check INCONCLUSIVE (`row-pairing key <col> is not unique / has NULLs on <table>` or `... is masked for <tier> on <table>`), never a pass.
 - **Present on the tables you verify.** If your tables don't share one key column, use a [`VERIFY_SPEC`](#explicit-spec---spec) with a key per table.
 
 If you omit it, the column-mask check is **skipped** (row filters are still checked) and the run can still exit 0, so masking has not been proven. Always set it.
@@ -57,8 +57,12 @@ non-conclusive outcome as blocking:
   not restrict, unmasked principals disagreed on the raw value, or a query
   failed / a principal could not be provisioned).
 - **INCONCLUSIVE** — the check could not be verified (no baseline rows, no
-  overlapping rows, an all-NULL/empty sample, or a restricted principal with no
+  overlapping rows, an all-NULL/empty sample, a row-pairing key that is not
+  unique, has NULLs or is masked for a tier, or a restricted principal with no
   collected count). This is kept distinct from FAIL only for diagnostics.
+
+Results name the table, column, tier, row counts and key *column*; they never
+print row values or key values, so a FAIL is safe to leave in CI logs.
 
 Both FAIL and INCONCLUSIVE make `make verify-access` exit non-zero. A run that
 derives **zero** checks also exits non-zero — verifying nothing is not success.

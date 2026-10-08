@@ -97,7 +97,7 @@ class TestColumnMaskComparison:
         }
         result = evaluate_column_mask_check(check, values)
         assert result.status == FAIL
-        assert result.evidence["leaks"][0]["row_key"] == 1
+        assert result.evidence["leaks_by_principal"] == {"Junior_Analyst": 1}
         assert "leaked" in result.detail
 
     def test_some_null_but_one_maskable_row_passes(self):
@@ -180,7 +180,7 @@ class TestColumnMaskComparison:
         }
         result = evaluate_column_mask_check(check, values)
         assert result.status == FAIL
-        assert len(result.evidence["leaks"]) == 1
+        assert result.evidence["leaked_rows"] == 1
 
     def test_conflicting_higher_tier_values_fail(self):
         """Two 'unmasked' principals disagreeing on the raw value -> FAIL.
@@ -728,7 +728,7 @@ class TestLiveGuard:
         monkeypatch.setattr(verifier, "_ws_for", lambda principal: object())
         monkeypatch.setattr(
             verifier, "run_query",
-            lambda ws, sql: (_ for _ in ()).throw(
+            lambda ws, sql, params=None: (_ for _ in ()).throw(
                 RuntimeError("[UNRESOLVED_COLUMN] customer_id cannot be resolved")
             ),
         )
@@ -750,7 +750,7 @@ class TestLiveGuard:
         original = RuntimeError("PERMISSION_DENIED: SELECT denied on table c.s.t")
         monkeypatch.setattr(
             verifier, "run_query",
-            lambda ws, sql: (_ for _ in ()).throw(original),
+            lambda ws, sql, params=None: (_ for _ in ()).throw(original),
         )
         with pytest.raises(RuntimeError, match="PERMISSION_DENIED") as exc:
             verifier.collect_column_values(
