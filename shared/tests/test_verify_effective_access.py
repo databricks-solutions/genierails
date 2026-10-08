@@ -97,7 +97,7 @@ class TestColumnMaskComparison:
         }
         result = evaluate_column_mask_check(check, values)
         assert result.status == FAIL
-        assert result.evidence["leaks"][0]["row_key"] == 1
+        assert result.evidence["leaks_by_principal"] == {"Junior_Analyst": 1}
         assert "leaked" in result.detail
 
     def test_some_null_but_one_maskable_row_passes(self):
@@ -180,7 +180,7 @@ class TestColumnMaskComparison:
         }
         result = evaluate_column_mask_check(check, values)
         assert result.status == FAIL
-        assert len(result.evidence["leaks"]) == 1
+        assert result.evidence["leaked_rows"] == 1
 
     def test_conflicting_higher_tier_values_fail(self):
         """Two 'unmasked' principals disagreeing on the raw value -> FAIL.
@@ -559,22 +559,37 @@ class TestSpecLoading:
         assert len(spec.row_filters) == 1
         assert spec.row_filters[0].table == "c.s.t2"
 
-    def test_tfvars_rejects_case_insensitive_tagged_sensitive_key(self, tmp_path):
+    @staticmethod
+    def _tagged_key_tfvars(tmp_path, match_condition):
         tfvars = tmp_path / "abac.auto.tfvars"
-        tfvars.write_text('''
-fgac_policies = [{
+        tfvars.write_text(f'''
+fgac_policies = [{{
   name = "mask_ssn"
   policy_type = "POLICY_TYPE_COLUMN_MASK"
   to_principals = ["Junior"]
-  match_condition = "hasTagValue('pii', 'ssn')"
-}]
+  match_condition = "{match_condition}"
+}}]
 tag_assignments = [
-  { entity_type = "columns", entity_name = "c.s.t.ssn", tag_key = "pii", tag_value = "ssn" },
-  { entity_type = "columns", entity_name = "C.S.T.Customer_ID", tag_key = "class", tag_value = "identifier" },
+  {{ entity_type = "columns", entity_name = "c.s.t.ssn", tag_key = "pii", tag_value = "ssn" }},
+  {{ entity_type = "columns", entity_name = "C.S.T.Customer_ID", tag_key = "class", tag_value = "identifier" }},
 ]
 ''')
-        with pytest.raises(ValueError, match="itself classified sensitive/masked"):
+        return tfvars
+
+    def test_tfvars_accepts_a_key_tag_no_mask_policy_matches(self, tmp_path):
+        tfvars = self._tagged_key_tfvars(tmp_path, "hasTagValue('pii', 'ssn')")
+        spec = load_spec_from_tfvars(tfvars, key_column="customer_id")
+        assert [c.key_column for c in spec.column_masks] == ["customer_id"]
+
+    def test_tfvars_rejects_case_insensitive_mask_matched_key(self, tmp_path):
+        tfvars = self._tagged_key_tfvars(
+            tmp_path, "hasTagValue('pii', 'ssn') OR hasTagValue('class', 'identifier')")
+        with pytest.raises(ValueError) as exc:
             load_spec_from_tfvars(tfvars, key_column="customer_id")
+        assert str(exc.value) == (
+            "ERROR: row-pairing key customer_id may be masked for Junior, __admin__ on c.s.t "
+            "(it has 1 column tag(s) a column-mask policy matches); "
+            "choose a unique, non-null, unmasked key")
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +743,7 @@ class TestLiveGuard:
         monkeypatch.setattr(verifier, "_ws_for", lambda principal: object())
         monkeypatch.setattr(
             verifier, "run_query",
-            lambda ws, sql: (_ for _ in ()).throw(
+            lambda ws, sql, params=None: (_ for _ in ()).throw(
                 RuntimeError("[UNRESOLVED_COLUMN] customer_id cannot be resolved")
             ),
         )
@@ -750,7 +765,7 @@ class TestLiveGuard:
         original = RuntimeError("PERMISSION_DENIED: SELECT denied on table c.s.t")
         monkeypatch.setattr(
             verifier, "run_query",
-            lambda ws, sql: (_ for _ in ()).throw(original),
+            lambda ws, sql, params=None: (_ for _ in ()).throw(original),
         )
         with pytest.raises(RuntimeError, match="PERMISSION_DENIED") as exc:
             verifier.collect_column_values(
