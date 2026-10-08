@@ -18,7 +18,8 @@ variables {
   genie_exposure_blocker     = "the coverage check is failing"
   genie_space_missing_grants = { sales = [] }
   genie_id_file_prefix       = "tests/.tmp/handoff/.genie_space_id"
-  genie_script_path          = "true"
+  genie_script_path          = "bash tests/genie_destroy_stub.sh"
+  genie_destroy_script       = "bash tests/genie_destroy_stub.sh"
 }
 
 run "create_path" {
@@ -47,7 +48,7 @@ run "move_to_id_path_while_gate_fails" {
     error_message = "the create-path resource must keep the recorded group and withhold only the new group"
   }
   assert {
-    condition     = length(output.genie_space_acls_created_groups) > 0 && !fileexists("handoff-revoke.log")
+    condition     = length(output.genie_space_acls_created_groups) > 0 && !strcontains(file("handoff-revoke.log"), "revoke-acls")
     error_message = "moving the same agent from the create path to the ID path must not run revoke-acls"
   }
 }

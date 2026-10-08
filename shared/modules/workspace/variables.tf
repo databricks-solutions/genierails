@@ -66,6 +66,12 @@ variable "genie_space_acl_created_handoffs" {
   description = "Create-path ACL state retained while an auto-created agent moves to an explicit ID on the same deployment. Supplied only by the workspace root after matching the state binding and ID file."
 }
 
+variable "genie_destroy_script" {
+  type        = string
+  default     = "bash ../../scripts/genie_space.sh"
+  description = "Destroy-provisioner command prefix. Production uses the project-relative Genie script; native Terraform tests explicitly select their local stub."
+}
+
 variable "sql_warehouse_id" {
   type        = string
   default     = ""

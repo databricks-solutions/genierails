@@ -208,7 +208,7 @@ locals {
     && try(local._applied["genie_space|${key}"].triggers_replace.value.host, local._applied["genie_space|${key}"].triggers_replace.host, "") == var.databricks_workspace_host
     && try(local._applied["genie_space|${key}"].input.value.id_file, local._applied["genie_space|${key}"].input.id_file, "") == "${var.env_dir}/.genie_space_id_${key}"
     && fileexists("${var.env_dir}/.genie_space_id_${key}")
-    && try(trimspace(file("${var.env_dir}/.genie_space_id_${key}")), "") == space.genie_space_id
+    && (fileexists("${var.env_dir}/.genie_space_id_${key}") ? try(trimspace(file("${var.env_dir}/.genie_space_id_${key}")), "") == space.genie_space_id : true)
   }
   applied_can_run_groups = {
     for key, space in local.merged_spaces : key => [
