@@ -1087,30 +1087,53 @@ def _key_batches(keys: Sequence[Any]) -> list[list[Any]]:
     return [keys[i:i + KEY_PARAM_BATCH] for i in range(0, len(keys), KEY_PARAM_BATCH)]
 
 
+def check_tiers(check: ColumnMaskCheck, admin_tier: str = DEFAULT_ADMIN_TIER) -> list[str]:
+    """Every principal a mask check reads as: its tiers and the admin baseline."""
+    return sorted(set(check.masked_principals) | set(check.unmasked_principals) | {admin_tier})
+
+
+def key_may_be_masked_message(check: ColumnMaskCheck, why: str,
+                              admin_tier: str = DEFAULT_ADMIN_TIER) -> str:
+    return (f"row-pairing key {check.key_column} may be masked for "
+            f"{', '.join(check_tiers(check, admin_tier))} on {check.table} ({why}); "
+            "choose a unique, non-null, unmasked key")
+
+
+def _tag_assignments(entity_type: str, entity: str, tags: Sequence[tuple[str, str]]) -> list[dict]:
+    # The matcher skips a valueless tag, and live tags (e.g. class.*) often have
+    # none; a value no config can name keeps hasTag() matching it.
+    return [{"entity_type": entity_type, "entity_name": entity, "tag_key": name,
+             "tag_value": value or "\x00"} for name, value in tags]
+
+
+def mask_policies_use_table_tags(mask_config: Optional[Mapping[str, Any]]) -> bool:
+    """Whether any column-mask policy's when_condition reads table tags."""
+    return any(
+        _as_str(p.get("policy_type")) == "POLICY_TYPE_COLUMN_MASK" and _as_str(p.get("when_condition"))
+        for p in (mask_config or {}).get("fgac_policies") or [] if isinstance(p, Mapping)
+    )
+
+
 def key_tags_mask_problem(
     mask_config: Optional[Mapping[str, Any]], table: str, key_column: str,
-    tags: Sequence[tuple[str, str]],
+    tags: Sequence[tuple[str, str]], table_tags: Sequence[tuple[str, str]] = (),
 ) -> str:
     """Why the key column's live ``tags`` could get it masked ("" if they can't).
 
     Decided as Terraform/Unity Catalog applies the masks, with the shared
     matcher (required_mask_columns: catalog-scoped, full tag conditions,
     fully-excepted policies skipped, names case-insensitive) over the config's
-    tag assignments plus these live tags. Fails closed when there is no config
-    to check against or its conditions can't be read.
+    tag assignments plus these live tags (and the table's live ``table_tags``,
+    which when_conditions read). Fails closed when there is no config to check
+    against or its conditions can't be read.
     """
     if not tags:
         return ""
     if mask_config is None:
         return f"{len(tags)} column tag(s), and no mask policies were given to check them against"
-    entity = f"{table}.{key_column}"
-    # The matcher skips a valueless tag, and live tags (e.g. class.*) often have
-    # none; a value no config can name keeps hasTag() matching it.
-    assignments = list(mask_config.get("tag_assignments") or []) + [
-        {"entity_type": "columns", "entity_name": entity, "tag_key": name,
-         "tag_value": value or "\x00"}
-        for name, value in tags
-    ]
+    assignments = (list(mask_config.get("tag_assignments") or [])
+                   + _tag_assignments("columns", f"{table}.{key_column}", tags)
+                   + _tag_assignments("tables", table, table_tags))
     try:
         masked = required_mask_columns(mask_config.get("fgac_policies") or [], assignments)
     except ValueError as exc:
@@ -1513,8 +1536,9 @@ class EffectiveAccessVerifier:
         Run as the admin baseline. A key mask can permute keys or map them onto
         other sampled keys, which no row comparison can see, so a key column is
         refused if it has a live column mask, or a live tag some column-mask
-        policy in ``self.mask_config`` matches (key_tags_mask_problem). Other
-        tags, e.g. native class.* tags on an ID, don't disqualify it.
+        policy in ``self.mask_config`` matches given the table's live tags
+        (key_tags_mask_problem). Other tags, e.g. native class.* tags on an ID,
+        don't disqualify it.
         """
         self._guard()
         catalog, schema, table = table_parts(check.table)
@@ -1531,10 +1555,21 @@ class EffectiveAccessVerifier:
         masks = int(rows[0][0] or 0) if rows else 0
         if masks:
             found.append(f"{masks} column mask(s)")
-        tags = [(str(r[0]), "" if r[1] is None else str(r[1])) for r in self.run_query(
-            ws, "SELECT tag_name, tag_value FROM system.information_schema.column_tags "
-            + where.format("catalog_name", "schema_name"), params) if r]
-        problem = key_tags_mask_problem(self.mask_config, check.table, check.key_column, tags)
+        def tag_rows(sql: str, query_params: Mapping[str, Any]) -> list[tuple[str, str]]:
+            return [(str(r[0]), "" if r[1] is None else str(r[1]))
+                    for r in self.run_query(ws, sql, query_params) if r]
+
+        tags = tag_rows("SELECT tag_name, tag_value FROM system.information_schema.column_tags "
+                        + where.format("catalog_name", "schema_name"), params)
+        # A when_condition is judged on the table's tags; read them live too
+        # (a failure to read them propagates, so the key fails closed).
+        table_tags = tag_rows(
+            "SELECT tag_name, tag_value FROM system.information_schema.table_tags "
+            "WHERE lower(catalog_name) = :c AND lower(schema_name) = :s AND lower(table_name) = :t",
+            {n: params[n] for n in ("c", "s", "t")},
+        ) if tags and mask_policies_use_table_tags(self.mask_config) else []
+        problem = key_tags_mask_problem(self.mask_config, check.table, check.key_column, tags,
+                                        table_tags)
         if problem:
             found.append(problem)
         return found
@@ -1639,9 +1674,7 @@ def verify_effective_access_live(
                     why = f"it has {', '.join(found)}" if found else ""
                 except Exception as exc:
                     why = f"could not read its column masks/tags as the admin baseline: {exc}"
-                key_metadata[meta_sig] = (
-                    f"row-pairing key {check.key_column} may be masked for {', '.join(tiers)} on "
-                    f"{check.table} ({why}); choose a unique, non-null, unmasked key" if why else "")
+                key_metadata[meta_sig] = key_may_be_masked_message(check, why, admin_tier) if why else ""
             if key_metadata[meta_sig]:
                 pairing_problems[sig] = key_metadata[meta_sig]
                 continue
@@ -1926,23 +1959,23 @@ def load_spec_from_tfvars(
         key_column=key_column, key_column_by_table=key_column_by_table,
     )
     spec.mask_config = {"fgac_policies": fgac_policies, "tag_assignments": tag_assignments}
-    tagged_columns = {
-        _as_str(item.get("entity_name")).lower()
-        for item in tag_assignments
-        if _as_str(item.get("entity_type")) == "columns"
-    }
-    sensitive_keys = sorted({
-        f"{check.table}.{check.key_column}"
-        for check in spec.column_masks
-        if check.key_column
-        and f"{check.table}.{check.key_column}".lower() in tagged_columns
-    })
-    if sensitive_keys:
-        raise ValueError(
-            "ERROR: verify key column is itself classified sensitive/masked: "
-            + ", ".join(sensitive_keys)
-            + ". Configure a non-sensitive stable row identifier."
-        )
+    # The rule the live run applies: a key is refused when a column-mask policy
+    # can match its configured tags (so it is itself a masked column), not for
+    # carrying a tag no mask policy matches (e.g. class.* on an ID).
+    problems: dict[tuple[str, str], str] = {}
+    for check in spec.column_masks:
+        sig = (check.table.lower(), check.key_column.lower())
+        if not check.key_column or sig in problems:
+            continue
+        entity = f"{check.table}.{check.key_column}".lower()
+        tags = [(_as_str(t.get("tag_key")), _as_str(t.get("tag_value"))) for t in tag_assignments
+                if _as_str(t.get("entity_type")) == "columns"
+                and _as_str(t.get("entity_name")).lower() == entity]
+        why = key_tags_mask_problem(spec.mask_config, check.table, check.key_column, tags)
+        problems[sig] = key_may_be_masked_message(check, f"it has {why}") if why else ""
+    refused = [why for why in problems.values() if why]
+    if refused:
+        raise ValueError("ERROR: " + "; ".join(refused))
     return spec
 
 

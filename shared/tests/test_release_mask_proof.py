@@ -81,7 +81,7 @@ def test_a_saved_per_table_key_that_is_tagged_sensitive_refuses(tmp_path, capsys
     env = _env(tmp_path, policies=TAGGED)
     (env / "env.auto.tfvars").write_text('verify_key_columns = { "cat.sch.customers" = "ssn" }\n')
     assert rh.require_mask_proof(env, "prod", "", "") == 1
-    assert "itself classified sensitive/masked: cat.sch.customers.ssn" in capsys.readouterr().err
+    assert "row-pairing key ssn may be masked for" in capsys.readouterr().err
 
 
 def test_a_key_lets_release_proceed(tmp_path):

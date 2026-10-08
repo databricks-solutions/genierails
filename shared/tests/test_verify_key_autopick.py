@@ -618,8 +618,15 @@ def test_legacy_single_key_still_works(warehouse, tmp_path, capsys):
 
 
 def test_a_tagged_global_key_is_still_refused_up_front(tmp_path):
-    with pytest.raises(SystemExit, match="itself classified sensitive/masked: cat.sch.customers.ssn"):
+    with pytest.raises(SystemExit, match="row-pairing key ssn may be masked for .* on cat.sch.customers"):
         _main(tmp_path, "--key-column", "ssn")
+
+
+def test_an_override_with_only_a_class_tag_in_the_config_is_accepted(warehouse, tmp_path, capsys):
+    warehouse(FakeWarehouse(sample_tables()))
+    assert _main(tmp_path, "--check-keys-only", env_text='verify_key_columns = { "cat.sch.payments" = "customer_id" }\n',
+                 extra_tags=[("cat.sch.payments.customer_id", "class", "customer_identifier")]) == 0
+    assert "Row-pairing key for cat.sch.payments: customer_id (verify_key_columns)" in capsys.readouterr().out
 
 
 def test_dry_run_names_the_keys_it_will_pick(tmp_path, capsys):
