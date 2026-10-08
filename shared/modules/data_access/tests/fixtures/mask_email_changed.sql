@@ -1,0 +1,3 @@
+CREATE OR REPLACE FUNCTION cat.sch.mask_email(v STRING)
+RETURNS STRING
+RETURN 'changed';
