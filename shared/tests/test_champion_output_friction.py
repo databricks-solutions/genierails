@@ -84,8 +84,9 @@ def test_champion_genie_next_steps_are_phase_1(tmp_path):
 
     assert out == (
         "  Next steps (walkthrough Phase 1):\n"
-        "    1. Enable classification on your catalog (Databricks UI, or: make enable-classification ENV=dev),\n"
-        "       review detections, then enable automatic tagging and wait for class.* tags\n"
+        "    1. In Catalog Explorer, open the catalog > Data classification: turn it on, review the detections\n"
+        "       and approve them, and turn on auto-tagging. Wait until the class.* tags appear.\n"
+        "       Prefer a script? make enable-classification ENV=dev turns it on (you still review detections in the UI).\n"
         "    2. make generate ENV=dev\n"
         "    3. make rehearse ENV=dev VERIFY_KEY_COLUMN=<key_column>"
     )

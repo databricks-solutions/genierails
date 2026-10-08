@@ -49,7 +49,7 @@ make promote-to ENV=prod   # promote_from/catalog_map are in envs/prod/env.auto.
 vi envs/prod/auth.auto.tfvars             # enter prod workspace credentials
 
 # prod re-derives its OWN facts — never re-run generate in prod
-make enable-classification ENV=prod       # or the Databricks UI (recommended); then wait for prod class.* tags
+# turn on Data Classification in Catalog Explorer, review + approve, enable auto-tagging; wait for prod class.* tags
 make release ENV=prod                     # derive (no LLM) → validate → coverage check → audit → apply → verify-access
 ```
 

@@ -7,13 +7,13 @@ Take a curated Genie agent in **dev** and ship it to **production** without ever
 ```
 # dev
 make setup ENV=dev                   # then set genie_space_id in envs/dev/env.auto.tfvars
-make enable-classification ENV=dev   # or turn it on in the UI; wait for class.* tags
+# turn on Data Classification in Catalog Explorer, review + approve, enable auto-tagging; wait for class.* tags
 make generate ENV=dev                # ONE run: imports the agent, finds its tables, drafts rules
 make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id   # key saved after a passing run
 # prod (same pattern for stg or any env)
 # Set promote_from/catalog_map in envs/prod/env.auto.tfvars first.
 make promote-to ENV=prod
-make enable-classification ENV=prod
+# turn on Data Classification in Catalog Explorer, review + approve, enable auto-tagging; wait for class.* tags
 make release ENV=prod                # key comes from dev
 make maintain ENV=prod
 ```
@@ -84,13 +84,11 @@ No `uc_tables` needed: the agent's tables are discovered from its ID. *No agent 
 
 **Goal —** *rehearse* safely on dev: prove the masks fire, confirm the agent still answers, and produce a reviewable draft — off live PII. (Prod discovers what's actually sensitive later.)
 
-**1a. Turn on the scanner.**
+**1a. Turn on classification, review, and approve detections.**
 
-```bash
-make enable-classification ENV=dev   # scans only — nothing is tagged until you opt in (1b)
-```
+In **Catalog Explorer**, open the catalog → **Data classification**: turn it on, review the detections and approve them, and turn on auto-tagging. Wait until the `class.*` tags appear.
 
-It finds the agent's tables from its ID (read-only; saved to `envs/dev/data_access/discovered_uc_tables.auto.tfvars`), then enables UC Data Classification on them. Or enable it in the **Databricks UI** — Catalog Explorer → your catalog → *Enable* classification.
+Prefer a script? `make enable-classification ENV=dev` turns it on (you still review detections in the UI).
 
 <details>
 <summary><strong>Note — <code>Usage policy ID must not be empty</code></strong></summary>
@@ -98,7 +96,7 @@ It finds the agent's tables from its ID (read-only; saved to `envs/dev/data_acce
 The as-code path applies the `databricks_data_classification_catalog_config` resource. On a workspace without a serverless usage policy it can fail with `Usage policy ID must not be empty` ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)); the UI path avoids this issue. If needed, create or attach a serverless usage policy first. Creating one requires Workspace Admin (non-admins need *Serverless usage policy: Manager*). Docs: [AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies).
 </details>
 
-**1b. Review detections.** The first scan is asynchronous (minutes to ~24h) — kick it off, grab a coffee ☕, and come back. Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) to see what the scanner found on your columns and **exclude any false positives**. Nothing is tagged yet — auto-tagging defaults off.
+The first scan is asynchronous (minutes to ~24h) — kick it off, grab a coffee ☕, and come back. Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) to approve what the scanner found and exclude any false positives before enabling auto-tagging.
 
 <details>
 <summary><strong>Next — Enable automatic tagging after review</strong></summary>
@@ -118,7 +116,7 @@ As code, set `enable_auto_tagging = true` in `envs/dev/env.auto.tfvars` and re-r
 ```bash
 make generate ENV=dev
 ```
-It imports the agent's config, finds its tables, and drafts masks and rules from the `class.*` tags. If the tags aren't there yet it stops before calling the model (fail-closed) and tells you to enable classification, wait for `class.*` tags, and re-run `make generate ENV=dev`.
+It imports the agent's config, finds its tables, and drafts masks and rules from the `class.*` tags. If the tags aren't there yet it stops before calling the model (fail-closed) and tells you to finish the Catalog Explorer review/approval and auto-tagging step, wait for `class.*` tags, and re-run `make generate ENV=dev`.
 
 It uses the `access_tier_groups` you set in Phase 0 — **your own** IdP-synced groups, **one per access tier, most-privileged first** (`payments_ops`=full/raw → `regional_analysts`=region-scoped + masked → `viewers`=least-privileged, with all sensitive columns masked — placeholders; use your real names). GenieRails *consumes* them by exact name, never creates them; the generated policies define each tier's actual access.
 
@@ -180,13 +178,9 @@ It carries the **rules** — the mapping, masking functions, access/row-filter p
 
 **Goal —** let production scan its *own* real data and tag its sensitive columns — the true facts land here (real customer PII only exists in prod).
 
-```bash
-make enable-classification ENV=prod   # same as step 1a, now on prod (or use the UI)
-```
+In **Catalog Explorer**, open the prod catalog → **Data classification**: turn it on, review the detections and approve them, and turn on auto-tagging. Wait until the `class.*` tags appear. Prod's real data may surface sensitive types dev never saw.
 
-It scans **without writing tags** (auto-tagging defaults off, so prod gets its *own* review, just like dev). Then, exactly as in dev's **1b**:
-
-**Review (UI).** Open [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) on the prod catalog and **exclude any false positives** — prod's real data may surface sensitive types dev never saw.
+Prefer a script? `make enable-classification ENV=prod` turns it on (you still review detections in the UI).
 
 <details>
 <summary><strong>Next — Enable automatic tagging after review</strong></summary>
@@ -269,7 +263,7 @@ make maintain ENV=prod   # audit-schema → derive-assignments → coverage-gate
 
 It protects newly tagged columns using prod's own `class.*` tags, and audits the rulebook before it applies anything. It reconciles governance, including `SELECT` for tables already covered by the passing coverage check; it never widens access past that check or changes the Genie agent. When generated inputs are unchanged, the apply is skipped, so `maintain` does not repair grants revoked outside Terraform.
 
-- **Stops at `audit-schema`** — a sensitive-looking column has no `class.*` tag yet. Review it in native classification (`make enable-classification ENV=prod`) or tag it in Unity Catalog, then re-run `make maintain ENV=prod`.
+- **Stops at `audit-schema`** — a sensitive-looking column has no `class.*` tag yet. In Catalog Explorer, review and approve its native classification detection and enable auto-tagging (or tag it in Unity Catalog), then re-run `make maintain ENV=prod`.
 - **Stops at `coverage-gate` or `audit-rulebook`** (before applying anything) — prod has a tag your rules don't cover. Add the rule in dev, rehearse, and `make promote-to ENV=prod` before running `make release ENV=prod` again.
 
 A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog granted nothing you didn't ask for). For your most sensitive data, prefer "locked down until proven safe" over "open until tagged."

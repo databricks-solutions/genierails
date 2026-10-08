@@ -33,10 +33,11 @@ vi envs/dev/env.auto.tfvars
 #   enable_auto_tagging   = false     # default; flip to true after reviewing detections
 # The classification footprint is the union of top-level uc_tables and each
 # genie_spaces[*].uc_tables entry.
-make enable-classification ENV=dev   # or enable it in the Databricks UI (recommended)
-# Scanning populates system.data_classification.results (review detections in the UI).
-# class.* column tags are written only once enable_auto_tagging = true and you re-apply;
-# then poll system.information_schema.column_tags until tags land for the footprint.
+# In Catalog Explorer, open the catalog > Data classification: turn it on, review + approve,
+# enable auto-tagging, and wait for class.* tags.
+# Prefer a script? make enable-classification ENV=dev turns it on (review stays in the UI).
+# class.* column tags are written after auto-tagging is enabled in the UI (or after setting
+# enable_auto_tagging = true and rerunning the optional script).
 
 # Generation consumes your existing IdP-synced groups (setup scaffolds
 # manage_groups = false); pass one group per access tier, strictest first.

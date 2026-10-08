@@ -2146,9 +2146,9 @@ def test_required_native_classification_fails_on_successful_empty_scan(monkeypat
         generate_abac._fetch_live_classification_source(
             ["cat.sch.*"], {"sql_warehouse_id": "warehouse"}, require_native=True,
         )
-    assert "review detections" in str(exc_info.value)
-    assert "enable_auto_tagging = true" in str(exc_info.value)
-    assert "re-apply enable-classification" in str(exc_info.value)
+    assert "review and approve the detections" in str(exc_info.value)
+    assert "turn on auto-tagging" in str(exc_info.value)
+    assert "wait until the class.* tags appear" in str(exc_info.value)
 
 
 def test_auto_install_pins_python_hcl2_below_8():

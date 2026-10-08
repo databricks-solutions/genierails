@@ -46,7 +46,7 @@ industry = ""                        # No industry overlay (default)
 Enable native classification first (sensitivity is native; the overlay only adds industry rule context), then prove coverage before applying:
 
 ```bash
-make enable-classification ENV=dev   # or the Databricks UI (recommended); then wait for class.* tags
+# turn on Data Classification in Catalog Explorer, review + approve, enable auto-tagging; wait for class.* tags
 make generate ENV=dev GENERATE_ARGS='--groups "<your-idp-groups>"'
 make coverage-gate ENV=dev           # blocks if any classified column is unprotected
 make rehearse ENV=dev                # apply (grants only if coverage passes) + verify-access

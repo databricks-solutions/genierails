@@ -289,8 +289,9 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "     (FROM=/CATALOG_MAP= remain optional command-line overrides.)"; \
 		echo "  2. Edit $(_SETUP_ENV_REL)/auth.auto.tfvars — deployment SP client_id / client_secret + prod workspace host & id"; \
 		echo "  3. In $(_SETUP_ENV_REL)/env.auto.tfvars, also set sql_warehouse_id (or leave \"\" to auto-create)"; \
-		echo "  4. Run: make enable-classification ENV=$(ENV)   (or turn it on in the UI);"; \
-		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
+		echo "  4. In Catalog Explorer, open the catalog > Data classification: turn it on, review the detections"; \
+		echo "     and approve them, and turn on auto-tagging. Wait until the class.* tags appear."; \
+		echo "     Prefer a script? make enable-classification ENV=$(ENV) turns it on (you still review detections in the UI)."; \
 		echo "  5. Run: make release ENV=$(ENV)   (the verify key comes from dev)"; \
 		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
 		echo "     Without a promoted verify_key_column, release refuses before applying."; \
@@ -312,8 +313,9 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "  $$step. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — set genie_space_id to your Genie agent ID and"; \
 		echo "     access_tier_groups to your IdP groups, most to least privileged"; \
 		echo "     (No agent yet? See ../shared/examples/dev_to_prod/SAMPLE_ENV.md)"; step=$$((step+1)); \
-		echo "  $$step. Run: make enable-classification ENV=$(ENV)   (or turn it on in the UI);"; \
-		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
+		echo "  $$step. In Catalog Explorer, open the catalog > Data classification: turn it on, review the detections"; \
+		echo "     and approve them, and turn on auto-tagging. Wait until the class.* tags appear."; \
+		echo "     Prefer a script? make enable-classification ENV=$(ENV) turns it on (you still review detections in the UI)."; \
 		step=$$((step+1)); echo "  $$step. Run: make generate ENV=$(ENV)   (one run: imports the agent, finds its tables, drafts rules)"; \
 		step=$$((step+1)); echo "  $$step. Run: make rehearse ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>   (key saved after a passing run)"; \
 		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
@@ -330,7 +332,7 @@ init-env: _bootstrap ## Prepare env directories and default config files
 # here and are filtered out; every other line (errors included) and the exit
 # status pass through. An agent configured only by ID has its tables discovered
 # first (read-only Genie API, no model call), so the scan covers them.
-enable-classification: _guarded-bootstrap _guard-workspace-target ## Apply UC Data Classification scanning and the configured auto-tagging opt-in
+enable-classification: _guarded-bootstrap _guard-workspace-target ## Optional scripted way to turn on UC Data Classification; review detections in the UI
 	@python3 "$(SHARED_ROOT)/scripts/validate_classification_config.py" "$(ENV_DIR)/env.auto.tfvars"
 	@python3 "$(SHARED_ROOT)/scripts/discover_agent_tables.py" "$(ENV_DIR)"
 	@existing_catalogs="$$(python3 "$(SHARED_ROOT)/scripts/prepare_classification_config.py" "$(ENV_DIR)")" || exit 1; \
@@ -562,7 +564,8 @@ maintain: _guard-genie-placeholder ## Reconcile governance (including existing c
 	if [ $$audit_rc -ne 0 ]; then \
 		if [ $$audit_rc -eq 1 ]; then \
 			echo "maintain: audit-schema reported drift (output above). For sensitive-looking columns with no class.* tag," >&2; \
-			echo "  review native UC classification / auto-tagging (make enable-classification ENV=$(ENV)) or tag them in UC," >&2; \
+			echo "  review and approve native UC classification detections and enable auto-tagging in Catalog Explorer," >&2; \
+			echo "  then wait for class.* tags," >&2; \
 			echo "  then re-run make maintain ENV=$(ENV). maintain never LLM-tags columns." >&2; \
 		else \
 			echo "maintain: audit-schema failed (error, not drift); review the error output above." >&2; \
@@ -647,7 +650,8 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 		if ! python3 "$(SHARED_ROOT)/scripts/auth_configured.py" "$$dest_env_dir/auth.auto.tfvars"; then \
 			echo "  Next: edit $$dest_env_dir/auth.auto.tfvars  ($(DEST_ENV) workspace credentials)"; \
 		fi; \
-		echo "  Then: scan $(DEST_ENV) (make enable-classification ENV=$(DEST_ENV)), wait for class.* tags,"; \
+		echo "  Then: in Catalog Explorer, turn on Data classification for $(DEST_ENV), review and approve detections,"; \
+		echo "        enable auto-tagging, and wait for class.* tags,"; \
 		echo "        and run make release ENV=$(DEST_ENV) (walkthrough Phases 3-4)"; \
 		trap - EXIT; \
 	else \
