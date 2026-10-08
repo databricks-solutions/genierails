@@ -79,7 +79,7 @@ TARGET_DATA_ACCESS_ENV_DIR = $(TARGET_ENV_DIR)/$(DATA_ACCESS_SUBDIR)
 # reach outside envs/.
 _ENV_NAME_CHARS := a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9 _ -
 _without_chars = $(if $(2),$(call _without_chars,$(subst $(firstword $(2)),,$(1)),$(wordlist 2,$(words $(2)),$(2))),$(1))
-_is_env_name = $(and $(filter 1,$(words $(1))),$(filter-out 0% 1% 2% 3% 4% 5% 6% 7% 8% 9% _% -%,$(1)),$(if $(call _without_chars,$(1),$(_ENV_NAME_CHARS)),,yes))
+_is_env_name = $(and $(filter 1,$(words $(1))),$(if $(filter 0% 1% 2% 3% 4% 5% 6% 7% 8% 9% _% -%,$(1)),,yes),$(if $(call _without_chars,$(1),$(_ENV_NAME_CHARS)),,yes))
 _check_env_name = $(if $(call _is_env_name,$($(1))),,$(error $(1)='$($(1))' is not an env name (lowercase letters, digits, '_' or '-', starting with a letter; no paths or spaces). Pass each make argument separately, e.g. make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id))
 $(call _check_env_name,ENV)
 $(foreach name,SOURCE_ENV DEST_ENV FROM TARGET_ENV,$(if $($(name)),$(call _check_env_name,$(name))))
