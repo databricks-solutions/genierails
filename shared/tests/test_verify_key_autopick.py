@@ -438,6 +438,44 @@ def test_sensitive_key_reason_uses_the_coverage_and_classification_rules():
     assert vea.sensitive_key_reason("total_amount") == ""        # first exposure doesn't block on amounts
 
 
+NEW_EXCLUDED_CLASSES = [
+    "class.ip", "class.ip_address", "class.IP-Address", "class.mac_address",
+    "class.national_id", "class.national_identifier", "class.passport", "class.us_passport",
+    "class.uk_passport", "class.driver_license", "class.us_driver_license", "class.tax_id",
+    "class.geolocation", "class.location", "class.lat_long", "class.date_of_birth",
+    "class.health_data", "class.medical_record_number", "class.biometric_data", "class.biometric",
+]
+
+
+@pytest.mark.parametrize("tag", NEW_EXCLUDED_CLASSES)
+def test_each_sensitive_class_rules_out_an_innocently_named_primary_key(warehouse, tmp_path, capsys, tag):
+    tags = {"contact_ref": [(tag, None)]}
+    warehouse(FakeWarehouse(_people("contact_ref", tags=tags)))
+    assert _main(tmp_path, "--check-keys-only", masked={"cat.sch.people": "secret"}) == 2   # nothing else
+    assert no_key_message("cat.sch.people") in capsys.readouterr().err
+    warehouse(FakeWarehouse(_people("contact_ref", extra_cols=[("person_id", "STRING")], tags=tags)))
+    assert _main(tmp_path, "--check-keys-only", masked={"cat.sch.people": "secret"}) == 0
+    assert "Row-pairing key for cat.sch.people: person_id (id-like column)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("tag", ["class.customer_id", "class.customer_identifier", "class.account_id",
+                                 "class.user_id", "class.identifier", "class.transaction_id"])
+def test_identifier_type_classes_stay_allowed(warehouse, tmp_path, capsys, tag):
+    warehouse(FakeWarehouse(_people("contact_ref", tags={"contact_ref": [(tag, None)]})))
+    assert _main(tmp_path, "--check-keys-only", masked={"cat.sch.people": "secret"}) == 0
+    assert "Row-pairing key for cat.sch.people: contact_ref (primary key)" in capsys.readouterr().out
+
+
+def test_key_exclusion_does_not_change_governance_mapping():
+    import sensitivity_source as ss
+    assert ss._CLASS_TO_GOVERNED.keys() <= ss.KEY_EXCLUDED_CLASS_SEMANTICS   # a superset
+    for semantic in ("ip_address", "national_id", "passport", "mac_address", "geolocation"):
+        assert semantic not in ss._CLASS_TO_GOVERNED     # still unmapped for governance
+        assert ss.sensitive_class_semantic(f"class.{semantic}", "") == semantic
+    assert ss.sensitive_class_semantic("class", "ip_address") == "ip_address"   # value-carried semantic
+    assert ss.sensitive_class_semantic("pii", "ip_address") is None             # not a class tag
+
+
 def test_a_sensitive_override_is_used_with_a_warning(warehouse, tmp_path, capsys):
     warehouse(FakeWarehouse(_people("email")))
     env_text = 'verify_key_columns = { "cat.sch.people" = "email" }\n'

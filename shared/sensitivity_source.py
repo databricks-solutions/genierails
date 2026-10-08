@@ -185,16 +185,65 @@ def _semantic_from_tag(tag_name: str, tag_value: str) -> str | None:
     return None
 
 
-def sensitive_class_semantic(tag_name: str, tag_value: str) -> str | None:
-    """The semantic of a native ``class.*`` tag that marks sensitive data, else None.
+# Native class.* semantics that mark a column as sensitive, for one purpose
+# only: a column carrying one is never auto-picked as verify-access's row-
+# pairing key (an explicit override still may be). This does NOT change how
+# tags map to governance treatments (_CLASS_TO_GOVERNED). It is a superset of
+# _CLASS_TO_GOVERNED's semantics plus Databricks' built-in classification
+# class tags (global and US-specific, docs.databricks.com "Supported
+# classification tags") and common aliases. Matched after _normalize_semantic
+# (case, '-' and ' ' folded to '_'); a two-letter country prefix (us_, uk_,
+# au_, in_, sg_, ...) is also stripped, so e.g. us_passport and uk_passport
+# match passport. Identifier-type classes (customer/account/user ids) are not
+# listed, so they stay allowed.
+KEY_EXCLUDED_CLASS_SEMANTICS: frozenset[str] = frozenset(_CLASS_TO_GOVERNED) | frozenset({
+    # Databricks built-in global class tags
+    "age", "bank_number", "biometric_data", "card_expiration_date", "card_pin",
+    "card_security_code", "card_track_data", "compensation", "credit_card", "credit_score",
+    "criminal_background", "date_of_birth", "driver_license", "email_address",
+    "employment_status", "ethnicity", "genetic_data", "health_data",
+    "health_plan_beneficiary_number", "iban_code", "imei", "ip_address", "license_plate",
+    "location", "mac_address", "marital_status", "medical_date", "medical_device_id",
+    "medical_license", "medical_record_number", "name", "passport", "phone_number",
+    "political_opinion", "religious_belief", "secret", "sexual_data", "sexual_orientation",
+    "swift_code", "trade_union_membership", "url", "vin",
+    # Databricks built-in US class tags (us_ prefix stripped: bank_number, driver_license,
+    # passport, ssn are above or in _CLASS_TO_GOVERNED; itin kept explicitly)
+    "itin",
+    # Aliases: IP / device
+    "ip", "ipv4", "ipv6", "ip_addr", "mac", "mac_addr",
+    # Aliases: national and government identifiers
+    "national_id", "national_identifier", "national_identity_number", "national_insurance_number",
+    "nino", "nhs", "nhs_number", "passport_number", "drivers_license", "driving_licence",
+    "driver_licence", "drivers_licence", "driver_license_number", "tax_id", "tax_identifier",
+    "tax_identification_number", "tin", "ird", "nhi", "abn", "acn", "crn", "pan",
+    "aadhaar_number", "voter_id", "social_insurance_number", "sin", "cpf", "curp",
+    # Aliases: location
+    "geolocation", "geo_location", "gps", "coordinates", "latitude", "longitude", "lat_long",
+    "lat_lng", "latlong", "zip_code", "postal_code", "postcode",
+    # Aliases: dates of birth, health, biometric, other personal data
+    "birthdate", "birthday", "health", "health_record", "medical", "medical_record",
+    "diagnosis", "biometric", "biometrics", "fingerprint", "face", "genetic", "gender",
+    "race", "religion", "salary", "password", "credentials", "api_key", "token",
+})
 
-    Sensitive means a semantic GenieRails governs (``_CLASS_TO_GOVERNED``: PII
-    such as email, phone, SSN/national IDs, name, address, date of birth, bank
-    account, and PCI card data). Unmapped semantics (e.g. an identifier type)
-    and non-class tags return None.
+
+def sensitive_class_semantic(tag_name: str, tag_value: str) -> str | None:
+    """The semantic of a native ``class.*`` tag in KEY_EXCLUDED_CLASS_SEMANTICS, else None.
+
+    Used only to keep sensitive columns from being auto-picked as a row-pairing
+    key. Identifier-type semantics (e.g. ``customer_identifier``) and non-class
+    tags return None.
     """
     semantic = _semantic_from_tag(tag_name, tag_value)
-    return semantic if semantic and semantic in _CLASS_TO_GOVERNED else None
+    if not semantic:
+        return None
+    if semantic in KEY_EXCLUDED_CLASS_SEMANTICS:
+        return semantic
+    country, sep, rest = semantic.partition("_")
+    if sep and len(country) == 2 and rest in KEY_EXCLUDED_CLASS_SEMANTICS:
+        return semantic
+    return None
 
 
 class ClassificationSource(SensitivitySource):
