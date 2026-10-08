@@ -44,13 +44,16 @@ class FakeWarehouse:
     """Just enough SQL for the queries verify_effective_access issues."""
 
     def __init__(self, rows, *, row_filters=None, masks=None, tags=None,
-                 hide_masks_from_metadata=False, metadata_error=None):
+                 hide_masks_from_metadata=False, metadata_error=None,
+                 table_tags=(), table_tags_error=None):
         self.rows = rows                      # [{"id": ..., "ssn": ...}, ...]
         self.row_filters = row_filters or {}  # tier -> predicate(row)
         self.masks = masks or {}              # tier -> {column: fn}
         self.tags = tags or {}                # column -> [(tag_name, tag_value), ...]
         self.hide_masks_from_metadata = hide_masks_from_metadata
         self.metadata_error = metadata_error
+        self.table_tags = list(table_tags)    # [(tag_name, tag_value), ...]
+        self.table_tags_error = table_tags_error
         self.statements = []                  # (tier, sql, params)
 
     def view(self, tier):
@@ -73,10 +76,14 @@ class FakeWarehouse:
         self.statements.append((tier, sql, dict(params)))
         cell = lambda v: None if v is None else str(v)  # noqa: E731 — data_array is strings
         m = re.fullmatch(r"SELECT (COUNT\(\*\)|tag_name, tag_value) FROM "
-                         r"system\.information_schema\.(column_masks|column_tags) .*", sql)
+                         r"system\.information_schema\.(column_masks|column_tags|table_tags) .*", sql)
         if m:
             if self.metadata_error:
                 raise RuntimeError(self.metadata_error)
+            if m.group(2) == "table_tags":
+                if self.table_tags_error:
+                    raise RuntimeError(self.table_tags_error)
+                return [list(t) for t in self.table_tags]
             column = params["k"]
             if m.group(2) == "column_tags":
                 tags = self.tags.get(column, [])
@@ -350,6 +357,68 @@ def test_a_key_tag_with_unreadable_mask_policies_fails_closed(tmp_path, warehous
     [result] = _verify_with_config(tmp_path, _mask_config("has_tag_value('pii', 'ssn')"), _check())
     assert result.status == INCONCLUSIVE
     assert "the mask policies can't be checked" in result.detail
+
+
+@pytest.mark.parametrize("table_tags,status", [
+    ([("domain", "customer")], INCONCLUSIVE),   # the when_condition holds: key masked
+    ([("domain", "orders")], PASS),             # it doesn't: the policy can't reach the key
+    ([], PASS),
+])
+def test_a_when_condition_is_judged_on_the_live_table_tags(tmp_path, warehouse, table_tags, status):
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags=CLASS_TAGS,
+                            table_tags=table_tags))
+    cfg = _mask_config()
+    cfg["fgac_policies"].append({
+        "name": "mask_ids", "policy_type": "POLICY_TYPE_COLUMN_MASK", "catalog": "cat",
+        "to_principals": [JUNIOR], "match_condition": "hasTag('class.identifier')",
+        "when_condition": "hasTagValue('domain', 'customer')"})
+    [result] = _verify_with_config(tmp_path, cfg, _check())
+    assert result.status == status, result.detail
+    if status == INCONCLUSIVE:
+        assert "column tag(s) a column-mask policy matches" in result.detail
+
+
+def test_unreadable_table_tags_fail_closed(tmp_path, warehouse):
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags=CLASS_TAGS,
+                            table_tags_error="PERMISSION_DENIED: table_tags"))
+    cfg = _mask_config(when_condition="hasTagValue('domain', 'customer')")
+    [result] = _verify_with_config(tmp_path, cfg, _check())
+    assert result.status == INCONCLUSIVE
+    assert "could not read its column masks/tags" in result.detail
+
+
+def test_table_tags_are_read_only_when_a_policy_needs_them(tmp_path, warehouse):
+    wh = warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags=CLASS_TAGS,
+                                 table_tags_error="PERMISSION_DENIED: table_tags"))
+    [result] = _verify_with_config(tmp_path, _mask_config(), _check())
+    assert result.status == PASS, result.detail
+    assert not [s for s in wh.statements if "table_tags" in s[1]]
+
+
+def test_tfvars_and_live_paths_refuse_a_key_with_the_same_message(tmp_path, warehouse):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text('''
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.customers.ssn", tag_key = "pii", tag_value = "ssn" },
+  { entity_type = "columns", entity_name = "cat.sch.customers.id", tag_key = "class.customer_id", tag_value = "yes" },
+  { entity_type = "columns", entity_name = "cat.sch.customers.id", tag_key = "class.identifier", tag_value = "yes" },
+]
+fgac_policies = [
+  { name = "mask_ssn", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "cat",
+    to_principals = ["Junior_Analyst"], match_condition = "hasTagValue('pii', 'ssn')" },
+  { name = "mask_ids", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "cat",
+    to_principals = ["Junior_Analyst"], match_condition = "hasTag('class.identifier')" },
+]
+''')
+    with pytest.raises(ValueError) as exc:
+        vea.load_spec_from_tfvars(tfvars, key_column="id")
+    # The same key and tags, live, against the same policies.
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags=CLASS_TAGS))
+    cfg = _mask_config()
+    cfg["fgac_policies"].append(cfg["fgac_policies"][0] | {
+        "name": "mask_ids", "match_condition": "hasTag('class.identifier')"})
+    [result] = _verify_with_config(tmp_path, cfg, _check(masked=(JUNIOR,)))
+    assert str(exc.value) == "ERROR: " + result.detail
 
 
 def test_from_tfvars_carries_the_mask_config(tmp_path):
