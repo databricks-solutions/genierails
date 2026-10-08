@@ -44,17 +44,17 @@ variable "groups" {
 
 variable "genie_exposure_blocker" {
   type        = string
-  description = "Why the data_access layer isn't ready for business exposure, or \"\" when it is. A non-empty value blocks every non-empty Genie CAN_RUN grant."
+  description = "Why the data_access layer isn't ready for business exposure, or \"\" when it is. A non-empty value withholds every CAN_RUN group beyond what the last apply left in place."
 }
 
 variable "genie_space_missing_grants" {
   type        = map(list(string))
-  description = "Per Genie agent key: <table>|<group> SELECT grants its CAN_RUN groups need that the data_access state lacks. A non-empty list (or a missing key) blocks that agent's non-empty CAN_RUN."
+  description = "Per Genie agent key: <table>|<group> SELECT grants its CAN_RUN groups need that the data_access state lacks. A non-empty list (or a missing key) withholds that agent's CAN_RUN groups beyond what the last apply left in place."
 }
 
 variable "genie_space_can_run_widening" {
   type        = map(list(string))
-  description = "Per Genie agent key: CAN_RUN groups the desired ACL adds beyond what the last apply left in place. Empty (keep, shrink or clear) needs no coverage check; a missing key counts as widening."
+  description = "Per Genie agent key: CAN_RUN groups the desired ACL adds beyond what the last apply left in place. Empty (keep, shrink or clear) needs no coverage check; a missing key counts as widening to every desired group."
 }
 
 variable "sql_warehouse_id" {

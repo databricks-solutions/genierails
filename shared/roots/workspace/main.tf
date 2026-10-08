@@ -649,6 +649,19 @@ output "genie_space_acls_groups" {
   value = module.workspace.genie_space_acls_groups
 }
 
+output "genie_space_can_run_withheld" {
+  description = "Per Genie agent key: CAN_RUN groups this plan withholds (blocked exposure); the rest of the change applies."
+  value       = module.workspace.genie_space_can_run_withheld
+}
+
+# A raw terraform run that withholds CAN_RUN still applies; say so.
+check "genie_can_run_withheld" {
+  assert {
+    condition     = length(module.workspace.genie_space_can_run_withheld) == 0
+    error_message = "Genie CAN_RUN withheld (${join("; ", [for key, groups in module.workspace.genie_space_can_run_withheld : "${key}: ${join(", ", groups)}"])}): ${local.genie_exposure_blocker != "" ? local.genie_exposure_blocker : "the data_access state lacks the SELECT grants those groups need"}. Removing or keeping CAN_RUN still applies. Apply governance first through make (make apply, make release or make apply-governance), which runs the coverage check and applies data_access before Genie ACLs."
+  }
+}
+
 output "genie_space_missing_grants" {
   description = "Per Genie agent: <table>|<group> SELECT grants its CAN_RUN groups need that the data_access state doesn't have. Any entry blocks that agent's non-empty CAN_RUN."
   value       = local.genie_space_missing_grants

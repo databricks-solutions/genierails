@@ -206,7 +206,7 @@ make coverage-gate ENV=prod
 
 The derivation reuses the exact rules you reviewed in dev and never calls a model. A promoted per-column override is merged strictest-wins with the native result, so it can strengthen but never weaken native protection.
 
-These commands are read-only apart from refreshing generated local files: they do not deploy governance or the Genie agent. If prod's tags cannot be read, or a detected data type has no protection rule, the coverage check stops.
+These commands deploy nothing: `derive-assignments` re-reads prod's live tags and DDL from Unity Catalog and rewrites generated local files (`generated/`, `ddl/`), and `coverage-gate` only checks them. Neither applies governance, grants access or touches the Genie agent. If prod's tags cannot be read, or a detected data type has no protection rule, the coverage check stops.
 
 **Done when —** `coverage-gate` exits PASS. `make release` repeats this check and then runs `audit-rulebook` against the promoted rules before it can apply new or wider access.
 
@@ -232,6 +232,8 @@ Repeat until the check passes and drift is clean. These checks don't apply anyth
 ```bash
 make release ENV=prod VERIFY_KEY_COLUMN=customer_id
 ```
+
+`release` must prove every mask, so it needs the row-pairing key. Pass `VERIFY_KEY_COLUMN`, or save `verify_key_column` in `envs/dev/env.auto.tfvars` (promote carries it to prod) or in `envs/prod/env.auto.tfvars`. Without a key (or a `VERIFY_SPEC`), `release` refuses before it applies anything, instead of skipping the mask checks.
 
 One command: placeholder guard → lock → live UC re-read/`derive-assignments` → validation → coverage check → promote the derived config into its Terraform layers → read-only `audit-rulebook` → all-layer apply → `verify-access`. The audit runs before the access-granting apply, so drift or an audit error leaves existing access unchanged and blocks any new or wider business `SELECT` or Genie run access. There is no access flag to set or save: Terraform grants business `SELECT` and Genie run access only through the passing coverage check, and re-running `promote` never closes access that is already live.
 
@@ -271,13 +273,13 @@ ENVS_DIR="$PWD/envs" ../shared/scripts/terraform_layer.sh workspace prod output 
 **Goal —** catch sensitive data that arrives after go-live. Run this on a schedule (cron or CI):
 
 ```bash
-make maintain ENV=prod   # audit-schema → derive-assignments → coverage-gate → validate-generated → apply-governance → audit-rulebook
+make maintain ENV=prod   # audit-schema → derive-assignments → coverage-gate → validate-generated → audit-rulebook → apply-governance
 ```
 
-It protects newly tagged columns using prod's own `class.*` tags. It never changes business access or the Genie agent.
+It protects newly tagged columns using prod's own `class.*` tags, and audits the rulebook before it applies anything. It reconciles governance, including `SELECT` for tables already covered by the passing coverage check; it never widens access past that check or changes the Genie agent. When generated inputs are unchanged, the apply is skipped, so `maintain` does not repair grants revoked outside Terraform.
 
 - **Stops at `audit-schema`** — a sensitive-looking column has no `class.*` tag yet. Review it in native classification (`make enable-classification ENV=prod`) or tag it in Unity Catalog, then re-run `make maintain ENV=prod`.
-- **Stops at `coverage-gate` or `audit-rulebook`** — prod has a tag your rules don't cover. Add the rule in dev, rehearse, and re-promote before running `make release ENV=prod` again.
+- **Stops at `coverage-gate` or `audit-rulebook`** (before applying anything) — prod has a tag your rules don't cover. Add the rule in dev, rehearse, and re-promote before running `make release ENV=prod` again.
 
 A newly-tagged column is a *masking* gap, not an access breach (Unity Catalog granted nothing you didn't ask for). For your most sensitive data, prefer "locked down until proven safe" over "open until tagged."
 

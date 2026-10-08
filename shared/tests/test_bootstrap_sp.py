@@ -52,11 +52,12 @@ def _fake(*, existing=False, existing_secrets=True, roles=()):
         workspace_id=123, metastore_id="meta-1"
     )
     workspace.metastores.get.return_value = MetastoreInfo(
-        metastore_id="meta-1", owner="metastore-owner@example.com"
+        metastore_id="meta-1", owner="caller@example.com"
     )
     workspace.catalogs.get.return_value = CatalogInfo(owner="caller@example.com")
     workspace.current_user.me.return_value = User(
-        user_name="caller@example.com", display_name="Caller", groups=[]
+        user_name="caller@example.com", display_name="Caller",
+        groups=[ComplexValue(display="admins")],
     )
     workspace.grants.get_effective.return_value = SimpleNamespace(privilege_assignments=[])
     workspace.api_client.do.return_value = {"id": "abcdef1234567890"}
@@ -82,6 +83,12 @@ def _preflight(workspace):
     workspace_factory = MagicMock(return_value=workspace)
     _preflight_target_catalog(
         _cfg(target_catalog="existing_catalog"), account, workspace_factory
+    )
+
+
+def _not_metastore_owner(workspace):
+    workspace.metastores.get.return_value = MetastoreInfo(
+        metastore_id="meta-1", owner="metastore-owner@example.com"
     )
 
 
@@ -134,6 +141,46 @@ def test_workspace_client_falls_back_to_dbc_workspace_id():
     host = _workspace_host(account, 456)
 
     assert host == "https://dbc-456.cloud.databricks.com"
+
+
+def test_workspace_client_uses_azure_account_host_when_cloud_is_missing():
+    account = MagicMock()
+    account.config.host = "https://accounts.azuredatabricks.net"
+    account.workspaces.get.return_value = SimpleNamespace(
+        deployment_name="adb-7405605806702166.6",
+    )
+    assert _workspace_host(account, 7405605806702166) == (
+        "https://adb-7405605806702166.6.azuredatabricks.net"
+    )
+
+
+def test_workspace_client_never_guesses_aws_host_for_azure_account():
+    account = MagicMock()
+    account.config.host = "https://accounts.azuredatabricks.net"
+    account.workspaces.get.return_value = SimpleNamespace()
+    with pytest.raises(ValueError, match="Workspace API returns one of those fields"):
+        _workspace_host(account, 456)
+
+
+@pytest.mark.parametrize("account_host, suffix", [
+    ("https://accounts.azuredatabricks.us", "azuredatabricks.us"),
+    ("https://accounts.databricks.azure.cn", "databricks.azure.cn"),
+])
+def test_workspace_client_derives_sovereign_azure_domain(account_host, suffix):
+    account = MagicMock()
+    account.config.host = account_host
+    account.workspaces.get.return_value = SimpleNamespace(deployment_name="adb-123.4")
+    assert _workspace_host(account, 123) == f"https://adb-123.4.{suffix}"
+
+
+@pytest.mark.parametrize("full_host", [
+    "adb-123.4.azuredatabricks.us",
+    "adb-123.4.databricks.azure.cn",
+])
+def test_workspace_client_preserves_sovereign_azure_deployment_domain(full_host):
+    account = MagicMock()
+    account.workspaces.get.return_value = SimpleNamespace(deployment_name=full_host)
+    assert _workspace_host(account, 123) == f"https://{full_host}"
 
 
 def test_preflight_catalog_owner_passes_without_effective_grant_lookup():
@@ -195,6 +242,10 @@ def test_preflight_workspace_admin_owner_requires_admins_group_membership():
     workspace.catalogs.get.return_value = CatalogInfo(
         owner="_workspace_admins_existing_catalog_123"
     )
+    workspace.current_user.me.return_value = User(
+        user_name="caller@example.com", groups=[]
+    )
+    _not_metastore_owner(workspace)
 
     with pytest.raises(RuntimeError, match="caller 'caller@example.com'.*catalog owner"):
         _preflight(workspace)
@@ -208,6 +259,7 @@ def test_preflight_display_name_admins_does_not_grant_workspace_admin_authority(
     workspace.current_user.me.return_value = User(
         user_name="caller@example.com", display_name="Admins", groups=[]
     )
+    _not_metastore_owner(workspace)
 
     with pytest.raises(RuntimeError, match="caller 'caller@example.com'.*catalog owner"):
         _preflight(workspace)
@@ -222,6 +274,7 @@ def test_preflight_workspace_admin_group_for_another_workspace_does_not_own_cata
         user_name="caller@example.com",
         groups=[ComplexValue(display="admins")],
     )
+    _not_metastore_owner(workspace)
 
     with pytest.raises(RuntimeError, match="caller 'caller@example.com'.*catalog owner"):
         _preflight(workspace)
@@ -234,7 +287,7 @@ def test_preflight_metastore_get_permission_error_falls_through_to_manage():
 
     with pytest.raises(
         RuntimeError,
-        match=r"metastore owner \(<unavailable>\).*lacks MANAGE",
+        match=r"metastore owner is '<unavailable>'.*lacks effective MANAGE",
     ):
         _preflight(workspace)
 
@@ -256,7 +309,7 @@ def test_preflight_missing_metastore_id_skips_metastore_lookup():
         workspace_id=123, metastore_id=None
     )
 
-    with pytest.raises(RuntimeError, match=r"metastore owner \(<unavailable>\)"):
+    with pytest.raises(RuntimeError, match=r"no metastore is assigned"):
         _preflight(workspace)
 
     workspace.metastores.get.assert_not_called()
@@ -265,6 +318,7 @@ def test_preflight_missing_metastore_id_skips_metastore_lookup():
 def test_preflight_non_owner_with_effective_manage_passes():
     _account, workspace, _workspace_factory, _factory = _fake()
     workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    _not_metastore_owner(workspace)
     workspace.grants.get_effective.return_value = SimpleNamespace(
         privilege_assignments=[SimpleNamespace(
             privileges=[SimpleNamespace(privilege="MANAGE")]
@@ -283,6 +337,7 @@ def test_preflight_non_owner_with_effective_manage_passes():
 def test_preflight_non_owner_without_manage_fails():
     _account, workspace, _workspace_factory, _factory = _fake()
     workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    _not_metastore_owner(workspace)
 
     with pytest.raises(RuntimeError, match="preflight failed.*catalog owner"):
         _preflight(workspace)
@@ -306,12 +361,19 @@ def test_preflight_owner_match_is_case_insensitive():
     workspace.grants.get_effective.assert_not_called()
 
 
-def test_dry_run_makes_no_client_calls():
-    factory = MagicMock()
+def test_dry_run_runs_read_only_preflight_and_makes_no_writes():
+    account, workspace, workspace_factory, factory = _fake()
     output = []
     assert bootstrap(_cfg(dry_run=True), client_factory=factory, emit=output.append) == 0
-    factory.assert_not_called()
-    assert output[-1] == "DRY RUN: no API calls were made."
+    workspace_factory.assert_called_once_with("https://dbc.example.com")
+    workspace.api_client.do.assert_called_once_with(
+        "GET", "/api/2.0/serving-endpoints/custom-model"
+    )
+    account.service_principals.create.assert_not_called()
+    account.service_principal_secrets.create.assert_not_called()
+    workspace.grants.update.assert_not_called()
+    assert any("model access CAN_QUERY" in line for line in output)
+    assert output[-1] == "DRY RUN: read-only preflight passed; no changes were made."
 
 
 def test_declining_confirmation_makes_no_client_calls():
@@ -334,7 +396,47 @@ def test_target_catalog_flows_from_parser_to_config():
     cfg = _config_from_args(args)
 
     assert cfg.workspace_ids == (123, 456)
-    assert cfg.target_catalog == "existing_catalog"
+    assert cfg.target_catalogs == ("existing_catalog", "existing_catalog")
+
+
+def test_per_workspace_catalogs_align_with_workspace_ids():
+    args = parser().parse_args([
+        "--account-id", "acct", "--workspace-id", "123,456",
+        "--target-catalog", "dev_cat,prod_cat",
+    ])
+    cfg = _config_from_args(args)
+    assert cfg.target_catalogs == ("dev_cat", "prod_cat")
+    output = []
+    _plan(cfg, output.append)
+    assert any("workspace 123" in line and "dev_cat" in line for line in output)
+    assert any("workspace 456" in line and "prod_cat" in line for line in output)
+
+
+def test_bad_target_catalog_count_exits_cleanly(capsys):
+    result = main([
+        "--account-id", "acct", "--workspace-id", "123,456,789",
+        "--target-catalog", "dev_cat,prod_cat", "--dry-run",
+    ])
+    assert result == 2
+    assert "2 catalog(s) for 3 workspace ID(s)" in capsys.readouterr().err
+
+
+def test_empty_target_catalog_item_exits_cleanly(capsys):
+    result = main([
+        "--account-id", "acct", "--workspace-id", "123,456",
+        "--target-catalog", "dev_cat,,prod_cat", "--dry-run",
+    ])
+    assert result == 2
+    assert "contains an empty catalog name" in capsys.readouterr().err
+
+
+def test_dry_run_falls_back_offline_only_when_credentials_are_absent():
+    output = []
+    factory = MagicMock(side_effect=ValueError(
+        "default auth: cannot configure default credentials"
+    ))
+    assert bootstrap(_cfg(dry_run=True), client_factory=factory, emit=output.append) == 0
+    assert output[-1].startswith("DRY RUN OFFLINE: credentials are absent")
 
 
 def test_workspace_profile_flows_from_parser_to_config():
@@ -412,7 +514,31 @@ def test_clients_reuses_azure_sp_profile_with_workspace_host():
 def test_m2m_builds_fresh_workspace_auth_without_mutating_account_config():
     account_host = "https://accounts.cloud.databricks.com"
     workspace_host = "https://dbc.example.com"
-    with patch.object(SdkConfig, "init_auth"):
+    discovered_urls = []
+
+    def oidc_response(_client, _method, url, **_kwargs):
+        discovered_urls.append(url)
+        token_host = workspace_host if url.startswith(workspace_host) else account_host
+        # databricks-sdk >= 0.148 first reads the host metadata and takes the
+        # OIDC discovery URL from it; answer as real hosts do (older SDKs
+        # never ask).
+        if url.endswith("/.well-known/databricks-config"):
+            oidc = "/oidc" if token_host == workspace_host else "/oidc/accounts/{account_id}"
+            return {"oidc_endpoint": f"{token_host}{oidc}"}
+        return {
+            "authorization_endpoint": f"{token_host}/oidc/v1/authorize",
+            "token_endpoint": f"{token_host}/oidc/v1/token",
+        }
+
+    token_response = MagicMock(ok=True)
+    token_response.json.return_value = {
+        "access_token": "workspace-token",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+    }
+    with patch("databricks.sdk.oauth._BaseClient.do", autospec=True,
+               side_effect=oidc_response), \
+         patch("databricks.sdk.oauth.requests.post", return_value=token_response) as post:
         account_config = SdkConfig(
             host=account_host,
             account_id="acct",
@@ -420,22 +546,20 @@ def test_m2m_builds_fresh_workspace_auth_without_mutating_account_config():
             client_secret="client-secret",
             auth_type="oauth-m2m",
         )
-    account_header_factory = object()
-    account_config._header_factory = account_header_factory
-    workspace = SimpleNamespace()
-    with patch("databricks.sdk.AccountClient"), \
-         patch("databricks.sdk.WorkspaceClient", return_value=workspace) as workspace_client, \
-         patch("databricks.sdk.config.Config", return_value=account_config):
-            _account, factory = _clients(_cfg(profile="account-m2m"))
-            result = factory(workspace_host)
+        account_header_factory = account_config._header_factory
 
-    workspace_client.assert_called_once_with(
-        host=workspace_host, client_id="client-id", client_secret="client-secret"
-    )
+        with patch("databricks.sdk.AccountClient"), \
+             patch("databricks.sdk.config.Config", return_value=account_config):
+            _account, factory = _clients(_cfg(profile="account-m2m"))
+            workspace = factory(workspace_host)
+        headers = workspace.config.authenticate()
+
+    assert headers["Authorization"] == "Bearer workspace-token"
+    assert workspace.config._header_factory is not account_header_factory
     assert account_config.host == account_host
     assert account_config.account_id == "acct"
-    assert result is workspace
-    assert account_config._header_factory is account_header_factory
+    assert f"{workspace_host}/oidc/.well-known/oauth-authorization-server" in discovered_urls
+    assert post.call_args.args[0] == f"{workspace_host}/oidc/v1/token"
 
 
 @pytest.mark.parametrize("account_auth_type", ["databricks-cli", "pat", "external-browser"])
@@ -547,29 +671,83 @@ def _fmapi_endpoint():
     }
 
 
-def test_fmapi_with_inherited_execute_is_unchanged_without_permissions_patch():
-    _account, workspace, _workspace_factory, factory = _fake()
+@pytest.mark.parametrize("execute_source", ["account users", "reused sp"])
+def test_fmapi_with_inherited_execute_is_unchanged_without_permissions_patch(
+    execute_source,
+):
+    _account, workspace, _workspace_factory, factory = _fake(existing=True)
     workspace.api_client.do.return_value = _fmapi_endpoint()
-    workspace.grants.get_effective.return_value = SimpleNamespace(
-        privilege_assignments=[SimpleNamespace(
-            privileges=[SimpleNamespace(privilege=Privilege.EXECUTE)]
-        )]
+    workspace.metastores.get.return_value = MetastoreInfo(
+        metastore_id="meta-1", owner="joseph@example.com"
     )
+    workspace.catalogs.get.return_value = CatalogInfo(
+        owner="_workspace_admins_louis_serverless_123"
+    )
+    workspace.functions.get.return_value = SimpleNamespace(owner="System user")
+
+    def effective(*, principal, **_kwargs):
+        has_execute = (
+            principal == "client-123"
+            or execute_source == "account users" and principal == "account users"
+        )
+        privileges = (
+            [SimpleNamespace(privilege=Privilege.EXECUTE)] if has_execute else []
+        )
+        return SimpleNamespace(privilege_assignments=[SimpleNamespace(
+            privileges=privileges
+        )])
+
+    workspace.grants.get_effective.side_effect = effective
+    dry_output = []
+    assert bootstrap(
+        _cfg(model_endpoint="databricks-claude-sonnet-4-6", dry_run=True,
+             target_catalog="existing_catalog"),
+        client_factory=factory,
+        emit=dry_output.append,
+    ) == 0
     output = []
 
-    bootstrap(_cfg(model_endpoint="databricks-claude-sonnet-4-6"),
+    bootstrap(_cfg(model_endpoint="databricks-claude-sonnet-4-6",
+                   target_catalog="existing_catalog"),
               client_factory=factory, emit=output.append)
 
-    workspace.grants.get_effective.assert_called_once_with(
-        securable_type="function",
-        full_name="system.ai.databricks-claude-sonnet-4-6",
-        principal="client-123",
-    )
-    assert workspace.api_client.do.call_args_list == [call(
-        "GET", "/api/2.0/serving-endpoints/databricks-claude-sonnet-4-6"
-    )]
+    assert any("UC EXECUTE (inherited)" in line for line in dry_output)
+    function_updates = [item for item in workspace.grants.update.call_args_list
+                        if item.kwargs["securable_type"] == "function"]
+    assert function_updates == []
     assert any(line.startswith("UNCHANGED workspace 123: EXECUTE on system.ai.")
                for line in output)
+
+
+def test_fmapi_caller_effective_lookup_failure_is_actionable():
+    _account, workspace, _workspace_factory, factory = _fake()
+    workspace.api_client.do.return_value = _fmapi_endpoint()
+    workspace.metastores.get.return_value = MetastoreInfo(
+        metastore_id="meta-1", owner="joseph@example.com"
+    )
+    workspace.catalogs.get.return_value = CatalogInfo(
+        owner="_workspace_admins_louis_serverless_123"
+    )
+    workspace.functions.get.return_value = SimpleNamespace(owner="System user")
+
+    def effective(*, principal, **_kwargs):
+        if principal == "caller@example.com":
+            raise PermissionDenied("cannot inspect grants")
+        return SimpleNamespace(privilege_assignments=[])
+
+    workspace.grants.get_effective.side_effect = effective
+
+    with pytest.raises(
+        RuntimeError,
+        match=(r"cannot prove MANAGE on function .*"
+               r"Cause: PermissionDenied: cannot inspect grants"),
+    ):
+        bootstrap(
+            _cfg(model_endpoint="databricks-claude-sonnet-4-6", dry_run=True,
+                 target_catalog="existing_catalog"),
+            client_factory=factory,
+            emit=MagicMock(),
+        )
 
 
 def test_fmapi_without_execute_grants_execute_on_function():
@@ -608,12 +786,24 @@ def test_fmapi_grant_failure_names_endpoint_securable_workspace_and_host():
 def test_fmapi_rerun_is_unchanged_after_execute_grant():
     _account, workspace, _workspace_factory, factory = _fake(existing=True)
     workspace.api_client.do.return_value = _fmapi_endpoint()
-    workspace.grants.get_effective.side_effect = [
-        SimpleNamespace(privilege_assignments=[]),
-        SimpleNamespace(privilege_assignments=[SimpleNamespace(
-            privileges=[SimpleNamespace(privilege=Privilege.EXECUTE)]
-        )]),
-    ]
+    granted = False
+
+    def effective(*, principal, **_kwargs):
+        privileges = (
+            [SimpleNamespace(privilege=Privilege.EXECUTE)]
+            if principal == "client-123" and granted else []
+        )
+        return SimpleNamespace(privilege_assignments=[SimpleNamespace(
+            privileges=privileges
+        )])
+
+    def update(*, securable_type, **_kwargs):
+        nonlocal granted
+        if securable_type == "function":
+            granted = True
+
+    workspace.grants.get_effective.side_effect = effective
+    workspace.grants.update.side_effect = update
 
     bootstrap(_cfg(model_endpoint="databricks-claude-sonnet-4-6"),
               client_factory=factory, emit=MagicMock())
@@ -709,6 +899,7 @@ def test_target_catalog_grants_brownfield_privileges():
 def test_target_catalog_preflight_fails_before_sp_or_secret_creation():
     account, workspace, _workspace_factory, factory = _fake()
     workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    _not_metastore_owner(workspace)
 
     with pytest.raises(RuntimeError, match="preflight failed.*catalog owner"):
         bootstrap(
@@ -717,10 +908,29 @@ def test_target_catalog_preflight_fails_before_sp_or_secret_creation():
             emit=MagicMock(),
         )
 
-    account.service_principals.list.assert_not_called()
+    account.service_principals.list.assert_called_once_with(filter='displayName eq "deploy"')
     account.service_principals.create.assert_not_called()
     account.service_principal_secrets.create.assert_not_called()
     account.workspace_assignment.update.assert_not_called()
+
+
+def test_metastore_preflight_failure_happens_before_every_write():
+    account, workspace, _workspace_factory, factory = _fake()
+    _not_metastore_owner(workspace)
+    workspace.grants.get_effective.return_value = SimpleNamespace(
+        privilege_assignments=[]
+    )
+
+    with pytest.raises(RuntimeError, match=r"cannot grant CREATE CATALOG.*Nothing was changed"):
+        bootstrap(_cfg(), client_factory=factory, emit=MagicMock())
+
+    account.service_principals.list.assert_called_once_with(filter='displayName eq "deploy"')
+    account.service_principals.create.assert_not_called()
+    account.service_principal_secrets.create.assert_not_called()
+    account.api_client.do.assert_not_called()
+    account.access_control.update_rule_set.assert_not_called()
+    account.workspace_assignment.update.assert_not_called()
+    workspace.grants.update.assert_not_called()
 
 
 def test_missing_workspace_login_fails_before_sp_or_secret_creation():
@@ -733,7 +943,7 @@ def test_missing_workspace_login_fails_before_sp_or_secret_creation():
     )):
         bootstrap(_cfg(), client_factory=factory, emit=MagicMock())
 
-    account.service_principals.list.assert_not_called()
+    account.service_principals.list.assert_called_once_with(filter='displayName eq "deploy"')
     account.service_principals.create.assert_not_called()
     account.service_principal_secrets.create.assert_not_called()
 
@@ -763,9 +973,33 @@ def test_workspace_client_construction_auth_failure_is_actionable_and_exits_two(
         "cannot authenticate to workspace 123 (https://dbc.example.com). Run: "
         "databricks auth login --host https://dbc.example.com"
     ) in capsys.readouterr().err
-    account.service_principals.list.assert_not_called()
+    account.service_principals.list.assert_called_once_with(filter='displayName eq "deploy"')
     account.service_principals.create.assert_not_called()
     account.service_principal_secrets.create.assert_not_called()
+
+
+def test_dry_run_missing_workspace_credentials_is_not_reported_as_offline(capsys):
+    account = MagicMock()
+    account.service_principals.list.return_value = []
+    account.workspaces.get.return_value = SimpleNamespace(
+        workspace_url="dbc.example.com"
+    )
+    workspace_factory = MagicMock(side_effect=ValueError(
+        "default auth: cannot configure default credentials; "
+        "Config: host=https://dbc.example.com, auth_type=databricks-cli"
+    ))
+
+    with patch(
+        "scripts.bootstrap_sp._clients", return_value=(account, workspace_factory)
+    ):
+        result = main([
+            "--account-id", "acct", "--workspace-id", "123", "--dry-run",
+        ])
+
+    captured = capsys.readouterr()
+    assert result == 2
+    assert "cannot authenticate to workspace 123" in captured.err
+    assert "DRY RUN OFFLINE" not in captured.out
 
 
 def test_account_workspace_lookup_failure_is_not_reported_as_workspace_auth():
@@ -812,6 +1046,7 @@ def test_preflight_authority_error_includes_cause():
 def test_effective_grants_permission_denied_is_authority_failure():
     _account, workspace, _workspace_factory, _factory = _fake()
     workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    _not_metastore_owner(workspace)
     workspace.grants.get_effective.side_effect = PermissionDenied("cannot inspect grants")
 
     with pytest.raises(
@@ -855,7 +1090,9 @@ def test_target_catalog_grant_fails_loudly_when_caller_lacks_authority():
             emit=MagicMock(),
         )
 
-    workspace.api_client.do.assert_not_called()
+    workspace.api_client.do.assert_called_once_with(
+        "GET", "/api/2.0/serving-endpoints/custom-model"
+    )
 
 
 def test_existing_sp_and_grants_are_not_duplicated():

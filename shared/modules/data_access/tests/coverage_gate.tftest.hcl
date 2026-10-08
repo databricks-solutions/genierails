@@ -1,6 +1,7 @@
 # The data_access module plans business SELECT only while the coverage-gate
-# result records a pass for the exact inputs Terraform sees. These runs test
-# the module directly so the precondition on table_access is expectable.
+# result records a pass for the exact inputs Terraform sees. Without one, a
+# new grant is withheld (left out of the plan, and named in
+# withheld_table_grants). These runs test the module directly so that is expectable.
 
 mock_provider "databricks" {
   alias = "account"
@@ -65,7 +66,10 @@ run "missing_gate_result_blocks_select" {
     databricks.workspace = databricks.workspace
     time                 = time
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "write_passing_gate" {
@@ -116,7 +120,10 @@ run "changed_tags_make_the_gate_stale" {
   variables {
     tag_assignments = []
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "changed_policies_make_the_gate_stale" {
@@ -129,7 +136,10 @@ run "changed_policies_make_the_gate_stale" {
   variables {
     fgac_policies = []
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "new_grant_principal_makes_the_gate_stale" {
@@ -142,7 +152,10 @@ run "new_grant_principal_makes_the_gate_stale" {
   variables {
     groups = { analysts = {}, auditors = {} }
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "acknowledgement_makes_the_gate_stale" {
@@ -155,7 +168,10 @@ run "acknowledgement_makes_the_gate_stale" {
   variables {
     coverage_acknowledged_columns = ["cat.sch.customers.id"]
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "changed_ddl_and_masks_make_the_gate_stale" {
@@ -178,7 +194,10 @@ run "new_ddl_column_blocks_select_until_regated" {
     databricks.workspace = databricks.workspace
     time                 = time
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "write_failed_gate" {
@@ -201,7 +220,10 @@ run "failed_gate_blocks_select_even_for_current_inputs" {
     databricks.workspace = databricks.workspace
     time                 = time
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "write_unreadable_gate" {
@@ -224,7 +246,10 @@ run "unreadable_gate_blocks_select" {
     databricks.workspace = databricks.workspace
     time                 = time
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 # Terraform can't re-read Unity Catalog, so a pass must carry the time make
@@ -249,7 +274,10 @@ run "never_refreshed_pass_blocks_select" {
     databricks.workspace = databricks.workspace
     time                 = time
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "write_pass_from_an_old_refresh" {
@@ -275,7 +303,10 @@ run "pass_older_than_the_max_age_blocks_select" {
   variables {
     coverage_gate_max_age = "6h"
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "write_pass_with_a_future_refresh" {
@@ -298,7 +329,10 @@ run "future_refresh_time_blocks_select" {
     databricks.workspace = databricks.workspace
     time                 = time
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 # The max age is a gate input with a hard 24h ceiling, so a raw -var or
@@ -340,7 +374,10 @@ run "raising_the_max_age_makes_the_pass_stale" {
   variables {
     coverage_gate_max_age = "12h"
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "gate_inputs_at_the_ceiling" {
@@ -354,7 +391,10 @@ run "gate_inputs_at_the_ceiling" {
     coverage_gate_max_age = "24h"
   }
   # The recorded pass is for the 6h inputs, so this plan refuses SELECT.
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
   assert {
     condition     = output.coverage_gate_inputs.fingerprint != run.missing_gate_result_blocks_select.coverage_gate_inputs.fingerprint
     error_message = "the max age must be part of the gate fingerprint"
@@ -384,7 +424,10 @@ run "ceiling_max_age_still_expires_an_old_refresh" {
   variables {
     coverage_gate_max_age = "24h"
   }
-  expect_failures = [databricks_grant.table_access]
+  assert {
+    condition     = length(databricks_grant.table_access) == 0
+    error_message = "without a current pass the new grant must be withheld"
+  }
 }
 
 run "max_age_above_the_ceiling_is_rejected" {

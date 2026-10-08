@@ -575,6 +575,28 @@ class TestValidatePolicyOverlaps:
         assert "only one mask" in message
         assert "MULTIPLE_MASKS" in message
 
+    def test_masks_overlap_across_spellings_of_one_column(self):
+        # Unity Catalog identifiers are case-insensitive: these are one column,
+        # and one policy's catalog is spelled differently. The message keeps
+        # the configured spelling.
+        assignment = {"entity_type": "columns", "tag_key": "pii_level", "tag_value": "Full_PII"}
+        cfg = {
+            "tag_assignments": [
+                {**assignment, "entity_name": "main.HR.Employees.ssn"},
+                {**assignment, "entity_name": "main.hr.employees.SSN", "tag_key": "region", "tag_value": "us"},
+            ],
+            "fgac_policies": [
+                {**self._policy("mask_full_pii", "POLICY_TYPE_COLUMN_MASK",
+                                "hasTagValue('pii_level', 'Full_PII')"), "catalog": "MAIN"},
+                self._policy("mask_us", "POLICY_TYPE_COLUMN_MASK", "hasTagValue('region', 'us')"),
+            ],
+        }
+        r = _result()
+        validate_policy_overlaps(cfg, r)
+        assert not r.passed
+        message = " ".join(r.errors)
+        assert "main.HR.Employees.ssn" in message and "mask_full_pii" in message and "mask_us" in message
+
     def test_two_row_filters_on_one_table_fail(self):
         cfg = {
             "tag_assignments": [

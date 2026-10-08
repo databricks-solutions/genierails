@@ -3,12 +3,18 @@
 This document lists everything that must be in place for business users (the groups defined in `abac.auto.tfvars`) to use an AI/BI Genie agent.
 
 Business exposure is fail-closed through the coverage check. Terraform plans a new
-or wider table `SELECT` grant only after the masks exist and a recent passing
-coverage check covers it, and a Genie agent business-group ACL only once those
-grants are applied; structural grants and resources apply regardless. There is no
-on/off flag: the former `business_access_enabled` setting is deprecated and
-ignored (`false` does not revoke access; remove the groups or `acl_groups` entries
-instead). Genie agent creation and configuration don't wait for the coverage check.
+table `SELECT` grant only after the masks exist and a recent passing coverage check
+covers it, and adds a business group to a Genie agent ACL only once those grants are
+applied; structural grants and resources apply regardless. Without a pass, the new
+grants and groups are withheld while the rest of the change (removals, unchanged
+access, other agents) still applies, and `make` exits non-zero naming what it
+withheld. There is no on/off flag: the former `business_access_enabled` setting is
+deprecated and ignored (`false` does not revoke access). To withdraw access, remove
+the groups or `acl_groups` entries (or the agent) and apply: that revokes their
+`SELECT`, and Terraform takes back the `CAN_RUN` GenieRails granted on the agent for
+those groups, leaving other direct entries and inherited permissions (workspace
+admins, the owner) alone. Withdrawing never waits for the coverage check. Genie agent
+creation and configuration don't wait for it either.
 
 ## 1. Identity
 
@@ -46,7 +52,7 @@ on a live Genie API response.
 - **Automation:** Terraform manages Genie agent lifecycle via `module.workspace`:
   - **`genie_space_id` empty** (greenfield): `terraform apply` auto-creates a Genie agent from `uc_tables`, sets ACLs, and trashes the space on `terraform destroy`.
   - **`genie_space_id` set** (existing): `terraform apply` only applies CAN_RUN ACLs to the existing space.
-  - In both modes, new or wider CAN_RUN ACLs are granted only after the coverage check has passed and the matching table grants exist.
+  - In both modes, groups are added to CAN_RUN only after the coverage check has passed and the matching table grants exist; until then they are withheld and the rest of the ACL change applies. Removing a group, or the agent, from config revokes the CAN_RUN GenieRails granted it (`genie_space.sh revoke-acls`).
 
 ### Auto-create mode
 

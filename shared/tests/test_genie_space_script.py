@@ -157,6 +157,32 @@ fi
     assert "admins" not in result.stdout
 
 
+def test_empty_withheld_acl_removes_hand_added_access_without_granting(tmp_path):
+    bin_dir = tmp_path / "bin"; bin_dir.mkdir()
+    request_body = tmp_path / "put-body.json"
+    (bin_dir / "curl").write_text(r'''#!/bin/sh
+if echo " $* " | grep -q " PUT "; then
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-d" ]; then printf '%s' "$2" > "$PUT_BODY"; break; fi
+    shift
+  done
+  printf '{}\n200'
+else
+  printf '%s\n200' '{"access_control_list":[{"group_name":"manual","display_name":"Manual Team","all_permissions":[{"permission_level":"CAN_RUN","inherited":false}]}]}'
+fi
+''')
+    (bin_dir / "curl").chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+           "PUT_BODY": str(request_body), "DATABRICKS_HOST": "https://target",
+           "DATABRICKS_TOKEN": "token", "GENIE_SPACE_OBJECT_ID": "adopted-space",
+           "GENIE_GROUPS_CSV": "", "GENIE_ALLOW_EMPTY_ACL": "1"}
+    result = subprocess.run(["bash", str(SCRIPT), "set-acls"], env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Removing hand-added Genie access: group:manual [Manual Team] (CAN_RUN) — not in config" in result.stdout
+    assert json.loads(request_body.read_text()) == {"access_control_list": []}
+
+
 def test_acl_replace_fails_closed_on_get_error_unless_force_is_printed(tmp_path):
     bin_dir = tmp_path / "bin"; bin_dir.mkdir()
     calls = tmp_path / "calls"

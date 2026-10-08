@@ -18,6 +18,8 @@ from pathlib import Path
 import hcl2
 import pytest
 
+from tests.terraform_helpers import TIMEOUT, shared_copy, skip_if_providers_unavailable, tf
+
 SHARED = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SHARED))
 sys.path.insert(0, str(SHARED / "scripts"))
@@ -458,13 +460,10 @@ def _policy_plan(tmp_path: Path, generated: Path) -> dict[str, tuple[list[str], 
     )
     _seed_state(da / "terraform.tfstate", f"gr_mask_{DEV_1}_redact")
 
+    root = shared_copy(tmp_path) / "roots" / "data_access"  # never the real root
     tf_env = {**os.environ, "TF_DATA_DIR": str(da / ".terraform"), "TF_IN_AUTOMATION": "1"}
-    init = subprocess.run(
-        ["terraform", "init", "-input=false",
-         f"-backend-config=path={da / 'terraform.tfstate'}"],
-        cwd=ROOT, env=tf_env, text=True, capture_output=True,
-    )
-    assert init.returncode == 0, init.stdout + init.stderr
+    skip_if_providers_unavailable(tf(root, "init", "-input=false",
+                                     f"-backend-config=path={da / 'terraform.tfstate'}", env=tf_env))
     var_args = [f"-var=env_dir={da}", f"-var-file={da / 'auth.auto.tfvars'}",
                 f"-var-file={da / 'abac.auto.tfvars'}"]
     # Business SELECT has no off switch: record a current passing coverage
@@ -472,7 +471,7 @@ def _policy_plan(tmp_path: Path, generated: Path) -> dict[str, tuple[list[str], 
     console = subprocess.run(
         ["terraform", "console", *var_args],
         input="module.data_access.coverage_gate_inputs.fingerprint\n",
-        cwd=ROOT, env=tf_env, text=True, capture_output=True,
+        cwd=root, env=tf_env, text=True, capture_output=True, timeout=TIMEOUT,
     )
     assert console.returncode == 0, console.stdout + console.stderr
     fingerprint = console.stdout.strip().splitlines()[-1].strip('"')
@@ -481,16 +480,10 @@ def _policy_plan(tmp_path: Path, generated: Path) -> dict[str, tuple[list[str], 
         "refreshed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }))
     plan_file = da / "plan.bin"
-    plan = subprocess.run(
-        ["terraform", "plan", "-refresh=false", "-lock=false", "-input=false", "-no-color",
-         f"-out={plan_file}", *var_args],
-        cwd=ROOT, env=tf_env, text=True, capture_output=True,
-    )
+    plan = tf(root, "plan", "-refresh=false", "-lock=false", "-input=false", "-no-color",
+              f"-out={plan_file}", *var_args, env=tf_env)
     assert plan.returncode == 0, plan.stdout + plan.stderr
-    shown = subprocess.run(
-        ["terraform", "show", "-json", str(plan_file)],
-        cwd=ROOT, env=tf_env, text=True, capture_output=True,
-    )
+    shown = tf(root, "show", "-json", str(plan_file), env=tf_env)
     assert shown.returncode == 0, shown.stderr
     return {
         rc["address"]: (

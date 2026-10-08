@@ -104,6 +104,7 @@ locals {
     && try(resource.type, "") == "databricks_grant" && try(resource.name, "") == "table_access"
   ]) : []
   applied_protection_fingerprint = local._state_is_for_us ? try(tostring(local._applied_record.protection_fingerprint), "") : ""
+  applied_protection             = local._state_is_for_us ? try(local._applied_record.protection, null) : null
 }
 
 variable "env_dir" {
@@ -391,6 +392,7 @@ module "data_access" {
   coverage_gate_max_age           = var.coverage_gate_max_age
   applied_table_grants            = local.applied_table_grants
   applied_protection_fingerprint  = local.applied_protection_fingerprint
+  applied_protection              = local.applied_protection
   deployment_binding              = local.deployment_binding
   enable_classification           = var.enable_classification
   enable_auto_tagging             = var.enable_auto_tagging
@@ -404,6 +406,14 @@ module "data_access" {
   masking_sql_file                = "${var.env_dir}/masking_functions.sql"
   deploy_masking_script           = "${local.project_root}/deploy_masking_functions.py"
   auth_file                       = "${var.env_dir}/auth.auto.tfvars"
+}
+
+# A raw terraform run that withholds new grants still applies; say so.
+check "business_select_withheld" {
+  assert {
+    condition     = length(module.data_access.withheld_table_grants.grants) == 0
+    error_message = "Coverage check ${module.data_access.withheld_table_grants.status}: ${module.data_access.withheld_table_grants.problem}. New business SELECT withheld: ${join(", ", module.data_access.withheld_table_grants.grants)}. Removals and existing grants still apply. Run this layer through make (make apply ENV=${basename(dirname(var.env_dir))}), which refreshes live tags and DDL and runs the coverage check."
+  }
 }
 
 output "sql_warehouse_id" {
