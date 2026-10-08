@@ -2207,8 +2207,9 @@ def _fetch_live_classification_source(
             message = (
                 "Native classification read succeeded but returned 0 class.* "
                 "findings for the declared footprint — in Catalog Explorer, open "
-                "the catalog > Data classification, review and approve the detections, "
-                "turn on auto-tagging, and wait until the class.* tags appear"
+                "the catalog > Details tab > Data classification and turn it on. "
+                "When the scan finishes, review the detections and exclude any false "
+                "positives, then turn on auto-tagging and wait until the class.* tags appear"
             )
             if require_native:
                 raise NativeClassificationRequiredError(message)
@@ -7353,8 +7354,9 @@ def champion_genie_next_steps(env_name: str) -> list[str]:
     """Next steps after the Phase 0 import (`make generate MODE=genie`)."""
     return [
         "  Next steps (walkthrough Phase 1):",
-        "    1. In Catalog Explorer, open the catalog > Data classification: turn it on, review the detections",
-        "       and approve them, and turn on auto-tagging. Wait until the class.* tags appear.",
+        "    1. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.",
+        "       When the scan finishes, review the detections and exclude any false positives, then turn on",
+        "       auto-tagging. Wait until the class.* tags appear.",
         f"       Prefer a script? make enable-classification ENV={env_name} turns it on (you still review detections in the UI).",
         f"    2. make generate ENV={env_name}",
         f"    3. make rehearse ENV={env_name} VERIFY_KEY_COLUMN=<key_column>",
@@ -7367,8 +7369,9 @@ def native_classification_stop(error: Exception, table_refs: list[str], env_name
     if table_refs:
         lines.append(f"  Tables found ({len(table_refs)}): {', '.join(table_refs)} (saved). No model was called.")
     return lines + [
-        "  Next: in Catalog Explorer, open the catalog > Data classification: turn it on, review the detections",
-        "  and approve them, and turn on auto-tagging. Wait until the class.* tags appear.",
+        "  Next: in Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.",
+        "  When the scan finishes, review the detections and exclude any false positives, then turn on",
+        "  auto-tagging. Wait until the class.* tags appear.",
         f"  Prefer a script? make enable-classification ENV={env_name} turns it on (you still review detections in the UI).",
         f"  Then re-run make generate ENV={env_name}.",
         "  Re-run with --allow-llm-sensitivity only to explicitly accept LLM/DDL inference.",

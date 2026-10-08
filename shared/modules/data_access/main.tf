@@ -244,8 +244,8 @@ module "coverage_gate" {
 
 # Data Classification is opt-in because deleting this resource disables scans
 # for the catalog. When enabled, scope scans to only the schemas represented by
-# the governed UC table footprint. Auto-tagging is a separate opt-in so operators
-# can review detections before allowing class.* tags to land on columns.
+# the governed UC table footprint. Auto-tagging stays UI-managed by default;
+# explicit true/false remains available for scripted environments such as CI.
 resource "databricks_data_classification_catalog_config" "classification" {
   for_each = var.enable_classification ? local.classification_catalog_schemas : {}
 
@@ -256,7 +256,9 @@ resource "databricks_data_classification_catalog_config" "classification" {
     names = each.value
   }
 
-  auto_tag_configs = var.enable_auto_tagging ? [
+  auto_tag_configs = var.enable_auto_tagging == null ? lookup(
+    var.classification_existing_auto_tag_configs, each.key, []
+    ) : var.enable_auto_tagging ? [
     for classification_tag in local.classification_auto_tags : {
       classification_tag = classification_tag
       auto_tagging_mode  = "AUTO_TAGGING_ENABLED"

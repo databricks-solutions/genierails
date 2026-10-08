@@ -28,6 +28,21 @@ def _value(config: dict, key: str) -> str:
     return str(value).strip()
 
 
+def _auto_tag_configs(remote) -> list[dict[str, str]]:
+    """Return provider-shaped auto-tag settings without changing UI ownership."""
+    configs = []
+    for item in getattr(remote, "auto_tag_configs", None) or []:
+        raw = item.as_dict() if hasattr(item, "as_dict") else item
+        tag = raw.get("classification_tag")
+        mode = raw.get("auto_tagging_mode")
+        if tag and mode:
+            configs.append({
+                "classification_tag": str(tag),
+                "auto_tagging_mode": getattr(mode, "value", str(mode)),
+            })
+    return sorted(configs, key=lambda item: item["classification_tag"])
+
+
 def main() -> int:
     env_dir = Path(sys.argv[1]).resolve()
     config = _load(env_dir / "env.auto.tfvars")
@@ -77,6 +92,7 @@ def main() -> int:
         custom_headers=routing_headers,
     )
     existing: dict[str, list[str]] = {}
+    existing_auto_tags: dict[str, list[dict[str, str]]] = {}
     all_schemas: set[str] = set()
     usage_policy_id = _value(auth, "serverless_usage_policy_id")
     for catalog in catalogs:
@@ -97,7 +113,9 @@ def main() -> int:
                     },
                 )
                 existing[catalog] = desired_schemas[catalog]
+                existing_auto_tags[catalog] = []
             continue
+        existing_auto_tags[catalog] = _auto_tag_configs(remote)
         if remote.included_schemas is None:
             all_schemas.add(catalog)
             print(
@@ -115,6 +133,16 @@ def main() -> int:
     lines.append("}")
     rendered_all = ", ".join(json.dumps(catalog) for catalog in sorted(all_schemas))
     lines.append(f"classification_all_schemas = [{rendered_all}]")
+    lines.append("classification_existing_auto_tag_configs = {")
+    for catalog, configs in existing_auto_tags.items():
+        lines.append(f"  {json.dumps(catalog)} = [")
+        for config in configs:
+            lines.append("    {")
+            lines.append(f"      classification_tag = {json.dumps(config['classification_tag'])}")
+            lines.append(f"      auto_tagging_mode   = {json.dumps(config['auto_tagging_mode'])}")
+            lines.append("    },")
+        lines.append("  ]")
+    lines.append("}")
     output.write_text("\n".join(lines) + "\n")
 
     for catalog in sorted(set(existing) | all_schemas):

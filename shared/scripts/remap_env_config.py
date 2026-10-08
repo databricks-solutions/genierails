@@ -403,7 +403,10 @@ def main():
         print(f"ERROR: {exc}")
         sys.exit(1)
     preserved_warehouse = _str(dest_cfg.get("sql_warehouse_id", ""))
-    preserved_auto_tagging = dest_cfg.get("enable_auto_tagging") is True
+    preserved_auto_tagging = dest_cfg.get("enable_auto_tagging")
+    if preserved_auto_tagging not in (None, True, False):
+        print("ERROR: destination enable_auto_tagging must be true, false, or omitted")
+        sys.exit(1)
     # Acknowledgements are reviewed per destination (they name its catalogs),
     # so keep the destination's own list and never carry the source's.
     preserved_acknowledged = [
@@ -582,7 +585,8 @@ def main():
     lines.append("# Safe production defaults. Business access is granted only through the")
     lines.append("# coverage check that make release runs; there is no access flag to set.")
     lines.append("enable_classification = true")
-    lines.append(f"enable_auto_tagging = {str(preserved_auto_tagging).lower()}")
+    if preserved_auto_tagging is not None:
+        lines.append(f"enable_auto_tagging = {str(preserved_auto_tagging).lower()}")
     if preserved_acknowledged:
         lines.append("")
         lines.append("# Reviewed as not sensitive; the coverage check doesn't block first exposure on them.")

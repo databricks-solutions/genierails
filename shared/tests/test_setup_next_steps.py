@@ -80,8 +80,9 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "uc_tables" not in out
     assert "existing agent:" not in out
     assert "pick one" not in out
-    assert "  4. In Catalog Explorer, open the catalog > Data classification: turn it on, review the detections\n" in out
-    assert "     and approve them, and turn on auto-tagging. Wait until the class.* tags appear.\n" in out
+    assert "  4. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.\n" in out
+    assert "     When the scan finishes, review the detections and exclude any false positives, then turn on\n" in out
+    assert "     auto-tagging. Wait until the class.* tags appear.\n" in out
     assert "     Prefer a script? make enable-classification ENV=dev turns it on (you still review detections in the UI).\n" in out
     assert "  5. Run: make generate ENV=dev   (one run: imports the agent, finds its tables, drafts rules)\n" in out
     assert "  6. Run: make rehearse ENV=dev VERIFY_KEY_COLUMN=<key_column>   (key saved after a passing run)\n" in out
@@ -130,7 +131,7 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
         'make promote-to ENV=prod\n',
         "     (FROM=/CATALOG_MAP= remain optional command-line overrides.)\n",
         "envs/prod/auth.auto.tfvars",
-        "In Catalog Explorer, open the catalog > Data classification: turn it on",
+        "In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on",
         "Prefer a script? make enable-classification ENV=prod turns it on",
         "  5. Run: make release ENV=prod   (the verify key comes from dev)\n",
         "make maintain ENV=prod",

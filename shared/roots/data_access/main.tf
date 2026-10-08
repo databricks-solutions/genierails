@@ -222,8 +222,8 @@ variable "verify_key_column" {
 
 variable "enable_auto_tagging" {
   type        = bool
-  default     = false
-  description = "Opt-in to automatically apply class.* tags for classification detections."
+  default     = null
+  description = "Optional scripted auto-tagging control. Null preserves the catalog's existing UI-managed setting; true enables supported class.* tags; false explicitly disables them."
 }
 
 variable "classification_existing_schemas" {
@@ -236,6 +236,15 @@ variable "classification_all_schemas" {
   type        = set(string)
   default     = []
   description = "Catalog classification configs whose remote included_schemas is unset (all schemas)."
+}
+
+variable "classification_existing_auto_tag_configs" {
+  type = map(list(object({
+    classification_tag = string
+    auto_tagging_mode  = string
+  })))
+  default     = {}
+  description = "Existing catalog auto-tag configuration preserved when enable_auto_tagging is null."
 }
 
 variable "access_tier_groups" {
@@ -410,10 +419,11 @@ module "data_access" {
   enable_auto_tagging             = var.enable_auto_tagging
   classification_existing_schemas = var.classification_existing_schemas
   classification_all_schemas      = var.classification_all_schemas
+  classification_existing_auto_tag_configs = var.classification_existing_auto_tag_configs
   tag_assignments                 = var.tag_assignments
   fgac_policies                   = var.fgac_policies
   sql_warehouse_id                = var.sql_warehouse_id
-  warehouse_name                  = var.warehouse_name
+  warehouse_name                 = var.warehouse_name
   retain_auto_warehouse           = local.retain_auto_warehouse
   masking_sql_file                = "${var.env_dir}/masking_functions.sql"
   deploy_masking_script           = "${local.project_root}/deploy_masking_functions.py"

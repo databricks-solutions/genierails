@@ -174,7 +174,7 @@ All nine fields are included in the `serialized_space` when a new Genie agent is
 | `make setup` | Prepare `envs/account`, `envs/<env>/data_access`, and the selected `envs/<env>` |
 | `make init-env` | Explicitly bootstrap env directories and default config files |
 | `make generate` | (dev) Run `generate_abac.py`: read native `class.*`, derive one `gr_treatment`/column, draft rules + Genie content (LLM drafts rules/content; sensitivity is native) |
-| `make enable-classification` | Turn on UC native Data Classification (scanning) for the footprint — the as-code alternative to enabling it in the Databricks UI (recommended); auto-tagging is opt-in via `enable_auto_tagging` (default off), no generated files needed |
+| `make enable-classification` | Optional scripted way to turn on UC native Data Classification for the footprint; omitted `enable_auto_tagging` preserves the UI-managed setting, while explicit `true`/`false` controls it as code; no generated files needed |
 | `make derive-assignments` | (prod) Re-derive **only** tag assignments from live `class.*`, reusing the promoted rules — no LLM |
 | `make coverage-gate` | Fail if any classified sensitive column in the generated config has no covering mask (explicit offline check; every plan/apply also runs the live, Terraform-enforced check) |
 | `make verify-access` | Prove masking/row filters by querying as per-tier test principals |

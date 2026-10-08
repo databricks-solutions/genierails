@@ -30,11 +30,12 @@ vi envs/dev/env.auto.tfvars
 
 # In envs/dev/env.auto.tfvars, opt into native classification:
 #   enable_classification = true      # turns on scanning
-#   enable_auto_tagging   = false     # default; flip to true after reviewing detections
+#   enable_auto_tagging   = true      # optional scripted override; omit for UI-managed auto-tagging
 # The classification footprint is the union of top-level uc_tables and each
 # genie_spaces[*].uc_tables entry.
-# In Catalog Explorer, open the catalog > Data classification: turn it on, review + approve,
-# enable auto-tagging, and wait for class.* tags.
+# In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.
+# When the scan finishes, review detections, exclude false positives, enable auto-tagging,
+# and wait for class.* tags.
 # Prefer a script? make enable-classification ENV=dev turns it on (review stays in the UI).
 # class.* column tags are written after auto-tagging is enabled in the UI (or after setting
 # enable_auto_tagging = true and rerunning the optional script).
@@ -63,7 +64,7 @@ make rehearse VERIFY_KEY_COLUMN=<key>   # apply (masks first; grants only if cov
 ## What happens end-to-end
 
 1. `make setup` creates `envs/account/`, `envs/dev/data_access/`, and `envs/dev/`
-2. `make enable-classification` applies only the UC catalog classification configuration (scanning); auto-tagging is opt-in via `enable_auto_tagging` (default off). It does not need generated ABAC or masking files
+2. `make enable-classification` applies only the UC catalog classification configuration (scanning); when `enable_auto_tagging` is omitted it preserves UI-managed auto-tagging, while explicit `true`/`false` is the scripted override. It does not need generated ABAC or masking files
 3. You review detections, set `enable_auto_tagging = true`, re-apply, then wait for the scan to write `class.*` tags
 4. `make generate` fetches DDLs and native classification, then writes a draft into `envs/dev/generated/`
 5. You tune generated governance and semantic config; durable agent ACL intent remains in `env.auto.tfvars`

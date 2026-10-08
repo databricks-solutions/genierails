@@ -2146,7 +2146,7 @@ def test_required_native_classification_fails_on_successful_empty_scan(monkeypat
         generate_abac._fetch_live_classification_source(
             ["cat.sch.*"], {"sql_warehouse_id": "warehouse"}, require_native=True,
         )
-    assert "review and approve the detections" in str(exc_info.value)
+    assert "review the detections and exclude any false positives" in str(exc_info.value)
     assert "turn on auto-tagging" in str(exc_info.value)
     assert "wait until the class.* tags appear" in str(exc_info.value)
 

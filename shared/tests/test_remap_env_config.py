@@ -70,7 +70,7 @@ def test_table_only_promotion_preserves_and_remaps_top_level_uc_tables(tmp_path,
     assert config["genie_spaces"] == []
     assert config["uc_tables"] == ["prod_catalog.genierails_e2e.customers"]
     assert config["enable_classification"] is True
-    assert config["enable_auto_tagging"] is False
+    assert "enable_auto_tagging" not in config
     # Promote writes no exposure flag: access follows the coverage gate.
     assert "business_access_enabled" not in config
     assert config["sql_warehouse_id"] == ""

@@ -307,8 +307,9 @@ def test_plain_generate_without_class_tags_stops_before_the_model(agent_env, mon
     assert exc.value.code == 1
     assert f"Tables found (2): {', '.join(TABLES)} (saved). No model was called." in out
     env_name = agent_env.name
-    assert "Next: in Catalog Explorer, open the catalog > Data classification: turn it on" in out
-    assert "approve them, and turn on auto-tagging. Wait until the class.* tags appear." in out
+    assert "Next: in Catalog Explorer, open the catalog > Details tab > Data classification: turn it on" in out
+    assert "review the detections and exclude any false positives" in out
+    assert "auto-tagging. Wait until the class.* tags appear." in out
     assert f"Prefer a script? make enable-classification ENV={env_name} turns it on" in out
     assert f"Then re-run make generate ENV={env_name}." in out
     # The discovery is persisted for enable-classification and the re-run.

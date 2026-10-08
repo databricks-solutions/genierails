@@ -27,12 +27,12 @@ def test_classification_is_opt_in_and_forwarded_by_the_root():
     assert "= var.enable_classification" in ROOT_MAIN.read_text()
 
 
-def test_auto_tagging_is_default_off_and_forwarded_by_the_root():
+def test_auto_tagging_defaults_to_preserving_ui_state_and_is_forwarded_by_the_root():
     variables = MODULE_VARIABLES.read_text()
     start = variables.index('variable "enable_auto_tagging"')
     body = variables[start : variables.index("}\n", start) + 2]
 
-    assert "default     = false" in body
+    assert "default     = null" in body
     root = ROOT_MAIN.read_text()
     assert 'variable "enable_auto_tagging"' in root
     assert "enable_auto_tagging             = var.enable_auto_tagging" in root
@@ -49,18 +49,14 @@ def test_classification_is_scoped_to_governed_uc_schemas():
     assert "prevent_destroy = true" in source
 
 
-def test_auto_tagging_false_emits_no_configs_while_classification_stays_enabled():
+def test_auto_tagging_is_tri_state_and_explicit_false_emits_no_configs():
     source = MODULE_MAIN.read_text()
 
     assert "var.enable_classification ? local.classification_catalog_schemas : {}" in source
-    match = re.search(
-        r"(?ms)^  auto_tag_configs = (var\.enable_auto_tagging \? \[.*?^  \] : \[\])$",
-        source,
-    )
-    assert match, "auto_tag_configs must render an empty list when auto-tagging is false"
-    expression = match.group(1)
-    assert expression.endswith("] : []")
-    assert expression.count('auto_tagging_mode  = "AUTO_TAGGING_ENABLED"') == 1
+    assert "var.enable_auto_tagging == null ? lookup(" in source
+    assert "var.classification_existing_auto_tag_configs, each.key, []" in source
+    assert ") : var.enable_auto_tagging ? [" in source
+    assert "] : []" in source
 
 
 def test_auto_tagging_true_emits_configs_for_dev_to_prod_types():
@@ -76,7 +72,7 @@ def test_auto_tagging_true_emits_configs_for_dev_to_prod_types():
         "class.us_ssn",
     }
     assert all(f'"{tag}"' in source for tag in expected)
-    assert "auto_tag_configs = var.enable_auto_tagging ? [" in source
+    assert ") : var.enable_auto_tagging ? [" in source
     assert 'auto_tagging_mode  = "AUTO_TAGGING_ENABLED"' in source
 
 
@@ -93,6 +89,7 @@ def test_auto_tagging_opt_in_plan_covers_default_off_and_enabled_configs(tmp_pat
     assert plan_test.returncode == 0, plan_test.stdout + plan_test.stderr
     assert 'run "classification_scans_without_auto_tagging"... pass' in plan_test.stdout
     assert 'run "auto_tagging_emits_all_dev_to_prod_classifier_types"... pass' in plan_test.stdout
+    assert 'run "ui_auto_tagging_survives_import_plan"... pass' in plan_test.stdout
 
 
 def test_enable_classification_target_is_a_classification_only_apply():
@@ -166,7 +163,13 @@ def test_prepare_resolves_two_part_tables_and_preserves_all_schema_scope(tmp_pat
     class FakeClassification:
         def get_catalog_config(self, name):
             requested.append(name)
-            return SimpleNamespace(included_schemas=None)
+            return SimpleNamespace(
+                included_schemas=None,
+                auto_tag_configs=[{
+                    "classification_tag": "class.email_address",
+                    "auto_tagging_mode": "AUTO_TAGGING_ENABLED",
+                }],
+            )
 
     client_kwargs = {}
 
@@ -186,6 +189,8 @@ def test_prepare_resolves_two_part_tables_and_preserves_all_schema_scope(tmp_pat
     assert requested == ["catalogs/real_catalog/config"]
     generated = (env_dir / "data_access/classification.auto.tfvars").read_text()
     assert 'classification_all_schemas = ["real_catalog"]' in generated
+    assert 'classification_tag = "class.email_address"' in generated
+    assert 'auto_tagging_mode   = "AUTO_TAGGING_ENABLED"' in generated
     assert "WARNING: real_catalog classification includes ALL schemas" in capsys.readouterr().err
 
 
@@ -298,6 +303,10 @@ def test_prepare_seeds_aws_classification_with_serverless_usage_policy(
         'classification_existing_schemas = {\n'
         '  "imported_catalog" = ["agent"]\n'
         '}\nclassification_all_schemas = []\n'
+        'classification_existing_auto_tag_configs = {\n'
+        '  "imported_catalog" = [\n'
+        '  ]\n'
+        '}\n'
     )
 
 
