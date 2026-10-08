@@ -565,6 +565,8 @@ def evaluate_column_mask_check(
       unmasked → FAIL.
     * At least one shared row has a **non-null / non-empty** raw value — otherwise
       the dataset cannot demonstrate masking → INCONCLUSIVE.
+    * Every row a masked principal returned is also seen by an unmasked
+      principal (else it has no raw value to compare) → INCONCLUSIVE.
     * Every masked principal that returned rows shares at least one maskable row
       with the raw baseline, and its value there **differs** from the raw value.
       Equality is a leak → FAIL. No overlap → INCONCLUSIVE.
@@ -679,6 +681,19 @@ def evaluate_column_mask_check(
                            "; ".join(unpaired.values()),
                            {"unpaired": sorted(unpaired),
                             "per_principal_compared": per_principal_compared})
+
+    # A masked tier's row no unmasked principal sees has no raw value to
+    # compare with, so it proves nothing — and could be an unmasked leak.
+    unbaselined = {mp: n for mp in masked_present
+                   if (n := sum(1 for k in values_by_principal[mp] if k not in raw_by_row))}
+    if unbaselined:
+        return CheckResult(
+            "column-mask", target, INCONCLUSIVE,
+            (f"masked principal(s) see row(s) no unmasked principal sees, so masking "
+             f"could not be verified for them (rows by key {check.key_column}): {unbaselined}"),
+            {"unbaselined_by_principal": unbaselined,
+             "per_principal_compared": per_principal_compared},
+        )
 
     # (issue 2) Every masked principal must have actually been compared on a
     # maskable row — otherwise we proved nothing for it.
@@ -825,9 +840,6 @@ def evaluate_effective_access(
 KEY_SAMPLE_LIMIT = 25
 _PREFERRED_KEY_TYPES = {"STRING", "VARCHAR", "CHAR", "INT", "INTEGER", "LONG", "BIGINT"}
 _OTHER_KEY_TYPES = {"SHORT", "SMALLINT", "BYTE", "TINYINT"}
-# Auto-picked names come from live metadata and go into admin SQL: plain
-# identifiers only.
-_PLAIN_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 SOURCE_TABLE_KEY = "verify_key_columns"
 SOURCE_GLOBAL_KEY = "VERIFY_KEY_COLUMN"
 SOURCE_PRIMARY_KEY = "primary key"
@@ -893,7 +905,8 @@ def key_candidates(table: str, facts: TableKeyFacts, unsafe: Iterable[str] = ())
     names = {name.lower(): name for name, _ in facts.columns}
 
     def usable(column: str) -> bool:
-        return (bool(_PLAIN_IDENTIFIER.fullmatch(column)) and column.lower() not in excluded
+        # Names come from live metadata and go into admin SQL: plain identifiers only.
+        return (bool(_IDENT_RE.fullmatch(column)) and column.lower() not in excluded
                 and _type_rank(types.get(column.lower(), "")) is not None)
 
     out: list[tuple[str, str]] = []
@@ -1006,6 +1019,43 @@ def load_auth(auth_file: Path) -> dict[str, str]:
     }
 
 
+# Table, key and value column names are written into SQL, so every part must
+# be a plain identifier; anything else is refused rather than escaped through.
+_IDENT_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,254}")
+
+
+def quote_identifier(name: str) -> str:
+    """Backtick-quote one identifier part, refusing anything but [A-Za-z0-9_-]."""
+    if not isinstance(name, str) or not _IDENT_RE.fullmatch(name):
+        raise ValueError(f"unsafe SQL identifier {name!r}: use letters, digits, '_' or '-'")
+    return "`" + name.replace("`", "``") + "`"
+
+
+def table_parts(table: str) -> tuple[str, str, str]:
+    """A catalog.schema.table name as its three validated parts."""
+    parts = table.split(".") if isinstance(table, str) else []
+    if len(parts) != 3:
+        raise ValueError(f"unsafe SQL table name {table!r}: expected catalog.schema.table")
+    for part in parts:
+        quote_identifier(part)
+    return parts[0], parts[1], parts[2]
+
+
+def quote_table(table: str) -> str:
+    return ".".join(quote_identifier(p) for p in table_parts(table))
+
+
+def validate_spec_identifiers(spec: VerificationSpec) -> None:
+    """Refuse a spec whose table/column names aren't plain identifiers."""
+    for c in spec.column_masks:
+        quote_table(c.table)
+        quote_identifier(c.column)
+        if c.key_column:
+            quote_identifier(c.key_column)
+    for r in spec.row_filters:
+        quote_table(r.table)
+
+
 def _key_filter(key_column: str, keys: Optional[Sequence[Any]]) -> tuple[str, dict[str, Any]]:
     """`` WHERE key IN (:k0, ...)`` and its parameters ("" when no keys)."""
     if keys is None:
@@ -1013,7 +1063,7 @@ def _key_filter(key_column: str, keys: Optional[Sequence[Any]]) -> tuple[str, di
     params = {f"k{i}": k for i, k in enumerate(keys)}
     if not params:
         return " WHERE FALSE", {}
-    return f" WHERE `{key_column}` IN ({', '.join(':' + n for n in params)})", params
+    return f" WHERE {quote_identifier(key_column)} IN ({', '.join(':' + n for n in params)})", params
 
 
 @dataclass
@@ -1265,9 +1315,10 @@ class EffectiveAccessVerifier:
             )
         ws = self._ws_for(principal)
         where, params = _key_filter(check.key_column, keys)
+        key = quote_identifier(check.key_column)
         sql = (
-            f"SELECT `{check.key_column}`, `{check.column}` "
-            f"FROM {check.table}{where} ORDER BY `{check.key_column}` LIMIT {int(limit)}"
+            f"SELECT {key}, {quote_identifier(check.column)} "
+            f"FROM {quote_table(check.table)}{where} ORDER BY {key} LIMIT {int(limit)}"
         )
         try:
             rows = self.run_query(ws, sql, params)
@@ -1303,10 +1354,11 @@ class EffectiveAccessVerifier:
         """prove_key_unique for any (table, key column)."""
         self._guard()
         where, params = _key_filter(key_column, keys)
+        key = quote_identifier(key_column)
         rows = self.run_query(
             self._ws_for(principal),
-            f"SELECT COUNT(*), COUNT(DISTINCT `{key_column}`), COUNT(`{key_column}`) "
-            f"FROM {table}{where}",
+            f"SELECT COUNT(*), COUNT(DISTINCT {key}), COUNT({key}) "
+            f"FROM {quote_table(table)}{where}",
             params,
         )
         total, distinct, non_null = (int(v or 0) for v in (rows[0] if rows else (0, 0, 0)))
@@ -1322,15 +1374,21 @@ class EffectiveAccessVerifier:
                           limit: int = KEY_SAMPLE_LIMIT) -> str:
         """Admin proof that ``key_column`` can pair ``table``'s rows ("" when proven).
 
-        Samples the lowest keys (NULLs sort first, so any NULL is sampled),
-        requires them unique and non-null, then proves across the whole table
-        that each names one row. Reasons carry counts only, never key values.
+        The key column must have no column mask or tag (key_mask_metadata);
+        then the lowest keys are sampled (NULLs sort first, so any NULL is
+        sampled), must be unique and non-null, and each must name one row of
+        the whole table. Reasons carry counts only, never key values.
         """
         self._guard()
         try:
+            found = self.key_mask_metadata(
+                principal, ColumnMaskCheck(table, key_column, key_column, (), ()))
+            if found:
+                return _pairing_key_problem(key_column, table, f"may be masked (it has {', '.join(found)})")
+            key = quote_identifier(key_column)
             rows = self.run_query(
                 self._ws_for(principal),
-                f"SELECT `{key_column}` FROM {table} ORDER BY `{key_column}` LIMIT {int(limit)}",
+                f"SELECT {key} FROM {quote_table(table)} ORDER BY {key} LIMIT {int(limit)}",
             )
             keys = [r[0] for r in rows if r]
             if not keys:
@@ -1343,10 +1401,7 @@ class EffectiveAccessVerifier:
     def table_key_facts(self, principal: TestPrincipal, table: str) -> TableKeyFacts:
         """Columns, PRIMARY KEY and tagged columns of ``table`` (read as the admin)."""
         self._guard()
-        parts = [p.strip().strip("`").lower() for p in table.split(".")]
-        if len(parts) != 3 or not all(parts):
-            raise ValueError(f"{table} is not catalog.schema.table")
-        params = dict(zip(("c", "s", "t"), parts))
+        params = dict(zip(("c", "s", "t"), (p.lower() for p in table_parts(table))))
         ws = self._ws_for(principal)
         columns = tuple(
             (str(r[0]), str(r[1] or "")) for r in self.run_query(ws, (
@@ -1374,14 +1429,44 @@ class EffectiveAccessVerifier:
         self._guard()
         where, params = _key_filter(check.key_column, keys)
         rows = self.run_query(self._ws_for(principal),
-                              f"SELECT COUNT(*) FROM {check.table}{where}", params)
+                              f"SELECT COUNT(*) FROM {quote_table(check.table)}{where}", params)
         return int(rows[0][0] or 0) if rows else 0
+
+    def key_mask_metadata(self, principal: TestPrincipal, check: ColumnMaskCheck) -> list[str]:
+        """What could mask the key column for some tier: its column masks and tags.
+
+        Run as the admin baseline. A key mask can permute keys or map them onto
+        other sampled keys, which no row comparison can see, so a key column
+        with a mask, or with any tag an ABAC mask policy could match, is refused.
+        """
+        self._guard()
+        catalog, schema, table = table_parts(check.table)
+        quote_identifier(check.key_column)
+        params = {"c": catalog.lower(), "s": schema.lower(), "t": table.lower(),
+                  "k": check.key_column.lower()}
+        ws = self._ws_for(principal)
+        found = []
+        for what, relation, catalog_col, schema_col in (
+            ("column mask", "column_masks", "table_catalog", "table_schema"),
+            ("column tag", "column_tags", "catalog_name", "schema_name"),
+        ):
+            rows = self.run_query(
+                ws,
+                f"SELECT COUNT(*) FROM system.information_schema.{relation} "
+                f"WHERE lower({catalog_col}) = :c AND lower({schema_col}) = :s "
+                "AND lower(table_name) = :t AND lower(column_name) = :k",
+                params,
+            )
+            n = int(rows[0][0] or 0) if rows else 0
+            if n:
+                found.append(f"{n} {what}(s)")
+        return found
 
     def collect_row_count(self, principal: TestPrincipal, table: str) -> int:
         """Return the row count a principal sees. Raises on query failure."""
         self._guard()
         ws = self._ws_for(principal)
-        rows = self.run_query(ws, f"SELECT COUNT(*) FROM {table}")
+        rows = self.run_query(ws, f"SELECT COUNT(*) FROM {quote_table(table)}")
         return int(rows[0][0]) if rows else 0
 
 
@@ -1406,6 +1491,7 @@ def verify_effective_access_live(
     Guarded: raises unless ``GENIERAILS_LIVE_VERIFY=1``.
     """
     _require_live_enabled()
+    validate_spec_identifiers(spec)
     auth = load_auth(auth_file)
     verifier = EffectiveAccessVerifier(auth, warehouse_id=warehouse_id)
     verifier.resolve_warehouse()
@@ -1451,36 +1537,81 @@ def verify_effective_access_live(
         column_values: dict[tuple, dict[str, list[tuple[Any, Any]]]] = {}
         column_errors: dict[tuple, dict[str, str]] = {}
         pairing_problems: dict[tuple, str] = {}
-        unpaired: dict[tuple, dict[str, str]] = {}
-        key_proofs: dict[tuple, str] = {}   # once per (table, key, sampled keys)
+        key_proofs: dict[tuple, str] = {}   # once per (table, key, read keys)
+        key_metadata: dict[tuple, str] = {}  # once per (table, key)
         for check in spec.column_masks:
             sig = (check.table, check.column)
             per_principal: dict[str, list[tuple[Any, Any]]] = {}
             per_errors: dict[str, str] = {}
             involved = set(check.masked_principals) | set(check.unmasked_principals)
-            # The admin baseline picks the rows every tier reads, and proves
-            # their keys are unique and non-null across the whole table.
-            try:
-                admin_rows = verifier.collect_column_values(admin_principal, check)
-            except Exception as exc:
-                print(f"    ({admin_tier}) query FAILED for {check.table}.{check.column}: {exc}")
-                if admin_tier in involved:
-                    column_errors[sig] = {admin_tier: str(exc)}
-                else:
-                    pairing_problems[sig] = (
-                        f"could not sample row-pairing key {check.key_column} on "
-                        f"{check.table} as the admin baseline: {exc}")
+            tiers = sorted(involved | {admin_tier})
+            # (1) A key that some tier could see masked pairs rows wrongly in
+            # ways no row comparison can detect (a permuting mask stays unique
+            # and overlapping), so its masks/tags must show nothing.
+            meta_sig = (check.table, check.key_column)
+            if meta_sig not in key_metadata:
+                try:
+                    found = verifier.key_mask_metadata(admin_principal, check)
+                    why = f"it has {', '.join(found)}" if found else ""
+                except Exception as exc:
+                    why = f"could not read its column masks/tags as the admin baseline: {exc}"
+                key_metadata[meta_sig] = (
+                    f"row-pairing key {check.key_column} may be masked for {', '.join(tiers)} on "
+                    f"{check.table} ({why}); choose a unique, non-null, unmasked key" if why else "")
+            if key_metadata[meta_sig]:
+                pairing_problems[sig] = key_metadata[meta_sig]
                 continue
-            problem = sample_key_problem(check, admin_tier, admin_rows)
-            keys = [k for k, _ in admin_rows]
+            # (2) Samples: the admin's, and each tier's OWN first rows, so rows
+            # only a tier sees (e.g. outside the admin's sample) are compared
+            # too, not just the rows the admin happened to sample.
+            samples: dict[str, list[tuple[Any, Any]]] = {}
+            for tier in tiers:
+                p = admin_principal if tier == admin_tier else principals.get(tier)
+                if p is None:
+                    # A tier in the check we could not provision leaves a gap the
+                    # evaluator must treat as a failure, not silently ignore.
+                    per_errors[tier] = "principal was not provisioned"
+                    continue
+                try:
+                    samples[tier] = verifier.collect_column_values(p, check)
+                except Exception as exc:
+                    print(f"    ({tier}) query FAILED for {check.table}.{check.column}: {exc}")
+                    if tier in involved:
+                        per_errors[tier] = str(exc)
+                    else:
+                        pairing_problems[sig] = (
+                            f"could not sample row-pairing key {check.key_column} on "
+                            f"{check.table} as the admin baseline: {exc}")
+            column_errors[sig] = per_errors
+            if per_errors or sig in pairing_problems:
+                continue
+            problem = next((why for why in (sample_key_problem(check, t, samples[t]) for t in tiers)
+                            if why), "")
+            keys = list(dict.fromkeys(k for t in tiers for k, _ in samples[t]))
             if not problem and not keys:
-                problem = (f"the admin baseline sees no rows of {check.table}, so rows "
-                           f"cannot be paired by {check.key_column}")
+                problem = (f"no principal sees rows of {check.table}, so rows cannot be "
+                           f"paired by {check.key_column}")
+            # (3) As the admin: every sampled key, whoever sampled it, names
+            # exactly one row of the whole table; a tier key the admin can't
+            # find means that tier sees the key masked.
             if not problem:
                 proof_sig = (check.table, check.key_column, tuple(keys))
                 if proof_sig not in key_proofs:
                     try:
                         key_proofs[proof_sig] = verifier.prove_key_unique(admin_principal, check, keys)
+                        if key_proofs[proof_sig]:
+                            missing = [
+                                t for t in tiers if t != admin_tier and samples[t]
+                                and verifier.count_rows_with_keys(
+                                    admin_principal, check, [k for k, _ in samples[t]],
+                                ) < len(samples[t])
+                            ]
+                            if missing:
+                                key_proofs[proof_sig] = (
+                                    f"row-pairing key {check.key_column} may be masked for "
+                                    f"{', '.join(missing)} on {check.table} (the admin baseline "
+                                    "can't find keys they see); choose a unique, non-null, "
+                                    "unmasked key")
                     except Exception as exc:
                         key_proofs[proof_sig] = (
                             f"could not prove row-pairing key {check.key_column} is unique "
@@ -1489,39 +1620,17 @@ def verify_effective_access_live(
             if problem:
                 pairing_problems[sig] = problem
                 continue
-            for tier in involved:
-                if tier == admin_tier:
-                    per_principal[tier] = admin_rows
-                    continue
-                p = principals.get(tier)
-                if p is None:
-                    # A tier in the check we could not provision leaves a gap the
-                    # evaluator must treat as a failure, not silently ignore.
-                    per_errors[tier] = "principal was not provisioned"
-                    continue
+            # (4) Every tier reads exactly those rows, so each comparison is
+            # between the same rows and every tier's own rows are covered.
+            for tier in sorted(involved):
+                p = admin_principal if tier == admin_tier else principals[tier]
                 try:
-                    rows = verifier.collect_column_values(p, check, keys=keys)
-                    if not rows:
-                        # None of the sampled rows. If it sees rows at all,
-                        # either a row filter hides the sampled ones or the key
-                        # is masked for it (its keys aren't real keys); either
-                        # way it can't be paired, and is reported, not skipped.
-                        seen = [k for k, _ in verifier.collect_column_values(p, check)]
-                        real = list(dict.fromkeys(k for k in seen if k is not None))
-                        if seen and (not real or not verifier.count_rows_with_keys(
-                                admin_principal, check, real)):
-                            unpaired.setdefault(sig, {})[tier] = key_masked_message(check, tier)
-                        elif seen:
-                            unpaired.setdefault(sig, {})[tier] = (
-                                f"{tier} sees none of the {len(keys)} rows of {check.table} the "
-                                "admin baseline sampled (row filter?) — masking could not be "
-                                "verified for it")
-                    per_principal[tier] = rows
+                    per_principal[tier] = verifier.collect_column_values(
+                        p, check, limit=len(keys), keys=keys)
                 except Exception as exc:
                     per_errors[tier] = str(exc)
                     print(f"    ({tier}) query FAILED for {check.table}.{check.column}: {exc}")
             column_values[sig] = per_principal
-            column_errors[sig] = per_errors
 
         row_counts: dict[str, dict[str, Optional[int]]] = {}
         row_errors: dict[str, dict[str, str]] = {}
@@ -1543,7 +1652,7 @@ def verify_effective_access_live(
 
         report = evaluate_effective_access(
             spec, column_values, row_counts, column_errors, row_errors,
-            pairing_problems=pairing_problems, unpaired=unpaired,
+            pairing_problems=pairing_problems,
         )
         report.results.extend(blocking)
         report.not_verified.extend(not_verified)
@@ -1891,6 +2000,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         args.result_file.unlink(missing_ok=True)
     try:
         spec = _load_spec_from_args(args, load_key_map(args.env_file))
+        validate_spec_identifiers(spec)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 

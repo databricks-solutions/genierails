@@ -42,10 +42,14 @@ def _mask(_value):
 class FakeWarehouse:
     """Just enough SQL for the queries verify_effective_access issues."""
 
-    def __init__(self, rows, *, row_filters=None, masks=None):
+    def __init__(self, rows, *, row_filters=None, masks=None, tags=None,
+                 hide_masks_from_metadata=False, metadata_error=None):
         self.rows = rows                      # [{"id": ..., "ssn": ...}, ...]
         self.row_filters = row_filters or {}  # tier -> predicate(row)
         self.masks = masks or {}              # tier -> {column: fn}
+        self.tags = tags or {}                # column -> number of tags
+        self.hide_masks_from_metadata = hide_masks_from_metadata
+        self.metadata_error = metadata_error
         self.statements = []                  # (tier, sql, params)
 
     def view(self, tier):
@@ -67,6 +71,15 @@ class FakeWarehouse:
         params = params or {}
         self.statements.append((tier, sql, dict(params)))
         cell = lambda v: None if v is None else str(v)  # noqa: E731 — data_array is strings
+        m = re.fullmatch(r"SELECT COUNT\(\*\) FROM system\.information_schema\.(column_masks|column_tags) .*", sql)
+        if m:
+            if self.metadata_error:
+                raise RuntimeError(self.metadata_error)
+            column = params["k"]
+            if m.group(1) == "column_tags":
+                return [[str(self.tags.get(column, 0))]]
+            masked = {c for cols in self.masks.values() for c in cols}
+            return [["0" if self.hide_masks_from_metadata else str(int(column in masked))]]
         m = re.fullmatch(
             r"SELECT `(\w+)`, `(\w+)` FROM (\S+)(?: WHERE `(\w+)` IN \(([^)]*)\))? "
             r"ORDER BY `\w+` LIMIT (\d+)", sql)
@@ -178,19 +191,66 @@ def test_null_keys_with_an_unapplied_mask_do_not_pass(tmp_path, warehouse):
 # a masked key column gets a clear message, and doesn't hide a leak elsewhere
 # ---------------------------------------------------------------------------
 def test_a_masked_key_column_is_reported_clearly(tmp_path, warehouse):
-    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"id": _mask, "ssn": _mask}}))
+    wh = warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"id": _mask, "ssn": _mask}}))
     [result] = _verify(tmp_path, _check())
     assert result.status == INCONCLUSIVE
     assert result.detail == (
-        f"row-pairing key id is masked for {JUNIOR} on {TABLE}; "
-        "choose a unique, non-null, unmasked key")
+        f"row-pairing key id may be masked for {JUNIOR}, {DEFAULT_ADMIN_TIER} on {TABLE} "
+        "(it has 1 column mask(s)); choose a unique, non-null, unmasked key")
+    assert not [s for s in wh.statements if TABLE.split(".")[-1] in s[1]]  # no row read
 
 
-def test_a_masked_key_for_one_tier_still_fails_a_leak_in_another(tmp_path, warehouse):
+def test_a_masked_key_blocks_even_when_another_tier_leaks(tmp_path, warehouse):
     warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"id": _mask, "ssn": _mask}}))
     [result] = _verify(tmp_path, _check(masked=(JUNIOR, SENIOR)))  # Senior: mask not applied
-    assert result.status == FAIL
-    assert "leaked the raw value" in result.detail
+    assert result.status == INCONCLUSIVE
+    assert "row-pairing key id may be masked" in result.detail
+
+
+def test_a_key_permuting_mask_with_an_unapplied_value_mask_does_not_pass(tmp_path, warehouse):
+    # Junior sees every key shifted onto the next row's key (still unique and
+    # overlapping), and the ssn mask is NOT applied to it.
+    ids = [r["id"] for r in _unique_rows(60)]
+    shift = dict(zip(ids, ids[1:] + ids[:1]))
+    warehouse(FakeWarehouse(_unique_rows(60), masks={JUNIOR: {"id": shift.get}}))
+    [result] = _verify(tmp_path, _check())
+    assert result.status == INCONCLUSIVE
+    assert f"row-pairing key id may be masked for {JUNIOR}, {DEFAULT_ADMIN_TIER}" in result.detail
+
+
+def test_an_admin_masked_key_does_not_pass(tmp_path, warehouse):
+    ids = [r["id"] for r in _unique_rows(60)]
+    shift = dict(zip(ids, ids[1:] + ids[:1]))
+    # The admin (the only raw baseline) sees permuted keys; Junior's ssn mask
+    # is NOT applied.
+    warehouse(FakeWarehouse(_unique_rows(60), masks={DEFAULT_ADMIN_TIER: {"id": shift.get}}))
+    [result] = _verify(tmp_path, _check())
+    assert result.status == INCONCLUSIVE
+    assert "row-pairing key id may be masked" in result.detail
+
+
+def test_a_tagged_key_column_is_refused(tmp_path, warehouse):
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags={"id": 2}))
+    [result] = _verify(tmp_path, _check())
+    assert result.status == INCONCLUSIVE
+    assert "may be masked" in result.detail and "2 column tag(s)" in result.detail
+
+
+def test_unreadable_key_metadata_is_inconclusive(tmp_path, warehouse):
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}},
+                            metadata_error="PERMISSION_DENIED: system.information_schema"))
+    [result] = _verify(tmp_path, _check())
+    assert result.status == INCONCLUSIVE
+    assert "may be masked" in result.detail and "could not read its column masks/tags" in result.detail
+
+
+def test_a_key_mask_missing_from_metadata_is_caught_by_the_admin_lookup(tmp_path, warehouse):
+    hidden = lambda v: v.replace("KEY-", "ALIAS-")  # noqa: E731 — keys the admin never sees
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"id": hidden}},
+                            hide_masks_from_metadata=True))
+    [result] = _verify(tmp_path, _check())
+    assert result.status == INCONCLUSIVE
+    assert result.detail.startswith(f"row-pairing key id may be masked for {JUNIOR} on {TABLE}")
 
 
 # ---------------------------------------------------------------------------
@@ -198,24 +258,83 @@ def test_a_masked_key_for_one_tier_still_fails_a_leak_in_another(tmp_path, wareh
 # ---------------------------------------------------------------------------
 def test_a_row_filtered_tier_is_compared_on_the_shared_rows(tmp_path, warehouse):
     even = lambda r: int(r["id"][-4:]) % 2 == 0  # noqa: E731
-    wh = warehouse(FakeWarehouse(_unique_rows(), row_filters={JUNIOR: even},
+    wh = warehouse(FakeWarehouse(_unique_rows(60), row_filters={JUNIOR: even},
                                  masks={JUNIOR: {"ssn": _mask}}))
     [result] = _verify(tmp_path, _check())
     assert result.status == PASS
-    # The 12 even keys among the admin's first 25, not Junior's own first 25.
-    assert result.evidence["per_principal_compared"] == {JUNIOR: 12}
+    # Junior's own first 25 (even) keys, all read back with the admin's sample.
+    assert result.evidence["per_principal_compared"] == {JUNIOR: 25}
     junior_reads = [s for s in wh.statements if s[0] == JUNIOR]
-    assert len(junior_reads) == 1 and " WHERE `id` IN (" in junior_reads[0][1]
-    assert sorted(junior_reads[0][2].values()) == [f"KEY-{i:04d}" for i in range(1, 26)]
+    assert len(junior_reads) == 2 and " WHERE `id` IN (" in junior_reads[1][1]
+    expected = {f"KEY-{i:04d}" for i in range(1, 26)} | {f"KEY-{i:04d}" for i in range(2, 51, 2)}
+    assert set(junior_reads[1][2].values()) == expected
 
 
-def test_a_tier_filtered_off_every_sampled_row_is_reported_not_skipped(tmp_path, warehouse):
+def test_a_tier_filtered_off_the_admin_sample_is_compared_on_its_own_rows(tmp_path, warehouse):
     late = lambda r: int(r["id"][-4:]) > 25  # noqa: E731
-    warehouse(FakeWarehouse(_unique_rows(), row_filters={SENIOR: late},
+    warehouse(FakeWarehouse(_unique_rows(60), row_filters={SENIOR: late},
                             masks={JUNIOR: {"ssn": _mask}, SENIOR: {"ssn": _mask}}))
     [result] = _verify(tmp_path, _check(masked=(JUNIOR, SENIOR)))
+    assert result.status == PASS
+    # Junior reads the admin's rows 1-25 and Senior's own 26-50.
+    assert result.evidence["per_principal_compared"] == {JUNIOR: 50, SENIOR: 25}
+
+
+def test_leaked_rows_only_a_tier_sees_do_not_pass(tmp_path, warehouse):
+    # Junior sees rows 21-60; its mask covers only rows 1-25, so rows 26-45 of
+    # its own sample leak — none of them in the admin's sample (rows 1-25).
+    late = lambda r: int(r["id"][-4:]) > 20  # noqa: E731
+    partial = lambda v: "XXX-MASKED" if int(v[4:8]) <= 25 else v  # noqa: E731
+    warehouse(FakeWarehouse(_unique_rows(60), row_filters={JUNIOR: late},
+                            masks={JUNIOR: {"ssn": partial}}))
+    [result] = _verify(tmp_path, _check())
+    assert result.status == FAIL
+    assert result.evidence["leaks_by_principal"] == {JUNIOR: 20}
+
+
+def test_rows_a_masked_tier_sees_without_a_baseline_do_not_pass(tmp_path, warehouse):
+    # The only unmasked tier (Senior) can't see the rows Junior samples.
+    early = lambda r: int(r["id"][-4:]) <= 25  # noqa: E731
+    warehouse(FakeWarehouse(_unique_rows(60), row_filters={SENIOR: early, JUNIOR: lambda r: not early(r)},
+                            masks={JUNIOR: {"ssn": _mask}, DEFAULT_ADMIN_TIER: {"ssn": _mask}}))
+    [result] = _verify(tmp_path, _check(unmasked=(SENIOR,)))
     assert result.status == INCONCLUSIVE
-    assert f"{SENIOR} sees none of the 25 rows of {TABLE} the admin baseline sampled" in result.detail
+    assert "no unmasked principal sees" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# identifiers are validated and quoted, never interpolated raw
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("table,column,key", [
+    ("cat.sch.t`; DROP TABLE x; --", "ssn", "id"),
+    ("cat.sch.customers", "ssn` FROM other.t --", "id"),
+    ("cat.sch.customers", "ssn", "id) OR (1=1"),
+    ("cat.sch", "ssn", "id"),
+    ("cat.sch.cust omers", "ssn", "id"),
+])
+def test_hostile_identifiers_are_refused_before_any_query(tmp_path, warehouse, table, column, key):
+    wh = warehouse(FakeWarehouse(_unique_rows()))
+    check = ColumnMaskCheck(table, column, key, (JUNIOR,), (DEFAULT_ADMIN_TIER,), "m")
+    with pytest.raises(ValueError, match="unsafe SQL"):
+        _verify(tmp_path, check)
+    assert wh.statements == []
+
+
+def test_hostile_identifiers_are_refused_by_the_cli(tmp_path, capsys):
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"column_masks": [{
+        "table": "cat.sch.t`; DROP TABLE x", "column": "ssn", "key_column": "id",
+        "masked_principals": [JUNIOR], "unmasked_principals": [DEFAULT_ADMIN_TIER]}]}))
+    with pytest.raises(SystemExit, match="unsafe SQL identifier"):
+        main(["--spec", str(spec), "--print-spec"])
+
+
+def test_identifiers_are_backtick_quoted():
+    assert vea.quote_identifier("my-catalog_1") == "`my-catalog_1`"
+    assert vea.quote_table("my-cat.sch.t") == "`my-cat`.`sch`.`t`"
+    for bad in ("a`b", "", "a b", "a.b", "-x"):
+        with pytest.raises(ValueError):
+            vea.quote_identifier(bad)
 
 
 def test_a_tier_that_sees_no_rows_at_all_is_still_skipped(tmp_path, warehouse):

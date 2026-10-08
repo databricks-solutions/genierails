@@ -63,6 +63,7 @@ class Table:
     rows: list                          # [{column: value}]
     pk: list = field(default_factory=list)
     tags: set = field(default_factory=set)
+    col_masks: set = field(default_factory=set)   # columns with a direct column mask
 
 
 class FakeWarehouse:
@@ -93,7 +94,15 @@ class FakeWarehouse:
     def run(self, tier, sql, params):
         params = dict(params or {})
         self.statements.append((tier, sql, params))
+        sql = sql.replace("`", "")      # identifiers are backtick-quoted; names here are plain
         cell = lambda v: None if v is None else str(v)  # noqa: E731 — data_array is strings
+        m = re.fullmatch(r"SELECT COUNT\(\*\) FROM system\.information_schema\.(column_masks|column_tags) .*", sql)
+        if m:
+            if self.broken_metadata:
+                raise RuntimeError("Query failed (FAILED): [TABLE_OR_VIEW_NOT_FOUND] system.information_schema")
+            table = self.tables.get(f"{params['c']}.{params['s']}.{params['t']}")
+            marked = (table.col_masks if m.group(1) == "column_masks" else table.tags) if table else set()
+            return [[str(int(params["k"] in {c.lower() for c in marked}))]]
         if "information_schema" in sql:
             if self.broken_metadata:
                 raise RuntimeError("Query failed (FAILED): [TABLE_OR_VIEW_NOT_FOUND] system.information_schema")
@@ -106,29 +115,29 @@ class FakeWarehouse:
                 return [[c] for c in table.pk]
             if "column_tags" in sql:
                 return [[c] for c in sorted(table.tags)]
-        m = re.fullmatch(r"SELECT `(\w+)` FROM (\S+) ORDER BY `\w+` LIMIT (\d+)", sql)
+        m = re.fullmatch(r"SELECT (\w+) FROM (\S+) ORDER BY \w+ LIMIT (\d+)", sql)
         if m:
             key, table, limit = m.groups()
             rows = sorted(self.view(tier, table), key=lambda r: (r[key] is not None, str(r[key])))
             return [[cell(r[key])] for r in rows[: int(limit)]]
         m = re.fullmatch(
-            r"SELECT `(\w+)`, `(\w+)` FROM (\S+)(?: WHERE `(\w+)` IN \(([^)]*)\))? "
-            r"ORDER BY `\w+` LIMIT (\d+)", sql)
+            r"SELECT (\w+), (\w+) FROM (\S+)(?: WHERE (\w+) IN \(([^)]*)\))? "
+            r"ORDER BY \w+ LIMIT (\d+)", sql)
         if m:
             key, col, table, where_col, in_list, limit = m.groups()
             rows = [r for r in self.view(tier, table) if self._keep(where_col, in_list, params)(r)]
             rows.sort(key=lambda r: (r[key] is not None, str(r[key])))
             return [[cell(r[key]), cell(r[col])] for r in rows[: int(limit)]]
         m = re.fullmatch(
-            r"SELECT COUNT\(\*\), COUNT\(DISTINCT `(\w+)`\), COUNT\(`\w+`\) FROM (\S+) "
-            r"WHERE `(\w+)` IN \(([^)]*)\)", sql)
+            r"SELECT COUNT\(\*\), COUNT\(DISTINCT (\w+)\), COUNT\(\w+\) FROM (\S+) "
+            r"WHERE (\w+) IN \(([^)]*)\)", sql)
         if m:
             key, table, where_col, in_list = m.groups()
             rows = [r for r in self.view(tier, table) if self._keep(where_col, in_list, params)(r)]
             vals = [r[key] for r in rows]
             return [[str(len(rows)), str(len({v for v in vals if v is not None})),
                      str(sum(v is not None for v in vals))]]
-        m = re.fullmatch(r"SELECT COUNT\(\*\) FROM (\S+)(?: WHERE `(\w+)` IN \(([^)]*)\))?", sql)
+        m = re.fullmatch(r"SELECT COUNT\(\*\) FROM (\S+)(?: WHERE (\w+) IN \(([^)]*)\))?", sql)
         if m:
             table, where_col, in_list = m.groups()
             return [[str(sum(1 for r in self.view(tier, table) if self._keep(where_col, in_list, params)(r)))]]
@@ -282,9 +291,9 @@ def test_composite_tagged_masked_or_unsafe_type_primary_keys_are_not_picked():
 
 
 def test_only_plain_identifier_columns_are_auto_picked():
-    facts = TableKeyFacts((("x` FROM t --_id", "STRING"), ("weird-name_id", "STRING"), ("ok_id", "STRING")),
+    facts = TableKeyFacts((("x` FROM t --_id", "STRING"), ("dash-ok_id", "STRING"), ("ok_id", "STRING")),
                           ("x` FROM t --_id",))
-    assert key_candidates("c.s.t", facts) == [("ok_id", SOURCE_ID_LIKE)]
+    assert key_candidates("c.s.t", facts) == [("dash-ok_id", SOURCE_ID_LIKE), ("ok_id", SOURCE_ID_LIKE)]
 
 
 def test_an_unreadable_env_file_is_a_clean_error(tmp_path):
@@ -365,6 +374,18 @@ def test_tagged_candidates_are_skipped_live_and_from_the_config(warehouse, tmp_p
     assert "Row-pairing key for cat.sch.payments: customer_id (id-like column)" in captured.out
     assert "Row-pairing key for cat.sch.notes: note_id (id-like column)" in captured.out
     assert no_key_message("cat.sch.customers") in captured.err
+
+
+def test_a_column_masked_directly_falls_through_to_the_next(warehouse, tmp_path, capsys):
+    tables = sample_tables()
+    tables["cat.sch.payments"].col_masks.add("payment_id")      # ALTER TABLE ... SET MASK, not a tag
+    warehouse(FakeWarehouse(tables))
+    assert _main(tmp_path, "--check-keys-only") == 0
+    assert "Row-pairing key for cat.sch.payments: customer_id (id-like column)" in capsys.readouterr().out
+    env_text = 'verify_key_columns = { "cat.sch.payments" = "payment_id" }\n'
+    assert _main(tmp_path, "--check-keys-only", env_text=env_text) == 2   # an override is not replaced
+    assert ("Row-pairing key for cat.sch.payments: NONE — row-pairing key payment_id may be masked "
+            "(it has 1 column mask(s))") in capsys.readouterr().out
 
 
 def test_a_non_unique_candidate_falls_through_to_the_next(warehouse, tmp_path, capsys):
@@ -541,10 +562,14 @@ def test_legacy_single_key_still_works(warehouse, tmp_path, capsys):
     assert proof["mask_checks_passed_by_key"] == {"customer_id": 3}
     assert set(proof["mask_keys_proven_by_table"].values()) == {"customer_id"}
 
-    # Without information_schema access the global key applies everywhere, as before.
+    # Without information_schema access the global key is still the one tried
+    # everywhere (no auto-pick replaces it), and the unreadable masks/tags
+    # check refuses it: fail-closed, and reported per table.
     wh.broken_metadata = True
-    assert _main(tmp_path, "--live", "--require-mask-checks", "--key-column", "customer_id") == 0
-    assert "RESULT: ALL EFFECTIVE (3 passed / 3)" in capsys.readouterr().out
+    assert _main(tmp_path, "--live", "--require-mask-checks", "--key-column", "customer_id") == 1
+    out = capsys.readouterr().out
+    assert out.count("customer_id (VERIFY_KEY_COLUMN)") == 3
+    assert out.count("could not read its column masks/tags as the admin baseline") == 3
 
 
 def test_a_tagged_global_key_is_still_refused_up_front(tmp_path):
