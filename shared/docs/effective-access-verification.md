@@ -34,7 +34,7 @@ value the unmasked tier sees.
 The key is how the tool knows two result rows, one per tier, are the *same* row. Pick a column that is:
 
 - **Not sensitive and not masked.** It must read identically for every tier; a masked key can't pair rows. Never pick a column you want protected.
-- **Unique, non-NULL and stable per row**: an ID such as `customer_id`, `order_id` or `account_id`. The admin baseline and every tier each sample their own first rows, and every tier then reads all of those rows by key, so rows only one tier sees are compared too. The tool checks, as the admin, that the key column has no column mask and no column tag (`system.information_schema.column_masks` / `column_tags`), and that every sampled key is unique, non-NULL and present across the whole table. A repeated, NULL or possibly-masked key makes the mask check INCONCLUSIVE (`row-pairing key <col> is not unique / has NULLs on <table>` or `... may be masked for <tier> on <table>`), never a pass. Table, column and key names must be plain identifiers (letters, digits, `_`, `-`).
+- **Unique, non-NULL and stable per row**: an ID such as `customer_id`, `order_id` or `account_id`. The admin baseline and every tier each sample their own rows, and every tier then reads all of those rows by key, so rows only one tier sees are compared too. The tool checks, as the admin, that the key column has no live column mask and no live tag that one of your column-mask policies matches (`system.information_schema.column_masks` / `column_tags`, judged with the same matcher as the coverage check; other tags, such as native `class.*` tags on an ID, are fine), and that every sampled key is unique, non-NULL and present across the whole table. With `VERIFY_SPEC` there are no policies to judge a tag against, so any tag on the key blocks the check. A repeated, NULL or possibly-masked key makes the mask check INCONCLUSIVE (`row-pairing key <col> is not unique / has NULLs on <table>` or `... may be masked for <tier> on <table>`), never a pass. Table, column and key names must be plain identifiers (letters, digits, `_`, `-`).
 - **Present on the tables you verify.** If your tables don't share one key column, use a [`VERIFY_SPEC`](#explicit-spec---spec) with a key per table.
 
 If you omit it, the column-mask check is **skipped** (row filters are still checked) and the run can still exit 0, so masking has not been proven. Always set it.
@@ -63,6 +63,14 @@ non-conclusive outcome as blocking:
 
 Results name the table, column, tier, row counts and key *column*; they never
 print row values or key values, so a FAIL is safe to leave in CI logs.
+
+**Mask checks are a bounded sample, not a proof over every row.** Each tier
+checks 25 sampled rows per masked column (plus the rows the other tiers
+sampled). Rows are spread across the table by a salted hash of the key, with a
+fresh salt each run; the summary prints `Sample: checked 25 sampled rows per
+tier …` and the salt, and `GENIERAILS_VERIFY_SAMPLE_SALT=<salt>` repeats that
+run's sample. A mask that is wrong only for rows outside the sample can still
+pass — row filters, by contrast, are checked by full row counts.
 
 Both FAIL and INCONCLUSIVE make `make verify-access` exit non-zero. A run that
 derives **zero** checks also exits non-zero — verifying nothing is not success.

@@ -44,6 +44,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import sys
 import time
 from dataclasses import dataclass, field
@@ -57,6 +58,11 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 # var, so importing this module or running the unit suite never provisions
 # principals or hits a cluster.
 LIVE_ENV_FLAG = "GENIERAILS_LIVE_VERIFY"
+
+# Mask checks compare a bounded sample of rows per tier, spread across the
+# table by a salted hash of the key; set the salt to repeat a run's sample.
+SAMPLE_ROWS = 25
+SAMPLE_SALT_ENV = "GENIERAILS_VERIFY_SAMPLE_SALT"
 
 # A per-mask "unmasked" comparison principal that is a workspace/metastore
 # admin sees raw values for everything; use it as the ground-truth tier when a
@@ -110,6 +116,9 @@ class VerificationSpec:
     """The set of effective-access checks to run."""
     column_masks: list[ColumnMaskCheck] = field(default_factory=list)
     row_filters: list[RowFilterCheck] = field(default_factory=list)
+    # The ABAC config the checks came from ({"fgac_policies", "tag_assignments"}),
+    # when known: tells whether a tag on a pairing key is one a mask matches.
+    mask_config: Optional[dict[str, Any]] = None
 
     @property
     def principals(self) -> set[str]:
@@ -165,6 +174,7 @@ class CheckResult:
 class EffectiveAccessReport:
     results: list[CheckResult] = field(default_factory=list)
     not_verified: list[CheckResult] = field(default_factory=list)
+    sample_note: str = ""   # how many rows the mask checks looked at
 
     def add(self, result: CheckResult) -> None:
         self.results.append(result)
@@ -202,6 +212,8 @@ class EffectiveAccessReport:
         for r in self.not_verified:
             lines.append(f"  ! [NOT VERIFIED] {r.target}")
             lines.append(f"        {r.detail}")
+        if self.sample_note:
+            lines.append(f"  Sample: {self.sample_note}")
         lines.append("-" * 60)
         total = sum(c.values())
         blocking = c[FAIL] + c[INCONCLUSIVE]
@@ -883,10 +895,56 @@ def validate_spec_identifiers(spec: VerificationSpec) -> None:
         quote_table(r.table)
 
 
+# At most this many key values are bound into one statement; longer key lists
+# are read in batches, so a large tier count can't overflow a statement.
+KEY_PARAM_BATCH = 100
+
+
+def _key_batches(keys: Sequence[Any]) -> list[list[Any]]:
+    keys = list(keys)
+    return [keys[i:i + KEY_PARAM_BATCH] for i in range(0, len(keys), KEY_PARAM_BATCH)]
+
+
+def key_tags_mask_problem(
+    mask_config: Optional[Mapping[str, Any]], table: str, key_column: str,
+    tags: Sequence[tuple[str, str]],
+) -> str:
+    """Why the key column's live ``tags`` could get it masked ("" if they can't).
+
+    Decided as Terraform/Unity Catalog applies the masks, with the shared
+    matcher (required_mask_columns: catalog-scoped, full tag conditions,
+    fully-excepted policies skipped, names case-insensitive) over the config's
+    tag assignments plus these live tags. Fails closed when there is no config
+    to check against or its conditions can't be read.
+    """
+    if not tags:
+        return ""
+    if mask_config is None:
+        return f"{len(tags)} column tag(s), and no mask policies were given to check them against"
+    entity = f"{table}.{key_column}"
+    # The matcher skips a valueless tag, and live tags (e.g. class.*) often have
+    # none; a value no config can name keeps hasTag() matching it.
+    assignments = list(mask_config.get("tag_assignments") or []) + [
+        {"entity_type": "columns", "entity_name": entity, "tag_key": name,
+         "tag_value": value or "\x00"}
+        for name, value in tags
+    ]
+    try:
+        masked = required_mask_columns(mask_config.get("fgac_policies") or [], assignments)
+    except ValueError as exc:
+        return f"{len(tags)} column tag(s), and the mask policies can't be checked: {exc}"
+    if (table.lower(), key_column.lower()) in masked:
+        return f"{len(tags)} column tag(s) a column-mask policy matches"
+    return ""
+
+
 def _key_filter(key_column: str, keys: Optional[Sequence[Any]]) -> tuple[str, dict[str, Any]]:
     """`` WHERE key IN (:k0, ...)`` and its parameters ("" when no keys)."""
     if keys is None:
         return "", {}
+    if len(keys) > KEY_PARAM_BATCH:
+        raise ValueError(f"{len(keys)} key values in one statement (max {KEY_PARAM_BATCH}); "
+                         "read them in batches")
     params = {f"k{i}": k for i, k in enumerate(keys)}
     if not params:
         return " WHERE FALSE", {}
@@ -919,6 +977,9 @@ class EffectiveAccessVerifier:
         self.auth = dict(auth)
         self.warehouse_id = warehouse_id
         self.name_prefix = name_prefix
+        # The parsed ABAC config ({"fgac_policies", "tag_assignments"}) used to
+        # tell whether a tag on a key column is one a column mask matches.
+        self.mask_config: Optional[Mapping[str, Any]] = None
         self._admin_ws = None
         self._account = None
 
@@ -1111,14 +1172,16 @@ class EffectiveAccessVerifier:
 
     def collect_column_values(
         self, principal: TestPrincipal, check: ColumnMaskCheck, limit: int = 25,
-        keys: Optional[Sequence[Any]] = None,
+        keys: Optional[Sequence[Any]] = None, salt: Optional[str] = None,
     ) -> list[tuple[Any, Any]]:
         """Return the (row_key, column_value) rows a principal sees.
 
         Every fetched row is returned (not a {key: value} dict) so a NULL or
         repeated key stays visible to the evaluator. With ``keys``, only rows
-        whose key is one of them are fetched, so every tier reads the rows the
-        admin baseline sampled.
+        whose key is one of them are fetched (in batches), so every tier reads
+        the same rows. Without, ``limit`` rows are sampled: the lowest keys, or
+        with ``salt`` rows spread across the table by a salted hash of the key —
+        NULL keys still first, and repeats of a key still adjacent.
 
         Raises on any failure — a failed/denied query is a verification failure,
         not an empty (and falsely-passing) result. The caller records the error.
@@ -1129,12 +1192,19 @@ class EffectiveAccessVerifier:
                 f"no key_column configured for {check.table}.{check.column}; "
                 "cannot pair rows across principals"
             )
+        if keys is not None and len(keys) > KEY_PARAM_BATCH:
+            return [row for batch in _key_batches(keys)
+                    for row in self.collect_column_values(principal, check, len(batch), batch)]
         ws = self._ws_for(principal)
         where, params = _key_filter(check.key_column, keys)
         key = quote_identifier(check.key_column)
+        order = key
+        if keys is None and salt is not None:
+            order = f"{key} IS NULL DESC, xxhash64(:salt, {key})"
+            params = {**params, "salt": salt}
         sql = (
             f"SELECT {key}, {quote_identifier(check.column)} "
-            f"FROM {quote_table(check.table)}{where} ORDER BY {key} LIMIT {int(limit)}"
+            f"FROM {quote_table(check.table)}{where} ORDER BY {order} LIMIT {int(limit)}"
         )
         try:
             rows = self.run_query(ws, sql, params)
@@ -1164,15 +1234,19 @@ class EffectiveAccessVerifier:
         else the reason (counts only, never key values).
         """
         self._guard()
-        where, params = _key_filter(check.key_column, keys)
         key = quote_identifier(check.key_column)
-        rows = self.run_query(
-            self._ws_for(principal),
-            f"SELECT COUNT(*), COUNT(DISTINCT {key}), COUNT({key}) "
-            f"FROM {quote_table(check.table)}{where}",
-            params,
-        )
-        total, distinct, non_null = (int(v or 0) for v in (rows[0] if rows else (0, 0, 0)))
+        total = distinct = non_null = 0
+        # Batches hold disjoint keys, so their distinct counts add up.
+        for batch in _key_batches(list(dict.fromkeys(keys))):
+            where, params = _key_filter(check.key_column, batch)
+            rows = self.run_query(
+                self._ws_for(principal),
+                f"SELECT COUNT(*), COUNT(DISTINCT {key}), COUNT({key}) "
+                f"FROM {quote_table(check.table)}{where}",
+                params,
+            )
+            counts = [int(v or 0) for v in (rows[0] if rows else (0, 0, 0))]
+            total, distinct, non_null = total + counts[0], distinct + counts[1], non_null + counts[2]
         if total == distinct == non_null == len(keys):
             return ""
         return _key_problem_message(
@@ -1186,39 +1260,44 @@ class EffectiveAccessVerifier:
     ) -> int:
         """How many rows ``principal`` sees whose key is one of ``keys``."""
         self._guard()
-        where, params = _key_filter(check.key_column, keys)
-        rows = self.run_query(self._ws_for(principal),
-                              f"SELECT COUNT(*) FROM {quote_table(check.table)}{where}", params)
-        return int(rows[0][0] or 0) if rows else 0
+        total = 0
+        for batch in _key_batches(list(dict.fromkeys(keys))):
+            where, params = _key_filter(check.key_column, batch)
+            rows = self.run_query(self._ws_for(principal),
+                                  f"SELECT COUNT(*) FROM {quote_table(check.table)}{where}", params)
+            total += int(rows[0][0] or 0) if rows else 0
+        return total
 
     def key_mask_metadata(self, principal: TestPrincipal, check: ColumnMaskCheck) -> list[str]:
-        """What could mask the key column for some tier: its column masks and tags.
+        """What could mask the key column for some tier ([] when nothing can).
 
         Run as the admin baseline. A key mask can permute keys or map them onto
-        other sampled keys, which no row comparison can see, so a key column
-        with a mask, or with any tag an ABAC mask policy could match, is refused.
+        other sampled keys, which no row comparison can see, so a key column is
+        refused if it has a live column mask, or a live tag some column-mask
+        policy in ``self.mask_config`` matches (key_tags_mask_problem). Other
+        tags, e.g. native class.* tags on an ID, don't disqualify it.
         """
         self._guard()
         catalog, schema, table = table_parts(check.table)
         quote_identifier(check.key_column)
         params = {"c": catalog.lower(), "s": schema.lower(), "t": table.lower(),
                   "k": check.key_column.lower()}
+        where = ("WHERE lower({0}) = :c AND lower({1}) = :s "
+                 "AND lower(table_name) = :t AND lower(column_name) = :k")
         ws = self._ws_for(principal)
         found = []
-        for what, relation, catalog_col, schema_col in (
-            ("column mask", "column_masks", "table_catalog", "table_schema"),
-            ("column tag", "column_tags", "catalog_name", "schema_name"),
-        ):
-            rows = self.run_query(
-                ws,
-                f"SELECT COUNT(*) FROM system.information_schema.{relation} "
-                f"WHERE lower({catalog_col}) = :c AND lower({schema_col}) = :s "
-                "AND lower(table_name) = :t AND lower(column_name) = :k",
-                params,
-            )
-            n = int(rows[0][0] or 0) if rows else 0
-            if n:
-                found.append(f"{n} {what}(s)")
+        rows = self.run_query(
+            ws, "SELECT COUNT(*) FROM system.information_schema.column_masks "
+            + where.format("table_catalog", "table_schema"), params)
+        masks = int(rows[0][0] or 0) if rows else 0
+        if masks:
+            found.append(f"{masks} column mask(s)")
+        tags = [(str(r[0]), "" if r[1] is None else str(r[1])) for r in self.run_query(
+            ws, "SELECT tag_name, tag_value FROM system.information_schema.column_tags "
+            + where.format("catalog_name", "schema_name"), params) if r]
+        problem = key_tags_mask_problem(self.mask_config, check.table, check.key_column, tags)
+        if problem:
+            found.append(problem)
         return found
 
     def collect_row_count(self, principal: TestPrincipal, table: str) -> int:
@@ -1245,7 +1324,11 @@ def verify_effective_access_live(
     validate_spec_identifiers(spec)
     auth = load_auth(auth_file)
     verifier = EffectiveAccessVerifier(auth, warehouse_id=warehouse_id)
+    verifier.mask_config = spec.mask_config
     verifier.resolve_warehouse()
+    # Mask checks sample rows spread across each table by a salted hash of the
+    # key, a fresh salt per run; logging it (never a key) makes a run repeatable.
+    salt = os.environ.get(SAMPLE_SALT_ENV) or secrets.token_hex(8)
 
     principals: dict[str, TestPrincipal] = {}
     # The admin baseline uses the admin credentials directly (raw values).
@@ -1267,6 +1350,8 @@ def verify_effective_access_live(
 
         # Newly-added group membership can take a short while to propagate.
         time.sleep(int(os.environ.get("GENIERAILS_VERIFY_PROPAGATION_SLEEP", "10")))
+        if spec.column_masks:
+            print(f"  Mask-check row sample salt: {salt} ({SAMPLE_SALT_ENV}={salt} repeats it)")
 
         column_values: dict[tuple, dict[str, list[tuple[Any, Any]]]] = {}
         column_errors: dict[tuple, dict[str, str]] = {}
@@ -1307,7 +1392,7 @@ def verify_effective_access_live(
                     per_errors[tier] = "principal was not provisioned"
                     continue
                 try:
-                    samples[tier] = verifier.collect_column_values(p, check)
+                    samples[tier] = verifier.collect_column_values(p, check, SAMPLE_ROWS, salt=salt)
                 except Exception as exc:
                     print(f"    ({tier}) query FAILED for {check.table}.{check.column}: {exc}")
                     if tier in involved:
@@ -1384,10 +1469,16 @@ def verify_effective_access_live(
             row_counts[check.table] = per_principal_counts
             row_errors[check.table] = per_row_errors
 
-        return evaluate_effective_access(
+        report = evaluate_effective_access(
             spec, column_values, row_counts, column_errors, row_errors,
             pairing_problems=pairing_problems,
         )
+        if spec.column_masks:
+            report.sample_note = (
+                f"checked {SAMPLE_ROWS} sampled rows per tier per masked column (spread by salt "
+                f"{salt}; rerun with {SAMPLE_SALT_ENV}={salt} to repeat) — a bounded sample, "
+                "not every row")
+        return report
     finally:
         if not keep_principals:
             for tier, p in principals.items():
@@ -1456,6 +1547,7 @@ def load_spec_from_tfvars(
         fgac_policies, tag_assignments, groups,
         key_column=key_column, key_column_by_table=key_column_by_table,
     )
+    spec.mask_config = {"fgac_policies": fgac_policies, "tag_assignments": tag_assignments}
     tagged_columns = {
         _as_str(item.get("entity_name")).lower()
         for item in tag_assignments
