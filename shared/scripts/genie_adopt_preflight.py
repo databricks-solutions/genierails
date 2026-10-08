@@ -14,6 +14,15 @@ them are adoptable (ID file present, recorded on this host, GET 200).
 
 `make apply` runs it with --arm before every workspace apply; it prints
 nothing when the state holds no legacy agent.
+
+  genie_adopt_preflight.py <env_dir> --id-files [--warn]
+      local only (no workspace call): every agent terraform_data.genie_space
+      created must still have its ID file. State does not record the agent
+      ID, so with the file gone Terraform plans no change and an apply skips,
+      while the next config or ACL change and make destroy can no longer find
+      the agent. Fails (or with --warn, warns) naming each missing file.
+      make runs it before every workspace apply (before the unchanged-inputs
+      skip) and plan.
 """
 
 import argparse
@@ -49,6 +58,50 @@ def legacy_agents(env_dir: Path) -> list[tuple[str, str]]:
             host = (instance.get("attributes", {}).get("triggers") or {}).get("host", "")
             found.append((str(key), str(host).rstrip("/")))
     return found
+
+
+CREATED_TYPE = "terraform_data"
+CREATED_NAME = "genie_space"
+
+
+def created_agents(env_dir: Path) -> list[str]:
+    """Keys of the agents terraform_data.genie_space created, as in the state.
+
+    Tainted and deposed objects are left out: Terraform replaces them, and
+    create re-adopts the agent (by its ID file, else its unique exact title).
+    """
+    state_path = env_dir / "terraform.tfstate"
+    if not state_path.exists():
+        return []
+    state = json.loads(state_path.read_text())
+    return [
+        str(instance.get("index_key"))
+        for resource in state.get("resources", [])
+        if resource.get("mode", "managed") == "managed"
+        and resource.get("type") == CREATED_TYPE and resource.get("name") == CREATED_NAME
+        and resource.get("module", "module.workspace") == "module.workspace"
+        for instance in resource.get("instances", [])
+        if instance.get("status") != "tainted" and not instance.get("deposed")
+    ]
+
+
+def check_id_files(env_dir: Path, warn: bool) -> int:
+    missing = [
+        (key, id_file_for(env_dir, key)) for key in created_agents(env_dir)
+        if not (id_file_for(env_dir, key).is_file() and id_file_for(env_dir, key).read_text().strip())
+    ]
+    if not missing:
+        return 0
+    label = "WARNING" if warn else "ERROR"
+    print(f"{label}: {len(missing)} Genie agent(s) created by GenieRails lost their ID file"
+          + ("" if warn else "; nothing was applied") + ":", file=sys.stderr)
+    for key, id_file in missing:
+        print(f"  {key}: {id_file} is missing or empty", file=sys.stderr)
+    print("  The state does not record the agent ID, so without this file a config or ACL change\n"
+          "  and make destroy can't find the agent. Write the agent's ID (it is in the agent URL)\n"
+          f"  into each file, then re-run (make plan ENV={env_dir.name} shows whether any is still missing).",
+          file=sys.stderr)
+    return 0 if warn else 1
 
 
 def load_auth(env_dir: Path) -> dict:
@@ -88,7 +141,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="mark each adoptable key adoption-required")
     parser.add_argument("--quiet", action="store_true",
                         help="print only when the check fails")
+    parser.add_argument("--id-files", action="store_true",
+                        help="only check that every created agent still has its ID file (no workspace call)")
+    parser.add_argument("--warn", action="store_true",
+                        help="with --id-files: warn instead of failing")
     args = parser.parse_args(argv)
+    if args.id_files:
+        return check_id_files(Path(args.env_dir).resolve(), args.warn)
     lines: list[str] = []
     out = lines.append if args.quiet else print
     env_dir = Path(args.env_dir).resolve()

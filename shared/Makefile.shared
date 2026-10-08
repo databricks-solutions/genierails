@@ -665,6 +665,7 @@ _plan-layer:
 		$(_COVERAGE_GATE) run --env-dir "$$(dirname "$$env_dir")" --env-name "$$target_env" --runner "$(ROOT_RUNNER)" $(if $(filter 1,$(VERBOSE)),--verbose,); \
 	fi; \
 	if [ "$$layer" = "workspace" ]; then \
+		python3 "$(GENIE_ADOPT_PREFLIGHT_SCRIPT)" "$$env_dir" --id-files --warn; \
 		$(_COVERAGE_GATE) can-run-check --env-dir "$$env_dir" --env-name "$$target_env" --runner "$(ROOT_RUNNER)"; \
 	fi; \
 	echo "=== Terraform Plan ($$layer:$$target_env) ==="; \
@@ -701,6 +702,7 @@ _apply-layer:
 		echo "=== Skipping terraform apply ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
 		exit 0; \
 	fi; \
+	if [ "$$layer" = "workspace" ]; then python3 "$(GENIE_ADOPT_PREFLIGHT_SCRIPT)" "$$env_dir" --id-files; fi; \
 	if [ "$$layer" = "data_access" ]; then \
 		$(_COVERAGE_GATE) run --env-dir "$$(dirname "$$env_dir")" --env-name "$$target_env" --runner "$(ROOT_RUNNER)" --apply-flags="$$apply_flags" $(if $(filter 1,$(VERBOSE)),--verbose,); \
 	fi; \
