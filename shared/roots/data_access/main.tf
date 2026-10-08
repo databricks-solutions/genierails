@@ -251,9 +251,9 @@ variable "promote_from" {
 }
 
 variable "catalog_map" {
-  type        = string
-  default     = ""
-  description = "make promote-to input only (saved in the destination env): comma-separated src=dest catalog renames. Declared so env.auto.tfvars loads cleanly; no resource reads it."
+  type        = any
+  default     = {}
+  description = "make promote-to input only (saved in the destination env): source-to-target catalog renames. Declared so env.auto.tfvars loads cleanly; no resource reads it."
 }
 
 variable "manage_groups" {
