@@ -70,6 +70,20 @@ TARGET_ENV_NAME = $(if $(TARGET_ENV),$(TARGET_ENV),$(ENV))
 TARGET_ENV_DIR = $(if $(filter $(TARGET_ENV_NAME),$(ENV)),$(ENV_DIR),$(CLOUD_ROOT)/envs/$(TARGET_ENV_NAME))
 TARGET_DATA_ACCESS_ENV_DIR = $(TARGET_ENV_DIR)/$(DATA_ACCESS_SUBDIR)
 
+# Env names are plain directory names under envs/, by the rule promote-to
+# already applies (scripts/saved_settings.py ENV_NAME): lowercase letters,
+# digits, '_' or '-', starting with a letter. Checked when make reads this
+# file, before any recipe runs. Recipes loop over env names word by word, so
+# a name with spaces (one mis-quoted "ENV=prod VERIFY_KEY_COLUMN=x" argument)
+# would scaffold and clean envs/<each word>, and one with "/" or ".." would
+# reach outside envs/.
+_ENV_NAME_CHARS := a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9 _ -
+_without_chars = $(if $(2),$(call _without_chars,$(subst $(firstword $(2)),,$(1)),$(wordlist 2,$(words $(2)),$(2))),$(1))
+_is_env_name = $(and $(filter 1,$(words $(1))),$(if $(filter 0% 1% 2% 3% 4% 5% 6% 7% 8% 9% _% -%,$(1)),,yes),$(if $(call _without_chars,$(1),$(_ENV_NAME_CHARS)),,yes))
+_check_env_name = $(if $(call _is_env_name,$($(1))),,$(error $(1)='$($(1))' is not an env name (lowercase letters, digits, '_' or '-', starting with a letter; no paths or spaces). Pass each make argument separately, e.g. make rehearse ENV=dev VERIFY_KEY_COLUMN=customer_id))
+$(call _check_env_name,ENV)
+$(foreach name,SOURCE_ENV DEST_ENV FROM TARGET_ENV,$(if $($(name)),$(call _check_env_name,$(name))))
+
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "}; /^[a-z_-]+:.*## / {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' "$(lastword $(MAKEFILE_LIST))"
 	@echo ""
@@ -100,6 +114,28 @@ _guard-root:
 		exit 1; \
 	fi
 
+# The checkout's own envs/ is $(GENIERAILS_CLOUD_DIR)/envs, where
+# GENIERAILS_CLOUD_DIR is the dir aws/Makefile or azure/Makefile records from
+# its own location; neither CLOUD_ROOT, which a command line or test can
+# override, nor MAKEFILES moves it. This guards against accidental
+# redirection, not a hostile environment (whoever controls MAKEFILES already
+# runs arbitrary make code). _is_own_env_dir <dir> <name> holds only when
+# <dir>'s physical path is exactly <physical GENIERAILS_CLOUD_DIR>/envs/<name>.
+# A physical path has no symlinks, so a symlinked envs/, envs/<name> or any dir
+# between them fails it, as do ENV_DIR, ACCOUNT_ENV_DIR, SOURCE_ENV_DIR and
+# DEST_ENV_DIR redirected elsewhere and an overridden CLOUD_ROOT. When this file
+# is included without GENIERAILS_CLOUD_DIR it never holds: _prepare-env skips
+# the cleanup and make clean refuses.
+_is_own_env_dir = { [ -n "$(GENIERAILS_CLOUD_DIR)" ] && _own=$$(CDPATH= cd -P "$(GENIERAILS_CLOUD_DIR)" 2>/dev/null && pwd) && _dir=$$(CDPATH= cd -P $(1) 2>/dev/null && pwd) && [ -n "$$_own" ] && [ "$$_dir" = "$$_own/envs/"$(2) ]; }
+
+# _prepare-env scaffolds each env dir, then removes leftovers of the retired
+# layout that copied root modules (*.tf, *.py, ABAC_PROMPT.md, scripts/) into
+# envs/<name> and kept ddl/, generated/ and data_access/ under envs/account.
+# Those globs would also match a user's own files, and the leftovers can only
+# exist in the checkout's own envs/<name>, so the cleanup runs only where
+# _is_own_env_dir holds. Anywhere else the dir is still scaffolded (missing
+# dirs, symlinks and tfvars are created), nothing is deleted, and one line
+# notes any leftovers kept.
 _prepare-env:
 	@envs="$(ENV)"; \
 	if [ "$(ENV)" != "$(ACCOUNT_ENV)" ] && [ "$(ENV)" != "$(DATA_ACCESS_SUBDIR)" ]; then \
@@ -114,8 +150,22 @@ _prepare-env:
 			env_dir="$(CLOUD_ROOT)/envs/$$env_name"; \
 		fi; \
 		mkdir -p "$$env_dir"; \
+		owned=; \
+		if $(call _is_own_env_dir,"$$env_dir","$$env_name"); then owned=1; fi; \
+		leftovers="$$env_dir/*.tf $$env_dir/*.py $$env_dir/ABAC_PROMPT.md $$env_dir/scripts"; \
 		if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
-			rm -rf "$$env_dir/ddl" "$$env_dir/generated" "$$env_dir/$(DATA_ACCESS_SUBDIR)"; \
+			leftovers="$$leftovers $$env_dir/ddl $$env_dir/generated $$env_dir/$(DATA_ACCESS_SUBDIR)"; \
+		fi; \
+		if [ -z "$$owned" ]; then \
+			for leftover in $$leftovers; do \
+				if [ -e "$$leftover" ] || [ -L "$$leftover" ]; then \
+					echo "Not removing old-layout files (*.tf, *.py, scripts/, ...) from $$env_dir: it is not this checkout's envs/$$env_name."; \
+					break; \
+				fi; \
+			done; \
+		fi; \
+		if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
+			if [ -n "$$owned" ]; then rm -rf "$$env_dir/ddl" "$$env_dir/generated" "$$env_dir/$(DATA_ACCESS_SUBDIR)"; fi; \
 		else \
 			mkdir -p "$$env_dir/ddl" "$$env_dir/generated"; \
 			gov_dir="$$env_dir/$(DATA_ACCESS_SUBDIR)"; \
@@ -123,9 +173,11 @@ _prepare-env:
 			if [ ! -e "$$gov_dir/auth.auto.tfvars" ]; then ln -sfn ../auth.auto.tfvars "$$gov_dir/auth.auto.tfvars"; fi; \
 			if [ ! -e "$$gov_dir/env.auto.tfvars" ]; then ln -sfn ../env.auto.tfvars "$$gov_dir/env.auto.tfvars"; fi; \
 		fi; \
-		rm -f "$$env_dir"/*.tf; \
-		rm -f "$$env_dir"/*.py "$$env_dir"/ABAC_PROMPT.md; \
-		rm -rf "$$env_dir/scripts"; \
+		if [ -n "$$owned" ]; then \
+			rm -f "$$env_dir"/*.tf; \
+			rm -f "$$env_dir"/*.py "$$env_dir"/ABAC_PROMPT.md; \
+			rm -rf "$$env_dir/scripts"; \
+		fi; \
 		if [ ! -e "$$env_dir/auth.auto.tfvars" ]; then \
 			if [ "$(ENV)" != "$(ACCOUNT_ENV)" ] && [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
 				ln -sfn "../$(ENV)/auth.auto.tfvars" "$$env_dir/auth.auto.tfvars"; \
@@ -913,10 +965,18 @@ destroy: _bootstrap ## Destroy the selected layer or workspace environment
 		$(MAKE) --no-print-directory _destroy-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
 	fi
 
+# clean deletes Terraform state and .terraform/ by glob, so it refuses unless
+# ENV_DIR is the checkout's own envs/$(ENV) (see _is_own_env_dir) with real
+# generated/ and data_access/ dirs, whatever ENV_DIR or CLOUD_ROOT say.
 clean: ## Remove generated files and Terraform state for the selected environment
 	@if [ ! -d "$(ENV_DIR)" ]; then \
 		echo "Environment '$(ENV)' not initialized: $(ENV_DIR)"; \
 		exit 0; \
+	fi
+	@if ! $(call _is_own_env_dir,"$(ENV_DIR)","$(ENV)") || [ -L "$(ENV_DIR)/generated" ] || [ -L "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" ]; then \
+		echo "make clean only cleans this checkout's $(if $(GENIERAILS_CLOUD_DIR),$(GENIERAILS_CLOUD_DIR)/,)envs/$(ENV) when it, envs/ and its generated/ and $(DATA_ACCESS_SUBDIR)/ are real directories."; \
+		echo "$(ENV_DIR) is not (a redirected ENV_DIR or CLOUD_ROOT, or a symlink on the way); delete its state files yourself."; \
+		exit 1; \
 	fi
 	@echo "=== Clean ($(ENV)) ==="
 	@rm -rf "$(ENV_DIR)/generated/abac.auto.tfvars" "$(ENV_DIR)/generated/masking_functions.sql" "$(ENV_DIR)/generated/generated_response.md" "$(ENV_DIR)/generated/genie_space_derived_acl_groups.auto.tfvars"
