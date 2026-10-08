@@ -16,13 +16,15 @@ them are adoptable (ID file present, recorded on this host, GET 200).
 nothing when the state holds no legacy agent.
 
   genie_adopt_preflight.py <env_dir> --id-files [--warn]
-      local only (no workspace call): every agent terraform_data.genie_space
-      created must still have its ID file. State does not record the agent
-      ID, so with the file gone Terraform plans no change and an apply skips,
-      while the next config or ACL change and make destroy can no longer find
-      the agent. Fails (or with --warn, warns) naming each missing file.
-      make runs it before every workspace apply (before the unchanged-inputs
-      skip) and plan.
+      [--env-name <env> --runner <terraform_layer.sh>]
+      no workspace call: every agent terraform_data.genie_space created must
+      still have its ID file. State does not record the agent ID, so with the
+      file gone Terraform plans no change and an apply skips, while the next
+      config or ACL change, the removal of the agent and make destroy can no
+      longer find it. Fails (or with --warn, warns) naming each missing file;
+      only then, with --runner, terraform console says which of them the
+      config removed. make runs it on the workspace layer before any early
+      exit of apply (fails) and plan (warns), and in maintain (warns).
 """
 
 import argparse
@@ -64,43 +66,125 @@ CREATED_TYPE = "terraform_data"
 CREATED_NAME = "genie_space"
 
 
+def _state(env_dir: Path) -> dict:
+    state_path = env_dir / "terraform.tfstate"
+    return json.loads(state_path.read_text()) if state_path.exists() else {}
+
+
+def _workspace_instances(state: dict, name: str, rtype: str):
+    for resource in state.get("resources", []):
+        if (resource.get("mode", "managed") == "managed" and resource.get("type") == rtype
+                and resource.get("name") == name
+                and resource.get("module", "module.workspace") == "module.workspace"):
+            yield from resource.get("instances", [])
+
+
 def created_agents(env_dir: Path) -> list[str]:
     """Keys of the agents terraform_data.genie_space created, as in the state.
 
     Tainted and deposed objects are left out: Terraform replaces them, and
     create re-adopts the agent (by its ID file, else its unique exact title).
     """
-    state_path = env_dir / "terraform.tfstate"
-    if not state_path.exists():
-        return []
-    state = json.loads(state_path.read_text())
     return [
         str(instance.get("index_key"))
-        for resource in state.get("resources", [])
-        if resource.get("mode", "managed") == "managed"
-        and resource.get("type") == CREATED_TYPE and resource.get("name") == CREATED_NAME
-        and resource.get("module", "module.workspace") == "module.workspace"
-        for instance in resource.get("instances", [])
+        for instance in _workspace_instances(_state(env_dir), CREATED_NAME, CREATED_TYPE)
         if instance.get("status") != "tainted" and not instance.get("deposed")
     ]
 
 
-def check_id_files(env_dir: Path, warn: bool) -> int:
-    missing = [
-        (key, id_file_for(env_dir, key)) for key in created_agents(env_dir)
-        if not (id_file_for(env_dir, key).is_file() and id_file_for(env_dir, key).read_text().strip())
-    ]
+def _attr(instance: dict, field: str) -> dict:
+    value = (instance.get("attributes") or {}).get(field) or {}
+    value = value.get("value", value) if isinstance(value, dict) and "type" in value else value
+    return value if isinstance(value, dict) else {}
+
+
+def _identify(state: dict, key: str) -> str:
+    """Host and tables the state recorded for an agent, to find it by hand."""
+    host = next((_attr(i, "triggers_replace").get("host", "")
+                 for i in _workspace_instances(state, CREATED_NAME, CREATED_TYPE)
+                 if str(i.get("index_key")) == key), "")
+    tables = next((_attr(i, "triggers").get("tables", "")
+                   for i in _workspace_instances(state, "genie_space_config", "null_resource")
+                   if str(i.get("index_key")) == key), "")
+    parts = [f"on {host}" if host else "", f"tables {tables}" if tables else ""]
+    return "; ".join(p for p in parts if p)
+
+
+# Created agents the workspace config still wants: the same filter as
+# modules/workspace new_spaces over the root's merged_spaces.
+DESIRED_CREATED_EXPRESSION = (
+    'base64encode(jsonencode([for key, space in local.merged_spaces : key '
+    'if space.genie_space_id == "" && length(space.uc_tables) > 0]))'
+)
+
+
+def desired_created_keys(env_dir: Path, env_name: str, runner: str) -> set[str] | None:
+    """Ask Terraform (console) which created agents the config keeps; None if it can't answer."""
+    import base64
+    import os
+    import subprocess
+
+    try:
+        result = subprocess.run([runner, "workspace", env_name, "console"],
+                                input=DESIRED_CREATED_EXPRESSION + "\n", capture_output=True, text=True,
+                                env={**os.environ, "LAYER_ENV_DIR": str(env_dir)}, timeout=600)
+        line = [l.strip() for l in result.stdout.splitlines() if l.strip()][-1]
+        if result.returncode != 0 or not (line.startswith('"') and line.endswith('"')):
+            return None
+        keys = json.loads(base64.b64decode(line[1:-1], validate=True))
+        return {str(k) for k in keys} if isinstance(keys, list) else None
+    except (OSError, IndexError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def check_id_files(env_dir: Path, warn: bool, env_name: str = "", runner: str = "") -> int:
+    """Every created agent must still have its ID file; refuse (or warn) if not.
+
+    Refusing is right in both cases, and never creates or orphans anything:
+    - kept in config: a config or ACL change and make destroy need the ID;
+    - removed from config: Terraform would trash the agent by its ID, and
+      genie_space.sh trash refuses without one rather than orphan it.
+    Only when a file is missing, Terraform is asked which agents the config
+    keeps, to say which case applies; if it can't answer, both are described.
+    """
+    label = "WARNING" if warn else "ERROR"
+    try:
+        state = _state(env_dir)
+        missing = [key for key in created_agents(env_dir)
+                   if not (id_file_for(env_dir, key).is_file() and id_file_for(env_dir, key).read_text().strip())]
+    except (OSError, ValueError) as exc:
+        print(f"{label}: cannot read {env_dir / 'terraform.tfstate'} to check Genie ID files ({exc})"
+              + ("" if warn else "; nothing was applied"), file=sys.stderr)
+        return 0 if warn else 1
     if not missing:
         return 0
-    label = "WARNING" if warn else "ERROR"
-    print(f"{label}: {len(missing)} Genie agent(s) created by GenieRails lost their ID file"
-          + ("" if warn else "; nothing was applied") + ":", file=sys.stderr)
-    for key, id_file in missing:
-        print(f"  {key}: {id_file} is missing or empty", file=sys.stderr)
-    print("  The state does not record the agent ID, so without this file a config or ACL change\n"
-          "  and make destroy can't find the agent. Write the agent's ID (it is in the agent URL)\n"
-          f"  into each file, then re-run (make plan ENV={env_dir.name} shows whether any is still missing).",
+    desired = desired_created_keys(env_dir, env_name, runner) if env_name and runner else None
+    outcome = "make apply would refuse" if warn else "nothing was applied"
+    print(f"{label}: {len(missing)} Genie agent(s) created by GenieRails lost their ID file; {outcome}:",
           file=sys.stderr)
+    removed = []
+    for key in missing:
+        where = _identify(state, key)
+        if desired is not None and key not in desired:
+            removed.append(key)
+            status = "removed from config, so this apply would trash it"
+        elif desired is None:
+            status = "in config, or removed from it (could not ask Terraform)"
+        else:
+            status = "still in config"
+        print(f"  {key}: {id_file_for(env_dir, key)} is missing or empty ({status}"
+              + (f"; {where}" if where else "") + ")", file=sys.stderr)
+    print("  The state does not record the agent ID; this file is the only record of it. Write the\n"
+          "  agent's ID (it is in the agent URL) into each file, then re-run.", file=sys.stderr)
+    if removed or desired is None:
+        print("  For an agent removed from config: GenieRails trashes a removed agent by its ID and, without\n"
+              "  it, would orphan it, so the removal is refused too. With the ID written back the removal\n"
+              "  trashes the agent; if you already deleted it by hand, write its old ID (a 404 counts as\n"
+              "  already deleted). To keep the agent instead, put it back in config.", file=sys.stderr)
+    if len(missing) > len(removed):
+        print("  For an agent still in config: a config or ACL change and make destroy can't find it\n"
+              "  without the ID.", file=sys.stderr)
+    print(f"  make plan ENV={env_name or env_dir.name} shows whether any file is still missing.", file=sys.stderr)
     return 0 if warn else 1
 
 
@@ -145,9 +229,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="only check that every created agent still has its ID file (no workspace call)")
     parser.add_argument("--warn", action="store_true",
                         help="with --id-files: warn instead of failing")
+    parser.add_argument("--env-name", default="", help="with --id-files: env name for terraform console")
+    parser.add_argument("--runner", default="",
+                        help="with --id-files: terraform_layer.sh, to ask which agents the config keeps")
     args = parser.parse_args(argv)
     if args.id_files:
-        return check_id_files(Path(args.env_dir).resolve(), args.warn)
+        return check_id_files(Path(args.env_dir).resolve(), args.warn, args.env_name, args.runner)
     lines: list[str] = []
     out = lines.append if args.quiet else print
     env_dir = Path(args.env_dir).resolve()

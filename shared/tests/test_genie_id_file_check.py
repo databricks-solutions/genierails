@@ -84,7 +84,7 @@ def test_warn_reports_without_failing(tmp_path, capsys):
     env = _env(tmp_path, [_resource([_instance()])])
     assert pf.main([str(env), "--id-files", "--warn"]) == 0
     err = capsys.readouterr().err
-    assert err.startswith("WARNING: 1 Genie agent(s) created by GenieRails lost their ID file:")
+    assert err.startswith("WARNING: 1 Genie agent(s) created by GenieRails lost their ID file; make apply would refuse:")
     assert "nothing was applied" not in err
 
 
@@ -112,7 +112,9 @@ def _stubs(tmp_path):
     stubs = {}
     for name, body in {
         "gate": 'printf "gate %s\\n" "$1" >> "{log}"; [ "$1" = skip-key ] && echo key; exit 0',
-        "runner": 'printf "runner %s\\n" "$3" >> "{log}"; exit 0',
+        "runner": ('printf "runner %s\\n" "$3" >> "{log}"; '
+                   'if [ "$3" = console ]; then cat >/dev/null; [ -n "$DESIRED" ] || exit 1; '
+                   'printf \'"%s"\\n\' "$(printf %s "$DESIRED" | base64)"; fi; exit 0'),
         "importer": 'exit 0',
     }.items():
         path = tmp_path / name
@@ -123,10 +125,12 @@ def _stubs(tmp_path):
                  f"IMPORT_EXISTING_SCRIPT={stubs['importer']}"]
 
 
-def _make(target, env, overrides):
+def _make(target, env, overrides, desired=None):
+    extra = {"DESIRED": json.dumps(desired)} if desired is not None else {}
     return subprocess.run(["make", "--no-print-directory", target, "LAYER=workspace", "TARGET_ENV=prod",
                            f"LAYER_ENV_DIR={env}", *overrides],
-                          cwd=ROOT / "aws", text=True, capture_output=True, env=_clean_env(), timeout=120)
+                          cwd=ROOT / "aws", text=True, capture_output=True, env={**_clean_env(), **extra},
+                          timeout=120)
 
 
 def _calls(log):
@@ -145,11 +149,77 @@ def test_apply_refuses_a_lost_id_file_even_when_inputs_are_unchanged(tmp_path):
 
     (env / f".genie_space_id_{KEY}").unlink()  # the live test: ID file moved aside
     log.unlink()
-    second = _make("_apply-layer", env, overrides)
+    second = _make("_apply-layer", env, overrides, desired=[KEY])
     assert second.returncode != 0
     assert "lost their ID file; nothing was applied" in second.stderr
+    assert "(still in config)" in second.stderr
     assert "inputs unchanged" not in second.stdout
-    assert _calls(log) == []  # refused before the coverage gate, the skip and Terraform
+    # Refused before the coverage gate, the skip and any plan or apply; only
+    # the console question (which agents the config keeps) ran.
+    assert _calls(log) == ["runner console"]
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make not installed")
+def test_apply_without_workspace_config_still_refuses(tmp_path):
+    # The no-abac.auto.tfvars early exit used to return 0 before the check.
+    env = _env(tmp_path, [_resource([_instance()])])
+    log, overrides = _stubs(tmp_path)
+    result = _make("_apply-layer", env, overrides)
+    assert result.returncode != 0
+    assert "lost their ID file; nothing was applied" in result.stderr
+    assert "Skipping terraform apply" not in result.stdout
+    assert "runner apply" not in _calls(log)
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make not installed")
+def test_removing_an_agent_without_its_id_file_is_refused_with_recovery(tmp_path):
+    state = [_resource([_instance()]),
+             _resource([{"index_key": KEY, "attributes": {"triggers": {"tables": "cat.sch.t"}}}],
+                       rtype="null_resource", name="genie_space_config")]
+    state[0]["instances"][0]["attributes"]["triggers_replace"] = {"value": {"host": "https://ws.example"},
+                                                                  "type": "object"}
+    env = _env(tmp_path, state)
+    (env / "abac.auto.tfvars").write_text("# the agent is no longer configured\n")
+    log, overrides = _stubs(tmp_path)
+    result = _make("_apply-layer", env, overrides, desired=[])
+    assert result.returncode != 0
+    err = result.stderr
+    assert "(removed from config, so this apply would trash it; on https://ws.example; tables cat.sch.t)" in err
+    assert "the removal is refused too" in err and "a 404 counts as" in err
+    assert "put it back in config" in err
+    assert "still in config" not in err
+    assert "runner apply" not in _calls(log) and not any(c.startswith("gate") for c in _calls(log))
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make not installed")
+def test_when_terraform_cant_answer_both_cases_are_described(tmp_path):
+    env = _env(tmp_path, [_resource([_instance()])])
+    (env / "abac.auto.tfvars").write_text("# config\n")
+    log, overrides = _stubs(tmp_path)
+    result = _make("_apply-layer", env, overrides)  # console fails (no DESIRED)
+    assert result.returncode != 0
+    err = result.stderr
+    assert "(in config, or removed from it (could not ask Terraform))" in err
+    assert "the removal is refused too" in err and "a config or ACL change" in err
+
+
+@pytest.mark.skipif(shutil.which("make") is None, reason="make not installed")
+def test_plan_warns_before_its_early_exit(tmp_path):
+    env = _env(tmp_path, [_resource([_instance()])])  # no abac.auto.tfvars
+    log, overrides = _stubs(tmp_path)
+    result = _make("_plan-layer", env, overrides, desired=[KEY])
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "WARNING: 1 Genie agent(s) created by GenieRails lost their ID file; make apply would refuse" in result.stderr
+    assert "Skipping terraform plan" in result.stdout
+
+
+def test_an_unreadable_state_fails_closed(tmp_path, capsys):
+    env = tmp_path / "prod"
+    env.mkdir()
+    (env / "terraform.tfstate").write_text("{not json")
+    assert pf.main([str(env), "--id-files"]) == 1
+    assert "cannot read" in capsys.readouterr().err
+    assert pf.main([str(env), "--id-files", "--warn"]) == 0
 
 
 @pytest.mark.skipif(shutil.which("make") is None, reason="make not installed")
@@ -163,12 +233,42 @@ def test_plan_warns_about_a_lost_id_file_and_still_plans(tmp_path):
     assert "runner plan" in _calls(log)
 
 
-def test_both_layer_recipes_run_the_check_before_terraform():
+@pytest.mark.skipif(shutil.which("make") is None, reason="make not installed")
+def test_maintain_warns_but_still_runs_governance(tmp_path):
+    # maintain never applies the workspace layer: a lost Genie ID file must
+    # not block masking new columns, so it warns and carries on.
+    env = _env(tmp_path, [_resource([_instance()])])
+    (env / "generated").mkdir()
+    (env / "env.auto.tfvars").write_text("\n")
+    log = tmp_path / "calls"
+    make_stub = tmp_path / "make-stub"
+    make_stub.write_text(f"#!/bin/sh\nprintf 'make %s\\n' \"$*\" >> '{log}'\nexit 0\n")
+    make_stub.chmod(0o755)
+    audit = tmp_path / "audit.py"
+    audit.write_text("raise SystemExit(0)\n")
+    result = subprocess.run(["make", "--no-print-directory", "maintain", "ENV=prod", f"ENV_DIR={env}",
+                             f"MAKE={make_stub}", f"AUDIT_SCHEMA_SCRIPT={audit}"],
+                            cwd=ROOT / "aws", text=True, capture_output=True, env=_clean_env(), timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "WARNING: 1 Genie agent(s) created by GenieRails lost their ID file; make apply would refuse" in result.stderr
+    assert any("apply-governance" in c for c in _calls(log))
+
+
+def _recipe(makefile, target):
+    body = makefile[makefile.index(f"\n{target}:"):]
+    return body[:body.index("\n\n")]
+
+
+def test_the_check_runs_before_every_early_exit_of_both_layer_recipes():
     makefile = (SHARED / "Makefile.shared").read_text()
-    apply = makefile[makefile.index("\n_apply-layer:"):]
-    apply = apply[:apply.index("\n\n")]
-    check = apply.index('"$(GENIE_ADOPT_PREFLIGHT_SCRIPT)" "$$env_dir" --id-files;')
+    apply = _recipe(makefile, "_apply-layer")
+    check = apply.index('then $(_GENIE_ID_FILE_CHECK); fi')
+    exits = [i for i in range(len(apply)) if apply.startswith("exit 0", i)]
+    assert exits and all(check < i for i in exits)
     assert check < apply.index("skip-key") < apply.index("inputs unchanged")
-    plan = makefile[makefile.index("\n_plan-layer:"):]
-    plan = plan[:plan.index("\n\n")]
-    assert plan.index("--id-files --warn") < plan.index('"$$layer" "$$target_env" plan')
+    plan = _recipe(makefile, "_plan-layer")
+    warn = plan.index("then $(_GENIE_ID_FILE_CHECK) --warn; fi")
+    assert all(warn < i for i in range(len(plan)) if plan.startswith("exit 0", i))
+    # maintain only warns (never refuses governance over Genie bookkeeping).
+    maintain = _recipe(makefile, "maintain")
+    assert '--id-files --warn;' in maintain and maintain.count("--id-files") == 1
