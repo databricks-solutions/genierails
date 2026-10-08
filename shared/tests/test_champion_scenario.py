@@ -102,7 +102,10 @@ class FakeMake:
         return self._guard(args, env_dir)
 
     def _rehearse(self, args, env_dir):
-        assert _var(args, "VERIFY_KEY_COLUMN") == rit.CHAMPION_KEY_COLUMN
+        assert _var(args, "VERIFY_KEY_COLUMN") is None  # no key flag: picked per table
+        # A passing verify-access saves the keys it proved per table.
+        with (env_dir / "env.auto.tfvars").open("a") as f:
+            f.write('verify_key_columns = { "dev_fin.finance.customers" = "customer_id" }\n')
         return self._done(args, 0, "  ✓ [PASS] column-mask x\n  RESULT: ALL EFFECTIVE (1 passed / 1)\n")
 
     def _promote(self, args, env_dir):
@@ -180,11 +183,11 @@ def test_champion_dry_run_follows_the_readme_order(champion):
         ["enable-classification", "ENV=dev"],
         ["enable-classification", "ENV=dev"],
         ["generate", "ENV=dev"],
-        ["rehearse", "ENV=dev", "VERIFY_KEY_COLUMN=customer_id"],
+        ["rehearse", "ENV=dev"],
         ["promote", "SOURCE_ENV=dev", "DEST_ENV=prod", "DEST_CATALOG_MAP=dev_fin=prod_fin"],
         ["enable-classification", "ENV=prod"],
         ["enable-classification", "ENV=prod"],
-        ["release", "ENV=prod", "VERIFY_KEY_COLUMN=customer_id"],
+        ["release", "ENV=prod"],
         ["maintain", "ENV=prod"],
     ]
     assert waits == ["dev_fin", "prod_fin"]
@@ -194,8 +197,10 @@ def test_champion_dry_run_follows_the_readme_order(champion):
     assert dev_cfg["genie_spaces"] == [{"genie_space_id": SPACE_ID}]
     assert "uc_tables" not in dev_cfg
     assert dev_cfg["enable_auto_tagging"] is True
-    assert dev_cfg["verify_key_column"] == "customer_id"
+    assert dev_cfg["verify_key_columns"] == {"dev_fin.finance.customers": "customer_id"}
+    assert "verify_key_column" not in dev_cfg
     prod_cfg = rit._load_tfvars(envs / "prod" / "env.auto.tfvars")
+    assert prod_cfg["verify_key_columns"] == {"prod_fin.finance.customers": "customer_id"}
     # Promote and release neither write nor need the retired exposure flag.
     assert "business_access_enabled" not in prod_cfg
     assert prod_cfg["sql_warehouse_id"] == WAREHOUSE

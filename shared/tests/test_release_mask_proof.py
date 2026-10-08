@@ -1,8 +1,9 @@
-"""make release must prove masking: with column masks but no row-pairing key,
-or a VERIFY_SPEC without keyed checks for every masked column, verify-access
-could not prove the masks, so release refuses before it takes its lock (and
-again before it applies), and its verify-access runs with
---require-mask-checks."""
+"""make release must prove masking: with a VERIFY_SPEC (or derived checks)
+that leaves a masked column unchecked, verify-access could not prove the
+masks, so release refuses before it takes its lock (and again before it
+applies). No row-pairing key is needed up front: verify-access-keys picks and
+proves one per masked table, as the admin, before release applies, and its
+verify-access runs with --require-mask-checks."""
 
 import json
 import os
@@ -67,15 +68,20 @@ def _spec(tmp_path, spec) -> str:
     return str(path)
 
 
-# ── no VERIFY_SPEC: the key decides ─────────────────────────────────────────
+# ── no VERIFY_SPEC: no key is needed (picked per table before apply) ────────
 
 @pytest.mark.parametrize("layer", ["data_access", "generated"])
-def test_masks_without_a_key_refuse(tmp_path, capsys, layer):
-    env = _env(tmp_path, layer=layer)
+@pytest.mark.parametrize("policies", [MASK_POLICY, TAGGED])
+def test_masks_without_a_key_proceed_to_the_key_check(tmp_path, layer, policies):
+    env = _env(tmp_path, policies=policies, layer=layer)
+    assert rh.require_mask_proof(env, "prod", "", "") == 0
+
+
+def test_a_saved_per_table_key_that_is_tagged_sensitive_refuses(tmp_path, capsys):
+    env = _env(tmp_path, policies=TAGGED)
+    (env / "env.auto.tfvars").write_text('verify_key_columns = { "cat.sch.customers" = "ssn" }\n')
     assert rh.require_mask_proof(env, "prod", "", "") == 1
-    err = capsys.readouterr().err
-    assert "could not prove its 1 column mask(s); nothing was applied" in err
-    assert "verify_key_column" in err and "VERIFY_KEY_COLUMN" in err and "VERIFY_SPEC" in err
+    assert "row-pairing key ssn may be masked for" in capsys.readouterr().err
 
 
 def test_a_key_lets_release_proceed(tmp_path):
@@ -92,8 +98,6 @@ def test_nothing_to_pair_needs_no_key(tmp_path, policies):
 @pytest.mark.parametrize("spec, message", [
     (ROW_FILTER_SPEC, "has no column-mask checks"),
     ({"column_masks": [], "row_filters": []}, "has no column-mask checks"),
-    ({"column_masks": [_mask("cat.sch.customers", "ssn", key=""), _mask("cat.sch.notes", "free_text")]},
-     "without a key_column: cat.sch.customers.ssn"),
     ({"column_masks": [_mask("cat.sch.customers", "ssn")]}, "does not check masked column(s): cat.sch.notes.free_text"),
     ("not json", "could not be read"),
 ])
@@ -113,6 +117,12 @@ def test_a_missing_spec_file_refuses(tmp_path, capsys):
 def test_a_keyed_spec_covering_every_masked_column_passes(tmp_path):
     env = _env(tmp_path, policies=TAGGED)
     assert rh.require_mask_proof(env, "prod", "", _spec(tmp_path, FULL_SPEC)) == 0
+
+
+def test_a_keyless_spec_check_is_keyed_live(tmp_path):
+    env = _env(tmp_path, policies=TAGGED)
+    keyless = {"column_masks": [_mask("cat.sch.customers", "ssn", key=""), _mask("cat.sch.notes", "free_text")]}
+    assert rh.require_mask_proof(env, "prod", "", _spec(tmp_path, keyless)) == 0
 
 
 def test_before_derivation_a_keyed_mask_spec_passes_and_is_rechecked_later(tmp_path):
@@ -179,31 +189,46 @@ def _names(log):
     return out
 
 
-@pytest.mark.parametrize("extra", [(), ("VERIFY_SPEC={spec}",)])
-def test_release_refuses_before_its_lock(tmp_path, extra):
-    # No key, or (the release-level regression) a row-filter-only VERIFY_SPEC
-    # against a config with masks: the only call is the refusing check.
+def test_release_refuses_before_its_lock(tmp_path):
+    # The release-level regression: a row-filter-only VERIFY_SPEC against a
+    # config with masks. The only call is the refusing check.
     env = _env(tmp_path)
     spec = _spec(tmp_path, ROW_FILTER_SPEC)
     log, overrides = _recorders(tmp_path)
-    result = _release(env, overrides, *(e.format(spec=spec) for e in extra))
+    result = _release(env, overrides, f"VERIFY_SPEC={spec}")
     assert result.returncode != 0
     assert "nothing was applied" in result.stderr
     assert _names(log) == ["release-helper require-mask-proof"]
 
 
-def test_release_checks_before_locking_and_again_before_applying(tmp_path):
-    env = _env(tmp_path, key="customer_id")
+@pytest.mark.parametrize("key", ["", "customer_id"])  # no key: picked per table
+def test_release_checks_before_locking_again_before_applying_then_proves_keys(tmp_path, key):
+    env = _env(tmp_path, key=key)
     log, overrides = _recorders(tmp_path)
     result = _release(env, overrides)
     assert result.returncode == 0, result.stdout + result.stderr
     names = _names(log)
-    assert names[:3] == ["release-helper require-mask-proof", "lock lock", "release-helper clear-old-receipts"], names
+    assert names[:4] == ["release-helper require-mask-proof", "make _verify-access-keys-readonly",
+                         "lock lock", "release-helper clear-old-receipts"], names
     promote = names.index("make promote")
     assert names[promote + 1] == "release-helper require-mask-proof", names  # re-check on the derived config
-    assert names.index("make apply") > promote + 1
+    assert names[promote + 2] == "make verify-access-keys", names  # admin key proof before any apply
+    assert names.index("make apply") > promote + 2
     assert names[-2:] == ["make verify-access", "lock unlock"], names
     assert "VERIFY_REQUIRE_MASKS=1" in _calls(log)[-2]
+
+
+def test_an_unprovable_key_refuses_before_the_lock_and_applies_nothing(tmp_path):
+    env = _env(tmp_path)
+    log, overrides = _recorders(tmp_path)
+    failing = tmp_path / "make-stub"
+    failing.write_text(f"#!/bin/sh\nprintf 'make %s\\n' \"$*\" >> '{log}'\n"
+                       '[ "$2" = "_verify-access-keys-readonly" ] && exit 2\nexit 0\n')
+    result = _release(env, overrides)
+    assert result.returncode != 0
+    assert _names(log) == ["release-helper require-mask-proof", "make _verify-access-keys-readonly"]
+    assert "nothing was applied and the lock was not taken" in result.stderr
+    assert not (env / "generated" / ".governance.lock").exists()
 
 
 def test_release_verifies_strictly():

@@ -1,7 +1,7 @@
 .PHONY: help bootstrap-sp genie-adopt-preflight _guard-root _prepare-env _bootstrap _guarded-bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config _guard-genie-placeholder setup init-env enable-classification generate scaffold-treatments derive-assignments generate-delta audit-schema validate validate-generated coverage-gate promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _prepare-classification _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema evidence validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema audit-rulebook validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec _guard-account-admin-env release maintain test-champion _derive-before-exposure _refresh-live-ddl promote-to
+.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec verify-access-keys _verify-access-keys-readonly _guard-account-admin-env release maintain test-champion _derive-before-exposure _refresh-live-ddl promote-to
 
 # ── Variables expected from the including Makefile ──────────────
 # SHARED_ROOT  — absolute path to shared/
@@ -291,9 +291,9 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "  3. In $(_SETUP_ENV_REL)/env.auto.tfvars, also set sql_warehouse_id (or leave \"\" to auto-create)"; \
 		echo "  4. Run: make enable-classification ENV=$(ENV)   (or turn it on in the UI);"; \
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
-		echo "  5. Run: make release ENV=$(ENV)   (the verify key comes from dev)"; \
+		echo "  5. Run: make release ENV=$(ENV)"; \
 		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
-		echo "     Without a promoted verify_key_column, release refuses before applying."; \
+		echo "     It proves a row-pairing key for every masked table before applying (no key to set)."; \
 		echo "  6. Steady state (scheduled): make maintain ENV=$(ENV)"; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 2 onward)"; \
@@ -315,9 +315,9 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "  $$step. Run: make enable-classification ENV=$(ENV)   (or turn it on in the UI);"; \
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
 		step=$$((step+1)); echo "  $$step. Run: make generate ENV=$(ENV)   (one run: imports the agent, finds its tables, drafts rules)"; \
-		step=$$((step+1)); echo "  $$step. Run: make rehearse ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>   (key saved after a passing run)"; \
+		step=$$((step+1)); echo "  $$step. Run: make rehearse ENV=$(ENV)"; \
 		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
-		echo "     The saved key (verify_key_column) is carried by promote; make release needs it."; \
+		echo "     verify-access picks a row-pairing key per masked table; the proven keys are saved and promoted."; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 0 and Phase 1)"; \
 	fi
@@ -456,15 +456,16 @@ _refresh-live-ddl: _guarded-bootstrap _guard-workspace-target
 	@$(_COVERAGE_GATE) invalidate --env-dir "$(ENV_DIR)"
 	@cd "$(ENV_DIR)" && python3 "$(DERIVE_ASSIGNMENTS_SCRIPT)" --ddl-only --auth-file auth.auto.tfvars --env-file env.auto.tfvars --write-ddl ddl/_fetched.sql --refresh-record generated/.live_refresh.json
 
-# After verify-access passes, an explicit VERIFY_KEY_COLUMN is saved as
-# verify_key_column (promote carries it), so later runs can omit it — but only
-# when verify-access's result file shows a passing mask check paired by that key
-# (a row-filter-only pass never used it).
+# After verify-access passes with a proven key for EVERY masked table, the
+# keys are saved as exactly that run's verify_key_columns (stale entries this
+# tool saved are dropped, your own are kept; promote carries the map, remapping
+# table names), and an explicit VERIFY_KEY_COLUMN as verify_key_column when
+# passing mask checks were paired by it. A partial run saves nothing.
 _SAVED_SETTINGS = python3 "$(SHARED_ROOT)/scripts/saved_settings.py"
 _VERIFY_RESULT = $(ENV_DIR)/generated/.verify_access.json
-_SAVE_VERIFY_KEY = $(if $(strip $(VERIFY_KEY_COLUMN)),$(_SAVED_SETTINGS) verify-key --env-file "$(ENV_DIR)/env.auto.tfvars" --value "$(strip $(VERIFY_KEY_COLUMN))" --result-file "$(_VERIFY_RESULT)",true)
+_SAVE_VERIFY_KEY = $(_SAVED_SETTINGS) verify-key --env-file "$(ENV_DIR)/env.auto.tfvars" --value "$(strip $(VERIFY_KEY_COLUMN))" --result-file "$(_VERIFY_RESULT)"
 
-rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is optional (recommended to prove masking live; saved after a pass)
+rehearse: _guard-genie-placeholder ## Run serial rehearsal (verify-access picks and proves a row-pairing key per masked table; VERIFY_KEY_COLUMN optionally overrides)
 	@if [ "$(ENV)" = "prod" ]; then \
 		echo "rehearse: ENV=prod is not allowed; use make release ENV=prod" >&2; \
 		exit 1; \
@@ -480,9 +481,11 @@ rehearse: _guard-genie-placeholder ## Run serial rehearsal; VERIFY_KEY_COLUMN is
 # (envs/<env>/generated/.governance.lock) throughout.
 _ENV_LOCK_HELPER = python3 "$(SHARED_ROOT)/scripts/environment_lock.py"
 _RELEASE_HELPER = python3 "$(SHARED_ROOT)/scripts/release_helpers.py"
-# release refuses, before its lock, to run when verify-access could not prove
-# every mask (no key, or a VERIFY_SPEC without keyed mask checks for them), and
-# re-checks after promoting the live-derived config, before it applies.
+# release refuses, before its lock, to run when verify-access could not check
+# every masked column (no concrete masked group, or a VERIFY_SPEC without checks
+# for them), and re-checks after promoting the live-derived config; then, still
+# before it applies, verify-access-keys proves every masked table's row-pairing
+# key as the admin.
 _REQUIRE_MASK_PROOF = $(_RELEASE_HELPER) require-mask-proof "$(ENV_DIR)" --env "$(ENV)" --key "$$key" \
 	--spec "$(VERIFY_SPEC)" --account-tfvars "$(ACCOUNT_ENV_DIR)/abac.auto.tfvars"
 # Same-env promote for release, apply, apply-governance and plan. Command-line
@@ -518,6 +521,10 @@ release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, ap
 	$(_DRY_RUN_GUARD); \
 	key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" || exit 1; \
 	$(_REQUIRE_MASK_PROOF) || exit 1; \
+	if ! $(MAKE) --no-print-directory _verify-access-keys-readonly ENV="$(ENV)"$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \
+		echo "release: no provable row-pairing key for every masked table (above); nothing was applied and the lock was not taken." >&2; \
+		exit 1; \
+	fi; \
 	$(call _ENV_LOCK,release); \
 	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
 	$(MAKE) derive-assignments ENV="$(ENV)" || exit 1; \
@@ -525,6 +532,10 @@ release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, ap
 	$(MAKE) coverage-gate ENV="$(ENV)" || exit 1; \
 	$(_SAME_ENV_PROMOTE) || exit 1; \
 	$(_REQUIRE_MASK_PROOF) || exit 1; \
+	if ! $(MAKE) verify-access-keys ENV="$(ENV)"$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \
+		echo "release: no provable row-pairing key for every masked table (above); nothing was applied." >&2; \
+		exit 1; \
+	fi; \
 	$(MAKE) audit-rulebook ENV="$(ENV)"; audit_rc=$$?; \
 	if [ $$audit_rc -ne 0 ]; then \
 		if [ $$audit_rc -eq 1 ]; then \
@@ -1042,30 +1053,57 @@ test-unit: ## Run fast unit tests (no Databricks/LLM/Terraform required) — use
 #
 # Options:
 #   ENV=<env>              workspace env whose data_access config to verify (default: dev)
-#   VERIFY_KEY_COLUMN=<c>  primary-key column used to pair rows across principals
+#   VERIFY_KEY_COLUMN=<c>  optional: row-pairing key for every masked table that has
+#                          this column (default: picked and proven per table; a
+#                          verify_key_columns entry in env.auto.tfvars wins)
 #   VERIFY_SPEC=<file>     explicit JSON spec (overrides --from-tfvars derivation)
 #   WAREHOUSE_ID=<id>      pin a specific SQL warehouse
 #   KEEP_PRINCIPALS=1      leave the provisioned test principals in place (debug)
-#   VERIFY_REQUIRE_MASKS=1 fail when a mask check has no key column (make release sets it)
+#   VERIFY_REQUIRE_MASKS=1 fail when a masked table has no provable key (make release sets it)
 VERIFY_KEY_COLUMN ?=
 VERIFY_SPEC ?=
 _VERIFY_SPEC_FLAG = $(if $(VERIFY_SPEC),--spec "$(VERIFY_SPEC)",--from-tfvars "$(TARGET_DATA_ACCESS_ENV_DIR)/abac.auto.tfvars" --account-tfvars "$(ACCOUNT_ENV_DIR)/abac.auto.tfvars")
 _VERIFY_KEEP_FLAG = $(if $(KEEP_PRINCIPALS),--keep-principals,)
-# make release sets VERIFY_REQUIRE_MASKS=1: a mask check skipped for want of a
-# key column fails instead of letting the release report success.
+# The global key (explicit VERIFY_KEY_COLUMN, else the saved verify_key_column)
+# and the env's per-table verify_key_columns.
+_VERIFY_KEY_FLAGS = --key-column "$$key" --env-file "$(ENV_DIR)/env.auto.tfvars"
+# make release sets VERIFY_REQUIRE_MASKS=1: a mask check whose table has no
+# provable row-pairing key fails instead of letting the release report success.
 _VERIFY_REQUIRE_FLAG = $(if $(filter 1,$(VERIFY_REQUIRE_MASKS)),--require-mask-checks,)
 
 verify-access-spec: _guarded-bootstrap _guard-workspace-target ## Print the derived effective-access checks (no workspace/cluster needed)
 	@key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" && \
 	cd "$(SHARED_ROOT)" && python3 verify_effective_access.py \
-		$(_VERIFY_SPEC_FLAG) --key-column "$$key" --print-spec
+		$(_VERIFY_SPEC_FLAG) $(_VERIFY_KEY_FLAGS) --print-spec
+
+# Admin-only (no test principals, no grants): pick and prove the row-pairing key
+# of every masked table. With no warehouse configured or applied yet, it reads
+# through a workspace warehouse.
+_VERIFY_KEYS_CHECK = key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" && \
+	warehouse_id="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" warehouse --env-dir "$(ENV_DIR)" --explicit "$(WAREHOUSE_ID)" --allow-unset)" && \
+	cd "$(SHARED_ROOT)" && GENIERAILS_LIVE_VERIFY=1 python3 verify_effective_access.py \
+		$(_VERIFY_SPEC_FLAG) $(_VERIFY_KEY_FLAGS) --warehouse-id "$$warehouse_id" \
+		--auth-file "$(ENV_DIR)/auth.auto.tfvars" --check-keys-only
+
+verify-access-keys: _guarded-bootstrap _guard-workspace-target ## Prove a row-pairing key for every masked table, as the admin only (make release runs it before its lock and again before applying)
+	@$(_VERIFY_KEYS_CHECK)
+
+# The same check with no bootstrap side effects: release runs it before it takes
+# its lock, on the config already promoted (nothing to check before the first
+# promote; release re-checks once it has promoted the live-derived config).
+_verify-access-keys-readonly: _guard-workspace-target
+	@if [ -z "$(VERIFY_SPEC)" ] && [ ! -f "$(TARGET_DATA_ACCESS_ENV_DIR)/abac.auto.tfvars" ]; then \
+		echo "Row-pairing keys: no promoted data-access config yet; checked after release promotes it."; \
+		exit 0; \
+	fi; \
+	$(_VERIFY_KEYS_CHECK)
 
 verify-access: _guarded-bootstrap _guard-workspace-target ## Verify masking/row-filters take effect via per-tier test principals (LIVE workspace)
 	@rm -f "$(_VERIFY_RESULT)"
 	@key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" && \
 	warehouse_id="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" warehouse --env-dir "$(ENV_DIR)" --explicit "$(WAREHOUSE_ID)" --terraform-runner "$(ROOT_RUNNER)" --env-name "$(ENV)")" && \
 	cd "$(SHARED_ROOT)" && GENIERAILS_LIVE_VERIFY=1 python3 verify_effective_access.py \
-		$(_VERIFY_SPEC_FLAG) --key-column "$$key" --warehouse-id "$$warehouse_id" $(_VERIFY_KEEP_FLAG) $(_VERIFY_REQUIRE_FLAG) \
+		$(_VERIFY_SPEC_FLAG) $(_VERIFY_KEY_FLAGS) --warehouse-id "$$warehouse_id" $(_VERIFY_KEEP_FLAG) $(_VERIFY_REQUIRE_FLAG) \
 		--auth-file "$(ENV_DIR)/auth.auto.tfvars" --live --result-file "$(_VERIFY_RESULT)"
 
 test-quickstart: _bootstrap _guard-workspace-target ## Scenario: single space, single catalog (quickstart flow)

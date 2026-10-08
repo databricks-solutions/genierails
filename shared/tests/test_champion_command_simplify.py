@@ -823,25 +823,22 @@ MASKED_DATA_ACCESS = '''fgac_policies = [
 '''
 
 
-@pytest.mark.parametrize(("env_text", "passes"), [
-    ('verify_key_column = "customer_id"\n', True),  # promoted from dev
-    ("enable_classification = true\n", False),
+@pytest.mark.parametrize("env_text", [
+    'verify_key_column = "customer_id"\n',  # promoted from dev (legacy single key)
+    "enable_classification = true\n",       # no key: picked per table
 ])
-def test_release_reads_the_promoted_key_before_the_mask_proof_check(tmp_path, env_text, passes):
+def test_release_needs_no_key_and_proves_keys_before_applying(tmp_path, env_text):
     env_dir = tmp_path / "prod"
     (env_dir / "data_access").mkdir(parents=True)
     (env_dir / "data_access/abac.auto.tfvars").write_text(MASKED_DATA_ACCESS)
 
     result, _env_file = _run_target(tmp_path, "release", "prod", env_text=env_text)
-    calls = (tmp_path / "calls").read_text() if (tmp_path / "calls").exists() else ""
+    calls = (tmp_path / "calls").read_text().splitlines()
 
-    if passes:
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "verify-access ENV=prod VERIFY_REQUIRE_MASKS=1" in calls
-    else:
-        assert result.returncode != 0
-        assert "could not prove its 1 column mask(s); nothing was applied" in result.stderr
-        assert calls == ""
+    assert result.returncode == 0, result.stdout + result.stderr
+    keys = calls.index("verify-access-keys ENV=prod")
+    assert keys < calls.index("apply ENV=prod APPLY_FLAGS= _EXPOSURE_DERIVED=1")
+    assert "verify-access ENV=prod VERIFY_REQUIRE_MASKS=1" in calls
 
 
 def _proof(tmp_path, payload=MASK_PASS):
@@ -912,7 +909,9 @@ def test_verify_result_file_counts_mask_passes_per_key(monkeypatch, tmp_path, ca
                             {"column-mask": "PASS", "row-filter": "PASS"})
     assert rc == 0
     assert result == {"passed": True, "mask_checks_passed": 1,
-                      "mask_checks_passed_by_key": {"customer_id": 1}, "row_filter_checks_passed": 1}
+                      "masked_tables": ["c.s.t"], "mask_keys_complete": False,
+                      "mask_checks_passed_by_key": {"customer_id": 1}, "mask_keys_proven_by_table": {},
+                      "row_filter_checks_passed": 1}
 
 
 def test_verify_result_file_row_filter_only_proves_no_key(monkeypatch, tmp_path, capsys):
