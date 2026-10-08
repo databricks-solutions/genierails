@@ -22,6 +22,11 @@ import pytest
 SHARED = Path(__file__).resolve().parents[1]
 MAKEFILE = SHARED / "Makefile.shared"
 
+REPO = SHARED.parent
+# The line aws/Makefile and azure/Makefile start with.
+CLOUD_DIR_LINE = next(line for line in (REPO / "aws/Makefile").read_text().splitlines()
+                      if line.startswith("override GENIERAILS_CLOUD_DIR"))
+
 pytestmark = pytest.mark.skipif(shutil.which("make") is None, reason="make not installed")
 
 USER_FILES = {"keep.tf": "# mine\n", "keep.py": "# mine\n", "scripts/keep": "# mine\n",
@@ -44,7 +49,7 @@ genie_space_id_to_name = { s1 = "Payments" }
 
 def _clean_env(**extra):
     env = {k: v for k, v in os.environ.items()
-           if k not in ("MAKEFLAGS", "MAKELEVEL", "ENV", "ENV_DIR", "ACCOUNT_ENV_DIR", "SOURCE_ENV",
+           if k not in ("MAKEFLAGS", "MAKELEVEL", "MAKEFILES", "GENIERAILS_CLOUD_DIR", "ENV", "ENV_DIR", "ACCOUNT_ENV_DIR", "SOURCE_ENV",
                         "SOURCE_ENV_DIR", "DEST_ENV", "DEST_ENV_DIR", "DEST_CATALOG_MAP")}
     env.update(extra)
     return env
@@ -56,7 +61,7 @@ def cloud(tmp_path):
     root = tmp_path / "cloud"
     (root / "envs").mkdir(parents=True)
     (root / "Makefile").write_text(
-        f"SHARED_ROOT := {SHARED}\nCLOUD_ROOT := {root}\nCLOUD := aws\ninclude {MAKEFILE}\n")
+        f"{CLOUD_DIR_LINE}\nSHARED_ROOT := {SHARED}\nCLOUD_ROOT := {root}\nCLOUD := aws\ninclude {MAKEFILE}\n")
     # validate_abac.py needs the Databricks SDK; promote's split is what matters here.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -254,3 +259,61 @@ def test_clean_still_cleans_its_own_env_dir(cloud):
     assert not (dev / "generated/abac.auto.tfvars").exists()
     assert not (dev / "terraform.tfstate").exists()
     assert (dev / "env.auto.tfvars").is_file()
+
+
+def test_cloud_makefiles_record_their_own_dir_first():
+    for cloud in ("aws", "azure"):
+        lines = [line for line in (REPO / cloud / "Makefile").read_text().splitlines()
+                 if line.strip() and not line.startswith("#")]
+        assert lines[0] == CLOUD_DIR_LINE, cloud
+
+
+def _victim_tree(path: Path) -> Path:
+    for name in ("dev", "account"):
+        _victim(path / "envs" / name)
+    # An accidental prelude, e.g. a stale MAKEFILES entry, that also names the victim.
+    (path / "Prelude.mk").write_text(f"GENIERAILS_CLOUD_DIR := {path}\nCLOUD_ROOT := {path}\n")
+    return path
+
+
+@pytest.mark.parametrize("cloud_name", ["aws", "azure"])
+def test_makefiles_and_overridden_roots_never_move_the_anchor(tmp_path, cloud_name):
+    victim = _victim_tree(tmp_path / "victim")
+    env = _clean_env(MAKEFILES=str(victim / "Prelude.mk"), GENIERAILS_CLOUD_DIR=str(victim))
+    overrides = [f"CLOUD_ROOT={victim}", f"SHARED_ROOT={SHARED}", f"GENIERAILS_CLOUD_DIR={victim}"]
+
+    def run(*args):
+        return subprocess.run(["make", "--no-print-directory", *args, *overrides], cwd=REPO / cloud_name,
+                              text=True, capture_output=True, timeout=120, env=env)
+
+    result = run("setup", "ENV=dev")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    _assert_intact(victim / "envs/dev")
+    _assert_intact(victim / "envs/account")
+    assert "Not removing old-layout files" in result.stdout
+
+    clean = run("clean", "ENV=dev")
+    assert clean.returncode != 0
+    assert f"make clean only cleans this checkout's {REPO / cloud_name}/envs/dev" in clean.stdout
+    _assert_intact(victim / "envs/dev")
+
+
+def test_makefile_shared_without_a_recorded_cloud_dir_never_cleans(tmp_path):
+    root = tmp_path / "cloud"
+    _victim(root / "envs/dev")
+    (root / "Makefile").write_text(
+        f"SHARED_ROOT := {SHARED}\nCLOUD_ROOT := {root}\nCLOUD := aws\ninclude {MAKEFILE}\n")
+
+    def run(*args):
+        return subprocess.run(["make", "--no-print-directory", *args], cwd=root, text=True,
+                              capture_output=True, timeout=120, env=_clean_env())
+
+    result = run("setup", "ENV=dev")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    _assert_intact(root / "envs/dev")
+    clean = run("clean", "ENV=dev")
+    assert clean.returncode != 0
+    assert "make clean only cleans this checkout's envs/dev" in clean.stdout
+    _assert_intact(root / "envs/dev")
