@@ -73,6 +73,9 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "GENERATE_ARGS" not in out
     assert "--groups" not in out
     assert "     (No agent yet? See ../shared/examples/dev_to_prod/SAMPLE_ENV.md)\n" in out
+    # rehearse saves the key itself; setup never asks for a hand edit.
+    assert "     The saved key (verify_key_column) is carried by promote; make release needs it.\n" in out
+    assert "Save the key as verify_key_column" not in out
     # The champion flow needs only the agent ID; tables are discovered.
     assert "uc_tables" not in out
     assert "existing agent:" not in out
@@ -134,6 +137,7 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
     assert "make generate" not in out
     assert "VERIFY_KEY_COLUMN" not in out
     assert "DEST_CATALOG_MAP" not in out
+    assert "     Without a promoted verify_key_column, release refuses before applying.\n" in out
     assert "Set business_access_enabled" not in out
     assert "business_access_enabled" not in out
     assert "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)\n" in out

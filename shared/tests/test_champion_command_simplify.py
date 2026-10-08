@@ -729,6 +729,43 @@ def test_different_explicit_key_updates_the_saved_one_with_a_note(tmp_path):
     assert "changed from 'account_id' to 'customer_id' (the VERIFY_KEY_COLUMN you passed)" in result.stdout
 
 
+MASKED_DATA_ACCESS = '''fgac_policies = [
+  {
+    name = "gr_mask_redact"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "cat"
+    to_principals = ["analysts"]
+    match_condition = "hasTagValue('gr_treatment', 'redact')"
+    match_alias = "gr_treatment_redact"
+    function_name = "mask_redact"
+    function_catalog = "cat"
+    function_schema = "sch"
+  },
+]
+'''
+
+
+@pytest.mark.parametrize(("env_text", "passes"), [
+    ('verify_key_column = "customer_id"\n', True),  # promoted from dev
+    ("enable_classification = true\n", False),
+])
+def test_release_reads_the_promoted_key_before_the_mask_proof_check(tmp_path, env_text, passes):
+    env_dir = tmp_path / "prod"
+    (env_dir / "data_access").mkdir(parents=True)
+    (env_dir / "data_access/abac.auto.tfvars").write_text(MASKED_DATA_ACCESS)
+
+    result, _env_file = _run_target(tmp_path, "release", "prod", env_text=env_text)
+    calls = (tmp_path / "calls").read_text() if (tmp_path / "calls").exists() else ""
+
+    if passes:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "verify-access ENV=prod VERIFY_REQUIRE_MASKS=1" in calls
+    else:
+        assert result.returncode != 0
+        assert "could not prove its 1 column mask(s); nothing was applied" in result.stderr
+        assert calls == ""
+
+
 def _proof(tmp_path, payload=MASK_PASS):
     path = tmp_path / ".verify_access.json"
     path.write_text(json.dumps(payload))

@@ -234,7 +234,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "     review detections, then enable automatic tagging and wait for class.* tags"; \
 		echo "  5. Run: make release ENV=$(ENV)   (the verify key comes from dev)"; \
 		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
-		echo "     The key may come from a saved verify_key_column; without one, release refuses before applying."; \
+		echo "     Without a promoted verify_key_column, release refuses before applying."; \
 		echo "  6. Steady state (scheduled): make maintain ENV=$(ENV)"; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 2 onward)"; \
@@ -258,7 +258,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		step=$$((step+1)); echo "  $$step. Run: make generate ENV=$(ENV)   (one run: imports the agent, finds its tables, drafts rules)"; \
 		step=$$((step+1)); echo "  $$step. Run: make rehearse ENV=$(ENV) VERIFY_KEY_COLUMN=<key_column>   (key saved after a passing run)"; \
 		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
-		echo "     Save the key as verify_key_column in $(_SETUP_ENV_REL)/env.auto.tfvars: promote carries it, and make release needs it."; \
+		echo "     The saved key (verify_key_column) is carried by promote; make release needs it."; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 0 and Phase 1)"; \
 	fi
