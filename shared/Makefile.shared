@@ -114,6 +114,15 @@ _guard-root:
 		exit 1; \
 	fi
 
+# _prepare-env scaffolds each env dir, then removes leftovers of the retired
+# layout that copied root modules (*.tf, *.py, ABAC_PROMPT.md, scripts/) into
+# envs/<name> and kept ddl/, generated/ and data_access/ under envs/account.
+# Those globs would also match a user's own files, so the cleanup runs only in
+# GenieRails' own $(CLOUD_ROOT)/envs/<name> (env names are checked above) and
+# never in a dir that ENV_DIR, ACCOUNT_ENV_DIR, SOURCE_ENV_DIR or DEST_ENV_DIR
+# redirects elsewhere, nor through a symlinked envs/<name>. Redirected dirs
+# only get the scaffold: missing dirs, symlinks and tfvars are created and
+# nothing is deleted.
 _prepare-env:
 	@envs="$(ENV)"; \
 	if [ "$(ENV)" != "$(ACCOUNT_ENV)" ] && [ "$(ENV)" != "$(DATA_ACCESS_SUBDIR)" ]; then \
@@ -127,9 +136,11 @@ _prepare-env:
 		else \
 			env_dir="$(CLOUD_ROOT)/envs/$$env_name"; \
 		fi; \
+		owned=; \
+		if [ "$$env_dir" = "$(CLOUD_ROOT)/envs/$$env_name" ] && [ ! -L "$$env_dir" ]; then owned=1; fi; \
 		mkdir -p "$$env_dir"; \
 		if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
-			rm -rf "$$env_dir/ddl" "$$env_dir/generated" "$$env_dir/$(DATA_ACCESS_SUBDIR)"; \
+			if [ -n "$$owned" ]; then rm -rf "$$env_dir/ddl" "$$env_dir/generated" "$$env_dir/$(DATA_ACCESS_SUBDIR)"; fi; \
 		else \
 			mkdir -p "$$env_dir/ddl" "$$env_dir/generated"; \
 			gov_dir="$$env_dir/$(DATA_ACCESS_SUBDIR)"; \
@@ -137,9 +148,11 @@ _prepare-env:
 			if [ ! -e "$$gov_dir/auth.auto.tfvars" ]; then ln -sfn ../auth.auto.tfvars "$$gov_dir/auth.auto.tfvars"; fi; \
 			if [ ! -e "$$gov_dir/env.auto.tfvars" ]; then ln -sfn ../env.auto.tfvars "$$gov_dir/env.auto.tfvars"; fi; \
 		fi; \
-		rm -f "$$env_dir"/*.tf; \
-		rm -f "$$env_dir"/*.py "$$env_dir"/ABAC_PROMPT.md; \
-		rm -rf "$$env_dir/scripts"; \
+		if [ -n "$$owned" ]; then \
+			rm -f "$$env_dir"/*.tf; \
+			rm -f "$$env_dir"/*.py "$$env_dir"/ABAC_PROMPT.md; \
+			rm -rf "$$env_dir/scripts"; \
+		fi; \
 		if [ ! -e "$$env_dir/auth.auto.tfvars" ]; then \
 			if [ "$(ENV)" != "$(ACCOUNT_ENV)" ] && [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
 				ln -sfn "../$(ENV)/auth.auto.tfvars" "$$env_dir/auth.auto.tfvars"; \
@@ -927,7 +940,14 @@ destroy: _bootstrap ## Destroy the selected layer or workspace environment
 		$(MAKE) --no-print-directory _destroy-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
 	fi
 
+# clean deletes Terraform state and .terraform/ by glob, so like _prepare-env's
+# cleanup it only touches GenieRails' own envs/<name>, never a redirected ENV_DIR.
 clean: ## Remove generated files and Terraform state for the selected environment
+	@if [ "$(ENV_DIR)" != "$(CLOUD_ROOT)/envs/$(ENV)" ]; then \
+		echo "make clean only cleans $(CLOUD_ROOT)/envs/$(ENV), not ENV_DIR=$(ENV_DIR)."; \
+		echo "Drop the ENV_DIR override, or delete that directory's state files yourself."; \
+		exit 1; \
+	fi
 	@if [ ! -d "$(ENV_DIR)" ]; then \
 		echo "Environment '$(ENV)' not initialized: $(ENV_DIR)"; \
 		exit 0; \
