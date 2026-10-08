@@ -5,6 +5,7 @@ import re
 import subprocess
 from pathlib import Path
 
+import hcl2
 import pytest
 
 
@@ -152,6 +153,7 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
     assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == ["1", "2", "3", "4", "5", "6"]
     assert "shared/examples/dev_to_prod/README.md" in out
     env_text = (tmp_path / cloud / "envs/prod/env.auto.tfvars").read_text()
+    assert "enable_auto_tagging" not in hcl2.loads(env_text)
     assert 'promote_from = "dev"' in env_text
     assert 'catalog_map  = { "<dev_catalog>" = "<prod_catalog>" }' in env_text
 

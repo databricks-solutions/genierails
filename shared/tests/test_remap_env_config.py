@@ -395,6 +395,44 @@ def test_repromotion_preserves_destination_settings_and_never_closes_live_access
     assert "business_access_enabled = false" not in (dest / "env.auto.tfvars").read_text()
 
 
+def test_promote_refuses_legacy_explicit_false_before_writing(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    dest.mkdir()
+    (source / "env.auto.tfvars").write_text('uc_tables = ["dev.s.t"]\n')
+    original = 'enable_auto_tagging = false\nsql_warehouse_id = "prod-wh"\n'
+    (dest / "env.auto.tfvars").write_text(original)
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+
+    with pytest.raises(SystemExit) as exc:
+        remap_env_config.main()
+
+    assert exc.value.code == 1
+    assert (dest / "env.auto.tfvars").read_text() == original
+    assert "promotion refuses to preserve a setting that can disable UI-managed auto-tagging" in capsys.readouterr().out
+
+
+def test_promote_explicit_false_requires_intentional_override(tmp_path, monkeypatch):
+    source = tmp_path / "dev"
+    dest = tmp_path / "prod"
+    source.mkdir()
+    dest.mkdir()
+    (source / "env.auto.tfvars").write_text('uc_tables = ["dev.s.t"]\n')
+    (dest / "env.auto.tfvars").write_text('enable_auto_tagging = false\n')
+    monkeypatch.setenv("ALLOW_DISABLE_AUTO_TAGGING", "1")
+    monkeypatch.setattr(sys, "argv", [
+        "remap_env_config.py", str(source), str(dest), "dev=prod"
+    ])
+
+    remap_env_config.main()
+
+    config = hcl2.load((dest / "env.auto.tfvars").open())
+    assert config["enable_auto_tagging"] is False
+
+
 def test_repromotion_keeps_destination_coverage_acknowledgements_only(tmp_path, monkeypatch):
     source = tmp_path / "dev"
     dest = tmp_path / "prod"

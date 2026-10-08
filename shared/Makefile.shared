@@ -353,11 +353,12 @@ enable-classification: _guarded-bootstrap _guard-workspace-target ## Optional sc
 	@if grep -Eq '^[[:space:]]*enable_auto_tagging[[:space:]]*=[[:space:]]*true' "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null; then \
 		echo "Automatic tagging is on. Wait for class.* tags to appear in Catalog Explorer, then run:"; \
 		echo "  make $(if $(filter prod,$(ENV)),release,generate) ENV=$(ENV)"; \
+	elif grep -Eq '^[[:space:]]*enable_auto_tagging[[:space:]]*=[[:space:]]*false' "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null; then \
+		echo "Classification is enabled. Auto-tagging is explicitly off in $(_SETUP_ENV_REL)/env.auto.tfvars."; \
+		echo "Delete that line to keep the UI setting, or use ALLOW_DISABLE_AUTO_TAGGING=1 only to intentionally disable it."; \
 	else \
-		echo "Classification is enabled (scanning only; nothing is tagged yet). The first scan can take minutes to ~24h."; \
-		echo "Next: in Catalog Explorer, open your catalog > Data classification > Review detections and exclude"; \
-		echo "any false positives. Then enable automatic tagging in the UI (or set enable_auto_tagging = true in"; \
-		echo "$(_SETUP_ENV_REL)/env.auto.tfvars and re-run: make enable-classification ENV=$(ENV))."; \
+		echo "Classification is enabled; auto-tagging follows the current UI setting. The first scan can take minutes to ~24h."; \
+		echo "In Catalog Explorer, review detections and exclude false positives, then turn on auto-tagging in the UI."; \
 	fi
 
 generate: _guarded-bootstrap _guard-workspace-target ## Run generate_abac.py in the selected workspace environment (set SPACE="Name" to regenerate only one space; set MODE=governance|genie for self-service Genie deployments)

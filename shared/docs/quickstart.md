@@ -28,9 +28,9 @@ vi envs/dev/env.auto.tfvars
 # Optional: replace envs/account/auth.auto.tfvars or
 # envs/dev/data_access/auth.auto.tfvars if shared layers need different credentials.
 
-# In envs/dev/env.auto.tfvars, opt into native classification:
-#   enable_classification = true      # turns on scanning
-#   enable_auto_tagging   = true      # optional scripted override; omit for UI-managed auto-tagging
+# In envs/dev/env.auto.tfvars, keep native classification enabled:
+#   enable_classification = true
+# Omit enable_auto_tagging for UI-managed auto-tagging. For CI only, explicitly set true.
 # The classification footprint is the union of top-level uc_tables and each
 # genie_spaces[*].uc_tables entry.
 # In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.
@@ -64,8 +64,8 @@ make rehearse VERIFY_KEY_COLUMN=<key>   # apply (masks first; grants only if cov
 ## What happens end-to-end
 
 1. `make setup` creates `envs/account/`, `envs/dev/data_access/`, and `envs/dev/`
-2. `make enable-classification` applies only the UC catalog classification configuration (scanning); when `enable_auto_tagging` is omitted it preserves UI-managed auto-tagging, while explicit `true`/`false` is the scripted override. It does not need generated ABAC or masking files
-3. You review detections, set `enable_auto_tagging = true`, re-apply, then wait for the scan to write `class.*` tags
+2. In Catalog Explorer, open the catalog's **Details** tab → **Data classification** and turn it on
+3. When the scan finishes, review detections and exclude false positives, enable auto-tagging in the UI, then wait for `class.*` tags. Prefer a script? `make enable-classification ENV=dev` turns classification on; review remains in the UI and an omitted `enable_auto_tagging` preserves its setting
 4. `make generate` fetches DDLs and native classification, then writes a draft into `envs/dev/generated/`
 5. You tune generated governance and semantic config; durable agent ACL intent remains in `env.auto.tfvars`
 6. `make coverage-gate` fails if any classified sensitive column has no protection

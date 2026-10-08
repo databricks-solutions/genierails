@@ -228,7 +228,8 @@ See [Architecture](architecture.md) for the full reference. Quick summary:
 The core loop (dev-to-prod walkthrough):
 
 ```
-enable-classification → wait for class.* → make generate (--groups) → coverage-gate
+Catalog Explorer: Details → Data classification on → review/exclude false positives
+  → auto-tagging on → wait for class.* → make generate (--groups) → coverage-gate
   → review generated/ → validate-generated → make rehearse   (prod: make release ENV=prod)
 ```
 Prod swaps `generate` for `derive-assignments` (re-derive facts from prod's own tags, no LLM).

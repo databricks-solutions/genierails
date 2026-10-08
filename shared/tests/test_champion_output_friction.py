@@ -768,8 +768,9 @@ def test_real_target_hides_target_warnings_and_points_to_catalog_explorer(real_c
     assert "Resource targeting is in effect" not in out
     assert "Applied changes may be incomplete" not in out
     assert "system.data_classification" not in out
-    assert "Catalog Explorer, open your catalog > Data classification > Review detections" in out
-    assert "envs/dev/env.auto.tfvars and re-run: make enable-classification ENV=dev" in out
+    assert "auto-tagging follows the current UI setting" in out
+    assert "review detections and exclude false positives" in out
+    assert "nothing is tagged yet" not in out
 
 
 def test_real_target_surfaces_terraform_errors_and_fails(real_cloud):

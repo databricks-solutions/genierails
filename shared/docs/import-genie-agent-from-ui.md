@@ -39,7 +39,7 @@ genie_spaces = [
 <details>
 <summary><strong>Step 2 — Import configuration and discover tables</strong></summary>
 
-In the [dev-to-prod walkthrough](../examples/dev_to_prod/README.md) there is no separate import step: `make enable-classification ENV=dev` discovers the agent's tables from its ID (read-only), and `make generate ENV=dev` imports its configuration, finds its tables, and drafts the rules in one run. Generation needs your existing access-tier groups, most-privileged first — set them once in the same file:
+In the [dev-to-prod walkthrough](../examples/dev_to_prod/README.md) there is no separate import step. In Catalog Explorer, open the catalog's **Details** tab → **Data classification**, turn it on, review detections and exclude false positives, then enable auto-tagging. The optional `make enable-classification ENV=dev` path discovers the agent's tables from its ID (read-only); review still happens in the UI. `make generate ENV=dev` imports its configuration, finds its tables, and drafts the rules in one run. Generation needs your existing access-tier groups, most-privileged first — set them once in the same file:
 
 ```hcl
 # envs/dev/env.auto.tfvars
