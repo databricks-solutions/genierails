@@ -414,6 +414,7 @@ def _upgrade_runs(tmp_path: Path, module: str, test_body: str) -> dict[str, str]
     current = tmp_path / "current" / "modules"
     shutil.copytree(SHARED / "modules", current,
                     ignore=shutil.ignore_patterns(".terraform", ".tmp", "*.tfstate*"))
+    shutil.copy(SHARED / "sql_tokenizer.py", current.parent / "sql_tokenizer.py")
     root = current / module
     # Module sources must sit under the root under test; the legacy modules
     # keep their sibling layout (../coverage_gate_check).

@@ -1,74 +1,76 @@
 #!/usr/bin/env python3
-"""Return a stable hash of executable masking-function definitions."""
+"""Return a fail-closed, stable hash of the complete masking SQL file."""
 from __future__ import annotations
 
 import hashlib
 import json
-import re
 import sys
 from pathlib import Path
 
+SHARED_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(SHARED_ROOT))
 
-def _tokens(sql: str) -> list[str]:
-    """Tokenize SQL while discarding comments and insignificant whitespace."""
-    token_re = re.compile(
-        r"--[^\n]*|/\*.*?\*/|"
-        r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|"
-        r"[A-Za-z_][A-Za-z0-9_$]*|\d+(?:\.\d+)?|<>|!=|<=|>=|=>|[-+*/%=<>()\[\]{},.;:]",
-        re.S,
-    )
-    return [token for token in token_re.findall(sql) if not token.startswith(("--", "/*"))]
+from sql_tokenizer import sql_tokens  # noqa: E402
 
 
-def _without_comments(sql: str) -> str:
-    pattern = re.compile(
-        r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|--[^\n]*|/\*.*?\*/",
-        re.S,
-    )
-
-    def replace(match: re.Match) -> str:
-        token = match.group(0)
-        if token.startswith(("--", "/*")):
-            return "".join("\n" if char == "\n" else " " for char in token)
-        return token
-
-    return pattern.sub(replace, sql)
+def _statements(tokens: list[str]) -> list[list[str]]:
+    statements: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        current.append(token)
+        if token == ";":
+            statements.append(current)
+            current = []
+    if current:
+        statements.append(current)
+    return statements
 
 
-def _definitions(sql_text: str) -> list[tuple[str, str]]:
-    """Extract CREATE FUNCTION statements with their effective USE namespace."""
-    clean = _without_comments(sql_text)
-    starts = list(re.finditer(r"\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\b", clean, re.I))
-    definitions = []
-    for index, start in enumerate(starts):
-        end = starts[index + 1].start() if index + 1 < len(starts) else len(clean)
-        statement = clean[start.start():end].strip().rstrip(";").strip()
-        name_match = re.search(r"\bFUNCTION\s+([^\s(]+)\s*\(", statement, re.I)
-        if not name_match:
-            continue
-        raw_name = name_match.group(1).strip("`")
-        prefix = clean[:start.start()]
-        catalogs = re.findall(r"\bUSE\s+CATALOG\s+([^\s;]+)", prefix, re.I)
-        schemas = re.findall(r"\bUSE\s+SCHEMA\s+([^\s;]+)", prefix, re.I)
-        parts = [part.strip("`") for part in raw_name.split(".")]
-        if len(parts) >= 3:
-            identity = ".".join(parts[-3:]).lower()
+def _function_name(statement: list[str]) -> str | None:
+    """Return a CREATE FUNCTION sort key, or None for every other statement."""
+    try:
+        create = statement.index("create")
+    except ValueError:
+        return None
+    cursor = create + 1
+    if statement[cursor:cursor + 2] == ["or", "replace"]:
+        cursor += 2
+    if statement[cursor:cursor + 1] != ["function"]:
+        return None
+    cursor += 1
+    name: list[str] = []
+    while cursor < len(statement) and statement[cursor] != "(":
+        name.append(statement[cursor])
+        cursor += 1
+    return "".join(name) if name and cursor < len(statement) else None
+
+
+def normalized_tokens(sql_text: str) -> list[list[str]]:
+    """Normalize only consecutive function order; retain every statement/token."""
+    statements = _statements(sql_tokens(sql_text))
+    normalized: list[list[str]] = []
+    run: list[tuple[str, list[str]]] = []
+
+    def flush() -> None:
+        normalized.extend(statement for _name, statement in sorted(run, key=lambda item: item[0]))
+        run.clear()
+
+    for statement in statements:
+        name = _function_name(statement)
+        if name is None:
+            flush()
+            normalized.append(statement)
         else:
-            identity = ".".join(
-                part for part in (
-                    catalogs[-1].strip("`") if catalogs else "",
-                    schemas[-1].strip("`") if schemas else "",
-                    parts[-1],
-                ) if part
-            ).lower()
-        definitions.append((identity, statement))
-    return definitions
+            run.append((name, statement))
+    flush()
+    return normalized
 
 
 def normalized_definitions(sql_text: str) -> str:
-    definitions = [(name, " ".join(_tokens(statement))) for name, statement in _definitions(sql_text)]
-    definitions.sort(key=lambda item: item[0])
-    return "\n".join(f"{name}\0{body}" for name, body in definitions)
+    # JSON provides an unambiguous token boundary encoding. SqlTokenizeError is
+    # intentionally uncaught: Terraform then fails closed instead of accepting
+    # an unsafe "unchanged" hash.
+    return json.dumps(normalized_tokens(sql_text), ensure_ascii=False, separators=(",", ":"))
 
 
 def main() -> int:

@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "modules/data_access"))
 
@@ -21,6 +23,34 @@ def test_masking_normalization_detects_real_body_change():
     before = "CREATE OR REPLACE FUNCTION mask(v STRING) RETURNS STRING RETURN 'x';\n"
     after = "CREATE OR REPLACE FUNCTION mask(v STRING) RETURNS STRING RETURN 'y';\n"
     assert normalized_definitions(before) != normalized_definitions(after)
+
+
+@pytest.mark.parametrize(("before", "after"), [
+    ("RETURN v & 1", "RETURN v | 1"),
+    ("RETURN v || 'x'", "RETURN v 'x'"),
+    ("RETURN !v", "RETURN v"),
+    ("RETURN v ^ 2", "RETURN v ~ 2"),
+    ("LANGUAGE PYTHON AS $$\n  return v\n$$", "LANGUAGE PYTHON AS $$\n    return v\n$$"),
+    ("LANGUAGE PYTHON AS $$return v--1$$", "LANGUAGE PYTHON AS $$return v--2$$"),
+    (r"RETURN 'it\' -- AAA'", r"RETURN 'it\' -- BBB'"),
+])
+def test_masking_normalization_never_collapses_real_changes(before, after):
+    prefix = "CREATE OR REPLACE FUNCTION cat.sch.mask(v STRING) RETURNS STRING "
+    assert normalized_definitions(prefix + before + ";") != normalized_definitions(prefix + after + ";")
+
+
+def test_non_function_statements_are_hashed_and_bound_function_reordering():
+    first = "SET timezone = 'UTC'; CREATE FUNCTION b() RETURNS INT RETURN 2; CREATE FUNCTION a() RETURNS INT RETURN 1;"
+    reordered = "SET timezone = 'UTC'; CREATE FUNCTION a() RETURNS INT RETURN 1; CREATE FUNCTION b() RETURNS INT RETURN 2;"
+    changed_set = reordered.replace("'UTC'", "'Australia/Melbourne'")
+    assert normalized_definitions(first) == normalized_definitions(reordered)
+    assert normalized_definitions(reordered) != normalized_definitions(changed_set)
+
+
+def test_coverage_fingerprint_hashes_the_raw_masking_file():
+    source = (Path(__file__).parents[1] / "modules/data_access/main.tf").read_text()
+    assert source.count("masking_sql     = filesha256(var.masking_sql_file)") >= 2
+    assert "masking_sql  = filesha256(var.masking_sql_file)" in source
 
 
 def test_masking_replacement_path_never_drops():
