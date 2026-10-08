@@ -114,15 +114,24 @@ _guard-root:
 		exit 1; \
 	fi
 
+# The checkout's own envs/ is anchored to the Makefile that includes this one
+# (aws/Makefile or azure/Makefile), not to CLOUD_ROOT, which a command line or
+# test can override. _is_own_env_dir <dir> <name> holds only when <dir>'s
+# physical path is exactly <that Makefile's physical dir>/envs/<name>. A
+# physical path has no symlinks, so a symlinked envs/, envs/<name> or any dir
+# between them fails it, as do ENV_DIR, ACCOUNT_ENV_DIR, SOURCE_ENV_DIR and
+# DEST_ENV_DIR redirected elsewhere and an overridden CLOUD_ROOT.
+_OWN_CLOUD_DIR := $(abspath $(dir $(firstword $(MAKEFILE_LIST))))
+_is_own_env_dir = { _own=$$(CDPATH= cd -P "$(_OWN_CLOUD_DIR)" 2>/dev/null && pwd) && _dir=$$(CDPATH= cd -P $(1) 2>/dev/null && pwd) && [ -n "$$_own" ] && [ "$$_dir" = "$$_own/envs/"$(2) ]; }
+
 # _prepare-env scaffolds each env dir, then removes leftovers of the retired
 # layout that copied root modules (*.tf, *.py, ABAC_PROMPT.md, scripts/) into
 # envs/<name> and kept ddl/, generated/ and data_access/ under envs/account.
-# Those globs would also match a user's own files, so the cleanup runs only in
-# GenieRails' own $(CLOUD_ROOT)/envs/<name> (env names are checked above) and
-# never in a dir that ENV_DIR, ACCOUNT_ENV_DIR, SOURCE_ENV_DIR or DEST_ENV_DIR
-# redirects elsewhere, nor through a symlinked envs/<name>. Redirected dirs
-# only get the scaffold: missing dirs, symlinks and tfvars are created and
-# nothing is deleted.
+# Those globs would also match a user's own files, and the leftovers can only
+# exist in the checkout's own envs/<name>, so the cleanup runs only where
+# _is_own_env_dir holds. Anywhere else the dir is still scaffolded (missing
+# dirs, symlinks and tfvars are created), nothing is deleted, and one line
+# notes any leftovers kept.
 _prepare-env:
 	@envs="$(ENV)"; \
 	if [ "$(ENV)" != "$(ACCOUNT_ENV)" ] && [ "$(ENV)" != "$(DATA_ACCESS_SUBDIR)" ]; then \
@@ -136,9 +145,21 @@ _prepare-env:
 		else \
 			env_dir="$(CLOUD_ROOT)/envs/$$env_name"; \
 		fi; \
-		owned=; \
-		if [ "$$env_dir" = "$(CLOUD_ROOT)/envs/$$env_name" ] && [ ! -L "$$env_dir" ]; then owned=1; fi; \
 		mkdir -p "$$env_dir"; \
+		owned=; \
+		if $(call _is_own_env_dir,"$$env_dir","$$env_name"); then owned=1; fi; \
+		leftovers="$$env_dir/*.tf $$env_dir/*.py $$env_dir/ABAC_PROMPT.md $$env_dir/scripts"; \
+		if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
+			leftovers="$$leftovers $$env_dir/ddl $$env_dir/generated $$env_dir/$(DATA_ACCESS_SUBDIR)"; \
+		fi; \
+		if [ -z "$$owned" ]; then \
+			for leftover in $$leftovers; do \
+				if [ -e "$$leftover" ] || [ -L "$$leftover" ]; then \
+					echo "Not removing old-layout files (*.tf, *.py, scripts/, ...) from $$env_dir: it is not this checkout's envs/$$env_name."; \
+					break; \
+				fi; \
+			done; \
+		fi; \
 		if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
 			if [ -n "$$owned" ]; then rm -rf "$$env_dir/ddl" "$$env_dir/generated" "$$env_dir/$(DATA_ACCESS_SUBDIR)"; fi; \
 		else \
@@ -940,17 +961,18 @@ destroy: _bootstrap ## Destroy the selected layer or workspace environment
 		$(MAKE) --no-print-directory _destroy-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
 	fi
 
-# clean deletes Terraform state and .terraform/ by glob, so like _prepare-env's
-# cleanup it only touches GenieRails' own envs/<name>, never a redirected ENV_DIR.
+# clean deletes Terraform state and .terraform/ by glob, so it refuses unless
+# ENV_DIR is the checkout's own envs/$(ENV) (see _is_own_env_dir) with real
+# generated/ and data_access/ dirs, whatever ENV_DIR or CLOUD_ROOT say.
 clean: ## Remove generated files and Terraform state for the selected environment
-	@if [ "$(ENV_DIR)" != "$(CLOUD_ROOT)/envs/$(ENV)" ]; then \
-		echo "make clean only cleans $(CLOUD_ROOT)/envs/$(ENV), not ENV_DIR=$(ENV_DIR)."; \
-		echo "Drop the ENV_DIR override, or delete that directory's state files yourself."; \
-		exit 1; \
-	fi
 	@if [ ! -d "$(ENV_DIR)" ]; then \
 		echo "Environment '$(ENV)' not initialized: $(ENV_DIR)"; \
 		exit 0; \
+	fi
+	@if ! $(call _is_own_env_dir,"$(ENV_DIR)","$(ENV)") || [ -L "$(ENV_DIR)/generated" ] || [ -L "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" ]; then \
+		echo "make clean only cleans this checkout's $(_OWN_CLOUD_DIR)/envs/$(ENV) when it, envs/ and its generated/ and $(DATA_ACCESS_SUBDIR)/ are real directories."; \
+		echo "$(ENV_DIR) is not (a redirected ENV_DIR or CLOUD_ROOT, or a symlink on the way); delete its state files yourself."; \
+		exit 1; \
 	fi
 	@echo "=== Clean ($(ENV)) ==="
 	@rm -rf "$(ENV_DIR)/generated/abac.auto.tfvars" "$(ENV_DIR)/generated/masking_functions.sql" "$(ENV_DIR)/generated/generated_response.md" "$(ENV_DIR)/generated/genie_space_derived_acl_groups.auto.tfvars"
