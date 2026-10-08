@@ -8,6 +8,7 @@ key is validated the same way and never silently replaced. The live layer runs
 against a fake multi-table SQL warehouse (information_schema included), the
 make targets against real make with a stub sub-make.
 """
+import hashlib
 import json
 import os
 import re
@@ -49,6 +50,7 @@ import remap_env_config  # noqa: E402
 import resolve_env_config  # noqa: E402
 import saved_settings  # noqa: E402
 
+SALT = "autopick-test-salt"
 ANALYSTS = "analysts"   # masked tier
 OPS = "ops"             # unmasked tier
 
@@ -62,7 +64,7 @@ class Table:
     columns: list                       # [(name, data type)]
     rows: list                          # [{column: value}]
     pk: list = field(default_factory=list)
-    tags: set = field(default_factory=set)
+    tags: dict = field(default_factory=dict)      # live column tags: column -> [(name, value)]
     col_masks: set = field(default_factory=set)   # columns with a direct column mask
 
 
@@ -96,13 +98,16 @@ class FakeWarehouse:
         self.statements.append((tier, sql, params))
         sql = sql.replace("`", "")      # identifiers are backtick-quoted; names here are plain
         cell = lambda v: None if v is None else str(v)  # noqa: E731 — data_array is strings
-        m = re.fullmatch(r"SELECT COUNT\(\*\) FROM system\.information_schema\.(column_masks|column_tags) .*", sql)
+        m = re.fullmatch(r"SELECT (COUNT\(\*\)|tag_name, tag_value) FROM "
+                         r"system\.information_schema\.(column_masks|column_tags) .*", sql)
         if m:
             if self.broken_metadata:
                 raise RuntimeError("Query failed (FAILED): [TABLE_OR_VIEW_NOT_FOUND] system.information_schema")
             table = self.tables.get(f"{params['c']}.{params['s']}.{params['t']}")
-            marked = (table.col_masks if m.group(1) == "column_masks" else table.tags) if table else set()
-            return [[str(int(params["k"] in {c.lower() for c in marked}))]]
+            if m.group(2) == "column_tags":
+                tags = {c.lower(): t for c, t in (table.tags if table else {}).items()}.get(params["k"], [])
+                return [list(t) for t in tags] if m.group(1) != "COUNT(*)" else [[str(len(tags))]]
+            return [[str(int(table is not None and params["k"] in {c.lower() for c in table.col_masks}))]]
         if "information_schema" in sql:
             if self.broken_metadata:
                 raise RuntimeError("Query failed (FAILED): [TABLE_OR_VIEW_NOT_FOUND] system.information_schema")
@@ -113,20 +118,18 @@ class FakeWarehouse:
                 return [[name, data_type] for name, data_type in table.columns]
             if "table_constraints" in sql:
                 return [[c] for c in table.pk]
-            if "column_tags" in sql:
-                return [[c] for c in sorted(table.tags)]
-        m = re.fullmatch(r"SELECT (\w+) FROM (\S+) ORDER BY \w+ LIMIT (\d+)", sql)
-        if m:
-            key, table, limit = m.groups()
-            rows = sorted(self.view(tier, table), key=lambda r: (r[key] is not None, str(r[key])))
-            return [[cell(r[key])] for r in rows[: int(limit)]]
         m = re.fullmatch(
             r"SELECT (\w+), (\w+) FROM (\S+)(?: WHERE (\w+) IN \(([^)]*)\))? "
-            r"ORDER BY \w+ LIMIT (\d+)", sql)
+            r"ORDER BY (\w+|\w+ IS NULL DESC, xxhash64\(:salt, \w+\)) LIMIT (\d+)", sql)
         if m:
-            key, col, table, where_col, in_list, limit = m.groups()
+            key, col, table, where_col, in_list, order, limit = m.groups()
             rows = [r for r in self.view(tier, table) if self._keep(where_col, in_list, params)(r)]
-            rows.sort(key=lambda r: (r[key] is not None, str(r[key])))
+            if "xxhash64" in order:
+                # NULLs first, then a salted hash of the key; repeats stay adjacent.
+                rows.sort(key=lambda r: (r[key] is not None, hashlib.sha256(
+                    f"{params['salt']}|{r[key]}".encode()).hexdigest()))
+            else:
+                rows.sort(key=lambda r: (r[key] is not None, str(r[key])))
             return [[cell(r[key]), cell(r[col])] for r in rows[: int(limit)]]
         m = re.fullmatch(
             r"SELECT COUNT\(\*\), COUNT\(DISTINCT (\w+)\), COUNT\(\w+\) FROM (\S+) "
@@ -166,6 +169,7 @@ def warehouse(monkeypatch):
 
     monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
     monkeypatch.setenv("GENIERAILS_VERIFY_PROPAGATION_SLEEP", "0")
+    monkeypatch.setenv(vea.SAMPLE_SALT_ENV, SALT)
     monkeypatch.setattr(vea, "load_auth", lambda path: {
         "host": "h", "client_id": "admin-app", "client_secret": "s"})
     monkeypatch.setattr(vea, "EffectiveAccessVerifier", FakeVerifier)
@@ -191,18 +195,18 @@ def sample_tables(n=30):
         "cat.sch.customers": Table(
             [("customer_id", "STRING"), ("full_name", "STRING"), ("ssn", "STRING")],
             [{"customer_id": c, "full_name": f"NAME-{c}", "ssn": f"SSN-{i:04d}-RAW"} for i, c in enumerate(cust)],
-            tags={"ssn", "full_name"}),
+            tags={"ssn": [("class.us_ssn", None)], "full_name": [("class.name", None)]}),
         "cat.sch.payments": Table(
             [("payment_id", "STRING"), ("customer_id", "STRING"), ("credit_card_number", "STRING"),
              ("amount", "DECIMAL(12,2)")],
             [{"payment_id": p, "customer_id": c, "credit_card_number": f"CARD-{i:04d}-RAW", "amount": "1.00"}
              for i, (p, c) in enumerate(zip(_ids("P", n), cust))],
-            tags={"credit_card_number"}),
+            tags={"credit_card_number": [("class.credit_card", None)]}),
         "cat.sch.notes": Table(
             [("note_id", "STRING"), ("customer_id", "STRING"), ("free_text", "STRING")],
             [{"note_id": nid, "customer_id": c, "free_text": f"NOTE-{i:04d}-RAW"}
              for i, (nid, c) in enumerate(zip(_ids("N", n), cust))],
-            tags={"free_text"}),
+            tags={"free_text": [("class.free_text", None)]}),
     }
 
 
@@ -285,7 +289,6 @@ def test_singular_table_names(table, expected):
 def test_composite_tagged_masked_or_unsafe_type_primary_keys_are_not_picked():
     cols = (("pk", "STRING"), ("ssn", "STRING"), ("ts", "TIMESTAMP"), ("x_id", "STRING"))
     assert key_candidates("c.s.t", TableKeyFacts(cols, ("pk", "x_id")))[0] == ("x_id", SOURCE_ID_LIKE)
-    assert key_candidates("c.s.t", TableKeyFacts(cols, ("pk",), frozenset({"pk"})))[0][0] == "x_id"
     assert key_candidates("c.s.t", TableKeyFacts(cols, ("pk",)), unsafe={"PK"})[0][0] == "x_id"
     assert key_candidates("c.s.t", TableKeyFacts(cols, ("ts",)))[0][0] == "x_id"
 
@@ -303,9 +306,18 @@ def test_an_unreadable_env_file_is_a_clean_error(tmp_path):
         main(["--from-tfvars", str(tfvars), "--account-tfvars", str(account), "--env-file", str(env)])
 
 
-def test_tagged_and_masked_id_columns_are_skipped():
-    facts = TableKeyFacts((("t_id", "STRING"), ("id", "STRING"), ("o_id", "STRING")), tagged=frozenset({"t_id"}))
-    assert [c for c, _ in key_candidates("c.s.t", facts, unsafe={"id"})] == ["o_id"]
+def test_masked_id_columns_are_skipped_but_tags_are_left_to_the_key_checks():
+    facts = TableKeyFacts((("t_id", "STRING"), ("id", "STRING"), ("o_id", "STRING")))
+    assert [c for c, _ in key_candidates("c.s.t", facts, unsafe={"id"})] == ["t_id", "o_id"]
+
+
+def test_unsafe_columns_come_from_the_shared_mask_matcher(tmp_path):
+    tfvars, _ = _abac(tmp_path, extra_tags=[("cat.sch.payments.customer_id", "gr_treatment", "redact"),
+                                            ("cat.sch.notes.note_id", "class", "identifier")])
+    spec = vea.load_spec_from_tfvars(tfvars)
+    unsafe = vea.unsafe_key_columns(spec.column_masks, spec.mask_config)
+    assert "customer_id" in unsafe["cat.sch.payments"]       # a mask policy matches its tag
+    assert "note_id" not in unsafe["cat.sch.notes"]          # class.* only: no mask matches it
 
 
 def test_nothing_id_like_is_a_clear_per_table_refusal():
@@ -363,17 +375,41 @@ def test_primary_key_is_picked(warehouse, tmp_path, capsys):
     assert "Row-pairing key for cat.sch.payments: customer_id (primary key)" in capsys.readouterr().out
 
 
-def test_tagged_candidates_are_skipped_live_and_from_the_config(warehouse, tmp_path, capsys):
+def test_candidates_with_mask_relevant_tags_are_skipped_live_and_from_the_config(warehouse, tmp_path, capsys):
     tables = sample_tables()
-    tables["cat.sch.payments"].tags.add("payment_id")          # e.g. a class.* tag on the column
-    tables["cat.sch.notes"].pk = ["free_text"]                 # the masked column itself
+    tables["cat.sch.payments"].tags["payment_id"] = [("gr_treatment", "redact")]   # live, a mask matches it
+    tables["cat.sch.notes"].pk = ["free_text"]                                     # the masked column itself
     warehouse(FakeWarehouse(tables))
     assert _main(tmp_path, "--check-keys-only",
-                 extra_tags=[("cat.sch.customers.customer_id", "class", "identifier")]) == 2
+                 extra_tags=[("cat.sch.customers.customer_id", "gr_treatment", "redact")]) == 2
     captured = capsys.readouterr()
+    # payment_id ranks first (<table singular>_id) but its live tag is one a mask matches.
     assert "Row-pairing key for cat.sch.payments: customer_id (id-like column)" in captured.out
     assert "Row-pairing key for cat.sch.notes: note_id (id-like column)" in captured.out
-    assert no_key_message("cat.sch.customers") in captured.err
+    assert no_key_message("cat.sch.customers") in captured.err   # its only id is masked in the config
+
+
+def test_a_mask_relevant_live_tag_is_named_when_nothing_else_is_left(warehouse, tmp_path, capsys):
+    tables = {"cat.sch.notes": Table([("note_id", "STRING"), ("free_text", "STRING")],
+                                     [{"note_id": f"N-{i}", "free_text": f"T-{i}"} for i in range(30)],
+                                     tags={"note_id": [("gr_treatment", "redact")]})}
+    warehouse(FakeWarehouse(tables))
+    assert _main(tmp_path, "--check-keys-only", masked={"cat.sch.notes": "free_text"}) == 2
+    assert ("note_id: row-pairing key note_id may be masked (it has 1 column tag(s) a column-mask "
+            "policy matches) on cat.sch.notes") in capsys.readouterr().err
+
+
+def test_class_only_tags_do_not_disqualify_a_candidate(warehouse, tmp_path, capsys):
+    tables = sample_tables()
+    for t in tables.values():
+        t.tags["customer_id"] = [("class.customer_identifier", None)]        # native classifier tags
+    tables["cat.sch.payments"].tags["payment_id"] = [("class.transaction_id", "")]
+    tables["cat.sch.payments"].pk = ["payment_id"]
+    warehouse(FakeWarehouse(tables))
+    assert _main(tmp_path, "--check-keys-only") == 0
+    out = capsys.readouterr().out
+    assert "Row-pairing key for cat.sch.customers: customer_id (id-like column)" in out
+    assert "Row-pairing key for cat.sch.payments: payment_id (primary key)" in out
 
 
 def test_a_column_masked_directly_falls_through_to_the_next(warehouse, tmp_path, capsys):
@@ -399,23 +435,31 @@ def test_a_non_unique_candidate_falls_through_to_the_next(warehouse, tmp_path, c
     _assert_no_values(out, wh.tables)
 
 
+def _salted_order(keys):
+    return sorted(keys, key=lambda k: hashlib.sha256(f"{SALT}|{k}".encode()).hexdigest())
+
+
 def test_a_repeat_past_the_sample_is_caught_by_the_whole_table_proof(warehouse, tmp_path, capsys):
     tables = sample_tables(n=40)
     rows = tables["cat.sch.notes"].rows
-    rows[-1]["note_id"] = "N-0025"      # repeats the last sampled key; the copy falls past LIMIT 25
-    rows[-1]["customer_id"] = None      # and the next candidate has a NULL
+    order = _salted_order([r["note_id"] for r in rows])
+    last_sampled, first_unsampled = order[vea.SAMPLE_ROWS - 1], order[vea.SAMPLE_ROWS]
+    dup = next(r for r in rows if r["note_id"] == first_unsampled)
+    dup["note_id"] = last_sampled       # the copy sorts right after it: past LIMIT 25
+    dup["customer_id"] = None           # and the next candidate has a NULL
     warehouse(FakeWarehouse(tables))
     assert _main(tmp_path, "--check-keys-only") == 2
     err = capsys.readouterr().err
     assert no_key_message("cat.sch.notes") in err
-    assert "note_id: row-pairing key note_id is not unique / has NULLs" in err
+    assert "note_id: row-pairing key note_id is not unique / has NULLs (25 sampled keys match 26 rows" in err
     assert "customer_id: row-pairing key customer_id has NULLs" in err
 
 
 def test_nothing_provable_is_a_clear_per_table_refusal(warehouse, tmp_path, capsys):
     tables = sample_tables()
     tables["cat.sch.notes"] = Table([("body", "STRING"), ("free_text", "STRING")],
-                                    [{"body": "b", "free_text": "f"}], tags={"free_text"})
+                                    [{"body": "b", "free_text": "f"}],
+                                    tags={"free_text": [("class.free_text", None)]})
     wh = warehouse(FakeWarehouse(tables))
     assert _main(tmp_path, "--check-keys-only", "--require-mask-checks") == 2
     captured = capsys.readouterr()
@@ -518,7 +562,8 @@ def test_mixed_tables_with_different_keys_and_a_leak_still_fails(warehouse, tmp_
 def test_an_unkeyable_table_blocks_release_but_is_not_verified_in_rehearse(warehouse, tmp_path, capsys):
     tables = sample_tables()
     tables["cat.sch.notes"] = Table([("body", "STRING"), ("free_text", "STRING")],
-                                    [{"body": "b", "free_text": "f"}], tags={"free_text"})
+                                    [{"body": "b", "free_text": "f"}],
+                                    tags={"free_text": [("class.free_text", None)]})
     wh = warehouse(FakeWarehouse(tables, masks=_analyst_masks()))
     assert _main(tmp_path, "--live", "--require-mask-checks") == 1
     out = capsys.readouterr().out

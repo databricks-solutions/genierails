@@ -37,7 +37,7 @@ The key is how the tool knows two result rows, one per tier, are the *same* row.
 1. The table's **single-column `PRIMARY KEY`** (read as the admin from `information_schema.table_constraints` / `key_column_usage`).
 2. Otherwise an **id-like column**: `<table singular>_id` (e.g. `customer_id` on `customers`), then `id`, then any other `*_id`; string/int/long types first, then alphabetical.
 
-An automatic candidate is used only if it has **no tags** (none in the config's `tag_assignments`, none live in `system.information_schema.column_tags`, `class.*` included), is **not a masked column**, is a plain identifier, and has a type that compares exactly (string or integer; never float, decimal, date/time or binary). Every key, an override included, must then pass the same proof, as the admin: the key column has no column mask and no column tag (`system.information_schema.column_masks` / `column_tags`), the sampled keys are unique and non-NULL, and each names exactly one row of the whole table. During the live run the admin and every tier each sample their own first rows, every tier then reads all of those rows by key (so rows only one tier sees are compared too), and the admin must find every key a tier sampled. A repeated, NULL or possibly-masked key never passes: it makes the mask check INCONCLUSIVE (`row-pairing key <col> is not unique / has NULLs on <table>` or `... may be masked for <tier> on <table>`). Table, column and key names must be plain identifiers (letters, digits, `_`, `-`).
+An automatic candidate must be a plain identifier with a type that compares exactly (string or integer; never float, decimal, date/time or binary), and must not be a column one of your column-mask policies applies to. Every key, automatic or override, then has to pass the same checks `verify-access` applies to any row-pairing key, run as the admin. First, the key column has no live column mask and no live tag that one of your column-mask policies matches (`system.information_schema.column_masks` / `column_tags`, judged with the same matcher as the coverage check). Other tags, such as native `class.*` tags on an ID, don't disqualify it; with `VERIFY_SPEC` there are no policies to judge against, so any tag does. Second, a spread sample of its keys is unique and non-NULL, and each key names exactly one row of the whole table. During the live run the admin and every tier each sample their own rows, every tier then reads all of those rows by key (so rows only one tier sees are compared too), and the admin must find every key a tier sampled. A repeated, NULL or possibly-masked key never passes: it makes the mask check INCONCLUSIVE (`row-pairing key <col> is not unique / has NULLs on <table>` or `... may be masked for <tier> on <table>`). Table, column and key names must be plain identifiers (letters, digits, `_`, `-`).
 
 If an automatic candidate fails its proof, the next one is tried. **An override that fails is reported, never silently replaced.** If nothing is provable, that table is refused with:
 
@@ -76,6 +76,14 @@ non-conclusive outcome as blocking:
 
 Results name the table, column, tier, row counts and key *column*; they never
 print row values or key values, so a FAIL is safe to leave in CI logs.
+
+**Mask checks are a bounded sample, not a proof over every row.** Each tier
+checks 25 sampled rows per masked column (plus the rows the other tiers
+sampled). Rows are spread across the table by a salted hash of the key, with a
+fresh salt each run; the summary prints `Sample: checked 25 sampled rows per
+tier …` and the salt, and `GENIERAILS_VERIFY_SAMPLE_SALT=<salt>` repeats that
+run's sample. A mask that is wrong only for rows outside the sample can still
+pass — row filters, by contrast, are checked by full row counts.
 
 Both FAIL and INCONCLUSIVE make `make verify-access` exit non-zero. A run that
 derives **zero** checks also exits non-zero — verifying nothing is not success.

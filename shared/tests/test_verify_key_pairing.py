@@ -7,6 +7,7 @@ the real live orchestrator against a fake SQL warehouse (no workspace): it
 applies per-tier row filters and column masks, and — like a real warehouse —
 returns rows that tie on the ORDER BY key in no fixed order across principals.
 """
+import hashlib
 import json
 import re
 import sys
@@ -47,7 +48,7 @@ class FakeWarehouse:
         self.rows = rows                      # [{"id": ..., "ssn": ...}, ...]
         self.row_filters = row_filters or {}  # tier -> predicate(row)
         self.masks = masks or {}              # tier -> {column: fn}
-        self.tags = tags or {}                # column -> number of tags
+        self.tags = tags or {}                # column -> [(tag_name, tag_value), ...]
         self.hide_masks_from_metadata = hide_masks_from_metadata
         self.metadata_error = metadata_error
         self.statements = []                  # (tier, sql, params)
@@ -71,22 +72,29 @@ class FakeWarehouse:
         params = params or {}
         self.statements.append((tier, sql, dict(params)))
         cell = lambda v: None if v is None else str(v)  # noqa: E731 — data_array is strings
-        m = re.fullmatch(r"SELECT COUNT\(\*\) FROM system\.information_schema\.(column_masks|column_tags) .*", sql)
+        m = re.fullmatch(r"SELECT (COUNT\(\*\)|tag_name, tag_value) FROM "
+                         r"system\.information_schema\.(column_masks|column_tags) .*", sql)
         if m:
             if self.metadata_error:
                 raise RuntimeError(self.metadata_error)
             column = params["k"]
-            if m.group(1) == "column_tags":
-                return [[str(self.tags.get(column, 0))]]
+            if m.group(2) == "column_tags":
+                tags = self.tags.get(column, [])
+                return [list(t) for t in tags] if m.group(1) != "COUNT(*)" else [[str(len(tags))]]
             masked = {c for cols in self.masks.values() for c in cols}
             return [["0" if self.hide_masks_from_metadata else str(int(column in masked))]]
         m = re.fullmatch(
             r"SELECT `(\w+)`, `(\w+)` FROM (\S+)(?: WHERE `(\w+)` IN \(([^)]*)\))? "
-            r"ORDER BY `\w+` LIMIT (\d+)", sql)
+            r"ORDER BY (`\w+`|`\w+` IS NULL DESC, xxhash64\(:salt, `\w+`\)) LIMIT (\d+)", sql)
         if m:
-            key, col, _, where_col, in_list, limit = m.groups()
+            key, col, _, where_col, in_list, order, limit = m.groups()
             rows = [r for r in self.view(tier) if self._keep(where_col, in_list, params)(r)]
-            rows.sort(key=lambda r: (r[key] is not None, str(r[key])))  # NULLs first; stable
+            if "xxhash64" in order:
+                # NULLs first, then a salted hash of the key; repeats stay adjacent.
+                rows.sort(key=lambda r: (r[key] is not None, hashlib.sha256(
+                    f"{params['salt']}|{r[key]}".encode()).hexdigest()))
+            else:
+                rows.sort(key=lambda r: (r[key] is not None, str(r[key])))  # NULLs first; stable
             return [[cell(r[key]), cell(r[col])] for r in rows[: int(limit)]]
         m = re.fullmatch(
             r"SELECT COUNT\(\*\), COUNT\(DISTINCT `(\w+)`\), COUNT\(`\w+`\) FROM (\S+) "
@@ -126,6 +134,7 @@ def warehouse(monkeypatch):
 
     monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
     monkeypatch.setenv("GENIERAILS_VERIFY_PROPAGATION_SLEEP", "0")
+    monkeypatch.setenv("GENIERAILS_VERIFY_SAMPLE_SALT", SALT)
     monkeypatch.setattr(vea, "load_auth", lambda path: {
         "host": "h", "client_id": "admin-app", "client_secret": "s"})
     monkeypatch.setattr(vea, "EffectiveAccessVerifier", FakeVerifier)
@@ -133,7 +142,37 @@ def warehouse(monkeypatch):
     def install(wh):
         holder["wh"] = wh
         return wh
+    install.current = None
     return install
+
+
+SALT = "test-salt"
+
+
+def _hash(key):
+    return hashlib.sha256(f"{SALT}|{key}".encode()).hexdigest()
+
+
+def _sampled(wh, tier):
+    """The keys ``tier``'s own (salted) sample returned."""
+    [(_, _, params)] = [s for s in wh.statements if s[0] == tier and "xxhash64" in s[1]]
+    view = sorted((r for r in wh.view(tier)), key=lambda r: (r["id"] is not None, _hash(r["id"])))
+    return {r["id"] for r in view[:25]}
+
+
+def _read_keys(wh, tier):
+    """The key set ``tier`` read back (the union of every tier's sample)."""
+    [(_, _, params)] = [s for s in wh.statements if s[0] == tier and " IN (" in s[1]]
+    return set(params.values())
+
+
+def _admin():
+    return VerificationPrincipal(DEFAULT_ADMIN_TIER, "admin", "admin-app", "s")
+
+
+def _verifier():
+    return vea.EffectiveAccessVerifier({"host": "h", "client_id": "c", "client_secret": "s"},
+                                       warehouse_id="wh-1")
 
 
 def _check(masked=(JUNIOR,), unmasked=(DEFAULT_ADMIN_TIER,), column="ssn"):
@@ -164,16 +203,24 @@ def test_duplicate_keys_with_an_unapplied_mask_do_not_pass(tmp_path, warehouse):
     assert "choose a unique, non-null, unmasked key" in result.detail
 
 
-def test_a_repeat_of_the_last_sampled_key_past_the_limit_is_caught(tmp_path, warehouse):
-    # The 25 sampled keys are unique in the sample; key 25 repeats at row 26.
+def test_a_repeat_of_a_sampled_key_outside_the_sample_is_caught(warehouse):
+    # The 25 sampled keys are unique in the sample; key 25 repeats elsewhere.
     rows = _unique_rows(25) + [{"id": "KEY-0025", "ssn": "SSN-0025-OTHER"}] + _unique_rows(40)[25:]
     wh = warehouse(FakeWarehouse(rows))
+    keys = [f"KEY-{i:04d}" for i in range(1, 26)]
+    problem = _verifier().prove_key_unique(_admin(), _check(), keys)
+    assert problem.startswith("row-pairing key id is not unique / has NULLs")
+    assert "25 sampled keys match 26 rows" in problem
+    assert [t for t, _, _ in wh.statements] == [DEFAULT_ADMIN_TIER]
+
+
+def test_the_sampled_rows_cover_a_repeated_key_together(tmp_path, warehouse):
+    # Repeats of a key hash alike, so a sample takes them together.
+    rows = _unique_rows(60) + [{"id": f"KEY-{i:04d}", "ssn": f"SSN-{i:04d}-OTHER"} for i in range(1, 61)]
+    warehouse(FakeWarehouse(rows))
     [result] = _verify(tmp_path, _check())
     assert result.status == INCONCLUSIVE
-    assert "row-pairing key id is not unique / has NULLs" in result.detail
-    assert "25 sampled keys match 26 rows" in result.detail
-    proofs = [s for s in wh.statements if s[1].startswith("SELECT COUNT(*), COUNT(DISTINCT")]
-    assert [t for t, _, _ in proofs] == [DEFAULT_ADMIN_TIER]
+    assert "row-pairing key id is not unique (" in result.detail
 
 
 # ---------------------------------------------------------------------------
@@ -229,11 +276,97 @@ def test_an_admin_masked_key_does_not_pass(tmp_path, warehouse):
     assert "row-pairing key id may be masked" in result.detail
 
 
-def test_a_tagged_key_column_is_refused(tmp_path, warehouse):
-    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags={"id": 2}))
-    [result] = _verify(tmp_path, _check())
+CLASS_TAGS = {"id": [("class.customer_id", ""), ("class.identifier", "")]}
+
+
+def _mask_config(match_condition="hasTagValue('pii', 'ssn')", **policy):
+    return {
+        "fgac_policies": [{"name": "mask_ssn", "policy_type": "POLICY_TYPE_COLUMN_MASK",
+                           "catalog": "cat", "to_principals": [JUNIOR],
+                           "match_condition": match_condition, **policy}],
+        "tag_assignments": [{"entity_type": "columns", "entity_name": f"{TABLE}.ssn",
+                             "tag_key": "pii", "tag_value": "ssn"}],
+    }
+
+
+def _verify_with_config(tmp_path, mask_config, *checks):
+    return verify_effective_access_live(
+        VerificationSpec(column_masks=list(checks), mask_config=mask_config),
+        tmp_path / "auth.auto.tfvars", warehouse_id="wh-1",
+    ).results
+
+
+def test_a_class_tagged_key_no_mask_policy_matches_passes(tmp_path, warehouse):
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags=CLASS_TAGS))
+    [result] = _verify_with_config(tmp_path, _mask_config(), _check())
+    assert result.status == PASS, result.detail
+
+
+@pytest.mark.parametrize("policy", [
+    {"match_condition": "hasTag('class.identifier')"},
+    {"match_condition": "hasTagValue('pii', 'ssn') OR hasTag('class.customer_id')"},
+])
+def test_a_key_tag_a_mask_policy_matches_is_inconclusive(tmp_path, warehouse, policy):
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags=CLASS_TAGS))
+    [result] = _verify_with_config(tmp_path, _mask_config(**policy), _check())
     assert result.status == INCONCLUSIVE
-    assert "may be masked" in result.detail and "2 column tag(s)" in result.detail
+    assert result.detail == (
+        f"row-pairing key id may be masked for {JUNIOR}, {DEFAULT_ADMIN_TIER} on {TABLE} "
+        "(it has 2 column tag(s) a column-mask policy matches); "
+        "choose a unique, non-null, unmasked key")
+
+
+@pytest.mark.parametrize("policy", [
+    {"match_condition": "hasTag('class.identifier')", "catalog": "other_catalog"},
+    {"match_condition": "hasTag('class.identifier')", "except_principals": [JUNIOR]},
+    {"match_condition": "hasTag('class.identifier') AND hasTagValue('pii', 'ssn')"},
+])
+def test_a_key_tag_no_policy_resolves_for_passes(tmp_path, warehouse, policy):
+    # Another catalog's policy, a policy excepting all its targets, and a
+    # condition the key's tags don't fully satisfy all leave the key unmasked.
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags=CLASS_TAGS))
+    cfg = _mask_config(**policy)
+    cfg["fgac_policies"].append(_mask_config()["fgac_policies"][0] | {"name": "mask_ssn_2"})
+    [result] = _verify_with_config(tmp_path, cfg, _check())
+    assert result.status == PASS, result.detail
+
+
+def test_a_live_column_mask_on_the_key_is_inconclusive(tmp_path, warehouse):
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask, "id": lambda v: v}}))
+    [result] = _verify_with_config(tmp_path, _mask_config(), _check())
+    assert result.status == INCONCLUSIVE
+    assert "(it has 1 column mask(s))" in result.detail
+
+
+def test_a_tagged_key_without_mask_policies_to_check_fails_closed(tmp_path, warehouse):
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags=CLASS_TAGS))
+    [result] = _verify(tmp_path, _check())   # e.g. a --spec run: no config
+    assert result.status == INCONCLUSIVE
+    assert "no mask policies were given to check them against" in result.detail
+
+
+def test_a_key_tag_with_unreadable_mask_policies_fails_closed(tmp_path, warehouse):
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}, tags=CLASS_TAGS))
+    [result] = _verify_with_config(tmp_path, _mask_config("has_tag_value('pii', 'ssn')"), _check())
+    assert result.status == INCONCLUSIVE
+    assert "the mask policies can't be checked" in result.detail
+
+
+def test_from_tfvars_carries_the_mask_config(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text('''
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.customers.ssn", tag_key = "pii", tag_value = "ssn" },
+]
+fgac_policies = [
+  { name = "mask_ssn", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "cat",
+    to_principals = ["Junior_Analyst"], match_condition = "hasTagValue('pii', 'ssn')",
+    function_name = "mask_ssn" },
+]
+''')
+    spec = vea.load_spec_from_tfvars(tfvars, key_column="id")
+    assert spec.mask_config["fgac_policies"][0]["name"] == "mask_ssn"
+    assert spec.mask_config["tag_assignments"][0]["entity_name"] == f"{TABLE}.ssn"
 
 
 def test_unreadable_key_metadata_is_inconclusive(tmp_path, warehouse):
@@ -262,34 +395,41 @@ def test_a_row_filtered_tier_is_compared_on_the_shared_rows(tmp_path, warehouse)
                                  masks={JUNIOR: {"ssn": _mask}}))
     [result] = _verify(tmp_path, _check())
     assert result.status == PASS
-    # Junior's own first 25 (even) keys, all read back with the admin's sample.
-    assert result.evidence["per_principal_compared"] == {JUNIOR: 25}
-    junior_reads = [s for s in wh.statements if s[0] == JUNIOR]
-    assert len(junior_reads) == 2 and " WHERE `id` IN (" in junior_reads[1][1]
-    expected = {f"KEY-{i:04d}" for i in range(1, 26)} | {f"KEY-{i:04d}" for i in range(2, 51, 2)}
-    assert set(junior_reads[1][2].values()) == expected
+    sample, read = [s for s in wh.statements if s[0] == JUNIOR]
+    assert " WHERE `id` IN (" in read[1]
+    read_keys = set(read[2].values())
+    # Junior reads the admin's sample and its own; every even one is compared.
+    assert {k for k in read_keys if int(k[-4:]) % 2 == 0} >= _sampled(wh, JUNIOR)
+    assert result.evidence["per_principal_compared"] == {
+        JUNIOR: sum(1 for k in read_keys if int(k[-4:]) % 2 == 0)}
 
 
 def test_a_tier_filtered_off_the_admin_sample_is_compared_on_its_own_rows(tmp_path, warehouse):
     late = lambda r: int(r["id"][-4:]) > 25  # noqa: E731
-    warehouse(FakeWarehouse(_unique_rows(60), row_filters={SENIOR: late},
+    warehouse.current = warehouse(FakeWarehouse(_unique_rows(60), row_filters={SENIOR: late},
                             masks={JUNIOR: {"ssn": _mask}, SENIOR: {"ssn": _mask}}))
+    wh = warehouse.current
     [result] = _verify(tmp_path, _check(masked=(JUNIOR, SENIOR)))
     assert result.status == PASS
-    # Junior reads the admin's rows 1-25 and Senior's own 26-50.
-    assert result.evidence["per_principal_compared"] == {JUNIOR: 50, SENIOR: 25}
+    read_keys = _read_keys(wh, SENIOR)
+    assert _sampled(wh, SENIOR) <= read_keys
+    assert result.evidence["per_principal_compared"] == {
+        JUNIOR: len(read_keys), SENIOR: sum(1 for k in read_keys if int(k[-4:]) > 25)}
 
 
 def test_leaked_rows_only_a_tier_sees_do_not_pass(tmp_path, warehouse):
-    # Junior sees rows 21-60; its mask covers only rows 1-25, so rows 26-45 of
-    # its own sample leak — none of them in the admin's sample (rows 1-25).
+    # Junior sees rows 21-60; its mask covers only rows 1-25, so its rows
+    # 26-60 leak, though the admin's sample has none of Junior's leaking rows.
     late = lambda r: int(r["id"][-4:]) > 20  # noqa: E731
     partial = lambda v: "XXX-MASKED" if int(v[4:8]) <= 25 else v  # noqa: E731
-    warehouse(FakeWarehouse(_unique_rows(60), row_filters={JUNIOR: late},
-                            masks={JUNIOR: {"ssn": partial}}))
+    wh = warehouse(FakeWarehouse(_unique_rows(60), row_filters={JUNIOR: late},
+                                 masks={JUNIOR: {"ssn": partial}}))
     [result] = _verify(tmp_path, _check())
     assert result.status == FAIL
-    assert result.evidence["leaks_by_principal"] == {JUNIOR: 20}
+    leaking = {k for k in _read_keys(wh, JUNIOR) if int(k[-4:]) > 25}
+    # Some leaking rows came only from Junior's own sample, and are counted.
+    assert leaking & _sampled(wh, JUNIOR) - _sampled(wh, DEFAULT_ADMIN_TIER)
+    assert result.evidence["leaks_by_principal"] == {JUNIOR: len(leaking)}
 
 
 def test_rows_a_masked_tier_sees_without_a_baseline_do_not_pass(tmp_path, warehouse):
@@ -435,3 +575,66 @@ def test_evaluator_rejects_a_null_key():
     result = evaluate_column_mask_check(_check(), {DEFAULT_ADMIN_TIER: {None: "a"}, JUNIOR: {None: "x"}})
     assert result.status == INCONCLUSIVE
     assert "has NULLs" in result.detail
+
+
+# ---------------------------------------------------------------------------
+# the sample is spread across the table, reproducible from the logged salt,
+# and its size is stated in the summary
+# ---------------------------------------------------------------------------
+def test_the_sample_is_spread_by_the_salt_not_the_lowest_keys(tmp_path, warehouse, monkeypatch):
+    wh = warehouse(FakeWarehouse(_unique_rows(200), masks={JUNIOR: {"ssn": _mask}}))
+    [result] = _verify(tmp_path, _check())
+    assert result.status == PASS
+    first = _sampled(wh, DEFAULT_ADMIN_TIER)
+    assert first != {f"KEY-{i:04d}" for i in range(1, 26)}
+    assert max(int(k[-4:]) for k in first) > 100
+    # Same salt, same sample; another salt, another sample.
+    wh.statements.clear()
+    _verify(tmp_path, _check())
+    assert _sampled(wh, DEFAULT_ADMIN_TIER) == first
+    monkeypatch.setenv("GENIERAILS_VERIFY_SAMPLE_SALT", "other-salt")
+    wh.statements.clear()
+    _verify(tmp_path, _check())
+    [(_, _, params)] = [s for s in wh.statements if s[0] == DEFAULT_ADMIN_TIER and "xxhash64" in s[1]]
+    assert params == {"salt": "other-salt"}
+
+
+def test_a_fresh_salt_is_used_and_logged_when_none_is_set(tmp_path, warehouse, monkeypatch, capsys):
+    monkeypatch.delenv("GENIERAILS_VERIFY_SAMPLE_SALT")
+    wh = warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}))
+    report = verify_effective_access_live(
+        VerificationSpec(column_masks=[_check()]), tmp_path / "auth.auto.tfvars", warehouse_id="wh-1")
+    [salt] = {s[2]["salt"] for s in wh.statements if "xxhash64" in s[1]}
+    assert len(salt) == 16 and salt != SALT
+    assert f"GENIERAILS_VERIFY_SAMPLE_SALT={salt}" in capsys.readouterr().out
+    assert f"spread by salt {salt}" in report.summary()
+
+
+def test_the_summary_states_the_sample_size(tmp_path, warehouse, capsys):
+    warehouse(FakeWarehouse(_unique_rows(), masks={JUNIOR: {"ssn": _mask}}))
+    rc, _ = _run_main(tmp_path)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Sample: checked 25 sampled rows per tier per masked column" in out
+    assert "a bounded sample, not every row" in out
+    assert "KEY-" not in out and "SSN-" not in out
+
+
+# ---------------------------------------------------------------------------
+# long key lists are read in batches, never one oversized statement
+# ---------------------------------------------------------------------------
+def test_long_key_lists_are_batched(warehouse):
+    wh = warehouse(FakeWarehouse(_unique_rows(250)))
+    keys = [f"KEY-{i:04d}" for i in range(1, 251)]
+    verifier, check = _verifier(), _check()
+    rows = verifier.collect_column_values(_admin(), check, len(keys), keys)
+    assert sorted(k for k, _ in rows) == keys
+    assert verifier.prove_key_unique(_admin(), check, keys) == ""
+    assert verifier.count_rows_with_keys(_admin(), check, keys) == 250
+    assert wh.statements and max(len(p) for _, _, p in wh.statements) <= vea.KEY_PARAM_BATCH
+    assert len(wh.statements) == 9  # 3 batches x 3 calls
+
+
+def test_an_oversized_key_list_has_a_clear_error():
+    with pytest.raises(ValueError, match=r"101 key values in one statement \(max 100\)"):
+        vea._key_filter("id", [str(i) for i in range(101)])
