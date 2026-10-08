@@ -87,6 +87,15 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         agents = id_only_agents(config)
         if not agents:
+            explicit = list(config.get("uc_tables") or [])
+            explicit.extend(
+                table
+                for space in config.get("genie_spaces") or []
+                if isinstance(space, dict)
+                for table in (space.get("uc_tables") or [])
+            )
+            if explicit:
+                print("Using listed uc_tables instead of discovering tables from genie_space_id.")
             return 0
         _tables, existing = load_discovered_footprint(env_dir)
         keep = other_agent_names(env_dir, config)

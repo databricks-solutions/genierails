@@ -13,6 +13,10 @@ terraform {
       source  = "hashicorp/time"
       version = "~> 0.12"
     }
+    external = {
+      source  = "hashicorp/external"
+      version = "~> 2.3"
+    }
   }
 }
 
@@ -393,9 +397,20 @@ resource "databricks_sql_endpoint" "warehouse" {
 # Every other input still forces a replacement, which only re-runs CREATE OR
 # REPLACE: the drop lives in masking_functions_drop, so changing the SQL never
 # drops a function the live policies use.
+data "external" "normalized_masking_sql" {
+  program = ["python3", "${path.module}/normalize_masking_sql.py"]
+  query = {
+    sql_file = var.masking_sql_file
+  }
+}
+
 resource "terraform_data" "masking_functions" {
   triggers_replace = {
-    sql_hash     = filemd5(var.masking_sql_file)
+    # The previous trigger used filemd5(), so upgrading an existing state may
+    # cause one drop-free CREATE OR REPLACE run.  Thereafter only executable
+    # definition changes replace this resource; comments, formatting and order
+    # do not.
+    sql_hash     = data.external.normalized_masking_sql.result.hash
     sql_file     = var.masking_sql_file
     script       = var.deploy_masking_script
     auth_file    = var.auth_file

@@ -313,6 +313,8 @@ def test_apply_fingerprint_includes_terraform_and_genie_code():
     assert '$(SHARED_ROOT)/modules/$$layer' in makefile
     assert '$(SHARED_ROOT)/scripts/genie_space.sh' in makefile
     assert '$(SHARED_ROOT)/deploy_masking_functions.py' in makefile
+    assert '$(SHARED_ROOT)/modules/data_access/normalize_masking_sql.py' in makefile
+    assert '$(SHARED_ROOT)/sql_tokenizer.py' in makefile
     assert "-type f -name '*.tf'" in makefile
     assert "! -path '*/tests/*'" in makefile
     assert "! -path '*/.terraform/*'" in makefile
