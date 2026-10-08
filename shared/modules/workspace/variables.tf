@@ -57,6 +57,15 @@ variable "genie_space_can_run_widening" {
   description = "Per Genie agent key: CAN_RUN groups the desired ACL adds beyond what the last apply left in place. Empty (keep, shrink or clear) needs no coverage check; a missing key counts as widening to every desired group."
 }
 
+variable "genie_space_acl_created_handoffs" {
+  type = map(object({
+    space_create_id = string
+    groups          = string
+  }))
+  default     = {}
+  description = "Create-path ACL state retained while an auto-created agent moves to an explicit ID on the same deployment. Supplied only by the workspace root after matching the state binding and ID file."
+}
+
 variable "sql_warehouse_id" {
   type        = string
   default     = ""

@@ -42,7 +42,7 @@ def test_workspace_business_acls_follow_the_gate_not_a_flag():
     assert source.count("if contains(local.genie_space_acl_keys, k)") == 2
     # Two grant-bearing resources plus two removal-only resources for the
     # fully-withheld adopted-agent paths must all permit an empty exact sync.
-    assert source.count('GENIE_ALLOW_EMPTY_ACL    = "1"') == 4
+    assert len(re.findall(r'GENIE_ALLOW_EMPTY_ACL\s*= "1"', source)) == 4
     # Opening or widening CAN_RUN still needs the coverage gate: without it
     # the new groups are withheld from both ACL resources.
     withheld = source[source.index("  genie_space_can_run_withheld = {"):source.index("  genie_space_acl_groups = {")]
@@ -260,7 +260,7 @@ def _terraform_trigger_plan(tmp_path, changes):
     block = source[start: source.index("\n}\n", start) + 3]
     block = re.sub(r"\n  provisioner \"local-exec\" \{.*?\n  \}\n", "\n", block, flags=re.S)
     block = re.sub(r"\n  depends_on = \[.*?\n  \]\n", "\n", block, flags=re.S)
-    block = block.replace("  for_each = local.new_spaces\n", "")
+    block = re.sub(r"  for_each = local\.[a-z_]+\n", "", block)
     block = block.replace("var.databricks_workspace_host", "var.host")
     block = block.replace("${var.genie_id_file_prefix}_${each.key}", "id")
     module = tmp_path / "trigger-plan"

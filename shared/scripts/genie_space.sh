@@ -23,6 +23,8 @@
 #
 # Configuration:
 #   GENIE_GROUPS_CSV     Required for create/set-acls. Comma-separated group names.
+#   GENIE_CONFIGURED_GROUPS_CSV Optional full configured group list when the
+#                        coverage check withholds some groups from GENIE_GROUPS_CSV.
 #   GENIE_TABLES_CSV     Required for create. Comma-separated fully-qualified
 #                        table names (catalog.schema.table). Wildcards (catalog.schema.*)
 #                        are expanded via the UC Tables API.
@@ -324,9 +326,10 @@ set_genie_acls() {
   current_body=$(printf '%s\n' "$current" | sed '$d')
   local acl_audit=""
   if [[ "$current_code" == "200" ]]; then
-    if ! acl_audit=$(CONFIGURED_GROUPS="$GENIE_GROUPS_CSV" python3 -c '
+    if ! acl_audit=$(CONFIGURED_GROUPS="${GENIE_CONFIGURED_GROUPS_CSV:-$GENIE_GROUPS_CSV}" GRANTED_GROUPS="$GENIE_GROUPS_CSV" python3 -c '
 import json, os, sys
 configured = {g for g in os.environ.get("CONFIGURED_GROUPS", "").split(",") if g}
+granted = {g for g in os.environ.get("GRANTED_GROUPS", "").split(",") if g}
 body = json.load(sys.stdin)
 if not isinstance(body, dict) or not isinstance(body.get("access_control_list"), list):
     raise ValueError("response must contain access_control_list")
@@ -346,7 +349,9 @@ for ace in body["access_control_list"]:
     levels = sorted({p.get("permission_level", "UNKNOWN") for p in direct})
     if kind == "group" and principal in configured:
         for level in levels:
-            if level != "CAN_RUN":
+            if principal not in granted:
+                print(f"Removing configured Genie access: {label} ({level}) — not granted: CAN_RUN withheld until the coverage check passes")
+            elif level != "CAN_RUN":
                 print(f"Changing configured Genie access: {label} ({level} -> CAN_RUN)")
         continue
     for level in levels:
@@ -881,6 +886,13 @@ revoke_genie_acls() {
     echo "No Genie CAN_RUN groups to revoke."
     return 0
   fi
+  # Native Terraform tests execute destroy provisioners during teardown but
+  # deliberately have no Databricks credentials. Production never sets this.
+  if [[ "${GENIERAILS_TERRAFORM_TEST:-0}" == "1" ]]; then
+    [[ -n "${GENIE_STUB_LOG:-}" ]] && printf 'revoke-acls space=%s id=%s revoke=%s\n' \
+      "${GENIE_SPACE_OBJECT_ID:-}" "${GENIE_ID_BASENAME:-}" "$groups" >> "$GENIE_STUB_LOG"
+    return 0
+  fi
   load_layer_auth
   local workspace_url="${DATABRICKS_HOST%/}"
   local space_id="${GENIE_SPACE_OBJECT_ID:-}"
@@ -944,6 +956,9 @@ print(json.dumps({"access_control_list": kept}))
 }
 
 trash_genie_space() {
+  if [[ "${GENIERAILS_TERRAFORM_TEST:-0}" == "1" ]]; then
+    return 0
+  fi
   load_layer_auth
 
   local auth_host="${DATABRICKS_HOST%/}"

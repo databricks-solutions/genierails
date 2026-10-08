@@ -592,6 +592,44 @@ run "created_space_acl_on_record" {
   }
 }
 
+# An auto-created agent can later be written back into config by ID. Its
+# create-path ACL and ownership resources must remain at their old addresses:
+# with a failing gate, recorded groups stay granted, a new group is withheld,
+# and there is no destroy-time revoke-acls action.
+run "created_space_moves_to_id_path_with_failing_gate" {
+  module {
+    source = "../data_access/tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/exposure/data_access/terraform.tfstate"   = jsonencode({ version = 4, outputs = { coverage_gate = { value = { status = "fail", fingerprint = "applied", max_age = "6h", table_grant_count = 2 } }, table_grant_resource_keys = { value = ["cat.sch.customers|analysts", "cat.sch.customers|auditors"] } } })
+      "tests/.tmp/exposure/data_access/.coverage_gate.json" = jsonencode({ status = "fail", fingerprint = "applied", refreshed_at = "@NOW@" })
+      "tests/.tmp/exposure/.genie_space_id_sales"           = "space-1\n"
+      "tests/.tmp/exposure/terraform.tfstate"               = jsonencode({ version = 4, outputs = {}, resources = [{ module = "module.workspace", mode = "managed", type = "terraform_data", name = "genie_space", instances = [{ index_key = "sales", attributes = { id = "created-1", input = { value = { id_file = "tests/.tmp/exposure/.genie_space_id_sales" }, type = ["object", { id_file = "string" }] }, triggers_replace = { value = { host = "https://example.invalid" }, type = ["object", { host = "string" }] } } }] }, { module = "module.workspace", mode = "managed", type = "null_resource", name = "genie_space_acls_created", instances = [{ index_key = "sales", attributes = { id = "2", triggers = { space_create_id = "created-1", groups = "analysts" } } }] }] })
+    }
+  }
+}
+
+run "id_path_handoff_keeps_recorded_groups_without_revoke" {
+  command = plan
+  expect_failures = [
+    check.genie_can_run_withheld,
+  ]
+  variables {
+    genie_spaces        = [{ name = "Sales", genie_space_id = "space-1", uc_tables = ["cat.sch.customers"] }]
+    groups              = { analysts = {}, auditors = {} }
+    genie_space_configs = { Sales = { acl_groups = ["analysts", "auditors"] } }
+  }
+  assert {
+    condition     = toset(output.genie_space_can_run_widening["sales"]) == toset(["auditors"])
+    error_message = "only the genuinely new group may count as widening during the create-to-ID handoff"
+  }
+  assert {
+    condition     = toset(output.genie_space_can_run_withheld["sales"]) == toset(["auditors"]) && output.genie_space_acls_created_groups["sales"] == "analysts" && output.genie_space_acl_created_handoffs["sales"].groups == "analysts"
+    error_message = "the old create-path ACL address must stay in place with the kept group, so no destroy-time revoke runs"
+  }
+}
+
 run "unchanged_created_space_acl_adds_nothing" {
   command = plan
   variables {

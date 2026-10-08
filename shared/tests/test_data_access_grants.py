@@ -397,7 +397,7 @@ def test_explicit_empty_agent_acl_is_fail_closed_in_both_layers():
     assert 'join(",", keys(var.groups))' not in workspace.split(
         "genie_space_groups =", 1
     )[1].split("existing_spaces =", 1)[0]
-    assert 'GENIE_ALLOW_EMPTY_ACL    = "1"' in workspace
+    assert re.search(r'GENIE_ALLOW_EMPTY_ACL\s*= "1"', workspace)
 
 
 def test_catalog_grants_are_serialized_without_authoritative_replacement():
