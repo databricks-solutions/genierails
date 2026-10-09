@@ -63,6 +63,8 @@ GenieRails ships a mapping for all 93 Databricks classification classes, each to
 - A `LANGUAGE PYTHON` UDF declared with `SECRETS (...)` computes the HMAC; a SQL wrapper is the mask function. Neither is declared `DETERMINISTIC`, because rotating the key changes every output.
 - Input is normalised before hashing: trimmed, Unicode NFKC, upper-cased, and spaces and hyphens removed. NULL stays NULL.
 - **Fail closed:** if UC secrets or Python UDFs are unavailable on the warehouse, hashed treatments fall back to **redacted** for tier 2, with a clear warning. They never fall back to raw.
+- **Verified live on AWS dev (spike):** UC secret creation, the Python HMAC UDF with `SECRETS (...)` and `environment_version = '6'`, and the SQL wrapper as a column mask all work on a serverless Pro warehouse. Callers need only `EXECUTE`; the secret is read with the function owner's permission. Output was stable 64-character hex, NULL stayed NULL, duplicates matched.
+- **Latency:** the Python UDF made a 1,000-row masked query about 10x slower (0.6 s to 6.5 s median). Only tier-2 queries touching hashed columns pay this (tier 1 sees raw, tier 3's full version is plain SQL). The cost is documented, and a team can switch a treatment to `redacted` for tier 2 with `treatment_versions` if latency matters more than joinability.
 - **Rotation** is explicit and disruptive (`make rotate-hash-key`): every hash changes at once, so stored or exported hashes stop joining. It is documented as a planned cutover.
 
 **Change from today:** `us_ssn` and `us_itin` move from last 4 to the keyed hash, following decision 2. Last 4 stays available as an explicit opt-in:
