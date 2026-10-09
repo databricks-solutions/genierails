@@ -13,7 +13,7 @@ Lookup companion to the **[Dev-to-Prod Walkthrough](README.md)**: the full comma
 | Table `SELECT` grant | **only after the masks exist and a recent coverage check passes** for it |
 | Genie run permission (`CAN_RUN`) | **only once its groups' `SELECT` grants are applied** through that check |
 | Workspace assignment + consume entitlement | applied on **every** apply (harmless without `SELECT`/`CAN_RUN`) |
-| Warehouse `CAN_USE` | **not managed by GenieRails** — you grant it (Phase 4) |
+| Warehouse `CAN_USE` | **not managed by GenieRails** — you grant business users `CAN_USE` on the agent's warehouse |
 
 So "expose last" isn't a policy you hope holds — there is simply no new or wider `SELECT` or `CAN_RUN` without a passing check. There is no on/off flag: the old `business_access_enabled` setting is deprecated and ignored (make warns while it is set; `false` does **not** revoke access). To withdraw access, remove the groups or `acl_groups` entries (or the agent) and apply: that revokes their `SELECT` and the Genie `CAN_RUN` GenieRails granted them, and never waits for the coverage check (other direct entries and inherited permissions on the agent are left alone).
 
@@ -35,7 +35,7 @@ So "expose last" isn't a policy you hope holds — there is simply no new or wid
 
 ## Command reference
 
-| Command | Phase | What it does |
+| Command | Used in (0 setup, 1 dev, 2 promote, 3 prod classify, 4 release, 5 maintain) | What it does |
 |---|---|---|
 | `make setup` / `make init-env ENV=<e>` | 0 | Create local env dirs + default config files (no Databricks calls) |
 | `make enable-classification ENV=<e>` | 1/3 | Optional scripted way to turn on UC Data Classification for the footprint; review detections, exclude false positives, and enable auto-tagging in the UI |
@@ -63,6 +63,55 @@ Successful validation reports are compact by default. Add `VERBOSE=1` to a
 warnings and failures are always printed in full.
 
 Key config & code: [`treatment_config.json`](../../treatment_config.json) (the `gr_treatment` precedence rules — shared across envs), [`sensitivity_source.py`](../../sensitivity_source.py) (native `class.*` source), [`treatment_derivation.py`](../../treatment_derivation.py) (one treatment/column), [`verify_effective_access.py`](../../verify_effective_access.py) (masked-vs-raw), [`scripts/audit_schema_drift.py`](../../scripts/audit_schema_drift.py) (drift).
+
+---
+
+## Step details
+
+What each walkthrough step does, for when you need more than the [walkthrough](README.md).
+
+**Setup and inputs**
+- `make setup ENV=<env>` only creates local files; it makes no Databricks calls.
+- Agent tables are discovered from the agent ID, so you don't list `uc_tables`.
+- `access_tier_groups` is read by every `make generate`. The first promote copies it to prod; later promotes keep prod's value. To change prod tiers or a space's `acl_groups`, edit `envs/prod/env.auto.tfvars` in a PR. GenieRails uses your groups by exact name and never creates them. (CLI alternative: leave it `[]` and pass `GENERATE_ARGS='--groups "a,b,c"'` once; that run saves it.)
+- `sql_warehouse_id` on an agent's `genie_spaces` entry picks its warehouse; leave it `""` to auto-create one. Agents can share the environment-level warehouse.
+
+**Classification**
+- The UI path is the default. `make enable-classification ENV=<env>` is a scripted alternative for turning it on; you still review detections in the UI.
+- Leave `enable_auto_tagging` out of `env.auto.tfvars` to keep the UI's auto-tagging settings. An explicit `false` is refused while UI auto-tagging is on, unless you pass `ALLOW_DISABLE_AUTO_TAGGING=1`.
+- The scripted path can fail with `Usage policy ID must not be empty` on a workspace without a serverless usage policy ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)). Use the UI, or attach a serverless usage policy first ([AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies)).
+
+**`make generate ENV=dev`**
+- Imports the agent's config, finds its tables, and drafts masks and access rules from the `class.*` tags. Without tags it stops before any model call.
+- Re-runs keep reviewed rules in `envs/dev/generated/` and add rules only for uncovered columns, printing `kept reviewed rule …` or `dropped stale reviewed rule …`. To accept the model's changes, pass `GENERATE_ARGS='--allow-rule-changes'` or edit the files.
+
+**`make rehearse ENV=dev`**
+- Runs live derive → validate-generated → coverage-gate → apply → verify-access, stopping at the first failure.
+- `verify-access` creates a test service principal per tier, gives each temporary `CAN_USE` on the warehouse, and checks a bounded sample of rows: unprivileged tiers must see masked values, the authorized tier raw ones.
+- To pair rows across tiers it picks a key per masked table (single-column primary key, else an untagged id-like column such as `customer_id`), proves it unique, non-null and unmasked, and saves the proven keys as `verify_key_columns` after a pass. [Details and overrides](../../docs/effective-access-verification.md#how-genierails-picks-the-row-pairing-key).
+- Dev keeps business access after rehearse; the masks protect the data either way.
+
+**`make promote-to ENV=prod`**
+- Reads `promote_from` (default `dev`) and `catalog_map` from the target's `env.auto.tfvars`; `FROM=` and `CATALOG_MAP=` override them for one run. One map entry per catalog; the old `"dev=prod"` string form still works.
+- Copies the rules: masking functions, policies, the group-to-tier mapping and reviewed `treatment_overrides`. It leaves dev's tag assignments behind, because prod derives its own from its own data. It carries the proven row-pairing keys, renamed to prod's catalogs, and keeps prod's own agent ID, groups and warehouse.
+- Staging chain: set `promote_from = "dev"` in `envs/stg`, promote stg, then `promote_from = "stg"` in `envs/prod`.
+- `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=…` is the same promotion with explicit arguments every time.
+- Prod's service principal can be the dev one if both workspaces are in the same account and it's authorized in prod; use a separate one if your policy requires isolation.
+
+**`make release ENV=prod`**
+- Order: placeholder guard → read-only key check (refuses before the lock) → lock → live derive → validate → coverage check → promote into layers → key proof → read-only `audit-rulebook` → apply all layers → `verify-access`.
+- Derivation reuses the reviewed rules and never calls a model. Overrides merge strictest-wins, so they can strengthen but never weaken protection.
+- Drift or an audit error stops it before the apply: existing access stays, and no new or wider `SELECT` or Genie run access is granted.
+- If it fails after it started applying, only access that passed the coverage check can be applied; follow the printed steps.
+- To withdraw access, remove the groups (or set `acl_groups = []`) and run `make apply ENV=prod`. `business_access_enabled` is retired; setting it to `false` revokes nothing.
+- Evidence: `make evidence ENV=prod` writes a config-based report to `envs/prod/generated/evidence/`. For a live, signed snapshot: `GENIERAILS_EVIDENCE_INTEGRATION=1 GENIERAILS_EVIDENCE_APPROVED_BY="<you>" make evidence ENV=prod WAREHOUSE_ID=<id>`.
+
+**`make maintain ENV=prod`**
+- Runs audit-schema → derive-assignments → coverage-gate → validate-generated → audit-rulebook → apply-governance. It audits before applying, keeps `SELECT` for already-covered tables, never widens access past a passing check, and never changes the Genie agent.
+- When inputs are unchanged the apply is skipped, so it doesn't repair grants revoked outside Terraform.
+- Stops at `audit-schema`: a sensitive-looking column has no `class.*` tag. Review it in Catalog Explorer, then re-run.
+- Stops at `coverage-gate` or `audit-rulebook`: add the rule in dev, rehearse, `promote-to`, `release`.
+- A newly tagged column is a masking gap, not an access breach. For your most sensitive data, prefer "locked down until proven safe" over "open until tagged".
 
 ---
 
