@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -41,3 +42,39 @@ def test_read_only_targets_have_no_ci_refusal(cloud, target):
         timeout=10,
     )
     assert "applying targets cannot run with CI=true" not in proc.stdout + proc.stderr
+
+
+def test_workspace_guard_runs_env_validator_and_rejects_bad_tfvars(tmp_path):
+    cloud_root = tmp_path / "aws"
+    env_dir = cloud_root / "envs" / "dev"
+    env_dir.mkdir(parents=True)
+    (env_dir / "env.auto.tfvars").write_text('governance_mode = "future"\n')
+    proc = subprocess.run(
+        [
+            "make", "-f", str(ROOT / "aws" / "Makefile"),
+            "_guard-workspace-config", "ENV=dev",
+            f"CLOUD_ROOT={cloud_root}", f"ENV_DIR={env_dir}",
+            f"SHARED_ROOT={ROOT / 'shared'}",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert proc.returncode != 0
+    assert "env config validation: governance_mode must be legacy or deterministic" in proc.stderr
+
+
+def test_env_validator_cli_uses_nonzero_exit_and_stderr(tmp_path):
+    env_file = tmp_path / "env.auto.tfvars"
+    env_file.write_text('treatment_versions = { ssn = { partial = ["bad"] } }\n')
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "shared" / "scripts" / "validate_env_config.py"), str(env_file)],
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert proc.returncode == 1
+    assert proc.stdout == ""
+    assert "treatment_versions" in proc.stderr
+    assert "Traceback" not in proc.stderr
