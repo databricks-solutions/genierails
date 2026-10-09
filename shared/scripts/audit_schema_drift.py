@@ -502,6 +502,10 @@ def main(argv: list[str] | None = None) -> int:
             "all: run every check."
         ),
     )
+    parser.add_argument(
+        "--env-name", default="",
+        help="env name, so a class.* coverage gap prints its fix commands",
+    )
     args = parser.parse_args(argv)
 
     run_drift = args.mode in ("drift", "all")
@@ -579,6 +583,14 @@ def main(argv: list[str] | None = None) -> int:
             for t in uncovered:
                 fqn = f"{t['catalog']}.{t['schema']}.{t['table']}.{t['column']}"
                 print(f"    {fqn}  [{t['tag_key']}={t['tag_value']}]  -- {t['reason']}")
+            gaps = [
+                (f"{t['catalog']}.{t['schema']}.{t['table']}.{t['column']}", t["tag_key"].lower())
+                for t in uncovered if t["tag_key"].lower().startswith("class.")
+            ]
+            if gaps and args.env_name:
+                from scripts.coverage_fix import fix_lines
+
+                print("\n".join(fix_lines(args.env_name, env_dir, gaps)))
 
     if not drift_found:
         print("\n  No drift detected.")

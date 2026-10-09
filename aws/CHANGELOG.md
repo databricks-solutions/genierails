@@ -19,6 +19,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Coverage-gap messages**: when `release`, `maintain`, `coverage-gate` or
+  `audit-rulebook` stop on an unmapped `class.*` tag, they print both fixes
+  (reuse an existing treatment, or a new one) with exact commands and the
+  treatments that fit each column's type. `release` and `maintain` now report
+  rulebook drift as drift; they used to call every audit failure an error,
+  because a failed nested `make` always exits 2.
+- **`make scaffold-treatments ENV=prod`** keeps prod's promoted masks under their
+  deployed names when it adds a new treatment. It used to rebuild prod's
+  generated masks from assignments, which promotion leaves empty, so only the
+  new mask was left.
 - **Masking SQL quiet-plan hash** now uses the deployer's exact statement
   blocks and execution contexts. Upgrading changes the hash format once more,
   causing at most one drop-free `CREATE OR REPLACE` pass; reorder-only generated
@@ -61,6 +71,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Fixing a coverage gap prod found**: `make scaffold-treatments ENV=<env>
+  TREATMENT=<existing>` maps each unmapped `class.*` tag to an existing
+  treatment in `shared/treatment_config.json`. It refuses before writing if the
+  treatment doesn't exist or its masking function's input type doesn't fit the
+  column, or that derivation would replace for that column (an unreadable
+  type refuses too; `ALLOW_UNKNOWN_TYPE=1` overrides). It changes only
+  `class_labels`.
+  For a new kind of mask, `make materialize-treatment ENV=dev TREATMENT=<t>`
+  adds that treatment's mask policy and function for every governed dev catalog,
+  without tag assignments (never in prod or another promotion target), so
+  `rehearse` → `promote-to` → `release` carries it
+  to prod. No matching dev column is needed and no rules are copied by hand.
 - **`genie_only = true` minimal-privilege SP** (`make test-genie-only`): Reduced
   the required SP role from Workspace Admin to **workspace USER + SQL entitlement**.
   The integration test creates a dedicated SP with no admin roles, grants it

@@ -476,8 +476,13 @@ def validate_coverage_gate(
     result: ValidationResult,
     ddl_columns: list[str] | None = None,
     exposure: dict | None = None,
+    env_name: str = "",
+    env_dir: Path | None = None,
 ) -> None:
     """Block every classification/treatment coverage gap in generated config.
+
+    With ``env_name`` and ``env_dir``, a gap error also prints how to fix it
+    (scripts/coverage_fix.py) with exact commands for that env.
 
     When ``ddl_columns`` is supplied, additionally warn about sensitive-looking
     columns that carry no sensitivity tag and no treatment. With ``exposure``
@@ -570,9 +575,27 @@ def validate_coverage_gate(
         ("treatments missing a masking function", sorted(missing_functions)),
         ("Unity Catalog policy quota exceeded", policy_quota),
     ]
+    fixes: dict[str, list[str]] = {}
+    if env_name and env_dir is not None and (unmapped or missing_policies):
+        from scripts.coverage_fix import fix_lines, materialize_lines
+
+        if unmapped:
+            fixes["detected tags with no mapping/rule"] = fix_lines(
+                env_name, env_dir, unmapped, config=treatment_cfg,
+            )
+        missing_treatments = sorted({
+            item.split(" ", 1)[0] for item in missing_policies if "; used by " in item
+        })
+        if missing_treatments:
+            fixes["treatments missing a column-mask policy"] = materialize_lines(
+                env_name, env_dir, missing_treatments,
+            )
     for title, items in groups:
         if items:
-            result.error(f"COVERAGE CHECK — {title}:\n    - " + "\n    - ".join(items))
+            result.error(
+                f"COVERAGE CHECK — {title}:\n    - " + "\n    - ".join(items)
+                + "".join("\n" + line for line in fixes.get(title, []))
+            )
     has_column_mask_policy = any(
         policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
         for policy in policies
@@ -1319,6 +1342,8 @@ def main():
              "detection with industry-specific identifier patterns. "
              "See shared/industries/.",
     )
+    parser.add_argument("--env-name", default="",
+                        help="With --coverage-gate: name the env so a gap prints its fix commands.")
     parser.add_argument("--summary-label", default="",
                         help="On a clean pass, print one labelled summary line instead of the full report.")
     parser.add_argument("--verbose", action="store_true",
@@ -1417,6 +1442,7 @@ def main():
         validate_coverage_gate(
             merged_cfg, sql_functions, tfvars_path.read_text(), result,
             ddl_columns=ddl_columns, exposure=exposure,
+            env_name=args.env_name, env_dir=tfvars_path.parent.parent,
         )
 
     result.print_report(args.summary_label, args.verbose)

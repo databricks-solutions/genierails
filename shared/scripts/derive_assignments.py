@@ -35,7 +35,28 @@ from treatment_derivation import (  # noqa: E402
     load_treatment_config,
 )
 from scripts.coverage_gate import write_refresh_record  # noqa: E402
+from scripts.coverage_fix import fix_lines, materialize_lines  # noqa: E402
 from scripts.footprint import FootprintError, resolve_footprint  # noqa: E402
+
+
+class UnmappedClassError(NativeClassificationRequiredError):
+    """Live class.* findings that no treatment rule maps (a coverage gap)."""
+
+    def __init__(self, gaps: list[tuple[str, str]]):
+        self.gaps = gaps
+        details = ", ".join(f"{column}={label}" for column, label in gaps)
+        super().__init__(f"Native classification contains unmapped class.* findings: {details}")
+
+
+class MissingMaskError(RuntimeError):
+    """Derived treatments whose promoted rules have no mask in that catalog."""
+
+    def __init__(self, missing: list[str], treatments: list[str]):
+        self.treatments = treatments
+        super().__init__(
+            "Promoted rules have no matching column-mask policy for derived treatment(s): "
+            + ", ".join(missing)
+        )
 
 
 def _retained_promoted_assignments(assignments: list[dict], config) -> list[dict]:
@@ -65,7 +86,7 @@ def _assert_promoted_masks_cover(assignments: list[dict], promoted: dict, tag_ke
         for value in pattern.findall(policy.get("match_condition", "") or ""):
             covered.add((catalog, value))
 
-    missing = []
+    missing, treatments = [], set()
     for item in assignments:
         if item.get("entity_type") != "columns" or item.get("tag_key") != tag_key:
             continue
@@ -73,11 +94,9 @@ def _assert_promoted_masks_cover(assignments: list[dict], promoted: dict, tag_ke
         key = (catalog, item.get("tag_value", ""))
         if key not in covered:
             missing.append(f"{item.get('entity_name')} ({tag_key}={key[1]}, catalog={catalog})")
+            treatments.add(key[1])
     if missing:
-        raise RuntimeError(
-            "Promoted rules have no matching column-mask policy for derived treatment(s): "
-            + ", ".join(missing)
-        )
+        raise MissingMaskError(missing, sorted(treatments))
 
 
 def refresh_fetched_ddl(table_refs: list[str], runtime: dict, footprint: list[dict], ddl_out: Path) -> None:
@@ -167,10 +186,7 @@ def derive_assignments(
     config = load_treatment_config()
     unmapped = native.unmapped_columns(sorted(native.classified_columns()))
     if unmapped:
-        details = ", ".join(f"{column}=class.{semantic}" for column, semantic in unmapped)
-        raise NativeClassificationRequiredError(
-            f"Native classification contains unmapped class.* findings: {details}"
-        )
+        raise UnmappedClassError([(column, f"class.{semantic}") for column, semantic in unmapped])
     native_assignments = [
         finding.as_assignment()
         for finding in native.findings_for(sorted(native.classified_columns()))
@@ -249,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ddl-only", action="store_true",
                         help="refresh only the live DDL (envs without native classification); "
                              "tag_assignments are left as make generate wrote them")
+    parser.add_argument("--env-name", default="",
+                        help="env name, so a coverage gap prints its fix commands")
     args = parser.parse_args(argv)
     if args.ddl_only and not args.write_ddl:
         parser.error("--ddl-only requires --write-ddl")
@@ -272,6 +290,12 @@ def main(argv: list[str] | None = None) -> int:
             )
     except (RuntimeError, NativeClassificationRequiredError, FootprintError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        env_dir = Path(args.config).resolve().parent.parent
+        if isinstance(exc, UnmappedClassError) and args.env_name:
+            print("\n".join(fix_lines(args.env_name, env_dir, exc.gaps)), file=sys.stderr)
+        elif isinstance(exc, MissingMaskError) and args.env_name:
+            print("\n".join(materialize_lines(args.env_name, env_dir, exc.treatments)),
+                  file=sys.stderr)
         return 1
     print(message)
     return 0
