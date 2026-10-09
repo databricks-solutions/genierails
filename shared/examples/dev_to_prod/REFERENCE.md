@@ -127,6 +127,22 @@ What each walkthrough step does, for when you need more than the [walkthrough](R
 
 ---
 
+## If something stops
+
+Every command prints what to do when it stops. The common cases:
+
+| Message | What to do |
+|---|---|
+| No `class.*` tags yet | Finish the Catalog Explorer review and auto-tagging, wait, re-run |
+| Coverage check failed / rulebook drift | See "Fixing a coverage gap found in prod" above |
+| No provable row-pairing key for a table | Set `verify_key_columns = { "<cat.sch.tbl>" = "<column>" }` ([how keys are picked](../../docs/effective-access-verification.md#how-genierails-picks-the-row-pairing-key)) |
+| Genie agent ID file missing | Follow the printed recovery steps; never re-create the agent by hand |
+| Env is locked | Another `release`/`maintain` is running; wait for it |
+
+To change who has access in prod, edit `envs/prod/env.auto.tfvars`, commit it, and let your deployment pipeline apply it. Don't change access by hand in the UI.
+
+---
+
 ## Glossary
 
 - **access tier** — a group of users who should see data at the same level (e.g. full / masked / least). You map one IdP group to each tier.

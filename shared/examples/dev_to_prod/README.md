@@ -102,17 +102,3 @@ make maintain ENV=prod      # schedule it (cron or CI)
 ```
 It masks newly tagged columns, never grants access past a passing coverage check, and never changes the Genie agent. If it stops, it prints what to do: usually review a new detection in Catalog Explorer, or add a missing rule in dev and re-promote.
 
-## If something stops
-
-| Message | What to do |
-|---|---|
-| No `class.*` tags yet | Finish the Catalog Explorer review and auto-tagging, wait, re-run |
-| Coverage check failed / rulebook drift | See "If it stops on coverage or drift" under Prod step 3 |
-| No provable row-pairing key for a table | Set `verify_key_columns = { "<cat.sch.tbl>" = "<column>" }` ([how keys are picked](../../docs/effective-access-verification.md#how-genierails-picks-the-row-pairing-key)) |
-| Genie agent ID file missing | Follow the printed recovery steps; never re-create the agent by hand |
-| Env is locked | Another `release`/`maintain` is running; wait for it |
-
-To change who has access in prod, edit `envs/prod/env.auto.tfvars`, commit it, and let your deployment pipeline apply it. Don't change access by hand in the UI.
-
-<a id="reference--commands-concepts-and-glossary"></a>
-**More:** [REFERENCE.md](REFERENCE.md) (every command, what each step does, how it works, glossary) · [SAMPLE_ENV.md](SAMPLE_ENV.md) · [Import an existing agent](../../docs/import-genie-agent-from-ui.md)
