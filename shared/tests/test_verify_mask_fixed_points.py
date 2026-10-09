@@ -118,7 +118,7 @@ def test_only_fixed_points_prove_nothing():
 
 def _function_problem(**overrides):
     args = dict(routine_body="SQL", external_language=None, is_deterministic="true",
-                sql_data_access="CONTAINS_SQL", definition=YEAR_BODY, parameters=1)
+                sql_data_access="CONTAINS_SQL", definition=YEAR_BODY, parameters=["dt"])
     args.update(overrides)
     return fixed_point_function_problem(**args)
 
@@ -130,20 +130,37 @@ def test_the_year_mask_is_eligible():
 @pytest.mark.parametrize("overrides, message", [
     ({"routine_body": "EXTERNAL", "external_language": "PYTHON"}, "not a SQL function"),
     ({"is_deterministic": "false"}, "not declared deterministic"),
-    ({"sql_data_access": "READS_SQL_DATA"}, "reads or modifies data"),
-    ({"parameters": 2}, "takes 2 arguments"),
+    ({"is_deterministic": None}, "not declared deterministic"),
+    ({"is_deterministic": "MAYBE"}, "not declared deterministic"),
+    ({"sql_data_access": "READS_SQL_DATA"}, "not NO_SQL or CONTAINS_SQL"),
+    ({"sql_data_access": None}, "not NO_SQL or CONTAINS_SQL"),
+    ({"sql_data_access": "UNKNOWN"}, "not NO_SQL or CONTAINS_SQL"),
+    ({"parameters": ["dt", "other"]}, "takes 2 arguments"),
+    ({"parameters": []}, "takes 0 arguments"),
+    ({"parameters": ["`dt`"]}, "not a plain identifier"),
     ({"definition": None}, "could not be read"),
     ({"definition": "CASE WHEN dt IS NULL THEN 'open"}, "could not be parsed"),
     ({"definition": "CASE WHEN is_account_group_member('admins') THEN dt ELSE MAKE_DATE(YEAR(dt), 1, 1) END"},
-     "depends on the caller"),
-    ({"definition": "CASE WHEN current_user() = 'a' THEN dt ELSE dt END"}, "depends on the caller"),
-    ({"definition": "IF(is_member('x'), dt, NULL)"}, "depends on the caller"),
-    ({"definition": "IF(session_user = 'x', dt, NULL)"}, "depends on the caller"),
-    ({"definition": "IF(current_timestamp() > TIMESTAMP'2030-01-01', dt, NULL)"}, "depends on the caller"),
-    ({"definition": "IF(rand() > 0.5, dt, NULL)"}, "depends on the caller"),
-    ({"definition": "cat.sch.other_mask(dt)"}, "calls another (qualified) function"),
-    ({"definition": "my_udf(dt)"}, "not a known caller-independent builtin"),
-    ({"definition": "(SELECT max(d) FROM t)"}, "depends on the caller"),
+     "calls is_account_group_member()"),
+    ({"definition": "CASE WHEN current_user() = 'a' THEN dt ELSE dt END"}, "calls current_user()"),
+    ({"definition": "IF(is_member('x'), dt, NULL)"}, "calls is_member()"),
+    ({"definition": "IF(session_user = 'x', dt, NULL)"}, "refers to session_user"),
+    ({"definition": "IF(current_user = 'x', dt, NULL)"}, "refers to current_user"),
+    ({"definition": "IF(current_timestamp() > TIMESTAMP'2030-01-01', dt, NULL)"}, "calls current_timestamp()"),
+    ({"definition": "IF(rand() > 0, dt, NULL)"}, "calls rand()"),
+    ({"definition": "cat.sch.other_mask(dt)"}, "qualified name"),
+    ({"definition": "my_udf(dt)"}, "calls my_udf()"),
+    ({"definition": "(SELECT max(d) FROM t)"}, "refers to select"),
+    ({"definition": "IF(dt = other_col, dt, NULL)"}, "refers to other_col"),
+    ({"definition": 'IF(dt = "x", dt, NULL)'}, "can't classify"),
+    ({"definition": "ROUND(dt, 1.5)"}, "decimal literal"),
+    # Backtick-quoted identifiers are never classified (Codex's repro and friends).
+    ({"definition": "CASE WHEN `current_user`() = 'admin' AND month(dt)=3 THEN dt ELSE MAKE_DATE(YEAR(dt),1,1) END"},
+     "quoted identifier (`current_user`)"),
+    ({"definition": "IF(`is_member`('g'), dt, NULL)"}, "quoted identifier (`is_member`)"),
+    ({"definition": "`cat`.`schema`.`udf`(dt)"}, "quoted identifier (`cat`)"),
+    ({"definition": "`year`(dt)"}, "quoted identifier (`year`)"),          # harmless, refused anyway
+    ({"definition": "MAKE_DATE(YEAR(`dt`), 1, 1)"}, "quoted identifier (`dt`)"),
 ])
 def test_anything_else_keeps_the_strict_rule(overrides, message):
     assert message in _function_problem(**overrides)
@@ -248,7 +265,7 @@ class MaskingWarehouse(FakeWarehouse):
             return [list(self.routine)] if self.routine else []
         if "FROM system.information_schema.parameters" in sql:
             self.statements.append((tier, sql, dict(params)))
-            return [[str(self.parameters)]]
+            return [["dt"]] + [[f"extra{i}"] for i in range(1, self.parameters)]
         m = re.fullmatch(r"SELECT `(\w+)` FROM (\S+) WHERE `(\w+)` IN \(([^)]*)\) "
                          r"AND \((\S+)\(`(\w+)`\) <=> `\w+`\)", sql)
         if not m:
@@ -305,6 +322,32 @@ def test_live_caller_sensitive_mask_is_not_a_pass(live, tmp_path):
     [result] = _verify(tmp_path, _check())
     assert result.status == FAIL and "1 row(s) leaked" in result.detail
     assert not _fixed_point_queries(wh)
+
+
+def test_live_codex_backtick_repro_is_not_a_pass(live, tmp_path):
+    # `current_user`() slipped past the plain-identifier call check: the admin
+    # sees March dates unchanged, and they are raw for the tier too (one of 25).
+    rows = [{"id": f"KEY-{i:04d}", "dob": f"{1950 + i}-0{4 + i % 6}-1{i % 9}"} for i in range(25)]
+    rows[5]["dob"] = "1955-03-15"  # the one March birth date
+    march = lambda v: v if v and v[5:7] == "03" else _year(v)  # noqa: E731
+    wh = live(rows, tier_mask=march, function=march,
+              routine=("SQL", None, "true", "CONTAINS_SQL",
+                       "CASE WHEN `current_user`() = 'admin' AND month(dt)=3 THEN dt "
+                       "ELSE MAKE_DATE(YEAR(dt),1,1) END"))
+    [result] = _verify(tmp_path, _check())
+    assert result.status == FAIL and "1 row(s) leaked" in result.detail
+    assert not _fixed_point_queries(wh)
+
+
+@pytest.mark.parametrize("routine", [
+    ("SQL", None, None, "CONTAINS_SQL", YEAR_BODY),
+    ("SQL", None, "true", None, YEAR_BODY),
+    ("SQL", None, "true", "UNKNOWN", YEAR_BODY),
+])
+def test_live_unknown_routine_metadata_is_strict(live, tmp_path, routine):
+    wh = live(routine=routine)
+    [result] = _verify(tmp_path, _check())
+    assert result.status == FAIL and not _fixed_point_queries(wh)
 
 
 def test_live_a_config_live_function_mismatch_is_strict(live, tmp_path):

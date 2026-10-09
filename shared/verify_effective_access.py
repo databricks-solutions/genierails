@@ -395,53 +395,76 @@ FIXED_POINT_SAFE_CALLS = frozenset({
     "substring_index", "to_date", "transform", "translate", "trim", "trunc", "try_cast", "ucase",
     "upper", "weekofyear", "xxhash64", "year",
 })
-# Words that may precede "(" without being a call.
-_SQL_WORDS_BEFORE_PAREN = frozenset({"and", "or", "not", "in", "when", "then", "else", "case",
-                                     "is", "like", "rlike", "ilike", "between", "return"})
-_CALLER_OR_SESSION_WORDS = frozenset({"user", "session_user", "current_user", "current_role",
-                                      "is_member", "is_account_group_member", "is_role_member",
-                                      "now", "rand", "randn", "random", "uuid", "shuffle", "secret",
-                                      "select", "from", "localtimestamp", "input_file_name"})
+# Every token of an eligible mask body must be one of these (or the function's
+# single parameter, or an allowlisted builtin in call position). Anything else
+# (a backtick-quoted or double-quoted identifier, a dot, an unknown word) makes
+# the function ineligible: the strict rule applies.
+_FIXED_POINT_KEYWORDS = frozenset({
+    "case", "when", "then", "else", "end", "is", "not", "null", "and", "or", "in", "between",
+    "like", "rlike", "ilike", "true", "false", "as",
+    "string", "int", "integer", "bigint", "smallint", "tinyint", "double", "float", "decimal",
+    "date", "timestamp", "timestamp_ntz", "boolean", "binary",
+})
+_FIXED_POINT_OPERATORS = frozenset("(),+-*/%=<>!|&^~:")
+# Only the routine metadata a pure SQL scalar function reports.
+_FIXED_POINT_DATA_ACCESS = frozenset({"NO_SQL", "CONTAINS_SQL"})
+_FIXED_POINT_DETERMINISTIC = frozenset({"YES", "TRUE"})
 
 
 def fixed_point_function_problem(
     *, routine_body: Any, external_language: Any, is_deterministic: Any, sql_data_access: Any,
-    definition: Any, parameters: int,
+    definition: Any, parameters: Sequence[Any],
 ) -> str:
     """Why a mask function's fixed points can't be trusted ("" when they can).
 
-    Pure. The function must be a deterministic, one-argument SQL function
-    whose body reads no data and calls only FIXED_POINT_SAFE_CALLS: a body
-    that depends on the caller (current_user, is_member, ...), the session or
-    time, or calls a UDF could be the identity for the admin but not for a
-    tier, so its "fixed points" would hide a leak.
+    Pure and allowlist-only. The function must be a SQL function declared
+    deterministic that reads no data (NO_SQL / CONTAINS_SQL), with exactly
+    one parameter, and every token of its body must be a single-quoted string
+    or a number literal, an operator, a keyword or type name, that parameter,
+    or an allowlisted builtin called by its plain name. A body that could
+    depend on the caller, the session or time, or call a UDF, could be the
+    identity for the admin but not for a tier, so its "fixed points" could
+    hide a leak; anything not positively classified counts as that.
     """
     from sql_tokenizer import SqlTokenizeError, sql_tokens
 
-    if str(routine_body or "").upper() != "SQL" or str(external_language or "").upper() not in ("", "SQL", "NONE"):
+    if str(routine_body or "").upper() != "SQL" or str(external_language or "").upper() not in ("", "SQL"):
         return f"the mask function is not a SQL function (body {routine_body!r}, language {external_language!r})"
-    if str(is_deterministic or "").lower() not in ("true", "yes"):
-        return "the mask function is not declared deterministic"
-    if str(sql_data_access or "").upper() in ("READS_SQL_DATA", "MODIFIES_SQL_DATA"):
-        return "the mask function reads or modifies data"
-    if parameters != 1:
-        return f"the mask function takes {parameters} arguments, not exactly one"
+    if str(is_deterministic or "").upper() not in _FIXED_POINT_DETERMINISTIC:
+        return f"the mask function is not declared deterministic ({is_deterministic!r})"
+    if str(sql_data_access or "").upper() not in _FIXED_POINT_DATA_ACCESS:
+        return f"the mask function's data access is {sql_data_access!r}, not NO_SQL or CONTAINS_SQL"
+    if len(parameters) != 1:
+        return f"the mask function takes {len(parameters)} arguments, not exactly one"
+    parameter = str(parameters[0] or "").strip().lower()
+    if not re.fullmatch(r"[a-z_][a-z0-9_]*", parameter):
+        return f"the mask function's parameter name {parameters[0]!r} is not a plain identifier"
     if not isinstance(definition, str) or not definition.strip():
         return "the mask function's definition could not be read"
     try:
         tokens = sql_tokens(definition)
     except SqlTokenizeError as exc:
         return f"the mask function's definition could not be parsed ({exc})"
+    # Anywhere in the body, not only in call position.
+    quoted = next((t for t in tokens if t.startswith("`")), None)
+    if quoted:
+        return f"the mask function uses a quoted identifier ({quoted})"
+    if "." in tokens:
+        return "the mask function uses a qualified name or a decimal literal"
     for i, token in enumerate(tokens):
-        if token.startswith("$"):
-            return "the mask function's definition embeds another language"
-        if token in _CALLER_OR_SESSION_WORDS or token.startswith(("current_", "session_", "is_")):
-            return f"the mask function depends on the caller, session or time ({token})"
-        if i + 1 < len(tokens) and tokens[i + 1] == "(" and re.fullmatch(r"[a-z_][a-z0-9_]*", token):
-            if i > 0 and tokens[i - 1] == ".":
-                return "the mask function calls another (qualified) function"
-            if token not in _SQL_WORDS_BEFORE_PAREN and token not in FIXED_POINT_SAFE_CALLS:
-                return f"the mask function calls {token}(), which is not a known caller-independent builtin"
+        calls = i + 1 < len(tokens) and tokens[i + 1] == "("
+        if token.startswith("'") or re.fullmatch(r"[0-9][0-9a-z]*", token) or token in _FIXED_POINT_OPERATORS:
+            continue
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", token):
+            return f"the mask function's definition has a token the verifier can't classify ({token[:20]})"
+        if calls:
+            if token in FIXED_POINT_SAFE_CALLS or token in ("and", "or", "not", "in", "when", "then", "else",
+                                                            "case", "is", "between"):
+                continue
+            return f"the mask function calls {token}(), which is not a known caller-independent builtin"
+        if token == parameter or token in _FIXED_POINT_KEYWORDS:
+            continue
+        return f"the mask function refers to {token}, which is not its parameter, a keyword or a literal"
     return ""
 
 
@@ -1814,13 +1837,13 @@ class EffectiveAccessVerifier:
         if len(routines) != 1:
             return f"{len(routines)} routines named {check.mask_function}, not exactly one"
         params = self.run_query(
-            ws, "SELECT COUNT(*) FROM system.information_schema.parameters WHERE lower(specific_catalog) = :c "
+            ws, "SELECT parameter_name FROM system.information_schema.parameters WHERE lower(specific_catalog) = :c "
             "AND lower(specific_schema) = :s AND lower(specific_name) = :n", fn)
         body, language, deterministic, data_access, definition = routines[0]
         return fixed_point_function_problem(
             routine_body=body, external_language=language, is_deterministic=deterministic,
             sql_data_access=data_access, definition=definition,
-            parameters=int(params[0][0] or 0) if params else 0)
+            parameters=[row[0] for row in params])
 
     def fixed_point_keys(
         self, principal: TestPrincipal, check: ColumnMaskCheck, keys: Sequence[Any],
