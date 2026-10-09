@@ -43,9 +43,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import re
 import secrets
 import sys
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -1005,13 +1007,14 @@ def evaluate_tiered_column_mask_check(
     if pairing_problem:
         return CheckResult("column-mask", target, INCONCLUSIVE, pairing_problem,
                            {"key_column": check.key_column})
-    expected = {tier: dict(_row_pairs(expected_by_tier.get(tier)))
-                for tier in ("raw", "partial", "full")}
-    for tier, rows in expected.items():
-        problem = sample_key_problem(check, f"expected-{tier}", list(rows.items()))
+    expected_rows = {tier: _row_pairs(expected_by_tier.get(tier))
+                     for tier in ("raw", "partial", "full")}
+    for tier, rows in expected_rows.items():
+        problem = sample_key_problem(check, f"expected-{tier}", rows)
         if problem:
             return CheckResult("column-mask", target, INCONCLUSIVE, problem,
                                {"key_column": check.key_column})
+    expected = {tier: dict(rows) for tier, rows in expected_rows.items()}
     used_tiers = set(tiers.values())
     common = set.intersection(*(set(expected[tier]) for tier in used_tiers)) if used_tiers else set()
     # Only tier pairs whose expected results differ need separate proof.  Some
@@ -1031,6 +1034,14 @@ def evaluate_tiered_column_mask_check(
             )
             if differs:
                 required_pairs.append((left, right))
+            elif ({left, right} == {"partial", "full"}
+                  and check.partial_function.lower() != check.full_function.lower()):
+                return CheckResult(
+                    "column-mask", target, INCONCLUSIVE,
+                    ("partial and full use different expected functions but their outputs "
+                     "cannot be distinguished on the sample"),
+                    {"sampled_rows": len(common)},
+                )
     masked_tiers = used_tiers - {"raw"}
     raw_pairs_proven = all(
         any(_normalize_exact_value(expected["raw"][key])
@@ -1052,11 +1063,12 @@ def evaluate_tiered_column_mask_check(
     for principal, tier in tiers.items():
         if principal in accepted:
             continue
-        actual = dict(_row_pairs(values_by_principal.get(principal)))
-        problem = sample_key_problem(check, principal, list(actual.items()))
+        actual_rows = _row_pairs(values_by_principal.get(principal))
+        problem = sample_key_problem(check, principal, actual_rows)
         if problem:
             return CheckResult("column-mask", target, INCONCLUSIVE, problem,
                                {"key_column": check.key_column})
+        actual = dict(actual_rows)
         wanted = expected.get(tier, {})
         actual_keys = set(actual)
         own_distinguishing_key = all(
@@ -2270,6 +2282,17 @@ def verify_effective_access_live(
     if spec.is_empty():
         return EffectiveAccessReport(results=blocking)
 
+    old_signal_handlers: dict[int, Any] = {}
+    if threading.current_thread() is threading.main_thread():
+        def interrupt_for_cleanup(signum, _frame):
+            raise KeyboardInterrupt(f"received {signal.Signals(signum).name}; cleaning up verification access")
+
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            old_signal_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, interrupt_for_cleanup)
+
+    report: Optional[EffectiveAccessReport] = None
+    cleanup_error: Optional[BaseException] = None
     try:
         for tier in sorted(spec.principals):
             print(f"  Provisioning test principal for tier: {tier}")
@@ -2367,10 +2390,10 @@ def verify_effective_access_live(
                         key_proofs[proof_sig] = verifier.prove_key_unique(admin_principal, check, keys)
                         if key_proofs[proof_sig]:
                             missing = [
-                                t for t in tiers if t != admin_tier and samples[t]
+                                t for t in tiers if t != admin_tier and samples.get(t)
                                 and verifier.count_rows_with_keys(
-                                    admin_principal, check, [k for k, _ in samples[t]],
-                                ) < len(samples[t])
+                                    admin_principal, check, [k for k, _ in samples.get(t, [])],
+                                ) < len(samples.get(t, []))
                             ]
                             if missing:
                                 key_proofs[proof_sig] = (
@@ -2484,12 +2507,48 @@ def verify_effective_access_live(
             try:
                 verifier.grant_outsider_table_access(outsider, outsider_tables, revoke=True)
             except BaseException as exc:
-                print(f"  WARN: could not revoke temporary outsider table access: {exc}")
+                cleanup_error = exc
+                privileges = ", ".join(f"USE CATALOG/USE SCHEMA/SELECT on {table}"
+                                       for table in outsider_tables)
+                grantee = quote_identifier(outsider.application_id)
+                catalogs = sorted({table_parts(table)[0] for table in outsider_tables})
+                schemas = sorted({table_parts(table)[:2] for table in outsider_tables})
+                manual_revokes = [
+                    f"REVOKE SELECT ON TABLE {quote_table(table)} FROM {grantee}"
+                    for table in outsider_tables
+                ]
+                manual_revokes.extend(
+                    f"REVOKE USE SCHEMA ON SCHEMA {quote_identifier(catalog)}."
+                    f"{quote_identifier(schema)} FROM {grantee}"
+                    for catalog, schema in schemas
+                )
+                manual_revokes.extend(
+                    f"REVOKE USE CATALOG ON CATALOG {quote_identifier(catalog)} FROM {grantee}"
+                    for catalog in catalogs
+                )
+                detail = (
+                    f"temporary outsider access was not fully revoked for service principal "
+                    f"{outsider.application_id}: {privileges}. Remove it manually with REVOKE "
+                    f"statements before retrying: {'; '.join(manual_revokes)}. Cause: {exc}"
+                )
+                print(f"  ERROR: {detail}", file=sys.stderr)
+                if report is not None:
+                    report.results.append(CheckResult(
+                        "cleanup", outsider.application_id, FAIL, detail,
+                        {"principal": outsider.application_id,
+                         "tables_with_possible_access": outsider_tables},
+                    ))
         if not keep_principals:
             for tier, p in principals.items():
                 if tier == admin_tier:
                     continue
                 verifier.deprovision_principal(p)
+        for signum, handler in old_signal_handlers.items():
+            signal.signal(signum, handler)
+        if cleanup_error is not None and report is None:
+            raise RuntimeError(
+                f"verification cleanup failed after another error: {cleanup_error}"
+            ) from cleanup_error
 
 
 def pick_pairing_keys(
@@ -2744,11 +2803,6 @@ def load_spec_from_tfvars(
                          if ALL_USERS_GROUP in _as_list(p.get("to_principals"))), "")
             partial = next((_mask_function(p) for p in policies
                             if ALL_USERS_GROUP not in _as_list(p.get("to_principals"))), "")
-            # A two-tier config has no partial audience; using the full
-            # function here keeps the spec executable while the evaluator only
-            # assigns configured principals to raw/full.
-            if len(tiers) == 2 and not partial:
-                partial = full
             treatment = config_tags.get(f"{check.table}.{check.column}".lower(), "")
             expectations = [
                 (principal, access_for(f"{check.table}.{check.column}", treatment,
@@ -2757,6 +2811,12 @@ def load_spec_from_tfvars(
             ]
             expectations.append((DEFAULT_ADMIN_TIER, access_for(
                 f"{check.table}.{check.column}", treatment, DEFAULT_ADMIN_TIER, (), deployer=True)))
+            # Never-raw treatments (secrets, CVV, and equivalent overrides)
+            # may intentionally have only the all-users/full policy.  If the
+            # resolved spec has no partial audience, the full function is the
+            # correct executable stand-in regardless of tier count.
+            if not partial and not any(access == "partial" for _, access in expectations):
+                partial = full
             deterministic_checks.append(replace(
                 check, expected_tiers=tuple(dict(expectations).items()),
                 partial_function=partial, full_function=full))
@@ -2886,6 +2946,10 @@ def write_result_file(path: Optional[Path], report: EffectiveAccessReport, spec:
         "mask_keys_proven_by_table": dict(sorted(report.pairing_keys.items())),
         "row_filter_checks_passed": sum(
             1 for r in report.results if r.kind == "row-filter" and r.status == PASS),
+        "cleanup_failures": [
+            {"target": r.target, "detail": r.detail, "evidence": r.evidence}
+            for r in report.results if r.kind == "cleanup" and r.status == FAIL
+        ],
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")

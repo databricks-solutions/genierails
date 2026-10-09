@@ -22,7 +22,10 @@ def test_empty_legacy_config_is_valid():
 def test_raw_exempt_identities_must_be_verifiable_groups():
     assert errors(raw_exempt_principals=["etl_group"]) == []
     assert errors(raw_exempt_principals=["etl@example.com"])
-    assert errors(raw_exempt_principals=["12345678-1234-1234-1234-123456789abc"])
+    # Shape alone is not ambiguous: account groups may legitimately have a
+    # UUID/hex display name. Live verification resolves that exact group name;
+    # an application ID with no identically named group fails provisioning.
+    assert errors(raw_exempt_principals=["12345678-1234-1234-1234-123456789abc"]) == []
 
 
 def test_governance_mode_raw_exempt_principals_and_hash_fallback():

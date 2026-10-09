@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import pytest
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import classification_completeness as cc
@@ -76,3 +77,21 @@ def test_live_check_has_a_hard_wall_timeout(tmp_path, monkeypatch):
     with pytest.raises(TimeoutError, match="hard timeout"):
         cc.live_classified_columns(tmp_path, 0.01)
     assert time.monotonic() - started < 0.5
+
+
+def test_result_paging_deadline_raises_timeout_not_name_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "_load_hcl", lambda path: {
+        "databricks_workspace_host": "h", "databricks_client_id": "c",
+        "databricks_client_secret": "s", "sql_warehouse_id": "w"})
+    succeeded = "SUCCEEDED"
+    statement = SimpleNamespace(
+        status=SimpleNamespace(state=succeeded),
+        result=SimpleNamespace(data_array=[]),
+        manifest=SimpleNamespace(total_chunk_count=2), statement_id="id")
+    execution = SimpleNamespace(execute_statement=lambda **kwargs: statement)
+    monkeypatch.setitem(sys.modules, "databricks.sdk", SimpleNamespace(
+        WorkspaceClient=lambda **kwargs: SimpleNamespace(statement_execution=execution)))
+    monkeypatch.setitem(sys.modules, "databricks.sdk.service.sql", SimpleNamespace(
+        StatementState=SimpleNamespace(SUCCEEDED=succeeded, FAILED="f", CANCELED="c", CLOSED="x")))
+    with pytest.raises(TimeoutError, match="paging exceeded its deadline"):
+        cc._live_classified_columns_query(tmp_path, time.monotonic() - 1)

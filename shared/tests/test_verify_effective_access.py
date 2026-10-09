@@ -24,12 +24,14 @@ from verify_effective_access import (  # noqa: E402
     FAIL,
     INCONCLUSIVE,
     DEFAULT_ADMIN_TIER,
+    OUT_OF_TIER_PRINCIPAL,
     ColumnMaskCheck,
     RowFilterCheck,
     VerificationSpec,
     CheckResult,
     EffectiveAccessReport,
     EffectiveAccessVerifier,
+    KeyPick,
     TestPrincipal as VerificationPrincipal,
     parse_tag_conditions,
     resolve_columns_for_condition,
@@ -43,6 +45,7 @@ from verify_effective_access import (  # noqa: E402
     load_spec_from_tfvars,
     main,
     verify_effective_access_live,
+    write_result_file,
 )
 
 
@@ -73,7 +76,7 @@ def test_tiered_indistinguishable_sample_is_inconclusive():
 
 
 def test_tiered_identical_partial_and_full_outputs_can_pass():
-    check = _tiered_check()
+    check = replace(_tiered_check(), full_function=_tiered_check().partial_function)
     raw = [(key, f"value-{key}") for key in range(12)]
     redacted = [(key, "[REDACTED]") for key in range(12)]
     expected = {"raw": raw, "partial": redacted, "full": redacted}
@@ -82,6 +85,33 @@ def test_tiered_identical_partial_and_full_outputs_can_pass():
     assert result.status == PASS
     assert result.evidence["per_principal_compared"]["analyst"] == 12
     assert result.evidence["per_principal_compared"]["viewer"] == 12
+
+
+def test_tiered_different_functions_with_coinciding_sample_are_inconclusive():
+    check = _tiered_check()
+    raw = [(key, f"value-{key}") for key in range(12)]
+    same = [(key, "[REDACTED]") for key in range(12)]
+    actual = {"raw_group": raw, "analyst": same, "viewer": same}
+    result = evaluate_tiered_column_mask_check(
+        check, actual, {"raw": raw, "partial": same, "full": same})
+    assert result.status == INCONCLUSIVE
+    assert "different expected functions" in result.detail
+
+
+@pytest.mark.parametrize("duplicate_in", ["viewer", "expected-full"])
+def test_tiered_duplicate_keys_are_inconclusive_before_rows_are_collapsed(duplicate_in):
+    check = replace(_tiered_check(), full_function=_tiered_check().partial_function)
+    raw = [(key, f"value-{key}") for key in range(12)]
+    masked = [(key, "[R]") for key in range(12)]
+    expected = {"raw": raw, "partial": list(masked), "full": list(masked)}
+    actual = {"raw_group": raw, "analyst": masked, "viewer": list(masked)}
+    if duplicate_in == "viewer":
+        actual["viewer"] = masked[:3] + [(3, raw[3][1]), (3, "[R]")] + masked[4:]
+    else:
+        expected["full"] = masked + [(3, "[R]")]
+    result = evaluate_tiered_column_mask_check(check, actual, expected)
+    assert result.status == INCONCLUSIVE
+    assert "not unique" in result.detail
 
 
 def test_dual_tier_principal_gets_most_privileged_tier():
@@ -140,6 +170,30 @@ def test_tiered_all_moving_masked_principals_error_is_inconclusive():
     assert "no masked principal" in result.detail
 
 
+def test_moving_principal_permission_error_is_a_failure():
+    check = replace(_tiered_check(), moving_principals=("analyst",))
+    expected = {"raw": [(1, "raw")], "partial": [(1, "part")], "full": [(1, "full")]}
+    result = evaluate_tiered_column_mask_check(
+        check, {"raw_group": expected["raw"], "viewer": expected["full"]}, expected,
+        {"analyst": "PERMISSION_DENIED: SELECT"})
+    assert result.status == FAIL
+    assert "PERMISSION_DENIED" in result.detail
+
+
+def test_tiered_fixed_point_bound_is_inconclusive():
+    check = _tiered_check()
+    raw = [(key, f"value-{key}") for key in range(12)]
+    partial = raw[:11] + [(11, "masked")]
+    full = [(key, "[R]") for key in range(12)]
+    result = evaluate_tiered_column_mask_check(
+        check,
+        {"raw_group": raw, "analyst": partial, "viewer": full},
+        {"raw": raw, "partial": partial, "full": full},
+    )
+    assert result.status == INCONCLUSIVE
+    assert "too many sampled rows" in result.detail
+
+
 def test_declared_tier_must_match_overlapping_memberships():
     check = replace(_tiered_check(), expected_tiers=_tiered_check().expected_tiers + (("dual", "full"),))
     expected = {"raw": [(1, "alice@example.com")], "partial": [(1, "a***@example.com")],
@@ -195,6 +249,23 @@ tag_assignments = [{ entity_type = "columns", entity_name = "cat.sch.people.emai
     check = load_spec_from_tfvars(tfvars, env_file=env, key_column="id").column_masks[0]
     assert check.partial_function == check.full_function == "cat.gov.full_email"
     assert set(dict(check.expected_tiers).values()) == {"raw", "full"}
+
+
+def test_deterministic_three_tier_never_raw_spec_uses_full_for_unused_partial(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    tfvars.write_text('''fgac_policies = [{ name = "full", policy_type = "POLICY_TYPE_COLUMN_MASK",
+      to_principals = ["account users"], match_condition = "hasTagValue('gr_treatment', 'secret')",
+      function_catalog = "cat", function_schema = "gov", function_name = "redact" }]
+tag_assignments = [{ entity_type = "columns", entity_name = "cat.sch.people.api_key",
+  tag_key = "gr_treatment", tag_value = "secret" }]
+''')
+    env.write_text(
+        'governance_mode = "deterministic"\naccess_tier_groups = ["raw", "analyst", "viewer"]\n')
+    spec = load_spec_from_tfvars(tfvars, env_file=env, key_column="id")
+    check = spec.column_masks[0]
+    assert check.partial_function == check.full_function == "cat.gov.redact"
+    assert "partial" not in set(dict(check.expected_tiers).values())
 
 
 def test_cli_missing_promoted_tfvars_reports_prerequisite(tmp_path):
@@ -1091,6 +1162,142 @@ class TestTemporaryWarehouseAccess:
             )
 
         assert deleted == ["456"]
+
+
+class TestTieredLiveGrantLifecycle:
+    @staticmethod
+    def _run(monkeypatch, tmp_path, *, revoke_error=None, keep=False, sample_error=None, log=None):
+        log = [] if log is None else log
+        raw = {key: f"raw-{key}" for key in range(12)}
+        partial = {key: f"partial-{key}" for key in range(12)}
+        full = {key: "[R]" for key in range(12)}
+        values = {"raw": raw, "partial": partial, "full": full}
+
+        class FakeVerifier:
+            def __init__(self, auth, warehouse_id=""):
+                self.mask_config = None
+
+            def resolve_warehouse(self):
+                return "warehouse"
+
+            def provision_principal(self, tier, memberships=None):
+                log.append(("provision", tier))
+                return VerificationPrincipal(tier, f"test-{tier}", f"app-{tier}", "secret", tier)
+
+            def grant_warehouse_use(self, principal):
+                log.append(("warehouse", principal.tier))
+
+            def grant_outsider_table_access(self, principal, tables, *, revoke=False):
+                log.append(("revoke" if revoke else "grant", principal.tier, tuple(tables)))
+                if revoke and revoke_error:
+                    raise revoke_error
+
+            def deprovision_principal(self, principal):
+                log.append(("deprovision", principal.tier))
+
+            def key_mask_metadata(self, principal, check):
+                return []
+
+            def collect_column_values(self, principal, check, limit=25, keys=None, salt=None):
+                if sample_error and principal.tier == "analyst":
+                    raise sample_error
+                tier = dict(check.expected_tiers).get(principal.tier, "raw")
+                selected = list(keys) if keys is not None else list(raw)[:limit]
+                return [(key, values[tier][key]) for key in selected]
+
+            def prove_key_unique(self, principal, check, keys):
+                return ""
+
+            def count_rows_with_keys(self, principal, check, keys):
+                return len(keys)
+
+            def expected_tier_values(self, principal, check, keys):
+                return {tier: [(key, tier_values[key]) for key in keys]
+                        for tier, tier_values in values.items()}
+
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        monkeypatch.setenv("GENIERAILS_VERIFY_PROPAGATION_SLEEP", "0")
+        monkeypatch.setattr("verify_effective_access.load_auth", lambda path: {
+            "client_id": "admin", "client_secret": "secret"})
+        monkeypatch.setattr("verify_effective_access.EffectiveAccessVerifier", FakeVerifier)
+        monkeypatch.setattr(
+            "verify_effective_access.pick_pairing_keys",
+            lambda verifier, principal, checks, **kwargs: {
+                check.table.lower(): KeyPick(check.table, "id", "explicit") for check in checks},
+        )
+        check = ColumnMaskCheck(
+            table="cat.sch.people", column="email", key_column="id",
+            masked_principals=(), unmasked_principals=(),
+            expected_tiers=(("raw_group", "raw"), ("analyst", "partial"),
+                            ("viewer", "full"), (OUT_OF_TIER_PRINCIPAL, "full"),
+                            (DEFAULT_ADMIN_TIER, "raw")),
+            partial_function="cat.gov.partial", full_function="cat.gov.full")
+        spec = VerificationSpec(column_masks=[check], principal_memberships={
+            "raw_group": ("raw_group",), "analyst": ("analyst",),
+            "viewer": ("viewer",), OUT_OF_TIER_PRINCIPAL: ()})
+        report = verify_effective_access_live(
+            spec, tmp_path / "auth.auto.tfvars", keep_principals=keep)
+        return report, log, spec
+
+    @pytest.mark.parametrize("keep", [False, True])
+    def test_live_flow_grants_then_revokes_outsider_even_when_principal_is_kept(
+        self, monkeypatch, tmp_path, keep,
+    ):
+        report, log, _spec = self._run(monkeypatch, tmp_path, keep=keep)
+        assert report.passed
+        assert ("grant", OUT_OF_TIER_PRINCIPAL, ("cat.sch.people",)) in log
+        assert ("revoke", OUT_OF_TIER_PRINCIPAL, ("cat.sch.people",)) in log
+        assert log.index(("grant", OUT_OF_TIER_PRINCIPAL, ("cat.sch.people",))) < log.index(
+            ("revoke", OUT_OF_TIER_PRINCIPAL, ("cat.sch.people",)))
+        assert (("deprovision", OUT_OF_TIER_PRINCIPAL) in log) is (not keep)
+
+    def test_failed_revoke_is_reported_and_written_as_failure(self, monkeypatch, tmp_path, capsys):
+        report, _log, spec = self._run(
+            monkeypatch, tmp_path, keep=True, revoke_error=RuntimeError("revoke denied"))
+        assert not report.passed
+        cleanup = next(result for result in report.results if result.kind == "cleanup")
+        assert cleanup.status == FAIL
+        assert "app-__out_of_tier__" in cleanup.detail
+        assert "REVOKE" in cleanup.detail and "cat.sch.people" in cleanup.detail
+        assert "ERROR" in capsys.readouterr().err
+        result_file = tmp_path / "result.json"
+        write_result_file(result_file, report, spec)
+        payload = __import__("json").loads(result_file.read_text())
+        assert payload["passed"] is False
+        assert payload["cleanup_failures"][0]["target"] == "app-__out_of_tier__"
+        assert "REVOKE SELECT" in payload["cleanup_failures"][0]["detail"]
+
+    def test_exception_and_keyboard_interrupt_still_revoke(self, monkeypatch, tmp_path):
+        error_log = []
+        report, _unused, _spec = self._run(
+            monkeypatch, tmp_path, sample_error=RuntimeError("query failed"), log=error_log)
+        assert not report.passed
+        assert ("revoke", OUT_OF_TIER_PRINCIPAL, ("cat.sch.people",)) in error_log
+
+        interrupt_log = []
+        with pytest.raises(KeyboardInterrupt):
+            self._run(
+                monkeypatch, tmp_path, sample_error=KeyboardInterrupt("cancelled"),
+                log=interrupt_log)
+        assert ("revoke", OUT_OF_TIER_PRINCIPAL, ("cat.sch.people",)) in interrupt_log
+
+    def test_sigterm_and_sighup_handlers_raise_for_finally_cleanup(self, monkeypatch, tmp_path):
+        installed = []
+        real_getsignal = __import__("signal").getsignal
+
+        def remember(signum, handler):
+            installed.append((signum, handler))
+
+        monkeypatch.setattr("verify_effective_access.signal.getsignal", real_getsignal)
+        monkeypatch.setattr("verify_effective_access.signal.signal", remember)
+        report, _log, _spec = self._run(monkeypatch, tmp_path)
+        assert report.passed
+        import signal as signal_module
+        for signum in (signal_module.SIGTERM, signal_module.SIGHUP):
+            handler = next(handler for installed_signum, handler in installed
+                           if installed_signum == signum and callable(handler))
+            with pytest.raises(KeyboardInterrupt, match="cleaning up"):
+                handler(signum, None)
 
 
 # ---------------------------------------------------------------------------

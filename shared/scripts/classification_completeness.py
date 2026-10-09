@@ -139,7 +139,7 @@ def _live_classified_columns_query(env_dir: Path, deadline: float) -> set[str]:
     for chunk_index in range(1, chunk_count):
         if time.monotonic() >= deadline:
             raise TimeoutError(
-                f"production classification result paging exceeded {timeout_seconds} seconds")
+                "production classification result paging exceeded its deadline")
         chunk = client.statement_execution.get_statement_result_chunk_n(
             statement.statement_id, chunk_index)
         rows.extend((chunk.data_array or []) if chunk else [])
