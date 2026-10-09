@@ -28,15 +28,17 @@ vi envs/dev/env.auto.tfvars
 # Optional: replace envs/account/auth.auto.tfvars or
 # envs/dev/data_access/auth.auto.tfvars if shared layers need different credentials.
 
-# In envs/dev/env.auto.tfvars, opt into native classification:
-#   enable_classification = true      # turns on scanning
-#   enable_auto_tagging   = false     # default; flip to true after reviewing detections
+# In envs/dev/env.auto.tfvars, keep native classification enabled:
+#   enable_classification = true
+# Omit enable_auto_tagging for UI-managed auto-tagging. For CI only, explicitly set true.
 # The classification footprint is the union of top-level uc_tables and each
 # genie_spaces[*].uc_tables entry.
-make enable-classification ENV=dev   # or enable it in the Databricks UI (recommended)
-# Scanning populates system.data_classification.results (review detections in the UI).
-# class.* column tags are written only once enable_auto_tagging = true and you re-apply;
-# then poll system.information_schema.column_tags until tags land for the footprint.
+# In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.
+# When the scan finishes, review detections, exclude false positives, enable auto-tagging,
+# and wait for class.* tags.
+# Prefer a script? make enable-classification ENV=dev turns it on (review stays in the UI).
+# class.* column tags are written after auto-tagging is enabled in the UI (or after setting
+# enable_auto_tagging = true and rerunning the optional script).
 
 # Generation consumes your existing IdP-synced groups (setup scaffolds
 # manage_groups = false); pass one group per access tier, strictest first.
@@ -62,8 +64,8 @@ make rehearse   # apply (masks first; grants only if coverage passes), then prov
 ## What happens end-to-end
 
 1. `make setup` creates `envs/account/`, `envs/dev/data_access/`, and `envs/dev/`
-2. `make enable-classification` applies only the UC catalog classification configuration (scanning); auto-tagging is opt-in via `enable_auto_tagging` (default off). It does not need generated ABAC or masking files
-3. You review detections, set `enable_auto_tagging = true`, re-apply, then wait for the scan to write `class.*` tags
+2. In Catalog Explorer, open the catalog's **Details** tab → **Data classification** and turn it on
+3. When the scan finishes, review detections and exclude false positives, enable auto-tagging in the UI, then wait for `class.*` tags. Prefer a script? `make enable-classification ENV=dev` turns classification on; review remains in the UI and an omitted `enable_auto_tagging` preserves its setting
 4. `make generate` fetches DDLs and native classification, then writes a draft into `envs/dev/generated/`
 5. You tune generated governance and semantic config; durable agent ACL intent remains in `env.auto.tfvars`
 6. `make coverage-gate` fails if any classified sensitive column has no protection

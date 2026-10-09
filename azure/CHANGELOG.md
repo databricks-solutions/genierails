@@ -17,6 +17,13 @@
   blocks and execution contexts. Upgrading changes the hash format once more,
   causing at most one drop-free `CREATE OR REPLACE` pass; reorder-only generated
   functions are quiet after that transition.
+- **Migration — UI-managed Data Classification auto-tagging**: new environment
+  templates leave `enable_auto_tagging` unset so rehearse/release/maintain preserve
+  the Catalog Explorer setting. If an environment created from an older template
+  contains `enable_auto_tagging = false`, delete that line before the next run.
+  GenieRails now refuses to disable live UI auto-tagging, and `make promote-to`
+  refuses to preserve explicit `false`, unless the operator explicitly passes
+  `ALLOW_DISABLE_AUTO_TAGGING=1`.
 
 - **No row-pairing key to choose**: `verify-access` picks a provably safe key
   per masked table: an explicit `verify_key_columns` entry, else

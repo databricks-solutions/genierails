@@ -21,7 +21,7 @@ access tiers**:
 
 | Check | Assertion |
 |---|---|
-| **Column mask** | A lower-tier principal sees a **masked** value while a higher-tier principal sees the **raw** value for the *same row*. Equal values = the mask did not take effect (a leak → FAIL). |
+| **Column mask** | A lower-tier principal sees a **masked** value while a higher-tier principal sees the **raw** value for the *same row*. Equal values = the mask did not take effect (a leak → FAIL), with one narrow exception for a row whose raw value the mask leaves unchanged (e.g. a date already on 1 January under a year mask). Such rows are left out, like NULL ones, only when the admin proves, live, that the column's mask is exactly the configured function (the one live column-mask policy its tags match, covering every masked tier, no extra `USING` arguments, no directly attached mask), and that the function is a deterministic one-argument SQL function that reads no data and whose body is nothing but literals, operators, keywords, its parameter and known caller-independent builtins called by their plain names (nothing like `current_user`, `is_member`, `is_account_group_member`, session, time or random functions, no other UDF, no qualified or backtick-quoted name). Even then, a tier needs at least 5 compared rows, and unchanged rows may be at most 10% of its sample; otherwise the check is INCONCLUSIVE. In any other case, every equal value counts as a leak. |
 | **Row filter** | A restricted principal gets back **fewer rows** than an unrestricted principal. Equal/greater counts = the filter is not restricting (FAIL). |
 
 The comparison is done by *effect*: rather than assuming a mask function's exact

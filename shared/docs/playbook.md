@@ -49,7 +49,7 @@ make promote-to ENV=prod   # promote_from/catalog_map are in envs/prod/env.auto.
 vi envs/prod/auth.auto.tfvars             # enter prod workspace credentials
 
 # prod re-derives its OWN facts — never re-run generate in prod
-make enable-classification ENV=prod       # or the Databricks UI (recommended); then wait for prod class.* tags
+# Catalog Explorer > catalog > Details > Data classification: turn on; review/exclude false positives; auto-tag; wait for prod class.*
 make release ENV=prod                     # derive (no LLM) → validate → coverage check → audit → apply → verify-access
 ```
 
@@ -228,7 +228,8 @@ See [Architecture](architecture.md) for the full reference. Quick summary:
 The core loop (dev-to-prod walkthrough):
 
 ```
-enable-classification → wait for class.* → make generate (--groups) → coverage-gate
+Catalog Explorer: Details → Data classification on → review/exclude false positives
+  → auto-tagging on → wait for class.* → make generate (--groups) → coverage-gate
   → review generated/ → validate-generated → make rehearse   (prod: make release ENV=prod)
 ```
 Prod swaps `generate` for `derive-assignments` (re-derive facts from prod's own tags, no LLM).

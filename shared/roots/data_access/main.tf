@@ -232,8 +232,8 @@ variable "verify_key_columns" {
 
 variable "enable_auto_tagging" {
   type        = bool
-  default     = false
-  description = "Opt-in to automatically apply class.* tags for classification detections."
+  default     = null
+  description = "Optional scripted auto-tagging control. Null preserves the catalog's existing UI-managed setting; true replaces UI per-tag choices with the module's supported class.* tag list; false explicitly disables them."
 }
 
 variable "classification_existing_schemas" {
@@ -246,6 +246,15 @@ variable "classification_all_schemas" {
   type        = set(string)
   default     = []
   description = "Catalog classification configs whose remote included_schemas is unset (all schemas)."
+}
+
+variable "classification_existing_auto_tag_configs" {
+  type = map(list(object({
+    classification_tag = string
+    auto_tagging_mode  = string
+  })))
+  default     = {}
+  description = "Existing catalog auto-tag configuration preserved when enable_auto_tagging is null."
 }
 
 variable "access_tier_groups" {
@@ -397,37 +406,38 @@ module "data_access" {
     databricks.workspace = databricks.workspace
   }
 
-  databricks_account_id           = var.databricks_account_id
-  databricks_client_id            = var.databricks_client_id
-  databricks_client_secret        = var.databricks_client_secret
-  databricks_workspace_host       = var.databricks_workspace_host
-  groups                          = var.groups
-  uc_tables                       = local.full_uc_tables
-  admin_uc_tables                 = local.full_admin_uc_tables
-  discovered_uc_tables            = local.full_discovered_uc_tables
-  table_agents                    = local.table_agents
-  genie_space_acl_groups          = var.genie_space_acl_groups
-  classification_uc_tables        = local.full_effective_uc_tables
-  coverage_gate_file              = "${var.env_dir}/.coverage_gate.json"
-  coverage_ddl_file               = "${var.env_dir}/../ddl/_fetched.sql"
-  coverage_acknowledged_columns   = var.coverage_acknowledged_columns
-  coverage_gate_max_age           = var.coverage_gate_max_age
-  applied_table_grants            = local.applied_table_grants
-  applied_protection_fingerprint  = local.applied_protection_fingerprint
-  applied_protection              = local.applied_protection
-  deployment_binding              = local.deployment_binding
-  enable_classification           = var.enable_classification
-  enable_auto_tagging             = var.enable_auto_tagging
-  classification_existing_schemas = var.classification_existing_schemas
-  classification_all_schemas      = var.classification_all_schemas
-  tag_assignments                 = var.tag_assignments
-  fgac_policies                   = var.fgac_policies
-  sql_warehouse_id                = var.sql_warehouse_id
-  warehouse_name                  = var.warehouse_name
-  retain_auto_warehouse           = local.retain_auto_warehouse
-  masking_sql_file                = "${var.env_dir}/masking_functions.sql"
-  deploy_masking_script           = "${local.project_root}/deploy_masking_functions.py"
-  auth_file                       = "${var.env_dir}/auth.auto.tfvars"
+  databricks_account_id                    = var.databricks_account_id
+  databricks_client_id                     = var.databricks_client_id
+  databricks_client_secret                 = var.databricks_client_secret
+  databricks_workspace_host                = var.databricks_workspace_host
+  groups                                   = var.groups
+  uc_tables                                = local.full_uc_tables
+  admin_uc_tables                          = local.full_admin_uc_tables
+  discovered_uc_tables                     = local.full_discovered_uc_tables
+  table_agents                             = local.table_agents
+  genie_space_acl_groups                   = var.genie_space_acl_groups
+  classification_uc_tables                 = local.full_effective_uc_tables
+  coverage_gate_file                       = "${var.env_dir}/.coverage_gate.json"
+  coverage_ddl_file                        = "${var.env_dir}/../ddl/_fetched.sql"
+  coverage_acknowledged_columns            = var.coverage_acknowledged_columns
+  coverage_gate_max_age                    = var.coverage_gate_max_age
+  applied_table_grants                     = local.applied_table_grants
+  applied_protection_fingerprint           = local.applied_protection_fingerprint
+  applied_protection                       = local.applied_protection
+  deployment_binding                       = local.deployment_binding
+  enable_classification                    = var.enable_classification
+  enable_auto_tagging                      = var.enable_auto_tagging
+  classification_existing_schemas          = var.classification_existing_schemas
+  classification_all_schemas               = var.classification_all_schemas
+  classification_existing_auto_tag_configs = var.classification_existing_auto_tag_configs
+  tag_assignments                          = var.tag_assignments
+  fgac_policies                            = var.fgac_policies
+  sql_warehouse_id                         = var.sql_warehouse_id
+  warehouse_name                           = var.warehouse_name
+  retain_auto_warehouse                    = local.retain_auto_warehouse
+  masking_sql_file                         = "${var.env_dir}/masking_functions.sql"
+  deploy_masking_script                    = "${local.project_root}/deploy_masking_functions.py"
+  auth_file                                = "${var.env_dir}/auth.auto.tfvars"
 }
 
 # A raw terraform run that withholds new grants still applies; say so.

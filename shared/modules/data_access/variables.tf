@@ -129,8 +129,8 @@ variable "enable_classification" {
 
 variable "enable_auto_tagging" {
   type        = bool
-  default     = false
-  description = "Opt-in to write class.* tags automatically after UC Data Classification detects sensitive data."
+  default     = null
+  description = "Optional scripted auto-tagging control. Null preserves the catalog's existing UI-managed auto-tag configuration; true replaces UI per-tag choices with the module's supported class.* tag list; false explicitly disables them."
 }
 
 variable "classification_existing_schemas" {
@@ -143,6 +143,15 @@ variable "classification_all_schemas" {
   type        = set(string)
   default     = []
   description = "Catalogs whose classification config intentionally covers all schemas (unset included_schemas)."
+}
+
+variable "classification_existing_auto_tag_configs" {
+  type = map(list(object({
+    classification_tag = string
+    auto_tagging_mode  = string
+  })))
+  default     = {}
+  description = "Existing UI-managed auto-tag configuration preserved when enable_auto_tagging is null."
 }
 
 variable "tag_assignments" {

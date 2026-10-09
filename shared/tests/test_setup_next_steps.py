@@ -5,6 +5,7 @@ import re
 import subprocess
 from pathlib import Path
 
+import hcl2
 import pytest
 
 
@@ -80,7 +81,10 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "uc_tables" not in out
     assert "existing agent:" not in out
     assert "pick one" not in out
-    assert "  4. Run: make enable-classification ENV=dev   (or turn it on in the UI);\n" in out
+    assert "  4. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.\n" in out
+    assert "     When the scan finishes, review the detections and exclude any false positives, then turn on\n" in out
+    assert "     auto-tagging. Wait until the class.* tags appear.\n" in out
+    assert "     Prefer a script? make enable-classification ENV=dev turns it on (you still review detections in the UI).\n" in out
     assert "  5. Run: make generate ENV=dev   (one run: imports the agent, finds its tables, drafts rules)\n" in out
     assert "  6. Run: make rehearse ENV=dev\n" in out
     assert "business_access_enabled" not in out
@@ -128,7 +132,8 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
         'make promote-to ENV=prod\n',
         "     (FROM=/CATALOG_MAP= remain optional command-line overrides.)\n",
         "envs/prod/auth.auto.tfvars",
-        "make enable-classification ENV=prod",
+        "In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on",
+        "Prefer a script? make enable-classification ENV=prod turns it on",
         "  5. Run: make release ENV=prod\n",
         "make maintain ENV=prod",
     ]
@@ -149,6 +154,7 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
     assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == ["1", "2", "3", "4", "5", "6"]
     assert "shared/examples/dev_to_prod/README.md" in out
     env_text = (tmp_path / cloud / "envs/prod/env.auto.tfvars").read_text()
+    assert "enable_auto_tagging" not in hcl2.loads(env_text)
     assert 'promote_from = "dev"' in env_text
     assert 'catalog_map  = { "<dev_catalog>" = "<prod_catalog>" }' in env_text
 

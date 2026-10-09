@@ -38,7 +38,7 @@ So "expose last" isn't a policy you hope holds — there is simply no new or wid
 | Command | Phase | What it does |
 |---|---|---|
 | `make setup` / `make init-env ENV=<e>` | 0 | Create local env dirs + default config files (no Databricks calls) |
-| `make enable-classification ENV=<e>` | 1/3 | Turn on UC Data Classification (scanning) for the footprint — an agent set only by ID has its tables found first (read-only, no model call); auto-tagging is opt-in. Or use the Databricks UI |
+| `make enable-classification ENV=<e>` | 1/3 | Optional scripted way to turn on UC Data Classification for the footprint; review detections, exclude false positives, and enable auto-tagging in the UI |
 | `make generate ENV=<e>` | 1 | (dev) One run: import the agent's config, find its tables, draft masks + access rules from the model, and derive one `gr_treatment`/column from native `class.*` (fail-closed: without `class.*` tags it stops before any model call); groups come from `access_tier_groups` in `env.auto.tfvars` (or `GENERATE_ARGS='--groups "..."'`, saved there on first use). Re-runs keep reviewed rules and add rules only for uncovered columns; `GENERATE_ARGS='--allow-rule-changes'` accepts the model's changes |
 | `make derive-assignments ENV=<e>` | 4/5 | Re-derive **only** `tag_assignments` from live `class.*`, reusing the promoted rules unchanged — no model call (fail-closed). `release` and `maintain` run it for you |
 | `make coverage-gate ENV=<e>` | 1/4/5 | Fail if any tagged-sensitive column has no mask (the "says NO" check). Every plan/apply also runs it against live tags |
