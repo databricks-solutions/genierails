@@ -102,6 +102,18 @@ def test_same_deployed_target_keeps_order_for_bare_and_schema_qualified_names():
     assert normalized_definitions(prefix + first + second) != normalized_definitions(prefix + second + first)
 
 
+def test_spaced_dot_unknown_name_keeps_deployment_order():
+    prefix = "USE CATALOG cat;\nUSE SCHEMA sch;\n"
+    qualified = (
+        "CREATE OR REPLACE FUNCTION cat . sch . mask(v STRING) "
+        "RETURNS STRING RETURN 'x';\n"
+    )
+    bare = "CREATE OR REPLACE FUNCTION mask(v STRING) RETURNS STRING RETURN 'y';\n"
+    assert normalized_definitions(prefix + qualified + bare) != normalized_definitions(
+        prefix + bare + qualified
+    )
+
+
 def test_final_name_collision_keeps_order_for_bare_use_and_default_fqn():
     prefix = "USE t;\n"
     first = "CREATE FUNCTION f() RETURNS STRING RETURN 'first';\n"

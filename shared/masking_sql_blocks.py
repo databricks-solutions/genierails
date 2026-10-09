@@ -58,6 +58,7 @@ def analyze_sql_blocks(sql_text: str) -> ParsedSqlBlocks:
             blocks.append((catalog, schema, stmt))
             if extract_function_name(stmt) == "<unknown>":
                 unambiguous = False
+                ambiguities.append(stmt)
         else:
             # This includes bare/unrecognized USE and block-comment-prefixed
             # USE. The deployer skips it, so normalization must retain order.
