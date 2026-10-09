@@ -59,7 +59,7 @@ GenieRails ships a mapping for all 93 Databricks classification classes, each to
 
 "Redacted" means a fixed placeholder for text and NULL for other types. The one-way hash is a **keyed** hash (HMAC-SHA-256). A plain hash is not acceptable: small ID spaces such as SSNs (about a billion values) can be reversed by trying every value. Implementation (Databricks' documented pattern):
 
-- The key is a **Unity Catalog secret** in a GenieRails governance schema, created automatically with random bytes on the first dev apply. Dev and prod form one **deployment pair** and use identical key bytes: on a shared metastore it is the same secret; on separate metastores `promote-to` copies it through the secrets API. The key never appears in git, Terraform state or logs.
+- The key's source of truth is one deployment secret generated once by `make init-hash-key` and held by the operator as `GENIERAILS_HASH_KEY` (section 11, G8). `rehearse` and `release` create a **Unity Catalog secret** in their own catalog's governance schema from it **if absent**; once the UC secret exists, the env var isn't needed. Dev and prod use identical key bytes, proven by comparing a probe hash. The key never appears in git, Terraform state or logs. Nothing about the key is needed until a treatment actually uses the hash.
 - A `LANGUAGE PYTHON` UDF declared with `SECRETS (...)` computes the HMAC; a SQL wrapper is the mask function. Neither is declared `DETERMINISTIC`, because rotating the key changes every output.
 - Input is normalised before hashing: trimmed, Unicode NFKC, upper-cased, and spaces and hyphens removed. NULL stays NULL.
 - **Fail closed:** if UC secrets or Python UDFs are unavailable on the warehouse, hashed treatments fall back to **redacted** for tier 2, with a clear warning. They never fall back to raw.
@@ -98,7 +98,7 @@ access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]  # full, p
   - **partial policy**: `TO <tier-2 groups>` `EXCEPT <tier-1 groups>`;
   - **full policy**: `TO account users` `EXCEPT <tier-1 and tier-2 groups>`.
 
-  So exactly one mask resolves for every user, a user in several tiers gets the **most privileged** one, and anyone outside the tiers who somehow has `SELECT` gets the full version, never raw.
+  So exactly one mask resolves for every user, a user in several tiers gets the **most privileged** one, and anyone outside the tiers who somehow has `SELECT` gets the full version. **Precedence for who sees raw:** never-raw treatments (G11) beat everything except the deployer SP; then `raw_exempt_principals` (G6) and tier 1 see raw; overrides naming a never-raw treatment are refused.
 - **Group-level override**, e.g. let tier 2 see email raw (moves those groups into the EXCEPT list of the partial policy):
 
 ```hcl
@@ -122,7 +122,7 @@ row_filters = [
 
 - No configuration means no row filters, and a missing row filter is never a coverage gap.
 - All declared rules for one table compile into **one** filter function and policy (Unity Catalog allows only one row filter to resolve per user and table). Several rules on a table combine with AND.
-- Groups named in `values_by_group` see only their values (case-sensitive, string literals, NULL never matches). Tier-1 groups and groups not named see all rows.
+- Groups named in `values_by_group` see only their values (case-sensitive, string literals, NULL never matches). Only tier-1 groups, `raw_exempt_principals` and the deployer SP see all rows; any other group not named sees **no** rows (fail closed, matching masks). A tier-1 group named in `values_by_group` is refused. Each table's filter is an ABAC policy on that **table** securable.
 - A user in several named groups sees the union of their values.
 
 ## 5. Agent lifecycle
@@ -136,9 +136,9 @@ row_filters = [
 
 ## 6. Migration for existing deployments
 
-- The first `generate` after upgrading writes a **migration report**: for every column and every tier group, what it sees today and what it will see. It also lists agents missing `acl_groups`.
+- The first `generate` after upgrading writes a **migration report**: for every column and **every principal holding SELECT** (tier groups, exempt principals, owners, service principals), what it sees today and what it will see. It also lists agents missing `acl_groups`.
 - **Refuse weakening:** if any principal would see a column less protected than today, migration stops and names it. Changing that needs an explicit override.
-- **Staged cutover:** new library functions are created under new names first; policies are switched one at a time, never dropped then recreated; old functions are kept until no policy uses them.
+- **Staged cutover:** new library functions are created under new names first; policies change in the tighten-before-loosen phases of section 11 (G2), never dropped then recreated; old functions are kept until no policy uses them.
 - Nothing is applied until accepted (`ACCEPT_MIGRATION=1`), and a fresh classification read plus tier-aware verification runs before the cutover is reported done.
 - Rollback reverts the commit and releases; the old functions are still there, so masks switch back in place.
 
@@ -150,19 +150,19 @@ row_filters = [
 
 ## 8. Rollout (separate PRs, each reviewed by a different vendor)
 
-Every step keeps `main` working. Steps 1–3 add capabilities without changing any existing deployment. **No existing deployment is cut over until step 6 (migration) lands**; until then the new generator only runs for envs with `governance_mode = "deterministic"` and no deployed AI-drafted policies.
+Every step keeps `main` working. Steps 1–4 change existing deployments only in **warn mode** (gated on `governance_mode`; see N5). **No existing deployment is cut over until step 6 (migration) lands**; until then the new generator only runs for envs with `governance_mode = "deterministic"` and no deployed AI-drafted policies.
 
-1. **Schemas:** settings, precedence and validation (section 11 additions included).
-2. **Tier-aware verification** and the prod-classification completeness check (section 11, G4).
-3. **Mask library + keyed hash:** all 93 classes, typed functions with exact output tests, never-raw treatments, hash key provisioning; latency spike at 10k/100k rows and on Azure.
-4. **Stable tags and sticky governance:** one treatment tag per column updated in place, a persisted governed-table set, `make ungovern` (G1).
-5. **Deterministic policies (new envs only):** per-tier policies, `raw_exempt_principals`, phased tighten-before-loosen applies (G2, G6).
-6. **Migration:** protection-order report over every SELECT holder, refuse weakening, staged cutover keeping deployed policy names and frozen AI row filters (G3, G11, G12-migration).
-7. **Required `acl_groups` + per-agent access files;** tiers promoted as governance (G7, G14).
-8. **Declared row filters** (replace frozen AI ones only when declared).
-9. **Capture + prod ownership:** `make capture`, versioned capture, remap on promote, committed prod agent IDs, drift report, agent detach-by-default (G9, G12, G13).
-10. **Per-agent live snapshot** in rehearse and per-agent fingerprints (G10).
-11. **Live tests on AWS** for every scenario in section 9, then Azure, then docs and the `envs/` version-control change (G15).
+1. **Schemas + CI guard:** settings, precedence and validation; every applying target refuses when `CI=true` (N3).
+2. **Tier-aware verification** and the prod-classification completeness check with the promote-side manifest (G4, N4); warn-only for existing envs.
+3. **Mask library + keyed hash:** all 93 classes, typed functions with exact output tests, never-raw treatments, `init-hash-key` (a no-op until a hashed treatment is used); latency spike at 10k/100k rows and on Azure.
+4. **Stable tags and sticky governance** for deterministic envs: separate treatment-tag resource keyed by `table.column`, persisted governed-table set, `make ungovern` (G1, N2).
+5. **Deterministic policies (new envs only)** together with **required `acl_groups` and no policy-derived access** (N1): per-tier policies, `raw_exempt_principals`, tighten-before-loosen phases, per-agent files with the loader (G14, N7), tiers promoted as governance (G7).
+6. **Migration:** protection-order report over every SELECT holder, refuse weakening, tag `state mv`, staged cutover keeping deployed policy names, frozen AI row filters (G3, G11, N2).
+7. **Version control:** root `.gitignore` commits env files and generated output (G15, N8); permanent refuse-weakening on every promote and release (N9); `maintain` fail-safe redaction for unmapped new classes (N10).
+8. **Declared row filters** on table securables (replace frozen AI ones only when declared).
+9. **Capture + prod ownership:** `make capture`, JSON-aware remap on promote, committed prod agent IDs, drift report, detach by default (G9, G12, G13, N15, N16).
+10. **Per-agent live snapshot** in rehearse, per-agent fingerprints and per-table SELECT gates (G10, N11).
+11. **Live tests on AWS** for every scenario in section 9, then Azure, then docs.
 
 ## 9. Change lifecycle (agreed)
 
@@ -179,7 +179,7 @@ There are two kinds of change, and git is the record of what is ready.
 
 1. **Capture is explicit and per agent.** `make capture ENV=dev SPACE="<agent>"` writes that agent's full exported config into git. A plain `make generate ENV=dev` only imports agents not yet in git; it never re-captures an existing agent. Unfinished UI work therefore never reaches git or prod.
 2. **Dev agent config is never overwritten.** In dev, GenieRails applies governance and access, and creates an agent only if it does not exist. In prod, every `release` overwrites the agent's config from git (full replacement); it never recreates the agent or changes its ID, so conversations are kept.
-3. **One pipeline.** A promotion PR (`make promote-to ENV=prod`) carries whatever is in git, governance changes, agent changes or both, and shows which. Merging it with the required approval runs `make release ENV=prod`.
+3. **One pipeline.** A promotion PR (`make promote-to ENV=prod`) carries whatever is in git, governance changes, agent changes or both, and shows which. After it is approved and merged, **the operator runs `make release ENV=prod` on the deployment machine** (v1 runs every applying target there; CI runs tests and read-only checks only — section 11, G5/N3).
 4. **Removing an agent or table removes access only.** Masks stay; deleting a mask is a deliberate governance change.
 5. **Dev governance covers every table a configured live dev agent uses,** including tables added in the UI but not captured yet, so work in progress is protected in dev. During `rehearse`, GenieRails reads each configured dev agent through the Genie API, records its ID, a digest of its config and its table list, and includes that in the coverage fingerprint; it re-reads just before granting `CAN_RUN` and stops if anything changed. Agents not listed in config are outside GenieRails' guarantee. Prod governance covers only tables of captured agents.
 
@@ -191,7 +191,7 @@ There are two kinds of change, and git is the record of what is ready.
 4. `make rehearse ENV=dev`: applies masks and access in dev and proves each tier.
 5. Set `catalog_map` in `envs/prod/env.auto.tfvars`; `make promote-to ENV=prod` opens the promotion PR.
 6. Classify the prod catalog in the UI.
-7. Approve and merge; the pipeline runs `make release ENV=prod`.
+7. Approve and merge the promotion PR; the operator runs `make release ENV=prod` on the deployment machine.
 8. `make maintain ENV=prod` on a schedule (governance only).
 
 ### Scenarios
@@ -204,12 +204,12 @@ There are two kinds of change, and git is the record of what is ready.
 | Mask change needed while B is mid-curation | Change governance in git, rehearse, promote. Prod B gets the new mask on its tables; its config is unchanged. Dev B sees the new mask; its UI work is untouched. |
 | New sensitive column in prod | Prod scan tags it; `maintain` applies the library mask. Unmapped class: `maintain`/`release` stop; add a mapping in git and promote. |
 | Change a mask default or tiers | Governance change; the promotion PR shows the function or policy diff. |
-| Grant another group access to A in prod | Edit A's `acl_groups` in `envs/prod`, PR, release. B untouched. |
-| Remove agent A | Delete its entry in dev, promote. Created agent deleted, attached agent loses access; table `SELECT` for A's groups removed unless another agent grants it. Masks stay. |
+| Grant another group access to A in prod | Edit `envs/prod/agents/A.auto.tfvars`, PR, release. B untouched. |
+| Remove agent A | Delete its entry in dev, promote. By default the prod agent is **detached** (access revoked, agent kept); deleting it needs `delete = true` and shows in the promotion PR. Table `SELECT` for A's groups is removed unless another agent grants it. The tables stay governed (masks stay) until `make ungovern`. |
 | Remove a table from A | Capture A, promote. `SELECT` removed if no other agent needs it. |
-| Roll back | Revert the commit and release. Masks swap in place; agent config returns to the previous version. |
+| Roll back | Revert code and config together and release. Mask changes follow the tighten-before-loosen phases; old functions are kept for 3 releases so masks can switch back; agent config returns to the previous version. |
 | Urgent fix | No hand edits in prod; same path, prioritised. |
-| Concurrent promotions | The env lock allows one `release` at a time. |
+| Concurrent promotions | v1 runs on one deployment machine, where the env lock allows one `release` at a time; every applying target refuses in CI. |
 | Upgrade GenieRails | Treated as a governance change: upgrade in dev, rehearse, promote. |
 | Several teams | Each agent's captured config lives in its own folder, so code owners can require each team's approval; a central team approves governance. |
 
@@ -226,9 +226,9 @@ There are two kinds of change, and git is the record of what is ready.
 | Row filters underspecified | Table-scoped, compiled to one filter per table, AND across rules (section 4) |
 | `acl_groups` ownership conflicted with #81 | Environment-owned, not captured; prod keeps its own after the first promotion (section 5) |
 | Plain `generate` re-captures today; dev overwrites agent config today | Separate `make capture`; environment-specific config ownership (rollout 7, 8) |
-| "Full overwrite" isn't a faithful export today | Capture stores the agent's `serialized_space` verbatim in a versioned file, minus IDs and ACLs; prod import sends it unchanged; a rejected field fails the release instead of being silently dropped (rollout 8) |
+| "Full overwrite" isn't a faithful export today | Capture stores the agent's `serialized_space` verbatim in a versioned file, minus IDs and ACLs; promote remaps catalog names and the warehouse, then prod import sends that remapped config; a rejected field fails the release instead of being silently dropped (rollout 8) |
 
-**Champion impact kept minimal:** the hash key is created and shared automatically (no champion step); `acl_groups` is one line per agent; everything else is unchanged from the current flow.
+**Champion impact:** one `make init-hash-key` the first time a hashed treatment is used; one `acl_groups` line per agent file; everything else is unchanged from the current flow.
 
 ## 11. Changes after the scenario review
 
@@ -254,3 +254,27 @@ These rules take precedence over earlier sections where they differ.
 | **G16** Row filters underspecified | Literals are strings; the table is mandatory; a tier-1 group in `values_by_group` is refused; `verify-access` creates one test principal per named group. |
 | **G17** Several `class.*` tags on one column; numeric IDs | The **strictest** treatment wins (protection order above). Identifiers stored as numbers are hashed as their canonical decimal string. Section 1 and section 2 agree: a column override sets the partial version or a stricter treatment, never the full version. |
 | **G18** Rotation rollback | Covered by G8: rotation keeps the previous key version until `make rotate-hash-key CONFIRM=1`. |
+
+## 12. Changes after the second scenario review
+
+| Item | Resolution |
+|---|---|
+| **N1** `TO account users` full policies would feed today's access derivation | For deterministic envs, required `acl_groups` and **no policy-derived access** land in **step 5**, together with the per-tier policies. Access is never derived from `account users`, from EXCEPT lists, or from any policy principal. Migrated envs get the same in step 6. |
+| **N2** G1 still had unmask windows | Treatment tags move to a **separate resource keyed by `table.column`, without `ignore_changes`**, so value changes are in-place updates. Migration generates `terraform state mv` for each existing tag. In the phases of G2, policies for a **new** treatment value are created in an earlier phase than the retag, so the new value is matched the moment it lands. |
+| **N3** CI refusal contradicted the pipeline | v1: the operator runs every applying target (`release`, `maintain`, `apply`, `rehearse`) on the deployment machine; all of them refuse when `CI=true`. CI runs tests, validation and plans. This guard lands in **step 1**. |
+| **N4** Classification check needs dev's tags in prod | `promote-to` writes `envs/<dest>/generated/expected_classification.json`: dev's classified columns remapped through `catalog_map`. `release` compares it with prod's live tags. |
+| **N5** Steps 2 and 4 could change existing envs | Steps 2 and 4 are gated on `governance_mode = "deterministic"`; existing envs get warnings only. The tag-state move runs in step 6. |
+| **N6** Row filters failed open for outsiders | Resolved in section 4: only tier 1, exempt principals and the deployer SP see all rows; other unnamed groups see none. |
+| **N7** Per-agent files aren't loaded and Terraform can't merge them | A loader merges `envs/<env>/agents/*.auto.tfvars` into one generated `genie_spaces` variable file before plan; `remap_env_config.py` and validation read the same merge. |
+| **N8** `.gitignore` | The **root** `.gitignore` changes in step 7 to re-include committed env files; `generated/.live_refresh.json`, `auth.auto.tfvars`, state and locks stay ignored. |
+| **N9** Refuse-weakening only at migration | The protection-order comparison against live state runs on **every** `promote-to` and `release`. Any weakening needs `ACK_WEAKEN="cat.sch.t.col:principal,..."`. |
+| **N10** Unmapped new prod class stays raw | `maintain` applies a fail-safe **redacted** treatment to tiers 2 and 3 for a newly tagged column whose class has no mapping, and reports it, until a mapping is promoted. |
+| **N11** Per-agent gating needs per-table SELECT gates | Step 10 changes the Terraform gate from one env-wide status to per-table status. |
+| **N12** Precedence of never-raw / exempt / overrides | Resolved in section 3. |
+| **N13** Verify during a tier move | The verify phase of G2 expects "more than one mask" errors only for principals being moved, and fails on any raw value. |
+| **N14** Different dev/prod groups | v1 requires the **same account groups** in dev and prod (tiers are promoted). |
+| **N15** Capture remap and ID file | Capture remap is JSON-aware (it remaps string values, including SQL inside them, never keys). `genie_space_ids.auto.tfvars` is added to the var-file list; `release` writes it and prints "commit envs/prod/genie_space_ids.auto.tfvars" for the operator. |
+| **N16** Detach needs a per-instance state removal | `release` runs a generated `terraform state rm` for the detached agent's resources before apply. |
+| **N17** Row-filter securable | Row-filter policies are created **on the table** securable. |
+| **N18** Key residuals | The probe is the hash of the fixed string `genierails-probe`, stored in `generated/hash_probe.json`. If the UC secret already exists, the env var isn't read. Residual risk documented: metastore admins and holders of `MANAGE` on the governance schema can grant themselves READ SECRET. |
+| **N19** Stale earlier text | Earlier sections edited to match sections 11 and 12. |
