@@ -115,7 +115,14 @@ What each walkthrough step does, for when you need more than the [walkthrough](R
 - Runs audit-schema → derive-assignments → coverage-gate → validate-generated → audit-rulebook → apply-governance. It audits before applying, keeps `SELECT` for already-covered tables, never widens access past a passing check, and never changes the Genie agent.
 - When inputs are unchanged the apply is skipped, so it doesn't repair grants revoked outside Terraform.
 - Stops at `audit-schema`: a sensitive-looking column has no `class.*` tag. Review it in Catalog Explorer, then re-run.
-- Stops at `coverage-gate` or `audit-rulebook`: add the rule in dev, rehearse, `promote-to`, `release`.
+- Stops at `coverage-gate` or `audit-rulebook`: add the rule in dev, rehearse, `promote-to`, `release` (see "Fixing a coverage gap" below).
+
+**Fixing a coverage gap found in prod**
+- `make scaffold-treatments ENV=prod` writes a suggested rule into prod's `generated/abac.auto.tfvars` and `generated/masking_functions.sql`, plus the shared mapping in `shared/treatment_config.json` and `shared/tag_vocabulary_registry.json`. The next `promote-to` replaces prod's generated files from dev, so the prod-local rule is only a preview: the rule has to live in dev.
+- Preferred: tag a matching column in dev and run `make scaffold-treatments ENV=dev`, so dev's generated files get the policy and its masking function.
+- No matching dev column: copy the new mask policy into `envs/dev/generated/abac.auto.tfvars` (with the dev catalog) and its function into `envs/dev/generated/masking_functions.sql`. Don't copy prod's `tag_assignments`.
+- Running `make generate ENV=dev` alone isn't enough when dev has no column with that class: the mapping exists, but no dev policy is created for promotion.
+- Then `make rehearse ENV=dev`, `make promote-to ENV=prod`, `make release ENV=prod`.
 - A newly tagged column is a masking gap, not an access breach. For your most sensitive data, prefer "locked down until proven safe" over "open until tagged".
 
 ---
