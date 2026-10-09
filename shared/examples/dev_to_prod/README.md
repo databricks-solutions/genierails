@@ -30,7 +30,7 @@ cd genierails/aws           # or: cd genierails/azure — every make command run
 |---|---|
 | The [prerequisites](../../docs/prerequisites.md) | Tools, a deploying service principal (`make bootstrap-sp`), IdP-synced groups |
 | Your Genie **Agent ID** | Genie UI → open the agent → **Configure** → *About this agent*. *No agent yet?* Use the [sample environment](SAMPLE_ENV.md) |
-| Access-tier groups | Your existing groups, most- to least-privileged, e.g. `payments_ops`, `regional_analysts`, `viewers` |
+| Access-tier groups | Your existing groups, most- to least-privileged, e.g. `payments_ops`, `regional_analysts`, `viewers`. Order matters: a tier listed above a masked tier also gets the agent and sees those columns unmasked |
 | Dev and prod catalog names | e.g. `dev_finance` and `prod_finance` |
 
 <a id="phase-0--dev-set-up"></a>

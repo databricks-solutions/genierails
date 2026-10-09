@@ -925,3 +925,53 @@ def test_genie_mode_import_with_deferred_acl_cannot_be_released(tmp_path):
     assert not runner_log.exists() or " apply" not in runner_log.read_text()
     # Release writes no exposure flag (there is none to open).
     assert "business_access_enabled" not in (env / "env.auto.tfvars").read_text()
+
+
+def _tiered_acl(tmp_path, tiers_line, policies):
+    env_dir = tmp_path / "dev"
+    generated = env_dir / "generated"
+    generated.mkdir(parents=True)
+    (env_dir / "env.auto.tfvars").write_text(f'''genie_spaces = [
+  {{ name = "Pay", uc_tables = ["dev_pay.s.t"] }}
+]
+{tiers_line}
+''')
+    abac = generated / "abac.auto.tfvars"
+    abac.write_text(f'''
+groups = {{ ops_g = {{}} analysts_g = {{}} viewers_g = {{}} }}
+fgac_policies = [
+{policies}
+]
+genie_space_configs = {{ Pay = {{ title = "Pay" }} }}
+''')
+    autofix_acl_groups(abac, env_dir / "env.auto.tfvars")
+    with open(generated / "genie_space_derived_acl_groups.auto.tfvars") as handle:
+        return hcl2.load(handle)["genie_space_derived_acl_groups"]["Pay"]
+
+
+def test_masks_naming_only_masked_tiers_keep_the_full_access_tier(tmp_path):
+    acl = _tiered_acl(
+        tmp_path,
+        'access_tier_groups = ["ops_g", "analysts_g", "viewers_g"]',
+        '  { name = "ssn" catalog = "dev_pay" to_principals = ["analysts_g", "viewers_g"] },\n'
+        '  { name = "email" catalog = "dev_pay" to_principals = ["viewers_g"] }',
+    )
+    assert acl == ["analysts_g", "ops_g", "viewers_g"]
+
+
+def test_tier_below_every_policy_group_is_not_added(tmp_path):
+    acl = _tiered_acl(
+        tmp_path,
+        'access_tier_groups = ["ops_g", "analysts_g", "viewers_g"]',
+        '  { name = "ssn" catalog = "dev_pay" to_principals = ["analysts_g"] }',
+    )
+    assert acl == ["analysts_g", "ops_g"]
+
+
+def test_without_access_tiers_acl_is_only_the_policy_groups(tmp_path):
+    acl = _tiered_acl(
+        tmp_path,
+        "",
+        '  { name = "ssn" catalog = "dev_pay" to_principals = ["analysts_g", "viewers_g"] }',
+    )
+    assert acl == ["analysts_g", "viewers_g"]
