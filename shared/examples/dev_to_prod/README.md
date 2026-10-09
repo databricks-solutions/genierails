@@ -92,7 +92,7 @@ make release ENV=prod
 **Pass looks like:** `ALL EFFECTIVE` and "Release complete". Business users can now open the agent and get masked answers. (They also need `CAN_USE` on the agent's SQL warehouse, which GenieRails doesn't grant.)
 
 **If it stops on coverage or drift**, prod found a sensitive tag your rules don't cover. Nothing new was granted. Fix it in dev, never by hand in prod:
-1. `make scaffold-treatments ENV=prod` names the uncovered tag and adds a suggested mask to `../shared/treatment_config.json`. Review it; it's a tracked file, so it goes in the same PR as step 2.
+1. `make scaffold-treatments ENV=prod` names the uncovered tag and adds a suggested mask to `../shared/treatment_config.json` (and `../shared/tag_vocabulary_registry.json`). Review it; these are tracked files, so they go in the same PR as step 2.
 2. Add the rule to dev: tag a matching dev column, then `make generate ENV=dev` ([no matching dev column?](REFERENCE.md#step-details)).
 3. `make rehearse ENV=dev`, then `make promote-to ENV=prod` and `make release ENV=prod`.
 
