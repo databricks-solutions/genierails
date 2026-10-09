@@ -89,8 +89,9 @@ def test_champion_genie_next_steps_are_phase_1(tmp_path):
         "       auto-tagging. Wait until the class.* tags appear.\n"
         "       Prefer a script? make enable-classification ENV=dev turns it on (you still review detections in the UI).\n"
         "    2. make generate ENV=dev\n"
-        "    3. make rehearse ENV=dev VERIFY_KEY_COLUMN=<key_column>"
+        "    3. make rehearse ENV=dev   (picks a verification key automatically)"
     )
+    assert "VERIFY_KEY_COLUMN" not in out
     assert "apply-genie" not in out
 
 
@@ -115,12 +116,13 @@ def test_self_service_genie_next_steps_unchanged(tmp_path):
 
 @pytest.mark.parametrize(
     ("env_name", "next_cmd"),
-    [("dev", "make rehearse ENV=dev VERIFY_KEY_COLUMN=<key_column>"), ("prod", "make release ENV=prod")],
+    [("dev", "make rehearse ENV=dev"), ("prod", "make release ENV=prod")],
 )
 def test_champion_full_mode_points_to_rehearse_or_release(tmp_path, env_name, next_cmd):
     lines = generate_next_steps(tmp_path, "full", env_name, has_sql=True, champion_flow=True)
 
     assert lines[-1] == f"    2. {next_cmd}"
+    assert not any("VERIFY_KEY_COLUMN" in line for line in lines)
     assert f"       {tmp_path}/masking_functions.sql" in lines
     assert not any(re.search(r"make apply\b", line) for line in lines)
 

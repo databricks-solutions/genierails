@@ -81,6 +81,7 @@ def test_a_mis_quoted_argument_scaffolds_nothing(cloud):
     result = cloud("setup", "ENV=prod VERIFY_KEY_COLUMN=customer_id")
     assert result.returncode != 0
     assert "Pass each make argument separately" in result.stderr
+    assert "make promote-to ENV=prod CATALOG_MAP=dev=prod" in result.stderr
     assert _entries(cloud.root) == before
     assert not (cloud.root / "envs" / "VERIFY_KEY_COLUMN=customer_id").exists()
 

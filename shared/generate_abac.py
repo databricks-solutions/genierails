@@ -7449,7 +7449,7 @@ def champion_genie_next_steps(env_name: str) -> list[str]:
         "       auto-tagging. Wait until the class.* tags appear.",
         f"       Prefer a script? make enable-classification ENV={env_name} turns it on (you still review detections in the UI).",
         f"    2. make generate ENV={env_name}",
-        f"    3. make rehearse ENV={env_name} VERIFY_KEY_COLUMN=<key_column>",
+        f"    3. make rehearse ENV={env_name}   (picks a verification key automatically)",
     ]
 
 
@@ -9114,7 +9114,7 @@ def generate_next_steps(
         # apply. Prod never rehearses (the Makefile refuses); it releases.
         next_cmd = (
             f"make release ENV={env_name}" if env_name == "prod"
-            else f"make rehearse ENV={env_name} VERIFY_KEY_COLUMN=<key_column>"
+            else f"make rehearse ENV={env_name}"
         )
         lines = ["  Next steps:", "    1. Review the draft:"]
         if has_sql:
