@@ -1,4 +1,6 @@
 import os
+import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -14,20 +16,38 @@ APPLYING_TARGETS = (
     "destroy", "destroy-governance", "destroy-genie", "_destroy-layer",
     "import", "migrate-state",
 )
+CI_MARKERS = ("CI", "TF_BUILD", "JENKINS_URL", "GITLAB_CI", "BUILDKITE", "CIRCLECI")
+
+
+def _clean_env(**updates):
+    env = {key: value for key, value in os.environ.items() if key not in (*CI_MARKERS, "GENIERAILS_ALLOW_CI_APPLY")}
+    env.update(updates)
+    return env
+
+
+def _run_guarded_make(cloud, target, *, env, timeout=10):
+    proc = subprocess.Popen(
+        ["make", "-f", str(ROOT / cloud / "Makefile"), target, "ENV=dev"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        pytest.fail(f"timed out and killed process group for {cloud} make {target}")
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
 @pytest.mark.parametrize("cloud", ["aws", "azure"])
 @pytest.mark.parametrize("target", APPLYING_TARGETS)
 def test_every_applying_target_refuses_in_ci(cloud, target):
-    env = {**os.environ, "CI": "true"}
-    proc = subprocess.run(
-        ["make", "-f", str(ROOT / cloud / "Makefile"), target, "ENV=dev"],
-        cwd=ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=10,
-    )
+    proc = _run_guarded_make(cloud, target, env=_clean_env(CI="true"))
     output = proc.stdout + proc.stderr
     assert proc.returncode != 0
     assert "GenieRails v1 runs Terraform applies on the deployment machine" in output
@@ -43,23 +63,28 @@ def test_read_only_targets_have_no_ci_refusal(cloud, target):
         capture_output=True,
         timeout=10,
     )
-    assert "applying targets cannot run with CI=true" not in proc.stdout + proc.stderr
+    assert "applying targets cannot run in CI" not in proc.stdout + proc.stderr
 
 
 @pytest.mark.parametrize("cloud", ["aws", "azure"])
 def test_throwaway_integration_workflow_has_explicit_ci_apply_opt_out(cloud):
-    proc = subprocess.run(
-        [
-            "make", "-f", str(ROOT / cloud / "Makefile"),
-            "_guard-not-ci-apply", "ENV=dev", "CI=true",
-            "GENIERAILS_ALLOW_CI_APPLY=1",
-        ],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        timeout=10,
+    proc = _run_guarded_make(
+        cloud,
+        "_guard-not-ci-apply",
+        env=_clean_env(CI="true", GENIERAILS_ALLOW_CI_APPLY="1"),
     )
     assert proc.returncode == 0
+
+
+@pytest.mark.parametrize(("marker", "value"), [
+    ("CI", "true"), ("CI", "1"), ("CI", "yes"), ("CI", "TrUe"),
+    ("TF_BUILD", "True"), ("JENKINS_URL", "https://jenkins.example"),
+    ("GITLAB_CI", "true"), ("BUILDKITE", "true"), ("CIRCLECI", "true"),
+])
+def test_guard_detects_common_ci_markers(marker, value):
+    proc = _run_guarded_make("aws", "_guard-not-ci-apply", env=_clean_env(**{marker: value}))
+    assert proc.returncode != 0
+    assert "GenieRails v1 runs Terraform applies on the deployment machine" in proc.stderr
 
 
 def test_ci_workflow_scopes_apply_opt_out_to_integration_steps():
@@ -67,6 +92,29 @@ def test_ci_workflow_scopes_apply_opt_out_to_integration_steps():
     assert workflow.count('GENIERAILS_ALLOW_CI_APPLY: "1"') == 2
     unit_job = workflow[workflow.index("  unit-tests:"):workflow.index("  validation:")]
     assert "GENIERAILS_ALLOW_CI_APPLY" not in unit_job
+
+
+def test_shipped_workflows_do_not_run_guarded_targets_without_opt_out():
+    workflow_paths = sorted(
+        path
+        for cloud in ("aws", "azure")
+        for suffix in ("*.yml", "*.yaml")
+        for path in (ROOT / cloud / ".github").rglob(suffix)
+    )
+    assert workflow_paths
+    for path in workflow_paths:
+        text = path.read_text()
+        steps = re.split(r"(?m)^      - ", text)[1:]
+        executed_targets = set()
+        for step in steps:
+            targets = re.findall(r"\bmake\s+(?:--no-print-directory\s+)?([A-Za-z_][\w-]*)", step)
+            executed_targets.update(targets)
+            opted_out = bool(re.search(r"GENIERAILS_ALLOW_CI_APPLY:\s*['\"]?1['\"]?", step))
+            guarded = set(targets) & set(APPLYING_TARGETS)
+            assert not guarded or opted_out, f"{path} runs guarded targets without opt-out: {sorted(guarded)}"
+        if path.name == "deploy.yml":
+            assert "GENIERAILS_ALLOW_CI_APPLY" not in text
+            assert not (executed_targets & set(APPLYING_TARGETS))
 
 
 def test_workspace_guard_runs_env_validator_and_rejects_bad_tfvars(tmp_path):
