@@ -22,7 +22,7 @@ Today the AI drafts parts of governance in every `make generate`: mask SQL for s
 
 For every table any configured agent uses:
 
-1. **Treatment per column** comes from its `class.*` tag through the shipped mask library (section 2). A per-column `treatment_overrides` entry can only make it stricter.
+1. **Treatment per column** comes from its `class.*` tag through the shipped mask library (section 2). A per-column `treatment_overrides` entry can make it stricter, or set an explicit, reviewed partial version for that column (e.g. a postcode prefix); it never changes what tier 3 sees.
 2. **One policy per catalog and treatment**, using that treatment's fixed function from the library.
 3. **Who sees what** comes from the tier rule (section 3).
 4. **Row filters** only where declared (section 4).
@@ -52,13 +52,29 @@ GenieRails ships a mapping for all 93 Databricks classification classes, each to
 | `ip_address` | network only (last octet zeroed) | redacted |
 | `mac_address` | vendor prefix only | redacted |
 | `url` | domain only | redacted |
-| `location` | redacted | redacted |
+| `location`, STRING columns (addresses, free text) | redacted | redacted |
+| `location`, numeric latitude/longitude (DOUBLE or DECIMAL) | rounded to 1 decimal place (about 11 km) | NULL |
 | `health_data`, `biometric_data`, `genetic_data`, `ethnicity`, `religious_belief`, `political_opinion`, `sexual_data`, `sexual_orientation`, `trade_union_membership`, `criminal_background`, `marital_status`, `employment_status` | redacted | redacted |
 | `secret` | redacted | redacted |
 
-"Redacted" means a fixed placeholder for text and NULL for other types. The one-way hash is a salted SHA-256 so values stay joinable and countable within a deployment but can't be reversed.
+"Redacted" means a fixed placeholder for text and NULL for other types. The one-way hash is a **keyed** hash (HMAC-SHA-256) with a secret key per deployment, shared by dev and prod so joins match across environments. A plain hash is not acceptable: small ID spaces such as SSNs (about a billion values) can be reversed by trying every value.
 
-**Change from today:** `us_ssn` and `us_itin` move from last 4 to one-way hash, following decision 2.
+**Change from today:** `us_ssn` and `us_itin` move from last 4 to the keyed hash, following decision 2. Last 4 stays available as an explicit opt-in:
+
+```hcl
+treatment_tier_overrides = { ssn = { partial = "last4" } }
+```
+
+**Location opt-ins.** Where a customer knows exactly what a column holds, a per-column override sets the partial version, reviewed in git like any governance change:
+
+```hcl
+treatment_overrides = {
+  "cat.sch.customers.postcode" = { partial = "prefix_3" }   # e.g. "200***"
+  "cat.sch.customers.city"     = { partial = "raw" }
+}
+```
+
+To confirm in the feasibility review: exactly which values Databricks' `location` class covers (addresses only, or also city, country and coordinates).
 
 ## 3. The tier rule
 
@@ -105,7 +121,7 @@ No configuration means no row filters.
 
 - **One mask per column with two masked tiers.** Unity Catalog allows only one mask on a column, so tier 2 (partial) and tier 3 (full) must come from one function that branches on group membership (`is_account_group_member`). That makes the mask function caller-sensitive, which `verify-access`'s fixed-point exclusion (#97) deliberately refuses. Verification must therefore check tier 2 and tier 3 against their own expected outputs, rather than relying on that exclusion.
 - **Typed variants**: partial and full versions are needed for DATE, TIMESTAMP, numeric and STRING columns where applicable.
-- **Hash salt**: where it lives (a secret per deployment) and how it carries from dev to prod.
+- **Hash key (required)**: where the per-deployment HMAC secret lives (e.g. a Databricks secret scope readable by the mask function), how it is shared between dev and prod, and how it is rotated.
 
 ## 8. Rollout (separate PRs, each reviewed by a different vendor)
 
