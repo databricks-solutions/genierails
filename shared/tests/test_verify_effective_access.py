@@ -12,6 +12,7 @@ conclusively proves the policy took effect. Anything it could not verify
 NON-PASSING (FAIL or INCONCLUSIVE) and blocks the gate.
 """
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,114 @@ def test_tiered_indistinguishable_sample_is_inconclusive():
 def test_dual_tier_principal_gets_most_privileged_tier():
     assert most_privileged_tier(["viewer", "raw_group"], ["raw_group", "analyst", "viewer"]) == "raw"
     assert most_privileged_tier(["viewer", "analyst"], ["raw_group", "analyst", "viewer"]) == "partial"
+
+
+@pytest.mark.parametrize(("principal", "wrong_tier"), [("analyst", "full"), ("viewer", "partial")])
+def test_tiered_partial_samples_cannot_hide_swapped_outputs(principal, wrong_tier):
+    check = _tiered_check()
+    expected = {
+        "raw": [(1, "alice@example.com"), (2, "bob@example.com")],
+        "partial": [(1, "a***@example.com"), (2, "[redacted]")],
+        "full": [(1, "[redacted]"), (2, "[redacted]")],
+    }
+    actual = {
+        "raw_group": expected["raw"],
+        "analyst": expected["partial"],
+        "viewer": expected["full"],
+    }
+    actual[principal] = [expected[wrong_tier][1]]
+    result = evaluate_tiered_column_mask_check(check, actual, expected)
+    assert result.status == INCONCLUSIVE
+    assert result.evidence["missing"] == [principal]
+
+
+def test_tiered_nulls_are_not_raw_leaks():
+    check = _tiered_check()
+    expected = {
+        "raw": [(1, "alice@example.com"), (2, None)],
+        "partial": [(1, "a***@example.com"), (2, None)],
+        "full": [(1, "[redacted]"), (2, None)],
+    }
+    actual = {principal: expected[tier] for principal, tier in check.expected_tiers}
+    assert evaluate_tiered_column_mask_check(check, actual, expected).status == PASS
+
+
+def test_tiered_raw_leak_has_dedicated_failure_evidence():
+    check = _tiered_check()
+    expected = {"raw": [(1, "alice@example.com")], "partial": [(1, "a***@example.com")],
+                "full": [(1, "[redacted]")]}
+    actual = {"raw_group": expected["raw"], "analyst": expected["raw"], "viewer": expected["full"]}
+    result = evaluate_tiered_column_mask_check(check, actual, expected)
+    assert result.status == FAIL
+    assert result.evidence["raw_leaks_by_principal"] == {"analyst": 1}
+
+
+def test_tiered_all_moving_masked_principals_error_is_inconclusive():
+    check = replace(_tiered_check(), moving_principals=("analyst", "viewer"))
+    expected = {"raw": [(1, "alice@example.com")], "partial": [(1, "a***@example.com")],
+                "full": [(1, "[redacted]")]}
+    result = evaluate_tiered_column_mask_check(
+        check, {"raw_group": expected["raw"]}, expected,
+        {"analyst": "more than one mask", "viewer": "More than one mask"})
+    assert result.status == INCONCLUSIVE
+    assert "no masked principal" in result.detail
+
+
+def test_declared_tier_must_match_overlapping_memberships():
+    check = replace(_tiered_check(), expected_tiers=_tiered_check().expected_tiers + (("dual", "full"),))
+    expected = {"raw": [(1, "alice@example.com")], "partial": [(1, "a***@example.com")],
+                "full": [(1, "[redacted]")]}
+    actual = {principal: expected[tier] for principal, tier in check.expected_tiers}
+    result = evaluate_tiered_column_mask_check(
+        check, actual, expected, principal_memberships={"dual": ("raw_group", "viewer")})
+    assert result.status == INCONCLUSIVE
+    assert "memberships resolve to raw" in result.detail
+
+
+def test_deterministic_tfvars_uses_env_settings_and_derives_overlap_and_outsider(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    tfvars.write_text('''
+fgac_policies = [
+  { name = "partial", policy_type = "POLICY_TYPE_COLUMN_MASK", to_principals = ["analyst"],
+    match_condition = "hasTagValue('gr_treatment', 'email_partial')",
+    function_catalog = "cat", function_schema = "gov", function_name = "partial_email" },
+  { name = "full", policy_type = "POLICY_TYPE_COLUMN_MASK", to_principals = ["account users"],
+    except_principals = ["raw", "analyst"], match_condition = "hasTagValue('gr_treatment', 'email_partial')",
+    function_catalog = "cat", function_schema = "gov", function_name = "full_email" },
+]
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.people.email", tag_key = "gr_treatment", tag_value = "email_partial" },
+]
+''')
+    env.write_text('''governance_mode = "deterministic"
+access_tier_groups = ["raw", "analyst", "viewer"]
+raw_exempt_principals = ["etl_group"]
+''')
+    spec = load_spec_from_tfvars(tfvars, env_file=env, key_column="id")
+    check = spec.column_masks[0]
+    expectations = dict(check.expected_tiers)
+    assert (check.partial_function, check.full_function) == ("cat.gov.partial_email", "cat.gov.full_email")
+    assert expectations["__out_of_tier__"] == "full"
+    assert expectations["__dual_tier__"] == "raw"
+    assert expectations["etl_group"] == "raw"
+    assert spec.principal_memberships["__dual_tier__"] == ("raw", "viewer")
+
+
+def test_deterministic_two_tier_spec_uses_full_for_unused_partial(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    tfvars.write_text('''fgac_policies = [{ name = "full", policy_type = "POLICY_TYPE_COLUMN_MASK",
+      to_principals = ["account users"], except_principals = ["raw"],
+      match_condition = "hasTagValue('gr_treatment', 'email_partial')",
+      function_catalog = "cat", function_schema = "gov", function_name = "full_email" }]
+tag_assignments = [{ entity_type = "columns", entity_name = "cat.sch.people.email",
+  tag_key = "gr_treatment", tag_value = "email_partial" }]
+''')
+    env.write_text('governance_mode = "deterministic"\naccess_tier_groups = ["raw", "viewer"]\n')
+    check = load_spec_from_tfvars(tfvars, env_file=env, key_column="id").column_masks[0]
+    assert check.partial_function == check.full_function == "cat.gov.full_email"
+    assert set(dict(check.expected_tiers).values()) == {"raw", "full"}
 
 
 def test_cli_missing_promoted_tfvars_reports_prerequisite(tmp_path):

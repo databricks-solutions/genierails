@@ -76,6 +76,8 @@ DEFAULT_ADMIN_TIER = "__admin__"
 # it applies to *everyone except* its ``except_principals``, so those exceptions
 # are the only reliable raw-value baseline.
 ALL_USERS_GROUP = "account users"
+OUT_OF_TIER_PRINCIPAL = "__out_of_tier__"
+DUAL_TIER_PRINCIPAL = "__dual_tier__"
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +682,13 @@ def _normalize_value(v: Any) -> Any:
     return str(v).strip()
 
 
+def _normalize_exact_value(v: Any) -> Any:
+    """Preserve string bytes for deterministic exact-output comparisons."""
+    if v is None:
+        return None
+    return str(v)
+
+
 def _errors_for(
     principals: Iterable[str], errors_by_principal: Optional[Mapping[str, str]],
 ) -> dict[str, str]:
@@ -962,6 +971,7 @@ def evaluate_tiered_column_mask_check(
     errors_by_principal: Optional[Mapping[str, str]] = None,
     *,
     pairing_problem: str = "",
+    principal_memberships: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> CheckResult:
     """Compare every deterministic tier with its exact admin-computed output.
 
@@ -970,6 +980,18 @@ def evaluate_tiered_column_mask_check(
     """
     target = check.describe()
     tiers = dict(check.expected_tiers)
+    rank = {"raw": 0, "partial": 1, "full": 2}
+    for principal, memberships in (principal_memberships or {}).items():
+        if principal not in tiers:
+            continue
+        membership_tiers = [tiers.get(group, "full") for group in memberships]
+        resolved = min(membership_tiers, key=rank.__getitem__) if membership_tiers else "full"
+        if tiers[principal] != resolved:
+            return CheckResult(
+                "column-mask", target, INCONCLUSIVE,
+                f"principal {principal!r} is declared {tiers[principal]} but its memberships resolve to {resolved}",
+                {"principal": principal, "declared_tier": tiers[principal], "resolved_tier": resolved},
+            )
     involved = set(tiers)
     errors = _errors_for(involved, errors_by_principal)
     moving = set(check.moving_principals)
@@ -993,7 +1015,7 @@ def evaluate_tiered_column_mask_check(
     used_tiers = set(tiers.values())
     common = set.intersection(*(set(expected[tier]) for tier in used_tiers)) if used_tiers else set()
     distinguishable = any(
-        len({_normalize_value(expected[t][key]) for t in used_tiers}) == len(used_tiers)
+        len({_normalize_exact_value(expected[t][key]) for t in used_tiers}) == len(used_tiers)
         for key in common
     )
     if not distinguishable:
@@ -1006,6 +1028,8 @@ def evaluate_tiered_column_mask_check(
     raw_leaks: dict[str, int] = {}
     compared: dict[str, int] = {}
     missing: list[str] = []
+    fixed_by_principal: dict[str, int] = {}
+    raw_keys = set(expected["raw"])
     for principal, tier in tiers.items():
         if principal in accepted:
             continue
@@ -1015,15 +1039,32 @@ def evaluate_tiered_column_mask_check(
             return CheckResult("column-mask", target, INCONCLUSIVE, problem,
                                {"key_column": check.key_column})
         wanted = expected.get(tier, {})
-        if not actual or any(key not in wanted for key in actual):
+        actual_keys = set(actual)
+        own_distinguishing_key = any(
+            key in common and len({_normalize_exact_value(expected[other][key])
+                                   for other in used_tiers}) == len(used_tiers)
+            for key in actual_keys
+        )
+        if (not actual or any(key not in wanted for key in actual)
+                or (actual_keys != raw_keys and not own_distinguishing_key)):
             missing.append(principal)
             continue
-        compared[principal] = len(actual)
+        compared[principal] = 0
+        fixed_by_principal[principal] = 0
         for key, value in actual.items():
-            normalized = _normalize_value(value)
-            if normalized != _normalize_value(wanted[key]):
+            normalized = _normalize_exact_value(value)
+            wanted_value = _normalize_exact_value(wanted[key])
+            raw_value = _normalize_exact_value(expected["raw"].get(key))
+            if normalized != wanted_value:
                 mismatches[principal] = mismatches.get(principal, 0) + 1
-            if tier != "raw" and normalized == _normalize_value(expected["raw"].get(key)):
+            # NULL and caller-independent fixed points cannot demonstrate that
+            # a mask ran. They are neither leaks nor proof rows.
+            proof_row = tier != "raw" and raw_value not in (None, "") and wanted_value != raw_value
+            if proof_row:
+                compared[principal] += 1
+            elif tier != "raw" and raw_value not in (None, ""):
+                fixed_by_principal[principal] += 1
+            if proof_row and normalized == raw_value:
                 raw_leaks[principal] = raw_leaks.get(principal, 0) + 1
     if raw_leaks:
         return CheckResult("column-mask", target, FAIL,
@@ -1036,6 +1077,28 @@ def evaluate_tiered_column_mask_check(
     if missing:
         return CheckResult("column-mask", target, INCONCLUSIVE,
                            f"principal(s) had no fully paired sample: {missing}", {"missing": missing})
+    masked_success = [principal for principal, tier in tiers.items()
+                      if tier != "raw" and principal not in accepted and compared.get(principal, 0)]
+    if any(tier != "raw" for tier in tiers.values()) and not masked_success:
+        return CheckResult(
+            "column-mask", target, INCONCLUSIVE,
+            "no masked principal returned a distinguishing row; masking was not proven",
+            {"accepted_fail_closed": sorted(accepted), "per_principal_compared": compared},
+        )
+    unbounded = {
+        principal: f"{compared.get(principal, 0)} compared, {fixed} unchanged of {len(_row_pairs(values_by_principal.get(principal)))} sampled"
+        for principal, fixed in fixed_by_principal.items()
+        if fixed and (compared.get(principal, 0) < FIXED_POINT_MIN_COMPARED
+                      or fixed > FIXED_POINT_MAX_SHARE * len(_row_pairs(values_by_principal.get(principal))))
+    }
+    if unbounded:
+        return CheckResult(
+            "column-mask", target, INCONCLUSIVE,
+            (f"too many sampled rows have a value the expected mask leaves unchanged "
+             f"(needs at least {FIXED_POINT_MIN_COMPARED} compared rows and at most "
+             f"{FIXED_POINT_MAX_SHARE:.0%} unchanged per tier): {unbounded}"),
+            {"per_principal_compared": compared, "fixed_point_rows_by_principal": fixed_by_principal},
+        )
     return CheckResult("column-mask", target, PASS,
                        f"all deterministic tiers matched their exact expected output across {sum(compared.values())} row(s)",
                        {"per_principal_compared": compared, "accepted_fail_closed": sorted(accepted)})
@@ -1147,7 +1210,8 @@ def evaluate_effective_access(
         if check.expected_tiers:
             report.add(evaluate_tiered_column_mask_check(
                 check, vals, (expected_values or {}).get(sig, {}), errs,
-                pairing_problem=(pairing_problems or {}).get(sig, "")))
+                pairing_problem=(pairing_problems or {}).get(sig, ""),
+                principal_memberships=spec.principal_memberships))
         else:
             report.add(evaluate_column_mask_check(
                 check, vals, errs,
@@ -1634,7 +1698,7 @@ class EffectiveAccessVerifier:
 
         # Add the SP to every requested account group. A dual-tier test
         # principal proves policy precedence, not merely each tier in isolation.
-        for membership in memberships or (tier,):
+        for membership in ((tier,) if memberships is None else memberships):
             group = next((g for g in a.groups.list(filter=f'displayName eq "{membership}"')), None)
             if group is None:
                 raise RuntimeError(f"Tier group not found: {membership!r} (apply the account layer first)")
@@ -2124,7 +2188,8 @@ def verify_effective_access_live(
         for tier in sorted(spec.principals):
             print(f"  Provisioning test principal for tier: {tier}")
             memberships = spec.principal_memberships.get(tier)
-            principal = (verifier.provision_principal(tier, memberships) if memberships
+            principal = (verifier.provision_principal(tier, memberships)
+                         if tier in spec.principal_memberships
                          else verifier.provision_principal(tier))
             principals[tier] = principal
             print(f"  Granting warehouse CAN_USE to test principal: {tier}")
@@ -2193,9 +2258,10 @@ def verify_effective_access_live(
             }
             if hard_sample_errors or sig in pairing_problems:
                 continue
-            problem = next((why for why in (sample_key_problem(check, t, samples[t]) for t in tiers)
+            problem = next((why for why in (sample_key_problem(check, t, samples[t])
+                                             for t in tiers if t in samples)
                             if why), "")
-            keys = list(dict.fromkeys(k for t in tiers for k, _ in samples[t]))
+            keys = list(dict.fromkeys(k for t in tiers if t in samples for k, _ in samples[t]))
             if not problem and not keys:
                 problem = (f"no principal sees rows of {check.table}, so rows cannot be "
                            f"paired by {check.key_column}")
@@ -2254,9 +2320,12 @@ def verify_effective_access_live(
                     "GENIERAILS_VERIFY_PROPAGATION_BACKOFF", "5")))
                 while sig in expected_values and not pairing_problems.get(sig):
                     result = evaluate_tiered_column_mask_check(
-                        check, per_principal, expected_values[sig], per_errors)
-                    if result.status != FAIL or "did not exactly match" not in result.detail \
-                            or time.time() >= deadline:
+                        check, per_principal, expected_values[sig], per_errors,
+                        principal_memberships=spec.principal_memberships)
+                    expired = time.time() >= deadline
+                    if result.status != FAIL or "did not exactly match" not in result.detail or expired:
+                        if expired and result.status == FAIL and "did not exactly match" in result.detail:
+                            print(f"    Tier membership propagation deadline expired for {check.table}.{check.column}")
                         break
                     print(f"    Tier membership may still be propagating; retrying {check.table}.{check.column}")
                     time.sleep(min(backoff, max(0, deadline - time.time())))
@@ -2485,6 +2554,7 @@ def load_spec_from_tfvars(
     tfvars_file: Path,
     account_tfvars_file: Optional[Path] = None,
     *,
+    env_file: Optional[Path] = None,
     key_column: str = "",
     key_column_by_table: Optional[Mapping[str, str]] = None,
 ) -> VerificationSpec:
@@ -2493,6 +2563,10 @@ def load_spec_from_tfvars(
 
     with open(tfvars_file) as f:
         data = hcl2.load(f)
+    env_data: dict[str, Any] = {}
+    if env_file and Path(env_file).is_file():
+        with open(env_file) as f:
+            env_data = hcl2.load(f)
     fgac_policies = data.get("fgac_policies", []) or []
     tag_assignments = data.get("tag_assignments", []) or []
 
@@ -2508,6 +2582,8 @@ def load_spec_from_tfvars(
                 groups.extend(gd.keys())
         elif isinstance(g, dict):
             groups.extend(g.keys())
+    groups.extend(_as_list(env_data.get("access_tier_groups")))
+    groups.extend(_as_list(env_data.get("raw_exempt_principals")))
     # Also treat any principal referenced by a policy as a known group.
     for pol in fgac_policies:
         groups.extend(_as_list(pol.get("to_principals")))
@@ -2518,9 +2594,19 @@ def load_spec_from_tfvars(
         key_column=key_column, key_column_by_table=key_column_by_table,
     )
     spec.mask_config = {"fgac_policies": fgac_policies, "tag_assignments": tag_assignments}
-    if _as_str(data.get("governance_mode")) == "deterministic":
-        tiers = _as_list(data.get("access_tier_groups"))
-        raw_exempt = _as_list(data.get("raw_exempt_principals"))
+    governance = {**data, **env_data}
+    if _as_str(governance.get("governance_mode")) == "deterministic":
+        from deterministic_governance import resolve_precedence
+
+        tiers = _as_list(governance.get("access_tier_groups"))
+        raw_exempt = _as_list(governance.get("raw_exempt_principals"))
+        invalid_exempt = [principal for principal in raw_exempt
+                          if "@" in principal or re.fullmatch(r"[0-9a-fA-F-]{32,36}", principal)]
+        if invalid_exempt:
+            raise ValueError(
+                "ERROR: verify-access requires raw_exempt_principals to name account groups; "
+                "service-principal application IDs and user emails cannot be authenticated as "
+                f"dedicated test identities: {invalid_exempt}")
         policies_by_column: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
         for policy in fgac_policies:
             if _as_str(policy.get("policy_type")) != "POLICY_TYPE_COLUMN_MASK":
@@ -2530,6 +2616,30 @@ def load_spec_from_tfvars(
                     entity_type="columns"):
                 policies_by_column.setdefault((column["table"], column["column"]), []).append(policy)
         deterministic_checks = []
+        config_tags = {
+            _as_str(item.get("entity_name")).lower(): _as_str(item.get("tag_value"))
+            for item in tag_assignments
+            if _as_str(item.get("entity_type")) == "columns"
+            and _as_str(item.get("tag_key")) == "gr_treatment"
+        }
+        memberships: dict[str, tuple[str, ...]] = {group: (group,) for group in tiers}
+        memberships.update({principal: (principal,) for principal in raw_exempt})
+        memberships[OUT_OF_TIER_PRINCIPAL] = ()
+        if len(tiers) >= 2:
+            memberships[DUAL_TIER_PRINCIPAL] = (tiers[0], tiers[-1])
+
+        def access_for(column: str, treatment: str, principal: str,
+                       groups_for_principal: Sequence[str], *, deployer: bool = False) -> str:
+            resolved = resolve_precedence(
+                column=column, treatment=treatment, group=groups_for_principal,
+                library_default="partial", access_tier_groups=tiers,
+                column_overrides=governance.get("column_overrides") or {},
+                treatment_versions=governance.get("treatment_versions") or {},
+                tier_access_overrides=governance.get("tier_access_overrides") or {},
+                principal=principal, deployer_principal=principal if deployer else None,
+                raw_exempt_principals=raw_exempt)
+            return str(getattr(resolved, "access", resolved))
+
         for check in spec.column_masks:
             policies = policies_by_column.get((check.table, check.column), [])
             full = next((_mask_function(p) for p in policies
@@ -2541,13 +2651,19 @@ def load_spec_from_tfvars(
             # assigns configured principals to raw/full.
             if len(tiers) == 2 and not partial:
                 partial = full
-            expectations = [(group, most_privileged_tier([group], tiers)) for group in tiers]
-            expectations += [(principal, "raw") for principal in raw_exempt]
-            expectations.append((DEFAULT_ADMIN_TIER, "raw"))
+            treatment = config_tags.get(f"{check.table}.{check.column}".lower(), "")
+            expectations = [
+                (principal, access_for(f"{check.table}.{check.column}", treatment,
+                                       principal, principal_memberships))
+                for principal, principal_memberships in memberships.items()
+            ]
+            expectations.append((DEFAULT_ADMIN_TIER, access_for(
+                f"{check.table}.{check.column}", treatment, DEFAULT_ADMIN_TIER, (), deployer=True)))
             deterministic_checks.append(replace(
                 check, expected_tiers=tuple(dict(expectations).items()),
                 partial_function=partial, full_function=full))
         spec.column_masks = deterministic_checks
+        spec.principal_memberships = memberships
     # The rule the live run applies: a key is refused when a column-mask policy
     # can match its configured tags (so it is itself a masked column), not for
     # carrying a tag no mask policy matches (e.g. class.* on an ID).
@@ -2637,7 +2753,7 @@ def _load_spec_from_args(args, key_map: Mapping[str, str]) -> VerificationSpec:
         # up front; it then applies only to tables that have it (picked live).
         spec = load_spec_from_tfvars(
             args.from_tfvars, args.account_tfvars, key_column=args.key_column,
-            key_column_by_table=key_map,
+            key_column_by_table=key_map, env_file=args.env_file,
         )
         spec.column_masks = [replace(c, key_column=by_table.get(c.table.lower(), ""))
                              for c in spec.column_masks]
