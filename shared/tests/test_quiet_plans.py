@@ -211,14 +211,54 @@ print(json.dumps([names, hashlib.sha256(normalized.encode()).hexdigest()]))
     assert results[0][0] == ["third", "first", "second"]
 
 
-def test_fallback_duplicate_names_are_refused_and_later_edits_are_not_ignored():
-    prefix = "SET timezone = 'UTC'; CREATE FUNCTION Mask() RETURNS INT RETURN 1; "
-    for later_body in ("2", "999"):
-        sql = prefix + f"CREATE OR REPLACE FUNCTION mASK() RETURNS INT RETURN {later_body};"
-        with pytest.raises(ValueError, match="function 'Mask' is defined more than once"):
+@pytest.mark.parametrize("hidden_prefix", ["SET x = 1; ", "/* c */ "])
+def test_unrepresented_duplicate_names_are_refused_and_later_edits_are_not_ignored(hidden_prefix):
+    prefix = "USE CATALOG c;\nUSE SCHEMA s;\nCREATE FUNCTION f() RETURNS INT RETURN 1;\n"
+    for later_body in ("4", "999"):
+        sql = prefix + hidden_prefix + f"CREATE OR REPLACE FUNCTION F() RETURNS INT RETURN {later_body};"
+        with pytest.raises(ValueError, match="function 'f' has a definition that deployment would not execute"):
             parse_sql_blocks(sql)
-        with pytest.raises(ValueError, match="function 'Mask' is defined more than once"):
+        with pytest.raises(ValueError, match="function 'f' has a definition that deployment would not execute"):
             normalized_definitions(sql)
+
+
+def test_one_line_fallback_duplicate_is_refused():
+    sql = (
+        "SET x = 1; CREATE FUNCTION f() RETURNS INT RETURN 1; "
+        "CREATE OR REPLACE FUNCTION F() RETURNS INT RETURN 2;"
+    )
+    with pytest.raises(ValueError, match="function 'f' has a definition that deployment would not execute"):
+        parse_sql_blocks(sql)
+
+
+def test_one_line_duplicate_block_that_deployment_executes_is_allowed():
+    sql = (
+        "CREATE FUNCTION f() RETURNS INT RETURN 1; "
+        "CREATE OR REPLACE FUNCTION F() RETURNS INT RETURN 2;"
+    )
+    blocks = parse_sql_blocks(sql)
+    assert len(blocks) == 1
+    assert "RETURN 1" in blocks[0][2] and "RETURN 2" in blocks[0][2]
+    normalized_definitions(sql)
+
+
+def test_same_name_in_separate_use_contexts_is_allowed():
+    sql = (
+        "USE CATALOG c;\nUSE SCHEMA one;\nCREATE FUNCTION f() RETURNS INT RETURN 1;\n"
+        "USE SCHEMA two;\nCREATE OR REPLACE FUNCTION F() RETURNS INT RETURN 2;"
+    )
+    assert len(parse_sql_blocks(sql)) == 2
+    normalized_definitions(sql)
+
+
+def test_create_function_text_in_string_literal_or_comment_is_not_a_definition():
+    sql = (
+        "USE CATALOG c;\nUSE SCHEMA s;\n"
+        "CREATE FUNCTION g() RETURNS INT COMMENT 'see CREATE FUNCTION g(x)' RETURN 1;\n"
+        "-- CREATE FUNCTION g(x) is documentation only\n"
+    )
+    assert len(parse_sql_blocks(sql)) == 1
+    normalized_definitions(sql)
 
 
 def test_duplicate_logical_function_names_keep_file_order():

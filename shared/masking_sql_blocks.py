@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import NamedTuple
+
+from sql_tokenizer import sql_tokens
 
 
 class ParsedSqlBlocks(NamedTuple):
@@ -15,6 +18,41 @@ def extract_function_name(stmt: str) -> str:
     """Extract a function name exactly as the deployer has always done."""
     match = re.search(r"FUNCTION\s+(\S+)\s*\(", stmt, re.IGNORECASE)
     return match.group(1) if match else "<unknown>"
+
+
+def _normalized_identifier(token: str) -> str:
+    return token.strip("`").lower()
+
+
+def _function_definitions(
+    sql_text: str,
+    catalog: str | None = None,
+    schema: str | None = None,
+) -> list[tuple[str | None, str | None, str]]:
+    """Find CREATE FUNCTION targets without matching comments or literals."""
+    tokens = sql_tokens(sql_text)
+    definitions: list[tuple[str | None, str | None, str]] = []
+    i = 0
+    while i < len(tokens):
+        if tokens[i:i + 2] == ["use", "catalog"] and i + 2 < len(tokens):
+            catalog = _normalized_identifier(tokens[i + 2]).rstrip(";")
+        elif tokens[i:i + 2] == ["use", "schema"] and i + 2 < len(tokens):
+            schema = _normalized_identifier(tokens[i + 2]).rstrip(";")
+        elif tokens[i] == "create":
+            j = i + 1
+            if tokens[j:j + 2] == ["or", "replace"]:
+                j += 2
+            if j < len(tokens) and tokens[j] == "function":
+                j += 1
+                name_parts: list[str] = []
+                while j < len(tokens) and tokens[j] != "(":
+                    if tokens[j] != ".":
+                        name_parts.append(tokens[j])
+                    j += 1
+                if j < len(tokens) and name_parts:
+                    definitions.append((catalog, schema, _normalized_identifier(name_parts[-1])))
+        i += 1
+    return definitions
 
 
 def analyze_sql_blocks(sql_text: str) -> ParsedSqlBlocks:
@@ -76,32 +114,15 @@ def analyze_sql_blocks(sql_text: str) -> ParsedSqlBlocks:
         extract_function_name(stmt).split(".")[-1].lower()
         for _, _, stmt in blocks
     }
-    function_matches = list(re.finditer(
-        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*(\w+)\s*\(",
-        sql_text, re.IGNORECASE,
-    ))
-    function_occurrences: dict[str, list[str]] = {}
+    definitions = _function_definitions(sql_text)
     all_fn_names: set[str] = set()
     missing: list[str] = []
-    for match in function_matches:
-        function_name = match.group(1).lower()
-        function_occurrences.setdefault(function_name, []).append(match.group(1))
+    for _, _, function_name in definitions:
         if function_name not in all_fn_names:
             all_fn_names.add(function_name)
             if function_name not in primary_names:
                 missing.append(function_name)
     if missing:
-        duplicate = next(
-            (name for name in missing if len(function_occurrences[name]) > 1),
-            None,
-        )
-        if duplicate is not None:
-            display_name = function_occurrences[duplicate][0]
-            raise ValueError(
-                "Ambiguous masking SQL fallback: function "
-                f"'{display_name}' is defined more than once; put each definition "
-                "on its own semicolon-terminated line or remove the duplicate"
-            )
         # Preserve the deployer's established fallback exactly. It is only
         # unambiguous when the whole file has one possible execution context;
         # this retains #94's block-comment/formatting contract without guessing
@@ -133,6 +154,22 @@ def analyze_sql_blocks(sql_text: str) -> ParsedSqlBlocks:
         if recovered != set(missing):
             unambiguous = False
             ambiguities.append(sql_text)
+
+    source_counts = Counter(name for _, _, name in definitions)
+    parsed_by_context: Counter[tuple[str | None, str | None, str]] = Counter()
+    for block_catalog, block_schema, statement in blocks:
+        parsed_by_context.update(_function_definitions(statement, block_catalog, block_schema))
+    parsed_counts = Counter()
+    for (_, _, name), count in parsed_by_context.items():
+        parsed_counts[name] += count
+    unrepresented = source_counts - parsed_counts
+    if unrepresented:
+        function_name = next(iter(unrepresented))
+        raise ValueError(
+            "Ambiguous masking SQL: function "
+            f"'{function_name}' has a definition that deployment would not execute; "
+            "put each definition on its own semicolon-terminated line or remove the duplicate"
+        )
 
     return ParsedSqlBlocks(blocks, unambiguous, ambiguities)
 

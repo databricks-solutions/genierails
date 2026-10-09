@@ -43,7 +43,7 @@ def test_validation_refuses_ambiguous_fallback_duplicate_functions(tmp_path):
     result = _result()
     validate_sql_deployment_blocks(sql, result)
     assert result.errors == [
-        "Ambiguous masking SQL fallback: function 'Mask' is defined more than once; "
+        "Ambiguous masking SQL: function 'mask' has a definition that deployment would not execute; "
         "put each definition on its own semicolon-terminated line or remove the duplicate"
     ]
 
