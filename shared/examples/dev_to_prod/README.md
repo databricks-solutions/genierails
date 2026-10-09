@@ -49,6 +49,7 @@ Fill in `envs/dev/auth.auto.tfvars` (service principal and workspace). In `envs/
 access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
 ```
 
+<a id="dev-classify"></a>
 **2. Classify (in the UI).** In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on. When the scan finishes, review the detections, exclude false positives, and turn on auto-tagging. Wait for the `class.*` tags to appear (the first scan can take up to about a day).
 
 **3. Generate.**
@@ -91,8 +92,8 @@ make release ENV=prod
 **Pass looks like:** `ALL EFFECTIVE` and "Release complete". Business users can now open the agent and get masked answers. (They also need `CAN_USE` on the agent's SQL warehouse, which GenieRails doesn't grant.)
 
 **If it stops on coverage or drift**, prod found a sensitive tag your rules don't cover. Nothing new was granted. Fix it in dev, never by hand in prod:
-1. `make scaffold-treatments ENV=prod` names the uncovered tag and suggests a mask. Review the new mapping in `shared/treatment_config.json`.
-2. Add the rule to dev: tag a matching dev column, then `make scaffold-treatments ENV=dev` ([no matching dev column?](REFERENCE.md#step-details)).
+1. `make scaffold-treatments ENV=prod` names the uncovered tag and adds a suggested mask to `../shared/treatment_config.json`. Review it; it's a tracked file, so it goes in the same PR as step 2.
+2. Add the rule to dev: tag a matching dev column, then `make generate ENV=dev` ([no matching dev column?](REFERENCE.md#step-details)).
 3. `make rehearse ENV=dev`, then `make promote-to ENV=prod` and `make release ENV=prod`.
 
 <a id="phase-5--prod-maintain-coverage"></a>

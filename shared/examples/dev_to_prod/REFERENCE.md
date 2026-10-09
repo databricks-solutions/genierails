@@ -119,9 +119,9 @@ What each walkthrough step does, for when you need more than the [walkthrough](R
 
 **Fixing a coverage gap found in prod**
 - `make scaffold-treatments ENV=prod` writes a suggested rule into prod's `generated/abac.auto.tfvars` and `generated/masking_functions.sql`, plus the shared mapping in `shared/treatment_config.json` and `shared/tag_vocabulary_registry.json`. The next `promote-to` replaces prod's generated files from dev, so the prod-local rule is only a preview: the rule has to live in dev.
-- Preferred: tag a matching column in dev and run `make scaffold-treatments ENV=dev`, so dev's generated files get the policy and its masking function.
+- Preferred: tag a matching column in dev and run `make generate ENV=dev`. It uses the mapping the prod scaffold added to `shared/treatment_config.json` and drafts the policy and masking function. (`scaffold-treatments ENV=dev` would do nothing here: it only acts on labels that aren't mapped yet.)
 - No matching dev column: copy the new mask policy into `envs/dev/generated/abac.auto.tfvars` (with the dev catalog) and its function into `envs/dev/generated/masking_functions.sql`. Don't copy prod's `tag_assignments`.
-- Running `make generate ENV=dev` alone isn't enough when dev has no column with that class: the mapping exists, but no dev policy is created for promotion.
+- `make generate ENV=dev` isn't enough when dev has no column with that class: the mapping exists, but no dev policy is created for promotion.
 - Then `make rehearse ENV=dev`, `make promote-to ENV=prod`, `make release ENV=prod`.
 - A newly tagged column is a masking gap, not an access breach. For your most sensitive data, prefer "locked down until proven safe" over "open until tagged".
 
