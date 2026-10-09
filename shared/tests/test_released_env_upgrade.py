@@ -484,6 +484,8 @@ def test_released_data_access_state_plans_no_change_after_the_retirement(tmp_pat
     trigger_upgrade = frozenset({
         ("terraform_data.masking_functions", "must be replaced"),
         ("time_sleep.wait_for_policy_enforcement", "will be updated in-place"),
+        # The deployer SP's own grant gains SELECT (verify-access reads as it).
+        ('databricks_grant.terraform_sp_manage_catalog["cat"]', "will be updated in-place"),
     })
     _assert_no_change(runs["released_upgrade_plan"], added=drop, changes=trigger_upgrade)
     _assert_no_change(runs["released_upgrade_plan_after_gate_expiry"],

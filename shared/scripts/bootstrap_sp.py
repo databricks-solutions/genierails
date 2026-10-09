@@ -67,7 +67,7 @@ def parser() -> argparse.ArgumentParser:
                          "for Foundation Model API endpoints; env: MODEL_ENDPOINT)"))
     p.add_argument(
         "--target-catalog",
-        help=("existing catalog to grant USE_CATALOG, USE_SCHEMA, MANAGE, and APPLY_TAG; "
+        help=("existing catalog to grant USE_CATALOG, USE_SCHEMA, SELECT, MANAGE, and APPLY_TAG; "
               "supply one value for every workspace or comma-separated values matching "
               "--workspace-id"),
     )
@@ -86,7 +86,7 @@ def _plan(cfg: Config, emit: Callable[[str], None]) -> None:
         if target_catalog:
             emit(
                 f"  workspace {workspace_id}: grant USE_CATALOG + USE_SCHEMA + "
-                f"MANAGE + APPLY_TAG on catalog {target_catalog}"
+                f"SELECT + MANAGE + APPLY_TAG on catalog {target_catalog}"
             )
         else:
             emit(f"  workspace {workspace_id}: grant CREATE_CATALOG on its metastore")
@@ -470,7 +470,7 @@ def _preflight(
                     "deployment service principal. Nothing was changed."
                 )
             requested = (
-                "USE CATALOG, USE SCHEMA, MANAGE, and APPLY TAG"
+                "USE CATALOG, USE SCHEMA, SELECT, MANAGE, and APPLY TAG"
                 if target_catalog else "CREATE CATALOG"
             )
             owner_label = "catalog owner" if target_catalog else "metastore owner"
@@ -790,6 +790,7 @@ def bootstrap(
                         add=[
                             Privilege.USE_CATALOG,
                             Privilege.USE_SCHEMA,
+                            Privilege.SELECT,
                             Privilege.MANAGE,
                             Privilege.APPLY_TAG,
                         ],
@@ -797,15 +798,15 @@ def bootstrap(
                 )
             except Exception as exc:
                 raise RuntimeError(
-                    f"could not grant USE_CATALOG + USE_SCHEMA + MANAGE + APPLY_TAG on "
+                    f"could not grant USE_CATALOG + USE_SCHEMA + SELECT + MANAGE + APPLY_TAG on "
                     f"catalog {target_catalog!r} "
                     f"in workspace {workspace_id}. The bootstrap caller lacks authority or "
                     "the catalog is unavailable; have the catalog owner grant the deployment "
-                    f"service principal {client_id!r} USE CATALOG, USE SCHEMA, MANAGE, and "
+                    f"service principal {client_id!r} USE CATALOG, USE SCHEMA, SELECT, MANAGE, and "
                     "APPLY TAG."
                 ) from exc
             emit(
-                f"GRANTED workspace {workspace_id}: USE_CATALOG + USE_SCHEMA + MANAGE + "
+                f"GRANTED workspace {workspace_id}: USE_CATALOG + USE_SCHEMA + SELECT + MANAGE + "
                 f"APPLY_TAG on catalog {target_catalog}"
             )
         else:

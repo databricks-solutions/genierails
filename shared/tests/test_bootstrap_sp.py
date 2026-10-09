@@ -602,7 +602,7 @@ def test_plan_distinguishes_greenfield_and_brownfield_grants():
     assert any("CREATE_CATALOG on its metastore" in line for line in greenfield_output)
     assert not any("MANAGE + APPLY_TAG on catalog" in line for line in greenfield_output)
     assert any(
-        "USE_CATALOG + USE_SCHEMA + MANAGE + APPLY_TAG on catalog existing_catalog" in line
+        "USE_CATALOG + USE_SCHEMA + SELECT + MANAGE + APPLY_TAG on catalog existing_catalog" in line
         for line in brownfield_output
     )
     assert not any("CREATE_CATALOG on its metastore" in line for line in brownfield_output)
@@ -902,11 +902,12 @@ def test_target_catalog_grants_brownfield_privileges():
     assert catalog_call["changes"][0].add == [
         Privilege.USE_CATALOG,
         Privilege.USE_SCHEMA,
+        Privilege.SELECT,
         Privilege.MANAGE,
         Privilege.APPLY_TAG,
     ]
     assert any(
-        "USE_CATALOG + USE_SCHEMA + MANAGE + APPLY_TAG on catalog existing_catalog" in line
+        "USE_CATALOG + USE_SCHEMA + SELECT + MANAGE + APPLY_TAG on catalog existing_catalog" in line
         for line in output
     )
     assert workspace.api_client.do.call_count == 2
@@ -1099,7 +1100,7 @@ def test_target_catalog_grant_fails_loudly_when_caller_lacks_authority():
     _account, workspace, _workspace_factory, factory = _fake()
     workspace.grants.update.side_effect = PermissionError("denied")
 
-    with pytest.raises(RuntimeError, match="catalog owner.*MANAGE, and APPLY TAG"):
+    with pytest.raises(RuntimeError, match="catalog owner.*SELECT, MANAGE, and APPLY TAG"):
         bootstrap(
             _cfg(target_catalog="existing_catalog"),
             client_factory=factory,

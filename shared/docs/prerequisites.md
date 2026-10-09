@@ -151,7 +151,7 @@ The SP needs:
 | **Account Admin** | Account | Create groups when explicitly requested; create, assign, and delete the per-tier test SPs used by live `verify-access` |
 | **Tag Policy Creator + Manager** | Account | Create and maintain governed tag policies |
 | **Workspace Admin** | Target workspace | Deploy governance resources |
-| **Authority over the target catalog** | The catalog you govern | **Own it, or** be granted `MANAGE` + `APPLY TAG` (plus `ASSIGN` on the governed tags GenieRails applies). This lets it deploy tag assignments, masking functions, FGAC policies, and grants — and self-grant its own `USE CATALOG` / `USE SCHEMA` / `EXECUTE` / `CREATE FUNCTION`. |
+| **Authority over the target catalog** | The catalog you govern | **Own it, or** be granted `SELECT` + `MANAGE` + `APPLY TAG` (plus `ASSIGN` on the governed tags GenieRails applies). This lets it deploy tag assignments, masking functions, FGAC policies, and grants — and self-grant its own `USE CATALOG` / `USE SCHEMA` / `EXECUTE` / `CREATE FUNCTION`. `SELECT` lets `verify-access` prove row-pairing keys as the SP, which `make release` does before its first apply. |
 | **Query the model serving endpoint** | Workspace | `CAN QUERY` on `databricks-claude-sonnet-4-6` — generation calls a foundation model (an external Anthropic/OpenAI provider works too). |
 
 *Optional background — skip the two sections below unless you want the details. Everything you need to act on is in the table above and the steps that follow.*
@@ -172,7 +172,7 @@ The SP governs an **existing** catalog — `make apply` never creates one — so
 
 **Provision the SP — choose one method:**
 
-1. **Manually** — the Account Admin creates the SP in the Account Console and assigns the account and workspace roles in the table above. The target catalog's owner grants it `MANAGE` + `APPLY TAG`.
+1. **Manually** — the Account Admin creates the SP in the Account Console and assigns the account and workspace roles in the table above. The target catalog's owner grants it `SELECT` + `MANAGE` + `APPLY TAG`.
 2. **With `make bootstrap-sp`** — an already-authorized Account Admin runs the command below. It cannot elevate a non-admin caller. Run it from your cloud's folder in a clone of the repo:
 
    ```bash
