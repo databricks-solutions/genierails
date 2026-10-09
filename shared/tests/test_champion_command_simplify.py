@@ -680,6 +680,7 @@ def test_promote_to_is_exactly_the_legacy_cross_env_promote(tmp_path):
 
     legacy_tree, legacy_out = results["legacy"]
     wrapper_tree, wrapper_out = results["wrapper"]
+    assert json.loads(wrapper_tree.pop("prod/generated/expected_classification.json")) == {}
     wrapper_prod = hcl2.loads(wrapper_tree.pop("prod/env.auto.tfvars"))
     legacy_prod = hcl2.loads(legacy_tree.pop("prod/env.auto.tfvars"))
     assert wrapper_prod.pop("promote_from") == "dev"

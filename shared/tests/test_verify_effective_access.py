@@ -34,6 +34,8 @@ from verify_effective_access import (  # noqa: E402
     resolve_columns_for_condition,
     derive_spec_from_config,
     evaluate_column_mask_check,
+    evaluate_tiered_column_mask_check,
+    most_privileged_tier,
     evaluate_row_filter_check,
     evaluate_effective_access,
     load_spec_from_file,
@@ -41,6 +43,37 @@ from verify_effective_access import (  # noqa: E402
     main,
     verify_effective_access_live,
 )
+
+
+def _tiered_check():
+    return ColumnMaskCheck(
+        table="cat.sch.people", column="email", key_column="id",
+        masked_principals=(), unmasked_principals=(),
+        expected_tiers=(("raw_group", "raw"), ("analyst", "partial"), ("viewer", "full")),
+        partial_function="cat.gov.email_partial", full_function="cat.gov.email_full")
+
+
+def test_tiered_exact_output_rejects_partial_and_full_swapped():
+    check = _tiered_check()
+    expected = {"raw": [(1, "alice@example.com")], "partial": [(1, "a***@example.com")], "full": [(1, "[redacted]")]}
+    actual = {"raw_group": expected["raw"], "analyst": expected["full"], "viewer": expected["partial"]}
+    result = evaluate_tiered_column_mask_check(check, actual, expected)
+    assert result.status == FAIL
+    assert result.evidence["mismatches_by_principal"] == {"analyst": 1, "viewer": 1}
+
+
+def test_tiered_indistinguishable_sample_is_inconclusive():
+    check = _tiered_check()
+    same = [(1, None), (2, "")]
+    actual = {principal: same for principal, _ in check.expected_tiers}
+    result = evaluate_tiered_column_mask_check(check, actual, {tier: same for tier in ("raw", "partial", "full")})
+    assert result.status == INCONCLUSIVE
+    assert "cannot be distinguished" in result.detail
+
+
+def test_dual_tier_principal_gets_most_privileged_tier():
+    assert most_privileged_tier(["viewer", "raw_group"], ["raw_group", "analyst", "viewer"]) == "raw"
+    assert most_privileged_tier(["viewer", "analyst"], ["raw_group", "analyst", "viewer"]) == "partial"
 
 
 def test_cli_missing_promoted_tfvars_reports_prerequisite(tmp_path):
