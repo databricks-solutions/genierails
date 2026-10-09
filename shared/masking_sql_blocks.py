@@ -76,11 +76,18 @@ def analyze_sql_blocks(sql_text: str) -> ParsedSqlBlocks:
         extract_function_name(stmt).split(".")[-1].lower()
         for _, _, stmt in blocks
     }
-    all_fn_names = set(re.findall(
+    function_matches = re.finditer(
         r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*(\w+)\s*\(",
         sql_text, re.IGNORECASE,
-    ))
-    missing = all_fn_names - primary_names
+    )
+    all_fn_names: set[str] = set()
+    missing: list[str] = []
+    for match in function_matches:
+        function_name = match.group(1).lower()
+        if function_name not in all_fn_names:
+            all_fn_names.add(function_name)
+            if function_name not in primary_names:
+                missing.append(function_name)
     if missing:
         # Preserve the deployer's established fallback exactly. It is only
         # unambiguous when the whole file has one possible execution context;
@@ -97,7 +104,7 @@ def analyze_sql_blocks(sql_text: str) -> ParsedSqlBlocks:
         schema_match = re.search(r"USE\s+SCHEMA\s+(\S+)", sql_text, re.IGNORECASE)
         fallback_catalog = cat_match.group(1).rstrip(";") if cat_match else catalog
         fallback_schema = schema_match.group(1).rstrip(";") if schema_match else schema
-        recovered = set()
+        recovered: set[str] = set()
         for function_name in missing:
             pattern = re.compile(
                 r"(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*"
@@ -110,7 +117,7 @@ def analyze_sql_blocks(sql_text: str) -> ParsedSqlBlocks:
                 statement = match.group(1).rstrip(";").strip()
                 blocks.append((fallback_catalog, fallback_schema, statement))
                 recovered.add(function_name)
-        if recovered != missing:
+        if recovered != set(missing):
             unambiguous = False
             ambiguities.append(sql_text)
 

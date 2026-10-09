@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "modules/data_access"))
 
 import generate_abac
+from masking_sql_blocks import extract_function_name, parse_sql_blocks
 from normalize_masking_sql import normalized_definitions
 from sql_tokenizer import SqlTokenizeError
 
@@ -165,6 +167,49 @@ def test_non_function_statements_are_hashed_and_bound_function_reordering():
     changed_set = reordered.replace("'UTC'", "'Australia/Melbourne'")
     assert normalized_definitions(first) == normalized_definitions(reordered)
     assert normalized_definitions(reordered) != normalized_definitions(changed_set)
+
+
+def test_fallback_recovery_preserves_file_order_and_deduplicates_case_insensitively():
+    sql = (
+        "SET timezone = 'UTC'; "
+        "CREATE FUNCTION Zulu() RETURNS INT RETURN 1; "
+        "CREATE FUNCTION alpha() RETURNS INT RETURN 2; "
+        "CREATE OR REPLACE FUNCTION BRAVO() RETURNS INT RETURN 3; "
+        "CREATE OR REPLACE FUNCTION zULU() RETURNS INT RETURN 4;"
+    )
+    names = [extract_function_name(stmt).split(".")[-1] for _, _, stmt in parse_sql_blocks(sql)]
+    assert [name.lower() for name in names] == ["zulu", "alpha", "bravo"]
+
+
+def test_fallback_recovery_order_and_hash_are_stable_across_hash_seeds():
+    sql = (
+        "SET timezone = 'UTC'; "
+        "CREATE FUNCTION third() RETURNS INT RETURN 3; "
+        "CREATE FUNCTION First() RETURNS INT RETURN 1; "
+        "CREATE FUNCTION SECOND() RETURNS INT RETURN 2;"
+    )
+    script = """
+import hashlib, json, sys
+sys.path[:0] = [sys.argv[1], sys.argv[2]]
+from masking_sql_blocks import extract_function_name, parse_sql_blocks
+from normalize_masking_sql import normalized_definitions
+sql = sys.argv[3]
+names = [extract_function_name(stmt).split('.')[-1].lower() for _, _, stmt in parse_sql_blocks(sql)]
+normalized = normalized_definitions(sql)
+print(json.dumps([names, hashlib.sha256(normalized.encode()).hexdigest()]))
+"""
+    shared = Path(__file__).parent.parent
+    module = shared / "modules/data_access"
+    results = []
+    for seed in (1, 5, 24, 30, 81):
+        env = {**os.environ, "PYTHONHASHSEED": str(seed)}
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(shared), str(module), sql],
+            check=True, capture_output=True, text=True, env=env,
+        )
+        results.append(json.loads(completed.stdout))
+    assert all(result == results[0] for result in results)
+    assert results[0][0] == ["third", "first", "second"]
 
 
 def test_duplicate_logical_function_names_keep_file_order():
