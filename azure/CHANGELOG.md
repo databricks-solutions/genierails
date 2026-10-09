@@ -69,10 +69,13 @@
   TREATMENT=<existing>` maps each unmapped `class.*` tag to an existing
   treatment in `shared/treatment_config.json`. It refuses before writing if the
   treatment doesn't exist or its masking function's input type doesn't fit the
-  column (an unreadable type refuses too; `ALLOW_UNKNOWN_TYPE=1` overrides).
+  column, or that derivation would replace for that column (an unreadable
+  type refuses too; `ALLOW_UNKNOWN_TYPE=1` overrides). It changes only
+  `class_labels`.
   For a new kind of mask, `make materialize-treatment ENV=dev TREATMENT=<t>`
   adds that treatment's mask policy and function for every governed dev catalog,
-  without tag assignments, so `rehearse` → `promote-to` → `release` carries it
+  without tag assignments (never in prod or another promotion target), so
+  `rehearse` → `promote-to` → `release` carries it
   to prod. No matching dev column is needed and no rules are copied by hand.
 - **Australian Bank Demo**: End-to-end demo documentation now covers Azure
   alongside AWS. Run the full dev-to-prod walkthrough (provision, generate, apply, promote,

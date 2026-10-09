@@ -197,29 +197,41 @@ def rerun_command(env_name: str, promoted: bool) -> str:
     return f"make {target} ENV={env_name}"
 
 
+def kept_as_is(column: str, treatment, config) -> bool:
+    """Whether derivation keeps ``treatment`` on ``column`` (no free-text upgrade)."""
+    from treatment_derivation import effective_treatment
+
+    return effective_treatment(column, treatment, config).value == treatment.value
+
+
+def fitting_treatments(config, column: str, column_type: str, sql_text: str) -> list[str]:
+    """Treatments whose UDF takes ``column_type`` and that derivation keeps on ``column``."""
+    return [
+        t.value for t in config.treatments
+        if (udf := treatment_input_type(t, sql_text)) and types_compatible(udf, column_type)
+        and kept_as_is(column, t, config)
+    ]
+
+
 def _candidate_lines(config, gaps: list[tuple[str, str]], env_dir: Path, sql_text: str) -> list[str]:
-    """One line per distinct gap column type, naming the treatments that fit it."""
+    """One line per gap column, naming the treatments that would close it."""
     column_types = env_column_types(env_dir)
-    by_type: dict[str, list[str]] = {}
-    for column, _label in gaps:
-        by_type.setdefault(column_types.get(column.lower(), ""), []).append(column)
     lines = []
-    for column_type, columns in sorted(by_type.items()):
+    for column in sorted({column for column, _label in gaps}):
+        column_type = column_types.get(column.lower(), "")
         if column_type:
-            names = [
-                t.value for t in config.treatments
-                if (udf := treatment_input_type(t, sql_text)) and types_compatible(udf, column_type)
-            ]
-            what = f"{column_type} column(s) {', '.join(sorted(columns))}"
+            names = fitting_treatments(config, column, column_type, sql_text)
             lines.append(
-                f"       Existing treatments for {what}: {', '.join(names) or 'none'}"
+                f"       Existing treatments for {column} ({column_type}): {', '.join(names) or 'none'}"
             )
         else:
-            names = []
-            for treatment in config.treatments:
-                udf = treatment_input_type(treatment, sql_text)
-                names.append(f"{treatment.value} ({udf or 'type unknown'})")
-            lines.append(f"       Existing treatments (input type): {', '.join(names)}")
+            names = [
+                f"{t.value} ({treatment_input_type(t, sql_text) or 'type unknown'})"
+                for t in config.treatments if kept_as_is(column, t, config)
+            ]
+            lines.append(
+                f"       Existing treatments for {column} (type unknown; input type): {', '.join(names)}"
+            )
     return lines
 
 

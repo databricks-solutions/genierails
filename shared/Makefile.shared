@@ -389,22 +389,23 @@ scaffold-treatments: _guarded-bootstrap _guard-workspace-target ## Map unmapped 
 
 # Rules reach prod only by promotion, so a mask prod needs is added in the
 # env it is promoted from, even when no column there carries the class.
-materialize-treatment: _guarded-bootstrap _guard-workspace-target ## Add TREATMENT=<t>'s mask policy + UDF for every governed catalog, without tag_assignments (then rehearse and promote-to)
+# The env check (exactly a real envs/<ENV>, not prod or a promotion target)
+# runs before bootstrap, so a redirected ENV_DIR is refused before anything is
+# written there.
+_MATERIALIZE = python3 "$(SHARED_ROOT)/scripts/materialize_treatment.py" \
+	--tfvars "$(ENV_DIR)/generated/abac.auto.tfvars" \
+	--sql "$(ENV_DIR)/generated/masking_functions.sql" \
+	--treatment-config "$(SHARED_ROOT)/treatment_config.json" \
+	--treatment "$(strip $(TREATMENT))" \
+	--env-dir "$(ENV_DIR)" --env-name "$(ENV)" --envs-dir "$(CLOUD_ROOT)/envs"
+
+materialize-treatment: _guard-workspace-target ## Add TREATMENT=<t>'s mask policy + UDF for every governed catalog, without tag_assignments (then rehearse and promote-to)
 	@if [ -z "$(strip $(TREATMENT))" ]; then \
 		echo "materialize-treatment: set TREATMENT=<treatment> (a value in shared/treatment_config.json)" >&2; exit 1; \
-	fi; \
-	if [ "$(ENV)" = "prod" ]; then \
-		echo "materialize-treatment: ENV=prod is not allowed; prod rules change only by promotion." >&2; \
-		echo "  Run it in the env prod is promoted from (e.g. make materialize-treatment ENV=dev TREATMENT=$(strip $(TREATMENT)))," >&2; \
-		echo "  then make rehearse ENV=dev, make promote-to ENV=prod and make release ENV=prod." >&2; \
-		exit 1; \
 	fi
-	@python3 "$(SHARED_ROOT)/scripts/materialize_treatment.py" \
-		--tfvars "$(ENV_DIR)/generated/abac.auto.tfvars" \
-		--sql "$(ENV_DIR)/generated/masking_functions.sql" \
-		--treatment-config "$(SHARED_ROOT)/treatment_config.json" \
-		--treatment "$(strip $(TREATMENT))" \
-		--env-dir "$(ENV_DIR)" --env-name "$(ENV)"
+	@$(_MATERIALIZE) --check-env
+	@$(MAKE) --no-print-directory _guarded-bootstrap ENV="$(ENV)" ENV_DIR="$(ENV_DIR)"
+	@$(_MATERIALIZE)
 
 derive-assignments: _guarded-bootstrap _guard-workspace-target ## Re-derive only tag_assignments from live native class.* tags (requires prior promote; never calls an LLM)
 	@echo "=== Derive Assignments ($(ENV)) ==="

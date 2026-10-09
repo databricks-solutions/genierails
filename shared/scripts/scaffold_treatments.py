@@ -30,10 +30,15 @@ from generate_abac import (  # noqa: E402
     footprint_table_refs,
     load_auth_config,
 )
-from treatment_derivation import derive_treatment_model, load_treatment_config  # noqa: E402
+from treatment_derivation import (  # noqa: E402
+    derive_treatment_model,
+    effective_treatment,
+    load_treatment_config,
+)
 from scripts.coverage_fix import (  # noqa: E402
     ddl_column_types,
     env_column_types,
+    fitting_treatments,
     promote_source,
     rerun_command,
     treatment_input_type,
@@ -335,10 +340,9 @@ def reuse(
 ) -> list[dict[str, object]]:
     """Map every unmapped class.* in ``markers`` to an existing treatment.
 
-    Only class_labels of that treatment change in the shared config. Offline
-    markers in the env's generated config are replaced by the treatment's
-    gr_treatment assignment; masks and functions are never rewritten, so a
-    promoted env's applied policy names stay exactly as deployed.
+    Only that treatment's class_labels in the shared config change; the env's
+    generated files are left alone (the next derivation maps the columns), so
+    a promoted env's applied policy names stay exactly as deployed.
     """
     raw = json.loads(config_path.read_text())
     config = load_treatment_config(config_path)
@@ -372,13 +376,18 @@ def reuse(
             )
             unknown_types.append(f"{entity} ({label}): cannot tell {missing}")
         elif not types_compatible(udf_type, column_type):
-            fits = [
-                t.value for t in config.treatments
-                if (other := treatment_input_type(t, sql_text)) and types_compatible(other, column_type)
-            ]
+            fits = fitting_treatments(config, entity, column_type, sql_text)
             problems.append(
                 f"{entity} ({label}) is {column_type} but {target.masking_function} "
-                f"takes {udf_type}; treatments that fit {column_type}: {', '.join(fits) or 'none'}"
+                f"takes {udf_type}; treatments that fit it: {', '.join(fits) or 'none'}"
+            )
+        effective = effective_treatment(entity, target, config)
+        if effective.value != target.value:
+            problems.append(
+                f"{entity} ({label}) does not look like a {target.masking_function} column, "
+                f"so derivation would mask it with {effective.value} instead of "
+                f"{treatment_value} (and audit-rulebook would report drift); "
+                f"use TREATMENT={effective.value}"
             )
     if problems:
         raise ValueError(
@@ -404,28 +413,7 @@ def reuse(
     finally:
         staged.unlink(missing_ok=True)
 
-    tfvars_text = tfvars_path.read_text()
-    cfg = hcl2.loads(tfvars_text)
-    updated_tfvars = tfvars_text
-    changed_entities: list[str] = []
-    if live_auth is None:
-        assignments = list(cfg.get("tag_assignments") or [])
-        seen = {(a.get("entity_name"), a.get("tag_key")) for a in assignments}
-        for entity, _label in pending:
-            if (entity, config.tag_key) not in seen:
-                assignments.append({"entity_type": "columns", "entity_name": entity,
-                                    "tag_key": config.tag_key, "tag_value": treatment_value})
-                seen.add((entity, config.tag_key))
-                changed_entities.append(entity)
-        updated_tfvars = MARKER_RE.sub(
-            lambda m: "" if m.group(2).lower() in labels else m.group(0), tfvars_text,
-        )
-        updated_tfvars = _replace_bracket_section(
-            updated_tfvars, "tag_assignments",
-            [_render_tag_assignment_block(item) for item in assignments],
-        )
-        hcl2.loads(updated_tfvars)
-
+    cfg = hcl2.loads(tfvars_path.read_text())
     covered = {
         policy.get("catalog")
         for policy in cfg.get("fgac_policies") or []
@@ -438,14 +426,11 @@ def reuse(
 
     if labels:
         config_path.write_text(json.dumps(raw, indent=2) + "\n")
-    if updated_tfvars != tfvars_text:
-        tfvars_path.write_text(updated_tfvars)
     return [{
         "reuse": True, "treatment": treatment_value, "function": target.masking_function,
         "udf_type": udf_type, "labels": labels, "already": already, "checked": checked,
-        "config": _shown(config_path),
-        "tfvars": _shown(tfvars_path) if updated_tfvars != tfvars_text else None,
-        "assigned": changed_entities, "missing_catalogs": missing_catalogs,
+        "config": _shown(config_path), "offline": live_auth is None,
+        "missing_catalogs": missing_catalogs,
     }]
 
 
@@ -463,12 +448,11 @@ def _print_reuse(result: dict, env_name: str, env_dir: Path) -> None:
     print("Changed:")
     print(f"  {result['config']}: added {', '.join(result['labels'])} to the class_labels "
           f"of treatment {treatment}")
-    if result["tfvars"]:
-        print(f"  {result['tfvars']}: assigned gr_treatment={treatment} to "
-              f"{', '.join(result['assigned']) or 'the marked columns'}; removed their "
-              "classification_unmapped markers")
     source = promote_source(env_dir)
     rerun = rerun_command(env_name, bool(source))
+    if result["offline"]:
+        # The markers came from this env's generated draft; regenerating maps them.
+        rerun = f"make generate ENV={env_name}, then {rerun}"
     if result["missing_catalogs"]:
         catalogs = ", ".join(result["missing_catalogs"])
         print(f"The {treatment} mask is not in this env's rules for catalog(s) {catalogs} yet.")

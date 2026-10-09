@@ -543,3 +543,15 @@ def test_no_retired_flag_means_no_warning_through_nested_apply(tmp_path, target,
     assert warnings == []
 
 
+
+
+@pytest.mark.parametrize("target", ["release", "maintain"])
+@pytest.mark.parametrize("script_rc,says", [(1, "reported drift"), (2, "failed (error, not drift)")])
+def test_audit_rulebook_script_exit_code_survives_the_nested_make(tmp_path, target, script_rc, says):
+    """A failed $(MAKE) exits 2; the audit's own code comes back through its rc file."""
+    env_dir = _env_dir(tmp_path)
+    stub, _log, audit = _stub(tmp_path, on={
+        "audit-rulebook": f'echo {script_rc} > "$GENIERAILS_AUDIT_RC_FILE"; exit 2'})
+    result = _make(target, env_dir, stub, audit)
+    assert result.returncode != 0  # the outer make exits 2 either way
+    assert f"{target}: audit-rulebook {says}" in result.stderr

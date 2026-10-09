@@ -109,6 +109,25 @@ def is_free_text_column(entity_name: str, masking_function: str) -> bool:
     )
 
 
+def effective_treatment(column: str, treatment: Treatment, config: TreatmentConfig) -> Treatment:
+    """The treatment derivation actually assigns ``column`` for ``treatment``.
+
+    A format-specific STRING mask on a free-text column is upgraded to full
+    redaction (see is_free_text_column); every other treatment stays as is.
+    """
+    if (
+        treatment.value not in _FREE_TEXT_ESCALATION_EXCLUDED
+        and is_free_text_column(column, treatment.masking_function)
+    ):
+        escalated = next(
+            (item for item in config.treatments if item.value == _FREE_TEXT_ESCALATION_TARGET),
+            None,
+        )
+        if escalated is not None:
+            return escalated
+    return treatment
+
+
 def resolve_treatment(findings: list[tuple[str, str]], config: TreatmentConfig) -> Treatment | None:
     """Return the strictest matching treatment; config order is precedence."""
     observed = set(findings)
@@ -231,16 +250,7 @@ def derive_treatment_model(
                 "entity_name": column,
                 "treatment": explicit_treatment.value,
             }
-        if (
-            treatment.value not in _FREE_TEXT_ESCALATION_EXCLUDED
-            and is_free_text_column(column, treatment.masking_function)
-        ):
-            escalated = next(
-                (item for item in config.treatments if item.value == _FREE_TEXT_ESCALATION_TARGET),
-                None,
-            )
-            if escalated is not None:
-                treatment = escalated
+        treatment = effective_treatment(column, treatment, config)
         used[treatment.value] = treatment
         catalog = column.split(".", 1)[0]
         source_tags = set(findings)

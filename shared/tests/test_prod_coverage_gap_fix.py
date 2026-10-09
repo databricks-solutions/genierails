@@ -43,6 +43,8 @@ def _uc():
 class _Statements:
     def execute_statement(self, statement, warehouse_id=None, wait_timeout=None):
         from .service.sql import StatementState
+        if _uc().get("fail_sql"):
+            raise RuntimeError("PERMISSION_DENIED: no SELECT on system.information_schema")
         if "data_classification.results" in statement:
             raise RuntimeError("TABLE_OR_VIEW_NOT_FOUND")
         rows = [row for row in _uc()["tags"] if f"'{row[0]}'" in statement or row[0] in statement]
@@ -138,9 +140,18 @@ RETURN CASE WHEN input IS NULL THEN NULL ELSE concat(left(input, 1), '***') END;
 
 
 def _clean_env():
-    return {k: v for k, v in os.environ.items()
-            if k not in ("MAKEFLAGS", "MAKELEVEL", "ENV", "MODE", "TREATMENT",
-                         "ALLOW_UNKNOWN_TYPE", "GENIERAILS_RERUN_TARGET")}
+    """The caller's env minus make state, with pip unable to install anything.
+
+    generate_abac.py pip-installs a missing databricks-sdk at import; the fake
+    SDK provides what it checks for, and this keeps any slip from reaching an
+    index or the real Python.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("MAKEFLAGS", "MAKELEVEL", "ENV", "MODE", "TREATMENT", "ENV_DIR",
+                        "ALLOW_UNKNOWN_TYPE", "GENIERAILS_RERUN_TARGET", "PIP_FIND_LINKS",
+                        "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_CONFIG_FILE")}
+    env.update({"PIP_NO_INDEX": "1", "PIP_REQUIRE_VIRTUALENV": "1"})
+    return env
 
 
 def _tags(catalog, extra=()):
@@ -200,7 +211,6 @@ class Repo:
         env = _clean_env()
         env["PYTHONPATH"] = str(self.root / "sdk")
         env["FAKE_UC"] = str(self.uc)
-        env["PIP_NO_INDEX"] = "1"  # never let a script install into the real Python
         return subprocess.run(["make", "--no-print-directory", *args], cwd=self.root / "aws",
                               text=True, capture_output=True, env=env, timeout=300)
 
@@ -256,7 +266,13 @@ def test_e2e_prod_gap_reuse_existing_mask_then_prod_coverage_passes(repo):
     assert "unmapped class.* findings: prod_fin.finance.customers.vat_number=class.vat_number" in out
     assert "make scaffold-treatments ENV=prod TREATMENT=<name>" in out
     assert "make materialize-treatment ENV=dev TREATMENT=<new>" in out
-    assert re.search(r"Existing treatments for STRING column\(s\) [^:]*vat_number: [^\n]*redact", out)
+    suggested = re.search(
+        r"Existing treatments for prod_fin\.finance\.customers\.vat_number \(STRING\): ([^\n]*)", out)
+    assert suggested, out
+    names = suggested.group(1).split(", ")
+    # Only treatments derivation would keep on this generic column are offered.
+    assert "redact" in names and "generic_partial" in names
+    assert "card_last4" not in names and "email_partial" not in names
 
     before = (repo.generated("prod").get("fgac_policies"), repo.sql("prod"), repo.config())
     result = repo.make("scaffold-treatments", "ENV=prod", "TREATMENT=redact")
@@ -389,7 +405,7 @@ def test_reuse_of_a_treatment_not_masked_in_prod_points_at_materialize(repo):
     assert step is None, _out(result)
 
 
-def test_reuse_in_dev_replaces_the_offline_marker_and_passes_the_coverage_check(repo):
+def test_reuse_in_dev_changes_only_the_shared_config(repo):
     abac = repo.envs / "dev" / "generated" / "abac.auto.tfvars"
     abac.write_text(abac.read_text().replace(
         "tag_assignments = [",
@@ -401,13 +417,35 @@ def test_reuse_in_dev_replaces_the_offline_marker_and_passes_the_coverage_check(
     assert "make scaffold-treatments ENV=dev TREATMENT=<name>" in out
     assert "then commit shared/treatment_config.json and run make rehearse ENV=dev" in out
 
+    generated = {p: p.read_bytes() for p in (repo.envs / "dev" / "generated").iterdir()}
     result = repo.make("scaffold-treatments", "ENV=dev", "TREATMENT=redact")
+    out = _out(result)
+    assert result.returncode == 0, out
+    assert "class.vat_number" in _treatment(repo.config(), "redact")["class_labels"]
+    # Only shared/treatment_config.json changed; the marker stays until regenerate.
+    assert {p: p.read_bytes() for p in (repo.envs / "dev" / "generated").iterdir()} == generated
+    assert "Next: commit shared/treatment_config.json, then run: make generate ENV=dev, " \
+           "then make rehearse ENV=dev" in out
+
+
+def test_reuse_refuses_a_treatment_derivation_would_upgrade(repo):
+    """card_last4 on a generic STRING column is upgraded to redact by derivation."""
+    repo.set_uc(prod_extra=[("vat_number", "class.vat_number")])
+    before = (repo.shared / "treatment_config.json").read_text()
+    result = repo.make("scaffold-treatments", "ENV=prod", "TREATMENT=card_last4")
+    out = _out(result)
+    assert result.returncode != 0
+    assert "prod_fin.finance.customers.vat_number (class.vat_number) does not look like a " \
+           "mask_credit_card_last4 column, so derivation would mask it with redact" in out
+    assert "use TREATMENT=redact" in out and "nothing was changed" in out
+    assert (repo.shared / "treatment_config.json").read_text() == before
+
+    # The suggested treatment closes the gap end to end with no rulebook drift.
+    result = repo.make("scaffold-treatments", "ENV=prod", "TREATMENT=redact")
     assert result.returncode == 0, _out(result)
-    assert "classification_unmapped" not in abac.read_text()
-    derived = {a["entity_name"]: a["tag_value"] for a in repo.generated("dev")["tag_assignments"]}
-    assert derived[f"{DEV_TABLE}.vat_number"] == "redact"
-    result = repo.make("coverage-gate", "ENV=dev")
-    assert result.returncode == 0, _out(result)
+    step, result = repo.prod_pipeline()
+    assert step is None, _out(result)
+    assert "No drift detected." in result.stdout
 
 
 # ── materialize-treatment ────────────────────────────────────────────────────
@@ -496,12 +534,35 @@ def test_materialize_refuses_past_the_policy_limit(repo):
 def test_materialize_refuses_prod_and_a_missing_treatment(repo):
     result = repo.make("materialize-treatment", "ENV=prod", "TREATMENT=redact")
     assert result.returncode != 0
-    assert "ENV=prod is not allowed; prod rules change only by promotion" in _out(result)
+    assert "ENV=prod is not allowed: prod's rules change only by promotion" in _out(result)
     result = repo.make("materialize-treatment", "ENV=dev")
     assert result.returncode != 0 and "set TREATMENT=<treatment>" in _out(result)
     result = repo.make("materialize-treatment", "ENV=dev", "TREATMENT=nope")
     assert result.returncode != 0
     assert "TREATMENT=nope is not a treatment" in _out(result)
+
+
+@pytest.mark.parametrize("how", ["env_dir", "symlink", "promotion_target"])
+def test_materialize_refuses_to_write_a_promoted_env(repo, how):
+    """ENV=dev ENV_DIR=envs/prod, a symlinked env, or any env with promote_from."""
+    prod = repo.envs / "prod"
+    if how == "env_dir":
+        args, expect = ("ENV=dev", f"ENV_DIR={prod}"), f"ENV_DIR={prod} is not envs/dev"
+    elif how == "symlink":
+        (repo.envs / "stage").symlink_to(prod, target_is_directory=True)
+        args, expect = ("ENV=stage",), "envs/stage is a symlink"
+    else:
+        shutil.copytree(repo.envs / "dev", repo.envs / "stg", symlinks=True)
+        with (repo.envs / "stg" / "env.auto.tfvars").open("a") as handle:
+            handle.write('promote_from = "dev"\n')
+        prod = repo.envs / "stg"
+        args, expect = ("ENV=stg",), "ENV=stg is not allowed: stg's rules change only by promotion"
+    before = {p: p.read_bytes() for p in prod.rglob("*") if p.is_file() and not p.is_symlink()}
+    result = repo.make("materialize-treatment", *args, "TREATMENT=round_amount")
+    assert result.returncode != 0
+    assert expect in _out(result)
+    assert {p: p.read_bytes() for p in prod.rglob("*")
+            if p.is_file() and not p.is_symlink()} == before
 
 
 def test_materialize_needs_a_udf_definition(repo):
@@ -524,7 +585,6 @@ def test_rulebook_drift_is_reported_as_drift_with_both_fixes(repo):
     assert "_RUN_AUDIT_RULEBOOK" in makefile
     rc_file = repo.root / "rc"
     env = _clean_env() | {"PYTHONPATH": str(repo.root / "sdk"), "FAKE_UC": str(repo.uc),
-                          "PIP_NO_INDEX": "1",
                           "GENIERAILS_AUDIT_RC_FILE": str(rc_file),
                           "GENIERAILS_RERUN_TARGET": "maintain"}
     result = subprocess.run(["make", "--no-print-directory", "audit-rulebook", "ENV=prod"],
@@ -535,3 +595,16 @@ def test_rulebook_drift_is_reported_as_drift_with_both_fixes(repo):
     assert "make scaffold-treatments ENV=prod TREATMENT=<name>" in out
     assert "then commit shared/treatment_config.json and run make maintain ENV=prod" in out
     assert "make materialize-treatment ENV=dev TREATMENT=<new>" in out
+
+
+def test_audit_error_is_reported_as_an_error_not_drift(repo):
+    uc = json.loads(repo.uc.read_text())
+    repo.uc.write_text(json.dumps({**uc, "fail_sql": True}))
+    rc_file = repo.root / "rc"
+    env = _clean_env() | {"PYTHONPATH": str(repo.root / "sdk"), "FAKE_UC": str(repo.uc),
+                          "GENIERAILS_AUDIT_RC_FILE": str(rc_file)}
+    result = subprocess.run(["make", "--no-print-directory", "audit-rulebook", "ENV=prod"],
+                            cwd=repo.root / "aws", text=True, capture_output=True, env=env)
+    assert result.returncode == 2 and rc_file.read_text().strip() == "2"
+    assert "PERMISSION_DENIED" in _out(result)
+    assert "How to fix" not in _out(result)

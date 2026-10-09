@@ -221,6 +221,33 @@ def materialize(
     }
 
 
+def source_env_dir(envs_dir: Path, env: str, env_dir: Path) -> Path:
+    """The env to write: exactly a real envs/<env>, and never a promotion target.
+
+    Rules reach a promoted env (prod, or anything with promote_from) only by
+    promotion, so materialize writes the env they are promoted from. ENV_DIR
+    can be overridden, so the check is on the resolved directory, not ENV.
+    """
+    from scripts.coverage_fix import promote_source
+    from scripts.saved_settings import _env_name, destination_env_dir
+
+    _env_name("ENV", env)
+    path = destination_env_dir(envs_dir, env, env_dir)
+    if not path.is_dir():
+        raise ValueError(f"envs/{env} does not exist; run make setup ENV={env} first")
+    source = promote_source(path)
+    if env == "prod" or source:
+        from_env = source or "dev"
+        raise ValueError(
+            f"ENV={env} is not allowed: {env}'s rules change only by promotion"
+            + (f" (its promote_from is {source})" if source else "")
+            + f". Run it in the env {env} is promoted from: make materialize-treatment "
+            f"ENV={from_env} TREATMENT=<t>, then make rehearse ENV={from_env}, "
+            f"make promote-to ENV={env} and make release ENV={env}"
+        )
+    return path
+
+
 def promoted_to(env_dir: Path, env: str) -> list[str]:
     """Sibling envs whose env.auto.tfvars says promote_from = env."""
     from scripts.coverage_fix import promote_source
@@ -239,12 +266,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--treatment-config", type=Path)
     parser.add_argument("--env-dir", type=Path)
     parser.add_argument("--env-name", default="")
+    parser.add_argument("--envs-dir", type=Path,
+                        help="the cloud's envs/; with it, --env-dir must be exactly "
+                             "envs/<env-name> and not a promoted env")
+    parser.add_argument("--check-env", action="store_true",
+                        help="only check --env-dir against --envs-dir, then exit")
     args = parser.parse_args(argv)
     if not args.treatment.strip():
         print("ERROR: set TREATMENT=<treatment> (a value in shared/treatment_config.json)",
               file=sys.stderr)
         return 1
     try:
+        if args.envs_dir is not None:
+            if args.env_dir is None:
+                raise ValueError("--envs-dir needs --env-dir")
+            args.env_dir = source_env_dir(args.envs_dir, args.env_name, args.env_dir)
+            args.tfvars = args.env_dir / "generated" / "abac.auto.tfvars"
+            args.sql = args.env_dir / "generated" / "masking_functions.sql"
+        if args.check_env:
+            if args.envs_dir is None:
+                raise ValueError("--check-env needs --envs-dir")
+            return 0
         result = materialize(
             args.tfvars, args.sql, args.treatment.strip(),
             config_path=args.treatment_config, env_dir=args.env_dir,
@@ -268,9 +310,13 @@ def main(argv: list[str] | None = None) -> int:
     print("  No tag_assignments were added; the mask applies where a column gets this treatment.")
     targets = promoted_to(args.env_dir, env) if args.env_dir else []
     dest = targets[0] if len(targets) == 1 else "<prod env>"
-    print(f"Next: make rehearse ENV={env}, make promote-to ENV={dest}, make release ENV={dest}. "
-          f"Commit shared/treatment_config.json, shared/tag_vocabulary_registry.json "
-          f"and envs/{env}/generated/.")
+    changed = []
+    if result["policies"] or result["vocabulary"]:
+        changed.append(f"envs/{env}/generated/abac.auto.tfvars")
+    if result["functions"]:
+        changed.append(f"envs/{env}/generated/masking_functions.sql")
+    print(f"Next: make rehearse ENV={env}, make promote-to ENV={dest}, make release ENV={dest}."
+          + (f" Commit {', '.join(changed)}." if changed else ""))
     return 0
 
 
