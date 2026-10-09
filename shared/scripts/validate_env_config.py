@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate environment-owned deterministic-governance configuration."""
 import sys
+import os
 from pathlib import Path
 
 import hcl2
@@ -16,7 +17,11 @@ def main() -> int:
     except Exception as exc:
         print(f"env config validation: {path}: {exc}", file=sys.stderr)
         return 1
-    errors = validate_config(cfg)
+    errors = validate_config(
+        cfg,
+        ack_unclassified=os.environ.get("ACK_UNCLASSIFIED"),
+        ack_weaken=os.environ.get("ACK_WEAKEN"),
+    )
     if errors:
         for error in errors:
             print(f"env config validation: {error}", file=sys.stderr)
