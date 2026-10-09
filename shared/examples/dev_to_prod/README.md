@@ -112,7 +112,7 @@ It masks newly tagged columns, never grants access past a passing coverage check
 | Genie agent ID file missing | Follow the printed recovery steps; never re-create the agent by hand |
 | Env is locked | Another `release`/`maintain` is running; wait for it |
 
-To change who has access in prod, edit `envs/prod/env.auto.tfvars` in a PR and let the pipeline apply it.
+To change who has access in prod, edit `envs/prod/env.auto.tfvars`, commit it, and let your deployment pipeline apply it. Don't change access by hand in the UI.
 
 <a id="reference--commands-concepts-and-glossary"></a>
 **More:** [REFERENCE.md](REFERENCE.md) (every command, what each step does, how it works, glossary) · [SAMPLE_ENV.md](SAMPLE_ENV.md) · [Import an existing agent](../../docs/import-genie-agent-from-ui.md)
