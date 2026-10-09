@@ -11,6 +11,8 @@ APPLYING_TARGETS = (
     "enable-classification", "rehearse", "release", "maintain", "apply",
     "apply-governance", "apply-genie", "_apply-layer", "integration-test",
     "test-champion", "test-all", "test-ci", "test-ci-parallel",
+    "destroy", "destroy-governance", "destroy-genie", "_destroy-layer",
+    "import", "migrate-state",
 )
 
 
@@ -42,6 +44,29 @@ def test_read_only_targets_have_no_ci_refusal(cloud, target):
         timeout=10,
     )
     assert "applying targets cannot run with CI=true" not in proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("cloud", ["aws", "azure"])
+def test_throwaway_integration_workflow_has_explicit_ci_apply_opt_out(cloud):
+    proc = subprocess.run(
+        [
+            "make", "-f", str(ROOT / cloud / "Makefile"),
+            "_guard-not-ci-apply", "ENV=dev", "CI=true",
+            "GENIERAILS_ALLOW_CI_APPLY=1",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert proc.returncode == 0
+
+
+def test_ci_workflow_scopes_apply_opt_out_to_integration_steps():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert workflow.count('GENIERAILS_ALLOW_CI_APPLY: "1"') == 2
+    unit_job = workflow[workflow.index("  unit-tests:"):workflow.index("  validation:")]
+    assert "GENIERAILS_ALLOW_CI_APPLY" not in unit_job
 
 
 def test_workspace_guard_runs_env_validator_and_rejects_bad_tfvars(tmp_path):
