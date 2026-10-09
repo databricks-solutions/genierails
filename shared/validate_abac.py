@@ -469,6 +469,75 @@ def _check_unclassified_sensitive_columns(
         )
 
 
+def column_treatment_coverage(
+    cfg: dict, sql_functions: set[str] | None, *, overrides: bool = False,
+) -> dict[str, tuple[str, list[str], tuple[str, str | None, str | None] | None]]:
+    """Each classified/treatment column -> (treatment, covering policies, gap).
+
+    A column is covered when it has a gr_treatment, a column-mask policy for
+    its catalog and treatment that uses the treatment's masking function, and
+    that function is defined. ``gap`` is None for a covered column, otherwise
+    (why the column is unprotected, missing policy, missing function) — the
+    coverage check's messages. With ``overrides``, a reviewed
+    treatment_override stands in for a column without a gr_treatment.
+    """
+    treatment_cfg = load_treatment_config()
+    mapped_sources = {source for item in treatment_cfg.treatments for source in item.sources}
+    treatment_functions = {item.value: item.masking_function for item in treatment_cfg.treatments}
+    policies = cfg.get("fgac_policies", []) or []
+
+    source_columns: dict[str, list[tuple[str, str]]] = {}
+    treatments: dict[str, str] = {}
+    for item in cfg.get("tag_assignments", []) or []:
+        if item.get("entity_type") != "columns":
+            continue
+        column = item.get("entity_name", "")
+        source = (item.get("tag_key", ""), item.get("tag_value", ""))
+        if source in mapped_sources:
+            source_columns.setdefault(column, []).append(source)
+        if item.get("tag_key") == treatment_cfg.tag_key:
+            treatments[column] = item.get("tag_value", "")
+    if overrides:
+        for item in cfg.get("treatment_overrides", []) or []:
+            if item.get("entity_name") and item.get("treatment"):
+                treatments.setdefault(item["entity_name"], item["treatment"])
+
+    coverage: dict[str, tuple[str, list[str], tuple[str, str | None, str | None] | None]] = {}
+    for column in sorted(set(source_columns) | set(treatments)):
+        sources = source_columns.get(column, [])
+        treatment = treatments.get(column)
+        if not treatment:
+            coverage[column] = ("", [], (
+                f"{column} (detected: {', '.join(f'{k}={v}' for k, v in sources)}; no gr_treatment)",
+                None, None,
+            ))
+            continue
+        catalog = column.split(".", 1)[0]
+        matching = [
+            p for p in policies
+            if p.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
+            and p.get("catalog") == catalog
+            and (treatment_cfg.tag_key, treatment) in _extract_tag_refs(p.get("match_condition", ""))[0]
+        ]
+        expected_fn = treatment_functions.get(treatment)
+        covering = [p.get("name", "") for p in matching if p.get("function_name") == expected_fn]
+        gap: tuple[str, str | None, str | None] | None = None
+        if not matching:
+            gap = (f"{column} (treatment {treatment}; no covering column-mask policy)",
+                   f"{treatment} (catalog {catalog}; used by {column})", None)
+        elif not expected_fn:
+            gap = (f"{column} (unknown gr_treatment {treatment}; no treatment mapping/rule)",
+                   f"{treatment} (no treatment mapping/rule)", None)
+        elif not covering:
+            gap = (f"{column} (treatment {treatment}; covering policy does not resolve to {expected_fn})",
+                   f"{treatment} (catalog {catalog}; expected masking function {expected_fn})", None)
+        elif sql_functions is None or expected_fn not in sql_functions:
+            gap = (f"{column} (treatment {treatment}; masking function {expected_fn} missing)",
+                   None, f"{expected_fn} (treatment {treatment}; used by {column})")
+        coverage[column] = (treatment, covering, gap)
+    return coverage
+
+
 def validate_coverage_gate(
     cfg: dict,
     sql_functions: set[str] | None,
@@ -484,24 +553,7 @@ def validate_coverage_gate(
     (see load_exposure_context), such columns block instead on tables that are
     about to be granted SELECT for the first time.
     """
-    treatment_cfg = load_treatment_config()
-    mapped_sources = {source for item in treatment_cfg.treatments for source in item.sources}
-    treatment_functions = {item.value: item.masking_function for item in treatment_cfg.treatments}
-    assignments = cfg.get("tag_assignments", []) or []
     policies = cfg.get("fgac_policies", []) or []
-
-    source_columns: dict[str, list[tuple[str, str]]] = {}
-    treatments: dict[str, str] = {}
-    for item in assignments:
-        if item.get("entity_type") != "columns":
-            continue
-        column = item.get("entity_name", "")
-        source = (item.get("tag_key", ""), item.get("tag_value", ""))
-        if source in mapped_sources:
-            source_columns.setdefault(column, []).append(source)
-        if item.get("tag_key") == treatment_cfg.tag_key:
-            treatments[column] = item.get("tag_value", "")
-
     unmapped = [
         (column.strip(), detected.strip())
         for column, detected in re.findall(
@@ -526,41 +578,19 @@ def validate_coverage_gate(
                 f"catalog {catalog}: {len(names)} policies (limit 100): {', '.join(names)}"
             )
 
-    protected_columns = set(source_columns) | set(treatments)
-    for column in sorted(protected_columns):
-        sources = source_columns.get(column, [])
-        treatment = treatments.get(column)
-        if not treatment:
-            unprotected.append(f"{column} (detected: {', '.join(f'{k}={v}' for k, v in sources)}; no gr_treatment)")
+    coverage = column_treatment_coverage(cfg, sql_functions)
+    protected_columns = set(coverage)
+    for _treatment, _covering, gap in coverage.values():
+        if gap is None:
             continue
-        catalog = column.split(".", 1)[0]
-        matching = [
-            p for p in policies
-            if p.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
-            and p.get("catalog") == catalog
-            and (treatment_cfg.tag_key, treatment) in _extract_tag_refs(p.get("match_condition", ""))[0]
-        ]
-        if not matching:
-            missing_policies.add(f"{treatment} (catalog {catalog}; used by {column})")
-            unprotected.append(f"{column} (treatment {treatment}; no covering column-mask policy)")
-            continue
-        expected_fn = treatment_functions.get(treatment)
-        if not expected_fn:
-            missing_policies.add(f"{treatment} (no treatment mapping/rule)")
-            unprotected.append(f"{column} (unknown gr_treatment {treatment}; no treatment mapping/rule)")
-        elif not any(p.get("function_name") == expected_fn for p in matching):
-            missing_policies.add(
-                f"{treatment} (catalog {catalog}; expected masking function {expected_fn})"
-            )
-            unprotected.append(
-                f"{column} (treatment {treatment}; covering policy does not resolve to {expected_fn})"
-            )
-        elif sql_functions is None or expected_fn not in sql_functions:
-            missing_functions.add(f"{expected_fn} (treatment {treatment}; used by {column})")
-            unprotected.append(f"{column} (treatment {treatment}; masking function {expected_fn} missing)")
+        unprotected.append(gap[0])
+        if gap[1]:
+            missing_policies.add(gap[1])
+        if gap[2]:
+            missing_functions.add(gap[2])
 
     _check_unclassified_sensitive_columns(
-        ddl_columns, set(source_columns) | set(treatments), result, exposure,
+        ddl_columns, protected_columns, result, exposure,
     )
 
     groups = [

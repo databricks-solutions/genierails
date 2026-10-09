@@ -731,6 +731,42 @@ def scope_ddl_to_footprint(ddl_text: str, footprint: list[dict]) -> str:
     return pattern.sub(replace, ddl_text)
 
 
+def drop_covered_columns(ddl_text: str, covered: set[str]) -> str:
+    """Remove the ``covered`` columns (lower-case FQNs) from fetched DDL.
+
+    A column line goes with its comment; a table left with no columns is
+    removed along with its ``-- Table:`` header and table comment.
+    """
+    if not covered:
+        return ddl_text
+    pattern = re.compile(
+        r"(^--[ \t]*Table:[^\n]*\n)?(CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+([\w.`]+)\s*\()"
+        r"(.*?)(\)\s*;)([ \t]*\n--[ \t]*Table comment:[^\n]*)?",
+        re.IGNORECASE | re.DOTALL | re.MULTILINE,
+    )
+
+    def replace(match: re.Match) -> str:
+        table = match.group(3).replace("`", "").lower()
+        lines = match.group(4).splitlines()
+        kept = [
+            line for line in lines
+            if not line.strip()
+            or table + "." + line.strip().split(None, 1)[0].strip('`",').lower() not in covered
+        ]
+        if len(kept) == len(lines):
+            return match.group(0)
+        body = [line for line in kept if line.strip()]
+        if not body:
+            return ""
+        body[-1] = re.sub(r",\s*$", "", body[-1])
+        return (
+            (match.group(1) or "") + match.group(2) + "\n" + "\n".join(body) + "\n"
+            + match.group(5) + (match.group(6) or "")
+        )
+
+    return re.sub(r"\n{3,}", "\n\n", pattern.sub(replace, ddl_text)).strip("\n")
+
+
 def parse_genie_config_from_serialized_space(serialized: str, description: str = "") -> dict:
     """Parse a Genie agent's serialized_space JSON into a genie_space_configs dict.
 
@@ -1410,7 +1446,8 @@ def build_prompt(ddl_text: str,
                  mode: str = "full",
                  countries: list[str] | None = None,
                  industries: list[str] | None = None,
-                 create_groups: bool = False) -> str:
+                 create_groups: bool = False,
+                 row_filtered_tables: list[str] | None = None) -> str:
     """Build the full prompt by injecting DDL and optional group names into the template.
 
     create_groups controls group ownership in the generated config:
@@ -1435,6 +1472,9 @@ def build_prompt(ddl_text: str,
 
     When space_names is set, the LLM is told to use exactly those names as the
     keys in genie_space_configs — preventing it from inventing its own titles.
+
+    row_filtered_tables lists tables a reviewed row filter already protects;
+    the LLM is told not to draft table tags or row filters for them.
     """
     template = PROMPT_TEMPLATE_PATH.read_text()
 
@@ -1552,6 +1592,13 @@ def build_prompt(ddl_text: str,
         overlay_detection_prompt, _ = build_industry_detection_guidance(
             ddl_text,
             industries,
+        )
+
+    if row_filtered_tables:
+        cs_lines += (
+            "\nThese tables already have a reviewed row filter. Do NOT add table-level "
+            "tag_assignments or row-filter policies for them:\n"
+            + "".join(f"  - {table}\n" for table in row_filtered_tables)
         )
 
     if idx == -1:
@@ -7479,6 +7526,162 @@ def native_classification_stop(error: Exception, table_refs: list[str], env_name
     ]
 
 
+def with_imported_genie_config(
+    hcl_text: str, reviewed_path: Path, api_genie_configs: dict[str, dict],
+    genie_space_id_to_name: dict[str, str],
+) -> str:
+    """hcl_text with genie_space_configs/genie_space_id_to_name refreshed.
+
+    For spaces with a genie_space_id the UI config is authoritative: the
+    drafted block is replaced by the verbatim parse from the Genie agent API,
+    keeping the reviewed benchmarks/snippets in ``reviewed_path``.
+    """
+    if api_genie_configs:
+        reviewed_genie_text = reviewed_path.read_text() if reviewed_path.exists() else ""
+        kept_genie_fields = keep_reviewed_genie_content(reviewed_path, api_genie_configs)
+        if kept_genie_fields:
+            print(
+                "  Kept reviewed Genie benchmarks/snippets: "
+                + ", ".join(kept_genie_fields)
+            )
+        hcl_text = remove_hcl_top_level_block(hcl_text, "genie_space_configs")
+        injected_hcl = (
+            "\n# genie_space_configs parsed verbatim from the existing Genie agent(s).\n"
+            "# Edit here to manage space config as code; make apply pushes changes back.\n"
+            + format_genie_space_configs_hcl(api_genie_configs)
+        )
+        injected_hcl = restore_reviewed_genie_text(
+            reviewed_genie_text, injected_hcl, list(api_genie_configs)
+        )
+        hcl_text = hcl_text.rstrip() + "\n" + injected_hcl + "\n"
+        print(
+            f"  Injected genie_space_configs from Genie API for: "
+            f"{', '.join(api_genie_configs)}"
+        )
+
+    if genie_space_id_to_name:
+        hcl_text = remove_hcl_top_level_block(hcl_text, "genie_space_id_to_name")
+        hcl_text = (
+            hcl_text.rstrip()
+            + "\n\n# Tool-owned canonical identity for id-only imported spaces.\n"
+            + format_string_map_hcl("genie_space_id_to_name", genie_space_id_to_name)
+            + "\n"
+        )
+    return hcl_text
+
+
+def keep_reviewed_genie_entries(
+    tfvars_path: Path, reviewed_cfg: dict, refreshed: set[str],
+) -> list[str]:
+    """Keep reviewed genie_space_configs entries the API did not refresh.
+
+    When covered columns are left out of the prompt, the model's Genie draft
+    sees only part of each table, so a reviewed entry is better than it.
+    Returns the names kept.
+    """
+    reviewed = reviewed_cfg.get("genie_space_configs") or {}
+    try:
+        configs = dict(_load_tfvars(tfvars_path, "draft", strict=True).get("genie_space_configs") or {})
+    except (ValueError, OSError):
+        return []
+    kept = [
+        name for name in configs
+        if name not in refreshed and isinstance(reviewed.get(name), dict)
+        and reviewed[name] != configs[name]
+    ]
+    if kept:
+        configs.update({name: reviewed[name] for name in kept})
+        text = remove_hcl_top_level_block(tfvars_path.read_text(), "genie_space_configs")
+        tfvars_path.write_text(text.rstrip() + "\n\n" + format_genie_space_configs_hcl(configs) + "\n")
+    return kept
+
+
+def merge_space_into_assembled(assembled_dir: Path, space_key: str, *, allow_rule_changes: bool) -> None:
+    """Merge generated/spaces/<space_key>/ into generated/; exit on a conflict."""
+    merge_script = SCRIPT_DIR / "scripts" / "merge_space_configs.py"
+    command = [sys.executable, str(merge_script), str(assembled_dir), space_key]
+    if allow_rule_changes:
+        command.append("--allow-rule-changes")
+    if subprocess.call(command):
+        sys.exit(1)
+
+
+def keep_covered_rules_in_draft(
+    reviewed_rules: tuple[dict, str], covered, tfvars_path: Path, sql_path: Path,
+    sql_block: str | None, *, env_tfvars: Path | None,
+) -> str | None:
+    """Put the covered columns' reviewed rules into the draft; the new sql_block.
+
+    ``env_tfvars`` (full runs) re-derives the ACL sidecar when policies moved.
+    """
+    from scripts.merge_space_configs import extract_function_names, keep_covered_rules
+
+    if not sql_block:
+        # The model wrote no SQL: start from none, not a previous run's file.
+        sql_path.write_text("")
+    try:
+        changed = keep_covered_rules(reviewed_rules, covered, tfvars_path, sql_path)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+    if changed:
+        fix_hcl_syntax(tfvars_path)
+        if env_tfvars is not None:
+            autofix_acl_groups(tfvars_path, env_tfvars if env_tfvars.exists() else None)
+    if not sql_block and extract_function_names(sql_path.read_text()):
+        return sql_path.read_text()
+    return sql_block
+
+
+def refresh_reviewed_draft(
+    out_dir: Path, auth_cfg: dict, *, mode: str, space_key: str, space_name: str,
+    api_genie_configs: dict[str, dict], genie_space_id_to_name: dict[str, str],
+) -> tuple[str, str]:
+    """Every column is covered: keep the reviewed rules, refresh only Genie config.
+
+    Full runs update generated/ in place; SPACE= runs write a Genie-only
+    per-space draft and merge it. Returns the (SQL, HCL) now in out_dir.
+    """
+    abac_path = out_dir / "abac.auto.tfvars"
+    if space_key:
+        assembled_dir = out_dir.parent.parent
+        out_dir.mkdir(parents=True, exist_ok=True)
+        text = (
+            "# Genie agent config only: every column in this agent's footprint is\n"
+            "# already covered by the reviewed rules in generated/.\n"
+        )
+        if mode != "governance":
+            reviewed = _load_tfvars(assembled_dir / "abac.auto.tfvars", "reviewed draft").get(
+                "genie_space_configs") or {}
+            if not api_genie_configs and isinstance(reviewed.get(space_name), dict):
+                text += format_genie_space_configs_hcl({space_name: reviewed[space_name]}) + "\n"
+            text = with_imported_genie_config(text, abac_path, api_genie_configs, genie_space_id_to_name)
+        abac_path.write_text(text)
+        (out_dir / "masking_functions.sql").write_text(
+            "-- No new masking functions: the reviewed ones in generated/ cover this agent.\n"
+        )
+        merge_space_into_assembled(assembled_dir, space_key, allow_rule_changes=False)
+        if mode != "governance":
+            autofix_missing_genie_space_entries(assembled_dir / "abac.auto.tfvars", auth_cfg)
+        abac_path = assembled_dir / "abac.auto.tfvars"
+        sql_path = assembled_dir / "masking_functions.sql"
+        return sql_path.read_text(), abac_path.read_text()
+
+    sql_path = out_dir / "masking_functions.sql"
+    if mode != "governance":
+        abac_path.write_text(with_imported_genie_config(
+            abac_path.read_text(), abac_path, api_genie_configs, genie_space_id_to_name,
+        ))
+        if auth_cfg.get("genie_spaces"):
+            strip_draft_genie_acl_fields(abac_path)
+        fix_hcl_syntax(abac_path)
+        autofix_missing_genie_space_entries(abac_path, auth_cfg)
+        env_tfvars = out_dir.parent / "env.auto.tfvars"
+        autofix_acl_groups(abac_path, env_tfvars if env_tfvars.exists() else None)
+    bootstrap_per_space_dirs(out_dir, auth_cfg, abac_path.read_text())
+    return sql_path.read_text(), abac_path.read_text()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate ABAC configuration from table DDL using AI",
@@ -7535,9 +7738,10 @@ def main():
         "--allow-rule-changes",
         action="store_true",
         help=(
-            "Accept the model's changes to rules already in the reviewed draft "
-            "(generated/). Without it, a re-run keeps every existing rule exactly "
-            "as reviewed and only adds rules for newly uncovered tags or columns."
+            "Re-draft every column and accept the model's changes to rules already "
+            "in the reviewed draft (generated/). Without it, columns the reviewed "
+            "rules cover are not sent to the model and keep their rules exactly as "
+            "reviewed; only uncovered columns are drafted."
         ),
     )
     parser.add_argument(
@@ -8127,57 +8331,14 @@ def main():
         if names:
             configured_space_names = names
 
-    overlay_detection_comments = ""
-    if industries:
-        _, overlay_detection_comments = build_industry_detection_guidance(
-            ddl_text,
-            industries,
-        )
-
-    prompt = build_prompt(
-        ddl_text,
-        catalog_schemas=catalog_schemas,
-        group_names=group_names,
-        per_space_name=args.space if args.space else None,
-        space_names=configured_space_names,
-        mode=args.mode,
-        countries=countries,
-        industries=industries,
-        create_groups=args.create_groups,
-    )
-
-    if args.dry_run:
-        print("=" * 60)
-        print("  DRY RUN — Prompt that would be sent:")
-        print("=" * 60)
-        print(prompt)
-        sys.exit(0)
-
-    # Resolve the sensitivity source before any model call. When classification
-    # is enabled, native class.* is required unless the operator explicitly opts
-    # out; a footprint whose tags haven't landed yet stops here, with the agent's
-    # discovered tables already persisted above and no model call spent.
-    classification_source = None
-    if args.mode != "genie":
-        native_expected = bool(auth_cfg.get("enable_classification"))
-        try:
-            classification_source = _fetch_live_classification_source(
-                table_refs,
-                auth_cfg,
-                require_native=native_expected and not args.allow_llm_sensitivity,
-            )
-        except NativeClassificationRequiredError as exc:
-            for line in native_classification_stop(exc, table_refs or [], WORK_DIR.name):
-                print(line)
-            sys.exit(1)
-
     # ── Reviewed rules from a prior run stick (additive merge after drafting) ──
     # The assembled generated/ draft is the reviewed rule set, also in --space
     # mode. Genie mode drafts no rules, so it has nothing to merge.
     from scripts.merge_space_configs import (
         extract_function_names, footprint_from_ddl, keep_reviewed_group_descriptions,
-        keep_reviewed_rules, load_reviewed_rules, prune_unused_new_functions,
+        keep_reviewed_rules, load_reviewed_rules, prune_unused_new_functions, reviewed_coverage,
     )
+    from validate_abac import parse_ddl_columns
     reviewed_rules = None
     # Functions the masking SQL defined before this run; only ones added since
     # are pruned when no policy uses them.
@@ -8194,7 +8355,75 @@ def main():
                 print(f"ERROR: {e}")
                 sys.exit(1)
 
-    if args.provider == "databricks":
+    # ── Columns the reviewed rules already cover are not drafted again ─────
+    # They (and their comments) are left out of the prompt; their reviewed
+    # rules are put back into the draft unchanged. With nothing uncovered,
+    # there is no governance model call at all. --allow-rule-changes
+    # re-drafts everything.
+    covered = None
+    prompt_ddl = ddl_text
+    skip_draft = False
+    if reviewed_rules is not None and not args.allow_rule_changes:
+        covered = reviewed_coverage(reviewed_rules, footprint_from_ddl(ddl_text))
+        total = len({column.lower() for column in parse_ddl_columns(ddl_text)})
+        prompt_ddl = drop_covered_columns(ddl_text, set(covered.columns))
+        if total and len(covered.columns) >= total:
+            skip_draft = True
+            print(f"  governance: all {total} columns already covered by reviewed rules "
+                  "— no draft needed")
+        elif covered.columns:
+            print(f"  governance: {len(covered.columns)} of {total} column(s) already covered "
+                  "by reviewed rules — drafting rules only for the other "
+                  f"{total - len(covered.columns)}")
+
+    overlay_detection_comments = ""
+    if industries:
+        _, overlay_detection_comments = build_industry_detection_guidance(
+            prompt_ddl,
+            industries,
+        )
+
+    prompt = build_prompt(
+        prompt_ddl,
+        catalog_schemas=catalog_schemas,
+        group_names=group_names,
+        per_space_name=args.space if args.space else None,
+        space_names=configured_space_names,
+        mode=args.mode,
+        countries=countries,
+        industries=industries,
+        create_groups=args.create_groups,
+        row_filtered_tables=sorted(covered.tables) if covered else None,
+    )
+
+    if args.dry_run:
+        if skip_draft:
+            sys.exit(0)
+        print("=" * 60)
+        print("  DRY RUN — Prompt that would be sent:")
+        print("=" * 60)
+        print(prompt)
+        sys.exit(0)
+
+    # Resolve the sensitivity source before any model call. When classification
+    # is enabled, native class.* is required unless the operator explicitly opts
+    # out; a footprint whose tags haven't landed yet stops here, with the agent's
+    # discovered tables already persisted above and no model call spent.
+    classification_source = None
+    if args.mode != "genie" and not skip_draft:
+        native_expected = bool(auth_cfg.get("enable_classification"))
+        try:
+            classification_source = _fetch_live_classification_source(
+                table_refs,
+                auth_cfg,
+                require_native=native_expected and not args.allow_llm_sensitivity,
+            )
+        except NativeClassificationRequiredError as exc:
+            for line in native_classification_stop(exc, table_refs or [], WORK_DIR.name):
+                print(line)
+            sys.exit(1)
+
+    if args.provider == "databricks" and not skip_draft:
         configure_databricks_env(auth_cfg)
 
     provider_cfg = PROVIDERS[args.provider]
@@ -8204,9 +8433,18 @@ def main():
     _semantic_retry_count = 0
     _semantic_max_retries = args.max_retries
 
-    response_text = call_with_retries(call_fn, prompt, model, args.max_retries)
-
-    sql_block, hcl_block = extract_code_blocks(response_text)
+    if skip_draft:
+        response_text = ""
+        sql_block, hcl_block = refresh_reviewed_draft(
+            out_dir, auth_cfg, mode=args.mode, space_key=space_key if target_space_cfg else "",
+            space_name=target_name if target_space_cfg else "",
+            api_genie_configs=api_genie_configs, genie_space_id_to_name=genie_space_id_to_name,
+        )
+        tfvars_path = out_dir / "abac.auto.tfvars"
+        sql_path = out_dir / "masking_functions.sql"
+    else:
+        response_text = call_with_retries(call_fn, prompt, model, args.max_retries)
+        sql_block, hcl_block = extract_code_blocks(response_text)
 
     if not sql_block:
         print("\nWARNING: Could not extract SQL code block from the response.")
@@ -8218,8 +8456,9 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     response_path = out_dir / "generated_response.md"
-    response_path.write_text(response_text)
-    print(f"\n  Full LLM response saved to: {response_path}")
+    if not skip_draft:
+        response_path.write_text(response_text)
+        print(f"\n  Full LLM response saved to: {response_path}")
 
     tuning_md = f"""# Review & Tune (Before Apply)
 
@@ -8272,8 +8511,9 @@ Before you apply, tune for your business roles, security requirements, and Genie
 """
 
     tuning_path = out_dir / "TUNING.md"
-    tuning_path.write_text(tuning_md)
-    print(f"  Tuning checklist written to: {tuning_path}")
+    if not skip_draft:
+        tuning_path.write_text(tuning_md)
+        print(f"  Tuning checklist written to: {tuning_path}")
 
     if sql_block and args.mode == "genie":
         # Genie mode: masking functions are owned by the governance team; discard SQL output.
@@ -8282,7 +8522,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
 
     all_cs = catalog_schemas if catalog_schemas else [(catalog, schema)] if catalog and schema else []
 
-    if sql_block:
+    if sql_block and not skip_draft:
         targets = ", ".join(f"{c}.{s}" for c, s in all_cs)
         sql_header = (
             "-- ============================================================================\n"
@@ -8307,7 +8547,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
         print(f"  masking_functions.sql written to: {sql_path}")
         print(f"    Target schemas: {targets}")
 
-    if hcl_block:
+    if hcl_block and not skip_draft:
         if args.mode == "genie" and champion_flow:
             hcl_header = (
                 "# ============================================================================\n"
@@ -8424,41 +8664,9 @@ Before you apply, tune for your business roles, security requirements, and Genie
         # genie_space_id the UI config is authoritative. Replace the LLM-generated
         # block with the verbatim parse from the Genie agent API.
         # Skip in governance mode — genie_space_configs is managed by BU teams.
-        if api_genie_configs and args.mode != "governance":
-            reviewed_genie_text = (
-                (out_dir / "abac.auto.tfvars").read_text()
-                if (out_dir / "abac.auto.tfvars").exists() else ""
-            )
-            kept_genie_fields = keep_reviewed_genie_content(
-                out_dir / "abac.auto.tfvars", api_genie_configs
-            )
-            if kept_genie_fields:
-                print(
-                    "  Kept reviewed Genie benchmarks/snippets: "
-                    + ", ".join(kept_genie_fields)
-                )
-            hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_configs")
-            injected_hcl = (
-                "\n# genie_space_configs parsed verbatim from the existing Genie agent(s).\n"
-                "# Edit here to manage space config as code; make apply pushes changes back.\n"
-                + format_genie_space_configs_hcl(api_genie_configs)
-            )
-            injected_hcl = restore_reviewed_genie_text(
-                reviewed_genie_text, injected_hcl, list(api_genie_configs)
-            )
-            hcl_block = hcl_block.rstrip() + "\n" + injected_hcl + "\n"
-            print(
-                f"  Injected genie_space_configs from Genie API for: "
-                f"{', '.join(api_genie_configs)}"
-            )
-
-        if genie_space_id_to_name and args.mode != "governance":
-            hcl_block = remove_hcl_top_level_block(hcl_block, "genie_space_id_to_name")
-            hcl_block = (
-                hcl_block.rstrip()
-                + "\n\n# Tool-owned canonical identity for id-only imported spaces.\n"
-                + format_string_map_hcl("genie_space_id_to_name", genie_space_id_to_name)
-                + "\n"
+        if args.mode != "governance":
+            hcl_block = with_imported_genie_config(
+                hcl_block, out_dir / "abac.auto.tfvars", api_genie_configs, genie_space_id_to_name,
             )
 
         tfvars_path = out_dir / "abac.auto.tfvars"
@@ -8476,6 +8684,18 @@ Before you apply, tune for your business roles, security requirements, and Genie
         fix_hcl_syntax(tfvars_path)
         if _configured_spaces:
             strip_draft_genie_acl_fields(tfvars_path)
+        # Full, non-governance runs derive the Genie ACL sidecar from policies.
+        _acl_env_tfvars = (
+            tfvars_path.parent.parent / "env.auto.tfvars"
+            if target_space_cfg is None and args.mode not in ("governance", "genie") else None
+        )
+        if covered is not None and covered.columns and args.mode != "governance":
+            kept_entries = keep_reviewed_genie_entries(
+                tfvars_path, reviewed_rules[0], set(api_genie_configs),
+            )
+            if kept_entries:
+                print("  Kept the reviewed Genie config of: " + ", ".join(kept_entries)
+                      + " (the model saw only uncovered columns)")
 
         n_canonical = autofix_canonical_tag_vocabulary(tfvars_path)
         if n_canonical:
@@ -8742,6 +8962,13 @@ Before you apply, tune for your business roles, security requirements, and Genie
         # Uncovered sensitive assignments remain intact: validation/coverage
         # must block rather than silently shrinking the protected surface.
 
+        if covered is not None:
+            sql_block = keep_covered_rules_in_draft(
+                reviewed_rules, covered, tfvars_path, out_dir / "masking_functions.sql", sql_block,
+                env_tfvars=_acl_env_tfvars,
+            )
+            sql_path = out_dir / "masking_functions.sql"
+
         # ── Final governance mode safety strip ─────────────────────────────────
         # Multiple code paths (autofixes, semantic retries) can re-introduce
         # genie_space_configs after the initial strip. This final pass ensures
@@ -8874,6 +9101,12 @@ Before you apply, tune for your business roles, security requirements, and Genie
                         if _retry_cleaned != _retry_text:
                             tfvars_path.write_text(_retry_cleaned)
                             print("  [governance mode] Final strip (retry): removed genie_space_configs")
+                if covered is not None:
+                    sql_block = keep_covered_rules_in_draft(
+                        reviewed_rules, covered, tfvars_path, out_dir / "masking_functions.sql",
+                        sql_block, env_tfvars=_acl_env_tfvars,
+                    )
+                    sql_path = out_dir / "masking_functions.sql"
                 # Re-check after retry
                 semantic_errors, semantic_warnings = post_generate_semantic_check(tfvars_path, auth_cfg, mode=args.mode)
             # Critical errors (empty governance output) should NOT be downgraded
@@ -8908,9 +9141,8 @@ Before you apply, tune for your business roles, security requirements, and Genie
             # The per-space dir is already out_dir; merge its content into
             # the assembled generated/abac.auto.tfvars one level up.
             assembled_dir = out_dir.parent.parent  # generated/spaces/<key>/../.. = generated/
-            merge_script = SCRIPT_DIR / "scripts" / "merge_space_configs.py"
-            subprocess.check_call(
-                [sys.executable, str(merge_script), str(assembled_dir), space_key]
+            merge_space_into_assembled(
+                assembled_dir, space_key, allow_rule_changes=args.allow_rule_changes,
             )
             # Safety-net autofix on the assembled abac in case the merge
             # introduced any cross-space tag_key inconsistencies.

@@ -54,7 +54,7 @@ access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
 ```bash
 make generate ENV=dev
 ```
-Review the drafted rules in `envs/dev/generated/` and edit them if you need to. If the tags aren't there yet, it stops and tells you to wait; re-run it later. Re-runs keep whatever is already in `envs/dev/generated/`, including your edits, and only add rules for new columns.
+Review the drafted rules in `envs/dev/generated/` and edit them if you need to. If the tags aren't there yet, it stops and tells you to wait; re-run it later. Re-runs keep whatever is already in `envs/dev/generated/`, including your edits, and only draft rules for columns not yet covered. Adding an agent that shares tables reuses the existing protection automatically.
 
 **4. Rehearse.**
 ```bash

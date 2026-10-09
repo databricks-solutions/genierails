@@ -39,7 +39,7 @@ So "expose last" isn't a policy you hope holds — there is simply no new or wid
 |---|---|---|
 | `make setup` / `make init-env ENV=<e>` | 0 | Create local env dirs + default config files (no Databricks calls) |
 | `make enable-classification ENV=<e>` | 1/3 | Optional scripted way to turn on UC Data Classification for the footprint; review detections, exclude false positives, and enable auto-tagging in the UI |
-| `make generate ENV=<e>` | 1 | (dev) One run: import the agent's config, find its tables, draft masks + access rules from the model, and derive one `gr_treatment`/column from native `class.*` (fail-closed: without `class.*` tags it stops before any model call); groups come from `access_tier_groups` in `env.auto.tfvars` (or `GENERATE_ARGS='--groups "..."'`, saved there on first use). Re-runs keep reviewed rules and add rules only for uncovered columns; `GENERATE_ARGS='--allow-rule-changes'` accepts the model's changes |
+| `make generate ENV=<e>` | 1 | (dev) One run: import the agent's config, find its tables, draft masks + access rules from the model, and derive one `gr_treatment`/column from native `class.*` (fail-closed: without `class.*` tags it stops before any model call); groups come from `access_tier_groups` in `env.auto.tfvars` (or `GENERATE_ARGS='--groups "..."'`, saved there on first use). Re-runs only draft rules for columns not yet covered (no model call when every column is); `GENERATE_ARGS='--allow-rule-changes'` re-drafts every column and accepts the model's changes |
 | `make derive-assignments ENV=<e>` | 4/5 | Re-derive **only** `tag_assignments` from live `class.*`, reusing the promoted rules unchanged — no model call (fail-closed). `release` and `maintain` run it for you |
 | `make coverage-gate ENV=<e>` | 1/4/5 | Fail if any tagged-sensitive column has no mask (the "says NO" check). Every plan/apply also runs it against live tags |
 | `make validate-generated ENV=<e>` | 1/4/5 | Static validation incl. the one-mask-per-column guard |
@@ -87,7 +87,10 @@ What each walkthrough step does, for when you need more than the [walkthrough](R
 
 **`make generate ENV=dev`**
 - Imports the agent's config, finds its tables, and drafts masks and access rules from the `class.*` tags. Without tags it stops before any model call.
-- Re-runs keep reviewed rules in `envs/dev/generated/` and add rules only for uncovered columns, printing `kept reviewed rule …` or `dropped stale reviewed rule …`. To accept the model's changes, pass `GENERATE_ARGS='--allow-rule-changes'` or edit the files.
+- Re-runs only draft rules for columns not yet covered by the reviewed rules in `envs/dev/generated/` (a `gr_treatment`, a mask policy for its catalog and treatment, and that policy's masking function). Covered columns aren't sent to the model, and their rules stay exactly as reviewed.
+- Adding an agent that shares tables reuses the existing protection automatically. A new column whose treatment already has a policy in that catalog just joins it; only a new treatment gets a new policy and masking function.
+- When every column is covered there is no model call: it prints `governance: all N columns already covered by reviewed rules — no draft needed` and only refreshes the agent's config.
+- To re-draft every column and accept the model's changes, pass `GENERATE_ARGS='--allow-rule-changes'`, or edit the files. Otherwise anything that would still change a reviewed rule is reverted with `kept reviewed rule …`; rules for removed tables or columns go with `dropped stale reviewed rule …`. A `SPACE=` run stops if its draft disagrees with `generated/` on a column's treatment, or has a policy or masking function of the same name with a different body.
 
 **`make rehearse ENV=dev`**
 - Runs live derive → validate-generated → coverage-gate → apply → verify-access, stopping at the first failure.

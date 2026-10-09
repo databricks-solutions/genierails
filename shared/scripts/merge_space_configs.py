@@ -2,7 +2,7 @@
 """Merge one per-space generated config into the assembled generated/ outputs.
 
 Usage:
-  python scripts/merge_space_configs.py <generated_dir> <space_key>
+  python scripts/merge_space_configs.py <generated_dir> <space_key> [--allow-rule-changes]
 
 Where:
   <generated_dir>  Path to the env's generated/ directory (e.g. envs/dev/generated)
@@ -22,6 +22,11 @@ The script patches (not replaces) the assembled outputs:
   - generated/masking_functions.sql:
       * appends new CREATE FUNCTION blocks (dedup by function name)
 
+A per-space draft that disagrees with the assembled rules on a column's
+gr_treatment or treatment override, or has a policy or masking function of the
+same name with a different body, stops the merge before anything is written
+(pass --allow-rule-changes to merge anyway).
+
 Groups and group_members are NEVER touched — they are shared governance state
 established by full generation.
 """
@@ -33,6 +38,7 @@ import os
 import re
 import sys
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -374,9 +380,17 @@ def merge_treatment_overrides(
     return [merged[column] for column in sorted(merged)]
 
 
-def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
+def merge_into_assembled(
+    generated_dir: Path, space_key: str, *, allow_changes: bool = False,
+) -> None:
     """Patch the assembled generated/abac.auto.tfvars and masking_functions.sql
     with content from generated/spaces/<space_key>/.
+
+    Raises ValueError, before writing anything, when the per-space draft
+    disagrees with the assembled rules on a column's treatment or override,
+    or has a policy or masking function of the same name with a different
+    body. allow_changes merges anyway: the per-space treatment wins, the
+    strictest override wins, and the assembled policy/function is kept.
     """
     space_dir = generated_dir / "spaces" / space_key
     space_abac = space_dir / "abac.auto.tfvars"
@@ -548,11 +562,20 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
         for ta in existing_tag_assignments
     }
     added_ta = 0
+    conflicts: list[str] = []
+    space_label = f"space {space_key}"
+    treatment_key = load_treatment_config().tag_key
     merged_tag_assignments = list(existing_tag_assignments)
     for ta in new_tag_assignments:
         key = (ta.get("entity_type", ""), ta.get("entity_name", ""), ta.get("tag_key", ""))
         existing_assignment = existing_ta_keys.get(key)
         if existing_assignment and existing_assignment.get("tag_value") != ta.get("tag_value"):
+            if key[2] == treatment_key and not allow_changes:
+                conflicts.append(
+                    f"{key[1]} {treatment_key}: '{existing_assignment.get('tag_value')}' "
+                    f"(assembled) vs '{ta.get('tag_value')}' ({space_label})"
+                )
+                continue
             # Per-space generate takes precedence — it's a more focused, recent
             # call specifically for the target space's tables.  Update in place.
             print(
@@ -585,19 +608,53 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
         new_treatment_overrides,
         merged_space_columns,
     )
+    if not allow_changes:
+        existing_override = {
+            o.get("entity_name", ""): o.get("treatment", "") for o in existing_treatment_overrides
+        }
+        for override in new_treatment_overrides:
+            column = override.get("entity_name", "")
+            if column in existing_override and existing_override[column] != override.get("treatment", ""):
+                conflicts.append(
+                    f"treatment override {column}: '{existing_override[column]}' "
+                    f"(assembled) vs '{override.get('treatment', '')}' ({space_label})"
+                )
 
     # ── Merge fgac_policies (dedup by name) ───────────────────────────────
-    existing_pol_names = {p.get("name", "") for p in existing_fgac_policies}
+    existing_pol_by_name = {p.get("name", ""): p for p in existing_fgac_policies}
+    existing_pol_names = set(existing_pol_by_name)
     added_pol = 0
     merged_fgac = list(existing_fgac_policies)
     for pol in new_fgac_policies:
         name = pol.get("name", "")
+        if (name in existing_pol_by_name and not allow_changes
+                and _fingerprint(existing_pol_by_name[name]) != _fingerprint(pol)):
+            conflicts.append(f"policy {name} differs between the assembled rules and {space_label}")
         if name not in existing_pol_names:
             merged_fgac.append(pol)
             existing_pol_names.add(name)
             added_pol += 1
     if added_pol:
         print(f"    fgac_policies:    added {added_pol} new entry/entries")
+
+    new_sql = space_sql.read_text() if space_sql.exists() else ""
+    existing_sql = assembled_sql.read_text() if assembled_sql.exists() else ""
+    if not allow_changes:
+        existing_fns = _function_blocks_by_key(existing_sql)
+        for fn_key, block in _function_blocks_by_key(new_sql).items():
+            if fn_key in existing_fns and not _same_sql(existing_fns[fn_key], block):
+                conflicts.append(
+                    f"function {'.'.join(p for p in fn_key if p)} differs between the "
+                    f"assembled masking_functions.sql and {space_label}"
+                )
+    if conflicts:
+        raise ValueError(
+            f"per-space draft for '{space_key}' conflicts with the assembled rules "
+            "(nothing was merged):\n    - " + "\n    - ".join(conflicts) + "\n"
+            f"  Fix generated/spaces/{space_key}/ or generated/ so they agree, or re-run "
+            f"with {ALLOW_RULE_CHANGES_FLAG} to merge anyway (the per-space treatment wins; "
+            "the assembled policy and function are kept)"
+        )
 
     # ── Rewrite assembled abac.auto.tfvars ────────────────────────────────
     # Remove the sections we are replacing, then append the new ones.
@@ -667,10 +724,7 @@ def merge_into_assembled(generated_dir: Path, space_key: str) -> None:
 
     # ── Merge masking_functions.sql (dedup by function name) ─────────────
     if space_sql.exists():
-        new_sql = space_sql.read_text()
         new_func_blocks = split_into_function_blocks(new_sql)
-
-        existing_sql = assembled_sql.read_text() if assembled_sql.exists() else ""
         existing_func_names = extract_function_names(existing_sql)
 
         appended = 0
@@ -883,6 +937,52 @@ def _condition_tag_refs(policy: dict) -> set[tuple[str, str | None]]:
     return refs
 
 
+def _with_reviewed_tag_values(
+    new_cfg: dict, prior_cfg: dict, needed: set[tuple[str, str | None]]
+) -> list[dict]:
+    """The new draft's tag_policies plus the reviewed keys/values ``needed``.
+
+    Restored rules must stay valid against the tag vocabulary, so the
+    reviewed tag_policies keys/values they reference are carried over.
+    """
+    merged = [dict(p) for p in new_cfg.get("tag_policies") or []]
+    by_key = {p.get("key", ""): p for p in merged}
+    prior = {p.get("key", ""): p for p in prior_cfg.get("tag_policies") or []}
+    for key, value in sorted(needed, key=lambda ref: (ref[0], ref[1] or "")):
+        if key not in by_key and key in prior:
+            by_key[key] = dict(prior[key], values=[])
+            merged.append(by_key[key])
+        if key in by_key and value is not None:
+            values = list(by_key[key].get("values") or [])
+            if value not in values:
+                by_key[key]["values"] = values + [value]
+    return merged
+
+
+def _write_rule_sections(abac_path: Path, sections: dict[str, list]) -> None:
+    text = abac_path.read_text()
+    for section, items in sections.items():
+        text = remove_hcl_top_level_list(text, section)
+        if items:
+            text = text.rstrip() + f"\n\n{section} = " + _render_value(items) + "\n"
+    abac_path.write_text(re.sub(r"\n{3,}", "\n\n", text))
+
+
+def _write_function_blocks(
+    sql_path: Path, new_sql: str, restore: dict[tuple[str, str, str], str]
+) -> None:
+    """Write new_sql with the ``restore`` blocks in place of (or after) its own."""
+    first_create = re.search(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE\s+)?FUNCTION\b", new_sql, re.IGNORECASE
+    )
+    prefix = new_sql[:first_create.start()] if first_create else new_sql
+    blocks = split_into_function_blocks(new_sql)
+    present = {_function_key(b) for b in blocks}
+    blocks = [restore.get(_function_key(b), b) for b in blocks]
+    blocks += [block for key, block in restore.items() if key not in present]
+    sql_path.write_text(prefix.rstrip() + "\n\n" + "\n\n".join(blocks) + "\n")
+
+
 def keep_reviewed_rules(
     reviewed: tuple[dict, str],
     abac_path: Path,
@@ -1087,53 +1187,198 @@ def keep_reviewed_rules(
         return messages
 
     if abac_changed:
-        # Restored rules must stay valid against the tag vocabulary: carry the
-        # reviewed tag_policies keys/values they reference into the new draft.
         needed: set[tuple[str, str | None]] = {
             (item.get("tag_key", ""), item.get("tag_value", ""))
             for entity in targets for item in prior_by_entity[entity]
         }
         for policy in kept_policies.values():
             needed |= _condition_tag_refs(policy)
-        merged_tag_policies = [dict(p) for p in new_cfg.get("tag_policies") or []]
-        by_key = {p.get("key", ""): p for p in merged_tag_policies}
-        prior_tag_policies = {p.get("key", ""): p for p in prior_cfg.get("tag_policies") or []}
-        for key, value in sorted(needed, key=lambda ref: (ref[0], ref[1] or "")):
-            if key not in by_key and key in prior_tag_policies:
-                by_key[key] = dict(prior_tag_policies[key], values=[])
-                merged_tag_policies.append(by_key[key])
-            if key in by_key and value is not None:
-                values = list(by_key[key].get("values") or [])
-                if value not in values:
-                    by_key[key]["values"] = values + [value]
-        text = abac_path.read_text()
-        for section, items in (
-            ("tag_policies", merged_tag_policies),
-            ("tag_assignments", merged_assignments),
-            ("treatment_overrides", merged_overrides),
-            ("fgac_policies", merged_policies),
-        ):
-            text = remove_hcl_top_level_list(text, section)
-            if items:
-                text = text.rstrip() + f"\n\n{section} = " + _render_value(items) + "\n"
-        abac_path.write_text(re.sub(r"\n{3,}", "\n\n", text))
+        _write_rule_sections(abac_path, {
+            "tag_policies": _with_reviewed_tag_values(new_cfg, prior_cfg, needed),
+            "tag_assignments": merged_assignments,
+            "treatment_overrides": merged_overrides,
+            "fgac_policies": merged_policies,
+        })
 
     if kept_fns:
-        first_create = re.search(
-            r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE\s+)?FUNCTION\b", new_sql, re.IGNORECASE
+        _write_function_blocks(
+            sql_path, new_sql, {k: b for k, b in prior_fns.items() if k in kept_fns}
         )
-        prefix = new_sql[:first_create.start()] if first_create else new_sql
-        blocks = [
-            prior_fns[key] if (key := _function_key(b)) in kept_fns else b
-            for b in split_into_function_blocks(new_sql)
-        ]
-        blocks += [prior_fns[k] for k in prior_fns if k in kept_fns and k not in new_fns]
-        sql_path.write_text(prefix.rstrip() + "\n\n" + "\n\n".join(blocks) + "\n")
 
     return messages + [
         f"  kept reviewed rule {rule} ({reason}); {_ACCEPT_HINT}"
         for rule, reason in changes
     ]
+
+
+@dataclass
+class ReviewedCoverage:
+    """What the reviewed rulebook already protects within a run's footprint.
+
+    columns: covered column -> the reviewed column-mask policies covering it.
+    tables: table with a reviewed row filter -> those row-filter policies.
+    reusable: (catalog, treatment) -> a reviewed column-mask policy (anywhere in
+    the rulebook) that a new column with that treatment can simply join.
+    Entity names are lower-case.
+    """
+    columns: dict[str, list[str]] = field(default_factory=dict)
+    tables: dict[str, list[str]] = field(default_factory=dict)
+    reusable: dict[tuple[str, str], str] = field(default_factory=dict)
+
+
+def reviewed_coverage(
+    reviewed: tuple[dict, str], footprint: dict[str, set[str] | None] | None
+) -> ReviewedCoverage:
+    """The columns/tables of ``footprint`` (from footprint_from_ddl) that the
+    reviewed rules already protect.
+
+    A column is covered when the coverage check would pass it — a
+    gr_treatment (or reviewed treatment_override), a column-mask policy for
+    its catalog and treatment, and that policy's masking function — and the
+    function is defined in the reviewed SQL where the policy points. A table
+    is covered for row filtering when a reviewed row filter matches its tags
+    and its function is defined.
+    """
+    from validate_abac import column_treatment_coverage
+
+    prior_cfg, prior_sql = reviewed
+    functions = _function_blocks_by_key(prior_sql)
+    policies = {p.get("name", ""): p for p in prior_cfg.get("fgac_policies") or []}
+
+    def defined(policy: dict) -> bool:
+        ref = _policy_function(policy)
+        return ref is not None and _find_function(functions, ref) is not None
+
+    in_footprint_columns = {
+        f"{table}.{column}"
+        for table, columns in (footprint or {}).items() for column in columns or ()
+    }
+    coverage = ReviewedCoverage()
+    for column, (treatment, covering, gap) in column_treatment_coverage(
+        prior_cfg, {key[2] for key in functions}, overrides=True,
+    ).items():
+        usable = [name for name in covering if gap is None and defined(policies[name])]
+        if not usable:
+            continue
+        coverage.reusable.setdefault((_uc_identifier(column.split(".", 1)[0]), treatment), usable[0])
+        if _uc_identifier(column) in in_footprint_columns:
+            coverage.columns[_uc_identifier(column)] = usable
+
+    by_entity = _by_entity(prior_cfg.get("tag_assignments") or [])
+    for name, policy in policies.items():
+        if policy.get("policy_type") != "POLICY_TYPE_ROW_FILTER" or not defined(policy):
+            continue
+        for _kind, table in sorted(_policy_targets(policy, by_entity)):
+            if table in (footprint or {}):
+                coverage.tables.setdefault(table, []).append(name)
+    return coverage
+
+
+def _treatment_refs(policy: dict) -> set[str]:
+    return {
+        value for key, value in re.findall(
+            r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)", policy.get("match_condition", "")
+        ) if key == load_treatment_config().tag_key
+    }
+
+
+def keep_covered_rules(
+    reviewed: tuple[dict, str], coverage: ReviewedCoverage, abac_path: Path, sql_path: Path,
+) -> bool:
+    """Put the reviewed rules for covered columns/tables into a new draft.
+
+    The model was not shown covered columns, so the draft has nothing for
+    them — except what autofixes added, which is dropped. Their reviewed tags,
+    treatment overrides, policies and masking functions (and the functions
+    those call) go in unchanged. A drafted column mask for a (catalog,
+    treatment) that a reviewed policy already serves is replaced by that
+    policy, so a new column just joins it; only a genuinely new treatment
+    keeps its drafted policy and function. Drafted policies that would also
+    land on a covered column or table are dropped. Returns whether anything
+    changed.
+    """
+    prior_cfg, prior_sql = reviewed
+    try:
+        new_cfg = hcl2.loads(abac_path.read_text())
+    except Exception as exc:
+        raise ValueError(f"cannot read the new draft {abac_path}: {exc}") from exc
+    prior_policies = {p.get("name", ""): p for p in prior_cfg.get("fgac_policies") or []}
+
+    entities = {("columns", c) for c in coverage.columns} | {("tables", t) for t in coverage.tables}
+    keep = {name for names in [*coverage.columns.values(), *coverage.tables.values()] for name in names}
+    for column, names in coverage.columns.items():
+        # A mask's when_condition reads its table's tags: keep those as reviewed.
+        if any(prior_policies[name].get("when_condition") for name in names):
+            entities.add(("tables", column.rsplit(".", 1)[0]))
+
+    drafted = []
+    for policy in new_cfg.get("fgac_policies") or []:
+        refs = _treatment_refs(policy) if policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK" else set()
+        catalog = _uc_identifier(policy.get("catalog"))
+        if refs and all((catalog, ref) in coverage.reusable for ref in refs):
+            keep |= {coverage.reusable[(catalog, ref)] for ref in refs}
+        else:
+            drafted.append(policy)
+
+    prior_by_entity = _by_entity(prior_cfg.get("tag_assignments") or [])
+    new_assignments = list(new_cfg.get("tag_assignments") or [])
+    assignments = [a for a in new_assignments if _entity(a) not in entities] + [
+        a for a in prior_cfg.get("tag_assignments") or [] if _entity(a) in entities
+    ]
+    by_entity = _by_entity(assignments)
+    policies = [p for name, p in prior_policies.items() if name in keep] + [
+        p for p in drafted
+        if p.get("name", "") not in keep and not (_policy_targets(p, by_entity) & entities)
+    ]
+    covered_columns = {name for kind, name in entities if kind == "columns"}
+    new_overrides = list(new_cfg.get("treatment_overrides") or [])
+    overrides = [
+        o for o in new_overrides if _uc_identifier(o.get("entity_name")) not in covered_columns
+    ] + [
+        o for o in prior_cfg.get("treatment_overrides") or []
+        if _uc_identifier(o.get("entity_name")) in covered_columns
+    ]
+
+    changed = False
+    if (_fingerprint(assignments) != _fingerprint(new_assignments)
+            or _fingerprint(policies) != _fingerprint(list(new_cfg.get("fgac_policies") or []))
+            or _fingerprint(overrides) != _fingerprint(new_overrides)):
+        needed: set[tuple[str, str | None]] = {
+            (item.get("tag_key", ""), item.get("tag_value", ""))
+            for item in assignments if _entity(item) in entities
+        }
+        for name in keep:
+            needed |= _condition_tag_refs(prior_policies[name])
+        _write_rule_sections(abac_path, {
+            "tag_policies": _with_reviewed_tag_values(new_cfg, prior_cfg, needed),
+            "tag_assignments": assignments,
+            "treatment_overrides": overrides,
+            "fgac_policies": policies,
+        })
+        changed = True
+
+    # The kept policies' functions, and what those call, exactly as reviewed.
+    prior_fns = _function_blocks_by_key(prior_sql)
+    pending = [
+        key for name in keep
+        if (ref := _policy_function(prior_policies[name])) and (key := _find_function(prior_fns, ref))
+    ]
+    restore: set[tuple[str, str, str]] = set()
+    while pending:
+        key = pending.pop()
+        if key in restore:
+            continue
+        restore.add(key)
+        header = _FUNC_NAME_RE.search(prior_fns[key])
+        scanned = _scan_statement(prior_fns[key][header.start():]) if header else None
+        called = _called_names(scanned[1][header.end() - header.start():]) if scanned else set()
+        pending += [k for k in prior_fns if k[2] in called and k[:2] == key[:2]]
+    new_sql = sql_path.read_text() if sql_path.exists() else ""
+    new_fns = _function_blocks_by_key(new_sql)
+    if any(key not in new_fns or not _same_sql(new_fns[key], prior_fns[key]) for key in restore):
+        _write_function_blocks(sql_path, new_sql, {k: b for k, b in prior_fns.items() if k in restore})
+        changed = True
+    return changed
 
 
 def _hcl_block_span(text: str, key: str) -> tuple[int, int] | None:
@@ -1326,24 +1571,31 @@ def prune_unused_new_functions(sql_path: Path, abac_path: Path, reviewed_names: 
 
 
 def main():
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    allow_changes = ALLOW_RULE_CHANGES_FLAG in args
+    args = [a for a in args if a != ALLOW_RULE_CHANGES_FLAG]
+    if len(args) != 2:
         print(
             "Usage: python scripts/merge_space_configs.py "
-            "<generated_dir> <space_key>"
+            f"<generated_dir> <space_key> [{ALLOW_RULE_CHANGES_FLAG}]"
         )
         print()
         print("  <generated_dir>  Path to envs/<env>/generated/")
         print("  <space_key>      Sanitized space key (e.g. finance_analytics)")
         sys.exit(1)
 
-    generated_dir = Path(sys.argv[1])
-    space_key = sys.argv[2]
+    generated_dir = Path(args[0])
+    space_key = args[1]
 
     if not generated_dir.is_dir():
         print(f"ERROR: generated_dir does not exist: {generated_dir}")
         sys.exit(1)
 
-    merge_into_assembled(generated_dir, space_key)
+    try:
+        merge_into_assembled(generated_dir, space_key, allow_changes=allow_changes)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

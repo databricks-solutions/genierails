@@ -632,11 +632,15 @@ def env_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _generate(env_dir, monkeypatch, columns, *extra, ddl=E2E_DDL):
+def _generate(env_dir, monkeypatch, columns, *extra, ddl=E2E_DDL, prompts=None):
+    def model(_call_fn, prompt, *_a, **_k):
+        if prompts is not None:
+            prompts.append(prompt.split("### MY TABLES", 1)[1])
+        return _model_response(columns)
+
     monkeypatch.setattr(generate_abac, "fetch_tables_from_databricks",
                         lambda refs, cfg: (ddl, [("dev_fin", "payments")]))
-    monkeypatch.setattr(generate_abac, "call_with_retries",
-                        lambda *a, **k: _model_response(columns))
+    monkeypatch.setattr(generate_abac, "call_with_retries", model)
     monkeypatch.setattr(sys, "argv", [
         "generate_abac.py", "--auth-file", str(env_dir / "auth.auto.tfvars"),
         "--groups", "payments_ops,viewers", "--out-dir", str(env_dir / "generated"), *extra,
@@ -662,15 +666,19 @@ def _generated(env_dir):
     }, _policy_names(cfg)
 
 
-def test_end_to_end_rerun_keeps_dropped_rule_through_validation_and_gate(env_dir, monkeypatch, capfd):
+def test_end_to_end_rerun_keeps_covered_rule_through_validation_and_gate(env_dir, monkeypatch, capfd):
     _generate(env_dir, monkeypatch, {EMAIL: EMAIL, LIMIT: LIMIT})
     assert "Coverage check: 2" in _coverage_gate(env_dir)
     first = _generated(env_dir)
     capfd.readouterr()
 
-    _generate(env_dir, monkeypatch, {EMAIL: EMAIL})  # the model drops round_amount
+    # spend_limit is covered, so the model never sees it and drafts nothing
+    # for it; its reviewed rule goes back in as it was, with nothing to report.
+    prompts = []
+    _generate(env_dir, monkeypatch, {EMAIL: EMAIL}, prompts=prompts)
     out = capfd.readouterr().out
-    assert f"kept reviewed rule {LIMIT} → round_amount (model proposed removing it); {HINT}" in out
+    assert "spend_limit" not in prompts[0]
+    assert "kept reviewed rule" not in out
     assert "RESULT: PASS" in out
     assert _generated(env_dir) == first
     assert "Coverage check: 2" in _coverage_gate(env_dir)
@@ -689,10 +697,14 @@ def test_end_to_end_space_rerun_keeps_reviewed_rule(env_dir, monkeypatch, capfd)
     first = _generated(env_dir)
     capfd.readouterr()
 
-    # SPACE=: the per-space merge would let the model's email change win.
-    _generate(env_dir, monkeypatch, {EMAIL: "email_generic", LIMIT: LIMIT}, "--space", "Payments")
+    # SPACE=: email is covered, so it is not sent and the model's would-be
+    # change to it never reaches the per-space merge.
+    prompts = []
+    _generate(env_dir, monkeypatch, {EMAIL: "email_generic", LIMIT: LIMIT}, "--space", "Payments",
+              prompts=prompts)
     out = capfd.readouterr().out
-    assert f"kept reviewed rule {EMAIL} → email_partial (model proposed changing it); {HINT}" in out
+    assert " email " not in prompts[0]
+    assert "kept reviewed rule" not in out
     assert "RESULT: PASS" in out
     treatments, policies = _generated(env_dir)
     assert treatments == first[0]
