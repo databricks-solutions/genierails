@@ -26,6 +26,122 @@ def test_masking_normalization_detects_real_body_change():
     assert normalized_definitions(before) != normalized_definitions(after)
 
 
+def _contextual_function(catalog, schema, name, body):
+    return (
+        f"USE CATALOG {catalog};\nUSE SCHEMA {schema};\n"
+        f"CREATE OR REPLACE FUNCTION {name}(v STRING) RETURNS STRING RETURN {body};\n"
+    )
+
+
+def test_masking_normalization_ignores_function_order_with_use_context():
+    alpha = _contextual_function("cat", "sales", "alpha", "v")
+    beta = _contextual_function("cat", "finance", "beta", "upper(v)")
+    assert normalized_definitions(alpha + beta) == normalized_definitions(beta + alpha)
+
+
+def test_contextual_masking_normalization_detects_body_change():
+    before = _contextual_function("cat", "sales", "mask", "'x'")
+    after = _contextual_function("cat", "sales", "mask", "'y'")
+    assert normalized_definitions(before) != normalized_definitions(after)
+
+
+@pytest.mark.parametrize(("catalog", "schema"), [("other", "sales"), ("cat", "finance")])
+def test_contextual_masking_normalization_detects_resolved_target_change(catalog, schema):
+    before = _contextual_function("cat", "sales", "mask", "v")
+    after = _contextual_function(catalog, schema, "mask", "v")
+    assert normalized_definitions(before) != normalized_definitions(after)
+
+
+def test_contextual_masking_normalization_detects_added_or_removed_function():
+    alpha = _contextual_function("cat", "sales", "alpha", "v")
+    beta = _contextual_function("cat", "sales", "beta", "v")
+    assert normalized_definitions(alpha) != normalized_definitions(alpha + beta)
+
+
+def test_fully_qualified_function_hashes_execution_context_for_body_references():
+    definition = "CREATE FUNCTION cat.sales.mask(v STRING) RETURNS STRING RETURN v;"
+    assert normalized_definitions("USE CATALOG old;\nUSE SCHEMA old;\n" + definition) != normalized_definitions(
+        "USE CATALOG other;\nUSE SCHEMA other;\n" + definition
+    )
+
+
+def test_duplicate_resolved_function_names_keep_file_order_across_use_blocks():
+    first = _contextual_function("cat", "sales", "mask", "'first'")
+    second = _contextual_function("cat", "sales", "`mask`", "'second'")
+    assert normalized_definitions(first + second) != normalized_definitions(second + first)
+
+
+def test_unclassified_statement_change_fails_closed_with_contextual_functions():
+    functions = (
+        _contextual_function("cat", "sales", "alpha", "v")
+        + _contextual_function("cat", "finance", "beta", "v")
+    )
+    assert normalized_definitions("SET timezone = 'UTC';" + functions) != normalized_definitions(
+        "SET timezone = 'Australia/Melbourne';" + functions
+    )
+
+
+def test_unclassified_statement_is_a_fail_closed_ordering_barrier():
+    function = _contextual_function("cat", "sales", "mask", "v")
+    statement = "SET timezone = 'UTC';"
+    assert normalized_definitions(statement + function) != normalized_definitions(function + statement)
+
+
+def test_use_catalog_keeps_deployer_schema_and_schema_change_moves_hash():
+    prefix = "USE CATALOG a;\nUSE SCHEMA {schema};\nUSE CATALOG b;\n"
+    function = "CREATE FUNCTION g() RETURNS STRING RETURN 'x';\n"
+    assert normalized_definitions(prefix.format(schema="s") + function) != normalized_definitions(
+        prefix.format(schema="t") + function
+    )
+
+
+def test_same_deployed_target_keeps_order_for_bare_and_schema_qualified_names():
+    prefix = "USE CATALOG a;\nUSE SCHEMA s;\nUSE CATALOG b;\n"
+    first = "CREATE FUNCTION f() RETURNS STRING RETURN 'first';\n"
+    second = "CREATE FUNCTION s.f() RETURNS STRING RETURN 'second';\n"
+    assert normalized_definitions(prefix + first + second) != normalized_definitions(prefix + second + first)
+
+
+def test_spaced_dot_unknown_name_keeps_deployment_order():
+    prefix = "USE CATALOG cat;\nUSE SCHEMA sch;\n"
+    qualified = (
+        "CREATE OR REPLACE FUNCTION cat . sch . mask(v STRING) "
+        "RETURNS STRING RETURN 'x';\n"
+    )
+    bare = "CREATE OR REPLACE FUNCTION mask(v STRING) RETURNS STRING RETURN 'y';\n"
+    assert normalized_definitions(prefix + qualified + bare) != normalized_definitions(
+        prefix + bare + qualified
+    )
+
+
+def test_final_name_collision_keeps_order_for_bare_use_and_default_fqn():
+    prefix = "USE t;\n"
+    first = "CREATE FUNCTION f() RETURNS STRING RETURN 'first';\n"
+    second = "CREATE FUNCTION main.default.f() RETURNS STRING RETURN 'second';\n"
+    assert normalized_definitions(prefix + first + second) != normalized_definitions(prefix + second + first)
+
+
+def test_deployer_splitter_difference_fails_closed():
+    function = "CREATE FUNCTION f() RETURNS STRING RETURN 'x';\n"
+    same_line = "USE CATALOG a; USE SCHEMA s;\n" + function
+    separate_lines = "USE CATALOG a;\nUSE SCHEMA s;\n" + function
+    assert normalized_definitions(same_line) != normalized_definitions(separate_lines)
+
+
+def test_deployer_skipped_block_comment_use_fails_closed():
+    suffix = "\nUSE SCHEMA s;\nCREATE FUNCTION f() RETURNS STRING RETURN 'x';\n"
+    skipped = "/* c */ USE CATALOG b;" + suffix
+    applied = "USE CATALOG b;" + suffix
+    assert normalized_definitions(skipped) != normalized_definitions(applied)
+
+
+def test_qualified_use_schema_is_fail_closed():
+    function = "\nCREATE FUNCTION f() RETURNS STRING RETURN 'x';\n"
+    assert normalized_definitions("USE SCHEMA x.y;" + function) != normalized_definitions(
+        "USE SCHEMA x.z;" + function
+    )
+
+
 @pytest.mark.parametrize(("before", "after"), [
     ("RETURN v & 1", "RETURN v | 1"),
     ("RETURN v || 'x'", "RETURN v 'x'"),

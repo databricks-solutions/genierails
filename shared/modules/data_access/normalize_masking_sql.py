@@ -10,67 +10,37 @@ from pathlib import Path
 SHARED_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SHARED_ROOT))
 
+from masking_sql_blocks import analyze_sql_blocks, extract_function_name  # noqa: E402
 from sql_tokenizer import sql_tokens  # noqa: E402
 
 
-def _statements(tokens: list[str]) -> list[list[str]]:
-    statements: list[list[str]] = []
-    current: list[str] = []
-    for token in tokens:
-        current.append(token)
-        if token == ";":
-            statements.append(current)
-            current = []
-    if current:
-        statements.append(current)
-    return statements
+def normalized_tokens(sql_text: str) -> list[list[object]]:
+    """Hash the exact blocks and execution contexts used by deployment."""
+    # Tokenize the full file first so every lexer fail-closed rule still runs.
+    sql_tokens(sql_text)
+    parsed = analyze_sql_blocks(sql_text)
 
+    records: list[list[object]] = []
+    final_names: list[str] = []
+    for catalog, schema, statement in parsed.blocks:
+        name = extract_function_name(statement).split(".")[-1].strip("`").lower()
+        final_names.append(name)
+        records.append([
+            "function",
+            catalog.lower() if catalog else "",
+            schema.lower() if schema else "",
+            sql_tokens(statement),
+        ])
 
-def _function_name(statement: list[str]) -> tuple[str, str] | None:
-    """Return full and last-name sort keys, or None for another statement."""
-    try:
-        create = statement.index("create")
-    except ValueError:
-        return None
-    cursor = create + 1
-    if statement[cursor:cursor + 2] == ["or", "replace"]:
-        cursor += 2
-    if statement[cursor:cursor + 1] != ["function"]:
-        return None
-    cursor += 1
-    name: list[str] = []
-    while cursor < len(statement) and statement[cursor] != "(":
-        name.append(statement[cursor])
-        cursor += 1
-    if not name or cursor >= len(statement):
-        return None
-    full_name = "".join(name)
-    last_dot = max((index for index, token in enumerate(name) if token == "."), default=-1)
-    last_name = "".join(name[last_dot + 1:]).strip("`").lower()
-    return full_name, last_name
-
-
-def normalized_tokens(sql_text: str) -> list[list[str]]:
-    """Normalize only consecutive function order; retain every statement/token."""
-    statements = _statements(sql_tokens(sql_text))
-    normalized: list[list[str]] = []
-    run: list[tuple[str, str, list[str]]] = []
-
-    def flush() -> None:
-        duplicate_logical_name = len({last_name for _full, last_name, _statement in run}) != len(run)
-        ordered = run if duplicate_logical_name else sorted(run, key=lambda item: item[0])
-        normalized.extend(statement for _full, _last, statement in ordered)
-        run.clear()
-
-    for statement in statements:
-        names = _function_name(statement)
-        if names is None:
-            flush()
-            normalized.append(statement)
-        else:
-            run.append((*names, statement))
-    flush()
-    return normalized
+    # Match #94's conservative collision rule: if any final function name is
+    # shared, preserve the entire deployment order because qualification and
+    # the execution context can make either definition the last winner.
+    if parsed.unambiguous and "<unknown>" not in final_names and len(set(final_names)) == len(final_names):
+        records = [record for _, record in sorted(zip(final_names, records), key=lambda item: item[0])]
+    # Ambiguity disables sorting, so discovery order already preserves its
+    # position-sensitive effect without storing a second position field.
+    ambiguity_records = [["fail_closed", sql_tokens(text)] for text in parsed.ambiguities]
+    return [["format", 3], *ambiguity_records, *records]
 
 
 def normalized_definitions(sql_text: str) -> str:

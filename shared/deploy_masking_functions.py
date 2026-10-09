@@ -13,9 +13,10 @@ Usage:
 
 import argparse
 import os
-import re
 import subprocess
 import sys
+
+from masking_sql_blocks import extract_function_name, parse_sql_blocks
 
 PRODUCT_NAME = "genierails"
 PRODUCT_VERSION = "0.1.0"
@@ -63,84 +64,6 @@ from databricks.sdk.service.catalog import (  # noqa: E402
 from databricks.sdk.service.sql import (  # noqa: E402
     StatementState,
 )
-
-
-def parse_sql_blocks(sql_text: str) -> list:
-    """Parse a SQL file into (catalog, schema, statement) tuples.
-
-    Tracks USE CATALOG / USE SCHEMA directives to determine the execution
-    context for each CREATE statement.
-
-    Uses two strategies: primary (split on ``;\n``) and fallback (regex
-    matching individual CREATE FUNCTION statements). The fallback catches
-    edge cases where the primary split misses functions due to unexpected
-    formatting in LLM output.
-    """
-    catalog, schema = None, None
-    blocks = []
-
-    for raw_stmt in re.split(r";\s*(?:--[^\n]*)?\n", sql_text):
-        lines = [
-            line for line in raw_stmt.split("\n")
-            if line.strip() and not line.strip().startswith("--")
-        ]
-        stmt = "\n".join(lines).strip()
-        if not stmt:
-            continue
-
-        m = re.match(r"USE\s+CATALOG\s+(\S+)", stmt, re.IGNORECASE)
-        if m:
-            catalog = m.group(1).rstrip(";")
-            continue
-
-        m = re.match(r"USE\s+SCHEMA\s+(\S+)", stmt, re.IGNORECASE)
-        if m:
-            schema = m.group(1).rstrip(";")
-            continue
-
-        if stmt.upper().startswith("CREATE"):
-            blocks.append((catalog, schema, stmt))
-
-    # Fallback: if the primary parser missed any CREATE FUNCTION statements,
-    # extract them individually using regex. This handles edge cases where
-    # the semicolon-split fails (e.g. functions with unusual formatting).
-    primary_names = {
-        extract_function_name(stmt).split(".")[-1].lower()
-        for _, _, stmt in blocks
-    }
-    all_fn_names = set(re.findall(
-        r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*(\w+)\s*\(",
-        sql_text, re.IGNORECASE,
-    ))
-    missing = all_fn_names - primary_names
-    if missing:
-        # Re-extract catalog/schema from USE directives
-        cat_m = re.search(r"USE\s+CATALOG\s+(\S+)", sql_text, re.IGNORECASE)
-        sch_m = re.search(r"USE\s+SCHEMA\s+(\S+)", sql_text, re.IGNORECASE)
-        fb_cat = cat_m.group(1).rstrip(";") if cat_m else catalog
-        fb_sch = sch_m.group(1).rstrip(";") if sch_m else schema
-        # Extract each missing function as a complete statement
-        for fn_name in missing:
-            pattern = re.compile(
-                r"(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*"
-                + re.escape(fn_name)
-                + r"\s*\(.*?(?:;|\Z))",
-                re.IGNORECASE | re.DOTALL,
-            )
-            m = pattern.search(sql_text)
-            if m:
-                stmt = m.group(1).rstrip(";").strip()
-                blocks.append((fb_cat, fb_sch, stmt))
-
-    return blocks
-
-
-def extract_function_name(stmt: str) -> str:
-    """Extract function name from a CREATE FUNCTION statement."""
-    m = re.search(
-        r"FUNCTION\s+(\S+)\s*\(", stmt, re.IGNORECASE
-    )
-    return m.group(1) if m else "<unknown>"
 
 
 def _get_existing_privileges(
