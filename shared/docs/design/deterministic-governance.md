@@ -90,7 +90,7 @@ No configuration means no row filters.
 
 ## 5. Agent lifecycle
 
-- **Config**: captured from the dev UI with `make generate ENV=dev SPACE="<agent>"`; code-owned in prod.
+- **Config**: curated in the dev UI and captured into git on purpose with `make capture ENV=dev SPACE="<agent>"` (section 9); code-owned in prod.
 - **Access**: each agent lists `acl_groups`. Those groups get `CAN_RUN` on the agent and `SELECT` on its tables; a table shared by several agents gets the union. Still gated by the coverage check.
 - **Missing `acl_groups`**: `generate` and `release` stop with "agent X has no acl_groups — list the groups that may run it".
 - **New table**: governed by section 1 first, then the agent gets access.
@@ -113,5 +113,55 @@ No configuration means no row filters.
 2. Tier rule and deterministic policy generation (no AI in governance).
 3. Required `acl_groups` per agent; access no longer derived from policies.
 4. Declared row filters.
-5. Migration report and acceptance flag.
-6. Docs, then a live check on AWS and Azure.
+5. Change lifecycle (section 9): `make capture`, no re-capture by plain `generate`, dev never overwrites agent config, prod always overwrites it with the full exported config, dev governance covers live dev agents' tables.
+6. Migration report and acceptance flag.
+7. Docs, then a live check on AWS and Azure.
+
+## 9. Change lifecycle (agreed)
+
+There are two kinds of change, and git is the record of what is ready.
+
+| | Governance | Agent |
+|---|---|---|
+| Covers | mask library, tier rule, row filters, mappings for new tags | one agent's instructions, examples, SQL snippets, table list, `acl_groups` |
+| Belongs to | tables (the same for every agent) | one agent |
+| Changed in | files in git | the dev Genie UI, then captured into git |
+| Reaches prod | when merged and released | when that agent is captured, merged and released |
+
+### Rules
+
+1. **Capture is explicit and per agent.** `make capture ENV=dev SPACE="<agent>"` writes that agent's full exported config into git. A plain `make generate ENV=dev` only imports agents not yet in git; it never re-captures an existing agent. Unfinished UI work therefore never reaches git or prod.
+2. **Dev agent config is never overwritten.** In dev, GenieRails applies governance and access, and creates an agent only if it does not exist. In prod, every `release` overwrites the agent's config from git (full replacement); it never recreates the agent or changes its ID, so conversations are kept.
+3. **One pipeline.** A promotion PR (`make promote-to ENV=prod`) carries whatever is in git, governance changes, agent changes or both, and shows which. Merging it with the required approval runs `make release ENV=prod`.
+4. **Removing an agent or table removes access only.** Masks stay; deleting a mask is a deliberate governance change.
+5. **Dev governance covers every table a live dev agent uses,** including tables only an uncaptured agent uses, so work in progress is protected in dev. Prod governance covers only tables of captured agents.
+
+### Champion flow (first deployment)
+
+1. `make setup ENV=dev`; set `access_tier_groups` (full, partial, fully masked) and each agent's `genie_space_id` and `acl_groups`.
+2. Classify the dev catalog in the UI: review detections, turn on auto-tagging, wait for `class.*` tags.
+3. `make generate ENV=dev`: imports each agent and derives masks for their tables from tags and the library (no AI). Review and commit.
+4. `make rehearse ENV=dev`: applies masks and access in dev and proves each tier.
+5. Set `catalog_map` in `envs/prod/env.auto.tfvars`; `make promote-to ENV=prod` opens the promotion PR.
+6. Classify the prod catalog in the UI.
+7. Approve and merge; the pipeline runs `make release ENV=prod`.
+8. `make maintain ENV=prod` on a schedule (governance only).
+
+### Scenarios
+
+| Scenario | What happens |
+|---|---|
+| Promote agent A while B has unfinished dev edits | Capture A only, rehearse, merge, promote. B's last captured version is re-pushed unchanged to prod B. |
+| A adds a new table | Capture records it; its masks are derived and appear in the same promotion PR; prod applies masks, then A's access, still behind the coverage check. |
+| A and B share a table | The table's masks are shared and unchanged; only A's config and access change. |
+| Mask change needed while B is mid-curation | Change governance in git, rehearse, promote. Prod B gets the new mask on its tables; its config is unchanged. Dev B sees the new mask; its UI work is untouched. |
+| New sensitive column in prod | Prod scan tags it; `maintain` applies the library mask. Unmapped class: `maintain`/`release` stop; add a mapping in git and promote. |
+| Change a mask default or tiers | Governance change; the promotion PR shows the function or policy diff. |
+| Grant another group access to A in prod | Edit A's `acl_groups` in `envs/prod`, PR, release. B untouched. |
+| Remove agent A | Delete its entry in dev, promote. Created agent deleted, attached agent loses access; table `SELECT` for A's groups removed unless another agent grants it. Masks stay. |
+| Remove a table from A | Capture A, promote. `SELECT` removed if no other agent needs it. |
+| Roll back | Revert the commit and release. Masks swap in place; agent config returns to the previous version. |
+| Urgent fix | No hand edits in prod; same path, prioritised. |
+| Concurrent promotions | The env lock allows one `release` at a time. |
+| Upgrade GenieRails | Treated as a governance change: upgrade in dev, rehearse, promote. |
+| Several teams | Each agent's captured config lives in its own folder, so code owners can require each team's approval; a central team approves governance. |
