@@ -72,6 +72,18 @@ def test_tiered_indistinguishable_sample_is_inconclusive():
     assert "cannot be distinguished" in result.detail
 
 
+def test_tiered_identical_partial_and_full_outputs_can_pass():
+    check = _tiered_check()
+    raw = [(key, f"value-{key}") for key in range(12)]
+    redacted = [(key, "[REDACTED]") for key in range(12)]
+    expected = {"raw": raw, "partial": redacted, "full": redacted}
+    actual = {principal: expected[tier] for principal, tier in check.expected_tiers}
+    result = evaluate_tiered_column_mask_check(check, actual, expected)
+    assert result.status == PASS
+    assert result.evidence["per_principal_compared"]["analyst"] == 12
+    assert result.evidence["per_principal_compared"]["viewer"] == 12
+
+
 def test_dual_tier_principal_gets_most_privileged_tier():
     assert most_privileged_tier(["viewer", "raw_group"], ["raw_group", "analyst", "viewer"]) == "raw"
     assert most_privileged_tier(["viewer", "analyst"], ["raw_group", "analyst", "viewer"]) == "partial"
@@ -957,6 +969,44 @@ class TestTemporaryWarehouseAccess:
         assert object_id == "warehouse-123"
         assert access.service_principal_name == "app-123"
         assert access.permission_level.value == "CAN_USE"
+
+    def test_outsider_table_access_is_exact_and_reversible(self, monkeypatch):
+        verifier = self._verifier(monkeypatch, object())
+        statements = []
+        monkeypatch.setattr(verifier, "run_query", lambda _ws, sql: statements.append(sql))
+        principal = VerificationPrincipal(
+            "__out_of_tier__", "test-outsider", "01234567-89ab-cdef", "secret", "456")
+
+        verifier.grant_outsider_table_access(
+            principal, ["cat.sales.customers", "cat.sales.customers"])
+        verifier.grant_outsider_table_access(
+            principal, ["cat.sales.customers"], revoke=True)
+
+        assert statements == [
+            "GRANT USE CATALOG ON CATALOG `cat` TO `01234567-89ab-cdef`",
+            "GRANT USE SCHEMA ON SCHEMA `cat`.`sales` TO `01234567-89ab-cdef`",
+            "GRANT SELECT ON TABLE `cat`.`sales`.`customers` TO `01234567-89ab-cdef`",
+            "REVOKE SELECT ON TABLE `cat`.`sales`.`customers` FROM `01234567-89ab-cdef`",
+            "REVOKE USE SCHEMA ON SCHEMA `cat`.`sales` FROM `01234567-89ab-cdef`",
+            "REVOKE USE CATALOG ON CATALOG `cat` FROM `01234567-89ab-cdef`",
+        ]
+
+    def test_outsider_revoke_attempts_every_privilege_after_an_error(self, monkeypatch):
+        verifier = self._verifier(monkeypatch, object())
+        statements = []
+
+        def fail_first(_ws, sql):
+            statements.append(sql)
+            if "SELECT" in sql:
+                raise RuntimeError("already absent")
+
+        monkeypatch.setattr(verifier, "run_query", fail_first)
+        principal = VerificationPrincipal(
+            "__out_of_tier__", "test-outsider", "app", "secret", "456")
+        with pytest.raises(RuntimeError, match="failed to revoke 1"):
+            verifier.grant_outsider_table_access(
+                principal, ["cat.sales.customers"], revoke=True)
+        assert len(statements) == 3
 
     def test_provision_assigns_temporary_principal_to_workspace_before_return(
         self, monkeypatch,

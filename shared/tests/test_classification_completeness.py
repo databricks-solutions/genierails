@@ -38,13 +38,14 @@ def test_legacy_warns_but_deterministic_blocks(tmp_path, monkeypatch, capsys):
     assert "ERROR" in capsys.readouterr().err
 
 
-def test_empty_manifest_skips_live_query_in_both_modes(tmp_path, monkeypatch):
+def test_empty_manifest_skips_live_query_in_both_modes(tmp_path, monkeypatch, capsys):
     env = tmp_path / "prod"
     (env / "generated").mkdir(parents=True)
     (env / "generated/expected_classification.json").write_text("{}\n")
     monkeypatch.setattr(cc, "live_classified_columns", lambda *_args: (_ for _ in ()).throw(AssertionError()))
     assert cc.main(["check", "--env-dir", str(env), "--mode", "legacy"]) == 0
     assert cc.main(["check", "--env-dir", str(env), "--mode", "deterministic"]) == 0
+    assert "deterministic classification manifest is empty" in capsys.readouterr().out
 
 
 def test_missing_manifest_blocks_only_deterministic(tmp_path, capsys):

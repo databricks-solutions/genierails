@@ -95,7 +95,7 @@ def _value(config: Mapping[str, Any], key: str) -> str:
     return str(value).strip()
 
 
-def _live_classified_columns_query(env_dir: Path, timeout_seconds: int) -> set[str]:
+def _live_classified_columns_query(env_dir: Path, deadline: float) -> set[str]:
     from databricks.sdk import WorkspaceClient
     from databricks.sdk.service.sql import StatementState
 
@@ -117,7 +117,6 @@ def _live_classified_columns_query(env_dir: Path, timeout_seconds: int) -> set[s
         ),
         wait_timeout="50s",
     )
-    deadline = time.monotonic() + timeout_seconds
     terminal = {
         StatementState.SUCCEEDED, StatementState.FAILED,
         StatementState.CANCELED, StatementState.CLOSED,
@@ -129,7 +128,7 @@ def _live_classified_columns_query(env_dir: Path, timeout_seconds: int) -> set[s
             except Exception:
                 pass
             raise TimeoutError(
-                f"production classification query exceeded {timeout_seconds} seconds")
+                "production classification query exceeded its deadline")
         time.sleep(min(2, max(0, deadline - time.monotonic())))
         statement = client.statement_execution.get_statement(statement.statement_id)
     if statement.status.state != StatementState.SUCCEEDED:
@@ -150,16 +149,17 @@ def _live_classified_columns_query(env_dir: Path, timeout_seconds: int) -> set[s
 def live_classified_columns(env_dir: Path, timeout_seconds: int = 120) -> set[str]:
     """Read every live class-tagged column, paging with a hard wall deadline."""
     outcome: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+    deadline = time.monotonic() + timeout_seconds
 
     def run() -> None:
         try:
-            outcome.put((True, _live_classified_columns_query(env_dir, timeout_seconds)))
+            outcome.put((True, _live_classified_columns_query(env_dir, deadline)))
         except BaseException as exc:
             outcome.put((False, exc))
 
     worker = threading.Thread(target=run, daemon=True)
     worker.start()
-    worker.join(timeout_seconds)
+    worker.join(max(0, deadline - time.monotonic()))
     if worker.is_alive():
         raise TimeoutError(
             f"production classification check exceeded hard timeout of {timeout_seconds} seconds")
@@ -187,6 +187,8 @@ def _check(env_dir: Path, mode: str, ack: str, timeout_seconds: int) -> int:
         print(f"{label}: cannot read expected classification manifest: {exc}", file=sys.stderr)
         return 1 if mode == "deterministic" else 0
     if not expected:
+        if mode == "deterministic":
+            print("NOTE: deterministic classification manifest is empty; no classified columns are expected.")
         return 0
     try:
         live = live_classified_columns(env_dir, timeout_seconds)

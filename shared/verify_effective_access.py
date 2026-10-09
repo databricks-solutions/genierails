@@ -1014,11 +1014,30 @@ def evaluate_tiered_column_mask_check(
                                {"key_column": check.key_column})
     used_tiers = set(tiers.values())
     common = set.intersection(*(set(expected[tier]) for tier in used_tiers)) if used_tiers else set()
-    distinguishable = any(
-        len({_normalize_exact_value(expected[t][key]) for t in used_tiers}) == len(used_tiers)
-        for key in common
-    )
-    if not distinguishable:
+    # Only tier pairs whose expected results differ need separate proof.  Some
+    # reviewed treatments intentionally use the same function for partial and
+    # full access; requiring three distinct values would make those treatments
+    # impossible to verify.  Raw versus every used masked tier must still be
+    # distinguishable on at least one paired row.
+    required_pairs: list[tuple[str, str]] = []
+    for left in sorted(used_tiers):
+        for right in sorted(used_tiers):
+            if left >= right:
+                continue
+            differs = any(
+                _normalize_exact_value(expected[left][key])
+                != _normalize_exact_value(expected[right][key])
+                for key in common
+            )
+            if differs:
+                required_pairs.append((left, right))
+    masked_tiers = used_tiers - {"raw"}
+    raw_pairs_proven = all(
+        any(_normalize_exact_value(expected["raw"][key])
+            != _normalize_exact_value(expected[tier][key]) for key in common)
+        for tier in masked_tiers
+    ) if "raw" in used_tiers else True
+    if not common or not raw_pairs_proven:
         return CheckResult(
             "column-mask", target, INCONCLUSIVE,
             f"{', '.join(sorted(used_tiers))} outputs cannot be distinguished on the sample",
@@ -1040,10 +1059,11 @@ def evaluate_tiered_column_mask_check(
                                {"key_column": check.key_column})
         wanted = expected.get(tier, {})
         actual_keys = set(actual)
-        own_distinguishing_key = any(
-            key in common and len({_normalize_exact_value(expected[other][key])
-                                   for other in used_tiers}) == len(used_tiers)
-            for key in actual_keys
+        own_distinguishing_key = all(
+            any(key in actual_keys
+                and _normalize_exact_value(expected[left][key])
+                != _normalize_exact_value(expected[right][key]) for key in common)
+            for left, right in required_pairs
         )
         if (not actual or any(key not in wanted for key in actual)
                 or (actual_keys != raw_keys and not own_distinguishing_key)):
@@ -1084,6 +1104,18 @@ def evaluate_tiered_column_mask_check(
             "column-mask", target, INCONCLUSIVE,
             "no masked principal returned a distinguishing row; masking was not proven",
             {"accepted_fail_closed": sorted(accepted), "per_principal_compared": compared},
+        )
+    under_proven = {
+        principal: compared.get(principal, 0)
+        for principal, tier in tiers.items()
+        if tier != "raw" and principal not in accepted
+        and compared.get(principal, 0) < 1
+    }
+    if under_proven:
+        return CheckResult(
+            "column-mask", target, INCONCLUSIVE,
+            f"no distinguishing proof row for masked principal(s): {under_proven}",
+            {"per_principal_compared": compared},
         )
     unbounded = {
         principal: f"{compared.get(principal, 0)} compared, {fixed} unchanged of {len(_row_pairs(values_by_principal.get(principal)))} sampled"
@@ -1774,6 +1806,60 @@ class EffectiveAccessVerifier:
             ],
         )
 
+    def grant_outsider_table_access(
+        self, principal: TestPrincipal, tables: Sequence[str], *, revoke: bool = False,
+    ) -> None:
+        """Temporarily grant/revoke the outsider access to only checked tables.
+
+        These direct SQL grants deliberately never enter Terraform state.  The
+        caller always revokes them in its outermost ``finally`` block.
+        """
+        self._guard()
+        verb = "REVOKE" if revoke else "GRANT"
+        joiner = " FROM " if revoke else " TO "
+        grantee = quote_identifier(principal.application_id)
+        ws = self.admin_ws
+        catalogs: set[str] = set()
+        schemas: set[tuple[str, str]] = set()
+        normalized_tables: set[tuple[str, str, str]] = set()
+        for table in tables:
+            parts = table.split(".")
+            if len(parts) != 3:
+                raise ValueError(f"checked table {table!r} is not catalog.schema.table")
+            catalog, schema, name = parts
+            catalogs.add(catalog)
+            schemas.add((catalog, schema))
+            normalized_tables.add((catalog, schema, name))
+        statements = [
+            f"{verb} SELECT ON TABLE {quote_table('.'.join(table))}{joiner}{grantee}"
+            for table in sorted(normalized_tables)
+        ]
+        statements.extend(
+            f"{verb} USE SCHEMA ON SCHEMA {quote_identifier(catalog)}."
+            f"{quote_identifier(schema)}{joiner}{grantee}"
+            for catalog, schema in sorted(schemas)
+        )
+        statements.extend(
+            f"{verb} USE CATALOG ON CATALOG {quote_identifier(catalog)}{joiner}{grantee}"
+            for catalog in sorted(catalogs)
+        )
+        # Revoke narrow privileges before their parents; grant parents first.
+        if not revoke:
+            statements.reverse()
+        failures = []
+        for statement in statements:
+            try:
+                self.run_query(ws, statement)
+            except BaseException as exc:
+                if not revoke:
+                    raise
+                failures.append(str(exc))
+        if failures:
+            raise RuntimeError(
+                f"failed to revoke {len(failures)} temporary outsider privilege(s): "
+                + "; ".join(failures)
+            )
+
     def _ws_for(self, principal: TestPrincipal):
         self._guard()
         from databricks.sdk import WorkspaceClient
@@ -2195,6 +2281,12 @@ def verify_effective_access_live(
             print(f"  Granting warehouse CAN_USE to test principal: {tier}")
             verifier.grant_warehouse_use(principal)
 
+        outsider = principals.get(OUT_OF_TIER_PRINCIPAL)
+        outsider_tables = sorted({check.table for check in spec.column_masks})
+        if outsider and outsider_tables:
+            print("  Granting temporary checked-table access to out-of-tier principal")
+            verifier.grant_outsider_table_access(outsider, outsider_tables)
+
         # Newly-added group membership can take a short while to propagate.
         time.sleep(int(os.environ.get("GENIERAILS_VERIFY_PROPAGATION_SLEEP", "10")))
         if spec.column_masks:
@@ -2386,6 +2478,13 @@ def verify_effective_access_live(
                 "not every row")
         return report
     finally:
+        outsider = principals.get(OUT_OF_TIER_PRINCIPAL)
+        outsider_tables = sorted({check.table for check in spec.column_masks})
+        if outsider and outsider_tables:
+            try:
+                verifier.grant_outsider_table_access(outsider, outsider_tables, revoke=True)
+            except BaseException as exc:
+                print(f"  WARN: could not revoke temporary outsider table access: {exc}")
         if not keep_principals:
             for tier, p in principals.items():
                 if tier == admin_tier:
@@ -2600,12 +2699,11 @@ def load_spec_from_tfvars(
 
         tiers = _as_list(governance.get("access_tier_groups"))
         raw_exempt = _as_list(governance.get("raw_exempt_principals"))
-        invalid_exempt = [principal for principal in raw_exempt
-                          if "@" in principal or re.fullmatch(r"[0-9a-fA-F-]{32,36}", principal)]
+        invalid_exempt = [principal for principal in raw_exempt if "@" in principal]
         if invalid_exempt:
             raise ValueError(
                 "ERROR: verify-access requires raw_exempt_principals to name account groups; "
-                "service-principal application IDs and user emails cannot be authenticated as "
+                "user emails cannot be authenticated as "
                 f"dedicated test identities: {invalid_exempt}")
         policies_by_column: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
         for policy in fgac_policies:
