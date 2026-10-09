@@ -245,8 +245,9 @@ _guard-genie-placeholder:
 	@$(_GENIE_PLACEHOLDER_GUARD)
 
 _guard-not-ci-apply:
-	@if [ "$$(printf '%s' "$$CI" | tr '[:upper:]' '[:lower:]')" = "true" ]; then \
+	@if [ "$$(printf '%s' "$$CI" | tr '[:upper:]' '[:lower:]')" = "true" ] && [ "$$GENIERAILS_ALLOW_CI_APPLY" != "1" ]; then \
 		echo "ERROR: applying targets cannot run with CI=true. GenieRails v1 runs Terraform applies on the deployment machine; CI may run tests, validation, coverage, audits, and plans only." >&2; \
+		echo "Only isolated integration-test workflows may opt out with GENIERAILS_ALLOW_CI_APPLY=1." >&2; \
 		exit 1; \
 	fi
 
@@ -929,13 +930,13 @@ apply-genie: _guard-not-ci-apply _guarded-bootstrap _guard-workspace-target ## [
 		|| echo "WARNING: the coverage check did not pass; only CAN_RUN changes that keep, shrink or clear what is applied can proceed." >&2; \
 	$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"
 
-destroy-governance: _bootstrap _guard-workspace-target ## [Governance team] Destroy data_access layer for the selected env (leaves workspace/Genie untouched)
+destroy-governance: _guard-not-ci-apply _bootstrap _guard-workspace-target ## [Governance team] Destroy data_access layer for the selected env (leaves workspace/Genie untouched)
 	@$(MAKE) --no-print-directory _destroy-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"
 
-destroy-genie: _bootstrap _guard-workspace-target ## [BU team] Destroy workspace layer only (leaves data_access/ABAC untouched)
+destroy-genie: _guard-not-ci-apply _bootstrap _guard-workspace-target ## [BU team] Destroy workspace layer only (leaves data_access/ABAC untouched)
 	@$(MAKE) --no-print-directory _destroy-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"
 
-import: _guarded-bootstrap ## Import existing resources into the selected layer state
+import: _guard-not-ci-apply _guarded-bootstrap ## Import existing resources into the selected layer state
 	@echo "=== Import Existing Resources ($(ENV)) ==="
 	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		cd "$(ACCOUNT_ENV_DIR)" && "$(SHARED_ROOT)/scripts/import_existing.sh"; \
@@ -944,7 +945,7 @@ import: _guarded-bootstrap ## Import existing resources into the selected layer 
 		cd "$(ENV_DIR)" && "$(SHARED_ROOT)/scripts/import_existing.sh"; \
 	fi
 
-migrate-state: _bootstrap ## Migrate legacy state into account/data_access/workspace ownership
+migrate-state: _guard-not-ci-apply _bootstrap ## Migrate legacy state into account/data_access/workspace ownership
 	@echo "=== Migrate Terraform State ($(ENV)) ==="
 	@$(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		if [ ! -f "$(ACCOUNT_ENV_DIR)/terraform.tfstate" ]; then echo "No Terraform state found in $(ACCOUNT_ENV_DIR)."; exit 0; fi; \
@@ -987,12 +988,12 @@ migrate-state: _bootstrap ## Migrate legacy state into account/data_access/works
 		cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then "$(SHARED_ROOT)/scripts/import_existing.sh"; fi; \
 	fi
 
-_destroy-layer:
+_destroy-layer: _guard-not-ci-apply
 	@layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	echo "=== Terraform Destroy ($$layer:$$target_env) ==="; \
 	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" destroy -auto-approve $(DESTROY_FLAGS)
 
-destroy: _bootstrap ## Destroy the selected layer or workspace environment
+destroy: _guard-not-ci-apply _bootstrap ## Destroy the selected layer or workspace environment
 	@$(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		$(MAKE) --no-print-directory _destroy-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 	else \
@@ -1250,6 +1251,8 @@ _guard-account-admin-env:
 	fi
 
 test-ci-parallel: _guard-not-ci-apply _guard-account-admin-env ## Parallel CI: provision one workspace per scenario, run concurrently, teardown
+	@# In CI this target is allowed only for isolated throwaway environments by
+	@# setting GENIERAILS_ALLOW_CI_APPLY=1 on this step, never at workflow scope.
 	@# Each scenario gets its own workspace + metastore + unique name suffix.
 	@# All workspaces provision in parallel (~3 min), then scenarios execute
 	@# in batches of MAX_PARALLEL (default 5) to avoid API rate limiting.
@@ -1264,6 +1267,8 @@ test-ci-parallel: _guard-not-ci-apply _guard-account-admin-env ## Parallel CI: p
 
 test-ci: _guard-not-ci-apply _guard-account-admin-env ## Full CI pipeline: unit tests → provision fresh env → integration tests → teardown (always)
 	@# Designed for automated DevOps workflows (PR checks, nightly runs).
+	@# CI callers must set GENIERAILS_ALLOW_CI_APPLY=1 only for this isolated
+	@# integration step; ordinary deployment environments remain refused.
 	@# Provisions a fresh isolated Databricks environment, runs all tests, then tears
 	@# it down — even if tests fail — so no cloud resources are left behind.
 	@# Runs with --fail-fast: stops at the first failing scenario so the pipeline
@@ -1327,6 +1332,8 @@ test-ci: _guard-not-ci-apply _guard-account-admin-env ## Full CI pipeline: unit 
 	echo "╚══════════════════════════════════════════════════════════════╝"
 
 integration-test: _guard-not-ci-apply ## Run the full end-to-end integration test (setup → generate → apply → verify → promote → apply prod → verify prod → teardown)
+	@# CI callers may set GENIERAILS_ALLOW_CI_APPLY=1 only when ENV/DEST_ENV are
+	@# freshly provisioned throwaway integration environments.
 	@# Options:
 	@#   ENV=dev              workspace env for dev  (default: dev)
 	@#   DEST_ENV=prod        workspace env for prod (default: prod)
