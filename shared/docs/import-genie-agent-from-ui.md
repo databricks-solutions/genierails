@@ -7,7 +7,7 @@ Import an existing Databricks Genie agent's supported configuration and table fo
 <summary><strong>Before you start — Complete prerequisites and get the Agent ID</strong></summary>
 
 - Complete the shared [prerequisites checklist](prerequisites.md).
-- Complete steps 1–2 of [Phase 0 — Dev: Set up](../examples/dev_to_prod/README.md#phase-0--dev-set-up), so `envs/dev/` exists and `auth.auto.tfvars` is filled in. This guide is Phase 0's step 3 for an existing agent.
+- In the walkthrough's [Dev step 1](../examples/dev_to_prod/README.md#phase-0--dev-set-up), run `make setup ENV=dev`, copy the template and fill in `auth.auto.tfvars`. This guide covers setting the Agent ID for an existing agent.
 - Find the agent ID in the Genie UI: open the agent, click **Configure**, and copy the **Agent ID** from the **About this agent** panel. (It's also in the agent's URL: `.../genie/rooms/01ef7b3c2a4d5e6f`.)
 
 </details>
@@ -69,7 +69,7 @@ treating a failed lookup as a legitimate removal.
 <details>
 <summary><strong>Step 3 — Continue through dev-to-prod</strong></summary>
 
-Continue at [Phase 1 of the dev-to-prod walkthrough](../examples/dev_to_prod/README.md#phase-1--dev-scan-draft-and-test-rules). The remaining workflow is unchanged: classify, generate, rehearse, promote, and release (which re-derives in production and exposes last).
+Continue at [Dev step 2 of the dev-to-prod walkthrough](../examples/dev_to_prod/README.md#phase-1--dev-scan-draft-and-test-rules). The remaining workflow is unchanged: classify, generate, rehearse, promote, and release (which re-derives in production and exposes last).
 
 For an imported agent:
 

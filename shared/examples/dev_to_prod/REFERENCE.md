@@ -35,7 +35,7 @@ So "expose last" isn't a policy you hope holds — there is simply no new or wid
 
 ## Command reference
 
-| Command | Used in (0 setup, 1 dev, 2 promote, 3 prod classify, 4 release, 5 maintain) | What it does |
+| Command | Step (0 setup, 1 dev, 2 promote, 3 prod classify, 4 release, 5 maintain) | What it does |
 |---|---|---|
 | `make setup` / `make init-env ENV=<e>` | 0 | Create local env dirs + default config files (no Databricks calls) |
 | `make enable-classification ENV=<e>` | 1/3 | Optional scripted way to turn on UC Data Classification for the footprint; review detections, exclude false positives, and enable auto-tagging in the UI |
@@ -73,13 +73,16 @@ What each walkthrough step does, for when you need more than the [walkthrough](R
 **Setup and inputs**
 - `make setup ENV=<env>` only creates local files; it makes no Databricks calls.
 - Agent tables are discovered from the agent ID, so you don't list `uc_tables`.
-- `access_tier_groups` is read by every `make generate`. The first promote copies it to prod; later promotes keep prod's value. To change prod tiers or a space's `acl_groups`, edit `envs/prod/env.auto.tfvars` in a PR. GenieRails uses your groups by exact name and never creates them. (CLI alternative: leave it `[]` and pass `GENERATE_ARGS='--groups "a,b,c"'` once; that run saves it.)
+- The Agent ID is also in the agent's URL (`…/genie/rooms/<id>`).
+- Tiers: e.g. `payments_ops` sees raw values, `regional_analysts` sees region-scoped masked data, `viewers` sees every sensitive column masked. Each agent's tables are `SELECT`-granted only to the tiers allowed to run that agent (a table shared by several agents gets the union). See [architecture](../../docs/architecture.md).
+- `access_tier_groups` is read by every `make generate`. The first promote copies it to prod; later promotes keep prod's value. To change prod tiers or a space's `acl_groups`, edit `envs/prod/env.auto.tfvars` in a PR. GenieRails uses your groups by exact name and never creates them. (CLI alternative: leave it `[]` and pass `GENERATE_ARGS='--groups "a,b,c"'` once; that run saves it. A later `--groups` that differs applies to that run only.)
 - `sql_warehouse_id` on an agent's `genie_spaces` entry picks its warehouse; leave it `""` to auto-create one. Agents can share the environment-level warehouse.
 
 **Classification**
+- The first scan is asynchronous and can take up to about 24 hours. [Review detections](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification#review-detections) shows what it found.
 - The UI path is the default. `make enable-classification ENV=<env>` is a scripted alternative for turning it on; you still review detections in the UI.
-- Leave `enable_auto_tagging` out of `env.auto.tfvars` to keep the UI's auto-tagging settings. An explicit `false` is refused while UI auto-tagging is on, unless you pass `ALLOW_DISABLE_AUTO_TAGGING=1`.
-- The scripted path can fail with `Usage policy ID must not be empty` on a workspace without a serverless usage policy ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)). Use the UI, or attach a serverless usage policy first ([AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies)).
+- Leave `enable_auto_tagging` out of `env.auto.tfvars` to keep the UI's auto-tagging settings. An explicit `false` is refused while UI auto-tagging is on, unless you pass `ALLOW_DISABLE_AUTO_TAGGING=1`. Scripted auto-tagging: set `enable_auto_tagging = true` and re-run `make enable-classification ENV=<env>`.
+- The scripted path can fail with `Usage policy ID must not be empty` on a workspace without a serverless usage policy ([terraform-provider-databricks#5985](https://github.com/databricks/terraform-provider-databricks/issues/5985)). Use the UI, or attach a serverless usage policy first (creating one needs Workspace Admin, or *Serverless usage policy: Manager*; [AWS](https://docs.databricks.com/aws/en/admin/usage/budget-policies) / [Azure](https://learn.microsoft.com/en-us/azure/databricks/admin/usage/budget-policies)).
 
 **`make generate ENV=dev`**
 - Imports the agent's config, finds its tables, and drafts masks and access rules from the `class.*` tags. Without tags it stops before any model call.
@@ -92,11 +95,13 @@ What each walkthrough step does, for when you need more than the [walkthrough](R
 - Dev keeps business access after rehearse; the masks protect the data either way.
 
 **`make promote-to ENV=prod`**
-- Reads `promote_from` (default `dev`) and `catalog_map` from the target's `env.auto.tfvars`; `FROM=` and `CATALOG_MAP=` override them for one run. One map entry per catalog; the old `"dev=prod"` string form still works.
+- Reads `promote_from` (default `dev`) and `catalog_map` from the target's `env.auto.tfvars`; `FROM=` and `CATALOG_MAP=` override them, and a successful promote saves the values you passed. One map entry per catalog; the old `"dev=prod"` string form still works.
+- Promoted override columns are renamed through the catalog map; they never carry or widen ACLs. Re-promoting never closes access that's already live.
+- Don't recreate prod's `env.auto.tfvars`: `make setup ENV=prod` seeds it with `promote_from` and a placeholder `catalog_map`, and promotion keeps prod's own settings.
 - Copies the rules: masking functions, policies, the group-to-tier mapping and reviewed `treatment_overrides`. It leaves dev's tag assignments behind, because prod derives its own from its own data. It carries the proven row-pairing keys, renamed to prod's catalogs, and keeps prod's own agent ID, groups and warehouse.
 - Staging chain: set `promote_from = "dev"` in `envs/stg`, promote stg, then `promote_from = "stg"` in `envs/prod`.
 - `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=…` is the same promotion with explicit arguments every time.
-- Prod's service principal can be the dev one if both workspaces are in the same account and it's authorized in prod; use a separate one if your policy requires isolation.
+- Prod's service principal can be the dev one if both workspaces are in the same account and it's authorized in prod; use a separate one if your policy requires isolation. Separate Databricks accounts need separate service principals.
 
 **`make release ENV=prod`**
 - Order: placeholder guard → read-only key check (refuses before the lock) → lock → live derive → validate → coverage check → promote into layers → key proof → read-only `audit-rulebook` → apply all layers → `verify-access`.

@@ -6,7 +6,7 @@ Take a Genie agent you've curated in **dev** and ship it to **prod** with its se
 
 ```bash
 # dev
-make setup ENV=dev          # then set genie_space_id and access_tier_groups
+make setup ENV=dev          # then copy the template; set genie_space_id and access_tier_groups
 #   Catalog Explorer: turn on Data classification, review detections, enable auto-tagging
 make generate ENV=dev       # imports the agent, finds its tables, drafts the rules
 make rehearse ENV=dev       # applies in dev and proves the masks work
@@ -49,7 +49,7 @@ Fill in `envs/dev/auth.auto.tfvars` (service principal and workspace). In `envs/
 access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
 ```
 
-**2. Classify (in the UI).** In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on. When the scan finishes, review the detections, exclude false positives, and turn on auto-tagging. Wait for the `class.*` tags to appear (minutes to hours).
+**2. Classify (in the UI).** In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on. When the scan finishes, review the detections, exclude false positives, and turn on auto-tagging. Wait for the `class.*` tags to appear (the first scan can take up to about a day).
 
 **3. Generate.**
 ```bash
@@ -64,6 +64,8 @@ make rehearse ENV=dev
 **Pass looks like:** `ALL EFFECTIVE`: each test tier sees masked values, the authorized tier sees raw ones.
 
 <a id="phase-2--prod-set-up-and-promote-rules"></a>
+<a id="phase-3--prod-scan-real-data"></a>
+<a id="phase-4--prod-release-and-verify"></a>
 ## Prod
 
 **1. Set up and promote.**
@@ -93,19 +95,20 @@ make release ENV=prod
 2. `make generate ENV=dev`, then `make rehearse ENV=dev`.
 3. `make promote-to ENV=prod`, then `make release ENV=prod`.
 
+<a id="phase-5--prod-maintain-coverage"></a>
 ## Keep it safe
 
 ```bash
 make maintain ENV=prod      # schedule it (cron or CI)
 ```
-It masks newly tagged columns and never widens access. If it stops, it prints what to do: usually review a new detection in Catalog Explorer, or add a missing rule in dev and re-promote.
+It masks newly tagged columns, never grants access past a passing coverage check, and never changes the Genie agent. If it stops, it prints what to do: usually review a new detection in Catalog Explorer, or add a missing rule in dev and re-promote.
 
 ## If something stops
 
 | Message | What to do |
 |---|---|
 | No `class.*` tags yet | Finish the Catalog Explorer review and auto-tagging, wait, re-run |
-| Coverage check failed / rulebook drift | Add the rule in dev, rehearse, `promote-to`, `release` (above) |
+| Coverage check failed / rulebook drift | See "If it stops on coverage or drift" under Prod step 3 |
 | No provable row-pairing key for a table | Set `verify_key_columns = { "<cat.sch.tbl>" = "<column>" }` ([how keys are picked](../../docs/effective-access-verification.md#how-genierails-picks-the-row-pairing-key)) |
 | Genie agent ID file missing | Follow the printed recovery steps; never re-create the agent by hand |
 | Env is locked | Another `release`/`maintain` is running; wait for it |
