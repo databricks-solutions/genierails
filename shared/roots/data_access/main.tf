@@ -260,7 +260,41 @@ variable "classification_existing_auto_tag_configs" {
 variable "access_tier_groups" {
   type        = list(string)
   default     = []
-  description = "Generate-time input only (read by make generate, carried by make promote): existing IdP-synced access-tier groups, most to least privileged. Declared so env.auto.tfvars loads cleanly; no resource reads it."
+  description = "Deterministic-governance tiers ordered raw, optional partial tier(s), then full. Unused until rollout step 4."
+  validation {
+    condition     = length(var.access_tier_groups) == length(distinct(var.access_tier_groups)) && alltrue([for group in var.access_tier_groups : trimspace(group) != ""])
+    error_message = "access_tier_groups must contain unique, non-empty group names."
+  }
+}
+
+variable "treatment_versions" {
+  type        = map(object({ partial = string }))
+  default     = {}
+  description = "Used from rollout step 3."
+}
+variable "tier_access_overrides" {
+  type        = map(map(string))
+  default     = {}
+  description = "Used from rollout step 4."
+  validation {
+    condition     = alltrue(flatten([for rules in values(var.tier_access_overrides) : [for access in values(rules) : contains(["raw", "partial", "full"], access)]]))
+    error_message = "tier_access_overrides values must be raw, partial, or full."
+  }
+}
+variable "column_overrides" {
+  type        = any
+  default     = {}
+  description = "Used from rollout step 3."
+}
+variable "row_filters" {
+  type        = list(object({ table = string, column = string, values_by_group = map(list(string)) }))
+  default     = []
+  description = "Used from rollout step 6."
+}
+variable "require_acl_groups" {
+  type        = bool
+  default     = false
+  description = "Rollout step 5 changes the default to true."
 }
 
 variable "promote_from" {

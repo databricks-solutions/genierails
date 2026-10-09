@@ -501,7 +501,49 @@ variable "genie_acl_groups" {
 variable "access_tier_groups" {
   type        = list(string)
   default     = []
-  description = "Generate-time input only (read by make generate, carried by make promote): existing IdP-synced access-tier groups, most to least privileged. Declared so env.auto.tfvars loads cleanly; no resource reads it."
+  description = "Deterministic-governance tiers ordered raw, optional partial tier(s), then full. Unused until rollout step 4."
+  validation {
+    condition     = length(var.access_tier_groups) == length(distinct(var.access_tier_groups)) && alltrue([for group in var.access_tier_groups : trimspace(group) != ""])
+    error_message = "access_tier_groups must contain unique, non-empty group names."
+  }
+}
+
+variable "treatment_versions" {
+  type        = map(object({ partial = string }))
+  default     = {}
+  description = "Reviewed partial version per treatment; used from rollout step 3."
+}
+
+variable "tier_access_overrides" {
+  type        = map(map(string))
+  default     = {}
+  description = "Per-treatment group access overrides; used from rollout step 4."
+  validation {
+    condition     = alltrue(flatten([for rules in values(var.tier_access_overrides) : [for access in values(rules) : contains(["raw", "partial", "full"], access)]]))
+    error_message = "tier_access_overrides values must be raw, partial, or full."
+  }
+}
+
+variable "column_overrides" {
+  type        = any
+  default     = {}
+  description = "Per-column reviewed partial version or stricter treatment; used from rollout step 3."
+}
+
+variable "row_filters" {
+  type = list(object({
+    table           = string
+    column          = string
+    values_by_group = map(list(string))
+  }))
+  default     = []
+  description = "Declared table row-filter rules; used from rollout step 6."
+}
+
+variable "require_acl_groups" {
+  type        = bool
+  default     = false
+  description = "Refuse Genie agents that omit acl_groups; rollout step 5 changes the default to true."
 }
 
 variable "promote_from" {

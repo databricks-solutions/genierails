@@ -64,6 +64,23 @@ warnings and failures are always printed in full.
 
 Key config & code: [`treatment_config.json`](../../treatment_config.json) (the `gr_treatment` precedence rules — shared across envs), [`sensitivity_source.py`](../../sensitivity_source.py) (native `class.*` source), [`treatment_derivation.py`](../../treatment_derivation.py) (one treatment/column), [`verify_effective_access.py`](../../verify_effective_access.py) (masked-vs-raw), [`scripts/audit_schema_drift.py`](../../scripts/audit_schema_drift.py) (drift).
 
+### Deterministic-governance settings
+
+These environment-owned settings are validated now. Their values are deliberately
+unused until the rollout step shown, so adding them cannot change current behavior.
+
+| Setting | Shape and meaning | Used from step |
+|---|---|---|
+| `access_tier_groups` | Ordered group names: first sees raw, last sees full masking, and groups between see partial masking. One group is raw-only; two are raw/full. Empty remains the legacy unset value. | 4 |
+| `treatment_versions` | `{ treatment = { partial = "version" } }`; only `partial` may be selected. | 3 |
+| `tier_access_overrides` | `{ treatment = { group = "raw" \| "partial" \| "full" } }`; groups must occur in `access_tier_groups`, and the named tier must exist. | 4 |
+| `column_overrides` | `{ "cat.sch.tbl.col" = { partial = "version" } }` or `{ "cat.sch.tbl.col" = { treatment = "stricter_treatment" } }`. Setting `full` is refused. | 3 |
+| `row_filters` | List of `{ table, column, values_by_group = map(group -> list(string)) }`; multiple columns on one table are ANDed, while values/groups within a rule are unioned. | 6 |
+| `genie_spaces[*].acl_groups` | Explicit `[]` means nobody. Set `require_acl_groups = true` to refuse a missing value now; step 5 makes that rule the default. | 5 |
+
+Resolution precedence is `column_overrides`, then `treatment_versions`, then
+`tier_access_overrides`, then the shipped library default.
+
 ---
 
 ## Step details
