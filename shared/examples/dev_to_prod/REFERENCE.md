@@ -13,7 +13,7 @@ Lookup companion to the **[Dev-to-Prod Walkthrough](README.md)**: the full comma
 | Table `SELECT` grant | **only after the masks exist and a recent coverage check passes** for it |
 | Genie run permission (`CAN_RUN`) | **only once its groups' `SELECT` grants are applied** through that check |
 | Workspace assignment + consume entitlement | applied on **every** apply (harmless without `SELECT`/`CAN_RUN`) |
-| Warehouse `CAN_USE` | **not managed by GenieRails** — you grant business users `CAN_USE` on the agent's warehouse |
+| Warehouse `CAN_USE` | **not needed for business users**: Genie runs queries with the compute credentials of whoever set the agent's warehouse (the deploying service principal), while data access is still checked as each end user ([Databricks docs](https://docs.databricks.com/aws/en/genie/set-up)) |
 
 So "expose last" isn't a policy you hope holds — there is simply no new or wider `SELECT` or `CAN_RUN` without a passing check. There is no on/off flag: the old `business_access_enabled` setting is deprecated and ignored (make warns while it is set; `false` does **not** revoke access). To withdraw access, remove the groups or `acl_groups` entries (or the agent) and apply: that revokes their `SELECT` and the Genie `CAN_RUN` GenieRails granted them, and never waits for the coverage check (other direct entries and inherited permissions on the agent are left alone).
 
@@ -131,7 +131,7 @@ What each walkthrough step does, for when you need more than the [walkthrough](R
 
 - **access tier** — a group of users who should see data at the same level (e.g. full / masked / least). You map one IdP group to each tier.
 - **ABAC (attribute-based access control)** — masks/filters that apply based on a column's *tag*, not its name — so a rule covers any column carrying that tag.
-- **`CAN_RUN` / `CAN_USE`** — Databricks permissions: `CAN_RUN` lets a group open and run a Genie agent (granted only through the coverage check); `CAN_USE` lets a group run a SQL warehouse (you grant it yourself).
+- **`CAN_RUN` / `CAN_USE`** — Databricks permissions: `CAN_RUN` lets a group open and run a Genie agent (granted only through the coverage check); `CAN_USE` lets a principal run a SQL warehouse (needed by the deploying service principal and by `verify-access`'s temporary test principals, not by Genie end users).
 - **`class.*` tag** — a tag Unity Catalog's classifier writes on a column it finds sensitive (e.g. `class.email_address`).
 - **coverage check** — `make coverage-gate`; the blocking check that fails if any tagged-sensitive column has no covering mask/policy. The "tool says NO" step.
 - **drift** — a gap between what's tagged and what's protected; `audit-rulebook` reports it.
