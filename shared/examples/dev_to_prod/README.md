@@ -48,7 +48,7 @@ access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
 ```
 
 <a id="dev-classify"></a>
-**2. Classify (in the UI).** In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on. When the scan finishes, review the detections, exclude false positives, and turn on auto-tagging. Wait for the `class.*` tags to appear (the first scan can take up to about a day).
+**2. Classify (in the UI).** In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on. When the scan finishes (the first one can take up to about a day), review the detections, exclude false positives, and turn on auto-tagging. Then wait until the columns show `class.*` tags such as `class.email_address`: open a table in Catalog Explorer and check its **Columns** tab.
 
 **3. Generate.**
 ```bash
