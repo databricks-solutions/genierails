@@ -26,6 +26,67 @@ def test_masking_normalization_detects_real_body_change():
     assert normalized_definitions(before) != normalized_definitions(after)
 
 
+def _contextual_function(catalog, schema, name, body):
+    return (
+        f"USE CATALOG {catalog}; USE SCHEMA {schema}; "
+        f"CREATE OR REPLACE FUNCTION {name}(v STRING) RETURNS STRING RETURN {body};"
+    )
+
+
+def test_masking_normalization_ignores_function_order_with_use_context():
+    alpha = _contextual_function("cat", "sales", "alpha", "v")
+    beta = _contextual_function("cat", "finance", "beta", "upper(v)")
+    assert normalized_definitions(alpha + beta) == normalized_definitions(beta + alpha)
+
+
+def test_contextual_masking_normalization_detects_body_change():
+    before = _contextual_function("cat", "sales", "mask", "'x'")
+    after = _contextual_function("cat", "sales", "mask", "'y'")
+    assert normalized_definitions(before) != normalized_definitions(after)
+
+
+@pytest.mark.parametrize(("catalog", "schema"), [("other", "sales"), ("cat", "finance")])
+def test_contextual_masking_normalization_detects_resolved_target_change(catalog, schema):
+    before = _contextual_function("cat", "sales", "mask", "v")
+    after = _contextual_function(catalog, schema, "mask", "v")
+    assert normalized_definitions(before) != normalized_definitions(after)
+
+
+def test_contextual_masking_normalization_detects_added_or_removed_function():
+    alpha = _contextual_function("cat", "sales", "alpha", "v")
+    beta = _contextual_function("cat", "sales", "beta", "v")
+    assert normalized_definitions(alpha) != normalized_definitions(alpha + beta)
+
+
+def test_fully_qualified_function_ignores_unrelated_use_context():
+    definition = "CREATE FUNCTION cat.sales.mask(v STRING) RETURNS STRING RETURN v;"
+    assert normalized_definitions("USE CATALOG old; USE SCHEMA old;" + definition) == normalized_definitions(
+        "USE CATALOG other; USE SCHEMA other;" + definition
+    )
+
+
+def test_duplicate_resolved_function_names_keep_file_order_across_use_blocks():
+    first = _contextual_function("cat", "sales", "mask", "'first'")
+    second = _contextual_function("cat", "sales", "`mask`", "'second'")
+    assert normalized_definitions(first + second) != normalized_definitions(second + first)
+
+
+def test_unclassified_statement_change_fails_closed_with_contextual_functions():
+    functions = (
+        _contextual_function("cat", "sales", "alpha", "v")
+        + _contextual_function("cat", "finance", "beta", "v")
+    )
+    assert normalized_definitions("SET timezone = 'UTC';" + functions) != normalized_definitions(
+        "SET timezone = 'Australia/Melbourne';" + functions
+    )
+
+
+def test_unclassified_statement_is_a_fail_closed_ordering_barrier():
+    function = _contextual_function("cat", "sales", "mask", "v")
+    statement = "SET timezone = 'UTC';"
+    assert normalized_definitions(statement + function) != normalized_definitions(function + statement)
+
+
 @pytest.mark.parametrize(("before", "after"), [
     ("RETURN v & 1", "RETURN v | 1"),
     ("RETURN v || 'x'", "RETURN v 'x'"),

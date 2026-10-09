@@ -404,10 +404,10 @@ data "external" "normalized_masking_sql" {
 
 resource "terraform_data" "masking_functions" {
   triggers_replace = {
-    # The previous trigger used filemd5(), so upgrading an existing state may
-    # cause one drop-free CREATE OR REPLACE run.  Thereafter only executable
-    # definition changes replace this resource; comments, formatting and order
-    # do not.
+    # The canonical hash format now includes each function's resolved target,
+    # so upgrading state from #94 may cause one more drop-free CREATE OR REPLACE
+    # run. Thereafter only target or executable definition changes replace this
+    # resource; comments, formatting and function order do not.
     sql_hash     = data.external.normalized_masking_sql.result.hash
     sql_file     = var.masking_sql_file
     script       = var.deploy_masking_script

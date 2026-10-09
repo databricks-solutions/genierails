@@ -26,13 +26,29 @@ def _statements(tokens: list[str]) -> list[list[str]]:
     return statements
 
 
-def _function_name(statement: list[str]) -> tuple[str, str] | None:
-    """Return full and last-name sort keys, or None for another statement."""
-    try:
-        create = statement.index("create")
-    except ValueError:
+def _identifier_parts(tokens: list[str]) -> list[str] | None:
+    """Return normalized dotted identifier parts, or None if ambiguous."""
+    if not tokens or len(tokens) % 2 == 0:
         return None
-    cursor = create + 1
+    parts: list[str] = []
+    for index, token in enumerate(tokens):
+        if index % 2:
+            if token != ".":
+                return None
+        elif token.startswith("`") and token.endswith("`"):
+            parts.append(token[1:-1].replace("``", "`").lower())
+        elif token.replace("_", "a").isalnum():
+            parts.append(token.lower())
+        else:
+            return None
+    return parts
+
+
+def _function_name(statement: list[str]) -> list[str] | None:
+    """Return the CREATE FUNCTION name parts, or None for another statement."""
+    if statement[:1] != ["create"]:
+        return None
+    cursor = 1
     if statement[cursor:cursor + 2] == ["or", "replace"]:
         cursor += 2
     if statement[cursor:cursor + 1] != ["function"]:
@@ -44,32 +60,69 @@ def _function_name(statement: list[str]) -> tuple[str, str] | None:
         cursor += 1
     if not name or cursor >= len(statement):
         return None
-    full_name = "".join(name)
-    last_dot = max((index for index, token in enumerate(name) if token == "."), default=-1)
-    last_name = "".join(name[last_dot + 1:]).strip("`").lower()
-    return full_name, last_name
+    return _identifier_parts(name)
 
 
-def normalized_tokens(sql_text: str) -> list[list[str]]:
-    """Normalize only consecutive function order; retain every statement/token."""
+def _use_context(statement: list[str]) -> tuple[str, list[str]] | None:
+    """Return a USE CATALOG/SCHEMA context update when fully classified."""
+    if len(statement) < 4 or statement[0] != "use" or statement[-1] != ";":
+        return None
+    kind = statement[1]
+    if kind not in ("catalog", "schema"):
+        return None
+    parts = _identifier_parts(statement[2:-1])
+    if parts is None or (kind == "catalog" and len(parts) != 1) or (kind == "schema" and len(parts) not in (1, 2)):
+        return None
+    return kind, parts
+
+
+def normalized_tokens(sql_text: str) -> list[list[object]]:
+    """Resolve and sort functions while retaining every unclassified token."""
     statements = _statements(sql_tokens(sql_text))
-    normalized: list[list[str]] = []
-    run: list[tuple[str, str, list[str]]] = []
+    catalog: str | None = None
+    schema: str | None = None
+    functions: list[tuple[tuple[str, str, str], list[str]]] = []
+    normalized: list[list[object]] = [["format", 2]]
 
-    def flush() -> None:
-        duplicate_logical_name = len({last_name for _full, last_name, _statement in run}) != len(run)
-        ordered = run if duplicate_logical_name else sorted(run, key=lambda item: item[0])
-        normalized.extend(statement for _full, _last, statement in ordered)
-        run.clear()
+    def flush_functions() -> None:
+        # Python's sort is stable: definitions with the same resolved target
+        # keep file order, matching SQL's later-definition-wins behavior.
+        functions.sort(key=lambda item: item[0])
+        normalized.extend(["function", *target, statement] for target, statement in functions)
+        functions.clear()
 
     for statement in statements:
-        names = _function_name(statement)
-        if names is None:
-            flush()
-            normalized.append(statement)
+        context = _use_context(statement)
+        if context is not None:
+            if context[0] == "catalog":
+                catalog = context[1][0]
+                schema = None
+            elif len(context[1]) == 2:
+                catalog, schema = context[1]
+            else:
+                schema = context[1][0]
+            continue
+
+        parts = _function_name(statement)
+        if parts is None or len(parts) > 3:
+            # Unknown executable SQL remains byte-significant (after comment
+            # and whitespace tokenization), so classification failures always
+            # move the hash instead of being silently ignored.
+            # It is also a sort barrier: moving a function across executable
+            # SQL we do not understand must move the hash.
+            flush_functions()
+            normalized.append(["unclassified", statement])
+            continue
+
+        if len(parts) == 3:
+            target = tuple(parts)
+        elif len(parts) == 2:
+            target = (catalog or "", parts[0], parts[1])
         else:
-            run.append((*names, statement))
-    flush()
+            target = (catalog or "", schema or "", parts[0])
+        functions.append((target, statement))
+
+    flush_functions()
     return normalized
 
 
