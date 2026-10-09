@@ -51,3 +51,37 @@ run "auto_tagging_emits_all_dev_to_prod_classifier_types" {
     error_message = "every emitted auto-tag config must enable auto-tagging"
   }
 }
+
+run "ui_auto_tagging_survives_import_plan" {
+  command = plan
+
+  variables {
+    env_dir                   = "../../examples/healthcare"
+    databricks_account_id     = "account"
+    databricks_client_id      = "service-principal"
+    databricks_client_secret  = "secret"
+    databricks_workspace_host = "https://example.invalid"
+    uc_tables                 = ["review_first.customers.records"]
+    enable_classification     = true
+    enable_auto_tagging       = null
+    classification_existing_auto_tag_configs = {
+      review_first = [
+        {
+          classification_tag = "class.email_address"
+          auto_tagging_mode  = "AUTO_TAGGING_ENABLED"
+        }
+      ]
+    }
+    sql_warehouse_id = "warehouse"
+  }
+
+  assert {
+    condition = output.classification_auto_tag_configs["review_first"] == tolist([
+      {
+        classification_tag = "class.email_address"
+        auto_tagging_mode  = "AUTO_TAGGING_ENABLED"
+      }
+    ])
+    error_message = "an imported UI auto-tag config must remain unchanged when the scripted override is unset"
+  }
+}

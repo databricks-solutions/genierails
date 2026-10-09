@@ -84,8 +84,10 @@ def test_champion_genie_next_steps_are_phase_1(tmp_path):
 
     assert out == (
         "  Next steps (walkthrough Phase 1):\n"
-        "    1. Enable classification on your catalog (Databricks UI, or: make enable-classification ENV=dev),\n"
-        "       review detections, then enable automatic tagging and wait for class.* tags\n"
+        "    1. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.\n"
+        "       When the scan finishes, review the detections and exclude any false positives, then turn on\n"
+        "       auto-tagging. Wait until the class.* tags appear.\n"
+        "       Prefer a script? make enable-classification ENV=dev turns it on (you still review detections in the UI).\n"
         "    2. make generate ENV=dev\n"
         "    3. make rehearse ENV=dev VERIFY_KEY_COLUMN=<key_column>"
     )
@@ -766,8 +768,9 @@ def test_real_target_hides_target_warnings_and_points_to_catalog_explorer(real_c
     assert "Resource targeting is in effect" not in out
     assert "Applied changes may be incomplete" not in out
     assert "system.data_classification" not in out
-    assert "Catalog Explorer, open your catalog > Data classification > Review detections" in out
-    assert "envs/dev/env.auto.tfvars and re-run: make enable-classification ENV=dev" in out
+    assert "auto-tagging follows the current UI setting" in out
+    assert "review detections and exclude false positives" in out
+    assert "nothing is tagged yet" not in out
 
 
 def test_real_target_surfaces_terraform_errors_and_fails(real_cloud):
@@ -782,7 +785,7 @@ def test_real_target_surfaces_terraform_errors_and_fails(real_cloud):
 
 def test_real_target_with_auto_tagging_points_to_generate(real_cloud, tmp_path):
     env_file = tmp_path / "aws/envs/dev/env.auto.tfvars"
-    env_file.write_text(env_file.read_text().replace("enable_auto_tagging = false", "enable_auto_tagging = true"))
+    env_file.write_text(env_file.read_text() + "\nenable_auto_tagging = true\n")
 
     result = real_cloud()
 
