@@ -33,8 +33,6 @@ cd genierails/aws           # or: cd genierails/azure — every make command run
 | Access-tier groups | Your existing groups, most- to least-privileged, e.g. `payments_ops`, `regional_analysts`, `viewers` |
 | Dev and prod catalog names | e.g. `dev_finance` and `prod_finance` |
 
-You don't choose a verification key: GenieRails picks and proves one per table.
-
 <a id="phase-0--dev-set-up"></a>
 <a id="phase-1--dev-scan-draft-and-test-rules"></a>
 ## Dev
