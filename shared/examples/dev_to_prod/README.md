@@ -33,8 +33,6 @@ cd genierails/aws           # or: cd genierails/azure — every make command run
 | Access-tier groups | Your existing groups, most- to least-privileged, e.g. `payments_ops`, `regional_analysts`, `viewers` |
 | Dev and prod catalog names | e.g. `dev_finance` and `prod_finance` |
 
-You don't choose a verification key: GenieRails picks and proves one per table.
-
 <a id="phase-0--dev-set-up"></a>
 <a id="phase-1--dev-scan-draft-and-test-rules"></a>
 ## Dev
@@ -50,13 +48,13 @@ access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
 ```
 
 <a id="dev-classify"></a>
-**2. Classify (in the UI).** In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on. When the scan finishes, review the detections, exclude false positives, and turn on auto-tagging. Wait for the `class.*` tags to appear (the first scan can take up to about a day).
+**2. Classify (in the UI).** In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on. When the scan finishes (the first one can take up to about a day), review the detections, exclude false positives, and turn on auto-tagging. Then wait until the columns show `class.*` tags such as `class.email_address`: open a table in Catalog Explorer and check its **Columns** tab.
 
 **3. Generate.**
 ```bash
 make generate ENV=dev
 ```
-Review the drafted rules in `envs/dev/generated/`. If the tags aren't there yet, it stops and tells you to wait; re-run it later. Re-runs keep the rules you've reviewed.
+Review the drafted rules in `envs/dev/generated/` and edit them if you need to. If the tags aren't there yet, it stops and tells you to wait; re-run it later. Re-runs keep whatever is already in `envs/dev/generated/`, including your edits, and only add rules for new columns.
 
 **4. Rehearse.**
 ```bash
@@ -89,10 +87,10 @@ Using the sample environment? Load its tables into prod first (`--skip-agent`, s
 ```bash
 make release ENV=prod
 ```
-**Pass looks like:** `ALL EFFECTIVE` and "Release complete". Business users can now open the agent and get masked answers. (They also need `CAN_USE` on the agent's SQL warehouse, which GenieRails doesn't grant.)
+**Pass looks like:** `ALL EFFECTIVE` and "Release complete". Business users can now open the agent and get masked answers.
 
 **If it stops on coverage or drift**, prod found a sensitive tag your rules don't cover. Nothing new was granted. Fix it in dev, never by hand in prod:
-1. `make scaffold-treatments ENV=prod` names the uncovered tag and adds a suggested mask to `../shared/treatment_config.json` (and `../shared/tag_vocabulary_registry.json`). Review it; these are tracked files, so they go in the same PR as step 2.
+1. `make scaffold-treatments ENV=prod` names the uncovered tag and adds a suggested mask to `../shared/treatment_config.json` (and `../shared/tag_vocabulary_registry.json`). Review it, and commit these files together with step 2's dev change.
 2. Add the rule to dev: tag a matching dev column, then `make generate ENV=dev` ([no matching dev column?](REFERENCE.md#step-details)).
 3. `make rehearse ENV=dev`, then `make promote-to ENV=prod` and `make release ENV=prod`.
 
@@ -114,7 +112,7 @@ It masks newly tagged columns, never grants access past a passing coverage check
 | Genie agent ID file missing | Follow the printed recovery steps; never re-create the agent by hand |
 | Env is locked | Another `release`/`maintain` is running; wait for it |
 
-To change who has access in prod, edit `envs/prod/env.auto.tfvars` in a PR and let the pipeline apply it.
+To change who has access in prod, edit `envs/prod/env.auto.tfvars`, commit it, and let your deployment pipeline apply it. Don't change access by hand in the UI.
 
 <a id="reference--commands-concepts-and-glossary"></a>
 **More:** [REFERENCE.md](REFERENCE.md) (every command, what each step does, how it works, glossary) · [SAMPLE_ENV.md](SAMPLE_ENV.md) · [Import an existing agent](../../docs/import-genie-agent-from-ui.md)
