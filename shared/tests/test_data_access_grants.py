@@ -185,6 +185,7 @@ def test_deployment_sp_self_grant_includes_apply_tag():
     assert set(re.findall(r'"([A-Z_]+)"', match.group(1))) == {
         "USE_CATALOG",
         "USE_SCHEMA",
+        "SELECT",
         "EXECUTE",
         "MANAGE",
         "CREATE_FUNCTION",
