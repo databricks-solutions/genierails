@@ -13,6 +13,11 @@
 
 ### Changed
 
+- **Masking SQL quiet-plan hash** now uses the deployer's exact statement
+  blocks and execution contexts. Upgrading changes the hash format once more,
+  causing at most one drop-free `CREATE OR REPLACE` pass; reorder-only generated
+  functions are quiet after that transition.
+
 - **No row-pairing key to choose**: `verify-access` picks a provably safe key
   per masked table: an explicit `verify_key_columns` entry, else
   `VERIFY_KEY_COLUMN` / `verify_key_column` when the table has it, else its
