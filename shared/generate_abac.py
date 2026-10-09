@@ -4012,6 +4012,7 @@ def autofix_acl_groups(
     # Build space_name → set of catalogs from env.auto.tfvars or from tag_assignments
     space_catalogs: dict[str, set[str]] = {}
     user_acls: dict[str, list[str]] = {}
+    tier_order: list[str] = []
     active_space_names: set[str] | None = None
     has_configured_spaces = False
 
@@ -4021,6 +4022,9 @@ def autofix_acl_groups(
             env_cfg = hcl2.loads(env_tfvars_path.read_text())
             configured_spaces = env_cfg.get("genie_spaces") or []
             has_configured_spaces = bool(configured_spaces)
+            tiers = env_cfg.get("access_tier_groups") or []
+            if isinstance(tiers, list):
+                tier_order = [tier for tier in tiers if isinstance(tier, str)]
             resolved_names: list[str] = []
             for space in configured_spaces:
                 if isinstance(space, list):
@@ -4162,6 +4166,13 @@ def autofix_acl_groups(
             g for g, g_cats in group_catalogs.items()
             if g_cats & cats and g in groups
         })
+        # access_tier_groups runs most- to least-privileged, so a tier above a
+        # group the policies name is at least as entitled. Masks that list only
+        # the masked tiers never name the full-access tier.
+        ranked = [tier for tier in tier_order if tier in groups]
+        named = [ranked.index(g) for g in space_groups if g in ranked]
+        if named:
+            space_groups = sorted(set(space_groups) | set(ranked[:max(named)]))
 
         if not space_groups and defer_unmapped:
             print(

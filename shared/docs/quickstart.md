@@ -41,7 +41,9 @@ vi envs/dev/env.auto.tfvars
 # enable_auto_tagging = true and rerunning the optional script).
 
 # Generation consumes your existing IdP-synced groups (setup scaffolds
-# manage_groups = false); pass one group per access tier, strictest first.
+# manage_groups = false); pass one group per access tier, most-privileged first.
+# Order matters: a tier listed above a masked tier also gets the agent and sees
+# those columns unmasked.
 make generate GENERATE_ARGS='--groups "<idp-tier-1>,<idp-tier-2>,<idp-tier-3>"'
 vi envs/dev/generated/abac.auto.tfvars
 # Review and iterate on the generated governance and Genie config:
