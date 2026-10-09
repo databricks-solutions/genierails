@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -165,6 +166,32 @@ def test_non_function_statements_are_hashed_and_bound_function_reordering():
     changed_set = reordered.replace("'UTC'", "'Australia/Melbourne'")
     assert normalized_definitions(first) == normalized_definitions(reordered)
     assert normalized_definitions(reordered) != normalized_definitions(changed_set)
+
+
+def test_ambiguous_masking_hash_is_stable_across_python_hash_seeds(tmp_path):
+    sql_file = tmp_path / "ambiguous.sql"
+    sql_file.write_text("""\
+USE CATALOG a;
+/* fallback */ CREATE FUNCTION alpha() RETURNS STRING RETURN 'a';
+/* fallback */ CREATE FUNCTION beta() RETURNS STRING RETURN 'b';
+USE CATALOG b;
+/* fallback */ CREATE FUNCTION gamma() RETURNS STRING RETURN 'c';
+/* fallback */ CREATE FUNCTION delta() RETURNS STRING RETURN 'd';
+/* fallback */ CREATE FUNCTION epsilon() RETURNS STRING RETURN 'e';
+""")
+    script = Path(__file__).parent.parent / "modules" / "data_access" / "normalize_masking_sql.py"
+    hashes = []
+    for seed in ("1", "2"):
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            input=json.dumps({"sql_file": str(sql_file)}),
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        hashes.append(json.loads(proc.stdout)["hash"])
+    assert hashes[0] == hashes[1]
 
 
 def test_duplicate_logical_function_names_keep_file_order():
