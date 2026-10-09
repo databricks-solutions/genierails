@@ -1,4 +1,4 @@
-.PHONY: help bootstrap-sp genie-adopt-preflight _guard-root _prepare-env _bootstrap _guarded-bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config _guard-genie-placeholder setup init-env enable-classification generate scaffold-treatments derive-assignments generate-delta audit-schema validate validate-generated coverage-gate promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _prepare-classification _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
+.PHONY: help bootstrap-sp genie-adopt-preflight _guard-root _prepare-env _bootstrap _guarded-bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config _guard-genie-placeholder setup init-env enable-classification generate scaffold-treatments materialize-treatment derive-assignments generate-delta audit-schema validate validate-generated coverage-gate promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _prepare-classification _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema evidence validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema audit-rulebook validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec verify-access-keys _verify-access-keys-readonly _guard-account-admin-env release maintain test-champion _derive-before-exposure _refresh-live-ddl promote-to
@@ -375,19 +375,41 @@ generate: _guarded-bootstrap _guard-workspace-target ## Run generate_abac.py in 
 		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
 
-scaffold-treatments: _guarded-bootstrap _guard-workspace-target ## Add fail-safe treatment stubs for unmapped native class.* tags
+scaffold-treatments: _guarded-bootstrap _guard-workspace-target ## Map unmapped native class.* tags: TREATMENT=<existing> reuses that mask; without it, adds fail-safe REVIEW stubs
 	@python3 "$(SHARED_ROOT)/scripts/scaffold_treatments.py" \
 		--tfvars "$(ENV_DIR)/generated/abac.auto.tfvars" \
 		--sql "$(ENV_DIR)/generated/masking_functions.sql" \
 		--treatment-config "$(SHARED_ROOT)/treatment_config.json" \
 		--tag-vocabulary "$(SHARED_ROOT)/tag_vocabulary_registry.json" \
 		--auth-file "$(ENV_DIR)/auth.auto.tfvars" \
-		--env-file "$(ENV_DIR)/env.auto.tfvars"
+		--env-file "$(ENV_DIR)/env.auto.tfvars" \
+		--env-name "$(ENV)" \
+		$(if $(strip $(TREATMENT)),--treatment "$(strip $(TREATMENT))",) \
+		$(if $(filter 1,$(ALLOW_UNKNOWN_TYPE)),--allow-unknown-type,)
+
+# Rules reach prod only by promotion, so a mask prod needs is added in the
+# env it is promoted from, even when no column there carries the class.
+materialize-treatment: _guarded-bootstrap _guard-workspace-target ## Add TREATMENT=<t>'s mask policy + UDF for every governed catalog, without tag_assignments (then rehearse and promote-to)
+	@if [ -z "$(strip $(TREATMENT))" ]; then \
+		echo "materialize-treatment: set TREATMENT=<treatment> (a value in shared/treatment_config.json)" >&2; exit 1; \
+	fi; \
+	if [ "$(ENV)" = "prod" ]; then \
+		echo "materialize-treatment: ENV=prod is not allowed; prod rules change only by promotion." >&2; \
+		echo "  Run it in the env prod is promoted from (e.g. make materialize-treatment ENV=dev TREATMENT=$(strip $(TREATMENT)))," >&2; \
+		echo "  then make rehearse ENV=dev, make promote-to ENV=prod and make release ENV=prod." >&2; \
+		exit 1; \
+	fi
+	@python3 "$(SHARED_ROOT)/scripts/materialize_treatment.py" \
+		--tfvars "$(ENV_DIR)/generated/abac.auto.tfvars" \
+		--sql "$(ENV_DIR)/generated/masking_functions.sql" \
+		--treatment-config "$(SHARED_ROOT)/treatment_config.json" \
+		--treatment "$(strip $(TREATMENT))" \
+		--env-dir "$(ENV_DIR)" --env-name "$(ENV)"
 
 derive-assignments: _guarded-bootstrap _guard-workspace-target ## Re-derive only tag_assignments from live native class.* tags (requires prior promote; never calls an LLM)
 	@echo "=== Derive Assignments ($(ENV)) ==="
 	@$(_COVERAGE_GATE) invalidate --env-dir "$(ENV_DIR)"
-	@cd "$(ENV_DIR)" && python3 "$(DERIVE_ASSIGNMENTS_SCRIPT)" --auth-file auth.auto.tfvars --env-file env.auto.tfvars --config generated/abac.auto.tfvars --write-ddl ddl/_fetched.sql --refresh-record generated/.live_refresh.json
+	@cd "$(ENV_DIR)" && python3 "$(DERIVE_ASSIGNMENTS_SCRIPT)" --auth-file auth.auto.tfvars --env-file env.auto.tfvars --config generated/abac.auto.tfvars --write-ddl ddl/_fetched.sql --refresh-record generated/.live_refresh.json --env-name "$(ENV)"
 
 audit-schema: _guarded-bootstrap _guard-workspace-target ## Report untagged sensitive columns and stale tag assignments in managed tables
 	@echo "=== Schema Drift Audit ($(ENV)) ==="
@@ -404,7 +426,10 @@ evidence: _guarded-bootstrap _guard-workspace-target ## Emit JSON and Markdown c
 	fi
 audit-rulebook: _guarded-bootstrap _guard-workspace-target ## Report prod-applied tags (class.* + governed keys) with no covering policy or mask
 	@echo "=== Rulebook Drift Audit ($(ENV)) ==="
-	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/scripts/audit_schema_drift.py" --mode rulebook
+	@rc=0; cd "$(ENV_DIR)" || exit 2; \
+	python3 "$(SHARED_ROOT)/scripts/audit_schema_drift.py" --mode rulebook --env-name "$(ENV)" || rc=$$?; \
+	if [ -n "$$GENIERAILS_AUDIT_RC_FILE" ]; then echo "$$rc" > "$$GENIERAILS_AUDIT_RC_FILE"; fi; \
+	exit $$rc
 
 generate-delta: _guarded-bootstrap _guard-workspace-target ## [Legacy] LLM/name-regex incremental tag_assignments; prefer native class.* tags + make maintain
 	@echo "=== Generate Delta ($(ENV)) ==="
@@ -419,7 +444,7 @@ validate-generated: _guarded-bootstrap _guard-workspace-target ## Validate gener
 	fi
 
 coverage-gate: _guarded-bootstrap _guard-workspace-target ## Block on any sensitive-column coverage gap in generated config
-	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" --coverage-gate generated/abac.auto.tfvars generated/masking_functions.sql $(call _VALIDATION_FLAGS,coverage-gate)
+	@cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/validate_abac.py" --coverage-gate generated/abac.auto.tfvars generated/masking_functions.sql --env-name "$(ENV)" $(call _VALIDATION_FLAGS,coverage-gate)
 
 # Terraform-enforced gate for the split data_access config (scripts/coverage_gate.py).
 # _apply-layer and _plan-layer run it before every data_access plan/apply; the
@@ -482,6 +507,15 @@ rehearse: _guard-genie-placeholder ## Run serial rehearsal (verify-access picks 
 		$(MAKE) verify-access ENV="$(ENV)" $(if $(strip $(VERIFY_KEY_COLUMN)),VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",) && \
 		$(_SAVE_VERIFY_KEY)
 
+# A failed $(MAKE) exits 2 whatever its recipe returned, so release and
+# maintain have audit-rulebook write its script's own exit code (1 = drift,
+# 2 = error) to a file they name. They also export GENIERAILS_RERUN_TARGET so a
+# coverage gap's fix message ends with the command that stopped.
+_RUN_AUDIT_RULEBOOK = audit_rc_file="$$(mktemp)"; \
+	GENIERAILS_AUDIT_RC_FILE="$$audit_rc_file" $(MAKE) audit-rulebook ENV="$(ENV)"; audit_rc=$$?; \
+	if [ $$audit_rc -ne 0 ] && [ -s "$$audit_rc_file" ]; then audit_rc="$$(cat "$$audit_rc_file")"; fi; \
+	rm -f "$$audit_rc_file"
+
 # release and maintain hold a per-env lock
 # (envs/<env>/generated/.governance.lock) throughout.
 _ENV_LOCK_HELPER = python3 "$(SHARED_ROOT)/scripts/environment_lock.py"
@@ -524,6 +558,7 @@ certify:
 release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify access
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); \
+	export GENIERAILS_RERUN_TARGET=release; \
 	key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" || exit 1; \
 	$(_REQUIRE_MASK_PROOF) || exit 1; \
 	if ! $(MAKE) --no-print-directory _verify-access-keys-readonly ENV="$(ENV)"$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \
@@ -541,11 +576,11 @@ release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, ap
 		echo "release: no provable row-pairing key for every masked table (above); nothing was applied." >&2; \
 		exit 1; \
 	fi; \
-	$(MAKE) audit-rulebook ENV="$(ENV)"; audit_rc=$$?; \
+	$(_RUN_AUDIT_RULEBOOK); \
 	if [ $$audit_rc -ne 0 ]; then \
 		if [ $$audit_rc -eq 1 ]; then \
 			echo "release: audit-rulebook reported drift (output above); no new or wider business access was applied." >&2; \
-			echo "  Fix the rulebook in dev, rehearse, promote, then re-run make release ENV=$(ENV)." >&2; \
+			echo "  For class.* tags, follow 'How to fix' above; otherwise fix the rule in dev, make rehearse, make promote-to ENV=$(ENV), then re-run make release ENV=$(ENV)." >&2; \
 		else \
 			echo "release: audit-rulebook failed (error, not drift); no new or wider business access was applied." >&2; \
 			echo "  Review the error output above, then re-run make release ENV=$(ENV)." >&2; \
@@ -569,7 +604,7 @@ release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, ap
 
 maintain: _guard-genie-placeholder ## Reconcile governance (including existing covered SELECT): audit-schema -> derive-assignments -> coverage check -> validate -> audit-rulebook -> apply-governance; never widen past coverage or touch Genie
 	@$(_GUARD_WORKSPACE_ENV); \
-	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,maintain); \
+	$(_DRY_RUN_GUARD); export GENIERAILS_RERUN_TARGET=maintain; $(call _ENV_LOCK,maintain); \
 	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
 	$(MAKE) --no-print-directory _guarded-bootstrap _guard-workspace-target ENV="$(ENV)" || exit 1; \
 	python3 "$(GENIE_ADOPT_PREFLIGHT_SCRIPT)" "$(ENV_DIR)" --id-files --warn; \
@@ -589,11 +624,11 @@ maintain: _guard-genie-placeholder ## Reconcile governance (including existing c
 	$(MAKE) derive-assignments ENV="$(ENV)" || exit 1; \
 	$(MAKE) coverage-gate ENV="$(ENV)" || exit 1; \
 	$(MAKE) validate-generated ENV="$(ENV)" || exit 1; \
-	$(MAKE) audit-rulebook ENV="$(ENV)"; audit_rc=$$?; \
+	$(_RUN_AUDIT_RULEBOOK); \
 	if [ $$audit_rc -ne 0 ]; then \
 		if [ $$audit_rc -eq 1 ]; then \
 			echo "maintain: audit-rulebook reported drift (output above); governance was not applied." >&2; \
-			echo "  Fix the rulebook in dev, rehearse, promote, then re-run make maintain ENV=$(ENV)." >&2; \
+			echo "  For class.* tags, follow 'How to fix' above; otherwise fix the rule in dev, make rehearse, make promote-to ENV=$(ENV), then re-run make maintain ENV=$(ENV)." >&2; \
 		else \
 			echo "maintain: audit-rulebook failed (error, not drift); governance was not applied." >&2; \
 			echo "  Review the error output above, then re-run make maintain ENV=$(ENV)." >&2; \

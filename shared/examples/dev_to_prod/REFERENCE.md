@@ -117,11 +117,12 @@ What each walkthrough step does, for when you need more than the [walkthrough](R
 - Stops at `audit-schema`: a sensitive-looking column has no `class.*` tag. Review it in Catalog Explorer, then re-run.
 - Stops at `coverage-gate` or `audit-rulebook`: add the rule in dev, rehearse, `promote-to`, `release` (see "Fixing a coverage gap" below).
 
+<a id="fixing-a-coverage-gap-found-in-prod"></a>
 **Fixing a coverage gap found in prod**
-- `make scaffold-treatments ENV=prod` writes a suggested rule into prod's `generated/abac.auto.tfvars` and `generated/masking_functions.sql`, plus the shared mapping in `shared/treatment_config.json` and `shared/tag_vocabulary_registry.json`. The next `promote-to` replaces prod's generated files from dev, so the prod-local rule is only a preview: the rule has to live in dev.
-- Preferred: tag a matching column in dev and run `make generate ENV=dev`. It uses the mapping the prod scaffold added to `shared/treatment_config.json` and drafts the policy and masking function. (`scaffold-treatments ENV=dev` would do nothing here: it only acts on labels that aren't mapped yet.)
-- No matching dev column: copy the new mask policy into `envs/dev/generated/abac.auto.tfvars` (with the dev catalog) and its function into `envs/dev/generated/masking_functions.sql`. Don't copy prod's `tag_assignments`.
-- `make generate ENV=dev` isn't enough when dev has no column with that class: the mapping exists, but no dev policy is created for promotion.
+- The stop names each uncovered `class.*` tag, prints both fixes for this env, and lists the existing treatments whose masking function fits each column's data type.
+- Reuse: `make scaffold-treatments ENV=prod TREATMENT=<name>` adds the tag to that treatment's `class_labels` in `shared/treatment_config.json`. Nothing else changes, so prod's deployed policies keep their names. Before writing, it refuses an unknown treatment, and a function whose input type doesn't match the column's type (read from `ddl/_fetched.sql`, else live). If a type can't be read it refuses too; `ALLOW_UNKNOWN_TYPE=1` overrides once you've checked. If that treatment has no mask in prod's catalog yet, it prints the `materialize-treatment` steps instead of `release`.
+- New kind of mask: `make scaffold-treatments ENV=prod` adds a `<class>_redacted` treatment with a full-redaction `REVIEW` stub to `shared/treatment_config.json` and `shared/tag_vocabulary_registry.json`. It also writes a prod preview, which the next `promote-to` replaces. Review the stub.
+- `make materialize-treatment ENV=dev TREATMENT=<new>` writes that treatment's mask policy for every governed dev catalog, plus its function, into `envs/dev/generated/`. It adds no tag assignments, so no dev column needs the class. Re-running it changes nothing. A policy or function already there for the treatment is kept as reviewed. It refuses past Unity Catalog's 100 policies per catalog, and refuses `ENV=prod`. Later `make generate ENV=dev` runs keep the mask.
 - Then `make rehearse ENV=dev`, `make promote-to ENV=prod`, `make release ENV=prod`.
 - A newly tagged column is a masking gap, not an access breach. For your most sensitive data, prefer "locked down until proven safe" over "open until tagged".
 

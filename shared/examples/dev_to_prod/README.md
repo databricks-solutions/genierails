@@ -89,10 +89,11 @@ make release ENV=prod
 ```
 **Pass looks like:** `ALL EFFECTIVE` and "Release complete". Business users can now open the agent and get masked answers.
 
-**If it stops on coverage or drift**, prod found a sensitive tag your rules don't cover. Nothing new was granted. Fix it in dev, never by hand in prod:
-1. `make scaffold-treatments ENV=prod` names the uncovered tag and adds a suggested mask to `../shared/treatment_config.json` (and `../shared/tag_vocabulary_registry.json`). Review it, and commit these files together with step 2's dev change.
-2. Add the rule to dev: tag a matching dev column, then `make generate ENV=dev` ([no matching dev column?](REFERENCE.md#step-details)).
-3. `make rehearse ENV=dev`, then `make promote-to ENV=prod` and `make release ENV=prod`.
+**If it stops on coverage or drift**, prod found a sensitive tag your rules don't cover. Nothing new was granted. The message prints both fixes with exact commands:
+- **Reuse an existing mask** (the common case): `make scaffold-treatments ENV=prod TREATMENT=<name>`, commit `../shared/treatment_config.json`, then `make release ENV=prod`.
+- **A new kind of mask**: `make scaffold-treatments ENV=prod` and review the stub it adds, then `make materialize-treatment ENV=dev TREATMENT=<new>`, `make rehearse ENV=dev`, `make promote-to ENV=prod` and `make release ENV=prod`. Commit the changed `../shared/` files and `envs/dev/generated/`.
+
+Details: [Fixing a coverage gap found in prod](REFERENCE.md#fixing-a-coverage-gap-found-in-prod).
 
 <a id="phase-5--prod-maintain-coverage"></a>
 ## Keep it safe

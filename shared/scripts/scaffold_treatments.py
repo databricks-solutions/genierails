@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Scaffold fail-safe treatments for offline or live unmapped class.* semantics."""
+"""Scaffold fail-safe treatments for offline or live unmapped class.* semantics.
+
+With --treatment, map each unmapped class.* to that existing treatment instead
+(no new treatment, UDF or vocabulary entry), refusing before any write when the
+treatment is unknown or its UDF can't take the column's data type.
+"""
 
 from __future__ import annotations
 
@@ -21,16 +26,27 @@ from generate_abac import (  # noqa: E402
     _render_tag_policy_block,
     _replace_bracket_section,
     discover_agent_footprint,
+    fetch_tables_from_databricks,
     footprint_table_refs,
     load_auth_config,
 )
 from treatment_derivation import derive_treatment_model, load_treatment_config  # noqa: E402
+from scripts.coverage_fix import (  # noqa: E402
+    ddl_column_types,
+    env_column_types,
+    promote_source,
+    rerun_command,
+    treatment_input_type,
+    types_compatible,
+)
 from scripts.footprint import load_discovered_footprint  # noqa: E402
 
 MARKER_RE = re.compile(
     r"^\s*#\s*gr\.classification_unmapped:\s*([^|\n]+)\|(class\.([^\s]+))\s*$",
     re.MULTILINE,
 )
+
+TAG_VALUE_RE = re.compile(r"hasTagValue\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)")
 
 
 def _slug(label: str) -> str:
@@ -61,6 +77,31 @@ def _live_unmapped_markers(auth_path: Path, env_path: Path) -> list[tuple[str, s
     ]
 
 
+def _unused_treatment_masks(before: dict, derived: dict, config) -> list[dict]:
+    """Reviewed treatment masks no column uses yet (make materialize-treatment).
+
+    Derivation rebuilds masks only for treatments its assignments use; keep
+    the others exactly as reviewed so a materialized mask is not dropped.
+    """
+    def key(policy: dict) -> set[tuple[str, str]]:
+        return {
+            (policy.get("catalog", ""), value)
+            for tag_key, value in TAG_VALUE_RE.findall(policy.get("match_condition", "") or "")
+            if tag_key == config.tag_key and value in config.values
+        }
+
+    masks = [p for p in derived.get("fgac_policies") or []
+             if p.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"]
+    names = {p.get("name") for p in derived.get("fgac_policies") or []}
+    covered = set().union(*(key(p) for p in masks)) if masks else set()
+    return [
+        policy for policy in before.get("fgac_policies") or []
+        if policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
+        and policy.get("name") not in names
+        and key(policy) and not key(policy) & covered
+    ]
+
+
 def scaffold(
     tfvars_path: Path,
     sql_path: Path,
@@ -68,6 +109,9 @@ def scaffold(
     vocabulary_path: Path | None = None,
     auth_path: Path | None = None,
     env_path: Path | None = None,
+    *,
+    reuse_treatment: str | None = None,
+    allow_unknown_type: bool = False,
 ) -> list[dict[str, object]]:
     if not tfvars_path.is_file():
         raise FileNotFoundError(f"Generated ABAC config not found: {tfvars_path}")
@@ -77,10 +121,18 @@ def scaffold(
     tfvars_text = tfvars_path.read_text()
     markers = [(m.group(1).strip(), m.group(2).lower(), m.group(3).lower())
                for m in MARKER_RE.finditer(tfvars_text)]
+    live = False
     if not markers and auth_path is not None and env_path is not None:
         markers = _live_unmapped_markers(auth_path, env_path)
+        live = True
     if not markers:
         return []
+    if reuse_treatment is not None:
+        return reuse(
+            tfvars_path, sql_path, config_path, reuse_treatment, markers,
+            live_auth=(auth_path, env_path) if live else None,
+            allow_unknown_type=allow_unknown_type,
+        )
 
     vocabulary_path = vocabulary_path or config_path.with_name("tag_vocabulary_registry.json")
     raw = json.loads(config_path.read_text())
@@ -208,7 +260,9 @@ def scaffold(
     )
     updated_tfvars = _replace_bracket_section(
         updated_tfvars, "fgac_policies",
-        [_render_fgac_policy_block(item) for item in derived.get("fgac_policies", [])],
+        [_render_fgac_policy_block(item)
+         for item in derived.get("fgac_policies", []) + _unused_treatment_masks(
+             hcl2.loads(tfvars_text), derived, config)],
     )
     hcl2.loads(updated_tfvars)
 
@@ -246,6 +300,189 @@ def scaffold(
     return actions
 
 
+def _live_column_types(auth_path: Path, env_path: Path, columns: list[str]) -> dict[str, str]:
+    """Data types of ``columns`` read from Unity Catalog (as make generate does)."""
+    import contextlib
+    import io
+
+    tables = sorted({column.rsplit(".", 1)[0] for column in columns})
+    runtime = load_auth_config(auth_path, env_path)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            ddl_text, _ = fetch_tables_from_databricks(tables, runtime)
+    except (Exception, SystemExit) as exc:
+        print(f"WARNING: could not read column types from Unity Catalog: {exc}", file=sys.stderr)
+        return {}
+    return ddl_column_types(ddl_text)
+
+
+def _shown(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(SHARED_ROOT.parent))
+    except ValueError:
+        return str(path)
+
+
+def reuse(
+    tfvars_path: Path,
+    sql_path: Path,
+    config_path: Path,
+    treatment_value: str,
+    markers: list[tuple[str, str, str]],
+    *,
+    live_auth: tuple[Path, Path] | None = None,
+    allow_unknown_type: bool = False,
+) -> list[dict[str, object]]:
+    """Map every unmapped class.* in ``markers`` to an existing treatment.
+
+    Only class_labels of that treatment change in the shared config. Offline
+    markers in the env's generated config are replaced by the treatment's
+    gr_treatment assignment; masks and functions are never rewritten, so a
+    promoted env's applied policy names stay exactly as deployed.
+    """
+    raw = json.loads(config_path.read_text())
+    config = load_treatment_config(config_path)
+    target = next((t for t in config.treatments if t.value == treatment_value), None)
+    if target is None:
+        raise ValueError(
+            f"TREATMENT={treatment_value} is not a treatment in {_shown(config_path)}. "
+            f"Existing treatments: {', '.join(config.values)}. For a new kind of mask, "
+            "run make scaffold-treatments without TREATMENT"
+        )
+    configured = {label.lower(): t.value for t in config.treatments for label in t.class_labels}
+    pending = [(entity, label) for entity, label, _ in markers if label not in configured]
+    already = sorted({(label, configured[label]) for _, label, _ in markers if label in configured})
+
+    sql_text = sql_path.read_text()
+    udf_type = treatment_input_type(target, sql_text)
+    env_dir = tfvars_path.parent.parent
+    column_types = env_column_types(env_dir)
+    unknown = [entity for entity, _ in pending if entity.lower() not in column_types]
+    if unknown and live_auth is not None:
+        column_types.update(_live_column_types(*live_auth, unknown))
+
+    problems, unknown_types, checked = [], [], []
+    for entity, label in pending:
+        column_type = column_types.get(entity.lower())
+        checked.append((entity, label, column_type))
+        if udf_type is None or column_type is None:
+            missing = (
+                f"what type {target.masking_function} takes" if udf_type is None
+                else f"the data type of {entity}"
+            )
+            unknown_types.append(f"{entity} ({label}): cannot tell {missing}")
+        elif not types_compatible(udf_type, column_type):
+            fits = [
+                t.value for t in config.treatments
+                if (other := treatment_input_type(t, sql_text)) and types_compatible(other, column_type)
+            ]
+            problems.append(
+                f"{entity} ({label}) is {column_type} but {target.masking_function} "
+                f"takes {udf_type}; treatments that fit {column_type}: {', '.join(fits) or 'none'}"
+            )
+    if problems:
+        raise ValueError(
+            f"Refusing to map to TREATMENT={treatment_value}; nothing was changed:\n  - "
+            + "\n  - ".join(problems)
+        )
+    if unknown_types and not allow_unknown_type:
+        raise ValueError(
+            f"Refusing to map to TREATMENT={treatment_value} without a type check; nothing "
+            "was changed:\n  - " + "\n  - ".join(unknown_types)
+            + "\n  Refresh the column types (make derive-assignments, or the make release "
+            "that stopped, writes ddl/_fetched.sql), or re-run with ALLOW_UNKNOWN_TYPE=1 "
+            "after checking the types yourself"
+        )
+
+    labels = sorted({label for _, label in pending})
+    entry = next(item for item in raw["treatments"] if item["value"] == treatment_value)
+    entry["class_labels"] = list(entry.get("class_labels", [])) + labels
+    staged = config_path.with_name(config_path.name + ".scaffold-check")
+    try:
+        staged.write_text(json.dumps(raw, indent=2) + "\n")
+        load_treatment_config(staged)
+    finally:
+        staged.unlink(missing_ok=True)
+
+    tfvars_text = tfvars_path.read_text()
+    cfg = hcl2.loads(tfvars_text)
+    updated_tfvars = tfvars_text
+    changed_entities: list[str] = []
+    if live_auth is None:
+        assignments = list(cfg.get("tag_assignments") or [])
+        seen = {(a.get("entity_name"), a.get("tag_key")) for a in assignments}
+        for entity, _label in pending:
+            if (entity, config.tag_key) not in seen:
+                assignments.append({"entity_type": "columns", "entity_name": entity,
+                                    "tag_key": config.tag_key, "tag_value": treatment_value})
+                seen.add((entity, config.tag_key))
+                changed_entities.append(entity)
+        updated_tfvars = MARKER_RE.sub(
+            lambda m: "" if m.group(2).lower() in labels else m.group(0), tfvars_text,
+        )
+        updated_tfvars = _replace_bracket_section(
+            updated_tfvars, "tag_assignments",
+            [_render_tag_assignment_block(item) for item in assignments],
+        )
+        hcl2.loads(updated_tfvars)
+
+    covered = {
+        policy.get("catalog")
+        for policy in cfg.get("fgac_policies") or []
+        if policy.get("policy_type") == "POLICY_TYPE_COLUMN_MASK"
+        and (config.tag_key, treatment_value) in TAG_VALUE_RE.findall(
+            policy.get("match_condition", "") or "")
+        and policy.get("function_name") == target.masking_function
+    }
+    missing_catalogs = sorted({entity.split(".", 1)[0] for entity, _ in pending} - covered)
+
+    if labels:
+        config_path.write_text(json.dumps(raw, indent=2) + "\n")
+    if updated_tfvars != tfvars_text:
+        tfvars_path.write_text(updated_tfvars)
+    return [{
+        "reuse": True, "treatment": treatment_value, "function": target.masking_function,
+        "udf_type": udf_type, "labels": labels, "already": already, "checked": checked,
+        "config": _shown(config_path),
+        "tfvars": _shown(tfvars_path) if updated_tfvars != tfvars_text else None,
+        "assigned": changed_entities, "missing_catalogs": missing_catalogs,
+    }]
+
+
+def _print_reuse(result: dict, env_name: str, env_dir: Path) -> None:
+    treatment = result["treatment"]
+    for label, value in result["already"]:
+        print(f"UNCHANGED {label} is already mapped to gr_treatment={value}")
+    if not result["labels"]:
+        print("No unmapped class.* tags to map; nothing changed.")
+        return
+    print(f"REUSED gr_treatment={treatment} -> {result['function']} "
+          f"(input {result['udf_type'] or 'type unknown'}) for:")
+    for entity, label, column_type in result["checked"]:
+        print(f"  {label}  ({entity}: {column_type or 'type unknown'})")
+    print("Changed:")
+    print(f"  {result['config']}: added {', '.join(result['labels'])} to the class_labels "
+          f"of treatment {treatment}")
+    if result["tfvars"]:
+        print(f"  {result['tfvars']}: assigned gr_treatment={treatment} to "
+              f"{', '.join(result['assigned']) or 'the marked columns'}; removed their "
+              "classification_unmapped markers")
+    source = promote_source(env_dir)
+    rerun = rerun_command(env_name, bool(source))
+    if result["missing_catalogs"]:
+        catalogs = ", ".join(result["missing_catalogs"])
+        print(f"The {treatment} mask is not in this env's rules for catalog(s) {catalogs} yet.")
+        if source:
+            print(f"Next: commit {result['config']}, then run make materialize-treatment "
+                  f"ENV={source} TREATMENT={treatment}, make rehearse ENV={source}, "
+                  f"make promote-to ENV={env_name}, {rerun}")
+        else:
+            print(f"Next: make materialize-treatment ENV={env_name} TREATMENT={treatment}, "
+                  f"then {rerun}; commit {result['config']}")
+        return
+    print(f"Next: commit {result['config']}, then run: {rerun}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tfvars", type=Path, required=True)
@@ -254,17 +491,31 @@ def main() -> int:
     parser.add_argument("--tag-vocabulary", type=Path)
     parser.add_argument("--auth-file", type=Path)
     parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--env-name", default="",
+                        help="env name, for the next-step commands (default: the env dir name)")
+    parser.add_argument("--treatment", default="",
+                        help="map unmapped class.* tags to this existing treatment instead of "
+                             "scaffolding a new one")
+    parser.add_argument("--allow-unknown-type", action="store_true",
+                        help="with --treatment: map even when a column or UDF type is unknown")
     args = parser.parse_args()
+    env_dir = args.tfvars.resolve().parent.parent
+    env_name = args.env_name or env_dir.name
     try:
         additions = scaffold(
             args.tfvars, args.sql, args.treatment_config, args.tag_vocabulary,
             args.auth_file, args.env_file,
+            reuse_treatment=args.treatment.strip() or None,
+            allow_unknown_type=args.allow_unknown_type,
         )
     except (RuntimeError, FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     if not additions:
         print("No unmapped class.* tags found; nothing changed.")
+        return 0
+    if additions[0].get("reuse"):
+        _print_reuse(additions[0], env_name, env_dir)
         return 0
     for item in additions:
         verb = "ADDED" if item["added"] else "APPLIED EXISTING"
@@ -273,7 +524,23 @@ def main() -> int:
             f'{verb} {item["label"]} -> gr_treatment={item["value"]} '
             f'-> {item["function"]}{suffix}'
         )
-    print("Review the stubs, then re-run `make release` (or `make generate`+`make coverage-gate`).")
+    source = promote_source(env_dir)
+    rerun = rerun_command(env_name, bool(source))
+    new = sorted({item["value"] for item in additions if item["added"]})
+    if new and source:
+        print("Review each stub's udf_body in shared/treatment_config.json (keep the "
+              "redaction or write a type-appropriate mask), then carry the mask through "
+              f"{source}; no {source} column needs the tag:")
+        for value in new:
+            print(f"  make materialize-treatment ENV={source} TREATMENT={value}")
+        print(f"  make rehearse ENV={source}")
+        print(f"  make promote-to ENV={env_name}")
+        print(f"  {rerun}")
+        print("Commit shared/treatment_config.json, shared/tag_vocabulary_registry.json "
+              f"and envs/{source}/generated/.")
+    else:
+        print(f"Review the stubs, then run {rerun}. Commit shared/treatment_config.json"
+              + (" and shared/tag_vocabulary_registry.json." if new else "."))
     return 0
 
 
