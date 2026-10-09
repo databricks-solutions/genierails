@@ -2946,11 +2946,13 @@ def write_result_file(path: Optional[Path], report: EffectiveAccessReport, spec:
         "mask_keys_proven_by_table": dict(sorted(report.pairing_keys.items())),
         "row_filter_checks_passed": sum(
             1 for r in report.results if r.kind == "row-filter" and r.status == PASS),
-        "cleanup_failures": [
-            {"target": r.target, "detail": r.detail, "evidence": r.evidence}
-            for r in report.results if r.kind == "cleanup" and r.status == FAIL
-        ],
     }
+    cleanup_failures = [
+        {"target": r.target, "detail": r.detail, "evidence": r.evidence}
+        for r in report.results if r.kind == "cleanup" and r.status == FAIL
+    ]
+    if cleanup_failures:
+        payload["cleanup_failures"] = cleanup_failures
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n")
