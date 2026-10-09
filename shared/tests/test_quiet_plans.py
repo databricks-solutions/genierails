@@ -169,13 +169,12 @@ def test_non_function_statements_are_hashed_and_bound_function_reordering():
     assert normalized_definitions(reordered) != normalized_definitions(changed_set)
 
 
-def test_fallback_recovery_preserves_file_order_and_deduplicates_case_insensitively():
+def test_fallback_recovery_preserves_file_order_case_insensitively():
     sql = (
         "SET timezone = 'UTC'; "
         "CREATE FUNCTION Zulu() RETURNS INT RETURN 1; "
         "CREATE FUNCTION alpha() RETURNS INT RETURN 2; "
-        "CREATE OR REPLACE FUNCTION BRAVO() RETURNS INT RETURN 3; "
-        "CREATE OR REPLACE FUNCTION zULU() RETURNS INT RETURN 4;"
+        "CREATE OR REPLACE FUNCTION BRAVO() RETURNS INT RETURN 3;"
     )
     names = [extract_function_name(stmt).split(".")[-1] for _, _, stmt in parse_sql_blocks(sql)]
     assert [name.lower() for name in names] == ["zulu", "alpha", "bravo"]
@@ -201,7 +200,7 @@ print(json.dumps([names, hashlib.sha256(normalized.encode()).hexdigest()]))
     shared = Path(__file__).parent.parent
     module = shared / "modules/data_access"
     results = []
-    for seed in (1, 5, 24, 30, 81):
+    for seed in (1, 2, 5, 24, 30, 46, 63, 64, 74, 81):
         env = {**os.environ, "PYTHONHASHSEED": str(seed)}
         completed = subprocess.run(
             [sys.executable, "-c", script, str(shared), str(module), sql],
@@ -212,15 +211,25 @@ print(json.dumps([names, hashlib.sha256(normalized.encode()).hexdigest()]))
     assert results[0][0] == ["third", "first", "second"]
 
 
+def test_fallback_duplicate_names_are_refused_and_later_edits_are_not_ignored():
+    prefix = "SET timezone = 'UTC'; CREATE FUNCTION Mask() RETURNS INT RETURN 1; "
+    for later_body in ("2", "999"):
+        sql = prefix + f"CREATE OR REPLACE FUNCTION mASK() RETURNS INT RETURN {later_body};"
+        with pytest.raises(ValueError, match="function 'Mask' is defined more than once"):
+            parse_sql_blocks(sql)
+        with pytest.raises(ValueError, match="function 'Mask' is defined more than once"):
+            normalized_definitions(sql)
+
+
 def test_duplicate_logical_function_names_keep_file_order():
-    prefix = "USE CATALOG cat; USE SCHEMA sch; "
+    prefix = "USE CATALOG cat;\nUSE SCHEMA sch;\n"
     definitions = [
         "CREATE FUNCTION mask() RETURNS INT RETURN 1;",
         "CREATE FUNCTION `mask`() RETURNS INT RETURN 2;",
         "CREATE FUNCTION cat.sch.mask() RETURNS INT RETURN 3;",
     ]
-    assert normalized_definitions(prefix + " ".join(definitions)) != normalized_definitions(
-        prefix + " ".join(reversed(definitions))
+    assert normalized_definitions(prefix + "\n".join(definitions)) != normalized_definitions(
+        prefix + "\n".join(reversed(definitions))
     )
 
 

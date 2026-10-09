@@ -112,6 +112,16 @@ def parse_sql_functions(path: Path) -> set[str]:
     return {m.group(1) for m in pattern.finditer(text)}
 
 
+def validate_sql_deployment_blocks(path: Path, result: ValidationResult) -> None:
+    """Reject SQL that the deployment parser cannot interpret safely."""
+    from masking_sql_blocks import parse_sql_blocks
+
+    try:
+        parse_sql_blocks(path.read_text())
+    except ValueError as exc:
+        result.error(str(exc))
+
+
 def parse_sql_function_arg_counts(path: Path) -> dict[str, int]:
     """Extract function names and their argument counts from SQL file.
 
@@ -1378,6 +1388,7 @@ def main():
         if not sql_path.exists():
             result.error(f"SQL file {sql_path} not found")
         else:
+            validate_sql_deployment_blocks(sql_path, result)
             sql_functions = parse_sql_functions(sql_path)
             sql_function_arg_counts = parse_sql_function_arg_counts(sql_path)
             if not sql_functions:

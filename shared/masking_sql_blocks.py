@@ -76,19 +76,32 @@ def analyze_sql_blocks(sql_text: str) -> ParsedSqlBlocks:
         extract_function_name(stmt).split(".")[-1].lower()
         for _, _, stmt in blocks
     }
-    function_matches = re.finditer(
+    function_matches = list(re.finditer(
         r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*(\w+)\s*\(",
         sql_text, re.IGNORECASE,
-    )
+    ))
+    function_occurrences: dict[str, list[str]] = {}
     all_fn_names: set[str] = set()
     missing: list[str] = []
     for match in function_matches:
         function_name = match.group(1).lower()
+        function_occurrences.setdefault(function_name, []).append(match.group(1))
         if function_name not in all_fn_names:
             all_fn_names.add(function_name)
             if function_name not in primary_names:
                 missing.append(function_name)
     if missing:
+        duplicate = next(
+            (name for name in missing if len(function_occurrences[name]) > 1),
+            None,
+        )
+        if duplicate is not None:
+            display_name = function_occurrences[duplicate][0]
+            raise ValueError(
+                "Ambiguous masking SQL fallback: function "
+                f"'{display_name}' is defined more than once; put each definition "
+                "on its own semicolon-terminated line or remove the duplicate"
+            )
         # Preserve the deployer's established fallback exactly. It is only
         # unambiguous when the whole file has one possible execution context;
         # this retains #94's block-comment/formatting contract without guessing
