@@ -101,8 +101,15 @@ principal is exempt. Tier-1 groups may not appear in `row_filters.values_by_grou
 
 GenieRails v1 runs every Terraform apply on the deployment machine. Applying
 targets—including `enable-classification`, `rehearse`, `release`, `maintain`,
-`apply`, `apply-governance`, and `apply-genie`—refuse when `CI=true`. CI may
-continue to run plans, validation, tests, coverage checks, and audits.
+`apply`, `apply-governance`, `apply-genie`, `_apply-layer`, `destroy`,
+`destroy-governance`, `destroy-genie`, `_destroy-layer`, `import`,
+`migrate-state`, `integration-test`, `test-champion`, `test-all`, `test-ci`, and
+`test-ci-parallel`—refuse common CI markers (`CI=true/1/yes`, Azure Pipelines,
+Jenkins, GitLab, Buildkite, or CircleCI). CI may continue to run plans,
+validation, unit tests, coverage checks, and audits. The
+`GENIERAILS_ALLOW_CI_APPLY=1` escape hatch is an internal switch used only by
+GenieRails' own throwaway integration-test jobs; never set it on a deployment
+job. Run `make release ENV=prod` from the persistent deployment workspace.
 
 ---
 

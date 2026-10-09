@@ -245,8 +245,11 @@ _guard-genie-placeholder:
 	@$(_GENIE_PLACEHOLDER_GUARD)
 
 _guard-not-ci-apply:
-	@if [ "$$(printf '%s' "$$CI" | tr '[:upper:]' '[:lower:]')" = "true" ] && [ "$$GENIERAILS_ALLOW_CI_APPLY" != "1" ]; then \
-		echo "ERROR: applying targets cannot run with CI=true. GenieRails v1 runs Terraform applies on the deployment machine; CI may run tests, validation, coverage, audits, and plans only." >&2; \
+	@ci_value=$$(printf '%s' "$$CI" | tr '[:upper:]' '[:lower:]'); is_ci=; \
+	case "$$ci_value" in true|1|yes) is_ci=1 ;; esac; \
+	if [ -n "$$TF_BUILD$$JENKINS_URL$$GITLAB_CI$$BUILDKITE$$CIRCLECI" ]; then is_ci=1; fi; \
+	if [ "$$is_ci" = "1" ] && [ "$$GENIERAILS_ALLOW_CI_APPLY" != "1" ]; then \
+		echo "ERROR: applying targets cannot run in CI. GenieRails v1 runs Terraform applies on the deployment machine; CI may run tests, validation, coverage, audits, and plans only." >&2; \
 		echo "Only isolated integration-test workflows may opt out with GENIERAILS_ALLOW_CI_APPLY=1." >&2; \
 		exit 1; \
 	fi

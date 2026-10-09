@@ -45,6 +45,7 @@ def _unit_tests_are_not_ci_apply_jobs(monkeypatch):
     """
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("GENIERAILS_ALLOW_CI_APPLY", raising=False)
 
 
 def pytest_configure(config):
