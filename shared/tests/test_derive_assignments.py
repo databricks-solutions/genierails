@@ -254,7 +254,14 @@ genie_space_configs = {{ Second = {{ title = "Second" }} }}
     (generated / "masking_functions.sql").write_text("")
     (second / "masking_functions.sql").write_text("")
 
-    merge_into_assembled(generated, "second")
+    # The drafts disagree on dev.sales.customers.shared: fail closed by default.
+    before = (generated / "abac.auto.tfvars").read_text()
+    with pytest.raises(ValueError, match="treatment override dev.sales.customers.shared"):
+        merge_into_assembled(generated, "second")
+    assert (generated / "abac.auto.tfvars").read_text() == before
+
+    # --allow-rule-changes merges anyway, strictest override wins.
+    merge_into_assembled(generated, "second", allow_changes=True)
     assembled = hcl2.loads((generated / "abac.auto.tfvars").read_text())
     assert assembled["treatment_overrides"] == [
         {"entity_name": "dev.sales.customers.amount", "treatment": "round_amount"},
