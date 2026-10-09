@@ -71,15 +71,38 @@ unused until the rollout step shown, so adding them cannot change current behavi
 
 | Setting | Shape and meaning | Used from step |
 |---|---|---|
-| `access_tier_groups` | Ordered group names: first sees raw, last sees full masking, and groups between see partial masking. One group is raw-only; two are raw/full. Empty remains the legacy unset value. | 4 |
-| `treatment_versions` | `{ treatment = { partial = "version" } }`; only `partial` may be selected. | 3 |
-| `tier_access_overrides` | `{ treatment = { group = "raw" \| "partial" \| "full" } }`; groups must occur in `access_tier_groups`, and the named tier must exist. | 4 |
-| `column_overrides` | `{ "cat.sch.tbl.col" = { partial = "version" } }` or `{ "cat.sch.tbl.col" = { treatment = "stricter_treatment" } }`. Setting `full` is refused. | 3 |
-| `row_filters` | List of `{ table, column, values_by_group = map(group -> list(string)) }`; multiple columns on one table are ANDed, while values/groups within a rule are unioned. | 6 |
+| `governance_mode` | `"legacy"` (default) or `"deterministic"`; gates rollout behavior so existing deployments remain unchanged. | 2 |
+| `access_tier_groups` | Ordered group names: first sees raw, last sees full masking, and groups between see partial masking. One group is raw-only; two are raw/full. Empty remains the legacy unset value. | 5 |
+| `raw_exempt_principals` | Environment-owned principals that see raw, except for never-raw treatments; the deployer SP is always exempt. | 5 |
+| `treatment_versions` | `{ treatment = { partial = "version" } }`; only `partial` may be selected, `redacted` is valid for every treatment, and treatment-wide `raw` is refused. | 3 |
+| `tier_access_overrides` | `{ treatment = { group = "raw" \| "partial" \| "full" } }`; groups must occur in `access_tier_groups`, and the named tier must exist. | 5 |
+| `column_overrides` | Per-column `{ partial = "version" }`, `{ treatment = "stricter_treatment" }`, or `{ keep_current = true }`. Setting `full` is refused. | 3 (`keep_current`: 6) |
+| `hash_fallback` | Unset for a hard stop, or `"redact"` to explicitly fail closed when keyed hashing is unavailable. | 3 |
+| `row_filters` | List of `{ table, column, values_by_group = map(group -> list(string)) }`; `table` is mandatory, literals are strings, tier-1 groups are refused, rules on one table are ANDed, and a multi-group caller receives the union of its named values. | 8 |
 | `genie_spaces[*].acl_groups` | Explicit `[]` means nobody. Set `require_acl_groups = true` to refuse a missing value now; step 5 makes that rule the default. | 5 |
+| `genie_spaces[*].delete` | `true` requests deletion instead of the default detach when an agent is removed. | 9 |
+| `ACK_UNCLASSIFIED` | Environment variable formatted as comma-separated `cat.sch.tbl.col` entries. Validation is format-only until the completeness check lands. | 2 |
+| `ACK_WEAKEN` | Environment variable formatted as comma-separated `cat.sch.tbl.col:principal` entries. Validation is format-only until refuse-weakening lands. | 7 |
 
-Resolution precedence is `column_overrides`, then `treatment_versions`, then
-`tier_access_overrides`, then the shipped library default.
+Resolution first fixes access: tier 1 is raw, the last tier and out-of-tier
+principals are full, and the most privileged group membership wins. A group
+access override can change only an intermediate tier. Only when the resulting
+access is partial does version precedence apply: `column_overrides`, then
+`treatment_versions`, then the shipped library default. A column override never
+changes what the full tier sees. Checking that a `treatment` column override is
+strictly stronger needs class-derived protection data and lands in step 3;
+`keep_current` is interpreted by migration in step 6.
+
+The treatments `card_security_code`, `card_pin`, `card_track_data`, and `secret`
+are never raw. No override may grant them raw values; only the deployer service
+principal is exempt. Tier-1 groups may not appear in `row_filters.values_by_group`.
+
+### Applying from CI
+
+GenieRails v1 runs every Terraform apply on the deployment machine. Applying
+targets—including `enable-classification`, `rehearse`, `release`, `maintain`,
+`apply`, `apply-governance`, and `apply-genie`—refuse when `CI=true`. CI may
+continue to run plans, validation, tests, coverage checks, and audits.
 
 ---
 

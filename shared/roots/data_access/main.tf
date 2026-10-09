@@ -183,6 +183,7 @@ variable "genie_spaces" {
     sql_warehouse_id = optional(string, "")
     uc_tables        = optional(list(string), [])
     acl_groups       = optional(list(string), null)
+    delete           = optional(bool, false)
   }))
   default     = []
   description = "User-owned workspace definitions and classification footprint. acl_groups omitted/null derives fresh from policy to_principals plus except_principals; [] explicitly grants nobody; a non-empty list is the durable override."
@@ -264,6 +265,35 @@ variable "access_tier_groups" {
   validation {
     condition     = length(var.access_tier_groups) == length(distinct(var.access_tier_groups)) && alltrue([for group in var.access_tier_groups : trimspace(group) != ""])
     error_message = "access_tier_groups must contain unique, non-empty group names."
+  }
+}
+
+variable "governance_mode" {
+  type        = string
+  default     = "legacy"
+  description = "Governance implementation selector."
+  validation {
+    condition     = contains(["legacy", "deterministic"], var.governance_mode)
+    error_message = "governance_mode must be legacy or deterministic."
+  }
+}
+variable "raw_exempt_principals" {
+  type        = list(string)
+  default     = []
+  description = "Used from rollout step 5."
+  validation {
+    condition     = alltrue([for principal in var.raw_exempt_principals : trimspace(principal) != ""])
+    error_message = "raw_exempt_principals must contain non-empty principal names."
+  }
+}
+variable "hash_fallback" {
+  type        = string
+  default     = null
+  nullable    = true
+  description = "Used from rollout step 3."
+  validation {
+    condition     = var.hash_fallback == null || var.hash_fallback == "redact"
+    error_message = "hash_fallback must be redact or unset."
   }
 }
 
