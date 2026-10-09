@@ -4,7 +4,7 @@
 
 **No tables or Genie agent of your own?** Expand this to create a sample schema (three tables of realistic synthetic PII) + a sample agent and get the exact values to paste into `envs/dev/env.auto.tfvars`. **Skip it if you have your own.**
 
-Do [Phase 0](README.md#phase-0--dev-set-up) steps 1–2 first, then this, then Phase 0 step 3 with the printed agent ID.
+In the walkthrough's [Dev step 1](README.md#phase-0--dev-set-up), run `make setup ENV=dev`, copy the template and fill in `auth.auto.tfvars`; then run this, and set the Agent ID it prints.
 
 ```bash
 cd ../shared/examples/dev_to_prod          # from the cloud root (aws/ or azure/); return with 'cd ../../../aws' afterward
@@ -25,7 +25,7 @@ With `--create-groups`, teardown deletes exactly the groups it created, by their
 
 State written before group IDs were recorded lists groups by name only; teardown keeps those groups and lists them — delete them in the Account Console, or opt in with `--delete-legacy-groups-by-name --account-id <account-id>` (exact-name match, so it can also remove a different group that reused the name).
 
-**Prod needs the same tables.** In [Phase 2](README.md#phase-2--prod-set-up-and-promote-rules), seed the prod catalog before scanning it — tables only, because `make release ENV=prod` creates prod's agent later:
+**Prod needs the same tables.** In the walkthrough's [Prod section](README.md#prod), seed the prod catalog before scanning it — tables only, because `make release ENV=prod` creates prod's agent later:
 
 ```bash
 python setup_sample_env.py --host <prod-workspace-url> --catalog prod_finance --warehouse-id <prod-warehouse-id> --skip-agent

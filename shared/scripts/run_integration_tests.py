@@ -6227,7 +6227,7 @@ genie_spaces = [
 
 # ---------------------------------------------------------------------------
 # Scenario: champion — the dev → prod CHAMPION walkthrough, exactly as a user
-# runs it (shared/examples/dev_to_prod/README.md, Phases 0-6)
+# runs it (the Dev and Prod sections of shared/examples/dev_to_prod/README.md)
 # ---------------------------------------------------------------------------
 
 DEV_TO_PROD_TEMPLATE = MODULE_ROOT / "examples" / "dev_to_prod" / "env.auto.tfvars.example"
@@ -6510,8 +6510,8 @@ def scenario_champion(
 ) -> None:
     """Dev → prod CHAMPION flow, driven only through the real make targets.
 
-    Follows shared/examples/dev_to_prod/README.md (Phases 0-4) and the
-    `make release` / `make maintain` Phases 5-6:
+    Follows the Dev and Prod sections of shared/examples/dev_to_prod/README.md,
+    including the `make release` / `make maintain` steps:
 
        1. Setup: dev_fin + prod_fin fixtures, two access-tier account groups,
           a curated dev Genie agent via the Genie API; make setup ENV=dev; copy
@@ -6587,7 +6587,7 @@ def scenario_champion(
         if (dev_dir / "data_access" / "discovered_uc_tables.auto.tfvars").exists():
             raise AssertionError("placeholder run wrote discovered_uc_tables.auto.tfvars")
 
-        # Only the edits Phase 0 asks for: the agent ID and the warehouse.
+        # Only the edits the walkthrough's Dev section asks for: the agent ID and warehouse.
         text = dev_env_file.read_text()
         if text.count('"<your-genie-space-id>"') != 1:
             raise AssertionError("walkthrough template no longer has exactly one genie_space_id placeholder")

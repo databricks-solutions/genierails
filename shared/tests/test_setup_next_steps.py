@@ -126,7 +126,7 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
     assert result.returncode == 0, result.stderr
     out = result.stdout
 
-    assert "Next steps (production — walkthrough Phases 2-5; finish the dev rehearsal first):" in out
+    assert "Next steps (production — the walkthrough's Prod section; finish the dev rehearsal first):" in out
     order = [
         "Set promote_from and catalog_map in envs/prod/env.auto.tfvars",
         'make promote-to ENV=prod\n',
