@@ -25,7 +25,7 @@ With `--create-groups`, teardown deletes exactly the groups it created, by their
 
 State written before group IDs were recorded lists groups by name only; teardown keeps those groups and lists them — delete them in the Account Console, or opt in with `--delete-legacy-groups-by-name --account-id <account-id>` (exact-name match, so it can also remove a different group that reused the name).
 
-**Prod needs the same tables.** In [Phase 2](README.md#phase-2--prod-set-up-and-promote-rules), seed the prod catalog before scanning it — tables only, because `make release ENV=prod` creates prod's agent later:
+**Prod needs the same tables.** In the walkthrough's [Prod section](README.md#prod), seed the prod catalog before scanning it — tables only, because `make release ENV=prod` creates prod's agent later:
 
 ```bash
 python setup_sample_env.py --host <prod-workspace-url> --catalog prod_finance --warehouse-id <prod-warehouse-id> --skip-agent

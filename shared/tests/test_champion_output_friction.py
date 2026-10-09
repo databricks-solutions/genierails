@@ -83,7 +83,7 @@ def test_champion_genie_next_steps_are_phase_1(tmp_path):
     out = "\n".join(generate_next_steps(tmp_path, "genie", "dev", has_sql=False, champion_flow=True))
 
     assert out == (
-        "  Next steps (walkthrough Phase 1):\n"
+        "  Next steps (the walkthrough's Dev section):\n"
         "    1. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.\n"
         "       When the scan finishes, review the detections and exclude any false positives, then turn on\n"
         "       auto-tagging. Wait until the class.* tags appear.\n"

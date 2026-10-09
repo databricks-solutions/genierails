@@ -7441,9 +7441,9 @@ def post_generate_semantic_check(tfvars_path: Path, auth_cfg: dict, mode: str = 
 
 
 def champion_genie_next_steps(env_name: str) -> list[str]:
-    """Next steps after the Phase 0 import (`make generate MODE=genie`)."""
+    """Next steps after the Dev import (`make generate MODE=genie`)."""
     return [
-        "  Next steps (walkthrough Phase 1):",
+        "  Next steps (the walkthrough's Dev section):",
         "    1. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.",
         "       When the scan finishes, review the detections and exclude any false positives, then turn on",
         "       auto-tagging. Wait until the class.* tags appear.",
@@ -8300,10 +8300,10 @@ Before you apply, tune for your business roles, security requirements, and Genie
         if args.mode == "genie" and champion_flow:
             hcl_header = (
                 "# ============================================================================\n"
-                "# IMPORTED GENIE AGENT CONFIG (walkthrough Phase 0 — genie mode)\n"
+                "# IMPORTED GENIE AGENT CONFIG (walkthrough Dev section — genie mode)\n"
                 "# ============================================================================\n"
                 "# Only genie_space_configs is produced in this mode. The protection rules\n"
-                "# are drafted in Phase 1 by: make generate ENV=" + WORK_DIR.name + "\n"
+                "# are drafted later in the Dev section by: make generate ENV=" + WORK_DIR.name + "\n"
                 "# ============================================================================\n\n"
             )
         elif args.mode == "genie":
@@ -9110,7 +9110,7 @@ def generate_next_steps(
     if champion_flow and mode == "genie":
         return champion_genie_next_steps(env_name)
     if champion_flow and mode == "full":
-        # Walkthrough Phase 1c -> 1d: rehearse already runs validate-generated +
+        # In the walkthrough's Dev section, rehearse already runs validate-generated +
         # apply. Prod never rehearses (the Makefile refuses); it releases.
         next_cmd = (
             f"make release ENV={env_name}" if env_name == "prod"

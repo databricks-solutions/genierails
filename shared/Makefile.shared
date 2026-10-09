@@ -264,8 +264,8 @@ _guard-workspace-config:
 	fi
 
 # Next steps follow shared/examples/dev_to_prod/README.md. ENV=prod (the name the
-# walkthrough and `make rehearse` reserve for production) gets the Phase 2-6
-# promote/release steps; every other workspace env gets the Phase 0-1 dev rehearsal.
+# walkthrough and `make rehearse` reserve for production) gets the walkthrough's
+# Prod-section steps; every other workspace env gets the Dev-section rehearsal.
 _SETUP_ENV_REL = $(patsubst $(CLOUD_ROOT)/%,%,$(ENV_DIR))
 _SETUP_WALKTHROUGH := ../shared/examples/dev_to_prod/README.md
 
@@ -283,7 +283,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "Environment governance ready:         $(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
 		echo "Workspace environment ready:          $(ENV_DIR)"; \
 		echo ""; \
-		echo "Next steps (production — walkthrough Phases 2-5; finish the dev rehearsal first):"; \
+		echo "Next steps (production — the walkthrough's Prod section; finish the dev rehearsal first):"; \
 		echo "  1. Set promote_from and catalog_map in $(_SETUP_ENV_REL)/env.auto.tfvars, then run:"; \
 		echo "       make promote-to ENV=$(ENV)"; \
 		echo "     (FROM=/CATALOG_MAP= remain optional command-line overrides.)"; \
@@ -298,13 +298,13 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "     It proves a row-pairing key for every masked table before applying (no key to set)."; \
 		echo "  6. Steady state (scheduled): make maintain ENV=$(ENV)"; \
 		echo ""; \
-		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 2 onward)"; \
+		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (the walkthrough's Prod section)"; \
 	else \
 		echo "Shared account environment ready:     $(ACCOUNT_ENV_DIR)"; \
 		echo "Environment governance ready:         $(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"; \
 		echo "Workspace environment ready:          $(ENV_DIR)"; \
 		echo ""; \
-		echo "Next steps (dev rehearsal — walkthrough Phases 0-1):"; \
+		echo "Next steps (dev rehearsal — the walkthrough's Dev section):"; \
 		step=1; \
 		if ! python3 -c 'import sys; sys.path.insert(0, "$(SHARED_ROOT)"); from pathlib import Path; from walkthrough_marker import follows_walkthrough; raise SystemExit(0 if follows_walkthrough(Path("$(ENV_DIR)/env.auto.tfvars")) else 1)'; then \
 			echo "  $$step. Start from the walkthrough template (first time only; keep its safety defaults):"; \
@@ -323,7 +323,7 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 		echo "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)"; \
 		echo "     verify-access picks a row-pairing key per masked table; the proven keys are saved and promoted."; \
 		echo ""; \
-		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (Phase 0 and Phase 1)"; \
+		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (the walkthrough's Dev section)"; \
 	fi
 
 init-env: _bootstrap ## Prepare env directories and default config files
@@ -667,7 +667,7 @@ promote: _guarded-bootstrap _guard-workspace-target ## Split generated/ into lay
 		echo "  Then: in Catalog Explorer, open the $(DEST_ENV) catalog > Details tab > Data classification and turn it on."; \
 		echo "        When the scan finishes, review detections, exclude false positives, enable auto-tagging,"; \
 		echo "        and wait for class.* tags,"; \
-		echo "        and run make release ENV=$(DEST_ENV) (walkthrough Phases 3-4)"; \
+		echo "        and run make release ENV=$(DEST_ENV) (the walkthrough's Prod section)"; \
 		trap - EXIT; \
 	else \
 		if [ "$(SOURCE_ENV)" = "$(ACCOUNT_ENV)" ] || [ "$(SOURCE_ENV)" = "$(DATA_ACCESS_SUBDIR)" ]; then \
