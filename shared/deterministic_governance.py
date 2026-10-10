@@ -163,8 +163,14 @@ def validate_config(
     if not isinstance(governance_mode, str) or governance_mode not in {"legacy", "deterministic"}:
         errors.append("governance_mode must be legacy or deterministic")
     raw_exempt = cfg.get("raw_exempt_principals", [])
-    if not isinstance(raw_exempt, list) or not all(isinstance(x, str) and x for x in raw_exempt):
+    if not isinstance(raw_exempt, list) or not all(
+            isinstance(x, str) and x.strip() for x in raw_exempt):
         errors.append("raw_exempt_principals must be a list of non-empty principal names")
+    elif any("@" in principal for principal in raw_exempt):
+        errors.append(
+            "raw_exempt_principals must name account groups; user emails cannot be verified. "
+            "UUID/hex-shaped names are allowed because they may be legitimate group display names; "
+            "live verification refuses them only when no account group with that exact name exists")
     hash_fallback = cfg.get("hash_fallback")
     if hash_fallback is not None and hash_fallback != "redact":
         errors.append('hash_fallback must be "redact" or unset')

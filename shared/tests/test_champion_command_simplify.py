@@ -346,6 +346,9 @@ groups = { pay_group = {} }
 fgac_policies = [
   { name = "pay" catalog = "paycat" to_principals = ["pay_group"] },
 ]
+tag_assignments = [
+  { entity_type = "columns", entity_name = "paycat.s.t.account_id", tag_key = "gr_treatment", tag_value = "account_last4" },
+]
 genie_space_configs = {
   Payments = { title = "Payments" }
 }
@@ -680,6 +683,9 @@ def test_promote_to_is_exactly_the_legacy_cross_env_promote(tmp_path):
 
     legacy_tree, legacy_out = results["legacy"]
     wrapper_tree, wrapper_out = results["wrapper"]
+    assert json.loads(wrapper_tree.pop("prod/generated/expected_classification.json")) == {
+        "ppay.s.t.account_id": ["gr_treatment:account_last4"]
+    }
     wrapper_prod = hcl2.loads(wrapper_tree.pop("prod/env.auto.tfvars"))
     legacy_prod = hcl2.loads(legacy_tree.pop("prod/env.auto.tfvars"))
     assert wrapper_prod.pop("promote_from") == "dev"

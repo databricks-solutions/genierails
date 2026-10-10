@@ -124,7 +124,10 @@ def warehouse(monkeypatch):
     holder = {}
 
     class FakeVerifier(vea.EffectiveAccessVerifier):
-        def provision_principal(self, tier):
+        def resolve_principal_groups(self, memberships):
+            return list(memberships)
+
+        def provision_principal(self, tier, memberships=None, *, resolved_groups=None):
             return VerificationPrincipal(tier, f"verify-{tier}", f"app-{tier}", "secret", f"sp-{tier}")
 
         def grant_warehouse_use(self, principal):

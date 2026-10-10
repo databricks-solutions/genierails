@@ -539,6 +539,8 @@ certify:
 release: _guard-not-ci-apply _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify access
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); \
+	mode="$$(python3 -c 'import hcl2,sys; print(hcl2.load(open(sys.argv[1])).get("governance_mode", "legacy"))' "$(ENV_DIR)/env.auto.tfvars")" || exit 1; \
+	python3 "$(SHARED_ROOT)/scripts/classification_completeness.py" check --env-dir "$(ENV_DIR)" --mode "$$mode" --ack "$(ACK_UNCLASSIFIED)" || exit 1; \
 	key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" || exit 1; \
 	$(_REQUIRE_MASK_PROOF) || exit 1; \
 	if ! $(MAKE) --no-print-directory _verify-access-keys-readonly ENV="$(ENV)"$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \
@@ -731,6 +733,8 @@ promote-to: ## Promote configured rules into ENV: set envs/prod/env.auto.tfvars,
 	src="$${resolved%% *}"; map="$${resolved#* }"; src_dir="$(CLOUD_ROOT)/envs/$$src"; dest_dir="$(CLOUD_ROOT)/envs/$(ENV)"; \
 	$(MAKE) --no-print-directory promote ENV="$$src" ENV_DIR="$$src_dir" SOURCE_ENV="$$src" SOURCE_ENV_DIR="$$src_dir" \
 		DEST_ENV="$(ENV)" DEST_ENV_DIR="$$dest_dir" DEST_CATALOG_MAP="$$map" || exit 1; \
+	python3 "$(SHARED_ROOT)/scripts/classification_completeness.py" write --source "$$src_dir/generated/abac.auto.tfvars" \
+		--destination "$$dest_dir/generated/expected_classification.json" --catalog-map "$$map" || exit 1; \
 	if [ -f "$$src_dir/generated/abac.auto.tfvars" ]; then \
 		$(_SAVED_SETTINGS) promote-save --env-file "$$dest_dir/env.auto.tfvars" --from "$$src" --catalog-map "$$map"; \
 	fi
