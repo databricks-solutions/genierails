@@ -296,12 +296,14 @@ One command per stage. A person runs the authoring commands on their own machine
 | **1. Author** | a person's machine | `make capture ENV=dev SPACE="<agent>"` (agent change), `make generate ENV=dev` (governance), `make scaffold-treatments` (new class); commit, open a PR | dev, read | no; it only writes files |
 | **2. PR check** | CI, on every PR | `make check ENV=dev` | dev, read-only (for `plan`) | no |
 | **3. Dev rehearsal** | the **dev pipeline**, on every merge to `main`, one at a time | `make rehearse ENV=dev` | dev deployer SP | dev only |
-| **4. Promotion PR** | the **promote pipeline**, started by a person (manual trigger) | `make promote-to ENV=prod`, opening the promotion PR | dev and prod, read | no |
+| **4. Promotion PR** | the **promote pipeline**, started by a person (manual trigger) | `make promote-to ENV=prod`, then the pipeline commits the result to a branch and opens the promotion PR | dev and prod, read; GitHub token scoped to create branches and PRs | no |
 | **5. Promotion PR check** | CI, on the promotion PR | `make check ENV=prod` | prod, read-only | no |
 | **6. Prod release** | the **prod pipeline**, after the promotion PR is approved and merged and stage 3 has passed on that merge commit; protected by a required approval | `make release ENV=prod` | prod deployer SP | prod |
-| **7. Keep protected** | the **prod pipeline**, on a schedule | `make maintain ENV=prod` | prod deployer SP | prod, governance only |
+| **7. Keep protected** | the **prod pipeline**, on a schedule | `make maintain ENV=prod`, run from the **last released commit** | prod deployer SP | prod, governance only |
 
-**`make check ENV=<env>`** is one new read-only target that runs, in order: `validate`, a regeneration that fails if any committed generated file differs, `validate-generated`, the offline coverage check, the mask-library unit tests, and `plan`. For a promotion PR it also re-runs `promote-to` and fails if the PR differs.
+**`make check ENV=<env>`** is one new read-only target that runs, in order: `validate`, a regeneration that fails if any committed generated file differs, `validate-generated`, the offline coverage check, the mask-library unit tests, and `plan`. For a promotion PR it also runs `make promote-to ENV=prod CHECK=1`, a read-only mode that regenerates the output in a scratch directory and fails if the PR differs; it writes nothing and opens nothing.
+
+**`plan` in CI before remote state exists** is a structural plan against empty state: it proves the config is valid and complete, not what will change. State-aware drift planning in CI starts when the env has remote state.
 
 **What each pipeline needs:**
 
@@ -309,12 +311,13 @@ One command per stage. A person runs the authoring commands on their own machine
 |---|---|---|---|
 | PR check | pull request | dev read-only token | none |
 | Dev | merge to `main` | dev deployer SP | remote Terraform state with locking for dev; one run at a time |
-| Promote | manual | dev and prod read-only tokens | none |
+| Promote | manual | dev and prod read-only tokens; a GitHub token scoped to create branches and PRs | none |
 | Prod | merge of a promotion PR, then a required approval; and a schedule for `maintain` | prod deployer SP, held in a protected environment | remote Terraform state with locking for prod; one run at a time |
 
 **Rules that make this safe:**
 - Only stages 3, 6 and 7 apply anything, and each reads the receipt or lock it needs (section 10).
 - The prod release refuses unless the merge commit it runs from passed stage 3 (section 10).
-- No pipeline edits files except the promote pipeline, which only opens the promotion PR.
+- `release` writes a **release receipt** (commit and digests). `maintain` refuses unless it runs from that exact commit with matching digests, so code merged after the last release can't reach prod through the schedule.
+- No pipeline edits files except the promote pipeline, which only commits generated output to a new branch and opens the promotion PR.
 
 **v1 vs later.** Until remote state with locking exists for an env, its applying stages (3, 6, 7) run on the **deployment machine** instead of a pipeline, with the same commands; every applying target refuses in CI. Remote state for dev (stage 3 in CI) is rollout step 12; for prod (stages 6 and 7 in CI) it is deferred (section 15). Stages 1, 2, 4 and 5 work in CI from v1. GenieRails ships one sample workflow file per stage for GitHub Actions.
