@@ -1,6 +1,9 @@
-name: Deploy ABAC Governance
+name: Plan ABAC Governance
 
-# Applies committed governance config to Databricks on merge to main.
+# PLAN ONLY: deploying from CI is not supported yet. Run
+# `make release ENV=prod` from the persistent deployment workspace instead.
+# The full PR→rehearse / approved-merge→release pipeline arrives in a later
+# deterministic-governance rollout step.
 # Requires GitHub Secrets and an S3 bucket for Terraform state storage.
 #
 # Required GitHub Secrets (Settings → Secrets → Actions):
@@ -48,8 +51,8 @@ on:
       - 'Makefile'
 
 jobs:
-  deploy:
-    name: Apply governance config
+  plan:
+    name: Validate and plan governance config
     runs-on: ubuntu-latest
 
     # Optional: configure a GitHub Environment named "production" to require
@@ -125,7 +128,7 @@ jobs:
           EOF
 
       # -----------------------------------------------------------------------
-      # Sync Terraform state from S3 before applying.
+      # Sync Terraform state from S3 before planning.
       # The local backend ("backend local {}") reads state from the envs/ paths.
       # CI runners are ephemeral — we pre-populate state so Terraform can diff
       # against existing deployed resources rather than treating every run as
@@ -142,35 +145,20 @@ jobs:
           find envs -name "*.tfstate" 2>/dev/null | sort || echo "  (none — first deploy)"
 
       # -----------------------------------------------------------------------
-      # Apply each environment layer.
-      # make apply ENV=<env> runs: account → data_access → workspace.
-      # The account layer is applied once explicitly, then dev and prod each
-      # re-run it (idempotent). This ensures account-layer changes are always
-      # applied before workspace-layer changes across all envs.
-      # The generated/ directory is gitignored, so promote is skipped
-      # automatically — Terraform uses the already-split abac.auto.tfvars.
+      # Validate and plan only. CI applies/releases are intentionally refused
+      # until remote state and the promotion workflow land in a later step.
       # -----------------------------------------------------------------------
-      - name: Apply account layer
-        run: make apply ENV=account
-
-      - name: Apply dev environment
-        run: make apply ENV=dev
-
-      - name: Apply prod environment
-        run: make apply ENV=prod
-
-      # -----------------------------------------------------------------------
-      # Persist updated Terraform state back to S3 regardless of apply outcome.
-      # Using `if: always()` so partial failures don't orphan updated state.
-      # -----------------------------------------------------------------------
-      - name: Upload Terraform state to S3
-        if: always()
+      - name: Validate committed configuration
         run: |
-          bucket="${{ secrets.TF_STATE_BUCKET }}"
-          prefix="genie-aws/envs"
-          echo "Uploading tfstate to s3://${bucket}/${prefix}/ ..."
-          find envs -name "terraform.tfstate" | while read -r f; do
-            key="${prefix}/${f#envs/}"
-            echo "  s3://${bucket}/${key}"
-            aws s3 cp "${f}" "s3://${bucket}/${key}"
-          done
+          make validate ENV=account
+          make validate ENV=dev
+          make validate ENV=prod
+
+      - name: Plan account layer
+        run: make plan ENV=account
+
+      - name: Plan dev environment
+        run: make plan ENV=dev
+
+      - name: Plan prod environment
+        run: make plan ENV=prod
