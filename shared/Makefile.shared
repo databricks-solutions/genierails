@@ -1,7 +1,7 @@
 .PHONY: help bootstrap-sp genie-adopt-preflight _guard-root _prepare-env _bootstrap _guarded-bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config _guard-genie-placeholder setup init-env enable-classification generate scaffold-treatments derive-assignments generate-delta audit-schema validate validate-generated coverage-gate promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _prepare-classification _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema evidence validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema audit-rulebook validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config _guard-not-ci-apply setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec verify-access-keys _verify-access-keys-readonly _guard-account-admin-env release maintain test-champion _derive-before-exposure _refresh-live-ddl promote-to
+.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config _guard-not-ci-apply setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec verify-access-keys _verify-access-keys-readonly _guard-account-admin-env release maintain ungovern rebuild-governed-tables test-champion _derive-before-exposure _refresh-live-ddl promote-to
 
 # ── Variables expected from the including Makefile ──────────────
 # SHARED_ROOT  — absolute path to shared/
@@ -385,6 +385,36 @@ generate: _guarded-bootstrap _guard-workspace-target ## Run generate_abac.py in 
 	else \
 		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
+	@if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ] && grep -Eq '^[[:space:]]*governance_mode[[:space:]]*=[[:space:]]*"deterministic"' "$(ENV_DIR)/env.auto.tfvars"; then \
+		$(_STICKY) record --env-dir "$(ENV_DIR)" --config "$(ENV_DIR)/generated/abac.auto.tfvars"; \
+	fi
+
+# Takes one table out of a deterministic env's governed set, removes its
+# treatment tags and applies governance. Refuses while any agent uses it; the
+# check runs before anything is created, then it asks to confirm (YES=1 skips).
+_STICKY = python3 "$(SHARED_ROOT)/scripts/sticky_governance.py"
+ungovern: _guard-not-ci-apply ## Remove governance (treatment tags, masks) from a table no agent uses: TABLE=cat.sch.tbl [YES=1]
+	@$(_GUARD_WORKSPACE_ENV); \
+	if [ -z "$(TABLE)" ]; then echo "ERROR: TABLE=cat.sch.tbl is required" >&2; exit 1; fi; \
+	$(_DRY_RUN_GUARD); \
+	$(_STICKY) ungovern --env-dir "$(ENV_DIR)" --table "$(TABLE)" || exit 1; \
+	if [ "$(YES)" != 1 ]; then \
+		printf 'Type YES to ungovern $(TABLE) in $(ENV): '; read -r answer || answer=; \
+		if [ "$$answer" != YES ]; then echo "ungovern: not confirmed; nothing changed." >&2; exit 1; fi; \
+	fi; \
+	$(call _ENV_LOCK,ungovern); \
+	$(_STICKY) ungovern --env-dir "$(ENV_DIR)" --table "$(TABLE)" --commit >/dev/null || exit 1; \
+	if ! GENIERAILS_UNGOVERN_TABLE="$(TABLE)" $(MAKE) --no-print-directory apply-governance ENV="$(ENV)" APPLY_FLAGS=; then \
+		echo "ungovern: apply failed; $(TABLE) stays governed while its tags are deployed. Fix the error and re-run." >&2; \
+		exit 1; \
+	fi
+
+# Rewrites a missing or unreadable governed-table record from its git history,
+# the deployed treatment tags and the generated/promoted config. Local only.
+rebuild-governed-tables: ## Rebuild envs/<env>/generated/governed_tables.json after it was lost (deterministic envs)
+	@$(_GUARD_WORKSPACE_ENV); \
+	$(_DRY_RUN_GUARD); \
+	$(_STICKY) rebuild --env-dir "$(ENV_DIR)"
 
 scaffold-treatments: _guarded-bootstrap _guard-workspace-target ## Add fail-safe treatment stubs for unmapped native class.* tags
 	@python3 "$(SHARED_ROOT)/scripts/scaffold_treatments.py" \
@@ -755,6 +785,7 @@ _plan-layer:
 		exit 0; \
 	fi; \
 	if [ "$$layer" = "data_access" ]; then \
+		$(_STICKY) check-layout --env-dir "$$(dirname "$$env_dir")" --env-name "$$target_env"; \
 		$(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$(LAYER_ENV_DIR)")"; \
 		$(_COVERAGE_GATE) run --env-dir "$$(dirname "$$env_dir")" --env-name "$$target_env" --runner "$(ROOT_RUNNER)" $(if $(filter 1,$(VERBOSE)),--verbose,); \
 	fi; \
@@ -791,7 +822,10 @@ _apply-layer: _guard-not-ci-apply
 	env_dir="$(LAYER_ENV_DIR)"; \
 	apply_flags="$(if $(filter data_access workspace,$(LAYER)),$(APPLY_FLAGS),)"; \
 	if [ "$$layer" = "workspace" ]; then $(_GENIE_ID_FILE_CHECK); fi; \
-	if [ "$$layer" = "data_access" ]; then $(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$$env_dir")" IMPORT_CLASSIFICATION=1; fi; \
+	if [ "$$layer" = "data_access" ]; then \
+		$(_STICKY) check-layout --env-dir "$$(dirname "$$env_dir")" --env-name "$$target_env"; \
+		$(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$$env_dir")" IMPORT_CLASSIFICATION=1; \
+	fi; \
 	if [ ! -f "$$env_dir/abac.auto.tfvars" ]; then \
 		echo "=== Skipping terraform apply ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
 		exit 0; \

@@ -1,3 +1,9 @@
+# Frozen copy of modules/data_access before stable treatment tags (91931be).
+# stable_treatment_tags.tftest.hcl applies it, then re-plans the current module
+# on the same state to prove legacy envs see no changes. Do not edit; only
+# the coverage_gate_check and normalize_masking_sql.py paths differ (they
+# point back at the real ones from this copy's location).
+
 terraform {
   required_providers {
     databricks = {
@@ -28,16 +34,8 @@ locals {
     : databricks_sql_endpoint.warehouse[0].id
   )
 
-  # Keyed without the value, so a treatment change updates the tag in place.
-  treatment_tag_assignments = var.governance_mode == "deterministic" ? {
-    for ta in var.tag_assignments : "${ta.entity_type}|${ta.entity_name}|${ta.tag_key}" => ta
-    if ta.entity_type == "columns" && ta.tag_key == "gr_treatment"
-  } : {}
-  legacy_tag_assignments = [for ta in var.tag_assignments : ta if !(
-    var.governance_mode == "deterministic" && ta.entity_type == "columns" && ta.tag_key == "gr_treatment"
-  )]
   _grouped_tag_assignments = {
-    for ta in local.legacy_tag_assignments :
+    for ta in var.tag_assignments :
     "${ta.entity_type}|${ta.entity_name}|${ta.tag_key}|${ta.tag_value}" => ta...
   }
 
@@ -247,7 +245,7 @@ locals {
 
 # Shared with the workspace layer's CAN_RUN check; no resources.
 module "coverage_gate" {
-  source = "../coverage_gate_check"
+  source = "../../../../coverage_gate_check"
 
   gate_file            = var.coverage_gate_file
   expected_fingerprint = local.coverage_gate_fingerprint
@@ -302,23 +300,6 @@ resource "databricks_entity_tag_assignment" "assignments" {
   lifecycle {
     ignore_changes = all
   }
-}
-
-# Retagged only after the masking functions and every policy exist (the
-# account layer has already added the allowed value), so a column never
-# carries a treatment that no policy masks yet.
-resource "databricks_entity_tag_assignment" "treatment" {
-  for_each    = local.treatment_tag_assignments
-  provider    = databricks.workspace
-  entity_type = each.value.entity_type
-  entity_name = each.value.entity_name
-  tag_key     = each.value.tag_key
-  tag_value   = each.value.tag_value
-  depends_on = [
-    databricks_grant.terraform_sp_manage_catalog,
-    terraform_data.masking_functions,
-    databricks_policy_info.policies,
-  ]
 }
 
 resource "time_sleep" "wait_for_tag_propagation" {
@@ -389,7 +370,6 @@ resource "databricks_grant" "table_access" {
     time_sleep.wait_for_tag_propagation,
     terraform_data.masking_functions,
     databricks_policy_info.policies,
-    databricks_entity_tag_assignment.treatment,
     time_sleep.wait_for_policy_enforcement,
   ]
 
@@ -426,7 +406,7 @@ resource "databricks_sql_endpoint" "warehouse" {
 # REPLACE: the drop lives in masking_functions_drop, so changing the SQL never
 # drops a function the live policies use.
 data "external" "normalized_masking_sql" {
-  program = ["python3", "${path.module}/normalize_masking_sql.py"]
+  program = ["python3", "${path.module}/../../../normalize_masking_sql.py"]
   query = {
     sql_file = var.masking_sql_file
   }
@@ -544,14 +524,13 @@ resource "databricks_policy_info" "policies" {
   ]
 }
 
-# Unity Catalog policy creation and treatment retags can return before
-# enforcement is observable. New table grants wait out that window. The wait
-# restarts when the policies change or the masking functions are redeployed
-# (any terraform_data replacement: SQL, warehouse, host, client ID), which
-# delays grants created in the same apply; SELECT grants that
-# already exist stay in place throughout.
+# Unity Catalog policy creation can return before enforcement is observable.
+# New table grants wait out that window. The wait restarts when the policies
+# change or the masking functions are redeployed (any terraform_data
+# replacement: SQL, warehouse, host, client ID), which delays grants created in
+# the same apply; SELECT grants that already exist stay in place throughout.
 resource "time_sleep" "wait_for_policy_enforcement" {
-  depends_on      = [databricks_policy_info.policies, databricks_entity_tag_assignment.treatment]
+  depends_on      = [databricks_policy_info.policies]
   create_duration = "30s"
 
   triggers = {

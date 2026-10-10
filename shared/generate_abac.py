@@ -8051,6 +8051,14 @@ def main():
             else configured
         )
     )
+    # Deterministic envs keep governing tables every agent dropped (until
+    # make ungovern), so their tags are regenerated rather than removed.
+    from scripts.sticky_governance import GovernedTablesError, load_governed_tables
+    try:
+        declared = list(dict.fromkeys(list(declared) + load_governed_tables(auth_file.parent)))
+    except GovernedTablesError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
     agent_footprint = discover_agent_footprint(declared_footprint=declared)
     table_refs = footprint_table_refs(agent_footprint) or None
 

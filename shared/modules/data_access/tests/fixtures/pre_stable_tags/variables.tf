@@ -165,11 +165,6 @@ variable "tag_assignments" {
   description = "Classifier-owned tag-to-entity facts. Promotion leaves this empty so each environment derives assignments from its own classification scan."
 }
 
-variable "governance_mode" {
-  type    = string
-  default = "legacy"
-}
-
 variable "fgac_policies" {
   type = list(object({
     name              = string

@@ -497,6 +497,7 @@ module "data_access" {
   classification_all_schemas               = var.classification_all_schemas
   classification_existing_auto_tag_configs = var.classification_existing_auto_tag_configs
   tag_assignments                          = var.tag_assignments
+  governance_mode                          = var.governance_mode
   fgac_policies                            = var.fgac_policies
   sql_warehouse_id                         = var.sql_warehouse_id
   warehouse_name                           = var.warehouse_name

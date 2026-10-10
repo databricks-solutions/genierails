@@ -231,10 +231,12 @@ def test_table_select_waits_for_complete_policy_enforcement_chain():
         "time_sleep.wait_for_tag_propagation",
         "terraform_data.masking_functions",
         "databricks_policy_info.policies",
+        "databricks_entity_tag_assignment.treatment",
         "time_sleep.wait_for_policy_enforcement",
     }
 
-    assert wait_dependencies == {"databricks_policy_info.policies"}
+    # Treatment retags happen after the policies; the wait covers them too.
+    assert wait_dependencies == {"databricks_policy_info.policies", "databricks_entity_tag_assignment.treatment"}
     assert "databricks_grant.table_access" not in policy_dependencies
 
 
