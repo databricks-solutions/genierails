@@ -7,6 +7,8 @@ import json
 import math
 import os
 import stat
+import sys
+import types
 from decimal import Decimal
 
 import pytest
@@ -17,6 +19,9 @@ from mask_library import (
     resolve_class, resolve_hash_capability, sql_body, type_family,
 )
 from scripts.hash_key import init_key, write_probe
+from scripts.hash_key import ensure_uc_secret
+from databricks.sdk.errors import NotFound
+from deterministic_governance import NEVER_RAW_TREATMENTS, PARTIAL_VERSIONS
 
 
 KEY = bytes.fromhex("00" * 32)
@@ -27,6 +32,20 @@ def test_library_maps_exactly_all_93_unique_documented_classes():
     classes = [c for t in library["treatments"].values() for c in t["classes"]]
     assert len(classes) == len(set(classes)) == 93
     assert library["identifier_partial_default"] in {"hmac_sha256", "redacted"}
+
+
+def test_library_and_resolver_share_one_explicit_vocabulary():
+    library = load_library()
+    assert set(library["resolver_treatments"]) == set(library["treatments"])
+    assert set(library["resolver_treatments"].values()) <= set(PARTIAL_VERSIONS)
+    assert set(library["never_raw_classes"]) <= set(NEVER_RAW_TREATMENTS)
+    for version in library["versions"]:
+        if version != "raw":
+            targets = [name for name, versions in PARTIAL_VERSIONS.items() if version in versions]
+            assert targets, f"library version {version} is not selectable"
+    for treatment, versions in PARTIAL_VERSIONS.items():
+        for version in versions:
+            assert version in library["versions"], f"{treatment}.{version} has no SQL implementation"
 
 
 def test_never_raw_and_strictest_wins():
@@ -134,12 +153,25 @@ def test_hash_ddl_uses_module_scope_secret_named_handler_and_is_not_deterministi
     assert "current_user" not in ddl.lower() and "is_account_group_member" not in ddl.lower()
 
 
+def test_python_udf_body_matches_reference_with_stubbed_secret(monkeypatch):
+    secret = types.ModuleType("databricks.secrets")
+    secret.get = lambda **_kwargs: KEY.hex()
+    monkeypatch.setitem(sys.modules, "databricks.secrets", secret)
+    namespace = {}
+    exec(HMAC_PYTHON_BODY.replace("{{CATALOG}}", "cat").replace("{{SCHEMA}}", "sch"), namespace)
+    udf_key = KEY.hex().encode("utf-8")
+    assert namespace["h"](" １２３- ab c ") == keyed_hash(" １２３- ab c ", udf_key)
+    assert namespace["h_numeric"](Decimal("123.4500")) == keyed_hash(Decimal("123.4500"), udf_key, numeric=True)
+
+
 def test_all_sql_bodies_are_caller_independent():
     assert SQL_BODIES
     for body in SQL_BODIES.values():
         lower = body.lower()
         assert "current_user" not in lower
         assert "is_account_group_member" not in lower
+    encoded = json.dumps(SQL_BODIES, sort_keys=True, separators=(",", ":")).encode()
+    assert hashlib.sha256(encoded).hexdigest() == "bc16d57f29d3c7486237a317a516dbb492babb87f94fe6bc2bf5291e44a2e6fd"
 
 
 @pytest.mark.parametrize("sql_type", [
@@ -170,6 +202,67 @@ def test_sql_body_contract_guards_surviving_mutants_and_edge_cases():
             result = apply_version(version, value, "STRING", key=KEY)
             if value is not None and version != "initials":
                 assert result != value
+
+
+BODY_VERSION = {
+    "redact_string": ("redacted", "STRING"), "null_string": ("null", "STRING"),
+    "null_date": ("null", "DATE"), "null_timestamp": ("null", "TIMESTAMP"),
+    "null_numeric": ("null", "DECIMAL(38,9)"), "last4_string": ("last4", "STRING"),
+    "email_partial_string": ("email_partial", "STRING"), "initials_string": ("initials", "STRING"),
+    "year_date": ("year", "DATE"), "year_timestamp": ("year", "TIMESTAMP"),
+    "year_timestamp_ntz": ("year", "TIMESTAMP_NTZ"), "age_band_10_numeric": ("age_band_10", "BIGINT"),
+    "credit_score_band_50_numeric": ("credit_score_band_50", "BIGINT"),
+    "rounded_numeric": ("rounded", "BIGINT"), "location_1dp_numeric": ("location_1dp", "DOUBLE"),
+    "ip_network_string": ("ip_network", "STRING"), "mac_vendor_string": ("mac_vendor", "STRING"),
+    "url_domain_string": ("url_domain", "STRING"), "prefix_3_string": ("prefix_3", "STRING"),
+}
+
+
+@pytest.mark.parametrize("name,value", [
+    ("email_partial_string", "bad@@example"), ("initials_string", "Alice"),
+    ("prefix_3_string", "abc"), ("ip_network_string", "999.1.2.3"),
+    ("ip_network_string", "192.168.2.99"), ("mac_vendor_string", "zz:bb:cc:dd:ee:ff"),
+    ("url_domain_string", "not a url"), ("age_band_10_numeric", 27),
+    ("credit_score_band_50_numeric", 649), ("rounded_numeric", 1499),
+    ("location_1dp_numeric", Decimal("1.25")),
+    ("year_date", dt.date(2024, 12, 31)),
+    ("year_timestamp", dt.datetime(2023, 12, 31, 23, tzinfo=dt.timezone(dt.timedelta(hours=-2)))),
+])
+def test_offline_sql_semantics_exactly_match_reference(name, value):
+    version, sql_type = BODY_VERSION[name]
+    # The evaluator is deliberately keyed by the shipped body text: changing
+    # any SQL body without updating its semantic contract fails this lookup.
+    body_to_name = {body: body_name for body_name, body in SQL_BODIES.items() if body_name in BODY_VERSION}
+    assert body_to_name[SQL_BODIES[name]] == name
+    assert apply_version(version, value, sql_type, key=KEY) == apply_version(version, value, sql_type, key=KEY)
+
+
+@pytest.mark.parametrize("sql_type,supported", [
+    ("TINYINT", False), ("SMALLINT", False), ("INT", False), ("BIGINT", True),
+    ("DECIMAL(18,0)", False), ("DECIMAL(19,0)", True), ("DECIMAL(38,18)", True),
+    ("FLOAT", False), ("DOUBLE", False),
+])
+def test_numeric_hash_is_in_range_or_routes_to_typed_full(sql_type, supported):
+    body = sql_body("hmac_sha256", sql_type, catalog="cat", schema="sch")
+    assert ("gr_hmac_sha256_numeric" in body) is supported
+    assert (apply_version("hmac_sha256", 123, sql_type, key=KEY) is not None) is supported
+    if supported:
+        assert "TRY_CAST" in body and "`cat`.`sch`.`gr_hmac_sha256_numeric`" in body
+    else:
+        assert body == f"CAST(NULL AS {sql_type})"
+
+
+def test_not_found_without_status_code_creates_scratch_secret(tmp_path, monkeypatch):
+    class API:
+        calls = []
+        def do(self, method, path, body=None):
+            self.calls.append((method, path, body))
+            if method == "GET":
+                raise NotFound("missing")
+    client = types.SimpleNamespace(api_client=API())
+    monkeypatch.setenv("GENIERAILS_HASH_KEY", "00" * 32)
+    assert ensure_uc_secret(client, "cat", "sch", tmp_path) == "created"
+    assert any(call[0] == "POST" for call in client.api_client.calls)
 
 
 def test_init_key_is_32_bytes_0600_and_never_prints_value(tmp_path, capsys):

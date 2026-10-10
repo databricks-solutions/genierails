@@ -10,6 +10,8 @@ import secrets
 import stat
 from pathlib import Path
 
+from databricks.sdk.errors import NotFound
+
 
 def init_key(path: Path) -> None:
     if path.exists():
@@ -32,8 +34,10 @@ def ensure_uc_secret(client, catalog: str, schema: str, generated_dir: Path) -> 
         client.api_client.do("GET", f"/api/2.1/unity-catalog/secrets/{name}")
         created = False
     except Exception as exc:
-        if getattr(exc, "status_code", None) != 404:
+        if not isinstance(exc, NotFound):
             raise
+        # TODO(step 5): production provisioning and cross-environment probe
+        # comparison are wired when deterministic masks are deployed.
         key = os.environ.get("GENIERAILS_HASH_KEY")
         if not key:
             raise RuntimeError(

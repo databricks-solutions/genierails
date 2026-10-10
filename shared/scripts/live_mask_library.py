@@ -14,6 +14,7 @@ from pathlib import Path
 
 import hcl2
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import NotFound
 
 SHARED = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SHARED))
@@ -47,6 +48,7 @@ CASES = {
     "rounded_numeric": ("CAST(-1500 AS DOUBLE)", -2000.0),
     "location_1dp_numeric": ("CAST(-1.25 AS DOUBLE)", -1.3),
     "ip_network_string": ("CAST('2001:db8:abcd:12:1234::1' AS STRING)", "2001:db8:abcd:12::/64"),
+    "ip_network_string_ipv4": ("CAST('192.168.2.99' AS STRING)", "192.168.2.0/24"),
     "mac_vendor_string": ("CAST('aa-bb-cc-dd-ee-ff' AS STRING)", "AA:BB:CC:**:**:**"),
     "url_domain_string": ("CAST('https://User:pass@EXAMPLE.com:443/a?q=1' AS STRING)", "example.com"),
     "prefix_3_string": ("CAST('2000' AS STRING)", "200***"),
@@ -75,15 +77,17 @@ def run(w: WorkspaceClient, warehouse_id: str, catalog: str, schema: str, genera
     try:
         w.api_client.do("GET", f"/api/2.1/unity-catalog/secrets/{catalog}.{schema}.hmac_key")
     except Exception as exc:
-        if getattr(exc, "status_code", None) != 404:
+        if not isinstance(exc, NotFound):
             raise
     else:
         raise RuntimeError(f"refusing live parity run: hmac_key already exists: {catalog}.{schema}")
     _execute(w, warehouse_id, f"CREATE SCHEMA `{catalog}`.`{schema}`")
     try:
+        # TODO(step 5): this scratch-only creation becomes deployment wiring.
         ensure_uc_secret(w, catalog, schema, generated_dir)
+        _execute(w, warehouse_id, "SET TIME ZONE 'America/Los_Angeles'")
         for name, (literal, expected) in CASES.items():
-            body = SQL_BODIES[name]
+            body = SQL_BODIES[name.removesuffix("_ipv4")]
             # JSON conversion gives stable DATE/TIMESTAMP/DECIMAL comparison.
             rows = _execute(w, warehouse_id, f"SELECT to_json(named_struct('v', {body})) FROM (SELECT {literal} AS value)")
             actual = json.loads(rows[0][0]).get("v")
@@ -101,7 +105,7 @@ def run(w: WorkspaceClient, warehouse_id: str, catalog: str, schema: str, genera
         write_probe(generated_dir / "hash_probe.json", probe)
         tested += 1
         rows = _execute(w, warehouse_id, f"SELECT `{catalog}`.`{schema}`.`gr_hmac_sha256_numeric`(CAST(123.4500 AS DECIMAL(38,18)))")
-        numeric_hash = rows[0][0]
+        numeric_hash = int(rows[0][0]) if rows[0][0] is not None else None
         expected_numeric = keyed_hash(Decimal("123.4500"), key_text.encode(), numeric=True)
         if numeric_hash != expected_numeric:
             mismatches.append({"body": "hmac_numeric", "expected": expected_numeric, "actual": numeric_hash})
@@ -130,7 +134,10 @@ def run_from_environment() -> dict:
         host=os.environ["DATABRICKS_HOST"], client_id=os.environ["DATABRICKS_CLIENT_ID"],
         client_secret=os.environ["DATABRICKS_CLIENT_SECRET"],
     )
-    return run(w, os.environ["DATABRICKS_WAREHOUSE_ID"], os.environ.get("DATABRICKS_TEST_CATALOG", "genierails_dev_1"), os.environ.get("DATABRICKS_TEST_SCHEMA", "gr_dg_libtest"), Path(os.environ.get("DATABRICKS_GENERATED_DIR", ".")))
+    scratch = os.environ.get("DATABRICKS_GENERATED_DIR")
+    if not scratch:
+        raise RuntimeError("DATABRICKS_GENERATED_DIR must name an explicit scratch directory")
+    return run(w, os.environ["DATABRICKS_WAREHOUSE_ID"], os.environ.get("DATABRICKS_TEST_CATALOG", "genierails_dev_1"), os.environ.get("DATABRICKS_TEST_SCHEMA", "gr_dg_libtest"), Path(scratch))
 
 
 def main() -> int:

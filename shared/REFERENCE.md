@@ -24,13 +24,13 @@ wins (`raw < partial < keyed hash < redacted/NULL`). Unsupported types receive
 the full version. Numeric identifiers are converted to canonical decimal text
 before hashing.
 
-The keyed hash reads its UC secret once at Python-module initialization. It is
-not declared deterministic. If a hash is actually required and the capability
-is missing, deployment stops unless `hash_fallback = "redact"` was explicitly
-selected; that fallback uses the full version. Nothing is created until a
-hashed treatment is used. The probe hash of `genierails-probe` is stored in
-`generated/hash_probe.json`; it proves dev/prod key equality without revealing
-the key. Metastore admins and principals holding `MANAGE` on the governance
+The keyed hash reads its UC secret once at Python-module initialization. The
+secret is the 64-character hexadecimal key text encoded as UTF-8 (not decoded
+hex bytes), consistently in the reference and UDF. It is not declared
+deterministic. Step 5 will provision the secret automatically, enforce the
+explicit `hash_fallback = "redact"` capability gate, and compare scratch probe
+hashes between dev and prod without writing them into a real environment's
+`generated/` directory. Metastore admins and principals holding `MANAGE` on the governance
 schema can grant themselves `READ SECRET`; this is a residual platform risk.
 
 Measured on the AWS dev serverless Pro warehouse: a query touching a hashed

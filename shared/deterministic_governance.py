@@ -42,6 +42,9 @@ PARTIAL_VERSIONS = {
     treatment: versions | {"redacted"}
     for treatment, versions in PARTIAL_VERSIONS.items()
 }
+_MASK_LIBRARY = json.loads(Path(__file__).with_name("mask_library.json").read_text())
+for _version, _treatment in _MASK_LIBRARY.get("resolver_versions", {}).items():
+    PARTIAL_VERSIONS[_treatment] = PARTIAL_VERSIONS[_treatment] | {_version}
 VERSION_NAMES = frozenset().union(*PARTIAL_VERSIONS.values())
 
 

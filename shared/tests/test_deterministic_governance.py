@@ -103,6 +103,7 @@ def test_treatment_versions_only_allows_partial_known_treatment_and_version():
     assert errors(treatment_versions={"email_partial": {"full": "redacted"}})
     assert errors(treatment_versions={"email_partial": {"partial": "missing"}})
     assert errors(treatment_versions={"email_partial": {"partial": "raw"}})
+    assert errors(treatment_versions={"generic_partial": {"partial": "raw"}})
     for treatment in NEVER_RAW_TREATMENTS:
         result = errors(treatment_versions={treatment: {"partial": "raw"}})
         assert any("may not be raw" in error for error in result)
@@ -131,8 +132,9 @@ def test_column_override_accepts_partial_or_treatment_and_refuses_full():
     assert errors(column_overrides={"cat.sch.tbl.col": {"keep_current": False}})
 
 
+@pytest.mark.xfail(strict=True, reason="step 3 requires live class-derived treatment input")
 def test_column_treatment_override_must_be_stricter_than_class_derived_treatment():
-    assert errors(column_overrides={"cat.sch.tbl.col": {"treatment": "missing"}})
+    assert errors(column_overrides={"cat.sch.tbl.col": {"treatment": "email_partial"}})
 
 
 def test_row_filter_schema_groups_literals_and_conflicts():

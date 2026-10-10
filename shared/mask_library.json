@@ -2,7 +2,6 @@
   "schema_version": 1,
   "identifier_partial_default": "hmac_sha256",
   "settings": {
-    "hash_fallback": null,
     "redacted_string": "[REDACTED]",
     "normalization": "trim, NFKC, uppercase, remove spaces and hyphens"
   },
@@ -11,14 +10,32 @@
   "treatment_aliases": {
     "ssn": {"treatment": "identifier", "allowed_partials": ["hmac_sha256", "last4", "redacted"]}
   },
+  "resolver_treatments": {
+    "financial_card": "card_last4", "financial_card_secret": "redact",
+    "card_expiration": "redact", "financial_account": "account_last4",
+    "identifier": "generic_partial", "email": "email_partial",
+    "phone": "phone_partial", "person_name": "name_partial", "date": "date_year",
+    "age": "generic_partial", "credit_score": "generic_partial",
+    "compensation": "compensation_redacted", "ip_address": "generic_partial",
+    "mac_address": "generic_partial", "url": "generic_partial", "location": "generic_partial",
+    "sensitive": "redact", "secret": "secret"
+  },
+  "resolver_versions": {
+    "null": "redact", "partial": "email_partial", "email_partial": "email_partial",
+    "age_band_10": "generic_partial",
+    "credit_score_band_50": "generic_partial", "ip_network": "generic_partial",
+    "mac_vendor": "generic_partial", "url_domain": "generic_partial",
+    "location_1dp": "generic_partial"
+  },
   "versions": {
     "redacted": {"STRING": "redact_string", "DATE": "null_date", "TIMESTAMP": "null_timestamp", "NUMERIC": "null_numeric"},
     "null": {"STRING": "null_string", "DATE": "null_date", "TIMESTAMP": "null_timestamp", "NUMERIC": "null_numeric"},
     "last4": {"STRING": "last4_string"},
     "hmac_sha256": {"STRING": "hmac_string", "NUMERIC": "hmac_numeric"},
+    "partial": {"STRING": "email_partial_string"},
     "email_partial": {"STRING": "email_partial_string"},
     "initials": {"STRING": "initials_string"},
-    "year": {"DATE": "year_date", "TIMESTAMP": "year_timestamp"},
+    "year": {"DATE": "year_date", "TIMESTAMP": "year_timestamp", "TIMESTAMP_NTZ": "year_timestamp_ntz"},
     "age_band_10": {"NUMERIC": "age_band_10_numeric"},
     "credit_score_band_50": {"NUMERIC": "credit_score_band_50_numeric"},
     "rounded": {"NUMERIC": "rounded_numeric"},

@@ -26,9 +26,19 @@ def type_family(sql_type: str) -> str:
     value = sql_type.upper().split("(", 1)[0].strip()
     if value in {"CHAR", "VARCHAR"}:
         return "STRING"
-    if value == "TIMESTAMP_NTZ":
-        return "TIMESTAMP"
     return "NUMERIC" if value in NUMERIC_TYPES else value
+
+
+def numeric_hash_supported(sql_type: str) -> bool:
+    """Only types that can hold the non-negative 63-bit digest use numeric HMAC."""
+    upper = sql_type.upper().strip()
+    base = upper.split("(", 1)[0]
+    if base in {"BIGINT", "LONG"}:
+        return True
+    if base in {"DECIMAL", "NUMERIC"}:
+        match = re.search(r"\((\d+)", upper)
+        return match is None or int(match.group(1)) >= 19
+    return False
 
 
 def normalize_identifier(value: object) -> str:
@@ -79,7 +89,9 @@ def apply_version(version: str, value: object, sql_type: str, *, key: bytes | No
     if version == "hmac_sha256":
         if key is None:
             raise ValueError("hmac_sha256 requires a key")
-        return keyed_hash(value, key, numeric=family == "NUMERIC") if family in {"STRING", "NUMERIC"} else None
+        if family == "STRING":
+            return keyed_hash(value, key)
+        return keyed_hash(value, key, numeric=True) if family == "NUMERIC" and numeric_hash_supported(sql_type) else None
     if version == "last4" and family == "STRING":
         text = str(value).strip()
         compact = re.sub(r"[\s-]+", "", text)
@@ -96,7 +108,7 @@ def apply_version(version: str, value: object, sql_type: str, *, key: bytes | No
     if version == "year":
         if family == "DATE" and isinstance(value, dt.date):
             return dt.date(value.year, 1, 1)
-        if family == "TIMESTAMP" and isinstance(value, dt.datetime):
+        if family in {"TIMESTAMP", "TIMESTAMP_NTZ"} and isinstance(value, dt.datetime):
             aware = value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
             year = aware.astimezone(dt.timezone.utc).year
             return dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc)
@@ -156,12 +168,13 @@ def resolve_class(classes: list[str], sql_type: str, library: dict | None = None
     if not candidates:
         raise KeyError(f"no mask-library mapping for {classes!r}")
     never_raw = any(candidate[4] for candidate in candidates)
-    _, _, partial, full, _ = max(candidates, key=lambda candidate: candidate[0])
+    _, _, partial, full, _ = max(candidates, key=lambda candidate: (candidate[0], candidate[1]))
     return partial, full, never_raw
 
 
 def resolve_hash_capability(partial: str, full: str, *, available: bool, fallback: str | None) -> str:
     """Fail closed only when a selected treatment actually needs keyed hashing."""
+    # TODO(step 5): wire capability discovery and the deployment fallback gate.
     if partial != "hmac_sha256" or available:
         return partial
     if fallback == "redact":
@@ -182,7 +195,8 @@ SQL_BODIES = {
     "email_partial_string": "CASE WHEN value IS NULL THEN NULL WHEN trim(value) NOT RLIKE '^[^@\\\\s]+@[^@\\\\s]+\\\\.[^@\\\\s]+$' THEN '[REDACTED]' ELSE concat(left(trim(value), 1), '***@', lower(substring_index(trim(value), '@', -1))) END",
     "initials_string": "CASE WHEN value IS NULL THEN NULL WHEN size(filter(split(trim(value), '[^\\\\p{L}]+'), x -> x <> '')) <= 1 THEN '[REDACTED]' ELSE aggregate(filter(split(trim(value), '[^\\\\p{L}]+'), x -> x <> ''), '', (a, x) -> concat(a, upper(left(x, 1)))) END",
     "year_date": "CASE WHEN value IS NULL THEN NULL ELSE make_date(year(value), 1, 1) END",
-    "year_timestamp": "CASE WHEN value IS NULL THEN NULL ELSE make_timestamp(year(value), 1, 1, 0, 0, 0, 'UTC') END",
+    "year_timestamp": "CASE WHEN value IS NULL THEN NULL ELSE make_timestamp(year(convert_timezone('UTC', value)), 1, 1, 0, 0, 0, 'UTC') END",
+    "year_timestamp_ntz": "CASE WHEN value IS NULL THEN NULL ELSE make_timestamp_ntz(year(value), 1, 1, 0, 0, 0) END",
     "age_band_10_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) OR value < 0 THEN NULL ELSE CAST(floor(value / 10) * 10 AS BIGINT) END",
     "credit_score_band_50_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) OR value < 0 THEN NULL ELSE CAST(floor(value / 50) * 50 AS BIGINT) END",
     "rounded_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) THEN NULL ELSE round(value, -3) END",
@@ -199,8 +213,8 @@ SQL_BODIES = {
 # without depending on session state or a user-defined function.
 SQL_BODIES["ip_network_string"] = """CASE
 WHEN value IS NULL THEN NULL
-WHEN trim(value) RLIKE '^(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)(?:\\.(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)){3}$'
-  THEN concat(regexp_extract(trim(value), '^(\\d+\\.\\d+\\.\\d+)\\.', 1), '.0/24')
+WHEN trim(value) RLIKE '^(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(?:[.](?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])){3}$'
+  THEN concat(regexp_extract(trim(value), '^([0-9]+[.][0-9]+[.][0-9]+)[.]', 1), '.0/24')
 WHEN lower(trim(value)) RLIKE '^[0-9a-f:]+$' AND trim(value) LIKE '%:%'
   THEN concat(concat_ws(':', transform(slice(
     concat(
@@ -215,14 +229,14 @@ WHEN lower(trim(value)) RLIKE '^[0-9a-f:]+$' AND trim(value) LIKE '%:%'
 ELSE '[REDACTED]' END"""
 
 
-def sql_body(version: str, sql_type: str) -> str:
+def sql_body(version: str, sql_type: str, *, catalog: str = "{{CATALOG}}", schema: str = "{{SCHEMA}}") -> str:
     """Return a mask expression whose result has exactly ``sql_type``."""
     family = type_family(sql_type)
     if version == "hmac_sha256":
         if family == "STRING":
-            return f"CAST((gr_hmac_sha256(value)) AS {sql_type})"
-        if family == "NUMERIC":
-            return f"CAST((gr_hmac_sha256_numeric(value)) AS {sql_type})"
+            return f"CAST((`{catalog}`.`{schema}`.`gr_hmac_sha256`(value)) AS {sql_type})"
+        if family == "NUMERIC" and numeric_hash_supported(sql_type):
+            return f"TRY_CAST((`{catalog}`.`{schema}`.`gr_hmac_sha256_numeric`(value)) AS {sql_type})"
         return f"CAST(NULL AS {sql_type})"
     if version in {"redacted", "null"} and family != "STRING":
         return f"CAST(NULL AS {sql_type})"
@@ -230,7 +244,8 @@ def sql_body(version: str, sql_type: str) -> str:
     if not body_name or body_name not in SQL_BODIES:
         return ("CASE WHEN value IS NULL THEN CAST(NULL AS STRING) ELSE '[REDACTED]' END"
                 if family == "STRING" else f"CAST(NULL AS {sql_type})")
-    return f"CAST(({SQL_BODIES[body_name]}) AS {sql_type})"
+    cast = "TRY_CAST" if family == "NUMERIC" else "CAST"
+    return f"{cast}(({SQL_BODIES[body_name]}) AS {sql_type})"
 
 
 HMAC_PYTHON_BODY = '''import hashlib\nimport hmac\nimport re\nimport unicodedata\nfrom databricks.secrets import get\n_key = get(catalog="{{CATALOG}}", schema="{{SCHEMA}}", key="hmac_key").encode("utf-8")\ndef _digest(normalized):\n    return hmac.new(_key, normalized.encode("utf-8"), hashlib.sha256).digest()\ndef h(value):\n    if value is None:\n        return None\n    normalized = re.sub(r"[\\s-]+", "", unicodedata.normalize("NFKC", str(value).strip()).upper())\n    return _digest(normalized).hex()\ndef h_numeric(value):\n    if value is None or not value.is_finite():\n        return None\n    if value == 0:\n        normalized = "0"\n    else:\n        normalized = format(value.normalize(), "f")\n        if "." in normalized:\n            normalized = normalized.rstrip("0").rstrip(".")\n    return int.from_bytes(_digest(normalized)[:8], "big") & ((1 << 63) - 1)\n'''
