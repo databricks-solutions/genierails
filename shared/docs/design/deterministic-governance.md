@@ -41,6 +41,7 @@ Governed set = top-level `uc_tables` ∪ tables of configured agents ∪ tables 
   }
   ```
 
+  - **Overlapping keys are unioned:** a table's readers are the union of every entry that matches it (exact table, `catalog.schema.*`). `plan`, `generate` and `promote-to` print the resolved readers per table.
   - These groups get `SELECT`; nothing else in GenieRails grants it. A table in `table_readers` is governed automatically.
   - Every reader must be a tier group or in `raw_exempt_principals`; any other group is refused, so nobody gets an unexpected full mask.
   - New `SELECT` is gated by the coverage check. Adding a reader counts as widening and is checked by refuse-weakening (section 6).
@@ -134,7 +135,7 @@ row_filters = [
 - **Capture is explicit:** `make capture ENV=dev SPACE="<agent>"` writes that agent's exported `serialized_space` to `envs/dev/agents/<agent>.space.json`. Only the outer fields (`space_id`, `etag`, ACLs) are removed; the item IDs inside the payload (instructions, sample questions, joins, snippets, benchmarks) are kept, because the format needs them for a faithful round-trip. A plain `generate` only imports agents not yet in git.
 - **Per-agent files:** `envs/<env>/agents/<agent>.auto.tfvars` holds `genie_space_id`, `acl_groups` and `delete`. The prod agent ID is written there by `release` and committed. A loader merges these files before plan.
 - **Access:** `acl_groups` get `CAN_RUN` on the agent, nothing else. `generate`, `rehearse` and `release` stop if any `acl_groups` group can't read one of the agent's tables through `table_readers`, and name the table and the missing group.
-- **Champion convenience:** when `generate` first imports an agent, it writes a `table_readers` entry for each of the agent's tables that has none, filled with the agent's `acl_groups`, for review and commit. It never edits an existing entry.
+- **Champion convenience:** when `generate` first imports an agent, it writes a `table_readers` entry for each of the agent's tables that no entry (exact or wildcard) already covers, filled with the agent's `acl_groups`, for review and commit. It never edits an existing entry.
 - **`acl_groups` is env-owned:** the first `promote-to` seeds prod from dev; later promotions keep prod's value and print the differences.
 - **Dev:** agent config is never overwritten; GenieRails applies governance and access for captured tables only, and creates an agent only if missing.
 - **Prod:** every `release` overwrites the agent's config from git (full replacement). Any field the API rejects fails the release; nothing is skipped silently. It prints a field-level report of what it overwrote, never recreates the agent and never changes its ID, so conversations stay.
@@ -210,7 +211,7 @@ Each entry names the env, the kind and the exact object. GenieRails prints the b
 - **Rehearse writes a receipt**, stored with dev's state: commit, clean-tree flag, fingerprint of code and inputs, result, target env mapping, and the digest of what `promote-to` produces for each target.
 - **`release` recomputes everything and refuses unless** `HEAD` equals the receipt's commit, the tree is clean, the fingerprints match, and the digest of `envs/prod/generated` matches the receipt. The promotion PR's merge commit is the one that must pass rehearse, so code merged after it can't reach prod untested.
 - **Unfinished agents** never reach git, because capture is explicit. Promoting A carries B's last captured version unchanged.
-- **Removing an agent or table removes access only.** Masks stay until `make ungovern`.
+- **Removing an agent revokes `CAN_RUN` only. Removing a `table_readers` entry revokes the `SELECT` it granted.** Masks stay until `make ungovern`.
 - A failed rehearse blocks release until a fix merges and rehearse passes. CI also regenerates each open promotion PR and fails it if it differs.
 - v1 runs every applying target from one deployment machine; the env lock allows one run at a time. No hand edits in prod; remove `CAN_EDIT` on prod agents from everyone except the deployer SP.
 - Until remote state exists, the operator runs the post-merge rehearse.
