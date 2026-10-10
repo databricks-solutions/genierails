@@ -28,8 +28,15 @@ locals {
     : databricks_sql_endpoint.warehouse[0].id
   )
 
+  treatment_tag_assignments = var.governance_mode == "deterministic" ? {
+    for ta in var.tag_assignments : ta.entity_name => ta
+    if ta.entity_type == "columns" && ta.tag_key == "gr_treatment"
+  } : {}
+  legacy_tag_assignments = [for ta in var.tag_assignments : ta if !(
+    var.governance_mode == "deterministic" && ta.entity_type == "columns" && ta.tag_key == "gr_treatment"
+  )]
   _grouped_tag_assignments = {
-    for ta in var.tag_assignments :
+    for ta in local.legacy_tag_assignments :
     "${ta.entity_type}|${ta.entity_name}|${ta.tag_key}|${ta.tag_value}" => ta...
   }
 
@@ -296,8 +303,18 @@ resource "databricks_entity_tag_assignment" "assignments" {
   }
 }
 
+resource "databricks_entity_tag_assignment" "treatment" {
+  for_each    = local.treatment_tag_assignments
+  provider    = databricks.workspace
+  entity_type = "columns"
+  entity_name = each.key
+  tag_key     = "gr_treatment"
+  tag_value   = each.value.tag_value
+  depends_on  = [databricks_grant.terraform_sp_manage_catalog]
+}
+
 resource "time_sleep" "wait_for_tag_propagation" {
-  depends_on      = [databricks_entity_tag_assignment.assignments]
+  depends_on      = [databricks_entity_tag_assignment.assignments, databricks_entity_tag_assignment.treatment]
   create_duration = "30s"
 }
 

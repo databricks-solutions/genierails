@@ -36,6 +36,7 @@ from treatment_derivation import (  # noqa: E402
 )
 from scripts.coverage_gate import write_refresh_record  # noqa: E402
 from scripts.footprint import FootprintError, resolve_footprint  # noqa: E402
+from scripts.sticky_governance import deterministic, load_manifest, merge_assignments  # noqa: E402
 
 
 def _retained_promoted_assignments(assignments: list[dict], config) -> list[dict]:
@@ -120,6 +121,8 @@ def _governed_footprint(auth_path: Path, env_path: Path) -> tuple[dict, list[dic
             for table in declared
         ]
     declared.extend(runtime.get("declared_footprint") or [])
+    if deterministic(env_path.parent):
+        declared.extend(load_manifest(env_path.parent))
     for space in runtime.get("genie_spaces") or []:
         declared.extend(space.get("declared_footprint") or [])
     footprint = discover_agent_footprint(declared_footprint=declared)
@@ -222,6 +225,7 @@ def derive_assignments(
             and item.get("tag_key") in sensitivity_keys
         )
     ]
+    refreshed = merge_assignments(env_path.parent, refreshed)
     _assert_promoted_masks_cover(refreshed, promoted, config.tag_key)
     updated = _replace_bracket_section(
         original,
