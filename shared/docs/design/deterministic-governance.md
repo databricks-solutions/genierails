@@ -319,7 +319,7 @@ A change that needs an intermediate replan (staged policy changes, tier moves, m
 **Provenance for operations.** Every applying command enforces its own provenance, independent of pipeline settings:
 - `detach-agent`: HEAD is the last released commit, and that release had the agent with `detached = true`.
 - `apply-account`: clean `origin/main` HEAD; a saved account plan and manifest; approval; the account lock; it writes an account receipt.
-- Migration and policy phases: a rehearsed commit; one manifest and approval per phase.
+- Migration and policy phases: a clean checkout whose `HEAD` is on freshly fetched `origin/main`, with a matching passing dev receipt, and not older than the last release unless `rollback:<commit>` is acknowledged; one manifest and approval per phase, each recording the commit and this provenance result.
 
 **`make check ENV=<env>`** is read-only. It runs `validate`, a regeneration that fails if any committed generated file differs, `validate-generated`, the offline coverage check, the mask-library unit tests and `plan`. With `ENV=prod` it also runs `make promote-to ENV=prod CHECK=1`, which regenerates into a scratch directory and fails if the committed output differs. Before an env has remote state, `plan` is a structural plan against empty state; state-aware plans start with remote state.
 
