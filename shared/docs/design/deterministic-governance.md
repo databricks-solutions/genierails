@@ -154,9 +154,9 @@ row_filters = [
 | Unmapped class | Blocks new access. `maintain` and `release` apply a fail-safe **never-raw redacted** treatment to the column (every tier, including tier 1, since an unknown class may be one that must never be raw) and report it until a mapping is promoted or the column is in `ack.txt`. |
 | Prod classification complete | `release` refuses if a column classified in dev (remapped through `catalog_map`) has no `class.*` tag in prod. `promote-to` writes the expected list to `generated/expected_classification.json`. |
 | Protection order | raw < partial versions < redacted/NULL. |
-| Refuse weakening | Every `promote-to`, `release` and migration compares each SELECT holder and column against live state. Any weakening, including new `raw_exempt_principals`, `partial = "raw"`, or removing or widening a row filter, stops the run unless listed in `ack.txt`. |
+| Refuse weakening | `release-plan`, `release` and migration compare each SELECT holder and column against live state; `promote-to` compares committed inputs only. Any weakening, including new `raw_exempt_principals`, `partial = "raw"`, or removing or widening a row filter, stops the run unless acknowledged in `ack.txt`. |
 | Reader check | Before the first deterministic apply of an env, and whenever governance newly covers a table, GenieRails computes the table's **current readers** that GenieRails didn't grant: `SELECT` and `ALL PRIVILEGES` at table, schema and catalog level (from `information_schema` privileges), owners of the table and its parents, readers of every view that depends on it (view-level and inherited `SELECT`/`ALL PRIVILEGES`, following views of views), and metastore admins, with group membership expanded transitively. ABAC masks still apply to view readers, because they're evaluated as the querying user. Every reader must be in a tier, in `raw_exempt_principals`, or in `ack.txt`; otherwise the run stops. Principals that can **grant** access (`MANAGE`, owners, including view owners) are reported separately as a risk. Groups a row filter would leave with zero rows are listed the same way. |
-| Account layer | The account layer (groups, group members, tag policies) is shared by every env. `rehearse` and `release` never change it, except to **add** allowed values to the treatment tag policy that a new treatment needs. Any other account change runs only through `make apply-account` in the operations stage, with an approval. If the account plan isn't otherwise empty, `rehearse` and `release` refuse and print that command. |
+| Account layer | The account layer (groups, group members, tag policies) is shared by every env. `rehearse` and `release` never change it, except to **add** allowed values to the treatment tag policy that a new treatment needs. Any other account change runs only through `make apply-account` in the operations stage, with an approval. If the account plan isn't otherwise empty, `rehearse` and `release` refuse and print that command. Every tag-value addition takes the global **account lock**, in local and pipeline runs alike. |
 | Policy changes | Any change that replaces or removes a policy or function runs as separate applies under the env lock: (1) create new functions and policies, removing nothing; (2) verify with `SHOW EFFECTIVE POLICIES` and queries as every affected tier; (3) retag or move principals; (4) verify; (5) remove the old policies and functions. Outside phase 5, policies and functions are protected from destroy. A brief `MULTIPLE_MASKS` error is acceptable only for the principals being moved; any raw value fails the run. Run tier moves as maintenance windows. |
 | External masks | Before every `rehearse`, `release` and `maintain`, GenieRails inventories effective policies and table-attached masks on governed tables. One it didn't create on a governed column stops the run, because it would break queries with `MULTIPLE_MASKS`. |
 | Tags | One treatment tag key for everything. Each column has one treatment-tag resource keyed by `entity_type|entity_name|tag_key` (never by value) with no `ignore_changes`, so value changes update in place (verified in the provider). Classifier-owned `class.*` tags are never managed by Terraform. Order for a column moving to a new treatment: add the value to the tag policy, create the new treatment's policies, then retag. A column is never tagged with a value no policy matches. |
@@ -199,7 +199,7 @@ GenieRails prints the before/after consequence of each entry and refuses entries
 `make setup` writes a `.gitignore` that commits `env.auto.tfvars`, `agents/`, `generated/`, `ack.txt` and capture files, and ignores `auth.auto.tfvars`, state, locks and `generated/.live_refresh.json`.
 
 - **Only authoring commands write committed files** (`capture`, `generate`, `scaffold-treatments`, `promote-to`, `ungovern`). Applying commands (`rehearse`, `release`, `maintain`, `detach-agent`) write only to ignored runtime files: Terraform state, receipts, lock files and live snapshots. So an applying run never leaves the tree dirty.
-- **`promote-to` is a pure function of the commit.** It reads only committed files: dev's generated output and prod's committed env-owned files. It never reads live prod or prod state, so `promote-to` on any machine, its `CHECK=1` mode and the receipt digest all produce the same bytes. Anything that needs live prod (reader check, refuse-weakening, kept deployed names) runs in `release`. Generated files are never hand-merged: on conflict, run `make generate` on the latest `main`. `promote-to` writes only the files it owns; env-owned keys (`acl_groups`, `table_readers`, `raw_exempt_principals`) are never overwritten and are excluded from the generated-file equality check in section 10. Changes to them are still subject to refuse-weakening.
+- **`promote-to` is a pure function of the commit.** It reads only committed files: dev's generated output and prod's committed env-owned files. It never reads live prod or prod state, so `promote-to` on any machine, its `CHECK=1` mode and the receipt digest all produce the same bytes. Anything that needs live prod (reader check, refuse-weakening, kept deployed policy names) runs in `release-plan`, before approval. Generated files are never hand-merged: on conflict, run `make generate` on the latest `main`. `promote-to` writes only the files it owns; env-owned keys (`acl_groups`, `table_readers`, `raw_exempt_principals`) are never overwritten and are excluded from the generated-file equality check in section 10. Changes to them are still subject to refuse-weakening.
 
 ## 10. Change lifecycle and team workflow
 
@@ -247,9 +247,9 @@ GenieRails prints the before/after consequence of each entry and refuses entries
 | Mask change while B is mid-curation | Governance change; rehearse, promote, release. B's config is untouched in dev and prod. |
 | New sensitive column in prod | `maintain` applies the library mask, or the fail-safe redaction if unmapped. |
 | Grant another group access to A in prod | Add the group to A's `acl_groups` in `envs/prod/agents/A.auto.tfvars` and, if it can't already read A's tables, to `table_readers`; PR, release. |
-| Remove agent A | `make detach-agent`, then remove it from config; `CAN_RUN` revoked; table access and masks unchanged. |
+| Remove agent A | A PR sets `acl_groups = []` and `detached = true` and is released (`CAN_RUN` revoked); then `make detach-agent`; then a PR removes it from config with a no-destroy plan. Table access and masks unchanged. |
 | Change who can read a table | Edit `table_readers` (dev, then promote, or prod directly as an env-owned change), PR, release. Additions are checked as widening. |
-| Stop governing a table | `make ungovern TABLE=...`, refused while anything still covers it. |
+| Stop governing a table | `make ungovern TABLE=...` edits the committed governed-table list (refused while anything still covers it); a PR, rehearse and release apply the removal. |
 | Roll back | One revert PR covering the source change and its promotion, with `rollback:<commit>` acknowledged; normal stages; masks switch back in place. |
 | Upgrade GenieRails | A governance change: upgrade, rehearse, promote, release. |
 | Several teams | Per-agent files with code owners; a central team owns governance files. |
@@ -290,7 +290,7 @@ Every step keeps `main` working and ships its own live test on AWS and Azure whe
 8. **Access:** `SELECT` only from `table_readers`, `CAN_RUN` only from `acl_groups`; per-agent files; the agent-readability check and the proposed `table_readers` in `generate`.
 9. **Release gating, then migration:** the rehearse receipt and `release` attestation first; then the migration dry run, revocation list, frozen AI row filters, tag state moves and staged cutover.
 10. **Declared row filters.**
-11. **Capture and prod ownership:** `make capture`, JSON-aware remap, prod IDs in agent files, overwrite report, `make detach-agent`.
+11. **Capture and prod ownership:** `make capture`, JSON-aware remap, prod IDs in state and the release receipt, overwrite report, two-step detach.
 12. **Pipelines:** `make check`; per-commit receipts; remote state for dev and the dev pipeline; GitHub Actions and Azure DevOps samples for each stage in section 17. The prod pipeline stays on the deployment machine until remote state for prod exists.
 13. **Docs** (golden path plus advanced), then a full live run on AWS and Azure.
 
@@ -303,11 +303,23 @@ One command per stage. People run the authoring commands on their own machine; p
 | **1. Author** | a person's machine | `make capture ENV=dev SPACE="<agent>"` (agent), `make generate ENV=dev` (governance), `make scaffold-treatments` (new class), `make promote-to ENV=prod` (promotion); commit, open a PR | no; files only |
 | **2. PR check** | CI, every PR | `make check ENV=dev`; also `make check ENV=prod` when the PR touches `envs/prod/**` | no |
 | **3. Dev rehearsal** | **dev pipeline**, every merge to `main` that touches code, governance or `envs/**`; every commit gets its own run, in order | `make rehearse ENV=dev` | dev only |
-| **4. Prod release** | **prod pipeline**, when stage 3 **succeeds** on a commit that touches `envs/prod/**`; a state-aware prod plan and the weakening/reader report are published, then a required approval | `make release ENV=prod`, applying the approved plan | prod |
+| **4. Prod release** | **prod pipeline**, when stage 3 **succeeds** on a commit that touches `envs/prod/**`: `make release-plan ENV=prod` publishes the approval manifest; after a required approval, `make release ENV=prod MANIFEST=<manifest>` applies it | `release-plan`, then `release` | prod |
 | **5. Keep protected** | **prod pipeline**, on a schedule, checked out at the last released commit (read from the release receipt) | `make maintain ENV=prod` | prod, governance only |
-| **6. Operations** | **prod pipeline**, manual dispatch with a required approval per run | `make detach-agent`, `make apply-account`, migration phases, phased policy changes | prod or account layer |
+| **6. Operations** | **prod pipeline**, manual dispatch, one approval per operation and per phase | `make detach-agent`, `make apply-account`, migration phases, phased policy changes (each with the provenance rules below) | prod or account layer |
 
 A promotion PR is just a PR whose diff includes `promote-to` output. It may also carry the dev change it promotes, in one PR. Prod-only PRs (`acl_groups`, `table_readers`, `ack.txt` in `envs/prod`) follow the same stages: rehearse on the merge commit is a no-op that writes a receipt, and the safety comes from the prod plan, refuse-weakening and the reader check.
+
+**Two-phase release.**
+1. **`make release-plan ENV=prod`**, under the prod lock, reads prod state and live policies and builds an ignored runtime overlay that keeps deployed policy names (#68: it fails closed when policies can't be listed, and refuses a collision with an unmanaged policy). From the committed promotion output plus that overlay it saves a Terraform plan for every root, runs the reader and refuse-weakening checks, and writes one immutable **manifest**: commit, state serial per root, plan file hashes, live-snapshot digest, the kept-name mapping and the reports.
+2. The approval is for that manifest.
+3. **`make release ENV=prod MANIFEST=<manifest>`** applies only those saved plans, then verifies. It refuses, and asks for a fresh `release-plan` and approval, if the commit, any state serial, the live snapshot or any plan hash has changed. The release receipt records the manifest.
+
+A change that needs an intermediate replan (staged policy changes, tier moves, migration) never goes through `release`; it runs as operations, with a manifest and an approval per phase.
+
+**Provenance for operations.** Every applying command enforces its own provenance, independent of pipeline settings:
+- `detach-agent`: HEAD is the last released commit, and that release had the agent with `detached = true`.
+- `apply-account`: clean `origin/main` HEAD; a saved account plan and manifest; approval; the account lock; it writes an account receipt.
+- Migration and policy phases: a rehearsed commit; one manifest and approval per phase.
 
 **`make check ENV=<env>`** is read-only. It runs `validate`, a regeneration that fails if any committed generated file differs, `validate-generated`, the offline coverage check, the mask-library unit tests and `plan`. With `ENV=prod` it also runs `make promote-to ENV=prod CHECK=1`, which regenerates into a scratch directory and fails if the committed output differs. Before an env has remote state, `plan` is a structural plan against empty state; state-aware plans start with remote state.
 
@@ -319,13 +331,13 @@ A promotion PR is just a PR whose diff includes `promote-to` output. It may also
 | Dev | merge to `main` (path filter) | dev deployer SP | dev remote state with locking; append-only receipt store; runs queue in order and are **never cancelled** (GitHub: a queue job, no `cancel-in-progress`; Azure DevOps: Exclusive Lock with `lockBehavior: sequential`) |
 | Prod | success of the dev pipeline on a commit touching `envs/prod/**` (GitHub `workflow_run`; Azure DevOps pipeline-resource trigger); a schedule; manual dispatch | prod deployer SP in a protected environment; read-only access to the dev receipt store | prod remote state with locking; one run at a time; pending runs superseded by a newer release are cancelled |
 
-- **Auth:** every Databricks credential is a service principal through OIDC workload identity federation (GitHub OIDC, Azure DevOps service connection). No PATs. Read-only SPs need `USE CATALOG`, `USE SCHEMA`, `BROWSE`, read on `system.information_schema` and `CAN_VIEW` on the agents.
+- **Auth:** every Databricks credential is a service principal through OIDC workload identity federation (GitHub OIDC, Azure DevOps service connection). No PATs. Read-only SPs need `USE CATALOG`, `USE SCHEMA`, `BROWSE`, read on `system.information_schema` and `CAN_VIEW` on the agents. The dev and prod deployer SPs also need account-level rights to add allowed values to the treatment tag policy; only the operations identity may run `apply-account`.
 - **Repo settings:** `main` requires `check ENV=dev` (and `check ENV=prod` for `envs/prod/**`), up-to-date branches, CODEOWNERS approval on `envs/prod/**`, `ack.txt` and governance files, and no direct pushes, including admins. The prod environment requires a reviewer from the governance code owners, forbids self-approval and deploys only from `main`.
 - **No pipeline writes to git.**
 - **Failures alert the owning team**, including `maintain` reporting a new reader or an unmapped class.
 
 **Rules that make this safe:**
-- Only the dev and prod pipelines apply anything, and each checks the receipt or lock it needs (section 10).
+- Only the dev and prod pipelines apply anything; each applying command checks its receipt, manifest or lock itself (section 10, two-phase release, provenance for operations).
 - Prod releases only a commit on `main` that passed stage 3, matching its receipt, never older than the last release unless a rollback is acknowledged.
 - `release` writes a **release receipt** (commit and digests); `maintain` refuses unless it runs from that commit with matching digests.
 - Acknowledgements are committed and reviewed (section 6), never pipeline parameters.
