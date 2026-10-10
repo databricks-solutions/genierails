@@ -13,39 +13,42 @@ from typing import Any, Literal, Mapping, Sequence
 
 
 ACCESS_LEVELS = {"raw", "partial", "full"}
-MASK_LIBRARY_PATH = Path(__file__).with_name("mask_library.json")
+NEVER_RAW_TREATMENTS = frozenset({
+    "card_security_code", "card_pin", "card_track_data", "secret",
+})
 
-
-def _mask_contract(path: Path = MASK_LIBRARY_PATH) -> tuple[dict[str, frozenset[str]], frozenset[str]]:
-    data = json.loads(path.read_text())
-    versions: dict[str, frozenset[str]] = {}
-    never_raw: set[str] = set()
-    for name, treatment in data["treatments"].items():
-        partials = set(treatment.get("partial_by_type", {}).values())
-        partials.add(treatment.get("partial", treatment["full"]))
-        partials.discard(None)
-        partials.discard("$identifier_partial_default")
-        if treatment.get("partial") == "$identifier_partial_default":
-            partials.add(data["identifier_partial_default"])
-        partials.add(treatment["full"])
-        versions[name] = frozenset(partials)
-        if treatment.get("never_raw"):
-            never_raw.add(name)
-    for alias, rule in data.get("treatment_aliases", {}).items():
-        versions[alias] = frozenset(rule["allowed_partials"])
-        if rule["treatment"] in never_raw:
-            never_raw.add(alias)
-    return versions, frozenset(never_raw)
-
-
-PARTIAL_VERSIONS, NEVER_RAW_TREATMENTS = _mask_contract()
-VERSION_NAMES = frozenset(json.loads(MASK_LIBRARY_PATH.read_text())["versions"]) - {"raw"}
+# Public treatment vocabulary from deterministic-governance step 1.  The mask
+# library implements these versions, but does not rename this shared contract.
+PARTIAL_VERSIONS: dict[str, frozenset[str]] = {
+    "ssn": frozenset({"hmac_sha256", "last4"}),
+    "redact": frozenset({"redacted"}),
+    "compensation_redacted": frozenset({"rounded"}),
+    "ssn_last4": frozenset({"hmac_sha256", "last4"}),
+    "card_last4": frozenset({"last4"}),
+    "account_last4": frozenset({"last4"}),
+    "email_partial": frozenset({"partial"}),
+    "phone_partial": frozenset({"last4"}),
+    "name_partial": frozenset({"initials"}),
+    "date_year": frozenset({"year"}),
+    "tfn_partial": frozenset({"hmac_sha256", "last4"}),
+    "medicare_partial": frozenset({"hmac_sha256", "last4"}),
+    "bsb_partial": frozenset({"last4"}),
+    "aadhaar_partial": frozenset({"hmac_sha256", "last4"}),
+    "generic_partial": frozenset({"redacted", "prefix_3"}),
+    "round_amount": frozenset({"rounded"}),
+    **{treatment: frozenset({"redacted"}) for treatment in NEVER_RAW_TREATMENTS},
+}
+PARTIAL_VERSIONS = {
+    treatment: versions | {"redacted"}
+    for treatment, versions in PARTIAL_VERSIONS.items()
+}
+VERSION_NAMES = frozenset().union(*PARTIAL_VERSIONS.values())
 
 
 def _known_treatments(registry_path: Path | None = None) -> set[str]:
     path = registry_path or Path(__file__).with_name("treatment_config.json")
     data = json.loads(path.read_text())
-    return set(PARTIAL_VERSIONS)
+    return {item["value"] for item in data.get("treatments", [])} | set(PARTIAL_VERSIONS)
 
 
 @dataclass(frozen=True)
