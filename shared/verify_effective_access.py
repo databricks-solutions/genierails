@@ -997,8 +997,13 @@ def evaluate_tiered_column_mask_check(
     involved = set(tiers)
     errors = _errors_for(involved, errors_by_principal)
     moving = set(check.moving_principals)
-    accepted = {p for p, detail in errors.items()
-                if p in moving and "more than one mask" in detail.lower()}
+    accepted = {
+        p for p, detail in errors.items()
+        if p in moving
+        and "more than one mask" in detail.lower()
+        and not any(marker in detail.lower() for marker in (
+            "permission_denied", "permission denied", "insufficient_permissions"))
+    }
     refused = {p: detail for p, detail in errors.items() if p not in accepted}
     if refused:
         return CheckResult("column-mask", target, FAIL,
@@ -1728,8 +1733,27 @@ class EffectiveAccessVerifier:
         display_name = f"{self.name_prefix}-{tier}"
         a = self.account
 
+        # SCIM string literals use JSON escaping. Account group displayName
+        # equality is case-insensitive, so filter results must still be
+        # narrowed to one exact, case-sensitive configured name before any
+        # service principal or secret is created.
+        resolved_groups = []
+        for membership in ((tier,) if memberships is None else memberships):
+            candidates = list(a.groups.list(
+                filter=f"displayName eq {json.dumps(membership)}"))
+            exact = [group for group in candidates
+                     if getattr(group, "display_name", None) == membership]
+            if len(exact) != 1:
+                raise RuntimeError(
+                    f"Tier group {membership!r} resolved to {len(exact)} exact account-group "
+                    f"matches ({len(candidates)} SCIM result(s)); expected exactly one. "
+                    "Apply or correct the account layer before verification."
+                )
+            resolved_groups.append(exact[0])
+
         existing = next(
-            (sp for sp in a.service_principals.list(filter=f'displayName eq "{display_name}"')),
+            (sp for sp in a.service_principals.list(
+                filter=f"displayName eq {json.dumps(display_name)}")),
             None,
         )
         if existing is None:
@@ -1742,10 +1766,7 @@ class EffectiveAccessVerifier:
 
         # Add the SP to every requested account group. A dual-tier test
         # principal proves policy precedence, not merely each tier in isolation.
-        for membership in ((tier,) if memberships is None else memberships):
-            group = next((g for g in a.groups.list(filter=f'displayName eq "{membership}"')), None)
-            if group is None:
-                raise RuntimeError(f"Tier group not found: {membership!r} (apply the account layer first)")
+        for group in resolved_groups:
             if not any((m.value == sp.id) for m in (group.members or [])):
                 a.groups.patch(
                     group.id,

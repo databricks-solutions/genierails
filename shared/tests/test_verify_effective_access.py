@@ -194,6 +194,42 @@ def test_tiered_fixed_point_bound_is_inconclusive():
     assert "too many sampled rows" in result.detail
 
 
+def test_row_filtered_masked_tier_with_only_null_raw_row_has_no_proof():
+    check = _tiered_check()
+    expected = {
+        "raw": [(1, None), (2, "raw")],
+        "partial": [(1, "n/a"), (2, "partial")],
+        "full": [(1, "[R]"), (2, "[R]")],
+    }
+    actual = {
+        "raw_group": expected["raw"],
+        "analyst": [expected["partial"][0]],
+        "viewer": expected["full"],
+    }
+    result = evaluate_tiered_column_mask_check(check, actual, expected)
+    assert result.status == INCONCLUSIVE
+    assert result.evidence["per_principal_compared"]["analyst"] == 0
+
+
+def test_empty_raw_value_never_counts_as_mask_proof():
+    check = replace(
+        _tiered_check(), expected_tiers=(("raw_group", "raw"), ("viewer", "full")))
+    expected = {"raw": [(1, "")], "partial": [(1, "[R]")], "full": [(1, "[R]")]}
+    result = evaluate_tiered_column_mask_check(
+        check, {"raw_group": expected["raw"], "viewer": expected["full"]}, expected)
+    assert result.status == INCONCLUSIVE
+    assert "no masked principal returned a distinguishing row" in result.detail
+
+
+def test_moving_principal_combined_permission_and_mask_error_is_failure():
+    check = replace(_tiered_check(), moving_principals=("analyst",))
+    expected = {"raw": [(1, "raw")], "partial": [(1, "part")], "full": [(1, "full")]}
+    result = evaluate_tiered_column_mask_check(
+        check, {"raw_group": expected["raw"], "viewer": expected["full"]}, expected,
+        {"analyst": "PERMISSION_DENIED; column has more than one mask"})
+    assert result.status == FAIL
+
+
 def test_declared_tier_must_match_overlapping_memberships():
     check = replace(_tiered_check(), expected_tiers=_tiered_check().expected_tiers + (("dual", "full"),))
     expected = {"raw": [(1, "alice@example.com")], "partial": [(1, "a***@example.com")],
@@ -266,6 +302,18 @@ tag_assignments = [{ entity_type = "columns", entity_name = "cat.sch.people.api_
     check = spec.column_masks[0]
     assert check.partial_function == check.full_function == "cat.gov.redact"
     assert "partial" not in set(dict(check.expected_tiers).values())
+
+
+def test_deterministic_spec_rejects_raw_exempt_user_email(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    tfvars.write_text("fgac_policies = []\ntag_assignments = []\n")
+    env.write_text('''governance_mode = "deterministic"
+access_tier_groups = ["raw", "viewer"]
+raw_exempt_principals = ["alice@example.com"]
+''')
+    with pytest.raises(ValueError, match="user emails"):
+        load_spec_from_tfvars(tfvars, env_file=env, key_column="id")
 
 
 def test_cli_missing_promoted_tfvars_reports_prerequisite(tmp_path):
@@ -1079,8 +1127,9 @@ class TestTemporaryWarehouseAccess:
                 principal, ["cat.sales.customers"], revoke=True)
         assert len(statements) == 3
 
-    def test_provision_assigns_temporary_principal_to_workspace_before_return(
-        self, monkeypatch,
+    @pytest.mark.parametrize("membership", ["viewers", 'team"blue\\ops'])
+    def test_provision_assigns_exact_temporary_group_before_return(
+        self, monkeypatch, membership,
     ):
         from types import SimpleNamespace
         from unittest.mock import Mock
@@ -1091,7 +1140,12 @@ class TestTemporaryWarehouseAccess:
             "account_host": "a", "account_id": "1", "workspace_id": "123",
         })
         sp = SimpleNamespace(id="456", application_id="app-123")
-        group = SimpleNamespace(id="789", members=[])
+        group = SimpleNamespace(id="789", display_name=membership, members=[])
+        group_filters = []
+
+        def list_groups(**kwargs):
+            group_filters.append(kwargs["filter"])
+            return [group]
         account = SimpleNamespace(
             service_principals=SimpleNamespace(
                 list=lambda **_: [], create=lambda **_: sp,
@@ -1100,7 +1154,7 @@ class TestTemporaryWarehouseAccess:
                 create=lambda **_: SimpleNamespace(secret="secret"),
             ),
             groups=SimpleNamespace(
-                list=lambda **_: [group], patch=Mock(),
+                list=list_groups, patch=Mock(),
             ),
             workspace_assignment=SimpleNamespace(update=Mock()),
         )
@@ -1110,7 +1164,7 @@ class TestTemporaryWarehouseAccess:
         verifier._account = account
         verifier._admin_ws = workspace
 
-        principal = verifier.provision_principal("viewers")
+        principal = verifier.provision_principal("viewers", memberships=(membership,))
 
         account.workspace_assignment.update.assert_called_once()
         call = account.workspace_assignment.update.call_args.kwargs
@@ -1118,6 +1172,33 @@ class TestTemporaryWarehouseAccess:
         assert call["principal_id"] == 456
         assert call["permissions"][0].value == "USER"
         assert principal.application_id == "app-123"
+        assert group_filters == [f"displayName eq {__import__('json').dumps(membership)}"]
+
+    @pytest.mark.parametrize("returned_names", [
+        ["analysts-prefix"],
+        ["analysts", "analysts"],
+    ])
+    def test_provision_refuses_nonexact_or_ambiguous_group_matches(
+        self, monkeypatch, returned_names,
+    ):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        verifier = EffectiveAccessVerifier({
+            "host": "h", "client_id": "c", "client_secret": "s",
+            "account_host": "a", "account_id": "1", "workspace_id": "123",
+        })
+        create = Mock()
+        verifier._account = SimpleNamespace(
+            groups=SimpleNamespace(list=lambda **_: [
+                SimpleNamespace(id=str(index), display_name=name, members=[])
+                for index, name in enumerate(returned_names)]),
+            service_principals=SimpleNamespace(create=create),
+        )
+        with pytest.raises(RuntimeError, match="expected exactly one"):
+            verifier.provision_principal("analysts")
+        create.assert_not_called()
 
     def test_warehouse_grant_failure_aborts_verification_setup(self, monkeypatch):
         class FailingPermissions:
@@ -1298,6 +1379,8 @@ class TestTieredLiveGrantLifecycle:
                            if installed_signum == signum and callable(handler))
             with pytest.raises(KeyboardInterrupt, match="cleaning up"):
                 handler(signum, None)
+            assert installed[-2:][0 if signum == signal_module.SIGTERM else 1] == (
+                signum, real_getsignal(signum))
 
 
 # ---------------------------------------------------------------------------

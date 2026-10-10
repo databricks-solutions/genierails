@@ -1,3 +1,7 @@
+from pathlib import Path
+import shutil
+import subprocess
+
 import pytest
 
 from deterministic_governance import (
@@ -26,6 +30,44 @@ def test_raw_exempt_identities_must_be_verifiable_groups():
     # UUID/hex display name. Live verification resolves that exact group name;
     # an application ID with no identically named group fails provisioning.
     assert errors(raw_exempt_principals=["12345678-1234-1234-1234-123456789abc"]) == []
+
+
+def _terraform_variable_block(path: Path, name: str) -> str:
+    source = path.read_text()
+    start = source.index(f'variable "{name}" {{')
+    depth = 0
+    for index in range(start, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise AssertionError(f"unterminated variable {name} in {path}")
+
+
+@pytest.mark.parametrize("root_name", ["data_access", "workspace"])
+def test_python_accepted_uuid_group_passes_terraform_validate_and_plan(tmp_path, root_name):
+    terraform = shutil.which("terraform")
+    if not terraform:
+        pytest.skip("terraform is not installed")
+    principal = "12345678-1234-1234-1234-123456789abc"
+    assert errors(raw_exempt_principals=[principal]) == []
+    root = Path(__file__).resolve().parents[1] / "roots" / root_name / "main.tf"
+    fixture = tmp_path / root_name
+    fixture.mkdir()
+    (fixture / "main.tf").write_text(
+        _terraform_variable_block(root, "raw_exempt_principals")
+        + '\noutput "accepted" { value = var.raw_exempt_principals }\n')
+    commands = [
+        [terraform, "init", "-backend=false", "-input=false", "-no-color"],
+        [terraform, "validate", "-no-color"],
+        [terraform, "plan", "-refresh=false", "-lock=false", "-input=false", "-no-color",
+         f'-var=raw_exempt_principals=["{principal}"]'],
+    ]
+    for command in commands:
+        result = subprocess.run(command, cwd=fixture, text=True, capture_output=True, timeout=120)
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_governance_mode_raw_exempt_principals_and_hash_fallback():
