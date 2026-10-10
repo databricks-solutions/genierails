@@ -284,5 +284,37 @@ Every step keeps `main` working and ships its own live test on AWS and Azure whe
 9. **Release gating, then migration:** the rehearse receipt and `release` attestation first; then the migration dry run, revocation list, frozen AI row filters, tag state moves and staged cutover.
 10. **Declared row filters.**
 11. **Capture and prod ownership:** `make capture`, JSON-aware remap, prod IDs in agent files, overwrite report, `make detach-agent`.
-12. **Optional:** remote state for dev and the post-merge rehearse job, with one sample CI workflow.
+12. **Pipelines:** `make check`; remote state for dev and the dev pipeline; sample workflows for each stage in section 17. Prod pipeline stays on the deployment machine until remote state for prod exists.
 13. **Docs** (golden path plus advanced), then a full live run on AWS and Azure.
+
+## 17. Where each command runs
+
+One command per stage. A person runs the authoring commands on their own machine; pipelines run the rest.
+
+| Stage | Where | Command | Credentials | Changes Databricks? |
+|---|---|---|---|---|
+| **1. Author** | a person's machine | `make capture ENV=dev SPACE="<agent>"` (agent change), `make generate ENV=dev` (governance), `make scaffold-treatments` (new class); commit, open a PR | dev, read | no; it only writes files |
+| **2. PR check** | CI, on every PR | `make check ENV=dev` | dev, read-only (for `plan`) | no |
+| **3. Dev rehearsal** | the **dev pipeline**, on every merge to `main`, one at a time | `make rehearse ENV=dev` | dev deployer SP | dev only |
+| **4. Promotion PR** | the **promote pipeline**, started by a person (manual trigger) | `make promote-to ENV=prod`, opening the promotion PR | dev and prod, read | no |
+| **5. Promotion PR check** | CI, on the promotion PR | `make check ENV=prod` | prod, read-only | no |
+| **6. Prod release** | the **prod pipeline**, after the promotion PR is approved and merged and stage 3 has passed on that merge commit; protected by a required approval | `make release ENV=prod` | prod deployer SP | prod |
+| **7. Keep protected** | the **prod pipeline**, on a schedule | `make maintain ENV=prod` | prod deployer SP | prod, governance only |
+
+**`make check ENV=<env>`** is one new read-only target that runs, in order: `validate`, a regeneration that fails if any committed generated file differs, `validate-generated`, the offline coverage check, the mask-library unit tests, and `plan`. For a promotion PR it also re-runs `promote-to` and fails if the PR differs.
+
+**What each pipeline needs:**
+
+| Pipeline | Trigger | Secret | Lock and state |
+|---|---|---|---|
+| PR check | pull request | dev read-only token | none |
+| Dev | merge to `main` | dev deployer SP | remote Terraform state with locking for dev; one run at a time |
+| Promote | manual | dev and prod read-only tokens | none |
+| Prod | merge of a promotion PR, then a required approval; and a schedule for `maintain` | prod deployer SP, held in a protected environment | remote Terraform state with locking for prod; one run at a time |
+
+**Rules that make this safe:**
+- Only stages 3, 6 and 7 apply anything, and each reads the receipt or lock it needs (section 10).
+- The prod release refuses unless the merge commit it runs from passed stage 3 (section 10).
+- No pipeline edits files except the promote pipeline, which only opens the promotion PR.
+
+**v1 vs later.** Until remote state with locking exists for an env, its applying stages (3, 6, 7) run on the **deployment machine** instead of a pipeline, with the same commands; every applying target refuses in CI. Remote state for dev (stage 3 in CI) is rollout step 12; for prod (stages 6 and 7 in CI) it is deferred (section 15). Stages 1, 2, 4 and 5 work in CI from v1. GenieRails ships one sample workflow file per stage for GitHub Actions.
