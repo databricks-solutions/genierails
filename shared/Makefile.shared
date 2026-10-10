@@ -386,18 +386,28 @@ generate: _guarded-bootstrap _guard-workspace-target ## Run generate_abac.py in 
 		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
 	@if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ] && grep -Eq '^[[:space:]]*governance_mode[[:space:]]*=[[:space:]]*"deterministic"' "$(ENV_DIR)/env.auto.tfvars"; then \
-		python3 "$(SHARED_ROOT)/scripts/sticky_governance.py" record --env-dir "$(ENV_DIR)" --config "$(ENV_DIR)/generated/abac.auto.tfvars"; \
+		$(_STICKY) record --env-dir "$(ENV_DIR)" --config "$(ENV_DIR)/generated/abac.auto.tfvars"; \
 	fi
 
-ungovern: _guard-not-ci-apply _guarded-bootstrap _guard-workspace-target ## Explicitly remove sticky governance from an unused table (TABLE=cat.sch.tbl)
-	@if [ -z "$(TABLE)" ]; then echo "ERROR: TABLE=cat.sch.tbl is required" >&2; exit 1; fi; \
+# Takes one table out of a deterministic env's governed set, removes its
+# treatment tags and applies governance. Refuses while any agent uses it; the
+# check runs before anything is created, then it asks to confirm (YES=1 skips).
+_STICKY = python3 "$(SHARED_ROOT)/scripts/sticky_governance.py"
+ungovern: _guard-not-ci-apply ## Remove governance (treatment tags, masks) from a table no agent uses: TABLE=cat.sch.tbl [YES=1]
+	@$(_GUARD_WORKSPACE_ENV); \
+	if [ -z "$(TABLE)" ]; then echo "ERROR: TABLE=cat.sch.tbl is required" >&2; exit 1; fi; \
 	$(_DRY_RUN_GUARD); \
+	$(_STICKY) ungovern --env-dir "$(ENV_DIR)" --table "$(TABLE)" || exit 1; \
+	if [ "$(YES)" != 1 ]; then \
+		printf 'Type YES to ungovern $(TABLE) in $(ENV): '; read -r answer || answer=; \
+		if [ "$$answer" != YES ]; then echo "ungovern: not confirmed; nothing changed." >&2; exit 1; fi; \
+	fi; \
 	$(call _ENV_LOCK,ungovern); \
-	python3 "$(SHARED_ROOT)/scripts/sticky_governance.py" check-ungovern --env-dir "$(ENV_DIR)" --table "$(TABLE)" || exit 1; \
-	python3 "$(SHARED_ROOT)/scripts/sticky_governance.py" commit-ungovern --env-dir "$(ENV_DIR)" --table "$(TABLE)" || exit 1; \
-	$(MAKE) --no-print-directory derive-assignments ENV="$(ENV)" || exit 1; \
-	$(MAKE) --no-print-directory validate-generated ENV="$(ENV)" || exit 1; \
-	$(MAKE) --no-print-directory apply-governance ENV="$(ENV)" APPLY_FLAGS= _EXPOSURE_DERIVED=1
+	$(_STICKY) ungovern --env-dir "$(ENV_DIR)" --table "$(TABLE)" --commit >/dev/null || exit 1; \
+	if ! GENIERAILS_UNGOVERN_TABLE="$(TABLE)" $(MAKE) --no-print-directory apply-governance ENV="$(ENV)" APPLY_FLAGS=; then \
+		echo "ungovern: apply failed; $(TABLE) stays governed while its tags are deployed. Fix the error and re-run." >&2; \
+		exit 1; \
+	fi
 
 scaffold-treatments: _guarded-bootstrap _guard-workspace-target ## Add fail-safe treatment stubs for unmapped native class.* tags
 	@python3 "$(SHARED_ROOT)/scripts/scaffold_treatments.py" \
@@ -768,6 +778,7 @@ _plan-layer:
 		exit 0; \
 	fi; \
 	if [ "$$layer" = "data_access" ]; then \
+		$(_STICKY) check-layout --env-dir "$$(dirname "$$env_dir")" --env-name "$$target_env"; \
 		$(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$(LAYER_ENV_DIR)")"; \
 		$(_COVERAGE_GATE) run --env-dir "$$(dirname "$$env_dir")" --env-name "$$target_env" --runner "$(ROOT_RUNNER)" $(if $(filter 1,$(VERBOSE)),--verbose,); \
 	fi; \
@@ -804,7 +815,10 @@ _apply-layer: _guard-not-ci-apply
 	env_dir="$(LAYER_ENV_DIR)"; \
 	apply_flags="$(if $(filter data_access workspace,$(LAYER)),$(APPLY_FLAGS),)"; \
 	if [ "$$layer" = "workspace" ]; then $(_GENIE_ID_FILE_CHECK); fi; \
-	if [ "$$layer" = "data_access" ]; then $(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$$env_dir")" IMPORT_CLASSIFICATION=1; fi; \
+	if [ "$$layer" = "data_access" ]; then \
+		$(_STICKY) check-layout --env-dir "$$(dirname "$$env_dir")" --env-name "$$target_env"; \
+		$(MAKE) --no-print-directory _prepare-classification TARGET_ENV="$$target_env" CLASSIFICATION_ENV_DIR="$$(dirname "$$env_dir")" IMPORT_CLASSIFICATION=1; \
+	fi; \
 	if [ ! -f "$$env_dir/abac.auto.tfvars" ]; then \
 		echo "=== Skipping terraform apply ($$layer:$$target_env): no $$env_dir/abac.auto.tfvars ==="; \
 		exit 0; \
