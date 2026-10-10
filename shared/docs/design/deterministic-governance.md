@@ -8,7 +8,7 @@ GenieRails has two layers with separate lifecycles:
 
 | | Governance layer | Agent layer |
 |---|---|---|
-| Owns | treatment tags, mask functions, ABAC policies, row filters, coverage check | Genie config, `acl_groups`, `CAN_RUN`, `SELECT` on the agent's tables |
+| Owns | treatment tags, mask functions, ABAC policies, row filters, coverage check, **who can read each table** (`table_readers`) | Genie config, `acl_groups`, `CAN_RUN` |
 | Input | the governed set of tables (section 1) and reviewed config | the configured agents |
 | Needs the other? | no | yes: its tables are governed first |
 
@@ -24,7 +24,7 @@ Governance is computed only from classification tags and reviewed config. It is 
 | 4 | An agent is run only by its `acl_groups`. A missing `acl_groups` stops the run; `[]` means nobody. |
 | 5 | No AI in governance. The AI only helps draft Genie content or suggest a mapping for an unmapped tag, which a person reviews. |
 | 6 | Governance works without any agent, using the existing `uc_tables`. |
-| 7 | GenieRails creates `SELECT` and `CAN_RUN` **only** from agents' `acl_groups`. Governance creates neither, and doesn't revoke unrelated existing access except in the explicit migration (section 8). |
+| 7 | GenieRails creates `SELECT` **only** from `table_readers` (governance) and `CAN_RUN` **only** from agents' `acl_groups`. It doesn't revoke unrelated existing access except in the explicit migration (section 8). |
 
 ## 1. The governed set
 
@@ -32,6 +32,20 @@ Governed set = top-level `uc_tables` ∪ tables of configured agents ∪ tables 
 
 - `uc_tables` keeps its existing syntax: `schema.table` (relative to `uc_catalog`), `catalog.schema.table`, or `catalog.schema.*`.
 - `uc_tables` **governs and never grants**, with or without agents.
+- **Who can read a table** is governance, set in one place:
+
+  ```hcl
+  table_readers = {
+    "cat.sch.customers" = ["payments_ops", "regional_analysts", "viewers"]
+    "cat.sch.*"         = ["payments_ops"]                     # same key syntax as uc_tables
+  }
+  ```
+
+  - These groups get `SELECT`; nothing else in GenieRails grants it. A table in `table_readers` is governed automatically.
+  - Every reader must be a tier group or in `raw_exempt_principals`; any other group is refused, so nobody gets an unexpected full mask.
+  - New `SELECT` is gated by the coverage check. Adding a reader counts as widening and is checked by refuse-weakening (section 6).
+  - `table_readers` is env-owned: the first `promote-to` seeds prod from dev, later promotions keep prod's value and print the differences.
+  - No `table_readers` means GenieRails grants no `SELECT`.
 - `make ungovern TABLE=...` is the only way out. It expands wildcards first and refuses while any agent, `uc_tables` entry or wildcard still covers the table.
 
 For each table in the set:
@@ -119,13 +133,14 @@ row_filters = [
 
 - **Capture is explicit:** `make capture ENV=dev SPACE="<agent>"` writes that agent's exported `serialized_space` to `envs/dev/agents/<agent>.space.json`. Only the outer fields (`space_id`, `etag`, ACLs) are removed; the item IDs inside the payload (instructions, sample questions, joins, snippets, benchmarks) are kept, because the format needs them for a faithful round-trip. A plain `generate` only imports agents not yet in git.
 - **Per-agent files:** `envs/<env>/agents/<agent>.auto.tfvars` holds `genie_space_id`, `acl_groups` and `delete`. The prod agent ID is written there by `release` and committed. A loader merges these files before plan.
-- **Access:** `acl_groups` get `CAN_RUN` on the agent and `SELECT` on its tables; a shared table gets the union. Gated by the coverage check. Never derived from policies, EXCEPT lists or `account users`.
+- **Access:** `acl_groups` get `CAN_RUN` on the agent, nothing else. `generate`, `rehearse` and `release` stop if any `acl_groups` group can't read one of the agent's tables through `table_readers`, and name the table and the missing group.
+- **Champion convenience:** when `generate` first imports an agent, it writes a `table_readers` entry for each of the agent's tables that has none, filled with the agent's `acl_groups`, for review and commit. It never edits an existing entry.
 - **`acl_groups` is env-owned:** the first `promote-to` seeds prod from dev; later promotions keep prod's value and print the differences.
 - **Dev:** agent config is never overwritten; GenieRails applies governance and access for captured tables only, and creates an agent only if missing.
 - **Prod:** every `release` overwrites the agent's config from git (full replacement). Any field the API rejects fails the release; nothing is skipped silently. It prints a field-level report of what it overwrote, never recreates the agent and never changes its ID, so conversations stay.
 - **Promotion remap** is JSON-aware: catalog names and the warehouse are replaced on identifier boundaries inside string values, never in keys or prose.
 - **Removing an agent** is a separate command, `make detach-agent ENV=<env> SPACE="<agent>"`, run under the env lock before the agent leaves config:
-  1. set its `acl_groups` to `[]` and apply, so `CAN_RUN` and its `SELECT` (unless another agent grants it) are revoked; verify;
+  1. set its `acl_groups` to `[]` and apply, so `CAN_RUN` is revoked; verify. Table access is unchanged, because it belongs to `table_readers`;
   2. run `terraform state rm` for the agent's exact resource addresses;
   3. remove the agent from config and require a plan with no destroy.
 
@@ -166,7 +181,7 @@ Each entry names the env, the kind and the exact object. GenieRails prints the b
 ## 8. Migration for existing deployments
 
 - A report-only dry run comes first, on the live env.
-- The report covers every column and every SELECT holder: what they see today and after. It lists agents missing `acl_groups`, and every `SELECT` grant GenieRails will **revoke** because `uc_tables` no longer grants (in any env, with or without agents).
+- The report covers every column and every SELECT holder: what they see today and after. It lists agents missing `acl_groups`, and writes a proposed `table_readers` that reproduces every `SELECT` GenieRails grants today, so nothing is revoked by surprise. Any grant left out of the accepted `table_readers` is listed as a **revocation**.
 - Weakening and revocations stop the run unless listed in `ACK`. There is no separate accept flag.
 - An inventory of masks GenieRails didn't create (`ALTER … SET MASK`, old policies) runs first; they block cutover until removed or acknowledged.
 - New functions are created under new names; policies change in tighten-before-loosen phases; old functions are kept until no policy uses them. Tag state moves with generated `terraform state mv`.
@@ -176,7 +191,7 @@ Each entry names the env, the kind and the exact object. GenieRails prints the b
 
 ## 9. Files and version control
 
-`make setup` writes a `.gitignore` that commits `env.auto.tfvars`, `agents/`, `generated/` and capture files, and ignores `auth.auto.tfvars`, state, locks and `generated/.live_refresh.json`. Generated files are never hand-merged: on conflict, run `make generate` on the latest `main`. `promote-to` writes only the files it owns; env-owned keys (`acl_groups`, `raw_exempt_principals`) are never overwritten and are excluded from the generated-file equality check in section 10. Changes to them are still subject to refuse-weakening.
+`make setup` writes a `.gitignore` that commits `env.auto.tfvars`, `agents/`, `generated/` and capture files, and ignores `auth.auto.tfvars`, state, locks and `generated/.live_refresh.json`. Generated files are never hand-merged: on conflict, run `make generate` on the latest `main`. `promote-to` writes only the files it owns; env-owned keys (`acl_groups`, `table_readers`, `raw_exempt_principals`) are never overwritten and are excluded from the generated-file equality check in section 10. Changes to them are still subject to refuse-weakening.
 
 ## 10. Change lifecycle and team workflow
 
@@ -206,13 +221,13 @@ Each entry names the env, the kind and the exact object. GenieRails prints the b
 
 1. `make setup ENV=dev`; set `access_tier_groups`; per agent, set `genie_space_id` and `acl_groups` in its agent file.
 2. Classify the dev catalog in the UI; turn on auto-tagging; wait for `class.*` tags.
-3. `make generate ENV=dev`: imports the agents and derives governance. Review and commit.
+3. `make generate ENV=dev`: imports the agents, derives governance, and proposes `table_readers` for the agents' tables. Review and commit.
 4. `make rehearse ENV=dev`.
 5. Set `catalog_map`; `make promote-to ENV=prod`; classify prod in the UI.
 6. Approve and merge the promotion PR; once rehearse passes on that commit, the operator runs `make release ENV=prod`.
 7. `make maintain ENV=prod` on a schedule.
 
-**Governance-only flow (no agents):** the same commands with `uc_tables` set and no agents. GenieRails creates no agent and grants nothing; masks apply to whoever already has access, after the reader check (section 6).
+**Governance-only flow (no agents):** the same commands with `uc_tables` set and no agents. GenieRails creates no agent. It grants `SELECT` only if `table_readers` is set; otherwise masks apply to whoever already has access, after the reader check (section 6).
 
 ## 12. Scenarios
 
@@ -223,8 +238,9 @@ Each entry names the env, the kind and the exact object. GenieRails prints the b
 | A and B share a table | Masks are shared and unchanged; only A changes. |
 | Mask change while B is mid-curation | Governance change; rehearse, promote, release. B's config is untouched in dev and prod. |
 | New sensitive column in prod | `maintain` applies the library mask, or the fail-safe redaction if unmapped. |
-| Grant another group access to A in prod | Edit `envs/prod/agents/A.auto.tfvars`, PR, release. |
-| Remove agent A | `make detach-agent`, then remove it from config; `SELECT` removed unless another agent grants it; tables stay governed. |
+| Grant another group access to A in prod | Add the group to A's `acl_groups` in `envs/prod/agents/A.auto.tfvars` and, if it can't already read A's tables, to `table_readers`; PR, release. |
+| Remove agent A | `make detach-agent`, then remove it from config; `CAN_RUN` revoked; table access and masks unchanged. |
+| Change who can read a table | Edit `table_readers` (dev, then promote, or prod directly as an env-owned change), PR, release. Additions are checked as widening. |
 | Stop governing a table | `make ungovern TABLE=...`, refused while anything still covers it. |
 | Roll back | Revert and release; masks switch back in place. |
 | Upgrade GenieRails | A governance change: upgrade, rehearse, promote, release. |
@@ -235,7 +251,7 @@ Each entry names the env, the kind and the exact object. GenieRails prints the b
 The README shows one golden-path config (three tiers, one agent, `catalog_map`); every optional setting lives in an advanced doc.
 
 
-- **Settings:** `access_tier_groups`, `uc_tables`, `catalog_map`, per-agent `genie_space_id` / `acl_groups` / `delete`, and optionally `raw_exempt_principals`, `treatment_versions`, `column_overrides`, `tag_treatments`, `row_filters`. `governance_mode` exists only during migration.
+- **Settings:** `access_tier_groups`, `table_readers`, `uc_tables`, `catalog_map`, per-agent `genie_space_id` / `acl_groups` / `delete`, and optionally `raw_exempt_principals`, `treatment_versions`, `column_overrides`, `tag_treatments`, `row_filters`. `governance_mode` exists only during migration.
 - **One variable:** `ACK`.
 - **Commands:** `setup`, `generate`, `capture`, `rehearse`, `promote-to`, `release`, `maintain`; occasionally `ungovern`, `detach-agent`, `scaffold-treatments`.
 
@@ -263,7 +279,7 @@ Every step keeps `main` working and ships its own live test on AWS and Azure whe
 5. **Governance-only policies, no grants:** per-tier policies, `raw_exempt_principals`, fail-safe redaction for unmapped classes, the external-mask inventory, and a test that no grant targets `account users`.
 6. **Policy changes and tier moves:** the staged-apply protocol and its verification.
 7. **Reader and weakening checks** with scoped `ACK`.
-8. **Agent access:** per-agent files; `SELECT` and `CAN_RUN` only from `acl_groups`.
+8. **Access:** `SELECT` only from `table_readers`, `CAN_RUN` only from `acl_groups`; per-agent files; the agent-readability check and the proposed `table_readers` in `generate`.
 9. **Release gating, then migration:** the rehearse receipt and `release` attestation first; then the migration dry run, revocation list, frozen AI row filters, tag state moves and staged cutover.
 10. **Declared row filters.**
 11. **Capture and prod ownership:** `make capture`, JSON-aware remap, prod IDs in agent files, overwrite report, `make detach-agent`.
