@@ -261,7 +261,7 @@ The README shows one golden-path config (three tiers, one agent, `catalog_map`);
 
 - **Settings:** `access_tier_groups`, `table_readers`, `uc_tables`, `catalog_map`, per-agent `genie_space_id` / `acl_groups` / `delete`, and optionally `raw_exempt_principals`, `treatment_versions`, `column_overrides`, `tag_treatments`, `row_filters`. `governance_mode` exists only during migration.
 - **One file:** `envs/<env>/ack.txt` for acknowledgements.
-- **Commands:** `setup`, `generate`, `capture`, `rehearse`, `promote-to`, `release`, `maintain`; occasionally `ungovern`, `detach-agent`, `scaffold-treatments`.
+- **Commands:** `setup`, `generate`, `capture`, `rehearse`, `promote-to`, `release-plan`, `release`, `maintain`; occasionally `ungovern`, `detach-agent`, `apply-account`, `scaffold-treatments`.
 
 ## 14. Platform checks (before step 4)
 
