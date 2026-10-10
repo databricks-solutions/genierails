@@ -135,7 +135,7 @@ row_filters = [
 | Prod classification complete | `release` refuses if a column classified in dev (remapped through `catalog_map`) has no `class.*` tag in prod. `promote-to` writes the expected list to `generated/expected_classification.json`. |
 | Protection order | raw < partial versions < redacted/NULL. |
 | Refuse weakening | Every `promote-to`, `release` and migration compares each SELECT holder and column against live state. Any weakening, including new `raw_exempt_principals`, `partial = "raw"`, or removing or widening a row filter, stops the run unless listed in `ACK`. |
-| SELECT-holder check | Before the first deterministic apply of an env, and whenever governance newly covers a table, GenieRails lists every SELECT holder, including schema- and catalog-level holders. Every holder (group, user or service principal) must be in a tier, in `raw_exempt_principals`, or in `ACK`; otherwise the run stops. Groups that a row filter would leave with zero rows are listed the same way. |
+| SELECT-holder check | Before the first deterministic apply of an env, and whenever governance newly covers a table, GenieRails lists every principal that can read the table and that GenieRails didn't grant: explicit `SELECT` holders at table, schema or catalog level, owners, and `ALL PRIVILEGES`/`MANAGE` holders. Every holder (group, user or service principal) must be in a tier, in `raw_exempt_principals`, or in `ACK`; otherwise the run stops. Groups that a row filter would leave with zero rows are listed the same way. |
 | Tighten before loosen | A change that moves a principal between tiers applies in phases: add or strengthen masks, verify, then loosen. A brief "more than one mask" error is acceptable only for the principals being moved; any raw value fails the run. Run tier moves as maintenance windows. |
 | Tags | One treatment tag key for everything. Each column has one treatment-tag resource keyed by `table.column`; value changes update in place (verified in the provider). Order for a column moving to a new treatment: add the value to the tag policy, create the new treatment's policies, then retag. A column is never tagged with a value no policy matches. |
 | CI | Every applying target refuses in CI. The only exception is the optional post-merge `rehearse ENV=dev` job, and only with remote locked state (section 10). |
@@ -157,7 +157,7 @@ ACK="weaken:cat.sch.t.col:etl-sp,unclassified:cat.sch.t.col,holder:bi-sp"
 ## 8. Migration for existing deployments
 
 - A report-only dry run comes first, on the live env.
-- The report covers every column and every SELECT holder: what they see today and after. It lists agents missing `acl_groups`, and, every `SELECT` grant GenieRails will **revoke** because `uc_tables` no longer grants (in any env, with or without agents).
+- The report covers every column and every SELECT holder: what they see today and after. It lists agents missing `acl_groups`, and every `SELECT` grant GenieRails will **revoke** because `uc_tables` no longer grants (in any env, with or without agents).
 - Weakening and revocations stop the run unless listed in `ACK`. There is no separate accept flag.
 - An inventory of masks GenieRails didn't create (`ALTER … SET MASK`, old policies) runs first; they block cutover until removed or acknowledged.
 - New functions are created under new names; policies change in tighten-before-loosen phases; old functions are kept until no policy uses them. Tag state moves with generated `terraform state mv`.
