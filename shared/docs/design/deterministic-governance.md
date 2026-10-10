@@ -47,7 +47,7 @@ Governed set = top-level `uc_tables` ∪ tables of configured agents ∪ tables 
   - New `SELECT` is gated by the coverage check. Adding a reader counts as widening and is checked by refuse-weakening (section 6).
   - `table_readers` is env-owned: the first `promote-to` seeds prod from dev, later promotions keep prod's value and print the differences.
   - No `table_readers` means GenieRails grants no `SELECT`.
-- `make ungovern TABLE=...` is the only way out. It expands wildcards first and refuses while any agent, `uc_tables` entry or wildcard still covers the table.
+- `make ungovern TABLE=...` is the only way out. It is an **authoring** command: it expands wildcards, refuses while any agent, `uc_tables` entry or wildcard still covers the table, and removes the table from the committed governed-table list. The next rehearse and release apply the removal.
 
 For each table in the set:
 
@@ -140,12 +140,11 @@ row_filters = [
 - **Dev:** agent config is never overwritten; GenieRails applies governance and access for captured tables only, and creates an agent only if missing.
 - **Prod:** every `release` overwrites the agent's config from git (full replacement). Any field the API rejects fails the release; nothing is skipped silently. It prints a field-level report of what it overwrote, never recreates the agent and never changes its ID, so conversations stay.
 - **Promotion remap** is JSON-aware: catalog names and the warehouse are replaced on identifier boundaries inside string values, never in keys or prose.
-- **Removing an agent** is a separate command, `make detach-agent ENV=<env> SPACE="<agent>"`, run under the env lock before the agent leaves config:
-  1. set its `acl_groups` to `[]` and apply, so `CAN_RUN` is revoked; verify. Table access is unchanged, because it belongs to `table_readers`;
-  2. run `terraform state rm` for the agent's exact resource addresses;
-  3. remove the agent from config and require a plan with no destroy.
+- **Removing an agent** takes two steps:
+  1. **A PR** sets the agent's `acl_groups` to `[]` and `detached = true`. Released normally, this revokes `CAN_RUN`. Table access is unchanged, because it belongs to `table_readers`.
+  2. **`make detach-agent ENV=<env> SPACE="<agent>"`** (operations stage) refuses unless step 1 is released, then runs `terraform state rm` for the agent's exact resource addresses. A later PR removes the agent from config, and its plan must show no destroy.
 
-  The agent and its conversations stay. Removing an agent from config without detaching it first is refused. `delete = true` deletes it instead and shows in the promotion PR.
+  The agent and its conversations stay. Removing an agent from config while it is still in state is refused. `delete = true` deletes it instead and shows in the promotion PR.
 
 ## 6. Safety rules
 
@@ -157,6 +156,7 @@ row_filters = [
 | Protection order | raw < partial versions < redacted/NULL. |
 | Refuse weakening | Every `promote-to`, `release` and migration compares each SELECT holder and column against live state. Any weakening, including new `raw_exempt_principals`, `partial = "raw"`, or removing or widening a row filter, stops the run unless listed in `ack.txt`. |
 | Reader check | Before the first deterministic apply of an env, and whenever governance newly covers a table, GenieRails computes the table's **current readers** that GenieRails didn't grant: `SELECT` and `ALL PRIVILEGES` at table, schema and catalog level (from `information_schema` privileges), owners of the table and its parents, readers of every view that depends on it (view-level and inherited `SELECT`/`ALL PRIVILEGES`, following views of views), and metastore admins, with group membership expanded transitively. ABAC masks still apply to view readers, because they're evaluated as the querying user. Every reader must be in a tier, in `raw_exempt_principals`, or in `ack.txt`; otherwise the run stops. Principals that can **grant** access (`MANAGE`, owners, including view owners) are reported separately as a risk. Groups a row filter would leave with zero rows are listed the same way. |
+| Account layer | The account layer (groups, group members, tag policies) is shared by every env. `rehearse` and `release` never change it, except to **add** allowed values to the treatment tag policy that a new treatment needs. Any other account change runs only through `make apply-account` in the operations stage, with an approval. If the account plan isn't otherwise empty, `rehearse` and `release` refuse and print that command. |
 | Policy changes | Any change that replaces or removes a policy or function runs as separate applies under the env lock: (1) create new functions and policies, removing nothing; (2) verify with `SHOW EFFECTIVE POLICIES` and queries as every affected tier; (3) retag or move principals; (4) verify; (5) remove the old policies and functions. Outside phase 5, policies and functions are protected from destroy. A brief `MULTIPLE_MASKS` error is acceptable only for the principals being moved; any raw value fails the run. Run tier moves as maintenance windows. |
 | External masks | Before every `rehearse`, `release` and `maintain`, GenieRails inventories effective policies and table-attached masks on governed tables. One it didn't create on a governed column stops the run, because it would break queries with `MULTIPLE_MASKS`. |
 | Tags | One treatment tag key for everything. Each column has one treatment-tag resource keyed by `entity_type|entity_name|tag_key` (never by value) with no `ignore_changes`, so value changes update in place (verified in the provider). Classifier-owned `class.*` tags are never managed by Terraform. Order for a column moving to a new treatment: add the value to the tag policy, create the new treatment's policies, then retag. A column is never tagged with a value no policy matches. |
@@ -196,7 +196,10 @@ GenieRails prints the before/after consequence of each entry and refuses entries
 
 ## 9. Files and version control
 
-`make setup` writes a `.gitignore` that commits `env.auto.tfvars`, `agents/`, `generated/` and capture files, and ignores `auth.auto.tfvars`, state, locks and `generated/.live_refresh.json`. Generated files are never hand-merged: on conflict, run `make generate` on the latest `main`. `promote-to` writes only the files it owns; env-owned keys (`acl_groups`, `table_readers`, `raw_exempt_principals`) are never overwritten and are excluded from the generated-file equality check in section 10. Changes to them are still subject to refuse-weakening.
+`make setup` writes a `.gitignore` that commits `env.auto.tfvars`, `agents/`, `generated/`, `ack.txt` and capture files, and ignores `auth.auto.tfvars`, state, locks and `generated/.live_refresh.json`.
+
+- **Only authoring commands write committed files** (`capture`, `generate`, `scaffold-treatments`, `promote-to`, `ungovern`). Applying commands (`rehearse`, `release`, `maintain`, `detach-agent`) write only to ignored runtime files: Terraform state, receipts, lock files and live snapshots. So an applying run never leaves the tree dirty.
+- **`promote-to` is a pure function of the commit.** It reads only committed files: dev's generated output and prod's committed env-owned files. It never reads live prod or prod state, so `promote-to` on any machine, its `CHECK=1` mode and the receipt digest all produce the same bytes. Anything that needs live prod (reader check, refuse-weakening, kept deployed names) runs in `release`. Generated files are never hand-merged: on conflict, run `make generate` on the latest `main`. `promote-to` writes only the files it owns; env-owned keys (`acl_groups`, `table_readers`, `raw_exempt_principals`) are never overwritten and are excluded from the generated-file equality check in section 10. Changes to them are still subject to refuse-weakening.
 
 ## 10. Change lifecycle and team workflow
 
@@ -302,7 +305,7 @@ One command per stage. People run the authoring commands on their own machine; p
 | **3. Dev rehearsal** | **dev pipeline**, every merge to `main` that touches code, governance or `envs/**`; every commit gets its own run, in order | `make rehearse ENV=dev` | dev only |
 | **4. Prod release** | **prod pipeline**, when stage 3 **succeeds** on a commit that touches `envs/prod/**`; a state-aware prod plan and the weakening/reader report are published, then a required approval | `make release ENV=prod`, applying the approved plan | prod |
 | **5. Keep protected** | **prod pipeline**, on a schedule, checked out at the last released commit (read from the release receipt) | `make maintain ENV=prod` | prod, governance only |
-| **6. Operations** | **prod pipeline**, manual dispatch with a required approval per run | `make detach-agent`, `make ungovern`, migration phases, phased policy changes | prod |
+| **6. Operations** | **prod pipeline**, manual dispatch with a required approval per run | `make detach-agent`, `make apply-account`, migration phases, phased policy changes | prod or account layer |
 
 A promotion PR is just a PR whose diff includes `promote-to` output. It may also carry the dev change it promotes, in one PR. Prod-only PRs (`acl_groups`, `table_readers`, `ack.txt` in `envs/prod`) follow the same stages: rehearse on the merge commit is a no-op that writes a receipt, and the safety comes from the prod plan, refuse-weakening and the reader check.
 
@@ -327,4 +330,4 @@ A promotion PR is just a PR whose diff includes `promote-to` output. It may also
 - `release` writes a **release receipt** (commit and digests); `maintain` refuses unless it runs from that commit with matching digests.
 - Acknowledgements are committed and reviewed (section 6), never pipeline parameters.
 
-**v1 vs later.** Until an env has remote state with locking, its applying stages run on the **deployment machine** with the same commands and the same checks, and every applying target refuses in CI. Dev remote state is rollout step 12; prod remote state is deferred (section 15). Stages 1 and 2 work in CI from v1. GenieRails ships a sample per stage for GitHub Actions and Azure DevOps.
+**v1 vs later.** Until an env has remote state with locking, its applying stages run on the **deployment machine** with the same commands and the same checks, and every applying target refuses in CI. The deployment machine keeps Terraform state, receipts and locks **outside the checkout**, in `GENIERAILS_STATE_DIR` (one folder per env plus one for the account layer), takes a machine-wide lock per env and one for the account layer, and runs each command from a fresh, clean checkout of the commit being applied. Dev remote state is rollout step 12; prod remote state is deferred (section 15). Stages 1 and 2 work in CI from v1. GenieRails ships a sample per stage for GitHub Actions and Azure DevOps.
