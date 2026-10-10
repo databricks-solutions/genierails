@@ -51,6 +51,16 @@ make maintain ENV=prod                 # on a schedule; governance only
 
 When prod's scan tags a new sensitive column, `maintain` masks it. If the class has no mapping yet, it stops and tells you what to add in git.
 
+## Working as a team
+
+Agent owners and the governance team share one repo. Each edits their own files.
+
+1. **Open a PR.** CI runs read-only checks and `make plan ENV=dev`. Nothing touches dev.
+2. **Merge.** `make rehearse ENV=dev` runs on the new `main`.
+3. **Promote only a rehearsed `main`.** `promote-to` and `release` refuse anything that hasn't passed rehearse.
+
+If two PRs conflict on generated files, don't merge them by hand: run `make generate ENV=dev` on the latest `main` and commit.
+
 ## Common cases
 
 | You want to | Do this |
@@ -71,5 +81,5 @@ Commit `envs/` (config, captured agents, generated rules and prod agent IDs). Ne
 
 ## Limits in this version
 
-- **Releases run from one deployment machine,** which keeps Terraform state. CI runs tests and plans only; applying targets refuse to run under CI.
+- **Prod releases run from one deployment machine.** CI only runs checks and the post-merge dev rehearse (once dev has remote state; until then the operator runs it).
 - **Prod UI edits aren't reported.** They're simply overwritten on the next release.
