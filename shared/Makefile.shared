@@ -1,7 +1,7 @@
 .PHONY: help bootstrap-sp genie-adopt-preflight _guard-root _prepare-env _bootstrap _guarded-bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config _guard-genie-placeholder setup init-env enable-classification generate scaffold-treatments derive-assignments generate-delta audit-schema validate validate-generated coverage-gate promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _prepare-classification _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema evidence validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
 .PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema audit-rulebook validate validate-generated promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo
-.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec verify-access-keys _verify-access-keys-readonly _guard-account-admin-env release maintain test-champion _derive-before-exposure _refresh-live-ddl promote-to
+.PHONY: help _guard-root _prepare-env _bootstrap _guard-workspace-target _guard-account-config _guard-data-access-config _guard-workspace-config _guard-not-ci-apply setup init-env generate generate-delta audit-schema validate validate-generated coverage-gate rehearse certify promote plan sync-tags wait-tag-policies apply apply-governance apply-genie import migrate-state destroy destroy-governance destroy-genie clean clean-all integration-test migrate-root-to-env _apply-layer _plan-layer _destroy-layer test-unit test-ci test-abac-only test-multi-space-import test-schema-drift test-genie-only test-country-overlay test-aus-bank-demo test-india-bank-demo test-asean-bank-demo verify-access verify-access-spec verify-access-keys _verify-access-keys-readonly _guard-account-admin-env release maintain test-champion _derive-before-exposure _refresh-live-ddl promote-to
 
 # ── Variables expected from the including Makefile ──────────────
 # SHARED_ROOT  — absolute path to shared/
@@ -244,6 +244,16 @@ _GENIE_PLACEHOLDER_GUARD = python3 "$(SHARED_ROOT)/genie_space_placeholder.py" "
 _guard-genie-placeholder:
 	@$(_GENIE_PLACEHOLDER_GUARD)
 
+_guard-not-ci-apply:
+	@ci_value=$$(printf '%s' "$$CI" | tr '[:upper:]' '[:lower:]'); is_ci=; \
+	case "$$ci_value" in true|1|yes) is_ci=1 ;; esac; \
+	if [ -n "$$TF_BUILD$$JENKINS_URL$$GITLAB_CI$$BUILDKITE$$CIRCLECI" ]; then is_ci=1; fi; \
+	if [ "$$is_ci" = "1" ] && [ "$$GENIERAILS_ALLOW_CI_APPLY" != "1" ]; then \
+		echo "ERROR: applying targets cannot run in CI. GenieRails v1 runs Terraform applies on the deployment machine; CI may run tests, validation, coverage, audits, and plans only." >&2; \
+		echo "Only isolated integration-test workflows may opt out with GENIERAILS_ALLOW_CI_APPLY=1." >&2; \
+		exit 1; \
+	fi
+
 # business_access_enabled is deprecated and ignored (business access is granted
 # whenever the coverage check passes). One warning line per run, whether it
 # is set in env.auto.tfvars, in APPLY_FLAGS (-var), or as TF_VAR_; never fails.
@@ -255,6 +265,7 @@ GENIERAILS_APPLY_FLAGS ?= $(APPLY_FLAGS)
 export GENIERAILS_APPLY_FLAGS
 _guard-workspace-config:
 	@$(_COVERAGE_GATE) warn-retired-flag --env-file "$(ENV_DIR)/env.auto.tfvars" --label "$(_SETUP_ENV_REL)/env.auto.tfvars" || true
+	@python3 "$(SHARED_ROOT)/scripts/validate_env_config.py" "$(ENV_DIR)/env.auto.tfvars"
 	@cd "$(ENV_DIR)" && if [ -f env.auto.tfvars ]; then \
 		python3 -c 'import sys,hcl2; cfg=hcl2.load(open("env.auto.tfvars")); ok = cfg.get("manage_groups", False) is False; ok or print("Workspace env.auto.tfvars must not set manage_groups = true. Manage groups in envs/account instead."); sys.exit(0 if ok else 1)'; \
 	fi
@@ -334,7 +345,7 @@ init-env: _bootstrap ## Prepare env directories and default config files
 # here and are filtered out; every other line (errors included) and the exit
 # status pass through. An agent configured only by ID has its tables discovered
 # first (read-only Genie API, no model call), so the scan covers them.
-enable-classification: _guarded-bootstrap _guard-workspace-target ## Optional scripted way to turn on UC Data Classification; review detections in the UI
+enable-classification: _guard-not-ci-apply _guarded-bootstrap _guard-workspace-target ## Optional scripted way to turn on UC Data Classification; review detections in the UI
 	@python3 "$(SHARED_ROOT)/scripts/validate_classification_config.py" "$(ENV_DIR)/env.auto.tfvars"
 	@python3 "$(SHARED_ROOT)/scripts/discover_agent_tables.py" "$(ENV_DIR)"
 	@existing_catalogs="$$(python3 "$(SHARED_ROOT)/scripts/prepare_classification_config.py" "$(ENV_DIR)")" || exit 1; \
@@ -470,7 +481,7 @@ _SAVED_SETTINGS = python3 "$(SHARED_ROOT)/scripts/saved_settings.py"
 _VERIFY_RESULT = $(ENV_DIR)/generated/.verify_access.json
 _SAVE_VERIFY_KEY = $(_SAVED_SETTINGS) verify-key --env-file "$(ENV_DIR)/env.auto.tfvars" --value "$(strip $(VERIFY_KEY_COLUMN))" --result-file "$(_VERIFY_RESULT)"
 
-rehearse: _guard-genie-placeholder ## Run serial rehearsal (verify-access picks and proves a row-pairing key per masked table; VERIFY_KEY_COLUMN optionally overrides)
+rehearse: _guard-not-ci-apply _guard-genie-placeholder ## Run serial rehearsal (verify-access picks and proves a row-pairing key per masked table; VERIFY_KEY_COLUMN optionally overrides)
 	@if [ "$(ENV)" = "prod" ]; then \
 		echo "rehearse: ENV=prod is not allowed; use make release ENV=prod" >&2; \
 		exit 1; \
@@ -521,9 +532,11 @@ certify:
 	@echo "  To review before granting, run make plan ENV=$(or $(ENV),<env>) and gate make release behind your approval step." >&2
 	@exit 1
 
-release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify access
+release: _guard-not-ci-apply _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify access
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); \
+	mode="$$(python3 -c 'import hcl2,sys; print(hcl2.load(open(sys.argv[1])).get("governance_mode", "legacy"))' "$(ENV_DIR)/env.auto.tfvars")" || exit 1; \
+	python3 "$(SHARED_ROOT)/scripts/classification_completeness.py" check --env-dir "$(ENV_DIR)" --mode "$$mode" --ack "$(ACK_UNCLASSIFIED)" || exit 1; \
 	key="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" verify-key --env-dir "$(ENV_DIR)" --explicit "$(VERIFY_KEY_COLUMN)")" || exit 1; \
 	$(_REQUIRE_MASK_PROOF) || exit 1; \
 	if ! $(MAKE) --no-print-directory _verify-access-keys-readonly ENV="$(ENV)"$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); then \
@@ -567,7 +580,7 @@ release: _guard-genie-placeholder ## Derive, validate, prove coverage, audit, ap
 	echo "  Verification:  make verify-access ENV=$(ENV) passed"; \
 	echo "  Steady state:  make maintain ENV=$(ENV)"
 
-maintain: _guard-genie-placeholder ## Reconcile governance (including existing covered SELECT): audit-schema -> derive-assignments -> coverage check -> validate -> audit-rulebook -> apply-governance; never widen past coverage or touch Genie
+maintain: _guard-not-ci-apply _guard-genie-placeholder ## Reconcile governance (including existing covered SELECT): audit-schema -> derive-assignments -> coverage check -> validate -> audit-rulebook -> apply-governance; never widen past coverage or touch Genie
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); $(call _ENV_LOCK,maintain); \
 	$(_RELEASE_HELPER) clear-old-receipts "$(ENV_DIR)" || exit 1; \
@@ -716,6 +729,8 @@ promote-to: ## Promote configured rules into ENV: set envs/prod/env.auto.tfvars,
 	src="$${resolved%% *}"; map="$${resolved#* }"; src_dir="$(CLOUD_ROOT)/envs/$$src"; dest_dir="$(CLOUD_ROOT)/envs/$(ENV)"; \
 	$(MAKE) --no-print-directory promote ENV="$$src" ENV_DIR="$$src_dir" SOURCE_ENV="$$src" SOURCE_ENV_DIR="$$src_dir" \
 		DEST_ENV="$(ENV)" DEST_ENV_DIR="$$dest_dir" DEST_CATALOG_MAP="$$map" || exit 1; \
+	python3 "$(SHARED_ROOT)/scripts/classification_completeness.py" write --source "$$src_dir/generated/abac.auto.tfvars" \
+		--destination "$$dest_dir/generated/expected_classification.json" --catalog-map "$$map" || exit 1; \
 	if [ -f "$$src_dir/generated/abac.auto.tfvars" ]; then \
 		$(_SAVED_SETTINGS) promote-save --env-file "$$dest_dir/env.auto.tfvars" --from "$$src" --catalog-map "$$map"; \
 	fi
@@ -771,7 +786,7 @@ wait-tag-policies: _bootstrap ## Wait until account tag policies are visible to 
 	@echo "=== Wait For Tag Policy Visibility (account) ==="
 	@cd "$(ACCOUNT_ENV_DIR)" && python3 -u "$(SHARED_ROOT)/scripts/wait_for_tag_policies.py" $(if $(REQUIRED_VALUES_TFVARS),--required-values-from "$(REQUIRED_VALUES_TFVARS)",)
 
-_apply-layer:
+_apply-layer: _guard-not-ci-apply
 	@set -e; $(_DRY_RUN_GUARD); layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	env_dir="$(LAYER_ENV_DIR)"; \
 	apply_flags="$(if $(filter data_access workspace,$(LAYER)),$(APPLY_FLAGS),)"; \
@@ -843,7 +858,7 @@ _apply-layer:
 		$(_COVERAGE_GATE) withheld --layer "$$layer" --layer-dir "$$env_dir" --env-name "$$target_env"; \
 	fi
 
-apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access -> workspace for ENV=<workspace>
+apply: _guard-not-ci-apply _guarded-bootstrap ## Apply the selected layer, or account -> data_access -> workspace for ENV=<workspace>
 	@set -e; $(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		$(_WARN_ACCOUNT_RETIRED_FLAG); $(MAKE) --no-print-directory _guard-account-config; \
 		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
@@ -873,7 +888,7 @@ apply: _guarded-bootstrap ## Apply the selected layer, or account -> data_access
 		exit $$withheld_rc; \
 	fi
 
-apply-governance: _guarded-bootstrap _guard-workspace-target ## [Governance team] Apply account + data_access layers only (no Genie agents)
+apply-governance: _guard-not-ci-apply _guarded-bootstrap _guard-workspace-target ## [Governance team] Apply account + data_access layers only (no Genie agents)
 	@set -e; $(_DRY_RUN_GUARD); \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 	if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" TOLERATE_REFRESH_FAILURE=1 _derive-before-exposure; fi; \
@@ -901,7 +916,7 @@ genie-adopt-preflight: _guard-workspace-target ## Read-only: check every legacy 
 # A failing refresh or gate never stops keeping, shrinking or clearing ACLs:
 # the workspace layer withholds only the groups an ACL adds beyond what is
 # applied, applies everything else, then exits non-zero naming them.
-apply-genie: _guarded-bootstrap _guard-workspace-target ## [BU team] Apply workspace layer only — groups + Genie agents (assumes governance already applied)
+apply-genie: _guard-not-ci-apply _guarded-bootstrap _guard-workspace-target ## [BU team] Apply workspace layer only — groups + Genie agents (assumes governance already applied)
 	@set -e; $(_DRY_RUN_GUARD); \
 	$(MAKE) --no-print-directory ENV="$(ENV)" _guard-workspace-config; \
 	if [ -z "$(_EXPOSURE_DERIVED)" ]; then $(MAKE) --no-print-directory ENV="$(ENV)" APPLY_FLAGS="$(APPLY_FLAGS)" TOLERATE_REFRESH_FAILURE=1 _derive-before-exposure; fi; \
@@ -922,13 +937,13 @@ apply-genie: _guarded-bootstrap _guard-workspace-target ## [BU team] Apply works
 		|| echo "WARNING: the coverage check did not pass; only CAN_RUN changes that keep, shrink or clear what is applied can proceed." >&2; \
 	$(MAKE) --no-print-directory _apply-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"
 
-destroy-governance: _bootstrap _guard-workspace-target ## [Governance team] Destroy data_access layer for the selected env (leaves workspace/Genie untouched)
+destroy-governance: _guard-not-ci-apply _bootstrap _guard-workspace-target ## [Governance team] Destroy data_access layer for the selected env (leaves workspace/Genie untouched)
 	@$(MAKE) --no-print-directory _destroy-layer LAYER=data_access TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)"
 
-destroy-genie: _bootstrap _guard-workspace-target ## [BU team] Destroy workspace layer only (leaves data_access/ABAC untouched)
+destroy-genie: _guard-not-ci-apply _bootstrap _guard-workspace-target ## [BU team] Destroy workspace layer only (leaves data_access/ABAC untouched)
 	@$(MAKE) --no-print-directory _destroy-layer LAYER=workspace TARGET_ENV=$(ENV) LAYER_ENV_DIR="$(ENV_DIR)"
 
-import: _guarded-bootstrap ## Import existing resources into the selected layer state
+import: _guard-not-ci-apply _guarded-bootstrap ## Import existing resources into the selected layer state
 	@echo "=== Import Existing Resources ($(ENV)) ==="
 	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		cd "$(ACCOUNT_ENV_DIR)" && "$(SHARED_ROOT)/scripts/import_existing.sh"; \
@@ -937,7 +952,7 @@ import: _guarded-bootstrap ## Import existing resources into the selected layer 
 		cd "$(ENV_DIR)" && "$(SHARED_ROOT)/scripts/import_existing.sh"; \
 	fi
 
-migrate-state: _bootstrap ## Migrate legacy state into account/data_access/workspace ownership
+migrate-state: _guard-not-ci-apply _bootstrap ## Migrate legacy state into account/data_access/workspace ownership
 	@echo "=== Migrate Terraform State ($(ENV)) ==="
 	@$(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		if [ ! -f "$(ACCOUNT_ENV_DIR)/terraform.tfstate" ]; then echo "No Terraform state found in $(ACCOUNT_ENV_DIR)."; exit 0; fi; \
@@ -980,12 +995,12 @@ migrate-state: _bootstrap ## Migrate legacy state into account/data_access/works
 		cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && if [ -f abac.auto.tfvars ]; then "$(SHARED_ROOT)/scripts/import_existing.sh"; fi; \
 	fi
 
-_destroy-layer:
+_destroy-layer: _guard-not-ci-apply
 	@layer="$(LAYER)"; target_env="$(TARGET_ENV)"; \
 	echo "=== Terraform Destroy ($$layer:$$target_env) ==="; \
 	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" destroy -auto-approve $(DESTROY_FLAGS)
 
-destroy: _bootstrap ## Destroy the selected layer or workspace environment
+destroy: _guard-not-ci-apply _bootstrap ## Destroy the selected layer or workspace environment
 	@$(_DRY_RUN_GUARD); if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		$(MAKE) --no-print-directory _destroy-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 	else \
@@ -1219,13 +1234,13 @@ test-asean-bank-demo: _bootstrap _guard-workspace-target ## Scenario: ASEAN bank
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-champion: _bootstrap _guard-workspace-target ## Scenario: dev → prod CHAMPION flow via make (generate → rehearse → promote → release → maintain)
+test-champion: _guard-not-ci-apply _bootstrap _guard-workspace-target ## Scenario: dev → prod CHAMPION flow via make (generate → rehearse → promote → release → maintain)
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario champion \
 		--auth-file "$(_ITEST_AUTH)" \
 		$(_ITEST_WH_FLAG) $(_ITEST_KD_FLAG)
 
-test-all: _bootstrap _guard-workspace-target ## Run all scenario tests sequentially (continues on failure — use test-ci for fail-fast CI runs)
+test-all: _guard-not-ci-apply _bootstrap _guard-workspace-target ## Run all scenario tests sequentially (continues on failure — use test-ci for fail-fast CI runs)
 	cd "$(CLOUD_ROOT)" && $(_ITEST_RUNNER) \
 		--scenario all \
 		--auth-file "$(_ITEST_AUTH)" \
@@ -1242,7 +1257,9 @@ _guard-account-admin-env:
 		exit 1; \
 	fi
 
-test-ci-parallel: _guard-account-admin-env ## Parallel CI: provision one workspace per scenario, run concurrently, teardown
+test-ci-parallel: _guard-not-ci-apply _guard-account-admin-env ## Parallel CI: provision one workspace per scenario, run concurrently, teardown
+	@# In CI this target is allowed only for isolated throwaway environments by
+	@# setting GENIERAILS_ALLOW_CI_APPLY=1 on this step, never at workflow scope.
 	@# Each scenario gets its own workspace + metastore + unique name suffix.
 	@# All workspaces provision in parallel (~3 min), then scenarios execute
 	@# in batches of MAX_PARALLEL (default 5) to avoid API rate limiting.
@@ -1255,8 +1272,10 @@ test-ci-parallel: _guard-account-admin-env ## Parallel CI: provision one workspa
 		$(if $(KEEP_ENVS),--keep-envs,) \
 		$(if $(NO_FAIL_FAST),--no-fail-fast,)
 
-test-ci: _guard-account-admin-env ## Full CI pipeline: unit tests → provision fresh env → integration tests → teardown (always)
+test-ci: _guard-not-ci-apply _guard-account-admin-env ## Full CI pipeline: unit tests → provision fresh env → integration tests → teardown (always)
 	@# Designed for automated DevOps workflows (PR checks, nightly runs).
+	@# CI callers must set GENIERAILS_ALLOW_CI_APPLY=1 only for this isolated
+	@# integration step; ordinary deployment environments remain refused.
 	@# Provisions a fresh isolated Databricks environment, runs all tests, then tears
 	@# it down — even if tests fail — so no cloud resources are left behind.
 	@# Runs with --fail-fast: stops at the first failing scenario so the pipeline
@@ -1319,7 +1338,9 @@ test-ci: _guard-account-admin-env ## Full CI pipeline: unit tests → provision 
 	echo "║              CI Pipeline PASSED                              ║"; \
 	echo "╚══════════════════════════════════════════════════════════════╝"
 
-integration-test: ## Run the full end-to-end integration test (setup → generate → apply → verify → promote → apply prod → verify prod → teardown)
+integration-test: _guard-not-ci-apply ## Run the full end-to-end integration test (setup → generate → apply → verify → promote → apply prod → verify prod → teardown)
+	@# CI callers may set GENIERAILS_ALLOW_CI_APPLY=1 only when ENV/DEST_ENV are
+	@# freshly provisioned throwaway integration environments.
 	@# Options:
 	@#   ENV=dev              workspace env for dev  (default: dev)
 	@#   DEST_ENV=prod        workspace env for prod (default: prod)

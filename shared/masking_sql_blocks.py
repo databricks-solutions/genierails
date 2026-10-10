@@ -139,6 +139,8 @@ def analyze_sql_blocks(sql_text: str) -> ParsedSqlBlocks:
         fallback_catalog = cat_match.group(1).rstrip(";") if cat_match else catalog
         fallback_schema = schema_match.group(1).rstrip(";") if schema_match else schema
         recovered: set[str] = set()
+        # ``missing`` is collected from tokenized definitions in source order,
+        # so recovery is deterministic without changing deployment order.
         for function_name in missing:
             pattern = re.compile(
                 r"(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*"

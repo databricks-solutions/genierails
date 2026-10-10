@@ -64,6 +64,53 @@ warnings and failures are always printed in full.
 
 Key config & code: [`treatment_config.json`](../../treatment_config.json) (the `gr_treatment` precedence rules — shared across envs), [`sensitivity_source.py`](../../sensitivity_source.py) (native `class.*` source), [`treatment_derivation.py`](../../treatment_derivation.py) (one treatment/column), [`verify_effective_access.py`](../../verify_effective_access.py) (masked-vs-raw), [`scripts/audit_schema_drift.py`](../../scripts/audit_schema_drift.py) (drift).
 
+### Deterministic-governance settings
+
+These environment-owned settings are validated now. Their values are deliberately
+unused until the rollout step shown, so adding them cannot change current behavior.
+
+| Setting | Shape and meaning | Used from step |
+|---|---|---|
+| `governance_mode` | `"legacy"` (default) or `"deterministic"`; gates rollout behavior so existing deployments remain unchanged. | 2 |
+| `access_tier_groups` | Ordered group names: first sees raw, last sees full masking, and groups between see partial masking. One group is raw-only; two are raw/full. Empty remains the legacy unset value. | 5 |
+| `raw_exempt_principals` | Environment-owned principals that see raw, except for never-raw treatments; the deployer SP also sees raw, except for never-raw treatments. | 5 |
+| `treatment_versions` | `{ treatment = { partial = "version" } }`; only `partial` may be selected, `redacted` is valid for every treatment, and treatment-wide `raw` and the deferred keyed hash (`hmac_sha256`) are refused. | 3 |
+| `tier_access_overrides` | `{ treatment = { group = "raw" \| "partial" \| "full" } }`; groups must occur in `access_tier_groups`, and the named tier must exist. | 5 |
+| `column_overrides` | Per-column `{ partial = "version" }`, `{ treatment = "stricter_treatment" }`, or `{ keep_current = true }`. Setting `full` is refused. | 3 (`keep_current`: 6) |
+| `row_filters` | List of `{ table, column, values_by_group = map(group -> list(string)) }`; `table` is mandatory, literals are strings, tier-1 groups are refused, rules on one table are ANDed, and a multi-group caller receives the union of its named values. | 8 |
+| `genie_spaces[*].acl_groups` | Explicit `[]` means nobody. Set `require_acl_groups = true` to refuse a missing value now; step 5 makes that rule the default. | 5 |
+| `genie_spaces[*].delete` | `true` requests deletion instead of the default detach when an agent is removed. | 9 |
+| `ACK_UNCLASSIFIED` | Environment variable formatted as comma-separated `cat.sch.tbl.col` entries. Validation is format-only until the completeness check lands. | 2 |
+| `ACK_WEAKEN` | Environment variable formatted as comma-separated `cat.sch.tbl.col:principal` entries. Validation is format-only until refuse-weakening lands. | 7 |
+
+Resolution first fixes access: tier 1 is raw, the last tier and out-of-tier
+principals are full, and the most privileged group membership wins. A group
+access override can change only an intermediate tier. Only when the resulting
+access is partial does version precedence apply: `column_overrides`, then
+`treatment_versions`, then the shipped library default. A column override never
+changes what the full tier sees. Checking that a `treatment` column override is
+strictly stronger needs class-derived protection data and lands in step 3;
+`keep_current` is interpreted by migration in step 6.
+
+The treatments `card_security_code`, `card_pin`, `card_track_data`, and `secret`
+are never raw, for every principal including tier 1 and the deployer service
+principal; a column carrying any of their classes is never raw even when another
+class tag wins strictest-wins. No override may grant them raw values. Tier-1 groups may not appear in `row_filters.values_by_group`.
+
+### Applying from CI
+
+GenieRails v1 runs every Terraform apply on the deployment machine. Applying
+targets—including `enable-classification`, `rehearse`, `release`, `maintain`,
+`apply`, `apply-governance`, `apply-genie`, `_apply-layer`, `destroy`,
+`destroy-governance`, `destroy-genie`, `_destroy-layer`, `import`,
+`migrate-state`, `integration-test`, `test-champion`, `test-all`, `test-ci`, and
+`test-ci-parallel`—refuse common CI markers (`CI=true/1/yes`, Azure Pipelines,
+Jenkins, GitLab, Buildkite, or CircleCI). CI may continue to run plans,
+validation, unit tests, coverage checks, and audits. The
+`GENIERAILS_ALLOW_CI_APPLY=1` escape hatch is an internal switch used only by
+GenieRails' own throwaway integration-test jobs; never set it on a deployment
+job. Run `make release ENV=prod` from the persistent deployment workspace.
+
 ---
 
 ## Step details

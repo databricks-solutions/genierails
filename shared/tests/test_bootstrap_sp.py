@@ -602,7 +602,7 @@ def test_plan_distinguishes_greenfield_and_brownfield_grants():
     assert any("CREATE_CATALOG on its metastore" in line for line in greenfield_output)
     assert not any("MANAGE + APPLY_TAG on catalog" in line for line in greenfield_output)
     assert any(
-        "USE_CATALOG + USE_SCHEMA + MANAGE + APPLY_TAG on catalog existing_catalog" in line
+        "USE_CATALOG + USE_SCHEMA + SELECT + MANAGE + APPLY_TAG on catalog existing_catalog" in line
         for line in brownfield_output
     )
     assert not any("CREATE_CATALOG on its metastore" in line for line in brownfield_output)
@@ -902,11 +902,12 @@ def test_target_catalog_grants_brownfield_privileges():
     assert catalog_call["changes"][0].add == [
         Privilege.USE_CATALOG,
         Privilege.USE_SCHEMA,
+        Privilege.SELECT,
         Privilege.MANAGE,
         Privilege.APPLY_TAG,
     ]
     assert any(
-        "USE_CATALOG + USE_SCHEMA + MANAGE + APPLY_TAG on catalog existing_catalog" in line
+        "USE_CATALOG + USE_SCHEMA + SELECT + MANAGE + APPLY_TAG on catalog existing_catalog" in line
         for line in output
     )
     assert workspace.api_client.do.call_count == 2
@@ -1099,7 +1100,7 @@ def test_target_catalog_grant_fails_loudly_when_caller_lacks_authority():
     _account, workspace, _workspace_factory, factory = _fake()
     workspace.grants.update.side_effect = PermissionError("denied")
 
-    with pytest.raises(RuntimeError, match="catalog owner.*MANAGE, and APPLY TAG"):
+    with pytest.raises(RuntimeError, match="catalog owner.*SELECT, MANAGE, and APPLY TAG"):
         bootstrap(
             _cfg(target_catalog="existing_catalog"),
             client_factory=factory,
@@ -1130,6 +1131,110 @@ def test_existing_sp_and_grants_are_not_duplicated():
     account.api_client.do.assert_not_called()
     account.access_control.update_rule_set.assert_not_called()
     assert any("OAuth secret unchanged" in line for line in output)
+
+
+def _sp_catalog_effective(sp_privileges, caller_privileges=()):
+    """get_effective for the SP (client-123) and the caller, by principal."""
+    def effective(*, principal, **_kwargs):
+        held = sp_privileges if principal == "client-123" else caller_privileges
+        return SimpleNamespace(privilege_assignments=[SimpleNamespace(
+            privileges=[SimpleNamespace(privilege=p) for p in held]
+        )])
+    return effective
+
+
+def _no_catalog_authority(workspace):
+    workspace.catalogs.get.return_value = SimpleNamespace(owner="someone-else@example.com")
+    _not_metastore_owner(workspace)
+
+
+def test_existing_sp_with_every_catalog_privilege_is_unchanged_without_authority():
+    account, workspace, _workspace_factory, factory = _fake(
+        existing=True, roles=("account_admin",)
+    )
+    _no_catalog_authority(workspace)
+    workspace.catalogs.get.side_effect = PermissionDenied("no access")
+    workspace.grants.get_effective.side_effect = _sp_catalog_effective([
+        Privilege.USE_CATALOG, Privilege.USE_SCHEMA, Privilege.SELECT,
+        Privilege.MANAGE, Privilege.APPLY_TAG,
+    ])
+    output = []
+
+    assert bootstrap(
+        _cfg(target_catalog="existing_catalog"), client_factory=factory, emit=output.append
+    ) == 0
+
+    workspace.grants.update.assert_not_called()
+    workspace.catalogs.get.assert_not_called()
+    assert any("catalog existing_catalog privileges UNCHANGED" in line for line in output)
+    assert any(
+        line.startswith("UNCHANGED workspace 123: USE_CATALOG + USE_SCHEMA + SELECT + "
+                        "MANAGE + APPLY_TAG on catalog existing_catalog")
+        for line in output
+    )
+
+
+def test_existing_sp_missing_select_is_granted_only_select():
+    _account, workspace, _workspace_factory, factory = _fake(
+        existing=True, roles=("account_admin",)
+    )
+    workspace.grants.get_effective.side_effect = _sp_catalog_effective([
+        Privilege.USE_CATALOG, Privilege.USE_SCHEMA, Privilege.MANAGE, Privilege.APPLY_TAG,
+    ])
+    output = []
+
+    assert bootstrap(
+        _cfg(target_catalog="existing_catalog"), client_factory=factory, emit=output.append
+    ) == 0
+
+    workspace.grants.update.assert_called_once()
+    change = workspace.grants.update.call_args.kwargs["changes"][0]
+    assert change.principal == "client-123"
+    assert change.add == [Privilege.SELECT]
+    assert any("GRANTED workspace 123: SELECT on catalog existing_catalog" in line
+               for line in output)
+
+
+def test_existing_sp_missing_a_privilege_needs_caller_authority_before_any_write():
+    account, workspace, _workspace_factory, factory = _fake(
+        existing=True, roles=("account_admin",)
+    )
+    _no_catalog_authority(workspace)
+    workspace.grants.get_effective.side_effect = _sp_catalog_effective([
+        Privilege.USE_CATALOG, Privilege.USE_SCHEMA, Privilege.MANAGE, Privilege.APPLY_TAG,
+    ])
+
+    with pytest.raises(RuntimeError, match="preflight failed.*cannot grant SELECT on catalog"):
+        bootstrap(
+            _cfg(target_catalog="existing_catalog"), client_factory=factory, emit=MagicMock()
+        )
+
+    workspace.grants.update.assert_not_called()
+    account.workspace_assignment.update.assert_not_called()
+    account.service_principal_secrets.create.assert_not_called()
+    account.access_control.update_rule_set.assert_not_called()
+
+
+def test_unreadable_sp_catalog_grants_fail_closed_to_a_full_grant():
+    _account, workspace, _workspace_factory, factory = _fake(
+        existing=True, roles=("account_admin",)
+    )
+
+    def effective(*, principal, **_kwargs):
+        if principal == "client-123":
+            raise PermissionDenied("cannot inspect another principal")
+        return SimpleNamespace(privilege_assignments=[])
+
+    workspace.grants.get_effective.side_effect = effective
+
+    assert bootstrap(
+        _cfg(target_catalog="existing_catalog"), client_factory=factory, emit=MagicMock()
+    ) == 0
+
+    assert workspace.grants.update.call_args.kwargs["changes"][0].add == [
+        Privilege.USE_CATALOG, Privilege.USE_SCHEMA, Privilege.SELECT,
+        Privilege.MANAGE, Privilege.APPLY_TAG,
+    ]
 
 
 def test_existing_sp_without_a_secret_mints_one_before_grants():

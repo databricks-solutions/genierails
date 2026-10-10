@@ -12,6 +12,8 @@ from typing import Any
 
 
 MODEL_ENDPOINT = "databricks-claude-sonnet-4-6"
+# Granted to the deployment SP on a TARGET_CATALOG, in grant order.
+CATALOG_PRIVILEGES = ("USE_CATALOG", "USE_SCHEMA", "SELECT", "MANAGE", "APPLY_TAG")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -67,7 +69,7 @@ def parser() -> argparse.ArgumentParser:
                          "for Foundation Model API endpoints; env: MODEL_ENDPOINT)"))
     p.add_argument(
         "--target-catalog",
-        help=("existing catalog to grant USE_CATALOG, USE_SCHEMA, MANAGE, and APPLY_TAG; "
+        help=("existing catalog to grant USE_CATALOG, USE_SCHEMA, SELECT, MANAGE, and APPLY_TAG; "
               "supply one value for every workspace or comma-separated values matching "
               "--workspace-id"),
     )
@@ -86,7 +88,7 @@ def _plan(cfg: Config, emit: Callable[[str], None]) -> None:
         if target_catalog:
             emit(
                 f"  workspace {workspace_id}: grant USE_CATALOG + USE_SCHEMA + "
-                f"MANAGE + APPLY_TAG on catalog {target_catalog}"
+                f"SELECT + MANAGE + APPLY_TAG on catalog {target_catalog}"
             )
         else:
             emit(f"  workspace {workspace_id}: grant CREATE_CATALOG on its metastore")
@@ -218,6 +220,14 @@ def _principal_has_effective_privilege(
         )
         for assignment in _value(effective, "privilege_assignments") or []
     )
+
+
+def _privilege_phrase(privileges: tuple[str, ...]) -> str:
+    """'USE CATALOG, SELECT, and APPLY TAG' for error messages."""
+    names = [privilege.replace("_", " ") for privilege in privileges]
+    if len(names) <= 2:
+        return " and ".join(names)
+    return ", ".join(names[:-1]) + ", and " + names[-1]
 
 
 def _role_values(sp: Any) -> set[str]:
@@ -367,6 +377,30 @@ class WorkspacePreflight:
     model_access: str
     model_resource: str
     model_grant_needed: bool
+    # Target-catalog privileges the deployment SP still lacks (all for a new SP).
+    catalog_missing: tuple[str, ...] = CATALOG_PRIVILEGES
+
+
+def _missing_catalog_privileges(
+    workspace: Any, catalog: str, existing_sp: Any | None
+) -> tuple[str, ...]:
+    """Privileges the existing SP lacks on catalog; all of them if unknown."""
+    if existing_sp is None:
+        return CATALOG_PRIVILEGES
+    try:
+        effective = workspace.grants.get_effective(
+            securable_type="catalog",
+            full_name=catalog,
+            principal=str(_value(existing_sp, "application_id")),
+        )
+    except Exception:
+        # Fail closed: an unreadable state is never treated as already granted;
+        # the caller-authority check below then guards the grant.
+        return CATALOG_PRIVILEGES
+    return tuple(
+        privilege for privilege in CATALOG_PRIVILEGES
+        if not _has_effective_privilege(effective, privilege)
+    )
 
 
 def _caller_context(workspace: Any) -> tuple[str, set[str], bool]:
@@ -416,8 +450,15 @@ def _preflight(
 
         securable_type = "catalog" if target_catalog else "metastore"
         full_name = target_catalog or metastore_id
+        catalog_missing = (
+            _missing_catalog_privileges(workspace, target_catalog, existing_sp)
+            if target_catalog else CATALOG_PRIVILEGES
+        )
+        # An SP that already holds every catalog privilege needs no grant, so
+        # the caller needs no authority over the catalog either.
+        needs_scope_authority = not target_catalog or bool(catalog_missing)
         scope_owner = metastore_owner
-        if target_catalog:
+        if target_catalog and needs_scope_authority:
             try:
                 scope_owner = str(_value(workspace.catalogs.get(target_catalog), "owner"))
             except Exception as exc:
@@ -444,7 +485,7 @@ def _preflight(
             or workspace_admin_owner
         )
         can_manage = False
-        if not owns_scope and target_catalog:
+        if not owns_scope and target_catalog and needs_scope_authority:
             try:
                 effective = workspace.grants.get_effective(
                     securable_type=securable_type,
@@ -460,7 +501,7 @@ def _preflight(
                     "check succeeds. "
                     f"Cause: {_error_details(exc)}"
                 ) from exc
-        if not (owns_scope or can_manage):
+        if needs_scope_authority and not (owns_scope or can_manage):
             if not target_catalog:
                 raise RuntimeError(
                     f"preflight failed in workspace {workspace_id}: caller "
@@ -470,8 +511,7 @@ def _preflight(
                     "deployment service principal. Nothing was changed."
                 )
             requested = (
-                "USE CATALOG, USE SCHEMA, MANAGE, and APPLY TAG"
-                if target_catalog else "CREATE CATALOG"
+                _privilege_phrase(catalog_missing) if target_catalog else "CREATE CATALOG"
             )
             owner_label = "catalog owner" if target_catalog else "metastore owner"
             raise RuntimeError(
@@ -632,6 +672,14 @@ def _preflight(
             if model_access == "UC EXECUTE" and not model_grant_needed
             else model_access
         )
+        if target_catalog:
+            emit(
+                f"PLAN RESOLVED workspace {workspace_id}: catalog {target_catalog} "
+                + (
+                    f"privileges to grant: {' + '.join(catalog_missing)}"
+                    if catalog_missing else "privileges UNCHANGED (already granted)"
+                )
+            )
         if model_access == "UC EXECUTE" and not model_grant_needed:
             emit(
                 f"PLAN RESOLVED workspace {workspace_id}: model access UNCHANGED via "
@@ -649,7 +697,7 @@ def _preflight(
         )
         results[workspace_id] = WorkspacePreflight(
             workspace, host, metastore_id, target_catalog, model_access, model_resource,
-            model_grant_needed,
+            model_grant_needed, catalog_missing,
         )
     return results
 
@@ -780,33 +828,34 @@ def bootstrap(
         checked = preflight[workspace_id]
         w, host = checked.workspace, checked.host
         target_catalog = checked.target_catalog
-        if target_catalog:
+        if target_catalog and not checked.catalog_missing:
+            emit(
+                f"UNCHANGED workspace {workspace_id}: "
+                f"{' + '.join(CATALOG_PRIVILEGES)} on catalog {target_catalog} "
+                "(already granted)"
+            )
+        elif target_catalog:
+            missing = checked.catalog_missing
             try:
                 w.grants.update(
                     securable_type="catalog",
                     full_name=target_catalog,
                     changes=[PermissionsChange(
                         principal=client_id,
-                        add=[
-                            Privilege.USE_CATALOG,
-                            Privilege.USE_SCHEMA,
-                            Privilege.MANAGE,
-                            Privilege.APPLY_TAG,
-                        ],
+                        add=[Privilege[privilege] for privilege in missing],
                     )],
                 )
             except Exception as exc:
                 raise RuntimeError(
-                    f"could not grant USE_CATALOG + USE_SCHEMA + MANAGE + APPLY_TAG on "
+                    f"could not grant {' + '.join(missing)} on "
                     f"catalog {target_catalog!r} "
                     f"in workspace {workspace_id}. The bootstrap caller lacks authority or "
                     "the catalog is unavailable; have the catalog owner grant the deployment "
-                    f"service principal {client_id!r} USE CATALOG, USE SCHEMA, MANAGE, and "
-                    "APPLY TAG."
+                    f"service principal {client_id!r} {_privilege_phrase(missing)}."
                 ) from exc
             emit(
-                f"GRANTED workspace {workspace_id}: USE_CATALOG + USE_SCHEMA + MANAGE + "
-                f"APPLY_TAG on catalog {target_catalog}"
+                f"GRANTED workspace {workspace_id}: {' + '.join(missing)} on catalog "
+                f"{target_catalog}"
             )
         else:
             metastore_id = checked.metastore_id

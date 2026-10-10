@@ -307,10 +307,12 @@ resource "databricks_grant" "terraform_sp_manage_catalog" {
   # the empty-string principal in that supported path.
   for_each = var.databricks_client_id != "" ? toset(local.all_catalogs) : toset([])
 
+  # SELECT lets verify-access prove row-pairing keys as this SP. This grant is
+  # authoritative for the SP, so leaving SELECT out would revoke bootstrap's.
   provider   = databricks.workspace
   catalog    = each.value
   principal  = var.databricks_client_id
-  privileges = ["USE_CATALOG", "USE_SCHEMA", "EXECUTE", "MANAGE", "CREATE_FUNCTION", "APPLY_TAG"]
+  privileges = ["USE_CATALOG", "USE_SCHEMA", "SELECT", "EXECUTE", "MANAGE", "CREATE_FUNCTION", "APPLY_TAG"]
 }
 
 resource "databricks_grant" "catalog_access" {

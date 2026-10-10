@@ -12,6 +12,7 @@ conclusively proves the policy took effect. Anything it could not verify
 NON-PASSING (FAIL or INCONCLUSIVE) and blocks the gate.
 """
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -23,24 +24,311 @@ from verify_effective_access import (  # noqa: E402
     FAIL,
     INCONCLUSIVE,
     DEFAULT_ADMIN_TIER,
+    OUT_OF_TIER_PRINCIPAL,
     ColumnMaskCheck,
     RowFilterCheck,
     VerificationSpec,
     CheckResult,
     EffectiveAccessReport,
     EffectiveAccessVerifier,
+    KeyPick,
     TestPrincipal as VerificationPrincipal,
     parse_tag_conditions,
     resolve_columns_for_condition,
     derive_spec_from_config,
     evaluate_column_mask_check,
+    evaluate_tiered_column_mask_check,
+    most_privileged_tier,
     evaluate_row_filter_check,
     evaluate_effective_access,
     load_spec_from_file,
     load_spec_from_tfvars,
     main,
     verify_effective_access_live,
+    write_result_file,
 )
+
+
+def _tiered_check():
+    return ColumnMaskCheck(
+        table="cat.sch.people", column="email", key_column="id",
+        masked_principals=(), unmasked_principals=(),
+        expected_tiers=(("raw_group", "raw"), ("analyst", "partial"), ("viewer", "full")),
+        partial_function="cat.gov.email_partial", full_function="cat.gov.email_full")
+
+
+def test_tiered_exact_output_rejects_partial_and_full_swapped():
+    check = _tiered_check()
+    expected = {"raw": [(1, "alice@example.com")], "partial": [(1, "a***@example.com")], "full": [(1, "[redacted]")]}
+    actual = {"raw_group": expected["raw"], "analyst": expected["full"], "viewer": expected["partial"]}
+    result = evaluate_tiered_column_mask_check(check, actual, expected)
+    assert result.status == FAIL
+    assert result.evidence["mismatches_by_principal"] == {"analyst": 1, "viewer": 1}
+
+
+def test_tiered_indistinguishable_sample_is_inconclusive():
+    check = _tiered_check()
+    same = [(1, None), (2, "")]
+    actual = {principal: same for principal, _ in check.expected_tiers}
+    result = evaluate_tiered_column_mask_check(check, actual, {tier: same for tier in ("raw", "partial", "full")})
+    assert result.status == INCONCLUSIVE
+    assert "cannot be distinguished" in result.detail
+
+
+def test_tiered_identical_partial_and_full_outputs_can_pass():
+    check = replace(_tiered_check(), full_function=_tiered_check().partial_function)
+    raw = [(key, f"value-{key}") for key in range(12)]
+    redacted = [(key, "[REDACTED]") for key in range(12)]
+    expected = {"raw": raw, "partial": redacted, "full": redacted}
+    actual = {principal: expected[tier] for principal, tier in check.expected_tiers}
+    result = evaluate_tiered_column_mask_check(check, actual, expected)
+    assert result.status == PASS
+    assert result.evidence["per_principal_compared"]["analyst"] == 12
+    assert result.evidence["per_principal_compared"]["viewer"] == 12
+
+
+def test_tiered_different_functions_with_coinciding_sample_are_inconclusive():
+    check = _tiered_check()
+    raw = [(key, f"value-{key}") for key in range(12)]
+    same = [(key, "[REDACTED]") for key in range(12)]
+    actual = {"raw_group": raw, "analyst": same, "viewer": same}
+    result = evaluate_tiered_column_mask_check(
+        check, actual, {"raw": raw, "partial": same, "full": same})
+    assert result.status == INCONCLUSIVE
+    assert "different expected functions" in result.detail
+
+
+@pytest.mark.parametrize("duplicate_in", ["viewer", "expected-full"])
+def test_tiered_duplicate_keys_are_inconclusive_before_rows_are_collapsed(duplicate_in):
+    check = replace(_tiered_check(), full_function=_tiered_check().partial_function)
+    raw = [(key, f"value-{key}") for key in range(12)]
+    masked = [(key, "[R]") for key in range(12)]
+    expected = {"raw": raw, "partial": list(masked), "full": list(masked)}
+    actual = {"raw_group": raw, "analyst": masked, "viewer": list(masked)}
+    if duplicate_in == "viewer":
+        actual["viewer"] = masked[:3] + [(3, raw[3][1]), (3, "[R]")] + masked[4:]
+    else:
+        expected["full"] = masked + [(3, "[R]")]
+    result = evaluate_tiered_column_mask_check(check, actual, expected)
+    assert result.status == INCONCLUSIVE
+    assert "not unique" in result.detail
+
+
+def test_dual_tier_principal_gets_most_privileged_tier():
+    assert most_privileged_tier(["viewer", "raw_group"], ["raw_group", "analyst", "viewer"]) == "raw"
+    assert most_privileged_tier(["viewer", "analyst"], ["raw_group", "analyst", "viewer"]) == "partial"
+
+
+@pytest.mark.parametrize(("principal", "wrong_tier"), [("analyst", "full"), ("viewer", "partial")])
+def test_tiered_partial_samples_cannot_hide_swapped_outputs(principal, wrong_tier):
+    check = _tiered_check()
+    expected = {
+        "raw": [(1, "alice@example.com"), (2, "bob@example.com")],
+        "partial": [(1, "a***@example.com"), (2, "[redacted]")],
+        "full": [(1, "[redacted]"), (2, "[redacted]")],
+    }
+    actual = {
+        "raw_group": expected["raw"],
+        "analyst": expected["partial"],
+        "viewer": expected["full"],
+    }
+    actual[principal] = [expected[wrong_tier][1]]
+    result = evaluate_tiered_column_mask_check(check, actual, expected)
+    assert result.status == INCONCLUSIVE
+    assert result.evidence["missing"] == [principal]
+
+
+def test_tiered_nulls_are_not_raw_leaks():
+    check = _tiered_check()
+    expected = {
+        "raw": [(1, "alice@example.com"), (2, None)],
+        "partial": [(1, "a***@example.com"), (2, None)],
+        "full": [(1, "[redacted]"), (2, None)],
+    }
+    actual = {principal: expected[tier] for principal, tier in check.expected_tiers}
+    assert evaluate_tiered_column_mask_check(check, actual, expected).status == PASS
+
+
+def test_tiered_raw_leak_has_dedicated_failure_evidence():
+    check = _tiered_check()
+    expected = {"raw": [(1, "alice@example.com")], "partial": [(1, "a***@example.com")],
+                "full": [(1, "[redacted]")]}
+    actual = {"raw_group": expected["raw"], "analyst": expected["raw"], "viewer": expected["full"]}
+    result = evaluate_tiered_column_mask_check(check, actual, expected)
+    assert result.status == FAIL
+    assert result.evidence["raw_leaks_by_principal"] == {"analyst": 1}
+
+
+def test_tiered_all_moving_masked_principals_error_is_inconclusive():
+    check = replace(_tiered_check(), moving_principals=("analyst", "viewer"))
+    expected = {"raw": [(1, "alice@example.com")], "partial": [(1, "a***@example.com")],
+                "full": [(1, "[redacted]")]}
+    result = evaluate_tiered_column_mask_check(
+        check, {"raw_group": expected["raw"]}, expected,
+        {"analyst": "more than one mask", "viewer": "More than one mask"})
+    assert result.status == INCONCLUSIVE
+    assert "no masked principal" in result.detail
+
+
+def test_moving_principal_permission_error_is_a_failure():
+    check = replace(_tiered_check(), moving_principals=("analyst",))
+    expected = {"raw": [(1, "raw")], "partial": [(1, "part")], "full": [(1, "full")]}
+    result = evaluate_tiered_column_mask_check(
+        check, {"raw_group": expected["raw"], "viewer": expected["full"]}, expected,
+        {"analyst": "PERMISSION_DENIED: SELECT"})
+    assert result.status == FAIL
+    assert "PERMISSION_DENIED" in result.detail
+
+
+def test_tiered_fixed_point_bound_is_inconclusive():
+    check = _tiered_check()
+    raw = [(key, f"value-{key}") for key in range(12)]
+    partial = raw[:11] + [(11, "masked")]
+    full = [(key, "[R]") for key in range(12)]
+    result = evaluate_tiered_column_mask_check(
+        check,
+        {"raw_group": raw, "analyst": partial, "viewer": full},
+        {"raw": raw, "partial": partial, "full": full},
+    )
+    assert result.status == INCONCLUSIVE
+    assert "too many sampled rows" in result.detail
+
+
+def test_row_filtered_masked_tier_with_only_null_raw_row_has_no_proof():
+    check = _tiered_check()
+    expected = {
+        "raw": [(1, None), (2, "raw")],
+        "partial": [(1, "n/a"), (2, "partial")],
+        "full": [(1, "[R]"), (2, "[R]")],
+    }
+    actual = {
+        "raw_group": expected["raw"],
+        "analyst": [expected["partial"][0]],
+        "viewer": expected["full"],
+    }
+    result = evaluate_tiered_column_mask_check(check, actual, expected)
+    assert result.status == INCONCLUSIVE
+    assert result.evidence["per_principal_compared"]["analyst"] == 0
+
+
+def test_empty_raw_value_never_counts_as_mask_proof():
+    check = replace(
+        _tiered_check(), expected_tiers=(("raw_group", "raw"), ("viewer", "full")))
+    expected = {"raw": [(1, "")], "partial": [(1, "[R]")], "full": [(1, "[R]")]}
+    result = evaluate_tiered_column_mask_check(
+        check, {"raw_group": expected["raw"], "viewer": expected["full"]}, expected)
+    assert result.status == INCONCLUSIVE
+    assert "no masked principal returned a distinguishing row" in result.detail
+
+
+def test_moving_principal_combined_permission_and_mask_error_is_failure():
+    check = replace(_tiered_check(), moving_principals=("analyst",))
+    expected = {"raw": [(1, "raw")], "partial": [(1, "part")], "full": [(1, "full")]}
+    result = evaluate_tiered_column_mask_check(
+        check, {"raw_group": expected["raw"], "viewer": expected["full"]}, expected,
+        {"analyst": "PERMISSION_DENIED; column has more than one mask"})
+    assert result.status == FAIL
+
+
+def test_declared_tier_must_match_overlapping_memberships():
+    check = replace(_tiered_check(), expected_tiers=_tiered_check().expected_tiers + (("dual", "full"),))
+    expected = {"raw": [(1, "alice@example.com")], "partial": [(1, "a***@example.com")],
+                "full": [(1, "[redacted]")]}
+    actual = {principal: expected[tier] for principal, tier in check.expected_tiers}
+    result = evaluate_tiered_column_mask_check(
+        check, actual, expected, principal_memberships={"dual": ("raw_group", "viewer")})
+    assert result.status == INCONCLUSIVE
+    assert "memberships resolve to raw" in result.detail
+
+
+def test_deterministic_tfvars_uses_env_settings_and_derives_overlap_and_outsider(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    tfvars.write_text('''
+fgac_policies = [
+  { name = "partial", policy_type = "POLICY_TYPE_COLUMN_MASK", to_principals = ["analyst"],
+    match_condition = "hasTagValue('gr_treatment', 'email_partial')",
+    function_catalog = "cat", function_schema = "gov", function_name = "partial_email" },
+  { name = "full", policy_type = "POLICY_TYPE_COLUMN_MASK", to_principals = ["account users"],
+    except_principals = ["raw", "analyst"], match_condition = "hasTagValue('gr_treatment', 'email_partial')",
+    function_catalog = "cat", function_schema = "gov", function_name = "full_email" },
+]
+tag_assignments = [
+  { entity_type = "columns", entity_name = "cat.sch.people.email", tag_key = "gr_treatment", tag_value = "email_partial" },
+]
+''')
+    env.write_text('''governance_mode = "deterministic"
+access_tier_groups = ["raw", "analyst", "viewer"]
+raw_exempt_principals = ["etl_group"]
+''')
+    spec = load_spec_from_tfvars(tfvars, env_file=env, key_column="id")
+    check = spec.column_masks[0]
+    expectations = dict(check.expected_tiers)
+    assert (check.partial_function, check.full_function) == ("cat.gov.partial_email", "cat.gov.full_email")
+    assert expectations["__out_of_tier__"] == "full"
+    assert expectations["__dual_tier__"] == "raw"
+    assert expectations["etl_group"] == "raw"
+    assert spec.principal_memberships["__dual_tier__"] == ("raw", "viewer")
+
+
+def test_deterministic_two_tier_spec_uses_full_for_unused_partial(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    tfvars.write_text('''fgac_policies = [{ name = "full", policy_type = "POLICY_TYPE_COLUMN_MASK",
+      to_principals = ["account users"], except_principals = ["raw"],
+      match_condition = "hasTagValue('gr_treatment', 'email_partial')",
+      function_catalog = "cat", function_schema = "gov", function_name = "full_email" }]
+tag_assignments = [{ entity_type = "columns", entity_name = "cat.sch.people.email",
+  tag_key = "gr_treatment", tag_value = "email_partial" }]
+''')
+    env.write_text('governance_mode = "deterministic"\naccess_tier_groups = ["raw", "viewer"]\n')
+    check = load_spec_from_tfvars(tfvars, env_file=env, key_column="id").column_masks[0]
+    assert check.partial_function == check.full_function == "cat.gov.full_email"
+    assert set(dict(check.expected_tiers).values()) == {"raw", "full"}
+
+
+def test_deterministic_three_tier_never_raw_spec_uses_full_for_unused_partial(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    tfvars.write_text('''fgac_policies = [{ name = "full", policy_type = "POLICY_TYPE_COLUMN_MASK",
+      to_principals = ["account users"], match_condition = "hasTagValue('gr_treatment', 'secret')",
+      function_catalog = "cat", function_schema = "gov", function_name = "redact" }]
+tag_assignments = [{ entity_type = "columns", entity_name = "cat.sch.people.api_key",
+  tag_key = "gr_treatment", tag_value = "secret" }]
+''')
+    env.write_text(
+        'governance_mode = "deterministic"\naccess_tier_groups = ["raw", "analyst", "viewer"]\n')
+    spec = load_spec_from_tfvars(tfvars, env_file=env, key_column="id")
+    check = spec.column_masks[0]
+    assert check.partial_function == check.full_function == "cat.gov.redact"
+    assert "partial" not in set(dict(check.expected_tiers).values())
+
+
+def test_deterministic_spec_rejects_raw_exempt_user_email(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    tfvars.write_text("fgac_policies = []\ntag_assignments = []\n")
+    env.write_text('''governance_mode = "deterministic"
+access_tier_groups = ["raw", "viewer"]
+raw_exempt_principals = ["alice@example.com"]
+''')
+    with pytest.raises(ValueError, match="user emails"):
+        load_spec_from_tfvars(tfvars, env_file=env, key_column="id")
+
+
+@pytest.mark.parametrize("setting", ["access_tier_groups", "raw_exempt_principals"])
+@pytest.mark.parametrize("principal", ["", " ", "\t"])
+def test_deterministic_spec_rejects_empty_or_whitespace_group_names(
+    tmp_path, setting, principal,
+):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    tfvars.write_text("fgac_policies = []\ntag_assignments = []\n")
+    env.write_text(
+        'governance_mode = "deterministic"\n'
+        f'{setting} = {__import__("json").dumps([principal])}\n')
+    with pytest.raises(ValueError, match="non-empty group names"):
+        load_spec_from_tfvars(tfvars, env_file=env, key_column="id")
 
 
 def test_cli_missing_promoted_tfvars_reports_prerequisite(tmp_path):
@@ -816,8 +1104,47 @@ class TestTemporaryWarehouseAccess:
         assert access.service_principal_name == "app-123"
         assert access.permission_level.value == "CAN_USE"
 
-    def test_provision_assigns_temporary_principal_to_workspace_before_return(
-        self, monkeypatch,
+    def test_outsider_table_access_is_exact_and_reversible(self, monkeypatch):
+        verifier = self._verifier(monkeypatch, object())
+        statements = []
+        monkeypatch.setattr(verifier, "run_query", lambda _ws, sql: statements.append(sql))
+        principal = VerificationPrincipal(
+            "__out_of_tier__", "test-outsider", "01234567-89ab-cdef", "secret", "456")
+
+        verifier.grant_outsider_table_access(
+            principal, ["cat.sales.customers", "cat.sales.customers"])
+        verifier.grant_outsider_table_access(
+            principal, ["cat.sales.customers"], revoke=True)
+
+        assert statements == [
+            "GRANT USE CATALOG ON CATALOG `cat` TO `01234567-89ab-cdef`",
+            "GRANT USE SCHEMA ON SCHEMA `cat`.`sales` TO `01234567-89ab-cdef`",
+            "GRANT SELECT ON TABLE `cat`.`sales`.`customers` TO `01234567-89ab-cdef`",
+            "REVOKE SELECT ON TABLE `cat`.`sales`.`customers` FROM `01234567-89ab-cdef`",
+            "REVOKE USE SCHEMA ON SCHEMA `cat`.`sales` FROM `01234567-89ab-cdef`",
+            "REVOKE USE CATALOG ON CATALOG `cat` FROM `01234567-89ab-cdef`",
+        ]
+
+    def test_outsider_revoke_attempts_every_privilege_after_an_error(self, monkeypatch):
+        verifier = self._verifier(monkeypatch, object())
+        statements = []
+
+        def fail_first(_ws, sql):
+            statements.append(sql)
+            if "SELECT" in sql:
+                raise RuntimeError("already absent")
+
+        monkeypatch.setattr(verifier, "run_query", fail_first)
+        principal = VerificationPrincipal(
+            "__out_of_tier__", "test-outsider", "app", "secret", "456")
+        with pytest.raises(RuntimeError, match="failed to revoke 1"):
+            verifier.grant_outsider_table_access(
+                principal, ["cat.sales.customers"], revoke=True)
+        assert len(statements) == 3
+
+    @pytest.mark.parametrize("membership", ["viewers", 'team"blue\\ops', "équipe"])
+    def test_provision_assigns_exact_temporary_group_before_return(
+        self, monkeypatch, membership,
     ):
         from types import SimpleNamespace
         from unittest.mock import Mock
@@ -827,17 +1154,28 @@ class TestTemporaryWarehouseAccess:
             "host": "h", "client_id": "c", "client_secret": "s",
             "account_host": "a", "account_id": "1", "workspace_id": "123",
         })
-        sp = SimpleNamespace(id="456", application_id="app-123")
-        group = SimpleNamespace(id="789", members=[])
+        sp = SimpleNamespace(
+            id="456", application_id="app-123",
+            display_name="genierails-verify-viewers")
+        nonexact_sp = SimpleNamespace(
+            id="999", application_id="wrong-app",
+            display_name="Genierails-Verify-Viewers")
+        group = SimpleNamespace(id="789", display_name=membership, members=[])
+        group_filters = []
+
+        def list_groups(**kwargs):
+            group_filters.append(kwargs["filter"])
+            return [group]
+        create_sp = Mock()
         account = SimpleNamespace(
             service_principals=SimpleNamespace(
-                list=lambda **_: [], create=lambda **_: sp,
+                list=lambda **_: [nonexact_sp, sp], create=create_sp,
             ),
             service_principal_secrets=SimpleNamespace(
                 create=lambda **_: SimpleNamespace(secret="secret"),
             ),
             groups=SimpleNamespace(
-                list=lambda **_: [group], patch=Mock(),
+                list=list_groups, patch=Mock(),
             ),
             workspace_assignment=SimpleNamespace(update=Mock()),
         )
@@ -847,7 +1185,7 @@ class TestTemporaryWarehouseAccess:
         verifier._account = account
         verifier._admin_ws = workspace
 
-        principal = verifier.provision_principal("viewers")
+        principal = verifier.provision_principal("viewers", memberships=(membership,))
 
         account.workspace_assignment.update.assert_called_once()
         call = account.workspace_assignment.update.call_args.kwargs
@@ -855,6 +1193,39 @@ class TestTemporaryWarehouseAccess:
         assert call["principal_id"] == 456
         assert call["permissions"][0].value == "USER"
         assert principal.application_id == "app-123"
+        create_sp.assert_not_called()
+        assert group_filters == [
+            f"displayName eq {__import__('json').dumps(membership, ensure_ascii=False)}"]
+
+    @pytest.mark.parametrize("returned_names", [
+        ["analysts-prefix"],
+        ["Analysts"],
+        ["analysts", "analysts"],
+    ])
+    def test_provision_refuses_nonexact_or_ambiguous_group_matches(
+        self, monkeypatch, returned_names,
+    ):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        verifier = EffectiveAccessVerifier({
+            "host": "h", "client_id": "c", "client_secret": "s",
+            "account_host": "a", "account_id": "1", "workspace_id": "123",
+        })
+        create = Mock()
+        create_secret = Mock()
+        verifier._account = SimpleNamespace(
+            groups=SimpleNamespace(list=lambda **_: [
+                SimpleNamespace(id=str(index), display_name=name, members=[])
+                for index, name in enumerate(returned_names)]),
+            service_principals=SimpleNamespace(create=create),
+            service_principal_secrets=SimpleNamespace(create=create_secret),
+        )
+        with pytest.raises(RuntimeError, match="expected exactly one"):
+            verifier.provision_principal("analysts")
+        create.assert_not_called()
+        create_secret.assert_not_called()
 
     def test_warehouse_grant_failure_aborts_verification_setup(self, monkeypatch):
         class FailingPermissions:
@@ -877,7 +1248,10 @@ class TestTemporaryWarehouseAccess:
             def resolve_warehouse(self):
                 return "warehouse-123"
 
-            def provision_principal(self, tier):
+            def resolve_principal_groups(self, memberships):
+                return list(memberships)
+
+            def provision_principal(self, tier, memberships=None, *, resolved_groups=None):
                 return VerificationPrincipal(tier, f"test-{tier}", "app-123", "secret", "456")
 
             def grant_warehouse_use(self, principal):
@@ -899,6 +1273,192 @@ class TestTemporaryWarehouseAccess:
             )
 
         assert deleted == ["456"]
+
+    def test_all_group_lookups_precede_any_principal_or_secret_creation(
+        self, monkeypatch, tmp_path,
+    ):
+        events = []
+
+        class FakeVerifier:
+            def __init__(self, auth, warehouse_id=""):
+                self.mask_config = None
+
+            def resolve_warehouse(self):
+                return "warehouse-123"
+
+            def resolve_principal_groups(self, memberships):
+                name = tuple(memberships)
+                events.append(("lookup", name))
+                if name == ("viewers",):
+                    raise RuntimeError("expected exactly one")
+                return list(memberships)
+
+            def provision_principal(self, tier, memberships=None, *, resolved_groups=None):
+                events.append(("create", tier))
+                raise AssertionError("pre-flight failure must prevent provisioning")
+
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        monkeypatch.setattr("verify_effective_access.load_auth", lambda path: {
+            "host": "h", "client_id": "c", "client_secret": "s",
+        })
+        monkeypatch.setattr("verify_effective_access.EffectiveAccessVerifier", FakeVerifier)
+        spec = VerificationSpec(row_filters=[RowFilterCheck(
+            table="cat.sch.people",
+            restricted_principals=("analysts", "viewers"),
+            unrestricted_principals=(),
+        )])
+
+        with pytest.raises(RuntimeError, match="expected exactly one"):
+            verify_effective_access_live(spec, tmp_path / "auth.auto.tfvars")
+
+        assert events == [
+            ("lookup", ("analysts",)),
+            ("lookup", ("viewers",)),
+        ]
+
+
+class TestTieredLiveGrantLifecycle:
+    @staticmethod
+    def _run(monkeypatch, tmp_path, *, revoke_error=None, keep=False, sample_error=None, log=None):
+        log = [] if log is None else log
+        raw = {key: f"raw-{key}" for key in range(12)}
+        partial = {key: f"partial-{key}" for key in range(12)}
+        full = {key: "[R]" for key in range(12)}
+        values = {"raw": raw, "partial": partial, "full": full}
+
+        class FakeVerifier:
+            def __init__(self, auth, warehouse_id=""):
+                self.mask_config = None
+
+            def resolve_warehouse(self):
+                return "warehouse"
+
+            def resolve_principal_groups(self, memberships):
+                log.append(("lookup", tuple(memberships)))
+                return list(memberships)
+
+            def provision_principal(
+                self, tier, memberships=None, *, resolved_groups=None,
+            ):
+                log.append(("provision", tier))
+                return VerificationPrincipal(tier, f"test-{tier}", f"app-{tier}", "secret", tier)
+
+            def grant_warehouse_use(self, principal):
+                log.append(("warehouse", principal.tier))
+
+            def grant_outsider_table_access(self, principal, tables, *, revoke=False):
+                log.append(("revoke" if revoke else "grant", principal.tier, tuple(tables)))
+                if revoke and revoke_error:
+                    raise revoke_error
+
+            def deprovision_principal(self, principal):
+                log.append(("deprovision", principal.tier))
+
+            def key_mask_metadata(self, principal, check):
+                return []
+
+            def collect_column_values(self, principal, check, limit=25, keys=None, salt=None):
+                if sample_error and principal.tier == "analyst":
+                    raise sample_error
+                tier = dict(check.expected_tiers).get(principal.tier, "raw")
+                selected = list(keys) if keys is not None else list(raw)[:limit]
+                return [(key, values[tier][key]) for key in selected]
+
+            def prove_key_unique(self, principal, check, keys):
+                return ""
+
+            def count_rows_with_keys(self, principal, check, keys):
+                return len(keys)
+
+            def expected_tier_values(self, principal, check, keys):
+                return {tier: [(key, tier_values[key]) for key in keys]
+                        for tier, tier_values in values.items()}
+
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        monkeypatch.setenv("GENIERAILS_VERIFY_PROPAGATION_SLEEP", "0")
+        monkeypatch.setattr("verify_effective_access.load_auth", lambda path: {
+            "client_id": "admin", "client_secret": "secret"})
+        monkeypatch.setattr("verify_effective_access.EffectiveAccessVerifier", FakeVerifier)
+        monkeypatch.setattr(
+            "verify_effective_access.pick_pairing_keys",
+            lambda verifier, principal, checks, **kwargs: {
+                check.table.lower(): KeyPick(check.table, "id", "explicit") for check in checks},
+        )
+        check = ColumnMaskCheck(
+            table="cat.sch.people", column="email", key_column="id",
+            masked_principals=(), unmasked_principals=(),
+            expected_tiers=(("raw_group", "raw"), ("analyst", "partial"),
+                            ("viewer", "full"), (OUT_OF_TIER_PRINCIPAL, "full"),
+                            (DEFAULT_ADMIN_TIER, "raw")),
+            partial_function="cat.gov.partial", full_function="cat.gov.full")
+        spec = VerificationSpec(column_masks=[check], principal_memberships={
+            "raw_group": ("raw_group",), "analyst": ("analyst",),
+            "viewer": ("viewer",), OUT_OF_TIER_PRINCIPAL: ()})
+        report = verify_effective_access_live(
+            spec, tmp_path / "auth.auto.tfvars", keep_principals=keep)
+        return report, log, spec
+
+    @pytest.mark.parametrize("keep", [False, True])
+    def test_live_flow_grants_then_revokes_outsider_even_when_principal_is_kept(
+        self, monkeypatch, tmp_path, keep,
+    ):
+        report, log, _spec = self._run(monkeypatch, tmp_path, keep=keep)
+        assert report.passed
+        assert ("grant", OUT_OF_TIER_PRINCIPAL, ("cat.sch.people",)) in log
+        assert ("revoke", OUT_OF_TIER_PRINCIPAL, ("cat.sch.people",)) in log
+        assert log.index(("grant", OUT_OF_TIER_PRINCIPAL, ("cat.sch.people",))) < log.index(
+            ("revoke", OUT_OF_TIER_PRINCIPAL, ("cat.sch.people",)))
+        assert (("deprovision", OUT_OF_TIER_PRINCIPAL) in log) is (not keep)
+
+    def test_failed_revoke_is_reported_and_written_as_failure(self, monkeypatch, tmp_path, capsys):
+        report, _log, spec = self._run(
+            monkeypatch, tmp_path, keep=True, revoke_error=RuntimeError("revoke denied"))
+        assert not report.passed
+        cleanup = next(result for result in report.results if result.kind == "cleanup")
+        assert cleanup.status == FAIL
+        assert "app-__out_of_tier__" in cleanup.detail
+        assert "REVOKE" in cleanup.detail and "cat.sch.people" in cleanup.detail
+        assert "ERROR" in capsys.readouterr().err
+        result_file = tmp_path / "result.json"
+        write_result_file(result_file, report, spec)
+        payload = __import__("json").loads(result_file.read_text())
+        assert payload["passed"] is False
+        assert payload["cleanup_failures"][0]["target"] == "app-__out_of_tier__"
+        assert "REVOKE SELECT" in payload["cleanup_failures"][0]["detail"]
+
+    def test_exception_and_keyboard_interrupt_still_revoke(self, monkeypatch, tmp_path):
+        error_log = []
+        report, _unused, _spec = self._run(
+            monkeypatch, tmp_path, sample_error=RuntimeError("query failed"), log=error_log)
+        assert not report.passed
+        assert ("revoke", OUT_OF_TIER_PRINCIPAL, ("cat.sch.people",)) in error_log
+
+        interrupt_log = []
+        with pytest.raises(KeyboardInterrupt):
+            self._run(
+                monkeypatch, tmp_path, sample_error=KeyboardInterrupt("cancelled"),
+                log=interrupt_log)
+        assert ("revoke", OUT_OF_TIER_PRINCIPAL, ("cat.sch.people",)) in interrupt_log
+
+    def test_sigterm_and_sighup_handlers_raise_for_finally_cleanup(self, monkeypatch, tmp_path):
+        installed = []
+        real_getsignal = __import__("signal").getsignal
+
+        def remember(signum, handler):
+            installed.append((signum, handler))
+
+        monkeypatch.setattr("verify_effective_access.signal.getsignal", real_getsignal)
+        monkeypatch.setattr("verify_effective_access.signal.signal", remember)
+        report, _log, _spec = self._run(monkeypatch, tmp_path)
+        assert report.passed
+        import signal as signal_module
+        for signum in (signal_module.SIGTERM, signal_module.SIGHUP):
+            handler = next(handler for installed_signum, handler in installed
+                           if installed_signum == signum and callable(handler))
+            with pytest.raises(KeyboardInterrupt, match="cleaning up"):
+                handler(signum, None)
+            assert installed[-2:][0 if signum == signal_module.SIGTERM else 1] == (
+                signum, real_getsignal(signum))
 
 
 # ---------------------------------------------------------------------------

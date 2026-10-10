@@ -66,6 +66,7 @@ locals {
       sql_warehouse_id = var.sql_warehouse_id
       uc_tables        = local.legacy_full_uc_tables
       acl_groups       = null
+      delete           = false
     }] : []
   )
 
@@ -331,6 +332,7 @@ variable "genie_spaces" {
     sql_warehouse_id = optional(string, "")
     uc_tables        = optional(list(string), [])
     acl_groups       = optional(list(string), null)
+    delete           = optional(bool, false)
   }))
   default     = []
   description = "User-owned Genie agent definitions. 'name' is the semantic-config lookup key. acl_groups omitted/null derives fresh from policy principals, [] explicitly grants nobody, and a non-empty list is the durable override; generated semantic drafts do not own ACLs."
@@ -501,7 +503,71 @@ variable "genie_acl_groups" {
 variable "access_tier_groups" {
   type        = list(string)
   default     = []
-  description = "Generate-time input only (read by make generate, carried by make promote): existing IdP-synced access-tier groups, most to least privileged. Declared so env.auto.tfvars loads cleanly; no resource reads it."
+  description = "Deterministic-governance tiers ordered raw, optional partial tier(s), then full. Unused until rollout step 4."
+  validation {
+    condition     = length(var.access_tier_groups) == length(distinct(var.access_tier_groups)) && alltrue([for group in var.access_tier_groups : trimspace(group) != ""])
+    error_message = "access_tier_groups must contain unique, non-empty group names."
+  }
+}
+
+variable "governance_mode" {
+  type        = string
+  default     = "legacy"
+  description = "Governance implementation selector. Deterministic mode is introduced incrementally by the rollout."
+  validation {
+    condition     = contains(["legacy", "deterministic"], var.governance_mode)
+    error_message = "governance_mode must be legacy or deterministic."
+  }
+}
+
+variable "raw_exempt_principals" {
+  type        = list(string)
+  default     = []
+  description = "Environment-owned principals that see raw values, except for never-raw treatments; used from rollout step 5."
+  validation {
+    condition = alltrue([for principal in var.raw_exempt_principals :
+      trimspace(principal) != "" && length(regexall("@", principal)) == 0
+    ])
+    error_message = "raw_exempt_principals must contain non-empty account group names, not user emails. UUID/hex-shaped group display names are allowed and resolved exactly during live verification."
+  }
+}
+
+variable "treatment_versions" {
+  type        = map(object({ partial = string }))
+  default     = {}
+  description = "Reviewed partial version per treatment; used from rollout step 3."
+}
+
+variable "tier_access_overrides" {
+  type        = map(map(string))
+  default     = {}
+  description = "Per-treatment group access overrides; used from rollout step 4."
+  validation {
+    condition     = alltrue(flatten([for rules in values(var.tier_access_overrides) : [for access in values(rules) : contains(["raw", "partial", "full"], access)]]))
+    error_message = "tier_access_overrides values must be raw, partial, or full."
+  }
+}
+
+variable "column_overrides" {
+  type        = any
+  default     = {}
+  description = "Per-column reviewed partial version or stricter treatment; used from rollout step 3."
+}
+
+variable "row_filters" {
+  type = list(object({
+    table           = string
+    column          = string
+    values_by_group = map(list(string))
+  }))
+  default     = []
+  description = "Declared table row-filter rules; used from rollout step 6."
+}
+
+variable "require_acl_groups" {
+  type        = bool
+  default     = false
+  description = "Refuse Genie agents that omit acl_groups; rollout step 5 changes the default to true."
 }
 
 variable "promote_from" {
