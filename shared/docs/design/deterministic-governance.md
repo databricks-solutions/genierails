@@ -72,7 +72,7 @@ GenieRails ships a mapping for all 93 Databricks classes. Each treatment has a f
 
 **Behaviour contract** (tested with a table of exact expected outputs per function, and live on a non-UTC session): NULL in gives NULL out; malformed input gets the full version; numbers round half away from zero; DATE becomes 1 January of the year; TIMESTAMP becomes the start of the year in UTC; bands include the lower bound; NaN and infinity become NULL.
 
-**Change from today:** `us_ssn` and `us_itin` move from last 4 to redacted for tier 2.
+**Changes from today:** `us_ssn` and `us_itin` move from last 4 to redacted for tier 2; IPv6 addresses are redacted for tier 2 instead of keeping a prefix.
 
 **Config** (each treatment is configurable on its own; the library uses the same treatment names as the config):
 
@@ -99,7 +99,7 @@ raw_exempt_principals = ["etl-sp", "bi-service-account"]                  # opti
   - full policy: `TO account users EXCEPT <tier-1 and tier-2 groups, raw_exempt_principals>`.
 
   Exactly one mask resolves per user. A user in several tiers gets the most privileged one. Anyone outside the tiers gets the full version.
-- **Precedence**, one rule: who sees what is decided first (never-raw > tier 1 and `raw_exempt_principals` > tier rule), then which version (`column_overrides` > `treatment_versions` > library). The deployer SP is not exempt from never-raw policies; it manages policies without reading the data.
+- **Precedence**, one rule: who sees what is decided first (never-raw > tier 1 and `raw_exempt_principals` > tier rule), then which version (`column_overrides` > `treatment_versions` > library). The deployer SP is in the tier-1 EXCEPT lists for ordinary treatments (verification needs raw rows), but **not** for never-raw treatments; never-raw columns are verified by checking every tier sees the redacted output.
 - Tiers are governance: defined in dev and promoted. Dev and prod use the same account groups.
 
 ## 4. Row filters (declared only)
@@ -124,7 +124,7 @@ row_filters = [
 - **Dev:** agent config is never overwritten; GenieRails applies governance and access for captured tables only, and creates an agent only if missing.
 - **Prod:** every `release` overwrites the agent's config from git (full replacement). It prints a field-level report of what it overwrote, never recreates the agent and never changes its ID, so conversations stay.
 - **Promotion remap** is JSON-aware: catalog names and the warehouse are replaced on identifier boundaries inside string values, never in keys or prose.
-- **Removing an agent** detaches it by default (access revoked, agent kept). `delete = true` deletes it and shows in the promotion PR.
+- **Removing an agent** detaches it by default: `release` revokes its access and runs a generated `terraform state rm` for the agent's resources, so Terraform never destroys it and its conversations stay. `delete = true` deletes it and shows in the promotion PR.
 
 ## 6. Safety rules
 
@@ -134,10 +134,10 @@ row_filters = [
 | Unmapped class | Blocks new access. `maintain` and `release` apply a fail-safe **redacted** treatment (tiers 2 and 3) to the column and report it until a mapping is promoted. |
 | Prod classification complete | `release` refuses if a column classified in dev (remapped through `catalog_map`) has no `class.*` tag in prod. `promote-to` writes the expected list to `generated/expected_classification.json`. |
 | Protection order | raw < partial versions < redacted/NULL. |
-| Refuse weakening | Every `promote-to`, `release` and migration compares each SELECT holder and column against live state. Any weakening, including new `raw_exempt_principals` or `partial = "raw"`, stops the run unless listed in `ACK`. |
-| SELECT-holder check | Before the first deterministic apply of an env, and whenever governance newly covers a table, GenieRails lists every SELECT holder, including schema- and catalog-level holders. Each non-human principal must be in a tier, in `raw_exempt_principals`, or in `ACK`; otherwise the run stops. Groups that a row filter would leave with zero rows are listed the same way. |
-| Tighten before loosen | A change that moves a principal between tiers applies in phases: add or strengthen masks, verify, then loosen. A brief "more than one mask" error is acceptable; a raw window is not. Run tier moves as maintenance windows. |
-| Tags | Each column has one treatment-tag resource keyed by `table.column`; value changes update in place (verified in the provider). New tag values are added to the tag policy before retagging. |
+| Refuse weakening | Every `promote-to`, `release` and migration compares each SELECT holder and column against live state. Any weakening, including new `raw_exempt_principals`, `partial = "raw"`, or removing or widening a row filter, stops the run unless listed in `ACK`. |
+| SELECT-holder check | Before the first deterministic apply of an env, and whenever governance newly covers a table, GenieRails lists every SELECT holder, including schema- and catalog-level holders. Every holder (group, user or service principal) must be in a tier, in `raw_exempt_principals`, or in `ACK`; otherwise the run stops. Groups that a row filter would leave with zero rows are listed the same way. |
+| Tighten before loosen | A change that moves a principal between tiers applies in phases: add or strengthen masks, verify, then loosen. A brief "more than one mask" error is acceptable only for the principals being moved; any raw value fails the run. Run tier moves as maintenance windows. |
+| Tags | One treatment tag key for everything. Each column has one treatment-tag resource keyed by `table.column`; value changes update in place (verified in the provider). Order for a column moving to a new treatment: add the value to the tag policy, create the new treatment's policies, then retag. A column is never tagged with a value no policy matches. |
 | CI | Every applying target refuses in CI. The only exception is the optional post-merge `rehearse ENV=dev` job, and only with remote locked state (section 10). |
 
 **One acknowledgement variable:**
@@ -146,7 +146,9 @@ row_filters = [
 ACK="weaken:cat.sch.t.col:etl-sp,unclassified:cat.sch.t.col,holder:bi-sp"
 ```
 
-**Residual risk (stated, not solved):** readers with schema- or catalog-level `SELECT` can read a new table raw until it is classified and `maintain` runs. Run `maintain` on a schedule.
+**Residual risks (stated, not solved):**
+- Readers with schema- or catalog-level `SELECT` can read a new table raw until it is classified and `maintain` runs. Run `maintain` on a schedule.
+- In dev, tables added to an agent in the UI but not yet captured are not governed.
 
 ## 7. Verification
 
@@ -155,15 +157,17 @@ ACK="weaken:cat.sch.t.col:etl-sp,unclassified:cat.sch.t.col,holder:bi-sp"
 ## 8. Migration for existing deployments
 
 - A report-only dry run comes first, on the live env.
-- The report covers every column and every SELECT holder: what they see today and after. It lists agents missing `acl_groups`, and, for governance-only envs, every `SELECT` grant GenieRails will **revoke** because `uc_tables` no longer grants.
+- The report covers every column and every SELECT holder: what they see today and after. It lists agents missing `acl_groups`, and, every `SELECT` grant GenieRails will **revoke** because `uc_tables` no longer grants (in any env, with or without agents).
 - Weakening and revocations stop the run unless listed in `ACK`. There is no separate accept flag.
 - An inventory of masks GenieRails didn't create (`ALTER … SET MASK`, old policies) runs first; they block cutover until removed or acknowledged.
 - New functions are created under new names; policies change in tighten-before-loosen phases; old functions are kept until no policy uses them. Tag state moves with generated `terraform state mv`.
+- Existing AI-drafted row filters are frozen as they are until declared ones replace them.
+- Cutover is reported done only after a fresh classification read and a passing tier-aware verification.
 - Rollback: revert and release; the old functions still exist, so masks switch back in place.
 
 ## 9. Files and version control
 
-`make setup` writes a `.gitignore` that commits `env.auto.tfvars`, `agents/`, `generated/` and capture files, and ignores `auth.auto.tfvars`, state, locks and `generated/.live_refresh.json`. Generated files are never hand-merged: on conflict, run `make generate` on the latest `main`. `promote-to` writes only the files it owns; env-owned keys (`acl_groups`, `raw_exempt_principals`) are never overwritten and are excluded from the promotion check.
+`make setup` writes a `.gitignore` that commits `env.auto.tfvars`, `agents/`, `generated/` and capture files, and ignores `auth.auto.tfvars`, state, locks and `generated/.live_refresh.json`. Generated files are never hand-merged: on conflict, run `make generate` on the latest `main`. `promote-to` writes only the files it owns; env-owned keys (`acl_groups`, `raw_exempt_principals`) are never overwritten and are excluded from the generated-file equality check in section 10. Changes to them are still subject to refuse-weakening.
 
 ## 10. Change lifecycle and team workflow
 
@@ -177,12 +181,14 @@ ACK="weaken:cat.sch.t.col:etl-sp,unclassified:cat.sch.t.col,holder:bi-sp"
 | PR | read-only: validate, generated files current, coverage check, mask tests, `make plan ENV=dev` | no |
 | Merge to `main` | `make rehearse ENV=dev` on the new `main` | yes, one at a time |
 | Promote | `make promote-to ENV=prod` opens the promotion PR | no |
-| Release | after approval, the operator runs `make release ENV=prod` on the deployment machine | prod |
+| Release | after the promotion PR is approved **and merged**, and rehearse has passed on that merge commit, the operator runs `make release ENV=prod` from it on the deployment machine | prod |
 
 - **Rehearse records what it proved:** commit, input fingerprint, result, stored with dev's state.
 - **`release` runs only from a commit that itself passed rehearse,** and refuses unless `envs/prod/generated` equals what `promote-to` produces from that commit. Code merged after the rehearse can't reach prod untested.
 - **Unfinished agents** never reach git, because capture is explicit. Promoting A carries B's last captured version unchanged.
 - **Removing an agent or table removes access only.** Masks stay until `make ungovern`.
+- A failed rehearse blocks release until a fix merges and rehearse passes. CI also regenerates each open promotion PR and fails it if it differs.
+- v1 runs every applying target from one deployment machine; the env lock allows one run at a time. No hand edits in prod; remove `CAN_EDIT` on prod agents from everyone except the deployer SP.
 - Until remote state exists, the operator runs the post-merge rehearse.
 
 ## 11. Flows
@@ -194,7 +200,7 @@ ACK="weaken:cat.sch.t.col:etl-sp,unclassified:cat.sch.t.col,holder:bi-sp"
 3. `make generate ENV=dev`: imports the agents and derives governance. Review and commit.
 4. `make rehearse ENV=dev`.
 5. Set `catalog_map`; `make promote-to ENV=prod`; classify prod in the UI.
-6. Approve the promotion PR; the operator runs `make release ENV=prod`.
+6. Approve and merge the promotion PR; once rehearse passes on that commit, the operator runs `make release ENV=prod`.
 7. `make maintain ENV=prod` on a schedule.
 
 **Governance-only flow (no agents):** the same commands with `uc_tables` set and no agents. GenieRails creates no agent and grants nothing; masks apply to whoever already has access, after the SELECT-holder check (section 6).
@@ -240,8 +246,8 @@ Every step keeps `main` working and ships its own live AWS test where it touches
 2. **Tier-aware verification** and the prod classification check (done in #109; add equality for identical tiers).
 3. **Mask library** (#110).
 4. **Stable tags and the governed set** from `uc_tables` and the governed-table list; `make ungovern` (#112).
-5. **Deterministic policies with access only from `acl_groups`:** per-tier policies, `raw_exempt_principals`, tighten before loosen, per-agent files, `uc_tables` never grants (with a test that nothing targets `account users`), governance-only flow. Run the section 14 checks first.
-6. **Migration:** dry run, SELECT-holder check, refuse weakening with `ACK`, mask inventory, tag state moves, staged cutover; fail-safe redaction in `maintain`.
+5. **Deterministic policies with access only from `acl_groups`:** per-tier policies, `raw_exempt_principals`, tighten before loosen, per-agent files, `uc_tables` never grants (with a test that no grant targets `account users`), the SELECT-holder check, governance-only flow. Run the section 14 checks first.
+6. **Migration:** dry run, refuse weakening with `ACK`, revocation list, mask inventory, frozen AI row filters, tag state moves, staged cutover; fail-safe redaction in `maintain` and `release`.
 7. **Declared row filters.**
 8. **Capture, prod ownership and release gating:** `make capture`, JSON-aware remap, prod IDs in agent files, overwrite report, detach by default, rehearsal record, and `release` only from a rehearsed commit.
 9. **Optional:** remote state for dev and the post-merge rehearse job, with one sample CI workflow.
