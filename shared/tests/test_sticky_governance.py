@@ -3,6 +3,8 @@
 import importlib.util
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +16,7 @@ import generate_abac
 from sensitivity_source import ClassificationSource
 from scripts import sticky_governance as sticky
 from scripts.sticky_governance import GovernedTablesError, check_layout, load_governed_tables, main, ungovern
+from tests.terraform_helpers import shared_copy, skip_if_providers_unavailable, tf, tf_env, tf_init
 
 SHARED = Path(__file__).parents[1]
 SCRIPT = SHARED / "scripts/derive_assignments.py"
@@ -126,12 +129,59 @@ def test_manifest_stores_only_table_names(tmp_path, monkeypatch):
 
 # -- A missing or edited manifest cannot drop or weaken governance ------------
 
-def test_deleted_manifest_is_rebuilt_from_deployed_tags(tmp_path, monkeypatch):
+REFUSED = "governed_tables.json is missing but this env has recorded governance"
+
+
+def test_manifest_deleted_before_any_apply_is_refused(tmp_path, monkeypatch):
+    # Governance recorded but not yet applied (no state): starting empty would
+    # drop orders once its agent is gone.
+    env = _env(tmp_path)
+    _live(monkeypatch, {f"{ORDERS}.ssn": "ssn"})
+    _derive(env)
+    assert _manifest(env) == {"tables": [ORDERS]}
+    (env / "generated/governed_tables.json").unlink()
+    _env(env, tables=("sales.customers",))
+    with pytest.raises(GovernedTablesError, match=REFUSED) as refused:
+        _derive(env)
+    assert f"make rebuild-governed-tables ENV={env.resolve().name}" in str(refused.value)
+    assert main(["rebuild", "--env-dir", str(env)]) == 0
+    assert _manifest(env) == {"tables": [ORDERS]}
+    assert _derive(env) == {f"{ORDERS}.ssn": "ssn_last4"}
+
+
+def test_manifest_deleted_after_apply_is_refused_then_rebuilt_from_state(tmp_path, monkeypatch):
     env = _env(tmp_path, tables=("sales.customers",))
     _state(env, {f"{ORDERS}.ssn": "ssn_last4"})
-    scanned = _live(monkeypatch, {f"{ORDERS}.ssn": "ssn"})
-    assert _derive(env) == {f"{ORDERS}.ssn": "ssn_last4"}
-    assert ORDERS in scanned[-1]
+    with pytest.raises(GovernedTablesError, match=r"treatment tags are deployed"):
+        load_governed_tables(env)
+    sticky.rebuild(env)
+    assert _manifest(env) == {"tables": [ORDERS]}
+
+
+def test_manifest_deleted_from_git_is_refused_then_rebuilt_from_history(tmp_path):
+    env = _env(tmp_path / "dev", tables=())
+    (env / "generated/abac.auto.tfvars").write_text(PROMOTED)
+    sticky.save_governed_tables(env, [ORDERS])
+    git = ["git", "-C", str(env), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+    subprocess.run(["git", "init", "-q", str(env)], check=True)
+    subprocess.run([*git, "add", "generated/governed_tables.json"], check=True)
+    subprocess.run([*git, "commit", "-qm", "record"], check=True)
+    subprocess.run([*git, "rm", "-q", "generated/governed_tables.json"], check=True)
+    subprocess.run([*git, "commit", "-qm", "lose it"], check=True)
+    with pytest.raises(GovernedTablesError, match="in git history"):
+        load_governed_tables(env)
+    sticky.rebuild(env)
+    assert _manifest(env) == {"tables": [ORDERS]}
+
+
+def test_only_a_fresh_env_starts_empty_and_its_first_record_succeeds(tmp_path):
+    env = _env(tmp_path)
+    assert load_governed_tables(env) == []
+    # make generate records right after writing its first config.
+    (env / "generated/abac.auto.tfvars").write_text(PROMOTED.replace("tag_assignments = [\n", (
+        'tag_assignments = [\n  { entity_type = "columns", entity_name = "prod.sales.orders.ssn", '
+        'tag_key = "gr_treatment", tag_value = "ssn_last4" },\n')))
+    assert main(["record", "--env-dir", str(env), "--config", str(env / "generated/abac.auto.tfvars")]) == 0
     assert _manifest(env) == {"tables": [ORDERS]}
 
 
@@ -175,10 +225,7 @@ def test_unreadable_state_fails_closed(tmp_path):
         load_governed_tables(env)
 
 
-def test_generate_scans_governed_tables_no_agent_uses(tmp_path, monkeypatch):
-    env = _env(tmp_path, tables=("sales.customers",))
-    _state(env, {f"{ORDERS}.ssn": "ssn_last4"})
-    (env / "generated/abac.auto.tfvars").unlink()
+def _generate(env, monkeypatch):
     scanned = []
 
     def stop(refs, cfg):
@@ -194,7 +241,24 @@ def test_generate_scans_governed_tables_no_agent_uses(tmp_path, monkeypatch):
                                       "--groups", "g", "--out-dir", str(env / "generated")])
     with pytest.raises(SystemExit):
         generate_abac.main()
-    assert ORDERS in {ref.lower() for ref in scanned}
+    return {ref.lower() for ref in scanned}
+
+
+def test_generate_scans_governed_tables_no_agent_uses(tmp_path, monkeypatch):
+    env = _env(tmp_path, tables=("sales.customers",))
+    (env / "generated/governed_tables.json").write_text('{"tables": []}\n')
+    _state(env, {f"{ORDERS}.ssn": "ssn_last4"})
+    (env / "generated/abac.auto.tfvars").unlink()
+    assert ORDERS in _generate(env, monkeypatch)
+
+
+def test_generate_refuses_when_the_record_was_lost(tmp_path, monkeypatch, capsys):
+    env = _env(tmp_path, tables=("sales.customers",))
+    (env / "generated/abac.auto.tfvars").write_text(PROMOTED.replace("tag_assignments = [\n", (
+        'tag_assignments = [\n  { entity_type = "columns", entity_name = "prod.sales.orders.ssn", '
+        'tag_key = "gr_treatment", tag_value = "ssn_last4" },\n')))
+    assert _generate(env, monkeypatch) == set()
+    assert REFUSED in capsys.readouterr().out
 
 
 # -- Legacy envs are untouched -----------------------------------------------
@@ -223,7 +287,7 @@ def test_old_address_tags_are_refused_with_state_mv_commands(tmp_path, capsys):
     assert (
         "data_access dev state-mv "
         "'module.data_access.databricks_entity_tag_assignment.assignments[\"columns|prod.sales.orders.ssn|gr_treatment|ssn_last4\"]' "
-        "'module.data_access.databricks_entity_tag_assignment.treatment[\"prod.sales.orders.ssn\"]'"
+        "'module.data_access.databricks_entity_tag_assignment.treatment[\"columns|prod.sales.orders.ssn|gr_treatment\"]'"
     ) in err
     assert f"ENVS_DIR={env.resolve().parent} " in err
 
@@ -245,6 +309,7 @@ def test_data_access_plan_and_apply_run_the_layout_check(recipe):
 # -- ungovern ----------------------------------------------------------------
 
 def _governed(env):
+    sticky.save_governed_tables(env, [CUSTOMERS, ORDERS])
     _state(env, {f"{ORDERS}.ssn": "ssn_last4"})
     (env / "generated/abac.auto.tfvars").write_text(PROMOTED.replace("tag_assignments = [\n", (
         'tag_assignments = [\n'
@@ -303,7 +368,7 @@ def test_ungovern_preview_changes_nothing(tmp_path, capsys):
     ungovern(env, "PROD.sales.orders")
     assert "prod.sales.orders.ssn" in capsys.readouterr().out
     assert (env / "generated/abac.auto.tfvars").read_text() == before
-    assert not (env / "generated/governed_tables.json").exists()
+    assert _manifest(env) == {"tables": [CUSTOMERS, ORDERS]}
 
 
 def test_ungovern_commit_removes_only_that_tables_tags(tmp_path, monkeypatch):
@@ -311,12 +376,12 @@ def test_ungovern_commit_removes_only_that_tables_tags(tmp_path, monkeypatch):
     ungovern(env, "PROD.sales.orders", commit=True)
     items = hcl2.loads((env / "generated/abac.auto.tfvars").read_text())["tag_assignments"]
     assert [i["entity_name"] for i in items] == [f"{CUSTOMERS}.email"]
-    assert _manifest(env) == {"tables": []}
+    assert _manifest(env) == {"tables": [CUSTOMERS]}
     # The tags stay deployed until the apply, so the table is only left out
     # while make ungovern's apply runs (it sets this variable).
-    assert load_governed_tables(env) == [ORDERS]
+    assert load_governed_tables(env) == [CUSTOMERS, ORDERS]
     monkeypatch.setenv(sticky.UNGOVERN_ENV, "prod.sales.ORDERS")
-    assert load_governed_tables(env) == []
+    assert load_governed_tables(env) == [CUSTOMERS]
     _live(monkeypatch, {f"{ORDERS}.ssn": "ssn", f"{CUSTOMERS}.email": "email"})
     assert _derive(env) == {f"{CUSTOMERS}.email": "email_partial"}
     assert _manifest(env) == {"tables": [CUSTOMERS]}
@@ -349,8 +414,18 @@ def test_make_ungovern_requires_typed_confirmation(tmp_path):
     assert "not confirmed; nothing changed" in result.stderr
     assert "prod.sales.orders.ssn" in result.stdout
     assert (env / "generated/abac.auto.tfvars").read_text() == before
-    assert not (env / "generated/governed_tables.json").exists()
+    assert _manifest(env) == {"tables": [CUSTOMERS, ORDERS]}
 
+
+
+def test_make_rebuild_governed_tables_restores_a_lost_record(tmp_path):
+    env = _env(tmp_path / "dev", tables=())
+    _state(env, {f"{ORDERS}.ssn": "ssn_last4"})
+    env_vars = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MAKELEVEL", "GNUMAKEFLAGS")}
+    result = subprocess.run(["make", "--no-print-directory", "rebuild-governed-tables", "ENV=dev", f"ENV_DIR={env}"],
+                            cwd=SHARED.parent / "aws", text=True, capture_output=True, env=env_vars)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _manifest(env) == {"tables": [ORDERS]}
 
 def test_make_ungovern_refuses_in_ci(tmp_path):
     result = _make("ENV=dev", f"ENV_DIR={tmp_path}", "TABLE=a.b.c", "YES=1", ci="true")
@@ -365,3 +440,49 @@ def test_make_ungovern_checks_then_confirms_then_applies_with_the_table_excluded
     assert recipe.index("$(_STICKY) ungovern ") < recipe.index("Type YES") < recipe.index("_ENV_LOCK")
     assert 'GENIERAILS_UNGOVERN_TABLE="$(TABLE)" $(MAKE) --no-print-directory apply-governance' in recipe
     assert "_guarded-bootstrap" not in recipe.splitlines()[1]
+
+
+# -- Terraform: apply order and legacy upgrade ---------------------------------
+
+def _reaches(edges, start):
+    seen, todo = set(), [start]
+    while todo:
+        for nxt in edges.get(todo.pop(), ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                todo.append(nxt)
+    return seen
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_treatment_retag_waits_for_functions_and_policies_and_grants_wait_for_it(tmp_path):
+    root = shared_copy(tmp_path) / "roots" / "data_access"
+    env = tf_env(tmp_path)
+    skip_if_providers_unavailable(tf(root, "init", "-input=false", env=env))
+    graph = tf(root, "graph", env=env)
+    assert graph.returncode == 0, graph.stdout + graph.stderr
+    edges = {}  # "a" -> "b": a depends on b
+    for a, b in re.findall(r'"module\.data_access\.([^"]+)" -> "module\.data_access\.([^"]+)"', graph.stdout):
+        edges.setdefault(a, set()).add(b)
+    treatment = "databricks_entity_tag_assignment.treatment"
+    # The account layer adds the allowed value first; here: functions and
+    # policies, then the retag, then any new SELECT grant.
+    assert {"terraform_data.masking_functions", "databricks_policy_info.policies"} <= _reaches(edges, treatment)
+    for earlier in ("databricks_policy_info.policies", "terraform_data.masking_functions",
+                    "time_sleep.wait_for_tag_propagation"):
+        assert treatment not in _reaches(edges, earlier), earlier
+    assert treatment in _reaches(edges, "databricks_grant.table_access")
+    assert treatment in _reaches(edges, "time_sleep.wait_for_policy_enforcement")
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_legacy_env_applied_with_the_old_module_replans_with_no_changes(tmp_path):
+    root = shared_copy(tmp_path) / "modules" / "data_access"
+    env = tf_env(tmp_path)
+    tf_init(root, env=env)
+    result = tf(root, "test", "-no-color", "-verbose", "-filter=tests/stable_treatment_tags.tftest.hcl", env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    replan = result.stdout[result.stdout.index('run "legacy_replan_with_new_module"'):]
+    assert replan.split("\n", 1)[0].endswith("pass")
+    assert "No changes. Your infrastructure matches the configuration." in replan
+    assert not re.search(r"# \S+ (will be|must be)", replan), replan

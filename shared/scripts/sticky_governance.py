@@ -5,8 +5,8 @@ The governed set is the table names in generated/governed_tables.json plus
 every table whose treatment tags are already deployed (data_access state).
 Only names are stored: treatments are always re-derived from current tags, so
 a stale or hand-edited record can neither keep an old tag nor weaken a mask,
-and a deleted record is rebuilt from what is deployed. Only ``make ungovern``
-takes a table out of the set.
+and a missing record is refused (make rebuild-governed-tables) unless the env
+is fresh. Only ``make ungovern`` takes a table out of the set.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import fnmatch
 import json
 import os
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -88,21 +89,75 @@ def _state_tags(env_dir: Path, tag_key: str) -> list[tuple[str, object, str]]:
     return tags
 
 
-def _read_manifest(env_dir: Path) -> list[str]:
-    path = Path(env_dir) / MANIFEST
-    if not path.is_file():
-        return []
+def _rebuild_hint(env_dir: Path) -> str:
+    return f"rebuild it with: make rebuild-governed-tables ENV={Path(env_dir).resolve().name}"
+
+
+def _parse_manifest(text: str, path: Path) -> list[str]:
     try:
-        raw = json.loads(path.read_text())
-    except (OSError, ValueError) as exc:
-        raise GovernedTablesError(f"cannot read {path}: {exc}") from exc
+        raw = json.loads(text)
+    except ValueError as exc:
+        raise GovernedTablesError(f"cannot read {path}: {exc}; {_rebuild_hint(path.parent.parent)}") from exc
     tables = raw.get("tables") if isinstance(raw, dict) else None
     if not isinstance(tables, list) or any(not isinstance(t, str) or not _is_table(t) for t in tables):
         raise GovernedTablesError(
             f'invalid {path}: expected {{"tables": ["catalog.schema.table", ...]}}; '
-            "delete it to rebuild it from what is deployed"
+            + _rebuild_hint(path.parent.parent)
         )
     return tables
+
+
+def _committed_manifest(env_dir: Path) -> list[str] | None:
+    """The newest version of the record in git history, if it was ever committed."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(env_dir), *args], capture_output=True, text=True)
+    log = git("log", "--format=%H", "--", str(MANIFEST))
+    for commit in log.stdout.split() if log.returncode == 0 else []:
+        shown = git("show", f"{commit}:./{MANIFEST}")
+        if shown.returncode == 0:
+            return _parse_manifest(shown.stdout, Path(env_dir) / MANIFEST)
+    return None
+
+
+def _config_tables(env_dir: Path, tag_key: str) -> list[str]:
+    """Tables with treatment tags in the generated or promoted config."""
+    tables = []
+    for path in (MANIFEST.parent / "abac.auto.tfvars", STATE.parent / "abac.auto.tfvars"):
+        for item in _load_hcl(Path(env_dir) / path).get("tag_assignments") or []:
+            if item.get("entity_type") == "columns" and item.get("tag_key") == tag_key:
+                if table := _table_of(item.get("entity_name", "")):
+                    tables.append(table)
+    return tables
+
+
+def _recorded_elsewhere(env_dir: Path, tag_key: str, check_config: bool) -> list[str]:
+    """Why this env has governance even though its record is missing."""
+    reasons = []
+    if _state_tags(env_dir, tag_key):
+        reasons.append(f"treatment tags are deployed ({STATE})")
+    if check_config and _config_tables(env_dir, tag_key):
+        reasons.append("its generated or promoted config has treatment tags")
+    if _committed_manifest(env_dir) is not None:
+        reasons.append(f"{MANIFEST} is in git history")
+    return reasons
+
+
+def _read_manifest(env_dir: Path, tag_key: str, check_config: bool = True) -> list[str]:
+    path = Path(env_dir) / MANIFEST
+    if path.is_file():
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            raise GovernedTablesError(f"cannot read {path}: {exc}") from exc
+        return _parse_manifest(text, path)
+    reasons = _recorded_elsewhere(env_dir, tag_key, check_config)
+    if reasons:
+        # Starting empty would silently drop governance not yet applied.
+        raise GovernedTablesError(
+            f"{path} is missing but this env has recorded governance ({'; '.join(reasons)}); "
+            + _rebuild_hint(env_dir)
+        )
+    return []  # A fresh env: nothing generated, nothing deployed.
 
 
 def _unique(tables: Iterable[str], drop: str = "") -> list[str]:
@@ -118,8 +173,24 @@ def load_governed_tables(env_dir: Path, tag_key: str | None = None) -> list[str]
     if not deterministic(env_dir):
         return []
     tag_key = tag_key or _tag_key()
-    deployed = [t for _name, _key, column in _state_tags(env_dir, tag_key) if (t := _table_of(column))]
-    return _unique(_read_manifest(env_dir) + deployed, os.environ.get(UNGOVERN_ENV, ""))
+    return _unique(_read_manifest(env_dir, tag_key) + _deployed_tables(env_dir, tag_key),
+                   os.environ.get(UNGOVERN_ENV, ""))
+
+
+def _deployed_tables(env_dir: Path, tag_key: str) -> list[str]:
+    return [t for _name, _key, column in _state_tags(env_dir, tag_key) if (t := _table_of(column))]
+
+
+def rebuild(env_dir: Path) -> list[str]:
+    """Rewrite the record from git history, deployed tags and generated/promoted config."""
+    if not deterministic(env_dir):
+        raise GovernedTablesError(f'{env_dir}: requires governance_mode = "deterministic"')
+    tag_key = _tag_key()
+    tables = _unique((_committed_manifest(env_dir) or []) + _deployed_tables(env_dir, tag_key)
+                     + _config_tables(env_dir, tag_key))
+    save_governed_tables(env_dir, tables)
+    print(f"Rebuilt {Path(env_dir) / MANIFEST}: {', '.join(tables) or '(no governed tables)'}")
+    return tables
 
 
 def save_governed_tables(env_dir: Path, tables: Iterable[str]) -> None:
@@ -138,7 +209,10 @@ def record(env_dir: Path, assignments: Iterable[dict], tag_key: str | None = Non
         if item.get("entity_type") == "columns" and item.get("tag_key") == tag_key
         and (t := _table_of(item.get("entity_name", "")))
     ]
-    tables = _unique(load_governed_tables(env_dir, tag_key) + tagged, os.environ.get(UNGOVERN_ENV, ""))
+    # make generate records right after writing its config, so that config is
+    # not evidence of a lost record here (generate's own load checked it first).
+    recorded = _read_manifest(env_dir, tag_key, check_config=False)
+    tables = _unique(recorded + _deployed_tables(env_dir, tag_key) + tagged, os.environ.get(UNGOVERN_ENV, ""))
     save_governed_tables(env_dir, tables)
     return tables
 
@@ -147,18 +221,19 @@ def check_layout(env_dir: Path, env_name: str, tag_key: str | None = None) -> No
     """Refuse a deterministic env whose treatment tags still sit at the old address."""
     if not deterministic(env_dir):
         return
-    old = [(key, column) for name, key, column in _state_tags(env_dir, tag_key or _tag_key())
-           if name == "assignments"]
+    tag_key = tag_key or _tag_key()
+    old = [(key, column) for name, key, column in _state_tags(env_dir, tag_key) if name == "assignments"]
     if not old:
         return
-    runner = SHARED / "scripts" / "terraform_layer.sh"
-    envs_dir = Path(env_dir).resolve().parent
-    commands = [
-        f"ENVS_DIR={shlex.quote(str(envs_dir))} {shlex.quote(str(runner))} data_access {shlex.quote(env_name)} "
-        f"state-mv {shlex.quote(f'{TAG_RESOURCE}.assignments[{json.dumps(key)}]')} "
-        f"{shlex.quote(f'{TAG_RESOURCE}.treatment[{json.dumps(column)}]')}"
-        for key, column in sorted(old, key=lambda item: item[1].lower())
-    ]
+    prefix = shlex.join([
+        f"ENVS_DIR={Path(env_dir).resolve().parent}", str(SHARED / "scripts" / "terraform_layer.sh"),
+        "data_access", env_name, "state-mv",
+    ])
+    commands = []
+    for key, column in sorted(old, key=lambda item: item[1].lower()):
+        new_key = f"columns|{column}|{tag_key}"
+        commands.append(f"{prefix} {shlex.quote(f'{TAG_RESOURCE}.assignments[{json.dumps(key)}]')} "
+                        f"{shlex.quote(f'{TAG_RESOURCE}.treatment[{json.dumps(new_key)}]')}")
     raise GovernedTablesError(
         f"{len(old)} treatment tag(s) in {Path(env_dir) / STATE} are at the old Terraform address; "
         "applying would destroy and recreate them, so nothing was planned or applied. "
@@ -240,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
     rec = sub.add_parser("record", help="add tables tagged in --config to the governed set")
     rec.add_argument("--env-dir", type=Path, required=True)
     rec.add_argument("--config", type=Path, required=True)
+    rebuilt = sub.add_parser("rebuild", help="rewrite the record from history, state and config")
+    rebuilt.add_argument("--env-dir", type=Path, required=True)
     layout = sub.add_parser("check-layout", help="refuse treatment tags still at the old state address")
     layout.add_argument("--env-dir", type=Path, required=True)
     layout.add_argument("--env-name", required=True)
@@ -251,6 +328,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "record":
             record(args.env_dir, _load_hcl(args.config).get("tag_assignments") or [])
+        elif args.command == "rebuild":
+            rebuild(args.env_dir)
         elif args.command == "check-layout":
             check_layout(args.env_dir, args.env_name)
         else:
