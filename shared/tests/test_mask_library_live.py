@@ -15,7 +15,8 @@ pytestmark = pytest.mark.skipif(
 def test_live_mask_library():
     # The executable lifecycle, including UC-secret creation and guaranteed
     # scratch cleanup, lives in one reusable module for local and CI runs.
-    from scripts.live_mask_library import run_from_environment
+    from scripts.live_mask_library import BODY_CASES, run_from_environment
     result = run_from_environment()
-    assert result["mismatches"] == 0
-    assert result["bodies_tested"] > 0
+    # Every case asserts its exact expected value; details name any mismatch.
+    assert result["details"] == []
+    assert result["bodies_tested"] == sum(len(cases) for cases in BODY_CASES.values()) + 2

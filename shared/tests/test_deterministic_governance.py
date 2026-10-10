@@ -132,7 +132,7 @@ def test_column_override_accepts_partial_or_treatment_and_refuses_full():
     assert errors(column_overrides={"cat.sch.tbl.col": {"keep_current": False}})
 
 
-@pytest.mark.xfail(strict=True, reason="step 3 requires live class-derived treatment input")
+@pytest.mark.xfail(strict=True, reason="needs the column's live class.* tags, which reach config with deterministic policies in step 5")
 def test_column_treatment_override_must_be_stricter_than_class_derived_treatment():
     assert errors(column_overrides={"cat.sch.tbl.col": {"treatment": "email_partial"}})
 

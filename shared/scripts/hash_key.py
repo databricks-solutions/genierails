@@ -10,8 +10,6 @@ import secrets
 import stat
 from pathlib import Path
 
-from databricks.sdk.errors import NotFound
-
 
 def init_key(path: Path) -> None:
     if path.exists():
@@ -29,6 +27,8 @@ def init_key(path: Path) -> None:
 
 def ensure_uc_secret(client, catalog: str, schema: str, generated_dir: Path) -> str:
     """Create hmac_key only when absent; never read its value from UC."""
+    from databricks.sdk.errors import NotFound
+
     name = f"{catalog}.{schema}.hmac_key"
     try:
         client.api_client.do("GET", f"/api/2.1/unity-catalog/secrets/{name}")

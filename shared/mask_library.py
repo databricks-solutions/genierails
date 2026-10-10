@@ -13,6 +13,8 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from deterministic_governance import NEVER_RAW_TREATMENTS
+
 LIBRARY_PATH = Path(__file__).with_name("mask_library.json")
 REDACTED = "[REDACTED]"
 NUMERIC_TYPES = frozenset({"BYTE", "TINYINT", "SHORT", "SMALLINT", "INT", "INTEGER", "LONG", "BIGINT", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC"})
@@ -30,14 +32,18 @@ def type_family(sql_type: str) -> str:
 
 
 def numeric_hash_supported(sql_type: str) -> bool:
-    """Only types that can hold the non-negative 63-bit digest use numeric HMAC."""
+    """Only types that can hold the non-negative 63-bit digest use numeric HMAC.
+
+    The digest has up to 19 integer digits; a bare DECIMAL is DECIMAL(10, 0).
+    """
     upper = sql_type.upper().strip()
-    base = upper.split("(", 1)[0]
+    base = upper.split("(", 1)[0].strip()
     if base in {"BIGINT", "LONG"}:
         return True
     if base in {"DECIMAL", "NUMERIC"}:
-        match = re.search(r"\((\d+)", upper)
-        return match is None or int(match.group(1)) >= 19
+        match = re.search(r"\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)", upper)
+        precision, scale = (int(match.group(1)), int(match.group(2) or 0)) if match else (10, 0)
+        return precision - scale >= 19
     return False
 
 
@@ -96,7 +102,7 @@ def apply_version(version: str, value: object, sql_type: str, *, key: bytes | No
         text = str(value).strip()
         compact = re.sub(r"[\s-]+", "", text)
         return "*" * (len(compact) - 4) + compact[-4:] if len(compact) > 4 else REDACTED
-    if version == "email_partial" and family == "STRING":
+    if version == "partial" and family == "STRING":
         text = str(value).strip()
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", text):
             return REDACTED
@@ -108,10 +114,10 @@ def apply_version(version: str, value: object, sql_type: str, *, key: bytes | No
     if version == "year":
         if family == "DATE" and isinstance(value, dt.date):
             return dt.date(value.year, 1, 1)
-        if family in {"TIMESTAMP", "TIMESTAMP_NTZ"} and isinstance(value, dt.datetime):
-            aware = value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
-            year = aware.astimezone(dt.timezone.utc).year
-            return dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc)
+        if family == "TIMESTAMP_NTZ" and isinstance(value, dt.datetime) and value.tzinfo is None:
+            return dt.datetime(value.year, 1, 1)
+        if family == "TIMESTAMP" and isinstance(value, dt.datetime) and value.tzinfo is not None:
+            return dt.datetime(value.astimezone(dt.timezone.utc).year, 1, 1, tzinfo=dt.timezone.utc)
         return None
     if version in {"age_band_10", "credit_score_band_50"} and family == "NUMERIC":
         number = _finite_decimal(value)
@@ -127,12 +133,12 @@ def apply_version(version: str, value: object, sql_type: str, *, key: bytes | No
         quantum = Decimal("1E3") if version == "rounded" else Decimal("0.1")
         return number.quantize(quantum, rounding=ROUND_HALF_UP)
     if version == "ip_network" and family == "STRING":
+        # IPv4 keeps its /24 network; IPv6 and anything else is redacted.
         try:
-            address = ipaddress.ip_address(str(value).strip())
-            prefix = 24 if address.version == 4 else 64
-            return str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
+            address = ipaddress.IPv4Address(str(value).strip())
         except ValueError:
             return REDACTED
+        return str(ipaddress.IPv4Network(f"{address}/24", strict=False))
     if version == "mac_vendor" and family == "STRING":
         chunks = re.split(r"[:-]", str(value).strip())
         return ":".join(part.upper() for part in chunks[:3]) + ":**:**:**" if len(chunks) == 6 and all(re.fullmatch(r"[0-9A-Fa-f]{2}", p) for p in chunks) else REDACTED
@@ -148,8 +154,12 @@ def apply_version(version: str, value: object, sql_type: str, *, key: bytes | No
     return REDACTED if family == "STRING" else None
 
 
-def resolve_class(classes: list[str], sql_type: str, library: dict | None = None) -> tuple[str, str, bool]:
-    """Resolve several class tags with G17 strictest-wins semantics."""
+def resolve_class(classes: list[str], sql_type: str, library: dict | None = None) -> tuple[str, str, str, bool]:
+    """Resolve several class tags to (treatment, partial, full, never_raw).
+
+    G17 strictest-wins: the strongest partial version wins; equal strength is
+    broken by the greatest treatment name so tag order never matters.
+    """
     data = library or load_library()
     family = type_family(sql_type)
     order = {name: i for i, name in enumerate(data["protection_order"])}
@@ -164,12 +174,13 @@ def resolve_class(classes: list[str], sql_type: str, library: dict | None = None
                 partial = treatment.get("partial_by_type", {}).get(family, treatment.get("partial"))
             if partial == "$identifier_partial_default":
                 partial = data["identifier_partial_default"]
-            candidates.append((order["hmac_sha256"] if partial == "hmac_sha256" else order["redacted"] if partial in {"redacted", "null"} else order["partial"], treatment_name, partial, treatment["full"], bool(treatment.get("never_raw"))))
+            rank = order["hmac_sha256"] if partial == "hmac_sha256" else order["redacted"] if partial in {"redacted", "null"} else order["partial"]
+            candidates.append((rank, treatment_name, partial, treatment["full"]))
     if not candidates:
         raise KeyError(f"no mask-library mapping for {classes!r}")
-    never_raw = any(candidate[4] for candidate in candidates)
-    _, _, partial, full, _ = max(candidates, key=lambda candidate: (candidate[0], candidate[1]))
-    return partial, full, never_raw
+    never_raw = any(candidate[1] in NEVER_RAW_TREATMENTS for candidate in candidates)
+    _, treatment_name, partial, full = max(candidates)
+    return treatment_name, partial, full, never_raw
 
 
 def resolve_hash_capability(partial: str, full: str, *, available: bool, fallback: str | None) -> str:
@@ -190,6 +201,7 @@ SQL_BODIES = {
     "null_string": "CAST(NULL AS STRING)",
     "null_date": "CAST(NULL AS DATE)",
     "null_timestamp": "CAST(NULL AS TIMESTAMP)",
+    "null_timestamp_ntz": "CAST(NULL AS TIMESTAMP_NTZ)",
     "null_numeric": "CAST(NULL AS DECIMAL(38, 9))",
     "last4_string": "CASE WHEN value IS NULL THEN NULL WHEN length(regexp_replace(trim(value), '[\\\\s-]+', '')) <= 4 THEN '[REDACTED]' ELSE concat(repeat('*', length(regexp_replace(trim(value), '[\\\\s-]+', '')) - 4), right(regexp_replace(trim(value), '[\\\\s-]+', ''), 4)) END",
     "email_partial_string": "CASE WHEN value IS NULL THEN NULL WHEN trim(value) NOT RLIKE '^[^@\\\\s]+@[^@\\\\s]+\\\\.[^@\\\\s]+$' THEN '[REDACTED]' ELSE concat(left(trim(value), 1), '***@', lower(substring_index(trim(value), '@', -1))) END",
@@ -201,32 +213,12 @@ SQL_BODIES = {
     "credit_score_band_50_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) OR value < 0 THEN NULL ELSE CAST(floor(value / 50) * 50 AS BIGINT) END",
     "rounded_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) THEN NULL ELSE round(value, -3) END",
     "location_1dp_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) THEN NULL ELSE round(value, 1) END",
-    "ip_network_string": "CASE WHEN value IS NULL THEN NULL WHEN trim(value) RLIKE '^(?:25[0-5]|2[0-4]\\\\d|1?\\\\d?\\\\d)(?:\\\\.(?:25[0-5]|2[0-4]\\\\d|1?\\\\d?\\\\d)){3}$' THEN concat(regexp_extract(trim(value), '^(\\\\d+\\\\.\\\\d+\\\\.\\\\d+)\\\\.', 1), '.0/24') WHEN lower(trim(value)) RLIKE '^[0-9a-f:]+$' AND trim(value) LIKE '%:%' AND regexp_extract(lower(trim(value)), '^((?:[0-9a-f]{1,4}:){4})', 1) <> '' THEN concat(regexp_extract(lower(trim(value)), '^((?:[0-9a-f]{1,4}:){4})', 1), ':/64') ELSE '[REDACTED]' END",
+    "ip_network_string": "CASE WHEN value IS NULL THEN NULL WHEN trim(value) RLIKE '^(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(?:[.](?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$' THEN concat(regexp_extract(trim(value), '^([0-9]+[.][0-9]+[.][0-9]+)[.]', 1), '.0/24') ELSE '[REDACTED]' END",
     "mac_vendor_string": "CASE WHEN value IS NULL THEN NULL WHEN trim(value) RLIKE '^(?i)[0-9a-f]{2}([:-][0-9a-f]{2}){5}$' THEN concat(upper(regexp_replace(substring(trim(value), 1, 8), '-', ':')), ':**:**:**') ELSE '[REDACTED]' END",
     "url_domain_string": "CASE WHEN value IS NULL THEN NULL WHEN try_parse_url(trim(value), 'PROTOCOL') IN ('http', 'https') AND try_parse_url(trim(value), 'HOST') IS NOT NULL THEN lower(try_parse_url(trim(value), 'HOST')) ELSE '[REDACTED]' END",
     "prefix_3_string": "CASE WHEN value IS NULL THEN NULL WHEN length(trim(value)) <= 3 THEN '[REDACTED]' ELSE concat(left(trim(value), 3), '***') END",
     "raw_string": "value", "raw_date": "value", "raw_timestamp": "value", "raw_numeric": "value"
 }
-
-# Expand IPv6 to eight hextets in SQL, select the first four, and canonicalize
-# each with base conversion.  This covers compressed and fully expanded forms
-# without depending on session state or a user-defined function.
-SQL_BODIES["ip_network_string"] = """CASE
-WHEN value IS NULL THEN NULL
-WHEN trim(value) RLIKE '^(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(?:[.](?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])){3}$'
-  THEN concat(regexp_extract(trim(value), '^([0-9]+[.][0-9]+[.][0-9]+)[.]', 1), '.0/24')
-WHEN lower(trim(value)) RLIKE '^[0-9a-f:]+$' AND trim(value) LIKE '%:%'
-  THEN concat(concat_ws(':', transform(slice(
-    concat(
-      filter(split(split(lower(trim(value)), '::', 2)[0], ':'), x -> x <> ''),
-      array_repeat('0', 8
-        - size(filter(split(split(lower(trim(value)), '::', 2)[0], ':'), x -> x <> ''))
-        - CASE WHEN instr(lower(trim(value)), '::') > 0
-            THEN size(filter(split(split(lower(trim(value)), '::', 2)[1], ':'), x -> x <> '')) ELSE 0 END),
-      CASE WHEN instr(lower(trim(value)), '::') > 0
-        THEN filter(split(split(lower(trim(value)), '::', 2)[1], ':'), x -> x <> '') ELSE array() END),
-    1, 4), x -> lower(conv(conv(x, 16, 10), 10, 16)))), '::/64')
-ELSE '[REDACTED]' END"""
 
 
 def sql_body(version: str, sql_type: str, *, catalog: str = "{{CATALOG}}", schema: str = "{{SCHEMA}}") -> str:

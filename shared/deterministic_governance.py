@@ -17,8 +17,8 @@ NEVER_RAW_TREATMENTS = frozenset({
     "card_security_code", "card_pin", "card_track_data", "secret",
 })
 
-# Public treatment vocabulary from deterministic-governance step 1.  The mask
-# library implements these versions, but does not rename this shared contract.
+# Public treatment vocabulary. mask_library.json uses these names directly, so
+# every library treatment is configurable through treatment_versions.
 PARTIAL_VERSIONS: dict[str, frozenset[str]] = {
     "ssn": frozenset({"hmac_sha256", "last4"}),
     "redact": frozenset({"redacted"}),
@@ -36,15 +36,20 @@ PARTIAL_VERSIONS: dict[str, frozenset[str]] = {
     "aadhaar_partial": frozenset({"hmac_sha256", "last4"}),
     "generic_partial": frozenset({"redacted", "prefix_3"}),
     "round_amount": frozenset({"rounded"}),
+    # Mask-library treatments with no step-1 name; see mask_library.json.
+    "identifier": frozenset({"hmac_sha256"}),
+    "age": frozenset({"age_band_10"}),
+    "credit_score": frozenset({"credit_score_band_50"}),
+    "ip_address": frozenset({"ip_network"}),
+    "mac_address": frozenset({"mac_vendor"}),
+    "url": frozenset({"url_domain"}),
+    "location": frozenset({"location_1dp"}),
     **{treatment: frozenset({"redacted"}) for treatment in NEVER_RAW_TREATMENTS},
 }
 PARTIAL_VERSIONS = {
     treatment: versions | {"redacted"}
     for treatment, versions in PARTIAL_VERSIONS.items()
 }
-_MASK_LIBRARY = json.loads(Path(__file__).with_name("mask_library.json").read_text())
-for _version, _treatment in _MASK_LIBRARY.get("resolver_versions", {}).items():
-    PARTIAL_VERSIONS[_treatment] = PARTIAL_VERSIONS[_treatment] | {_version}
 VERSION_NAMES = frozenset().union(*PARTIAL_VERSIONS.values())
 
 

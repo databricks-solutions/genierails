@@ -10,6 +10,7 @@ import stat
 import sys
 import types
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -18,10 +19,9 @@ from mask_library import (
     hmac_function_ddl, keyed_hash, load_library, normalize_identifier,
     resolve_class, resolve_hash_capability, sql_body, type_family,
 )
-from scripts.hash_key import init_key, write_probe
-from scripts.hash_key import ensure_uc_secret
-from databricks.sdk.errors import NotFound
-from deterministic_governance import NEVER_RAW_TREATMENTS, PARTIAL_VERSIONS
+from scripts.hash_key import ensure_uc_secret, init_key, write_probe
+from scripts.live_mask_library import BODY_CASES, RENDER_ZONE, comparable, refuse_real_env_dir
+from deterministic_governance import NEVER_RAW_TREATMENTS, PARTIAL_VERSIONS, validate_config
 
 
 KEY = bytes.fromhex("00" * 32)
@@ -34,36 +34,76 @@ def test_library_maps_exactly_all_93_unique_documented_classes():
     assert library["identifier_partial_default"] in {"hmac_sha256", "redacted"}
 
 
-def test_library_and_resolver_share_one_explicit_vocabulary():
+def test_library_uses_the_shared_treatment_vocabulary_directly():
     library = load_library()
-    assert set(library["resolver_treatments"]) == set(library["treatments"])
-    assert set(library["resolver_treatments"].values()) <= set(PARTIAL_VERSIONS)
-    assert set(library["never_raw_classes"]) <= set(NEVER_RAW_TREATMENTS)
-    for version in library["versions"]:
-        if version != "raw":
-            targets = [name for name, versions in PARTIAL_VERSIONS.items() if version in versions]
-            assert targets, f"library version {version} is not selectable"
+    for name, treatment in library["treatments"].items():
+        assert name in PARTIAL_VERSIONS, f"{name} is not configurable via treatment_versions"
+        partials = set(treatment.get("partial_by_type", {}).values()) | {treatment.get("partial")} - {None}
+        partials = {library["identifier_partial_default"] if v == "$identifier_partial_default" else v for v in partials}
+        assert partials <= PARTIAL_VERSIONS[name], name
+        assert treatment["full"] in {"redacted", "null"}
     for treatment, versions in PARTIAL_VERSIONS.items():
         for version in versions:
             assert version in library["versions"], f"{treatment}.{version} has no SQL implementation"
 
 
-def test_never_raw_and_strictest_wins():
-    for class_name in ("card_security_code", "card_pin", "card_track_data", "secret"):
-        partial, full, never_raw = resolve_class([class_name], "STRING")
-        assert (partial, full, never_raw) == ("redacted", "redacted", True)
-    assert resolve_class(["email_address", "us_ssn"], "STRING")[:2] == ("hmac_sha256", "redacted")
-    assert resolve_class(["email_address", "health_data"], "STRING")[:2] == ("redacted", "redacted")
+def _config_errors(**overrides):
+    return validate_config({"access_tier_groups": ["t1", "t2", "t3"], **overrides})
+
+
+@pytest.mark.parametrize("treatment", ["identifier", "age", "credit_score", "ip_address", "mac_address", "url", "location"])
+def test_each_former_generic_treatment_is_configurable_on_its_own(treatment):
+    assert _config_errors(treatment_versions={treatment: {"partial": "redacted"}}) == []
+    assert resolve_class([f"class.{treatment}" if treatment != "identifier" else "class.passport"], "STRING")[0] == treatment
+
+
+def test_identifiers_can_be_hashed_or_redacted():
+    assert resolve_class(["passport"], "STRING")[:3] == ("identifier", "hmac_sha256", "redacted")
+    assert _config_errors(treatment_versions={"identifier": {"partial": "hmac_sha256"}}) == []
+    assert _config_errors(treatment_versions={"identifier": {"partial": "redacted"}}) == []
+    assert _config_errors(treatment_versions={"identifier": {"partial": "last4"}})
+    assert _config_errors(treatment_versions={"ssn": {"partial": "last4"}}) == []
+
+
+def test_every_never_raw_class_lands_on_a_never_raw_treatment():
     library = load_library()
-    never_raw = library["never_raw_classes"]
-    sensitive = library["treatments"]["sensitive"]["classes"]
-    for protected in never_raw:
-        for other in sensitive:
-            assert resolve_class([protected, other], "STRING")[2] is True
+    owner = {c: name for name, t in library["treatments"].items() for c in t["classes"]}
+    assert set(library["never_raw_classes"]) == {"card_security_code", "card_pin", "card_track_data", "secret"}
+    for class_name in library["never_raw_classes"]:
+        assert owner[class_name] in NEVER_RAW_TREATMENTS, f"{class_name} resolves to {owner[class_name]}"
+        for sql_type in ("STRING", "DATE", "BIGINT"):
+            treatment, partial, full, never_raw = resolve_class([class_name], sql_type)
+            assert treatment in NEVER_RAW_TREATMENTS and never_raw is True
+            assert (partial, full) == ("redacted", "redacted")
+    # Only the never-raw classes may land there.
+    for name in NEVER_RAW_TREATMENTS:
+        assert set(library["treatments"][name]["classes"]) <= set(library["never_raw_classes"])
+
+
+def test_strictest_wins():
+    assert resolve_class(["email_address", "us_ssn"], "STRING")[:3] == ("ssn", "hmac_sha256", "redacted")
+    assert resolve_class(["email_address", "health_data"], "STRING")[:3] == ("redact", "redacted", "redacted")
+    library = load_library()
+    for protected in library["never_raw_classes"]:
+        for other in library["treatments"]["redact"]["classes"]:
+            assert resolve_class([protected, other], "STRING")[3] is True
+            assert resolve_class([other, protected], "STRING")[3] is True
+
+
+def test_strictest_wins_tie_break_is_order_independent():
+    # email (partial) and phone (last4) rank equally; the greater treatment name wins.
+    assert resolve_class(["email_address", "phone_number"], "STRING") == ("phone_partial", "last4", "redacted", False)
+    assert resolve_class(["phone_number", "email_address"], "STRING") == ("phone_partial", "last4", "redacted", False)
+    # Two equally strong hashed treatments: still deterministic.
+    assert resolve_class(["us_ssn", "passport"], "STRING")[0] == resolve_class(["passport", "us_ssn"], "STRING")[0] == "ssn"
+    # A redacted never-raw treatment beats an equally strong ordinary one either way.
+    assert resolve_class(["health_data", "card_pin"], "STRING")[0] == resolve_class(["card_pin", "health_data"], "STRING")[0] == "redact"
+    assert resolve_class(["health_data", "card_pin"], "STRING")[3] is True
 
 
 def test_unsupported_type_resolves_partial_to_full():
-    assert resolve_class(["email_address"], "BOOLEAN")[:2] == ("redacted", "redacted")
+    assert resolve_class(["email_address"], "BOOLEAN")[1:3] == ("redacted", "redacted")
+    assert resolve_class(["date_of_birth"], "TIMESTAMP_NTZ")[1:3] == ("year", "null")
 
 
 def test_hash_capability_is_lazy_and_fails_closed():
@@ -80,12 +120,14 @@ def test_hash_capability_is_lazy_and_fails_closed():
     ("null", "secret", "STRING", None),
     ("last4", "4111-1111-1111-1234", "STRING", "************1234"),
     ("last4", "1234", "STRING", "[REDACTED]"),
-    ("email_partial", "Jane.Doe@Example.COM", "STRING", "J***@example.com"),
-    ("email_partial", "bad-email", "STRING", "[REDACTED]"),
+    ("partial", "Jane.Doe@Example.COM", "STRING", "J***@example.com"),
+    ("partial", "bad-email", "STRING", "[REDACTED]"),
     ("initials", " Élodie van 李 ", "STRING", "ÉV李"),
     ("initials", "123", "STRING", "[REDACTED]"),
     ("year", dt.date(2024, 12, 31), "DATE", dt.date(2024, 1, 1)),
     ("year", dt.datetime(2023, 12, 31, 23, tzinfo=dt.timezone(dt.timedelta(hours=-2))), "TIMESTAMP", dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)),
+    ("year", dt.datetime(2024, 12, 31, 23, 30), "TIMESTAMP_NTZ", dt.datetime(2024, 1, 1)),
+    ("year", dt.datetime(2024, 12, 31, 23, 30), "TIMESTAMP", None),
     ("age_band_10", 0, "INT", 0),
     ("age_band_10", 10, "INT", 10),
     ("age_band_10", -1, "INT", None),
@@ -97,7 +139,8 @@ def test_hash_capability_is_lazy_and_fails_closed():
     ("location_1dp", Decimal("1.25"), "DOUBLE", Decimal("1.3")),
     ("location_1dp", Decimal("-1.25"), "DOUBLE", Decimal("-1.3")),
     ("ip_network", "192.168.2.99", "STRING", "192.168.2.0/24"),
-    ("ip_network", "2001:db8:abcd:12:1234::1", "STRING", "2001:db8:abcd:12::/64"),
+    ("ip_network", "2001:db8:abcd:12:1234::1", "STRING", "[REDACTED]"),
+    ("ip_network", "192.168.2.09", "STRING", "[REDACTED]"),
     ("ip_network", "not-an-ip", "STRING", "[REDACTED]"),
     ("mac_vendor", "aa-bb-cc-dd-ee-ff", "STRING", "AA:BB:CC:**:**:**"),
     ("mac_vendor", "broken", "STRING", "[REDACTED]"),
@@ -113,7 +156,7 @@ def test_exact_version_outputs(version, value, sql_type, expected):
 
 @pytest.mark.parametrize("version,sql_type", [
     ("redacted", "STRING"), ("null", "DATE"), ("last4", "STRING"),
-    ("email_partial", "STRING"), ("initials", "STRING"), ("year", "DATE"),
+    ("partial", "STRING"), ("initials", "STRING"), ("year", "DATE"), ("year", "TIMESTAMP_NTZ"),
     ("age_band_10", "INT"), ("credit_score_band_50", "DOUBLE"),
     ("rounded", "DECIMAL"), ("location_1dp", "DOUBLE"),
     ("ip_network", "STRING"), ("mac_vendor", "STRING"),
@@ -136,7 +179,7 @@ def test_identifier_normalization_unicode_and_numeric_canonical_form():
     assert canonical_decimal("-0.00") == "0"
     expected = int.from_bytes(hmac.new(KEY, b"123.45", hashlib.sha256).digest()[:8], "big") & ((1 << 63) - 1)
     assert keyed_hash(Decimal("00123.4500"), KEY, numeric=True) == expected
-    assert apply_version("hmac_sha256", Decimal("123.450"), "DECIMAL", key=KEY) == expected
+    assert apply_version("hmac_sha256", Decimal("123.450"), "DECIMAL(38,0)", key=KEY) == expected
 
 
 def test_hash_ddl_uses_module_scope_secret_named_handler_and_is_not_deterministic():
@@ -170,8 +213,6 @@ def test_all_sql_bodies_are_caller_independent():
         lower = body.lower()
         assert "current_user" not in lower
         assert "is_account_group_member" not in lower
-    encoded = json.dumps(SQL_BODIES, sort_keys=True, separators=(",", ":")).encode()
-    assert hashlib.sha256(encoded).hexdigest() == "bc16d57f29d3c7486237a317a516dbb492babb87f94fe6bc2bf5291e44a2e6fd"
 
 
 @pytest.mark.parametrize("sql_type", [
@@ -189,57 +230,49 @@ def test_full_and_unsupported_partial_are_typed_and_never_raw(sql_type):
         assert fallback == f"CAST(NULL AS {sql_type})"
 
 
-def test_sql_body_contract_guards_surviving_mutants_and_edge_cases():
-    assert SQL_BODIES["redact_string"] == "CASE WHEN value IS NULL THEN NULL ELSE '[REDACTED]' END"
-    assert "left(trim(value), 1)" in SQL_BODIES["email_partial_string"]
-    assert "<= 4" in SQL_BODIES["last4_string"] and "right(" in SQL_BODIES["last4_string"]
-    assert "try_parse_url" in SQL_BODIES["url_domain_string"]
-    assert "current_timezone" not in SQL_BODIES["year_timestamp"]
-    assert "array_repeat('0', 8" in SQL_BODIES["ip_network_string"]
-    corpus = [None, "", " ", "x", "abc", "1234", "12 34", "é 李", "bad@@x", "2001:db8::1", "192.0.2.9"]
-    for value in corpus:
-        for version in ("redacted", "last4", "email_partial", "initials", "ip_network", "prefix_3"):
-            result = apply_version(version, value, "STRING", key=KEY)
-            if value is not None and version != "initials":
-                assert result != value
+def _body_versions():
+    """Shipped body name -> (version, type family) from the library table."""
+    pairs = {}
+    for version, by_family in load_library()["versions"].items():
+        for family, body in by_family.items():
+            pairs.setdefault(body, (version, family))
+    return pairs
 
 
-BODY_VERSION = {
-    "redact_string": ("redacted", "STRING"), "null_string": ("null", "STRING"),
-    "null_date": ("null", "DATE"), "null_timestamp": ("null", "TIMESTAMP"),
-    "null_numeric": ("null", "DECIMAL(38,9)"), "last4_string": ("last4", "STRING"),
-    "email_partial_string": ("email_partial", "STRING"), "initials_string": ("initials", "STRING"),
-    "year_date": ("year", "DATE"), "year_timestamp": ("year", "TIMESTAMP"),
-    "year_timestamp_ntz": ("year", "TIMESTAMP_NTZ"), "age_band_10_numeric": ("age_band_10", "BIGINT"),
-    "credit_score_band_50_numeric": ("credit_score_band_50", "BIGINT"),
-    "rounded_numeric": ("rounded", "BIGINT"), "location_1dp_numeric": ("location_1dp", "DOUBLE"),
-    "ip_network_string": ("ip_network", "STRING"), "mac_vendor_string": ("mac_vendor", "STRING"),
-    "url_domain_string": ("url_domain", "STRING"), "prefix_3_string": ("prefix_3", "STRING"),
-}
+def _rendered(value):
+    """The Python value as to_json(..., TO_JSON_OPTIONS) renders it."""
+    if isinstance(value, dt.datetime) and value.tzinfo is None:
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, dt.datetime):
+        local = value.astimezone(ZoneInfo(RENDER_ZONE))
+        offset = local.strftime("%z")
+        return local.strftime("%Y-%m-%dT%H:%M:%S.") + f"{local.microsecond // 1000:03d}" + offset[:3] + ":" + offset[3:]
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    return comparable(value)
 
 
-@pytest.mark.parametrize("name,value", [
-    ("email_partial_string", "bad@@example"), ("initials_string", "Alice"),
-    ("prefix_3_string", "abc"), ("ip_network_string", "999.1.2.3"),
-    ("ip_network_string", "192.168.2.99"), ("mac_vendor_string", "zz:bb:cc:dd:ee:ff"),
-    ("url_domain_string", "not a url"), ("age_band_10_numeric", 27),
-    ("credit_score_band_50_numeric", 649), ("rounded_numeric", 1499),
-    ("location_1dp_numeric", Decimal("1.25")),
-    ("year_date", dt.date(2024, 12, 31)),
-    ("year_timestamp", dt.datetime(2023, 12, 31, 23, tzinfo=dt.timezone(dt.timedelta(hours=-2)))),
+def test_every_shipped_sql_body_has_exact_expected_cases():
+    assert set(BODY_CASES) == set(SQL_BODIES)
+    assert set(SQL_BODIES) <= set(_body_versions())
+
+
+# No offline Spark SQL engine exists, so the SQL bodies themselves run only in
+# the live test (DATABRICKS_LIVE_TESTS=1), which asserts these same exact
+# values. Offline, the Python reference must produce them exactly.
+@pytest.mark.parametrize("body,python_input,expected", [
+    (body, python_input, expected)
+    for body, cases in BODY_CASES.items() for _sql, python_input, expected in cases
 ])
-def test_offline_sql_semantics_exactly_match_reference(name, value):
-    version, sql_type = BODY_VERSION[name]
-    # The evaluator is deliberately keyed by the shipped body text: changing
-    # any SQL body without updating its semantic contract fails this lookup.
-    body_to_name = {body: body_name for body_name, body in SQL_BODIES.items() if body_name in BODY_VERSION}
-    assert body_to_name[SQL_BODIES[name]] == name
-    assert apply_version(version, value, sql_type, key=KEY) == apply_version(version, value, sql_type, key=KEY)
+def test_reference_produces_exact_expected_value_per_body(body, python_input, expected):
+    version, family = _body_versions()[body]
+    assert _rendered(apply_version(version, python_input, family, key=KEY)) == comparable(expected)
 
 
 @pytest.mark.parametrize("sql_type,supported", [
     ("TINYINT", False), ("SMALLINT", False), ("INT", False), ("BIGINT", True),
     ("DECIMAL(18,0)", False), ("DECIMAL(19,0)", True), ("DECIMAL(38,18)", True),
+    ("DECIMAL(20,2)", False), ("DECIMAL(21, 2)", True), ("DECIMAL", False),
     ("FLOAT", False), ("DOUBLE", False),
 ])
 def test_numeric_hash_is_in_range_or_routes_to_typed_full(sql_type, supported):
@@ -253,6 +286,7 @@ def test_numeric_hash_is_in_range_or_routes_to_typed_full(sql_type, supported):
 
 
 def test_not_found_without_status_code_creates_scratch_secret(tmp_path, monkeypatch):
+    NotFound = pytest.importorskip("databricks.sdk.errors").NotFound
     class API:
         calls = []
         def do(self, method, path, body=None):
@@ -279,3 +313,60 @@ def test_probe_shape(tmp_path):
     path = tmp_path / "generated" / "hash_probe.json"
     write_probe(path, digest)
     assert json.loads(path.read_text()) == {"input": "genierails-probe", "hmac_sha256": digest}
+
+
+def test_live_probe_refuses_real_env_dirs(tmp_path):
+    from scripts.live_mask_library import REPO
+    refuse_real_env_dir(tmp_path / "scratch")
+    with pytest.raises(RuntimeError, match="inside the repository"):
+        refuse_real_env_dir(REPO / "aws" / "envs" / "dev" / "generated")
+    env = tmp_path / "outside_env"
+    env.mkdir()
+    (env / "env.auto.tfvars").write_text("")
+    with pytest.raises(RuntimeError, match="real environment"):
+        refuse_real_env_dir(env / "generated")
+
+
+class _FakeWarehouse:
+    """Answers the live harness's statements with each case's expected value."""
+
+    def __init__(self, key_text, wrong_body=None):
+        self.key_text, self.wrong_body, self.statements = key_text, wrong_body, []
+        self.statement_execution = self
+        self.api_client = self
+
+    def do(self, method, path, body=None):
+        if method == "GET":
+            raise pytest.importorskip("databricks.sdk.errors").NotFound("missing")
+
+    def execute_statement(self, *, warehouse_id, statement, wait_timeout):
+        self.statements.append(statement)
+        rows = []
+        if "gr_hmac_sha256`('genierails-probe')" in statement:
+            rows = [[keyed_hash("genierails-probe", self.key_text.encode())]]
+        elif "gr_hmac_sha256_numeric`(CAST" in statement:
+            rows = [[str(keyed_hash(Decimal("123.4500"), self.key_text.encode(), numeric=True))]]
+        elif statement.startswith("SELECT to_json("):
+            for body, cases in BODY_CASES.items():
+                for sql_input, _python_input, expected in cases:
+                    if f"named_struct('v', {SQL_BODIES[body]})," in statement and f"SELECT {sql_input} AS value" in statement:
+                        value = "tampered" if body == self.wrong_body else expected
+                        rendered = str(value) if isinstance(value, Decimal) else json.dumps(value)
+                        rows = [['{"v": ' + rendered + '}']]
+        ok = types.SimpleNamespace(state="SUCCEEDED", error=None)
+        return types.SimpleNamespace(status=ok, result=types.SimpleNamespace(data_array=rows))
+
+
+@pytest.mark.parametrize("wrong_body", [None, "last4_string", "year_timestamp"])
+def test_live_harness_checks_exact_values_per_statement_zone(tmp_path, monkeypatch, wrong_body):
+    pytest.importorskip("databricks.sdk.errors")
+    from scripts.live_mask_library import TO_JSON_OPTIONS, run
+    monkeypatch.setenv("GENIERAILS_HASH_KEY", "11" * 32)
+    warehouse = _FakeWarehouse("11" * 32, wrong_body)
+    result = run(warehouse, "wh", "cat", "scratch", tmp_path / "generated")
+    assert result["bodies_tested"] == sum(len(cases) for cases in BODY_CASES.values()) + 2
+    assert {d["body"] for d in result["details"]} == ({wrong_body} if wrong_body else set())
+    assert not any("SET TIME ZONE" in s.upper() for s in warehouse.statements)
+    selects = [s for s in warehouse.statements if s.startswith("SELECT to_json(")]
+    assert selects and all(s.split(" FROM (SELECT ")[0].endswith(f", {TO_JSON_OPTIONS})") for s in selects)
+    assert f"'timeZone', '{RENDER_ZONE}'" in TO_JSON_OPTIONS and RENDER_ZONE != "UTC"
