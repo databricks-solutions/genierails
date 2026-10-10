@@ -70,15 +70,13 @@ def test_python_accepted_uuid_group_passes_terraform_validate_and_plan(tmp_path,
         assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_governance_mode_raw_exempt_principals_and_hash_fallback():
-    assert errors(governance_mode="deterministic", raw_exempt_principals=["etl"], hash_fallback="redact") == []
+def test_governance_mode_and_raw_exempt_principals():
+    assert errors(governance_mode="deterministic", raw_exempt_principals=["etl"]) == []
     assert errors(governance_mode="future")
     assert errors(governance_mode=[])
     assert errors(raw_exempt_principals="etl")
     for principal in ("", " ", "\t"):
         assert errors(raw_exempt_principals=[principal])
-    assert errors(hash_fallback="raw")
-    assert errors(hash_fallback=[])
 
 
 def test_one_two_and_three_plus_tiers_are_valid():
@@ -97,7 +95,8 @@ def test_treatment_versions_only_allows_partial_known_treatment_and_version():
     assert errors(treatment_versions={"email_partial": {"partial": "partial"}}) == []
     assert errors(treatment_versions={"ssn": {"partial": "last4"}}) == []
     for treatment in PARTIAL_VERSIONS:
-        assert errors(treatment_versions={treatment: {"partial": "redacted"}}) == []
+        version = next(iter(PARTIAL_VERSIONS[treatment]))
+        assert errors(treatment_versions={treatment: {"partial": version}}) == []
     assert errors(treatment_versions={"missing": {"partial": "partial"}})
     assert errors(treatment_versions={"email_partial": {"full": "redacted"}})
     assert errors(treatment_versions={"email_partial": {"partial": "missing"}})
@@ -131,7 +130,7 @@ def test_column_override_accepts_partial_or_treatment_and_refuses_full():
     assert errors(column_overrides={"cat.sch.tbl.col": {"keep_current": False}})
 
 
-@pytest.mark.xfail(strict=True, reason="step 3 adds class-derived protection-order data")
+@pytest.mark.xfail(strict=True, reason="needs the column's live class.* tags, which reach config with deterministic policies in step 5")
 def test_column_treatment_override_must_be_stricter_than_class_derived_treatment():
     assert errors(column_overrides={"cat.sch.tbl.col": {"treatment": "email_partial"}})
 
@@ -205,8 +204,12 @@ def test_raw_view_precedence_never_raw_deployer_exempt_tier1_then_overrides():
     assert resolve_precedence(**{**base, "principal": "viewer"}) == AccessResolution("full")
     never_raw = {**base, "treatment": "secret", "principal": "etl"}
     assert resolve_precedence(**never_raw) == AccessResolution("full")
-    # The deployer SP is the sole never-raw exception in section 3.
-    assert resolve_precedence(**{**never_raw, "principal": "deployer"}) == AccessResolution("raw")
+    # Section 3: the deployer SP is not exempt from never-raw.
+    assert resolve_precedence(**{**never_raw, "principal": "deployer"}) == AccessResolution("full")
+    flagged = {**base, "treatment": "redact", "library_default": "redacted", "never_raw": True}
+    for principal in ("etl", "deployer"):
+        assert resolve_precedence(**{**flagged, "principal": principal}) == AccessResolution("full")
+    assert resolve_precedence(**{**flagged, "principal": "viewer", "group": "t1"}) == AccessResolution("full")
 
 
 def test_wrong_typed_nested_values_return_clean_errors():
@@ -214,3 +217,14 @@ def test_wrong_typed_nested_values_return_clean_errors():
     assert errors(column_overrides={"a.b.c.d": {"partial": ["x"]}})
     assert errors(tier_access_overrides={"ssn": {"partial": ["raw"]}})
     assert errors(row_filters=[{"table": ["x"], "column": "r", "values_by_group": {}}])
+
+
+def test_every_shared_treatment_fails_closed_by_tier_and_unknowns_are_full():
+    for treatment in PARTIAL_VERSIONS:
+        args = dict(column="c.s.t.x", treatment=treatment, library_default=next(iter(PARTIAL_VERSIONS[treatment])), access_tier_groups=["t1", "t2", "t3"])
+        tier1 = resolve_precedence(**args, group="t1")
+        assert tier1.access == ("full" if treatment in NEVER_RAW_TREATMENTS else "raw")
+        assert resolve_precedence(**args, group="t3").access == "full"
+        assert resolve_precedence(**args, group="outsider").access == "full"
+    assert resolve_precedence(column="c.s.t.x", treatment="unknown", group="t1", library_default="raw", access_tier_groups=["t1", "t2", "t3"]) == AccessResolution("full")
+    assert errors(treatment_versions={"unknown": {"partial": "redacted"}})

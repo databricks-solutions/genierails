@@ -17,33 +17,42 @@ NEVER_RAW_TREATMENTS = frozenset({
     "card_security_code", "card_pin", "card_track_data", "secret",
 })
 
-# Version names are the public schema contract from design section 2.  The
-# implementation and typed variants land with rollout step 3.
+# Public treatment vocabulary. mask_library.json uses these names directly, so
+# every library treatment is configurable through treatment_versions.
 PARTIAL_VERSIONS: dict[str, frozenset[str]] = {
-    # Deterministic-library treatment name used by design section 2.  Its
-    # implementation lands in step 3; ssn_last4 remains a known legacy name.
-    "ssn": frozenset({"hmac_sha256", "last4"}),
+    "ssn": frozenset({"last4"}),
     "redact": frozenset({"redacted"}),
     "compensation_redacted": frozenset({"rounded"}),
-    "ssn_last4": frozenset({"hmac_sha256", "last4"}),
+    "ssn_last4": frozenset({"last4"}),
     "card_last4": frozenset({"last4"}),
     "account_last4": frozenset({"last4"}),
     "email_partial": frozenset({"partial"}),
     "phone_partial": frozenset({"last4"}),
     "name_partial": frozenset({"initials"}),
     "date_year": frozenset({"year"}),
-    "tfn_partial": frozenset({"hmac_sha256", "last4"}),
-    "medicare_partial": frozenset({"hmac_sha256", "last4"}),
+    "tfn_partial": frozenset({"last4"}),
+    "medicare_partial": frozenset({"last4"}),
     "bsb_partial": frozenset({"last4"}),
-    "aadhaar_partial": frozenset({"hmac_sha256", "last4"}),
+    "aadhaar_partial": frozenset({"last4"}),
     "generic_partial": frozenset({"redacted", "prefix_3"}),
     "round_amount": frozenset({"rounded"}),
+    # Mask-library treatments with no step-1 name; see mask_library.json.
+    "identifier": frozenset(),
+    "age": frozenset({"age_band_10"}),
+    "credit_score": frozenset({"credit_score_band_50"}),
+    "ip_address": frozenset({"ip_network"}),
+    "mac_address": frozenset({"mac_vendor"}),
+    "url": frozenset({"url_domain"}),
+    "location": frozenset({"location_1dp"}),
     **{treatment: frozenset({"redacted"}) for treatment in NEVER_RAW_TREATMENTS},
 }
 PARTIAL_VERSIONS = {
     treatment: versions | {"redacted"}
     for treatment, versions in PARTIAL_VERSIONS.items()
 }
+VERSION_NAMES = frozenset().union(*PARTIAL_VERSIONS.values())
+# Deferred from v1: identifiers are redacted for tiers 2 and 3.
+KEYED_HASH_UNAVAILABLE = "keyed hash is not available in this version; use redacted"
 
 
 def _known_treatments(registry_path: Path | None = None) -> set[str]:
@@ -73,22 +82,29 @@ def resolve_precedence(
     principal: str | None = None,
     deployer_principal: str | None = None,
     raw_exempt_principals: list[str] | None = None,
+    never_raw: bool = False,
 ) -> AccessResolution:
     """Resolve access first, then resolve a version only for partial access.
 
     A principal in several configured groups receives the most privileged
     effective access. Principals outside every tier fail closed to full.
+    ``never_raw`` is set when any class on the column is never raw, even if
+    strictest-wins picked an ordinary treatment (see mask_library.resolve_class).
     """
     memberships = [group] if isinstance(group, str) else list(group)
     configured = list(access_tier_groups)
     member_groups = [candidate for candidate in configured if candidate in memberships]
     effective_treatment = (column_overrides or {}).get(column, {}).get("treatment", treatment)
 
-    # Never-raw is considered first, but the deployer is its sole exception.
-    is_deployer = deployer_principal is not None and principal == deployer_principal
-    if (treatment in NEVER_RAW_TREATMENTS or effective_treatment in NEVER_RAW_TREATMENTS) and not is_deployer:
+    # Invalid or drifted names can never open access. validate_config reports
+    # the schema error; direct resolver callers still fail closed.
+    if treatment not in PARTIAL_VERSIONS or effective_treatment not in PARTIAL_VERSIONS:
         return AccessResolution("full")
-    if is_deployer:
+
+    # Never-raw beats everything, including the deployer SP: nobody sees raw.
+    if never_raw or treatment in NEVER_RAW_TREATMENTS or effective_treatment in NEVER_RAW_TREATMENTS:
+        return AccessResolution("full")
+    if deployer_principal is not None and principal == deployer_principal:
         return AccessResolution("raw")
     if principal is not None and (
         principal in (raw_exempt_principals or [])
@@ -167,9 +183,6 @@ def validate_config(
             "raw_exempt_principals must name account groups; user emails cannot be verified. "
             "UUID/hex-shaped names are allowed because they may be legitimate group display names; "
             "live verification refuses them only when no account group with that exact name exists")
-    hash_fallback = cfg.get("hash_fallback")
-    if hash_fallback is not None and hash_fallback != "redact":
-        errors.append('hash_fallback must be "redact" or unset')
     tiers = cfg.get("access_tier_groups", [])
     if not isinstance(tiers, list) or not all(isinstance(x, str) and x.strip() for x in tiers):
         errors.append("access_tier_groups must be an ordered list of non-empty group names")
@@ -192,6 +205,8 @@ def validate_config(
             errors.append(f"{label}.partial must be a string")
         elif rule["partial"] == "raw":
             errors.append(f"{label}.partial may not be raw; use a column or tier access override")
+        elif rule["partial"] == "hmac_sha256":
+            errors.append(f"{label}.partial: {KEYED_HASH_UNAVAILABLE}")
         elif rule["partial"] not in PARTIAL_VERSIONS.get(treatment, frozenset()):
             errors.append(f"{label}.partial names unknown version {rule['partial']!r}")
 
@@ -249,9 +264,11 @@ def validate_config(
         # TODO(step 3): compare a treatment override with live class-derived
         # treatment data and refuse it unless the protection order is stricter.
         if "partial" in rule:
-            valid_versions = set().union(*PARTIAL_VERSIONS.values())
+            valid_versions = VERSION_NAMES
             if not isinstance(rule["partial"], str):
                 errors.append(f"{label}.partial must be a string")
+            elif rule["partial"] == "hmac_sha256":
+                errors.append(f"{label}.partial: {KEYED_HASH_UNAVAILABLE}")
             elif rule["partial"] not in valid_versions | {"raw"}:
                 errors.append(f"{label}.partial names unknown version {rule['partial']!r}")
 

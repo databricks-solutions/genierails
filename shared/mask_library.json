@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "settings": {
+    "redacted_string": "[REDACTED]",
+    "normalization": "trim, NFKC, uppercase, remove spaces and hyphens"
+  },
+  "protection_order": ["raw", "partial", "redacted"],
+  "never_raw_classes": ["card_security_code", "card_pin", "card_track_data", "secret"],
+  "versions": {
+    "redacted": {"STRING": "redact_string", "DATE": "null_date", "TIMESTAMP": "null_timestamp", "TIMESTAMP_NTZ": "null_timestamp_ntz", "NUMERIC": "null_numeric"},
+    "null": {"STRING": "null_string", "DATE": "null_date", "TIMESTAMP": "null_timestamp", "TIMESTAMP_NTZ": "null_timestamp_ntz", "NUMERIC": "null_numeric"},
+    "last4": {"STRING": "last4_string"},
+    "partial": {"STRING": "email_partial_string"},
+    "initials": {"STRING": "initials_string"},
+    "year": {"DATE": "year_date", "TIMESTAMP": "year_timestamp", "TIMESTAMP_NTZ": "year_timestamp_ntz"},
+    "age_band_10": {"NUMERIC": "age_band_10_numeric"},
+    "credit_score_band_50": {"NUMERIC": "credit_score_band_50_numeric"},
+    "rounded": {"NUMERIC": "rounded_numeric"},
+    "ip_network": {"STRING": "ip_network_string"},
+    "mac_vendor": {"STRING": "mac_vendor_string"},
+    "url_domain": {"STRING": "url_domain_string"},
+    "location_1dp": {"NUMERIC": "location_1dp_numeric"},
+    "prefix_3": {"STRING": "prefix_3_string"},
+    "raw": {"STRING": "raw_string", "DATE": "raw_date", "TIMESTAMP": "raw_timestamp", "NUMERIC": "raw_numeric"}
+  },
+  "treatments": {
+    "card_last4": {"classes": ["credit_card"], "partial": "last4", "full": "redacted", "types": ["STRING"]},
+    "card_security_code": {"classes": ["card_security_code"], "partial": "redacted", "full": "redacted", "types": ["STRING"]},
+    "card_pin": {"classes": ["card_pin"], "partial": "redacted", "full": "redacted", "types": ["STRING"]},
+    "card_track_data": {"classes": ["card_track_data"], "partial": "redacted", "full": "redacted", "types": ["STRING"]},
+    "account_last4": {"classes": ["bank_number", "iban_code", "swift_code", "us_bank_number", "uk_sort_code"], "partial": "last4", "full": "redacted", "types": ["STRING"]},
+    "ssn": {"classes": ["us_ssn", "us_itin"], "partial": "redacted", "full": "redacted", "types": ["STRING", "NUMERIC"]},
+    "tfn_partial": {"classes": ["au_tfn"], "partial": "redacted", "full": "redacted", "types": ["STRING", "NUMERIC"]},
+    "medicare_partial": {"classes": ["au_medicare"], "partial": "redacted", "full": "redacted", "types": ["STRING", "NUMERIC"]},
+    "aadhaar_partial": {"classes": ["in_aadhaar"], "partial": "redacted", "full": "redacted", "types": ["STRING", "NUMERIC"]},
+    "identifier": {"classes": ["ae_emirates_id", "br_cnpj", "br_cns", "br_cpf", "br_pis", "br_rg", "br_titulo_eleitor", "ca_health_number", "ca_pr_card", "ca_social_insurance_number", "ch_ahv", "de_id_card", "de_svnr", "de_tax_id", "dk_cpr", "driver_license", "es_business_tax_id", "es_dni", "es_nie", "fr_id_card", "fr_nir", "fr_tax_id", "health_plan_beneficiary_number", "il_teudat_zehut", "imei", "in_esic", "in_pan", "in_uan", "in_voter_id", "it_codice_fiscale", "it_id_card", "it_partita_iva", "jp_my_number", "jp_pension_number", "license_plate", "medical_device_id", "medical_license", "medical_record_number", "mx_curp", "mx_nss", "mx_rfc", "mx_voter_id", "nl_bsn", "no_d_number", "no_fodselsnummer", "passport", "se_personnummer", "uk_nhs", "uk_nino", "uk_utr", "us_driver_license", "us_passport", "vin"], "partial": "redacted", "full": "redacted", "types": ["STRING", "NUMERIC"]},
+    "email_partial": {"classes": ["email_address"], "partial": "partial", "full": "redacted", "types": ["STRING"]},
+    "phone_partial": {"classes": ["phone_number"], "partial": "last4", "full": "redacted", "types": ["STRING"]},
+    "name_partial": {"classes": ["name"], "partial": "initials", "full": "redacted", "types": ["STRING"]},
+    "date_year": {"classes": ["date_of_birth", "medical_date"], "partial": "year", "full": "null", "types": ["DATE", "TIMESTAMP", "TIMESTAMP_NTZ"]},
+    "age": {"classes": ["age"], "partial": "age_band_10", "full": "null", "types": ["NUMERIC"]},
+    "credit_score": {"classes": ["credit_score"], "partial": "credit_score_band_50", "full": "null", "types": ["NUMERIC"]},
+    "compensation_redacted": {"classes": ["compensation"], "partial": "rounded", "full": "null", "types": ["NUMERIC"]},
+    "ip_address": {"classes": ["ip_address"], "partial": "ip_network", "full": "redacted", "types": ["STRING"]},
+    "mac_address": {"classes": ["mac_address"], "partial": "mac_vendor", "full": "redacted", "types": ["STRING"]},
+    "url": {"classes": ["url"], "partial": "url_domain", "full": "redacted", "types": ["STRING"]},
+    "location": {"classes": ["location"], "partial_by_type": {"STRING": "redacted", "NUMERIC": "location_1dp"}, "full": "redacted", "types": ["STRING", "NUMERIC"]},
+    "redact": {"classes": ["card_expiration_date", "biometric_data", "criminal_background", "employment_status", "ethnicity", "genetic_data", "health_data", "marital_status", "political_opinion", "religious_belief", "sexual_data", "sexual_orientation", "trade_union_membership"], "partial": "redacted", "full": "redacted", "types": ["STRING", "DATE", "TIMESTAMP", "TIMESTAMP_NTZ"]},
+    "secret": {"classes": ["secret"], "partial": "redacted", "full": "redacted", "types": ["STRING", "DATE", "TIMESTAMP", "TIMESTAMP_NTZ", "NUMERIC"]}
+  }
+}
