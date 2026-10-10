@@ -525,8 +525,10 @@ variable "raw_exempt_principals" {
   default     = []
   description = "Environment-owned principals that see raw values, except for never-raw treatments; used from rollout step 5."
   validation {
-    condition     = alltrue([for principal in var.raw_exempt_principals : trimspace(principal) != ""])
-    error_message = "raw_exempt_principals must contain non-empty principal names."
+    condition = alltrue([for principal in var.raw_exempt_principals :
+      trimspace(principal) != "" && length(regexall("@", principal)) == 0
+    ])
+    error_message = "raw_exempt_principals must contain non-empty account group names, not user emails. UUID/hex-shaped group display names are allowed and resolved exactly during live verification."
   }
 }
 

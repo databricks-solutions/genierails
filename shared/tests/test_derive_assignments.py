@@ -96,6 +96,9 @@ def test_refresh_changes_only_assignments_and_derives_one_treatment_per_column(t
         if item["tag_key"] == "gr_treatment":
             counts[item["entity_name"]] = counts.get(item["entity_name"], 0) + 1
     assert set(counts.values()) == {1}
+    classified_columns = {"prod.sales.customers.email", "prod.sales.customers.ssn",
+                          "prod.sales.customers.free_text"}
+    assert set(counts) <= classified_columns
 
 
 @pytest.mark.parametrize("failure", [
