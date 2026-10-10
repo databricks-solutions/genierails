@@ -13,14 +13,15 @@ Today the AI drafts parts of governance in every `make generate`: mask SQL for s
 | # | Decision |
 |---|---|
 | 1 | Three access tiers by default: full access (raw), partial (partial mask), fully masked. |
-| 2 | Identifiers (national, tax, document and device IDs) default to a one-way hash for the partial tier, and full redaction for the fully masked tier. |
+| 2 | Identifiers (national, tax, document and device IDs) are **redacted** for both masked tiers in v1. The keyed hash is **deferred** to a later release (section 2). |
 | 3 | Row filters are supported only when declared in config. GenieRails never invents one. |
 | 4 | An agent can only be run by the groups assigned to it (`acl_groups`). There is no default; a missing `acl_groups` stops the run. |
 | 5 | The AI is not used for governance. It stays available as a helper for Genie content and for suggesting a mask for an unmapped tag, which a person reviews and commits. |
+| 6 | Governance works **without any Genie agent**: tables can be governed on their own (section 14). |
 
 ## 1. Table governance
 
-For every table any configured agent uses:
+For every table in the **governed set** (section 14): the tables any configured agent uses, plus tables declared in `governed_tables`, plus tables already governed (they stay governed until `make ungovern`):
 
 1. **Treatment per column** comes from its `class.*` tag through the shipped mask library (section 2). A per-column `column_overrides` entry can make it stricter, or set an explicit, reviewed partial version for that column (e.g. a postcode prefix); it never changes what tier 3 sees.
 2. **Per catalog and treatment, one policy per masked tier** (section 3), each using a fixed, caller-independent function from the library.
@@ -39,9 +40,9 @@ GenieRails ships a mapping for all 93 Databricks classification classes, each to
 | `credit_card` | last 4 | redacted |
 | `card_security_code`, `card_pin`, `card_track_data`, `card_expiration_date` | redacted | redacted |
 | `bank_number`, `iban_code`, `swift_code`, `us_bank_number`, `uk_sort_code` | last 4 | redacted |
-| `us_ssn`, `us_itin`, `us_passport`, `us_driver_license`, `passport`, `driver_license` | one-way hash | redacted |
-| All regional national, tax, social, health and voter IDs (`ae_*`, `au_*`, `br_*`, `ca_*`, `ch_*`, `de_*`, `dk_*`, `es_*`, `fr_*`, `il_*`, `in_*`, `it_*`, `jp_*`, `mx_*`, `nl_*`, `no_*`, `se_*`, `uk_nhs`, `uk_nino`, `uk_utr`) | one-way hash | redacted |
-| `health_plan_beneficiary_number`, `medical_record_number`, `medical_license`, `medical_device_id`, `imei`, `vin`, `license_plate` | one-way hash | redacted |
+| `us_ssn`, `us_itin`, `us_passport`, `us_driver_license`, `passport`, `driver_license` | redacted | redacted |
+| All regional national, tax, social, health and voter IDs (`ae_*`, `au_*`, `br_*`, `ca_*`, `ch_*`, `de_*`, `dk_*`, `es_*`, `fr_*`, `il_*`, `in_*`, `it_*`, `jp_*`, `mx_*`, `nl_*`, `no_*`, `se_*`, `uk_nhs`, `uk_nino`, `uk_utr`) | redacted | redacted |
+| `health_plan_beneficiary_number`, `medical_record_number`, `medical_license`, `medical_device_id`, `imei`, `vin`, `license_plate` | redacted | redacted |
 | `email_address` | partial (`j***@example.com`) | redacted |
 | `phone_number` | last 4 | redacted |
 | `name` | initials | redacted |
@@ -57,22 +58,16 @@ GenieRails ships a mapping for all 93 Databricks classification classes, each to
 | `health_data`, `biometric_data`, `genetic_data`, `ethnicity`, `religious_belief`, `political_opinion`, `sexual_data`, `sexual_orientation`, `trade_union_membership`, `criminal_background`, `marital_status`, `employment_status` | redacted | redacted |
 | `secret` | redacted | redacted |
 
-"Redacted" means a fixed placeholder for text and NULL for other types. The one-way hash is a **keyed** hash (HMAC-SHA-256). A plain hash is not acceptable: small ID spaces such as SSNs (about a billion values) can be reversed by trying every value. Implementation (Databricks' documented pattern):
+"Redacted" means a fixed placeholder for text and NULL for other types.
 
-- The key's source of truth is one deployment secret generated once by `make init-hash-key` and held by the operator as `GENIERAILS_HASH_KEY` (section 11, G8). `rehearse` and `release` create a **Unity Catalog secret** in their own catalog's governance schema from it **if absent**; once the UC secret exists, the env var isn't needed. Dev and prod use identical key bytes, proven by comparing a probe hash. The key never appears in git, Terraform state or logs. Nothing about the key is needed until a treatment actually uses the hash.
-- A `LANGUAGE PYTHON` UDF declared with `SECRETS (...)` computes the HMAC; a SQL wrapper is the mask function. Neither is declared `DETERMINISTIC`, because rotating the key changes every output.
-- Input is normalised before hashing: trimmed, Unicode NFKC, upper-cased, and spaces and hyphens removed. NULL stays NULL.
-- **Fail closed:** if UC secrets or Python UDFs are unavailable on the warehouse, hashed treatments fall back to **redacted** for tier 2, with a clear warning. They never fall back to raw.
-- **Verified live on AWS dev (spike):** UC secret creation, the Python HMAC UDF with `SECRETS (...)` and `environment_version = '6'`, and the SQL wrapper as a column mask all work on a serverless Pro warehouse. Callers need only `EXECUTE`; the secret is read with the function owner's permission. Output was stable 64-character hex, NULL stayed NULL, duplicates matched.
-- **Read the key once at module scope** (`HANDLER` function, key fetched outside it): verified to work through ABAC with a SQL wrapper, and it cut overhead by about 60%.
-- **Latency (measured, AWS dev serverless):** about **8 seconds of fixed overhead per query** that touches a hashed column, roughly the same at 10k and 100k rows; unmasked queries took about 0.6 s. Only tier-2 queries touching hashed columns pay this (tier 1 sees raw; tier 3's full version is plain SQL). A team can switch a treatment to `redacted` for tier 2 with `treatment_versions` if latency matters more than joinability.
-- **Decision (2026-10-10): the keyed hash stays the tier-2 default for identifier classes** (`identifier_partial_default = "hmac_sha256"`), accepting the ~8 s per-query overhead in exchange for joinable, countable IDs. `redacted` remains a per-treatment opt-out via `treatment_versions`. Plain built-in hashes (`sha2`, `md5`, `xxhash64`) were rejected: identifier spaces like SSNs are small enough to reverse by hashing every value, and a salt embedded in the function body would live in git and may be readable via the function definition.
-- **Tier shape verified live with real groups:** in no tier gives full; tier 2 only gives the hash; tier 1 only gives raw; tier 1 + tier 2 gives raw; tier 2 + another group gives the hash. Exactly one mask resolved every time, with no "multiple masks" error.
+**Keyed hash: deferred (decision 2026-10-10).** v1 ships no hash. A plain built-in hash (`sha2`, `md5`) is reversible for small ID spaces such as SSNs, and the safe version (HMAC with a Unity Catalog secret read by a Python UDF) adds a key to manage, a Python UDF dependency and about 8 s per query, measured on AWS dev. It can come back later as an opt-in `treatment_versions` value without changing anything else in this design. The AWS spike results are kept in the PR history.
+
+Verified live on AWS dev and still relevant:
+- **Tier shape with real groups:** in no tier gives full; tier 2 only gives partial; tier 1 only gives raw; tier 1 + tier 2 gives raw; tier 2 + another group gives partial. Exactly one mask resolved every time, with no "multiple masks" error.
 - **Group membership propagation:** about **5 minutes** before ABAC sees a membership change. `verify-access` waits for it.
-- **Tag policy capacity:** the AWS test account has reached its maximum number of governed tag policies. GenieRails uses a single treatment tag key, so no new tag policy is needed per treatment, but a deployment that needs a new tag policy will fail on such an account; bootstrap reports remaining capacity.
-- **Rotation** is explicit and disruptive (`make rotate-hash-key`): every hash changes at once, so stored or exported hashes stop joining. It is documented as a planned cutover.
+- **Tag policy capacity:** the AWS test account has reached its maximum number of governed tag policies. GenieRails uses a single treatment tag key, so no new tag policy is needed per treatment; bootstrap reports remaining capacity.
 
-**Change from today:** `us_ssn` and `us_itin` move from last 4 to the keyed hash, following decision 2. Last 4 stays available as an explicit opt-in:
+**Change from today:** `us_ssn` and `us_itin` move from last 4 to redacted for tier 2, following decision 2. Last 4 stays available as an explicit opt-in:
 
 ```hcl
 treatment_versions = { ssn = { partial = "last4" } }
@@ -151,7 +146,6 @@ row_filters = [
 
 - **Tier-aware verification (required).** `verify-access` checks each tier against its **exact expected output**, not just "differs from raw": it reads paired raw rows, applies the pure partial or full function to them, and compares exactly. Functions stay caller-independent (section 3), so #97's fixed-point handling still applies. A sample where raw, partial and full can't be told apart is **inconclusive**, never a pass. A test principal in two tiers must see the most privileged tier's output.
 - **Typed variants**: partial and full versions for DATE, TIMESTAMP, numeric and STRING where applicable.
-- **Hash key**: as specified in section 2.
 
 ## 8. Rollout (separate PRs, each reviewed by a different vendor)
 
@@ -159,8 +153,8 @@ Every step keeps `main` working. Steps 1–4 change existing deployments only in
 
 1. **Schemas + CI guard:** settings, precedence and validation; every applying target refuses when `CI=true` (N3).
 2. **Tier-aware verification** and the prod-classification completeness check with the promote-side manifest (G4, N4); warn-only for existing envs.
-3. **Mask library + keyed hash:** all 93 classes, typed functions with exact output tests, never-raw treatments, `init-hash-key` (a no-op until a hashed treatment is used); latency spike at 10k/100k rows and on Azure.
-4. **Stable tags and sticky governance** for deterministic envs: separate treatment-tag resource keyed by `table.column`, persisted governed-table set, `make ungovern` (G1, N2).
+3. **Mask library:** all 93 classes, typed functions with exact output tests, never-raw treatments. No keyed hash in v1.
+4. **Stable tags and sticky governance** for deterministic envs: separate treatment-tag resource keyed by `table.column`, persisted governed-table set, `governed_tables`, governance-only envs (section 14), `make ungovern` (G1, N2).
 5. **Deterministic policies (new envs only)** together with **required `acl_groups` and no policy-derived access** (N1): per-tier policies, `raw_exempt_principals`, tighten-before-loosen phases, per-agent files with the loader (G14, N7), tiers promoted as governance (G7).
 6. **Migration:** protection-order report over every SELECT holder, refuse weakening, tag `state mv`, staged cutover keeping deployed policy names, frozen AI row filters (G3, G11, N2).
 7. **Version control:** root `.gitignore` commits env files and generated output (G15, N8); permanent refuse-weakening on every promote and release (N9); `maintain` fail-safe redaction for unmapped new classes (N10).
@@ -223,7 +217,7 @@ There are two kinds of change, and git is the record of what is ready.
 
 | Review finding | Resolution |
 |---|---|
-| A SQL mask can't read a secret | UC secret + Python HMAC UDF + SQL wrapper, created automatically; fail closed to redacted (section 2) |
+| A SQL mask can't read a secret | Keyed hash deferred (section 2); no secret needed in v1 |
 | Verifier can't tell partial from full | Exact expected-output checks per tier; inconclusive when indistinguishable (section 7) |
 | One mask per column with two masked tiers | One policy per masked tier with ordered `EXCEPT` lists; caller-independent functions; most privileged tier wins; unknown principals get full (section 3) |
 | "Every live dev agent" was unbounded | Configured dev agents only, read live during `rehearse` and fingerprinted (section 9, rule 5) |
@@ -234,7 +228,7 @@ There are two kinds of change, and git is the record of what is ready.
 | Plain `generate` re-captures today; dev overwrites agent config today | Separate `make capture`; environment-specific config ownership (rollout 7, 8) |
 | "Full overwrite" isn't a faithful export today | Capture stores the agent's `serialized_space` verbatim in a versioned file, minus IDs and ACLs; promote remaps catalog names and the warehouse, then prod import sends that remapped config; a rejected field fails the release instead of being silently dropped (rollout 8) |
 
-**Champion impact:** one `acl_groups` line per agent file; everything else is unchanged from the current flow. The hash key is not a champion step: the first `rehearse`/`release` that uses a hashed treatment creates the Unity Catalog secret if missing, `release` provisions the same key into later environments and checks dev and prod produce the same hash before granting access, and stops (or uses `hash_fallback`) if it can't. Hashing itself only happens inside the mask function at query time; table data is never rewritten. `make init-hash-key` stays as an optional operator command for pre-provisioning and rotation.
+**Champion impact:** one `acl_groups` line per agent file; everything else is unchanged from the current flow. There is no hash key in v1.
 
 ## 11. Changes after the scenario review
 
@@ -249,7 +243,7 @@ These rules take precedence over earlier sections where they differ.
 | **G5** Two CI releases can run at once | **v1 supports one deployment machine.** The local env lock covers it. `release` refuses to run in CI (`CI=true`) unless a remote backend with locking is configured, with a message explaining why. Remote state and CI concurrency are a separate project. |
 | **G6** Principals outside the tiers (ETL SPs, owners) go from raw to fully masked | New `raw_exempt_principals` (env-owned, reviewed) is added to every policy's EXCEPT list. The deployer SP is always exempt. The migration report lists every principal holding SELECT, not only tier groups, and flags anyone whose view changes. |
 | **G7** `access_tier_groups` ownership contradicts main | Tiers are **governance**: defined in dev, promoted to prod like any rule. `acl_groups` per agent and `raw_exempt_principals` stay env-owned. |
-| **G8** Hash key reachability, approval and drift | The key's source of truth is one **deployment secret** generated once by `make init-hash-key` and held by the operator or CI secret store as `GENIERAILS_HASH_KEY`. `rehearse` and `release` create the UC secret in their own catalog **if absent** (never at promote time). A probe hash of a fixed string is compared between dev and prod to prove both use the same key, without exposing it. Missing UC secrets or Python UDFs is a **hard stop** unless `hash_fallback = "redact"` is set explicitly; dev and prod must use the same mode. The secret is owned by the deployer SP; only it holds READ SECRET. `make rotate-hash-key` rotates dev and prod together and keeps the previous version until confirmed. |
+| **G8** Hash key reachability, approval and drift | **Deferred** with the keyed hash (section 2). |
 | **G9** Captured config can't be sent unchanged; CI has no ID files | The capture file stores dev's `serialized_space` with IDs stripped; `promote-to` remaps catalog names (including SQL text) and the warehouse with the existing remap code. After the first create, `release` records the prod agent ID in `envs/prod/genie_space_ids.auto.tfvars`, which is committed, so any checkout updates the same agent. Title adoption (#79) stays as the fallback. |
 | **G10** One fingerprint over every agent's config couples A and B | Live snapshots and fingerprints are **per agent**. A's grants depend only on A's snapshot and the governance of A's tables. |
 | **G11** Refuse-weakening has no protection order; nothing can mask tier 1 | Protection order, weakest to strongest: raw < partial versions (last 4, initials, year, band, prefix) < keyed hash < redacted/NULL. Migration compares each principal and column with that order. `column_overrides` gains `keep_current = true` to freeze today's protection on a column. Treatments for `card_security_code`, `card_pin`, `card_track_data` and `secret` are **never raw**: tier 1 sees the full version too. |
@@ -259,7 +253,7 @@ These rules take precedence over earlier sections where they differ.
 | **G15** `envs/` is gitignored | `make setup` writes a `.gitignore` that **commits** `env.auto.tfvars`, `agents/`, `generated/`, capture files and agent-ID files, and **ignores** `auth.auto.tfvars`, state and locks. Docs updated. |
 | **G16** Row filters underspecified | Literals are strings; the table is mandatory; a tier-1 group in `values_by_group` is refused; `verify-access` creates one test principal per named group. |
 | **G17** Several `class.*` tags on one column; numeric IDs | The **strictest** treatment wins (protection order above). Identifiers stored as numbers are hashed as their canonical decimal string. Section 1 and section 2 agree: a column override sets the partial version or a stricter treatment, never the full version. |
-| **G18** Rotation rollback | Covered by G8: rotation keeps the previous key version until `make rotate-hash-key CONFIRM=1`. |
+| **G18** Rotation rollback | **Deferred** with the keyed hash. |
 
 ## 12. Changes after the second scenario review
 
@@ -282,7 +276,7 @@ These rules take precedence over earlier sections where they differ.
 | **N15** Capture remap and ID file | Capture remap is JSON-aware (it remaps string values, including SQL inside them, never keys). `genie_space_ids.auto.tfvars` is added to the var-file list; `release` writes it and prints "commit envs/prod/genie_space_ids.auto.tfvars" for the operator. |
 | **N16** Detach needs a per-instance state removal | `release` runs a generated `terraform state rm` for the detached agent's resources before apply. |
 | **N17** Row-filter securable | Row-filter policies are created **on the table** securable. |
-| **N18** Key residuals | The probe is the hash of the fixed string `genierails-probe`, stored in `generated/hash_probe.json`. If the UC secret already exists, the env var isn't read. Residual risk documented: metastore admins and holders of `MANAGE` on the governance schema can grant themselves READ SECRET. |
+| **N18** Key residuals | **Deferred** with the keyed hash. |
 | **N19** Stale earlier text | Earlier sections edited to match sections 11 and 12. |
 
 ## 13. Team workflow (agreed, KISS)
@@ -303,4 +297,18 @@ Rules:
 5. **Prod is unchanged:** after the promotion PR is approved, the operator runs `make release ENV=prod` from the deployment machine.
 
 Prerequisite: remote Terraform state with locking for dev, so the post-merge job can apply. Until it exists, the operator runs the post-merge rehearse from the deployment machine. A merge queue (pre-merge rehearse, always-green `main`) is an optional later addition, not v1.
+
+## 14. Governance without agents (agreed, KISS)
+
+The governance layer stands on its own; the agent layer sits on top of it.
+
+- **The governed set** is the union of: tables any configured agent uses; tables you declare; tables already governed (the governed-table list from step 4, so a table stays governed until `make ungovern`).
+
+  ```hcl
+  governed_tables = ["finance.payments", "hr.people.employees"]   # catalog.schema or catalog.schema.table
+  ```
+
+- **No agents configured** (`genie_spaces` empty or absent): GenieRails only does governance. `generate`, `rehearse`, `promote-to`, `release` and `maintain` work the same and skip every agent step. GenieRails creates no agent and **grants nothing**: no `CAN_RUN`, no `SELECT`. Unity Catalog denies by default, so existing grants stay as they are and the masks apply to whoever already has access.
+- **`verify-access`** still proves each tier with its own temporary test principals, so governance-only envs are verified the same way.
+- **With agents**, nothing changes: the champion never lists tables; each agent's tables are added to the governed set automatically.
 
