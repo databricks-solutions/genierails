@@ -233,7 +233,7 @@ There are two kinds of change, and git is the record of what is ready.
 | Plain `generate` re-captures today; dev overwrites agent config today | Separate `make capture`; environment-specific config ownership (rollout 7, 8) |
 | "Full overwrite" isn't a faithful export today | Capture stores the agent's `serialized_space` verbatim in a versioned file, minus IDs and ACLs; promote remaps catalog names and the warehouse, then prod import sends that remapped config; a rejected field fails the release instead of being silently dropped (rollout 8) |
 
-**Champion impact:** one `make init-hash-key` the first time a hashed treatment is used; one `acl_groups` line per agent file; everything else is unchanged from the current flow.
+**Champion impact:** one `acl_groups` line per agent file; everything else is unchanged from the current flow. The hash key is not a champion step: the first `rehearse`/`release` that uses a hashed treatment creates the Unity Catalog secret if missing, `release` provisions the same key into later environments and checks dev and prod produce the same hash before granting access, and stops (or uses `hash_fallback`) if it can't. Hashing itself only happens inside the mask function at query time; table data is never rewritten. `make init-hash-key` stays as an optional operator command for pre-provisioning and rotation.
 
 ## 11. Changes after the scenario review
 
