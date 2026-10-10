@@ -98,7 +98,9 @@ def analyze_sql_blocks(sql_text: str) -> ParsedSqlBlocks:
         fallback_catalog = cat_match.group(1).rstrip(";") if cat_match else catalog
         fallback_schema = schema_match.group(1).rstrip(";") if schema_match else schema
         recovered = set()
-        for function_name in missing:
+        # Set iteration can differ between otherwise equivalent SQL inputs,
+        # making the fail-closed hash depend on process hash ordering.
+        for function_name in sorted(missing):
             pattern = re.compile(
                 r"(CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:\S+\.)*"
                 + re.escape(function_name)

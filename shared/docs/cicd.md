@@ -14,9 +14,14 @@ Use this split of responsibilities:
   - commit the reviewed config changes
 - CI workflow:
   - validate committed config **and run `make coverage-gate`** (block the build if any classified sensitive column has no covering mask)
-  - for prod: enable/wait for native classification; `make release ENV=prod` re-derives facts from prod's own tags (no LLM) and runs the coverage check itself
-  - run `make plan`, then on approved branches `make release ENV=prod` (re-derive → validate → coverage check → rulebook audit → apply → verify-access, under a lock)
-  - the shipped `.github/workflows/ci.yml` only runs tests and validation; to deploy from CI, add your own deployment job that runs `make release ENV=prod`, and if you need a human approval before business users get access, attach a protected `environment:` (approval rule) to that job. There is no separate exposure switch
+  - run `make plan`; applying from CI is not supported in v1
+- Persistent deployment workspace:
+  - after the reviewed change is approved, enable/wait for prod native classification and run `make release ENV=prod`
+  - keep the deployment checkout, credentials, and Terraform state persistent between releases
+
+The full PR→rehearse / approved-merge→release pipeline, including remote state
+and promotion automation, arrives in a later deterministic-governance rollout
+step. Do not bypass the v1 CI guard on a deployment job.
 
 This keeps LLM-driven generation and human review out of the automated deployment path, keeps the LLM out of prod entirely (prod re-derives deterministically), and makes coverage an explicit, enforced check rather than something you hope happened.
 
@@ -89,22 +94,29 @@ This shows the net change across the layered state model:
 2. env-scoped `data_access`
 3. env-scoped `workspace`
 
-## 3. Apply on approved branches
+## 3. Release from the persistent deployment workspace
 
-After approval, deploy. **For prod, re-derive facts from prod's own classification first** — never re-run `generate` in prod (that re-invokes the LLM and could drift from the reviewed rules):
+After approval, deploy from the persistent deployment workspace. **For prod,
+re-derive facts from prod's own classification first** — never re-run `generate`
+in prod (that re-invokes the LLM and could drift from the reviewed rules):
 
 ```bash
 # prod facts: enable/wait for native classification first
 make release ENV=prod   # row-pairing keys: picked per table and proven before apply
 ```
 
-`make release` re-derives assignments from prod's own tags (no LLM), validates, runs the coverage check and the rulebook audit, applies all layers in order (masks and policies before grants), then proves masking with `verify-access`. It never re-generates via the LLM. Terraform itself refuses new or wider business `SELECT` / Genie `CAN_RUN` without a recent passing coverage result, so no path can grant access past the gate. The shipped `.github/workflows/ci.yml` has no deployment job, so add one that runs this command; if you want a human approval before a deployment can add or widen access, give that job a protected `environment:`.
+`make release` re-derives assignments from prod's own tags (no LLM), validates,
+runs the coverage check and the rulebook audit, applies all layers in order
+(masks and policies before grants), then proves masking with `verify-access`.
+It never re-generates via the LLM. Terraform itself refuses new or wider
+business `SELECT` / Genie `CAN_RUN` without a recent passing coverage result,
+so no path can grant access past the gate.
 
 ## Promotion in CI/CD
 
 There are two common models:
 
-### Model A: Promote locally, deploy in CI
+### Model A: Promote locally, release from the deployment workspace
 
 Recommended for most teams.
 
@@ -115,8 +127,8 @@ Recommended for most teams.
    ```
 
 2. The promoted config is reviewed and committed
-3. CI enables/waits for prod native classification, then runs `make plan ENV=prod` (it re-reads live tags and runs the coverage check)
-4. After approval, CI runs `make release ENV=prod`; if its coverage check fails, fix the rules in dev and re-promote
+3. CI runs `make plan ENV=prod` against the reviewed configuration
+4. After approval, the operator enables/waits for prod native classification and runs `make release ENV=prod` from the persistent deployment workspace; if its coverage check fails, fix the rules in dev and re-promote
 
 This is the best model when you want promotion to stay explicit and reviewable in Git.
 
@@ -131,14 +143,14 @@ Use this for separate business units or environments that should not inherit `de
    ```
 
 2. The generated config is reviewed and committed
-3. CI validates and applies `ENV=bu2`
+3. CI validates and plans `ENV=bu2`; the persistent deployment workspace applies the approved change
 
 ## Ready-to-Use GitHub Actions Workflows
 
 Template workflows are included at `.github/workflows/` inside each cloud wrapper (`aws/` and `azure/`):
 
 - `validate.yml` — runs `make validate` on every pull request; no Databricks credentials needed.
-- `deploy.yml` — runs `make apply` on merge to `main`; writes `auth.auto.tfvars` from GitHub Secrets and syncs Terraform state.
+- `deploy.yml` — despite its historical filename, validates and runs `make plan` on merge to `main`; it never applies, releases, imports, migrates, or destroys.
 
 ### AWS (`aws/.github/workflows/`)
 - Uses `aws-actions/configure-aws-credentials@v4` for S3 state backend
@@ -160,7 +172,10 @@ cp -r uc-quickstart/utils/genie/azure/.github/workflows/validate.yml .github/wor
 cp -r uc-quickstart/utils/genie/azure/.github/workflows/deploy.yml   .github/workflows/genie-azure-deploy.yml
 ```
 
-If this folder is later promoted to its own top-level repository, the workflows are ready as-is — place `.github/workflows/` at the new repo root and they will activate without modification.
+If this folder is later promoted to its own top-level repository, the workflows
+are ready as plan-only checks — place `.github/workflows/` at the new repo root
+and they will activate without modification. Run releases separately from the
+persistent deployment workspace.
 
 ---
 
@@ -182,7 +197,7 @@ When drift is found, prefer letting native classification tag the new columns, t
 
 - Avoid running `make generate` automatically in CI — and never in prod. Dev drafts locally with the LLM (reviewed, committed); prod re-derives facts with `make derive-assignments` (no LLM), so prod enforcement can't drift from the reviewed rules.
 - Every plan/apply (`make apply`, `plan`, `apply-governance`, `apply-genie`, and `release`) re-reads live UC state and runs the enforced coverage check. Still keep `make coverage-gate` as a required PR check, so uncovered columns fail early on the generated config.
-- `make apply ENV=<workspace>` also applies the shared account layer, so your CI user must be authorized for both account and workspace operations.
+- `make apply ENV=<workspace>` also applies the shared account layer, so the deployment-workspace identity must be authorized for both account and workspace operations.
 - If you deploy multiple environments from the same repo, parameterize `ENV` and inject the matching workspace secrets per environment.
-- Destroy should usually be a separate manual workflow, for example `make destroy ENV=dev`, rather than part of the normal deployment pipeline.
-- If you are adopting existing Databricks resources, run the import workflow first and let CI manage them only after they are in state.
+- Destroy is a deployment-workspace operation, for example `make destroy ENV=dev`; it is refused in CI.
+- If you are adopting existing Databricks resources, run the import from the persistent deployment workspace before planning the managed resources in CI.

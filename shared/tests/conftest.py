@@ -37,6 +37,17 @@ def _find_gnu_make() -> str | None:
 GNU_MAKE = _find_gnu_make()
 
 
+@pytest.fixture(autouse=True)
+def _unit_tests_are_not_ci_apply_jobs(monkeypatch):
+    """Keep GitHub's ambient CI marker from changing make-driven unit tests.
+
+    Guard tests opt back in explicitly for the subprocess they are checking.
+    """
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("GENIERAILS_ALLOW_CI_APPLY", raising=False)
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "gnu_make: needs GNU Make 4+ options (e.g. -Oline) from `make`")
     # Tests and recipes call plain `make`; when that is Apple's 3.81 but gmake
