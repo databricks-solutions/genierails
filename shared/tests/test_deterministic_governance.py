@@ -75,7 +75,8 @@ def test_governance_mode_raw_exempt_principals_and_hash_fallback():
     assert errors(governance_mode="future")
     assert errors(governance_mode=[])
     assert errors(raw_exempt_principals="etl")
-    assert errors(raw_exempt_principals=[""])
+    for principal in ("", " ", "\t"):
+        assert errors(raw_exempt_principals=[principal])
     assert errors(hash_fallback="raw")
     assert errors(hash_fallback=[])
 

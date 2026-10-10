@@ -316,6 +316,21 @@ raw_exempt_principals = ["alice@example.com"]
         load_spec_from_tfvars(tfvars, env_file=env, key_column="id")
 
 
+@pytest.mark.parametrize("setting", ["access_tier_groups", "raw_exempt_principals"])
+@pytest.mark.parametrize("principal", ["", " ", "\t"])
+def test_deterministic_spec_rejects_empty_or_whitespace_group_names(
+    tmp_path, setting, principal,
+):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    env = tmp_path / "env.auto.tfvars"
+    tfvars.write_text("fgac_policies = []\ntag_assignments = []\n")
+    env.write_text(
+        'governance_mode = "deterministic"\n'
+        f'{setting} = {__import__("json").dumps([principal])}\n')
+    with pytest.raises(ValueError, match="non-empty group names"):
+        load_spec_from_tfvars(tfvars, env_file=env, key_column="id")
+
+
 def test_cli_missing_promoted_tfvars_reports_prerequisite(tmp_path):
     with pytest.raises(SystemExit) as exc:
         main(["--from-tfvars", str(tmp_path / "data_access" / "abac.auto.tfvars"), "--print-spec"])
@@ -1127,7 +1142,7 @@ class TestTemporaryWarehouseAccess:
                 principal, ["cat.sales.customers"], revoke=True)
         assert len(statements) == 3
 
-    @pytest.mark.parametrize("membership", ["viewers", 'team"blue\\ops'])
+    @pytest.mark.parametrize("membership", ["viewers", 'team"blue\\ops', "équipe"])
     def test_provision_assigns_exact_temporary_group_before_return(
         self, monkeypatch, membership,
     ):
@@ -1139,16 +1154,22 @@ class TestTemporaryWarehouseAccess:
             "host": "h", "client_id": "c", "client_secret": "s",
             "account_host": "a", "account_id": "1", "workspace_id": "123",
         })
-        sp = SimpleNamespace(id="456", application_id="app-123")
+        sp = SimpleNamespace(
+            id="456", application_id="app-123",
+            display_name="genierails-verify-viewers")
+        nonexact_sp = SimpleNamespace(
+            id="999", application_id="wrong-app",
+            display_name="Genierails-Verify-Viewers")
         group = SimpleNamespace(id="789", display_name=membership, members=[])
         group_filters = []
 
         def list_groups(**kwargs):
             group_filters.append(kwargs["filter"])
             return [group]
+        create_sp = Mock()
         account = SimpleNamespace(
             service_principals=SimpleNamespace(
-                list=lambda **_: [], create=lambda **_: sp,
+                list=lambda **_: [nonexact_sp, sp], create=create_sp,
             ),
             service_principal_secrets=SimpleNamespace(
                 create=lambda **_: SimpleNamespace(secret="secret"),
@@ -1172,10 +1193,13 @@ class TestTemporaryWarehouseAccess:
         assert call["principal_id"] == 456
         assert call["permissions"][0].value == "USER"
         assert principal.application_id == "app-123"
-        assert group_filters == [f"displayName eq {__import__('json').dumps(membership)}"]
+        create_sp.assert_not_called()
+        assert group_filters == [
+            f"displayName eq {__import__('json').dumps(membership, ensure_ascii=False)}"]
 
     @pytest.mark.parametrize("returned_names", [
         ["analysts-prefix"],
+        ["Analysts"],
         ["analysts", "analysts"],
     ])
     def test_provision_refuses_nonexact_or_ambiguous_group_matches(
@@ -1190,15 +1214,18 @@ class TestTemporaryWarehouseAccess:
             "account_host": "a", "account_id": "1", "workspace_id": "123",
         })
         create = Mock()
+        create_secret = Mock()
         verifier._account = SimpleNamespace(
             groups=SimpleNamespace(list=lambda **_: [
                 SimpleNamespace(id=str(index), display_name=name, members=[])
                 for index, name in enumerate(returned_names)]),
             service_principals=SimpleNamespace(create=create),
+            service_principal_secrets=SimpleNamespace(create=create_secret),
         )
         with pytest.raises(RuntimeError, match="expected exactly one"):
             verifier.provision_principal("analysts")
         create.assert_not_called()
+        create_secret.assert_not_called()
 
     def test_warehouse_grant_failure_aborts_verification_setup(self, monkeypatch):
         class FailingPermissions:
@@ -1221,7 +1248,10 @@ class TestTemporaryWarehouseAccess:
             def resolve_warehouse(self):
                 return "warehouse-123"
 
-            def provision_principal(self, tier):
+            def resolve_principal_groups(self, memberships):
+                return list(memberships)
+
+            def provision_principal(self, tier, memberships=None, *, resolved_groups=None):
                 return VerificationPrincipal(tier, f"test-{tier}", "app-123", "secret", "456")
 
             def grant_warehouse_use(self, principal):
@@ -1244,6 +1274,48 @@ class TestTemporaryWarehouseAccess:
 
         assert deleted == ["456"]
 
+    def test_all_group_lookups_precede_any_principal_or_secret_creation(
+        self, monkeypatch, tmp_path,
+    ):
+        events = []
+
+        class FakeVerifier:
+            def __init__(self, auth, warehouse_id=""):
+                self.mask_config = None
+
+            def resolve_warehouse(self):
+                return "warehouse-123"
+
+            def resolve_principal_groups(self, memberships):
+                name = tuple(memberships)
+                events.append(("lookup", name))
+                if name == ("viewers",):
+                    raise RuntimeError("expected exactly one")
+                return list(memberships)
+
+            def provision_principal(self, tier, memberships=None, *, resolved_groups=None):
+                events.append(("create", tier))
+                raise AssertionError("pre-flight failure must prevent provisioning")
+
+        monkeypatch.setenv("GENIERAILS_LIVE_VERIFY", "1")
+        monkeypatch.setattr("verify_effective_access.load_auth", lambda path: {
+            "host": "h", "client_id": "c", "client_secret": "s",
+        })
+        monkeypatch.setattr("verify_effective_access.EffectiveAccessVerifier", FakeVerifier)
+        spec = VerificationSpec(row_filters=[RowFilterCheck(
+            table="cat.sch.people",
+            restricted_principals=("analysts", "viewers"),
+            unrestricted_principals=(),
+        )])
+
+        with pytest.raises(RuntimeError, match="expected exactly one"):
+            verify_effective_access_live(spec, tmp_path / "auth.auto.tfvars")
+
+        assert events == [
+            ("lookup", ("analysts",)),
+            ("lookup", ("viewers",)),
+        ]
+
 
 class TestTieredLiveGrantLifecycle:
     @staticmethod
@@ -1261,7 +1333,13 @@ class TestTieredLiveGrantLifecycle:
             def resolve_warehouse(self):
                 return "warehouse"
 
-            def provision_principal(self, tier, memberships=None):
+            def resolve_principal_groups(self, memberships):
+                log.append(("lookup", tuple(memberships)))
+                return list(memberships)
+
+            def provision_principal(
+                self, tier, memberships=None, *, resolved_groups=None,
+            ):
                 log.append(("provision", tier))
                 return VerificationPrincipal(tier, f"test-{tier}", f"app-{tier}", "secret", tier)
 

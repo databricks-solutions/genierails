@@ -1725,22 +1725,14 @@ class EffectiveAccessVerifier:
         )
 
     # -- provisioning ------------------------------------------------------
-    def provision_principal(self, tier: str, memberships: Optional[Sequence[str]] = None) -> TestPrincipal:
-        """Create (or reuse) a service principal and add it to the tier group."""
+    def resolve_principal_groups(self, memberships: Sequence[str]) -> list[Any]:
+        """Resolve every configured membership to one exact account group."""
         self._guard()
-        from databricks.sdk.service import iam
-
-        display_name = f"{self.name_prefix}-{tier}"
         a = self.account
-
-        # SCIM string literals use JSON escaping. Account group displayName
-        # equality is case-insensitive, so filter results must still be
-        # narrowed to one exact, case-sensitive configured name before any
-        # service principal or secret is created.
         resolved_groups = []
-        for membership in ((tier,) if memberships is None else memberships):
+        for membership in memberships:
             candidates = list(a.groups.list(
-                filter=f"displayName eq {json.dumps(membership)}"))
+                filter=f"displayName eq {json.dumps(membership, ensure_ascii=False)}"))
             exact = [group for group in candidates
                      if getattr(group, "display_name", None) == membership]
             if len(exact) != 1:
@@ -1750,16 +1742,34 @@ class EffectiveAccessVerifier:
                     "Apply or correct the account layer before verification."
                 )
             resolved_groups.append(exact[0])
+        return resolved_groups
 
-        existing = next(
-            (sp for sp in a.service_principals.list(
-                filter=f"displayName eq {json.dumps(display_name)}")),
-            None,
-        )
-        if existing is None:
+    def provision_principal(
+        self, tier: str, memberships: Optional[Sequence[str]] = None,
+        *, resolved_groups: Optional[Sequence[Any]] = None,
+    ) -> TestPrincipal:
+        """Create (or reuse) a service principal and add it to the tier group."""
+        self._guard()
+        from databricks.sdk.service import iam
+
+        display_name = f"{self.name_prefix}-{tier}"
+        a = self.account
+        if resolved_groups is None:
+            resolved_groups = self.resolve_principal_groups(
+                (tier,) if memberships is None else memberships)
+
+        candidates = list(a.service_principals.list(
+            filter=f"displayName eq {json.dumps(display_name, ensure_ascii=False)}"))
+        exact = [sp for sp in candidates
+                 if getattr(sp, "display_name", None) == display_name]
+        if len(exact) > 1:
+            raise RuntimeError(
+                f"Verification service principal {display_name!r} resolved to "
+                f"{len(exact)} exact matches; expected at most one.")
+        if not exact:
             sp = a.service_principals.create(display_name=display_name, active=True)
         else:
-            sp = existing
+            sp = exact[0]
 
         # Mint an OAuth secret so the principal can authenticate on its own.
         secret = a.service_principal_secrets.create(service_principal_id=int(sp.id))
@@ -2315,12 +2325,19 @@ def verify_effective_access_live(
     report: Optional[EffectiveAccessReport] = None
     cleanup_error: Optional[BaseException] = None
     try:
+        resolved_groups = {}
+        for tier in sorted(spec.principals):
+            memberships = spec.principal_memberships.get(tier, (tier,))
+            resolved_groups[tier] = verifier.resolve_principal_groups(memberships)
+
         for tier in sorted(spec.principals):
             print(f"  Provisioning test principal for tier: {tier}")
             memberships = spec.principal_memberships.get(tier)
-            principal = (verifier.provision_principal(tier, memberships)
-                         if tier in spec.principal_memberships
-                         else verifier.provision_principal(tier))
+            principal = verifier.provision_principal(
+                tier,
+                memberships if tier in spec.principal_memberships else None,
+                resolved_groups=resolved_groups[tier],
+            )
             principals[tier] = principal
             print(f"  Granting warehouse CAN_USE to test principal: {tier}")
             verifier.grant_warehouse_use(principal)
@@ -2779,6 +2796,12 @@ def load_spec_from_tfvars(
 
         tiers = _as_list(governance.get("access_tier_groups"))
         raw_exempt = _as_list(governance.get("raw_exempt_principals"))
+        invalid_names = [principal for principal in (*tiers, *raw_exempt)
+                         if not isinstance(principal, str) or not principal.strip()]
+        if invalid_names:
+            raise ValueError(
+                "ERROR: verify-access requires access_tier_groups and "
+                "raw_exempt_principals to contain non-empty group names")
         invalid_exempt = [principal for principal in raw_exempt if "@" in principal]
         if invalid_exempt:
             raise ValueError(

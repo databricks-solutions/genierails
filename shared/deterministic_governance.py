@@ -159,7 +159,8 @@ def validate_config(
     if not isinstance(governance_mode, str) or governance_mode not in {"legacy", "deterministic"}:
         errors.append("governance_mode must be legacy or deterministic")
     raw_exempt = cfg.get("raw_exempt_principals", [])
-    if not isinstance(raw_exempt, list) or not all(isinstance(x, str) and x for x in raw_exempt):
+    if not isinstance(raw_exempt, list) or not all(
+            isinstance(x, str) and x.strip() for x in raw_exempt):
         errors.append("raw_exempt_principals must be a list of non-empty principal names")
     elif any("@" in principal for principal in raw_exempt):
         errors.append(
