@@ -7,19 +7,16 @@ import argparse
 import datetime as dt
 import json
 import os
-import secrets
 import sys
 import time
 from decimal import Decimal
 from pathlib import Path
 
 SHARED = Path(__file__).resolve().parents[1]
-REPO = SHARED.parent
 UTC = dt.timezone.utc
 PST = dt.timezone(dt.timedelta(hours=-8))
 sys.path.insert(0, str(SHARED))
-from mask_library import SQL_BODIES, hmac_function_ddl, keyed_hash  # noqa: E402
-from scripts.hash_key import ensure_uc_secret, write_probe  # noqa: E402
+from mask_library import SQL_BODIES  # noqa: E402
 
 # The Statement Execution API opens a fresh session per call, so a separate
 # SET TIME ZONE never reaches the next statement. Each SELECT instead renders
@@ -86,81 +83,19 @@ def comparable(value):
     return Decimal(str(value)) if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool) else value
 
 
-def refuse_real_env_dir(path: Path) -> None:
-    """The probe file must never land in a real environment's directory."""
-    resolved = path.resolve()
-    if resolved == REPO or REPO in resolved.parents:
-        raise RuntimeError(f"refusing --generated-dir inside the repository: {path}; use a scratch directory")
-    for parent in (resolved, *resolved.parents):
-        if (parent / "env.auto.tfvars").exists() or (parent / "auth.auto.tfvars").exists():
-            raise RuntimeError(f"refusing --generated-dir in a real environment ({parent}); use a scratch directory")
-
-
-def run(w, warehouse_id: str, catalog: str, schema: str, generated_dir: Path) -> dict:
-    from databricks.sdk.errors import NotFound
-
-    refuse_real_env_dir(generated_dir)
-    key_text = os.environ.get("GENIERAILS_HASH_KEY")
-    if not key_text:
-        key_text = secrets.token_hex(32)
-        os.environ["GENIERAILS_HASH_KEY"] = key_text
+def run(w, warehouse_id: str) -> dict:
+    """Read-only: every body is evaluated inline, so nothing is created."""
     mismatches: list[dict] = []
     tested = 0
     started = time.monotonic()
-    existing = _execute(
-        w, warehouse_id,
-        f"SELECT schema_name FROM `{catalog}`.information_schema.schemata "
-        f"WHERE schema_name = '{schema.replace(chr(39), chr(39) * 2)}'",
-    )
-    if existing:
-        raise RuntimeError(f"refusing live parity run: schema already exists: {catalog}.{schema}")
-    try:
-        w.api_client.do("GET", f"/api/2.1/unity-catalog/secrets/{catalog}.{schema}.hmac_key")
-    except Exception as exc:
-        if not isinstance(exc, NotFound):
-            raise
-    else:
-        raise RuntimeError(f"refusing live parity run: hmac_key already exists: {catalog}.{schema}")
-    _execute(w, warehouse_id, f"CREATE SCHEMA `{catalog}`.`{schema}`")
-    try:
-        # TODO(step 5): this scratch-only creation becomes deployment wiring.
-        ensure_uc_secret(w, catalog, schema, generated_dir)
-        for name, cases in BODY_CASES.items():
-            for literal, _python_input, expected in cases:
-                rows = _execute(w, warehouse_id, f"SELECT to_json(named_struct('v', {SQL_BODIES[name]}), {TO_JSON_OPTIONS}) FROM (SELECT {literal} AS value)")
-                actual = json.loads(rows[0][0], parse_float=Decimal).get("v")
-                if comparable(actual) != comparable(expected):
-                    mismatches.append({"body": name, "input": literal, "expected": str(expected), "actual": str(actual)})
-                tested += 1
-        for statement in hmac_function_ddl(catalog, schema).split(";\n"):
-            if statement.strip():
-                _execute(w, warehouse_id, statement)
-        rows = _execute(w, warehouse_id, f"SELECT `{catalog}`.`{schema}`.`gr_hmac_sha256`('genierails-probe')")
-        probe = rows[0][0]
-        expected_probe = keyed_hash("genierails-probe", key_text.encode())
-        if probe != expected_probe:
-            mismatches.append({"body": "hmac_string", "expected": expected_probe, "actual": probe})
-        write_probe(generated_dir / "hash_probe.json", probe)
-        tested += 1
-        rows = _execute(w, warehouse_id, f"SELECT `{catalog}`.`{schema}`.`gr_hmac_sha256_numeric`(CAST(123.4500 AS DECIMAL(38,18)))")
-        numeric_hash = int(rows[0][0]) if rows[0][0] is not None else None
-        expected_numeric = keyed_hash(Decimal("123.4500"), key_text.encode(), numeric=True)
-        if numeric_hash != expected_numeric:
-            mismatches.append({"body": "hmac_numeric", "expected": expected_numeric, "actual": numeric_hash})
-        tested += 1
-        return {"bodies_tested": tested, "mismatches": len(mismatches), "details": mismatches, "elapsed_seconds": round(time.monotonic() - started, 2)}
-    finally:
-        try:
-            _execute(w, warehouse_id, f"DROP FUNCTION IF EXISTS `{catalog}`.`{schema}`.`gr_hmac_sha256_numeric`")
-            _execute(w, warehouse_id, f"DROP FUNCTION IF EXISTS `{catalog}`.`{schema}`.`gr_hmac_sha256_numeric_python`")
-            _execute(w, warehouse_id, f"DROP FUNCTION IF EXISTS `{catalog}`.`{schema}`.`gr_hmac_sha256`")
-            _execute(w, warehouse_id, f"DROP FUNCTION IF EXISTS `{catalog}`.`{schema}`.`gr_hmac_sha256_python`")
-        finally:
-            try:
-                w.api_client.do("DELETE", f"/api/2.1/unity-catalog/secrets/{catalog}.{schema}.hmac_key")
-            except Exception:
-                pass
-            _execute(w, warehouse_id, f"DROP SCHEMA IF EXISTS `{catalog}`.`{schema}` CASCADE")
+    for name, cases in BODY_CASES.items():
+        for literal, _python_input, expected in cases:
+            rows = _execute(w, warehouse_id, f"SELECT to_json(named_struct('v', {SQL_BODIES[name]}), {TO_JSON_OPTIONS}) FROM (SELECT {literal} AS value)")
+            actual = json.loads(rows[0][0], parse_float=Decimal).get("v")
+            if comparable(actual) != comparable(expected):
+                mismatches.append({"body": name, "input": literal, "expected": str(expected), "actual": str(actual)})
+            tested += 1
+    return {"bodies_tested": tested, "mismatches": len(mismatches), "details": mismatches, "elapsed_seconds": round(time.monotonic() - started, 2)}
 
 
 def run_from_environment() -> dict:
@@ -174,19 +109,13 @@ def run_from_environment() -> dict:
         host=os.environ["DATABRICKS_HOST"], client_id=os.environ["DATABRICKS_CLIENT_ID"],
         client_secret=os.environ["DATABRICKS_CLIENT_SECRET"],
     )
-    scratch = os.environ.get("DATABRICKS_GENERATED_DIR")
-    if not scratch:
-        raise RuntimeError("DATABRICKS_GENERATED_DIR must name an explicit scratch directory")
-    return run(w, os.environ["DATABRICKS_WAREHOUSE_ID"], os.environ.get("DATABRICKS_TEST_CATALOG", "genierails_dev_1"), os.environ.get("DATABRICKS_TEST_SCHEMA", "gr_dg_libtest"), Path(scratch))
+    return run(w, os.environ["DATABRICKS_WAREHOUSE_ID"])
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--auth-file", type=Path)
     parser.add_argument("--env-file", type=Path)
-    parser.add_argument("--catalog", default="genierails_dev_1")
-    parser.add_argument("--schema", default="gr_dg_libtest")
-    parser.add_argument("--generated-dir", type=Path, required=True)
     args = parser.parse_args()
     if args.auth_file and args.env_file:
         import hcl2
@@ -198,8 +127,7 @@ def main() -> int:
             host=auth["databricks_workspace_host"], client_id=auth["databricks_client_id"],
             client_secret=auth["databricks_client_secret"],
         )
-        os.environ.setdefault("GENIERAILS_HASH_KEY", secrets.token_hex(32))
-        result = run(w, env["sql_warehouse_id"], args.catalog, args.schema, args.generated_dir)
+        result = run(w, env["sql_warehouse_id"])
     else:
         result = run_from_environment()
     print(json.dumps(result, indent=2))

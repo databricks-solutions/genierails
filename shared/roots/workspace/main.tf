@@ -532,17 +532,6 @@ variable "raw_exempt_principals" {
   }
 }
 
-variable "hash_fallback" {
-  type        = string
-  default     = null
-  nullable    = true
-  description = "Explicit fail-closed fallback for unavailable keyed hashing; used from rollout step 3."
-  validation {
-    condition     = var.hash_fallback == null || var.hash_fallback == "redact"
-    error_message = "hash_fallback must be redact or unset."
-  }
-}
-
 variable "treatment_versions" {
   type        = map(object({ partial = string }))
   default     = {}

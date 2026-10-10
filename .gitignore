@@ -15,7 +15,6 @@ __pycache__/
 # Terraform state (may contain secrets)
 *.tfstate
 *.tfstate.backup
-.genierails_hash_key
 .terraform/
 
 # AI-generated output (user-specific)

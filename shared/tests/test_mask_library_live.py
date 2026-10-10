@@ -13,10 +13,9 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_live_mask_library():
-    # The executable lifecycle, including UC-secret creation and guaranteed
-    # scratch cleanup, lives in one reusable module for local and CI runs.
+    # Read-only: every SQL body runs inline against exact expected values.
     from scripts.live_mask_library import BODY_CASES, run_from_environment
     result = run_from_environment()
     # Every case asserts its exact expected value; details name any mismatch.
     assert result["details"] == []
-    assert result["bodies_tested"] == sum(len(cases) for cases in BODY_CASES.values()) + 2
+    assert result["bodies_tested"] == sum(len(cases) for cases in BODY_CASES.values())

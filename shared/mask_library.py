@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
-import hmac
 import ipaddress
 import json
 import re
-import unicodedata
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -31,50 +28,6 @@ def type_family(sql_type: str) -> str:
     return "NUMERIC" if value in NUMERIC_TYPES else value
 
 
-def numeric_hash_supported(sql_type: str) -> bool:
-    """Only types that can hold the non-negative 63-bit digest use numeric HMAC.
-
-    The digest has up to 19 integer digits; a bare DECIMAL is DECIMAL(10, 0).
-    """
-    upper = sql_type.upper().strip()
-    base = upper.split("(", 1)[0].strip()
-    if base in {"BIGINT", "LONG"}:
-        return True
-    if base in {"DECIMAL", "NUMERIC"}:
-        match = re.search(r"\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)", upper)
-        precision, scale = (int(match.group(1)), int(match.group(2) or 0)) if match else (10, 0)
-        return precision - scale >= 19
-    return False
-
-
-def normalize_identifier(value: object) -> str:
-    text = unicodedata.normalize("NFKC", str(value).strip()).upper()
-    return re.sub(r"[\s-]+", "", text)
-
-
-def canonical_decimal(value: object) -> str | None:
-    try:
-        number = Decimal(str(value).strip())
-    except (InvalidOperation, ValueError):
-        return None
-    if not number.is_finite():
-        return None
-    if number == 0:
-        return "0"
-    rendered = format(number.normalize(), "f")
-    return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
-
-
-def keyed_hash(value: object, key: bytes, *, numeric: bool = False) -> str | int | None:
-    if value is None:
-        return None
-    normalized = canonical_decimal(value) if numeric else normalize_identifier(value)
-    if normalized is None:
-        return None
-    digest = hmac.new(key, normalized.encode("utf-8"), hashlib.sha256).digest()
-    return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1) if numeric else digest.hex()
-
-
 def _finite_decimal(value: object) -> Decimal | None:
     try:
         number = Decimal(str(value))
@@ -83,7 +36,7 @@ def _finite_decimal(value: object) -> Decimal | None:
     return number if number.is_finite() else None
 
 
-def apply_version(version: str, value: object, sql_type: str, *, key: bytes | None = None) -> object:
+def apply_version(version: str, value: object, sql_type: str) -> object:
     """Apply a named library version. Malformed/unsupported inputs get its full value."""
     if value is None:
         return None
@@ -92,12 +45,6 @@ def apply_version(version: str, value: object, sql_type: str, *, key: bytes | No
         return value
     if version in {"redacted", "null"}:
         return REDACTED if version == "redacted" and family == "STRING" else None
-    if version == "hmac_sha256":
-        if key is None:
-            raise ValueError("hmac_sha256 requires a key")
-        if family == "STRING":
-            return keyed_hash(value, key)
-        return keyed_hash(value, key, numeric=True) if family == "NUMERIC" and numeric_hash_supported(sql_type) else None
     if version == "last4" and family == "STRING":
         text = str(value).strip()
         compact = re.sub(r"[\s-]+", "", text)
@@ -172,28 +119,13 @@ def resolve_class(classes: list[str], sql_type: str, library: dict | None = None
                 partial = treatment["full"]
             else:
                 partial = treatment.get("partial_by_type", {}).get(family, treatment.get("partial"))
-            if partial == "$identifier_partial_default":
-                partial = data["identifier_partial_default"]
-            rank = order["hmac_sha256"] if partial == "hmac_sha256" else order["redacted"] if partial in {"redacted", "null"} else order["partial"]
+            rank = order["redacted"] if partial in {"redacted", "null"} else order["partial"]
             candidates.append((rank, treatment_name, partial, treatment["full"]))
     if not candidates:
         raise KeyError(f"no mask-library mapping for {classes!r}")
     never_raw = any(candidate[1] in NEVER_RAW_TREATMENTS for candidate in candidates)
     _, treatment_name, partial, full = max(candidates)
     return treatment_name, partial, full, never_raw
-
-
-def resolve_hash_capability(partial: str, full: str, *, available: bool, fallback: str | None) -> str:
-    """Fail closed only when a selected treatment actually needs keyed hashing."""
-    # TODO(step 5): wire capability discovery and the deployment fallback gate.
-    if partial != "hmac_sha256" or available:
-        return partial
-    if fallback == "redact":
-        return full
-    raise RuntimeError(
-        "keyed hash requires Unity Catalog secrets and Python UDFs; "
-        "set hash_fallback=\"redact\" explicitly to use the full version"
-    )
 
 
 SQL_BODIES = {
@@ -221,15 +153,9 @@ SQL_BODIES = {
 }
 
 
-def sql_body(version: str, sql_type: str, *, catalog: str = "{{CATALOG}}", schema: str = "{{SCHEMA}}") -> str:
+def sql_body(version: str, sql_type: str) -> str:
     """Return a mask expression whose result has exactly ``sql_type``."""
     family = type_family(sql_type)
-    if version == "hmac_sha256":
-        if family == "STRING":
-            return f"CAST((`{catalog}`.`{schema}`.`gr_hmac_sha256`(value)) AS {sql_type})"
-        if family == "NUMERIC" and numeric_hash_supported(sql_type):
-            return f"TRY_CAST((`{catalog}`.`{schema}`.`gr_hmac_sha256_numeric`(value)) AS {sql_type})"
-        return f"CAST(NULL AS {sql_type})"
     if version in {"redacted", "null"} and family != "STRING":
         return f"CAST(NULL AS {sql_type})"
     body_name = load_library()["versions"].get(version, {}).get(family)
@@ -238,30 +164,3 @@ def sql_body(version: str, sql_type: str, *, catalog: str = "{{CATALOG}}", schem
                 if family == "STRING" else f"CAST(NULL AS {sql_type})")
     cast = "TRY_CAST" if family == "NUMERIC" else "CAST"
     return f"{cast}(({SQL_BODIES[body_name]}) AS {sql_type})"
-
-
-HMAC_PYTHON_BODY = '''import hashlib\nimport hmac\nimport re\nimport unicodedata\nfrom databricks.secrets import get\n_key = get(catalog="{{CATALOG}}", schema="{{SCHEMA}}", key="hmac_key").encode("utf-8")\ndef _digest(normalized):\n    return hmac.new(_key, normalized.encode("utf-8"), hashlib.sha256).digest()\ndef h(value):\n    if value is None:\n        return None\n    normalized = re.sub(r"[\\s-]+", "", unicodedata.normalize("NFKC", str(value).strip()).upper())\n    return _digest(normalized).hex()\ndef h_numeric(value):\n    if value is None or not value.is_finite():\n        return None\n    if value == 0:\n        normalized = "0"\n    else:\n        normalized = format(value.normalize(), "f")\n        if "." in normalized:\n            normalized = normalized.rstrip("0").rstrip(".")\n    return int.from_bytes(_digest(normalized)[:8], "big") & ((1 << 63) - 1)\n'''
-
-
-def hmac_function_ddl(catalog: str, schema: str) -> str:
-    body = HMAC_PYTHON_BODY.replace("{{CATALOG}}", catalog).replace("{{SCHEMA}}", schema)
-    return f"""CREATE OR REPLACE FUNCTION `{catalog}`.`{schema}`.`gr_hmac_sha256_python`(value STRING)
-RETURNS STRING
-LANGUAGE PYTHON
-HANDLER 'h'
-SECRETS (`{catalog}`.`{schema}`.`hmac_key`)
-ENVIRONMENT (environment_version = '6')
-AS $${body}$$;
-CREATE OR REPLACE FUNCTION `{catalog}`.`{schema}`.`gr_hmac_sha256`(value STRING)
-RETURNS STRING
-RETURN `{catalog}`.`{schema}`.`gr_hmac_sha256_python`(value);
-CREATE OR REPLACE FUNCTION `{catalog}`.`{schema}`.`gr_hmac_sha256_numeric_python`(value DECIMAL(38, 18))
-RETURNS BIGINT
-LANGUAGE PYTHON
-HANDLER 'h_numeric'
-SECRETS (`{catalog}`.`{schema}`.`hmac_key`)
-ENVIRONMENT (environment_version = '6')
-AS $${body}$$;
-CREATE OR REPLACE FUNCTION `{catalog}`.`{schema}`.`gr_hmac_sha256_numeric`(value DECIMAL(38, 18))
-RETURNS BIGINT
-RETURN `{catalog}`.`{schema}`.`gr_hmac_sha256_numeric_python`(value);"""

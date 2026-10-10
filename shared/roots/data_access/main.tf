@@ -288,16 +288,6 @@ variable "raw_exempt_principals" {
     error_message = "raw_exempt_principals must contain non-empty account group names, not user emails. UUID/hex-shaped group display names are allowed and resolved exactly during live verification."
   }
 }
-variable "hash_fallback" {
-  type        = string
-  default     = null
-  nullable    = true
-  description = "Used from rollout step 3."
-  validation {
-    condition     = var.hash_fallback == null || var.hash_fallback == "redact"
-    error_message = "hash_fallback must be redact or unset."
-  }
-}
 
 variable "treatment_versions" {
   type        = map(object({ partial = string }))

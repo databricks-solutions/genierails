@@ -70,15 +70,13 @@ def test_python_accepted_uuid_group_passes_terraform_validate_and_plan(tmp_path,
         assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_governance_mode_raw_exempt_principals_and_hash_fallback():
-    assert errors(governance_mode="deterministic", raw_exempt_principals=["etl"], hash_fallback="redact") == []
+def test_governance_mode_and_raw_exempt_principals():
+    assert errors(governance_mode="deterministic", raw_exempt_principals=["etl"]) == []
     assert errors(governance_mode="future")
     assert errors(governance_mode=[])
     assert errors(raw_exempt_principals="etl")
     for principal in ("", " ", "\t"):
         assert errors(raw_exempt_principals=[principal])
-    assert errors(hash_fallback="raw")
-    assert errors(hash_fallback=[])
 
 
 def test_one_two_and_three_plus_tiers_are_valid():

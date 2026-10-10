@@ -20,24 +20,24 @@ NEVER_RAW_TREATMENTS = frozenset({
 # Public treatment vocabulary. mask_library.json uses these names directly, so
 # every library treatment is configurable through treatment_versions.
 PARTIAL_VERSIONS: dict[str, frozenset[str]] = {
-    "ssn": frozenset({"hmac_sha256", "last4"}),
+    "ssn": frozenset({"last4"}),
     "redact": frozenset({"redacted"}),
     "compensation_redacted": frozenset({"rounded"}),
-    "ssn_last4": frozenset({"hmac_sha256", "last4"}),
+    "ssn_last4": frozenset({"last4"}),
     "card_last4": frozenset({"last4"}),
     "account_last4": frozenset({"last4"}),
     "email_partial": frozenset({"partial"}),
     "phone_partial": frozenset({"last4"}),
     "name_partial": frozenset({"initials"}),
     "date_year": frozenset({"year"}),
-    "tfn_partial": frozenset({"hmac_sha256", "last4"}),
-    "medicare_partial": frozenset({"hmac_sha256", "last4"}),
+    "tfn_partial": frozenset({"last4"}),
+    "medicare_partial": frozenset({"last4"}),
     "bsb_partial": frozenset({"last4"}),
-    "aadhaar_partial": frozenset({"hmac_sha256", "last4"}),
+    "aadhaar_partial": frozenset({"last4"}),
     "generic_partial": frozenset({"redacted", "prefix_3"}),
     "round_amount": frozenset({"rounded"}),
     # Mask-library treatments with no step-1 name; see mask_library.json.
-    "identifier": frozenset({"hmac_sha256"}),
+    "identifier": frozenset(),
     "age": frozenset({"age_band_10"}),
     "credit_score": frozenset({"credit_score_band_50"}),
     "ip_address": frozenset({"ip_network"}),
@@ -51,6 +51,8 @@ PARTIAL_VERSIONS = {
     for treatment, versions in PARTIAL_VERSIONS.items()
 }
 VERSION_NAMES = frozenset().union(*PARTIAL_VERSIONS.values())
+# Deferred from v1: identifiers are redacted for tiers 2 and 3.
+KEYED_HASH_UNAVAILABLE = "keyed hash is not available in this version; use redacted"
 
 
 def _known_treatments(registry_path: Path | None = None) -> set[str]:
@@ -179,9 +181,6 @@ def validate_config(
             "raw_exempt_principals must name account groups; user emails cannot be verified. "
             "UUID/hex-shaped names are allowed because they may be legitimate group display names; "
             "live verification refuses them only when no account group with that exact name exists")
-    hash_fallback = cfg.get("hash_fallback")
-    if hash_fallback is not None and hash_fallback != "redact":
-        errors.append('hash_fallback must be "redact" or unset')
     tiers = cfg.get("access_tier_groups", [])
     if not isinstance(tiers, list) or not all(isinstance(x, str) and x.strip() for x in tiers):
         errors.append("access_tier_groups must be an ordered list of non-empty group names")
@@ -204,6 +203,8 @@ def validate_config(
             errors.append(f"{label}.partial must be a string")
         elif rule["partial"] == "raw":
             errors.append(f"{label}.partial may not be raw; use a column or tier access override")
+        elif rule["partial"] == "hmac_sha256":
+            errors.append(f"{label}.partial: {KEYED_HASH_UNAVAILABLE}")
         elif rule["partial"] not in PARTIAL_VERSIONS.get(treatment, frozenset()):
             errors.append(f"{label}.partial names unknown version {rule['partial']!r}")
 
@@ -264,6 +265,8 @@ def validate_config(
             valid_versions = VERSION_NAMES
             if not isinstance(rule["partial"], str):
                 errors.append(f"{label}.partial must be a string")
+            elif rule["partial"] == "hmac_sha256":
+                errors.append(f"{label}.partial: {KEYED_HASH_UNAVAILABLE}")
             elif rule["partial"] not in valid_versions | {"raw"}:
                 errors.append(f"{label}.partial names unknown version {rule['partial']!r}")
 
