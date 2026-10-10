@@ -20,6 +20,7 @@ from validate_abac import (  # noqa: E402
     validate_acl_groups,
     parse_sql_functions,
     parse_sql_function_arg_counts,
+    validate_sql_deployment_blocks,
     _condition_matches_tags,
     _infer_column_categories,
 )
@@ -31,6 +32,20 @@ from validate_abac import (  # noqa: E402
 
 def _result() -> ValidationResult:
     return ValidationResult()
+
+
+def test_validation_refuses_ambiguous_fallback_duplicate_functions(tmp_path):
+    sql = tmp_path / "masking_functions.sql"
+    sql.write_text(
+        "SET timezone = 'UTC'; CREATE FUNCTION Mask() RETURNS INT RETURN 1; "
+        "CREATE OR REPLACE FUNCTION mask() RETURNS INT RETURN 2;"
+    )
+    result = _result()
+    validate_sql_deployment_blocks(sql, result)
+    assert result.errors == [
+        "Ambiguous masking SQL: function 'mask' has a definition that deployment would not execute; "
+        "put each definition on its own semicolon-terminated line or remove the duplicate"
+    ]
 
 
 def test_clean_labelled_report_is_one_line_unless_verbose(capsys):

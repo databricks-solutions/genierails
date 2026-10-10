@@ -35,10 +35,11 @@ def normalized_tokens(sql_text: str) -> list[list[object]]:
     # Match #94's conservative collision rule: if any final function name is
     # shared, preserve the entire deployment order because qualification and
     # the execution context can make either definition the last winner.
-    if parsed.unambiguous and "<unknown>" not in final_names and len(set(final_names)) == len(final_names):
+    if "<unknown>" not in final_names and len(set(final_names)) == len(final_names):
         records = [record for _, record in sorted(zip(final_names, records), key=lambda item: item[0])]
-    # Ambiguity disables sorting, so discovery order already preserves its
-    # position-sensitive effect without storing a second position field.
+    # Ambiguous input is still represented by position-sensitive ambiguity
+    # records. Distinct function targets can be sorted independently because
+    # their deployment order cannot affect which definition wins.
     ambiguity_records = [["fail_closed", sql_tokens(text)] for text in parsed.ambiguities]
     return [["format", 3], *ambiguity_records, *records]
 
