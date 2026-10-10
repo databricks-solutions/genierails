@@ -8,9 +8,9 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from mask_library import SQL_BODIES, apply_version, load_library, resolve_class, sql_body, type_family
-from scripts.live_mask_library import BODY_CASES, RENDER_ZONE, comparable
-from deterministic_governance import NEVER_RAW_TREATMENTS, PARTIAL_VERSIONS, validate_config
+from mask_library import SQL_BODIES, apply_version, load_library, resolve_class, resolve_column_access, sql_body, type_family
+from scripts.live_mask_library import BODY_CASES, RENDER_ZONE, TYPED_CASES, comparable
+from deterministic_governance import NEVER_RAW_TREATMENTS, PARTIAL_VERSIONS, AccessResolution, validate_config
 
 
 
@@ -74,6 +74,30 @@ def test_every_never_raw_class_lands_on_a_never_raw_treatment():
         assert set(library["treatments"][name]["classes"]) <= set(library["never_raw_classes"])
 
 
+PRINCIPALS = {
+    "tier1": dict(group="t1", principal="analyst"),
+    "exempt": dict(group="outsider", principal="etl"),
+    "deployer": dict(group="outsider", principal="deployer"),
+    "tier1_deployer": dict(group="t1", principal="deployer"),
+}
+
+
+def test_never_raw_classes_are_never_raw_for_anyone_alone_or_combined():
+    library = load_library()
+    classes = [c for t in library["treatments"].values() for c in t["classes"]]
+    access = dict(column="c.s.t.x", access_tier_groups=["t1", "t2", "t3"],
+                  deployer_principal="deployer", raw_exempt_principals=["etl"], library=library)
+    for protected in library["never_raw_classes"]:
+        for tags in [[protected]] + [pair for other in classes if other != protected
+                                      for pair in ([protected, other], [other, protected])]:
+            for who, principal in PRINCIPALS.items():
+                result = resolve_column_access(tags, "STRING", **access, **principal)
+                assert result == AccessResolution("full"), (tags, who, result)
+    # Ordinary classes still give tier 1, exempt principals and the deployer raw.
+    for who, principal in PRINCIPALS.items():
+        assert resolve_column_access(["email_address"], "STRING", **access, **principal) == AccessResolution("raw"), who
+
+
 def test_strictest_wins():
     assert resolve_class(["email_address", "us_ssn"], "STRING")[:3] == ("ssn", "redacted", "redacted")
     assert resolve_class(["email_address", "health_data"], "STRING")[:3] == ("redact", "redacted", "redacted")
@@ -122,8 +146,8 @@ def test_unsupported_type_resolves_partial_to_full():
     ("rounded", Decimal("1499"), "DECIMAL(10,2)", Decimal("1E+3")),
     ("rounded", Decimal("1500"), "DECIMAL(10,2)", Decimal("2E+3")),
     ("rounded", Decimal("-1500"), "DECIMAL(10,2)", Decimal("-2E+3")),
-    ("location_1dp", Decimal("1.25"), "DOUBLE", Decimal("1.3")),
-    ("location_1dp", Decimal("-1.25"), "DOUBLE", Decimal("-1.3")),
+    ("location_1dp", Decimal("1.25"), "DOUBLE", 1.3),
+    ("location_1dp", Decimal("-1.25"), "DOUBLE", -1.3),
     ("ip_network", "192.168.2.99", "STRING", "192.168.2.0/24"),
     ("ip_network", "2001:db8:abcd:12:1234::1", "STRING", "[REDACTED]"),
     ("ip_network", "192.168.2.09", "STRING", "[REDACTED]"),
@@ -187,6 +211,7 @@ def _body_versions():
     pairs = {}
     for version, by_family in load_library()["versions"].items():
         for family, body in by_family.items():
+            # A bare family name means a raw body with no outer cast.
             pairs.setdefault(body, (version, family))
     return pairs
 
@@ -206,6 +231,8 @@ def _rendered(value):
 
 def test_every_shipped_sql_body_has_exact_expected_cases():
     assert set(BODY_CASES) == set(SQL_BODIES)
+    numeric = {"age_band_10", "credit_score_band_50", "rounded", "location_1dp"}
+    assert {version for version, *_ in TYPED_CASES} >= numeric
     assert set(SQL_BODIES) <= set(_body_versions())
 
 
@@ -221,6 +248,29 @@ def test_reference_produces_exact_expected_value_per_body(body, python_input, ex
     assert _rendered(apply_version(version, python_input, family)) == comparable(expected)
 
 
+@pytest.mark.parametrize("version,sql_type,python_input,expected", [
+    (version, sql_type, python_input, expected) for version, sql_type, _sql, python_input, expected in TYPED_CASES
+])
+def test_reference_produces_exact_expected_value_per_typed_mask(version, sql_type, python_input, expected):
+    assert _rendered(apply_version(version, python_input, sql_type)) == comparable(expected)
+
+
+NON_THROWING = ("try_cast(", "try_divide(", "round(", "floor(", "CASE WHEN", "CAST(NULL AS")
+
+
+def test_numeric_masks_use_only_non_throwing_operations():
+    # A plain CAST, division or multiplication of the column can raise an
+    # overflow error under ANSI mode; every numeric step goes through try_cast.
+    for name, body in SQL_BODIES.items():
+        if name.endswith("_numeric") and body != "value":
+            # The column is only ever read through the non-throwing try_cast.
+            assert body.startswith("CAST(NULL AS") or "try_cast(value AS DECIMAL(38, 18))" in body, name
+            assert "value" not in body.replace("try_cast(value AS DECIMAL(38, 18))", ""), name
+    for sql_type in ("TINYINT", "INT", "BIGINT", "DECIMAL(38,0)", "DECIMAL(38,10)", "DOUBLE"):
+        for version in ("age_band_10", "credit_score_band_50", "rounded", "location_1dp", "raw"):
+            assert sql_body(version, sql_type).startswith("TRY_CAST((")
+
+
 class _FakeWarehouse:
     """Answers the live harness's statements with each case's expected value."""
 
@@ -231,22 +281,25 @@ class _FakeWarehouse:
     def execute_statement(self, *, warehouse_id, statement, wait_timeout):
         self.statements.append(statement)
         rows = []
-        for body, cases in BODY_CASES.items():
-            for sql_input, _python_input, expected in cases:
-                if f"named_struct('v', {SQL_BODIES[body]})," in statement and f"SELECT {sql_input} AS value" in statement:
-                    value = "tampered" if body == self.wrong_body else expected
-                    rendered = str(value) if isinstance(value, Decimal) else json.dumps(value)
-                    rows = [['{"v": ' + rendered + '}']]
+        checks = [(body, SQL_BODIES[body], sql_input, expected)
+                  for body, cases in BODY_CASES.items() for sql_input, _python_input, expected in cases]
+        checks += [(f"{version}:{sql_type}", sql_body(version, sql_type), sql_input, expected)
+                   for version, sql_type, sql_input, _python_input, expected in TYPED_CASES]
+        for name, expression, sql_input, expected in checks:
+            if f"named_struct('v', {expression})," in statement and f"SELECT {sql_input} AS value" in statement:
+                value = "tampered" if name == self.wrong_body else expected
+                rendered = str(value) if isinstance(value, Decimal) else json.dumps(value)
+                rows = [['{"v": ' + rendered + '}']]
         ok = types.SimpleNamespace(state="SUCCEEDED", error=None)
         return types.SimpleNamespace(status=ok, result=types.SimpleNamespace(data_array=rows))
 
 
-@pytest.mark.parametrize("wrong_body", [None, "last4_string", "year_timestamp"])
+@pytest.mark.parametrize("wrong_body", [None, "last4_string", "year_timestamp", "rounded:BIGINT"])
 def test_live_harness_checks_exact_values_per_statement_zone(wrong_body):
     from scripts.live_mask_library import TO_JSON_OPTIONS, run
     warehouse = _FakeWarehouse(wrong_body)
     result = run(warehouse, "wh")
-    assert result["bodies_tested"] == sum(len(cases) for cases in BODY_CASES.values())
+    assert result["bodies_tested"] == sum(len(cases) for cases in BODY_CASES.values()) + len(TYPED_CASES)
     assert {d["body"] for d in result["details"]} == ({wrong_body} if wrong_body else set())
     # Read-only: only the per-body SELECTs run, each rendered in a non-UTC zone.
     assert all(s.startswith("SELECT to_json(") for s in warehouse.statements)

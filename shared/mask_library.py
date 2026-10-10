@@ -6,11 +6,11 @@ import datetime as dt
 import ipaddress
 import json
 import re
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from deterministic_governance import NEVER_RAW_TREATMENTS
+from deterministic_governance import NEVER_RAW_TREATMENTS, AccessResolution, resolve_precedence
 
 LIBRARY_PATH = Path(__file__).with_name("mask_library.json")
 REDACTED = "[REDACTED]"
@@ -28,12 +28,49 @@ def type_family(sql_type: str) -> str:
     return "NUMERIC" if value in NUMERIC_TYPES else value
 
 
-def _finite_decimal(value: object) -> Decimal | None:
+BIGINT_MAX = 2**63 - 1
+# Wide enough for DECIMAL(38, x) arithmetic without the default 28-digit rounding.
+_WIDE = Context(prec=80, rounding=ROUND_HALF_UP)
+INTEGRAL_RANGES = {
+    "BYTE": 2**7, "TINYINT": 2**7, "SHORT": 2**15, "SMALLINT": 2**15,
+    "INT": 2**31, "INTEGER": 2**31, "LONG": 2**63, "BIGINT": 2**63,
+}
+
+
+def _decimal_38_18(value: object) -> Decimal | None:
+    """Mirror SQL try_cast(value AS DECIMAL(38, 18)): NULL for NaN, infinity,
+    and anything with 20 or more integer digits; otherwise round half up."""
     try:
         number = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
-    return number if number.is_finite() else None
+    if not number.is_finite() or number.copy_abs() >= 10**20:
+        return None
+    with localcontext(_WIDE):
+        number = number.quantize(Decimal("1E-18"))
+        return number if number.copy_abs() < 10**20 else None
+
+
+def _try_cast_numeric(value: Decimal | int | None, sql_type: str) -> object:
+    """Mirror the outer TRY_CAST(... AS sql_type) of a numeric mask."""
+    if value is None:
+        return None
+    upper = sql_type.upper().replace(" ", "")
+    if upper == "NUMERIC":
+        return value  # the type family itself: a raw body with no outer cast
+    base = upper.split("(", 1)[0]
+    if base in INTEGRAL_RANGES:
+        whole = int(value)  # truncates toward zero, like TRY_CAST
+        return whole if -INTEGRAL_RANGES[base] <= whole < INTEGRAL_RANGES[base] else None
+    if base in {"DECIMAL", "NUMERIC"}:
+        match = re.fullmatch(r"[A-Z]+\((\d+)(?:,(\d+))?\)", upper)
+        precision, scale = (int(match.group(1)), int(match.group(2) or 0)) if match else (10, 0)
+        with localcontext(_WIDE):
+            fitted = Decimal(value).quantize(Decimal(1).scaleb(-scale))
+            return fitted if fitted.copy_abs() < 10 ** (precision - scale) else None
+    if base in {"DOUBLE", "FLOAT"}:
+        return float(value)
+    return value
 
 
 def apply_version(version: str, value: object, sql_type: str) -> object:
@@ -42,7 +79,7 @@ def apply_version(version: str, value: object, sql_type: str) -> object:
         return None
     family = type_family(sql_type)
     if version == "raw":
-        return value
+        return _try_cast_numeric(value, sql_type) if family == "NUMERIC" else value
     if version in {"redacted", "null"}:
         return REDACTED if version == "redacted" and family == "STRING" else None
     if version == "last4" and family == "STRING":
@@ -67,18 +104,20 @@ def apply_version(version: str, value: object, sql_type: str) -> object:
             return dt.datetime(value.astimezone(dt.timezone.utc).year, 1, 1, tzinfo=dt.timezone.utc)
         return None
     if version in {"age_band_10", "credit_score_band_50"} and family == "NUMERIC":
-        number = _finite_decimal(value)
+        number = _decimal_38_18(value)
         if number is None or number < 0:
             return None
-        width = Decimal(10 if version == "age_band_10" else 50)
-        lower = (number // width) * width
-        return int(lower)
+        width = 10 if version == "age_band_10" else 50
+        with localcontext(_WIDE):
+            lower = int(number // width) * width
+        return _try_cast_numeric(lower if lower <= BIGINT_MAX else None, sql_type)
     if version in {"rounded", "location_1dp"} and family == "NUMERIC":
-        number = _finite_decimal(value)
+        number = _decimal_38_18(value)
         if number is None:
             return None
         quantum = Decimal("1E3") if version == "rounded" else Decimal("0.1")
-        return number.quantize(quantum, rounding=ROUND_HALF_UP)
+        with localcontext(_WIDE):
+            return _try_cast_numeric(number.quantize(quantum), sql_type)
     if version == "ip_network" and family == "STRING":
         # IPv4 keeps its /24 network; IPv6 and anything else is redacted.
         try:
@@ -128,6 +167,16 @@ def resolve_class(classes: list[str], sql_type: str, library: dict | None = None
     return treatment_name, partial, full, never_raw
 
 
+def resolve_column_access(classes: list[str], sql_type: str, *, library: dict | None = None, **precedence) -> AccessResolution:
+    """Resolve a column's class tags, then access, carrying the never-raw flag."""
+    treatment, partial, _full, never_raw = resolve_class(classes, sql_type, library)
+    return resolve_precedence(treatment=treatment, library_default=partial, never_raw=never_raw, **precedence)
+
+
+# Every body is non-throwing under ANSI mode, so a mask can never fail a query:
+# numeric bodies go through try_cast(value AS DECIMAL(38, 18)), which is NULL
+# for NaN, infinity and values of 1E20 or more, and then use only try_* steps
+# or operations that cannot overflow DECIMAL(38, 18). sql_body() adds TRY_CAST.
 SQL_BODIES = {
     "redact_string": "CASE WHEN value IS NULL THEN NULL ELSE '[REDACTED]' END",
     "null_string": "CAST(NULL AS STRING)",
@@ -141,10 +190,10 @@ SQL_BODIES = {
     "year_date": "CASE WHEN value IS NULL THEN NULL ELSE make_date(year(value), 1, 1) END",
     "year_timestamp": "CASE WHEN value IS NULL THEN NULL ELSE make_timestamp(year(convert_timezone('UTC', value)), 1, 1, 0, 0, 0, 'UTC') END",
     "year_timestamp_ntz": "CASE WHEN value IS NULL THEN NULL ELSE make_timestamp_ntz(year(value), 1, 1, 0, 0, 0) END",
-    "age_band_10_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) OR value < 0 THEN NULL ELSE CAST(floor(value / 10) * 10 AS BIGINT) END",
-    "credit_score_band_50_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) OR value < 0 THEN NULL ELSE CAST(floor(value / 50) * 50 AS BIGINT) END",
-    "rounded_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) THEN NULL ELSE round(value, -3) END",
-    "location_1dp_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) THEN NULL ELSE round(value, 1) END",
+    "age_band_10_numeric": "CASE WHEN try_cast(value AS DECIMAL(38, 18)) IS NULL OR try_cast(value AS DECIMAL(38, 18)) < 0 THEN NULL ELSE try_cast(floor(try_divide(try_cast(value AS DECIMAL(38, 18)), 10)) * 10 AS BIGINT) END",
+    "credit_score_band_50_numeric": "CASE WHEN try_cast(value AS DECIMAL(38, 18)) IS NULL OR try_cast(value AS DECIMAL(38, 18)) < 0 THEN NULL ELSE try_cast(floor(try_divide(try_cast(value AS DECIMAL(38, 18)), 50)) * 50 AS BIGINT) END",
+    "rounded_numeric": "CASE WHEN try_cast(value AS DECIMAL(38, 18)) IS NULL THEN NULL ELSE round(try_cast(value AS DECIMAL(38, 18)), -3) END",
+    "location_1dp_numeric": "CASE WHEN try_cast(value AS DECIMAL(38, 18)) IS NULL THEN NULL ELSE round(try_cast(value AS DECIMAL(38, 18)), 1) END",
     "ip_network_string": "CASE WHEN value IS NULL THEN NULL WHEN trim(value) RLIKE '^(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(?:[.](?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$' THEN concat(regexp_extract(trim(value), '^([0-9]+[.][0-9]+[.][0-9]+)[.]', 1), '.0/24') ELSE '[REDACTED]' END",
     "mac_vendor_string": "CASE WHEN value IS NULL THEN NULL WHEN trim(value) RLIKE '^(?i)[0-9a-f]{2}([:-][0-9a-f]{2}){5}$' THEN concat(upper(regexp_replace(substring(trim(value), 1, 8), '-', ':')), ':**:**:**') ELSE '[REDACTED]' END",
     "url_domain_string": "CASE WHEN value IS NULL THEN NULL WHEN try_parse_url(trim(value), 'PROTOCOL') IN ('http', 'https') AND try_parse_url(trim(value), 'HOST') IS NOT NULL THEN lower(try_parse_url(trim(value), 'HOST')) ELSE '[REDACTED]' END",

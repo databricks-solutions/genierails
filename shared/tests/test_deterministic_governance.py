@@ -204,8 +204,12 @@ def test_raw_view_precedence_never_raw_deployer_exempt_tier1_then_overrides():
     assert resolve_precedence(**{**base, "principal": "viewer"}) == AccessResolution("full")
     never_raw = {**base, "treatment": "secret", "principal": "etl"}
     assert resolve_precedence(**never_raw) == AccessResolution("full")
-    # The deployer SP is the sole never-raw exception in section 3.
-    assert resolve_precedence(**{**never_raw, "principal": "deployer"}) == AccessResolution("raw")
+    # Section 3: the deployer SP is not exempt from never-raw.
+    assert resolve_precedence(**{**never_raw, "principal": "deployer"}) == AccessResolution("full")
+    flagged = {**base, "treatment": "redact", "library_default": "redacted", "never_raw": True}
+    for principal in ("etl", "deployer"):
+        assert resolve_precedence(**{**flagged, "principal": principal}) == AccessResolution("full")
+    assert resolve_precedence(**{**flagged, "principal": "viewer", "group": "t1"}) == AccessResolution("full")
 
 
 def test_wrong_typed_nested_values_return_clean_errors():

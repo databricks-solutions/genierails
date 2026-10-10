@@ -22,11 +22,18 @@ can be configured on its own (for example `ssn = { partial = "last4" }`).
 | `secret` | 1 | redacted (never raw) | redacted | all supported types |
 
 `card_security_code`, `card_pin`, `card_track_data`, and `secret` are never raw:
-their classes map to treatments of the same names, which tier 1 also sees in
-the full version. When several class tags occur on one column, the strongest
+their classes map to treatments of the same names, and a column carrying any
+of them gets the full version for every principal, including tier 1,
+`raw_exempt_principals` and the deployer SP, even when another class tag wins
+strictest-wins (`resolve_column_access` carries that flag into access). When several class tags occur on one column, the strongest
 partial treatment wins (`raw < partial < redacted/NULL`); a tie goes to the
 greater treatment name, so tag order never matters. Unsupported types receive
 the full version.
+
+No mask can fail a query. Numeric masks read the column only through
+`try_cast(value AS DECIMAL(38, 18))`, which is NULL for NaN, infinity and
+values of 1E20 or more, and the final typed `TRY_CAST` is NULL when the
+result does not fit the column type (for example a rounded `BIGINT` maximum).
 
 The keyed hash (`hmac_sha256`) is deferred from v1: identifiers are redacted for
 tiers 2 and 3, and `treatment_versions` or `column_overrides` naming

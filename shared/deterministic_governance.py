@@ -82,11 +82,14 @@ def resolve_precedence(
     principal: str | None = None,
     deployer_principal: str | None = None,
     raw_exempt_principals: list[str] | None = None,
+    never_raw: bool = False,
 ) -> AccessResolution:
     """Resolve access first, then resolve a version only for partial access.
 
     A principal in several configured groups receives the most privileged
     effective access. Principals outside every tier fail closed to full.
+    ``never_raw`` is set when any class on the column is never raw, even if
+    strictest-wins picked an ordinary treatment (see mask_library.resolve_class).
     """
     memberships = [group] if isinstance(group, str) else list(group)
     configured = list(access_tier_groups)
@@ -98,11 +101,10 @@ def resolve_precedence(
     if treatment not in PARTIAL_VERSIONS or effective_treatment not in PARTIAL_VERSIONS:
         return AccessResolution("full")
 
-    # Never-raw is considered first, but the deployer is its sole exception.
-    is_deployer = deployer_principal is not None and principal == deployer_principal
-    if (treatment in NEVER_RAW_TREATMENTS or effective_treatment in NEVER_RAW_TREATMENTS) and not is_deployer:
+    # Never-raw beats everything, including the deployer SP: nobody sees raw.
+    if never_raw or treatment in NEVER_RAW_TREATMENTS or effective_treatment in NEVER_RAW_TREATMENTS:
         return AccessResolution("full")
-    if is_deployer:
+    if deployer_principal is not None and principal == deployer_principal:
         return AccessResolution("raw")
     if principal is not None and (
         principal in (raw_exempt_principals or [])
