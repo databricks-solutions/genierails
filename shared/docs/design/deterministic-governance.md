@@ -167,7 +167,8 @@ Every step keeps `main` working. Steps 1–4 change existing deployments only in
 8. **Declared row filters** on table securables (replace frozen AI ones only when declared).
 9. **Capture + prod ownership:** `make capture`, JSON-aware remap on promote, committed prod agent IDs, drift report, detach by default (G9, G12, G13, N15, N16).
 10. **Per-agent live snapshot** in rehearse, per-agent fingerprints and per-table SELECT gates (G10, N11).
-11. **Live tests on AWS** for every scenario in section 9, then Azure, then docs.
+11. **Team workflow (section 13):** remote Terraform state with locking for dev; a post-merge `rehearse ENV=dev` job (the only CI-guard exception); a rehearsal record; `promote-to`/`release` refuse a `main` commit without a passing rehearse; a stale-promotion-PR check; sample GitHub and Azure DevOps workflows.
+12. **Live tests on AWS** for every scenario in section 9, then Azure, then docs.
 
 ## 9. Change lifecycle (agreed)
 
@@ -283,3 +284,23 @@ These rules take precedence over earlier sections where they differ.
 | **N17** Row-filter securable | Row-filter policies are created **on the table** securable. |
 | **N18** Key residuals | The probe is the hash of the fixed string `genierails-probe`, stored in `generated/hash_probe.json`. If the UC secret already exists, the env var isn't read. Residual risk documented: metastore admins and holders of `MANAGE` on the governance schema can grant themselves READ SECRET. |
 | **N19** Stale earlier text | Earlier sections edited to match sections 11 and 12. |
+
+## 13. Team workflow (agreed, KISS)
+
+Several people (agent owners, the governance team) work in the same repo. Each edits their own files: one file per agent, governance files separately.
+
+| Stage | What runs | Touches dev? |
+|---|---|---|
+| **PR** | read-only: validate, generated files current, coverage check, mask exact-output tests, `make plan ENV=dev` | no, so PRs run in parallel |
+| **Merge to `main`** | one job runs `make rehearse ENV=dev` on the new `main` | yes, only from `main`, one at a time |
+| **Promote** | `promote-to` and `release` accept only a `main` commit whose rehearse passed | — |
+
+Rules:
+1. **Generated files are never hand-merged.** On conflict, run `make generate ENV=dev` on the latest `main` and commit.
+2. **Rehearse records what it proved:** commit, input fingerprint, result, stored with dev's Terraform state. It gates promotion only; it never grants access.
+3. **A failed post-merge rehearse** blocks promotion until a fix PR merges and rehearse passes. `main` is not "deployable"; only a rehearsed commit is.
+4. **Promotion PRs are generated output.** CI re-runs `promote-to` from the recorded rehearsed commit and fails if the PR differs; a stale one is regenerated, never hand-edited.
+5. **Prod is unchanged:** after the promotion PR is approved, the operator runs `make release ENV=prod` from the deployment machine.
+
+Prerequisite: remote Terraform state with locking for dev, so the post-merge job can apply. Until it exists, the operator runs the post-merge rehearse from the deployment machine. A merge queue (pre-merge rehearse, always-green `main`) is an optional later addition, not v1.
+
