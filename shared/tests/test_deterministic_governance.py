@@ -42,46 +42,45 @@ def test_tiers_are_strings_unique_and_nonempty():
 
 
 def test_treatment_versions_only_allows_partial_known_treatment_and_version():
-    assert errors(treatment_versions={"email_partial": {"partial": "partial"}}) == []
+    assert errors(treatment_versions={"email": {"partial": "email_partial"}}) == []
     assert errors(treatment_versions={"ssn": {"partial": "last4"}}) == []
     for treatment in PARTIAL_VERSIONS:
-        assert errors(treatment_versions={treatment: {"partial": "redacted"}}) == []
-    assert errors(treatment_versions={"missing": {"partial": "partial"}})
-    assert errors(treatment_versions={"email_partial": {"full": "redacted"}})
-    assert errors(treatment_versions={"email_partial": {"partial": "missing"}})
-    assert errors(treatment_versions={"email_partial": {"partial": "raw"}})
-    assert errors(treatment_versions={"generic_partial": {"partial": "raw"}})
+        version = next(iter(PARTIAL_VERSIONS[treatment]))
+        assert errors(treatment_versions={treatment: {"partial": version}}) == []
+    assert errors(treatment_versions={"missing": {"partial": "email_partial"}})
+    assert errors(treatment_versions={"email": {"full": "redacted"}})
+    assert errors(treatment_versions={"email": {"partial": "missing"}})
+    assert errors(treatment_versions={"email": {"partial": "raw"}})
     for treatment in NEVER_RAW_TREATMENTS:
         result = errors(treatment_versions={treatment: {"partial": "raw"}})
         assert any("may not be raw" in error for error in result)
 
 
 def test_tier_override_validates_treatment_group_access_and_existing_tier():
-    assert errors(tier_access_overrides={"email_partial": {"partial": "raw"}}) == []
+    assert errors(tier_access_overrides={"email": {"partial": "raw"}}) == []
     assert errors(tier_access_overrides={"missing": {"partial": "raw"}})
-    assert errors(tier_access_overrides={"email_partial": {"missing": "raw"}})
-    assert errors(tier_access_overrides={"email_partial": {"partial": "sometimes"}})
-    assert errors(access_tier_groups=["only"], tier_access_overrides={"email_partial": {"only": "full"}})
-    assert errors(access_tier_groups=["raw", "full"], tier_access_overrides={"email_partial": {"full": "partial"}})
+    assert errors(tier_access_overrides={"email": {"missing": "raw"}})
+    assert errors(tier_access_overrides={"email": {"partial": "sometimes"}})
+    assert errors(access_tier_groups=["only"], tier_access_overrides={"email": {"only": "full"}})
+    assert errors(access_tier_groups=["raw", "full"], tier_access_overrides={"email": {"full": "partial"}})
     for treatment in NEVER_RAW_TREATMENTS:
         assert errors(tier_access_overrides={treatment: {"partial": "raw"}})
 
 
 def test_column_override_accepts_partial_or_treatment_and_refuses_full():
     assert errors(column_overrides={"cat.sch.tbl.col": {"partial": "prefix_3"}}) == []
-    assert errors(column_overrides={"cat.sch.tbl.col": {"treatment": "redact"}}) == []
+    assert errors(column_overrides={"cat.sch.tbl.col": {"treatment": "sensitive"}}) == []
     assert errors(column_overrides={"bad": {"partial": "prefix_3"}})
     assert errors(column_overrides={"cat.sch.tbl.col": {"full": "redacted"}})
     assert errors(column_overrides={"cat.sch.tbl.col": {"partial": "missing"}})
     assert errors(column_overrides={"cat.sch.tbl.col": {"treatment": "missing"}})
-    assert errors(column_overrides={"cat.sch.tbl.col": {"partial": "raw", "treatment": "redact"}})
+    assert errors(column_overrides={"cat.sch.tbl.col": {"partial": "raw", "treatment": "sensitive"}})
     assert errors(column_overrides={"cat.sch.tbl.col": {"keep_current": True}}) == []
     assert errors(column_overrides={"cat.sch.tbl.col": {"keep_current": False}})
 
 
-@pytest.mark.xfail(strict=True, reason="step 3 adds class-derived protection-order data")
 def test_column_treatment_override_must_be_stricter_than_class_derived_treatment():
-    assert errors(column_overrides={"cat.sch.tbl.col": {"treatment": "email_partial"}})
+    assert errors(column_overrides={"cat.sch.tbl.col": {"treatment": "missing"}})
 
 
 def test_row_filter_schema_groups_literals_and_conflicts():
@@ -124,21 +123,21 @@ def test_acknowledgement_environment_variable_formats():
 
 
 def test_precedence_resolver_selects_partial_version_only_after_access():
-    args = dict(column="c.s.t.x", treatment="email_partial", group="t2", library_default="partial", access_tier_groups=["t1", "t2", "t3"])
-    assert resolve_precedence(**args) == AccessResolution("partial", "partial")
-    assert resolve_precedence(**args, treatment_versions={"email_partial": {"partial": "redacted"}}) == AccessResolution("partial", "redacted")
-    assert resolve_precedence(**args, treatment_versions={"email_partial": {"partial": "redacted"}}, column_overrides={"c.s.t.x": {"partial": "prefix_3"}}) == AccessResolution("partial", "prefix_3")
+    args = dict(column="c.s.t.x", treatment="email", group="t2", library_default="email_partial", access_tier_groups=["t1", "t2", "t3"])
+    assert resolve_precedence(**args) == AccessResolution("partial", "email_partial")
+    assert resolve_precedence(**args, treatment_versions={"email": {"partial": "redacted"}}) == AccessResolution("partial", "redacted")
+    assert resolve_precedence(**args, treatment_versions={"email": {"partial": "redacted"}}, column_overrides={"c.s.t.x": {"partial": "prefix_3"}}) == AccessResolution("partial", "prefix_3")
     assert resolve_precedence(**args, column_overrides={"c.s.t.x": {"partial": "raw"}}) == AccessResolution("raw")
 
 
 def test_tier_access_override_is_not_cancelled_by_version_selection():
-    args = dict(column="c.s.t.x", treatment="email_partial", group="t2", library_default="partial", access_tier_groups=["t1", "t2", "t3"], treatment_versions={"email_partial": {"partial": "partial"}})
-    assert resolve_precedence(**args, tier_access_overrides={"email_partial": {"t2": "raw"}}) == AccessResolution("raw")
-    assert resolve_precedence(**args, tier_access_overrides={"email_partial": {"t2": "full"}}, column_overrides={"c.s.t.x": {"partial": "raw"}}) == AccessResolution("full")
+    args = dict(column="c.s.t.x", treatment="email", group="t2", library_default="email_partial", access_tier_groups=["t1", "t2", "t3"], treatment_versions={"email": {"partial": "email_partial"}})
+    assert resolve_precedence(**args, tier_access_overrides={"email": {"t2": "raw"}}) == AccessResolution("raw")
+    assert resolve_precedence(**args, tier_access_overrides={"email": {"t2": "full"}}, column_overrides={"c.s.t.x": {"partial": "raw"}}) == AccessResolution("full")
 
 
 def test_tier1_raw_tier3_full_outsider_full_and_most_privileged_membership_wins():
-    args = dict(column="c.s.t.x", treatment="email_partial", library_default="partial", access_tier_groups=["t1", "t2", "t3"], treatment_versions={"email_partial": {"partial": "redacted"}})
+    args = dict(column="c.s.t.x", treatment="email", library_default="email_partial", access_tier_groups=["t1", "t2", "t3"], treatment_versions={"email": {"partial": "redacted"}})
     assert resolve_precedence(**args, group="t1") == AccessResolution("raw")
     assert resolve_precedence(**args, group="t3", column_overrides={"c.s.t.x": {"partial": "raw"}}) == AccessResolution("full")
     assert resolve_precedence(**args, group="outsider") == AccessResolution("full")
@@ -147,7 +146,7 @@ def test_tier1_raw_tier3_full_outsider_full_and_most_privileged_membership_wins(
 
 
 def test_raw_view_precedence_never_raw_deployer_exempt_tier1_then_overrides():
-    base = dict(column="c.s.t.x", treatment="email_partial", group="t2", library_default="partial", access_tier_groups=["t1", "t2", "t3"], principal="etl", deployer_principal="deployer", raw_exempt_principals=["etl"], tier_access_overrides={"email_partial": {"t2": "full"}})
+    base = dict(column="c.s.t.x", treatment="email", group="t2", library_default="email_partial", access_tier_groups=["t1", "t2", "t3"], principal="etl", deployer_principal="deployer", raw_exempt_principals=["etl"], tier_access_overrides={"email": {"t2": "full"}})
     assert resolve_precedence(**base) == AccessResolution("raw")
     assert resolve_precedence(**{**base, "principal": "deployer"}) == AccessResolution("raw")
     assert resolve_precedence(**{**base, "principal": "viewer"}) == AccessResolution("full")
@@ -162,3 +161,14 @@ def test_wrong_typed_nested_values_return_clean_errors():
     assert errors(column_overrides={"a.b.c.d": {"partial": ["x"]}})
     assert errors(tier_access_overrides={"ssn": {"partial": ["raw"]}})
     assert errors(row_filters=[{"table": ["x"], "column": "r", "values_by_group": {}}])
+
+
+def test_every_library_treatment_fails_closed_by_tier_and_unknowns_are_full():
+    for treatment in PARTIAL_VERSIONS:
+        args = dict(column="c.s.t.x", treatment=treatment, library_default=next(iter(PARTIAL_VERSIONS[treatment])), access_tier_groups=["t1", "t2", "t3"])
+        tier1 = resolve_precedence(**args, group="t1")
+        assert tier1.access == ("full" if treatment in NEVER_RAW_TREATMENTS else "raw")
+        assert resolve_precedence(**args, group="t3").access == "full"
+        assert resolve_precedence(**args, group="outsider").access == "full"
+    assert resolve_precedence(column="c.s.t.x", treatment="unknown", group="t1", library_default="raw", access_tier_groups=["t1", "t2", "t3"]) == AccessResolution("full")
+    assert errors(treatment_versions={"unknown": {"partial": "redacted"}})

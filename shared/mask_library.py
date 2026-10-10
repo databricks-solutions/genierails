@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 LIBRARY_PATH = Path(__file__).with_name("mask_library.json")
 REDACTED = "[REDACTED]"
-NUMERIC_TYPES = frozenset({"BYTE", "SHORT", "INT", "INTEGER", "LONG", "BIGINT", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC"})
+NUMERIC_TYPES = frozenset({"BYTE", "TINYINT", "SHORT", "SMALLINT", "INT", "INTEGER", "LONG", "BIGINT", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC"})
 
 
 def load_library(path: Path = LIBRARY_PATH) -> dict:
@@ -24,6 +24,10 @@ def load_library(path: Path = LIBRARY_PATH) -> dict:
 
 def type_family(sql_type: str) -> str:
     value = sql_type.upper().split("(", 1)[0].strip()
+    if value in {"CHAR", "VARCHAR"}:
+        return "STRING"
+    if value == "TIMESTAMP_NTZ":
+        return "TIMESTAMP"
     return "NUMERIC" if value in NUMERIC_TYPES else value
 
 
@@ -45,13 +49,14 @@ def canonical_decimal(value: object) -> str | None:
     return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
 
 
-def keyed_hash(value: object, key: bytes, *, numeric: bool = False) -> str | None:
+def keyed_hash(value: object, key: bytes, *, numeric: bool = False) -> str | int | None:
     if value is None:
         return None
     normalized = canonical_decimal(value) if numeric else normalize_identifier(value)
     if normalized is None:
         return None
-    return hmac.new(key, normalized.encode("utf-8"), hashlib.sha256).hexdigest()
+    digest = hmac.new(key, normalized.encode("utf-8"), hashlib.sha256).digest()
+    return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1) if numeric else digest.hex()
 
 
 def _finite_decimal(value: object) -> Decimal | None:
@@ -78,7 +83,7 @@ def apply_version(version: str, value: object, sql_type: str, *, key: bytes | No
     if version == "last4" and family == "STRING":
         text = str(value).strip()
         compact = re.sub(r"[\s-]+", "", text)
-        return "*" * max(0, len(compact) - 4) + compact[-4:] if len(compact) >= 4 else REDACTED
+        return "*" * (len(compact) - 4) + compact[-4:] if len(compact) > 4 else REDACTED
     if version == "email_partial" and family == "STRING":
         text = str(value).strip()
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", text):
@@ -87,7 +92,7 @@ def apply_version(version: str, value: object, sql_type: str, *, key: bytes | No
         return local[0] + "***@" + domain.lower()
     if version == "initials" and family == "STRING":
         words = re.findall(r"[^\W\d_]+", str(value), flags=re.UNICODE)
-        return "".join(word[0].upper() for word in words) if words else REDACTED
+        return "".join(word[0].upper() for word in words) if len(words) > 1 else REDACTED
     if version == "year":
         if family == "DATE" and isinstance(value, dt.date):
             return dt.date(value.year, 1, 1)
@@ -102,7 +107,7 @@ def apply_version(version: str, value: object, sql_type: str, *, key: bytes | No
             return None
         width = Decimal(10 if version == "age_band_10" else 50)
         lower = (number // width) * width
-        return f"{lower:f}-{(lower + width - 1):f}"
+        return int(lower)
     if version in {"rounded", "location_1dp"} and family == "NUMERIC":
         number = _finite_decimal(value)
         if number is None:
@@ -127,7 +132,7 @@ def apply_version(version: str, value: object, sql_type: str, *, key: bytes | No
             return REDACTED
     if version == "prefix_3" and family == "STRING":
         text = str(value).strip()
-        return text[:3] + "***" if len(text) >= 3 else REDACTED
+        return text[:3] + "***" if len(text) > 3 else REDACTED
     return REDACTED if family == "STRING" else None
 
 
@@ -150,7 +155,8 @@ def resolve_class(classes: list[str], sql_type: str, library: dict | None = None
             candidates.append((order["hmac_sha256"] if partial == "hmac_sha256" else order["redacted"] if partial in {"redacted", "null"} else order["partial"], treatment_name, partial, treatment["full"], bool(treatment.get("never_raw"))))
     if not candidates:
         raise KeyError(f"no mask-library mapping for {classes!r}")
-    _, name, partial, full, never_raw = max(candidates)
+    never_raw = any(candidate[4] for candidate in candidates)
+    _, _, partial, full, _ = max(candidates, key=lambda candidate: candidate[0])
     return partial, full, never_raw
 
 
@@ -172,24 +178,62 @@ SQL_BODIES = {
     "null_date": "CAST(NULL AS DATE)",
     "null_timestamp": "CAST(NULL AS TIMESTAMP)",
     "null_numeric": "CAST(NULL AS DECIMAL(38, 9))",
-    "last4_string": "CASE WHEN value IS NULL THEN NULL WHEN length(regexp_replace(trim(value), '[\\\\s-]+', '')) < 4 THEN '[REDACTED]' ELSE concat(repeat('*', greatest(0, length(regexp_replace(trim(value), '[\\\\s-]+', '')) - 4)), right(regexp_replace(trim(value), '[\\\\s-]+', ''), 4)) END",
+    "last4_string": "CASE WHEN value IS NULL THEN NULL WHEN length(regexp_replace(trim(value), '[\\\\s-]+', '')) <= 4 THEN '[REDACTED]' ELSE concat(repeat('*', length(regexp_replace(trim(value), '[\\\\s-]+', '')) - 4), right(regexp_replace(trim(value), '[\\\\s-]+', ''), 4)) END",
     "email_partial_string": "CASE WHEN value IS NULL THEN NULL WHEN trim(value) NOT RLIKE '^[^@\\\\s]+@[^@\\\\s]+\\\\.[^@\\\\s]+$' THEN '[REDACTED]' ELSE concat(left(trim(value), 1), '***@', lower(substring_index(trim(value), '@', -1))) END",
-    "initials_string": "CASE WHEN value IS NULL THEN NULL WHEN size(filter(split(trim(value), '[^\\\\p{L}]+'), x -> x <> '')) = 0 THEN '[REDACTED]' ELSE aggregate(filter(split(trim(value), '[^\\\\p{L}]+'), x -> x <> ''), '', (a, x) -> concat(a, upper(left(x, 1)))) END",
+    "initials_string": "CASE WHEN value IS NULL THEN NULL WHEN size(filter(split(trim(value), '[^\\\\p{L}]+'), x -> x <> '')) <= 1 THEN '[REDACTED]' ELSE aggregate(filter(split(trim(value), '[^\\\\p{L}]+'), x -> x <> ''), '', (a, x) -> concat(a, upper(left(x, 1)))) END",
     "year_date": "CASE WHEN value IS NULL THEN NULL ELSE make_date(year(value), 1, 1) END",
-    "year_timestamp": "CASE WHEN value IS NULL THEN NULL ELSE to_utc_timestamp(make_timestamp(year(to_utc_timestamp(value, current_timezone())), 1, 1, 0, 0, 0), current_timezone()) END",
-    "age_band_10_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) OR value < 0 THEN NULL ELSE concat(CAST(floor(value / 10) * 10 AS BIGINT), '-', CAST(floor(value / 10) * 10 + 9 AS BIGINT)) END",
-    "credit_score_band_50_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) OR value < 0 THEN NULL ELSE concat(CAST(floor(value / 50) * 50 AS BIGINT), '-', CAST(floor(value / 50) * 50 + 49 AS BIGINT)) END",
+    "year_timestamp": "CASE WHEN value IS NULL THEN NULL ELSE make_timestamp(year(value), 1, 1, 0, 0, 0, 'UTC') END",
+    "age_band_10_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) OR value < 0 THEN NULL ELSE CAST(floor(value / 10) * 10 AS BIGINT) END",
+    "credit_score_band_50_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) OR value < 0 THEN NULL ELSE CAST(floor(value / 50) * 50 AS BIGINT) END",
     "rounded_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) THEN NULL ELSE round(value, -3) END",
     "location_1dp_numeric": "CASE WHEN value IS NULL OR isnan(CAST(value AS DOUBLE)) OR abs(CAST(value AS DOUBLE)) = CAST('Infinity' AS DOUBLE) THEN NULL ELSE round(value, 1) END",
     "ip_network_string": "CASE WHEN value IS NULL THEN NULL WHEN trim(value) RLIKE '^(?:25[0-5]|2[0-4]\\\\d|1?\\\\d?\\\\d)(?:\\\\.(?:25[0-5]|2[0-4]\\\\d|1?\\\\d?\\\\d)){3}$' THEN concat(regexp_extract(trim(value), '^(\\\\d+\\\\.\\\\d+\\\\.\\\\d+)\\\\.', 1), '.0/24') WHEN lower(trim(value)) RLIKE '^[0-9a-f:]+$' AND trim(value) LIKE '%:%' AND regexp_extract(lower(trim(value)), '^((?:[0-9a-f]{1,4}:){4})', 1) <> '' THEN concat(regexp_extract(lower(trim(value)), '^((?:[0-9a-f]{1,4}:){4})', 1), ':/64') ELSE '[REDACTED]' END",
     "mac_vendor_string": "CASE WHEN value IS NULL THEN NULL WHEN trim(value) RLIKE '^(?i)[0-9a-f]{2}([:-][0-9a-f]{2}){5}$' THEN concat(upper(regexp_replace(substring(trim(value), 1, 8), '-', ':')), ':**:**:**') ELSE '[REDACTED]' END",
-    "url_domain_string": "CASE WHEN value IS NULL THEN NULL WHEN parse_url(trim(value), 'PROTOCOL') IN ('http', 'https') AND parse_url(trim(value), 'HOST') IS NOT NULL THEN lower(parse_url(trim(value), 'HOST')) ELSE '[REDACTED]' END",
-    "prefix_3_string": "CASE WHEN value IS NULL THEN NULL WHEN length(trim(value)) < 3 THEN '[REDACTED]' ELSE concat(left(trim(value), 3), '***') END",
+    "url_domain_string": "CASE WHEN value IS NULL THEN NULL WHEN try_parse_url(trim(value), 'PROTOCOL') IN ('http', 'https') AND try_parse_url(trim(value), 'HOST') IS NOT NULL THEN lower(try_parse_url(trim(value), 'HOST')) ELSE '[REDACTED]' END",
+    "prefix_3_string": "CASE WHEN value IS NULL THEN NULL WHEN length(trim(value)) <= 3 THEN '[REDACTED]' ELSE concat(left(trim(value), 3), '***') END",
     "raw_string": "value", "raw_date": "value", "raw_timestamp": "value", "raw_numeric": "value"
 }
 
+# Expand IPv6 to eight hextets in SQL, select the first four, and canonicalize
+# each with base conversion.  This covers compressed and fully expanded forms
+# without depending on session state or a user-defined function.
+SQL_BODIES["ip_network_string"] = """CASE
+WHEN value IS NULL THEN NULL
+WHEN trim(value) RLIKE '^(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)(?:\\.(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)){3}$'
+  THEN concat(regexp_extract(trim(value), '^(\\d+\\.\\d+\\.\\d+)\\.', 1), '.0/24')
+WHEN lower(trim(value)) RLIKE '^[0-9a-f:]+$' AND trim(value) LIKE '%:%'
+  THEN concat(concat_ws(':', transform(slice(
+    concat(
+      filter(split(split(lower(trim(value)), '::', 2)[0], ':'), x -> x <> ''),
+      array_repeat('0', 8
+        - size(filter(split(split(lower(trim(value)), '::', 2)[0], ':'), x -> x <> ''))
+        - CASE WHEN instr(lower(trim(value)), '::') > 0
+            THEN size(filter(split(split(lower(trim(value)), '::', 2)[1], ':'), x -> x <> '')) ELSE 0 END),
+      CASE WHEN instr(lower(trim(value)), '::') > 0
+        THEN filter(split(split(lower(trim(value)), '::', 2)[1], ':'), x -> x <> '') ELSE array() END),
+    1, 4), x -> lower(conv(conv(x, 16, 10), 10, 16)))), '::/64')
+ELSE '[REDACTED]' END"""
 
-HMAC_PYTHON_BODY = '''import hashlib\nimport hmac\nimport re\nimport unicodedata\nfrom databricks.secrets import get\n_key = get(catalog="{{CATALOG}}", schema="{{SCHEMA}}", key="hmac_key").encode("utf-8")\ndef _digest(normalized):\n    return hmac.new(_key, normalized.encode("utf-8"), hashlib.sha256).hexdigest()\ndef h(value):\n    if value is None:\n        return None\n    normalized = re.sub(r"[\\s-]+", "", unicodedata.normalize("NFKC", str(value).strip()).upper())\n    return _digest(normalized)\ndef h_numeric(value):\n    if value is None or not value.is_finite():\n        return None\n    if value == 0:\n        normalized = "0"\n    else:\n        normalized = format(value.normalize(), "f")\n        if "." in normalized:\n            normalized = normalized.rstrip("0").rstrip(".")\n    return _digest(normalized)\n'''
+
+def sql_body(version: str, sql_type: str) -> str:
+    """Return a mask expression whose result has exactly ``sql_type``."""
+    family = type_family(sql_type)
+    if version == "hmac_sha256":
+        if family == "STRING":
+            return f"CAST((gr_hmac_sha256(value)) AS {sql_type})"
+        if family == "NUMERIC":
+            return f"CAST((gr_hmac_sha256_numeric(value)) AS {sql_type})"
+        return f"CAST(NULL AS {sql_type})"
+    if version in {"redacted", "null"} and family != "STRING":
+        return f"CAST(NULL AS {sql_type})"
+    body_name = load_library()["versions"].get(version, {}).get(family)
+    if not body_name or body_name not in SQL_BODIES:
+        return ("CASE WHEN value IS NULL THEN CAST(NULL AS STRING) ELSE '[REDACTED]' END"
+                if family == "STRING" else f"CAST(NULL AS {sql_type})")
+    return f"CAST(({SQL_BODIES[body_name]}) AS {sql_type})"
+
+
+HMAC_PYTHON_BODY = '''import hashlib\nimport hmac\nimport re\nimport unicodedata\nfrom databricks.secrets import get\n_key = get(catalog="{{CATALOG}}", schema="{{SCHEMA}}", key="hmac_key").encode("utf-8")\ndef _digest(normalized):\n    return hmac.new(_key, normalized.encode("utf-8"), hashlib.sha256).digest()\ndef h(value):\n    if value is None:\n        return None\n    normalized = re.sub(r"[\\s-]+", "", unicodedata.normalize("NFKC", str(value).strip()).upper())\n    return _digest(normalized).hex()\ndef h_numeric(value):\n    if value is None or not value.is_finite():\n        return None\n    if value == 0:\n        normalized = "0"\n    else:\n        normalized = format(value.normalize(), "f")\n        if "." in normalized:\n            normalized = normalized.rstrip("0").rstrip(".")\n    return int.from_bytes(_digest(normalized)[:8], "big") & ((1 << 63) - 1)\n'''
 
 
 def hmac_function_ddl(catalog: str, schema: str) -> str:
@@ -205,12 +249,12 @@ CREATE OR REPLACE FUNCTION `{catalog}`.`{schema}`.`gr_hmac_sha256`(value STRING)
 RETURNS STRING
 RETURN `{catalog}`.`{schema}`.`gr_hmac_sha256_python`(value);
 CREATE OR REPLACE FUNCTION `{catalog}`.`{schema}`.`gr_hmac_sha256_numeric_python`(value DECIMAL(38, 18))
-RETURNS STRING
+RETURNS BIGINT
 LANGUAGE PYTHON
 HANDLER 'h_numeric'
 SECRETS (`{catalog}`.`{schema}`.`hmac_key`)
 ENVIRONMENT (environment_version = '6')
 AS $${body}$$;
 CREATE OR REPLACE FUNCTION `{catalog}`.`{schema}`.`gr_hmac_sha256_numeric`(value DECIMAL(38, 18))
-RETURNS STRING
+RETURNS BIGINT
 RETURN `{catalog}`.`{schema}`.`gr_hmac_sha256_numeric_python`(value);"""

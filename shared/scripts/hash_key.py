@@ -32,9 +32,7 @@ def ensure_uc_secret(client, catalog: str, schema: str, generated_dir: Path) -> 
         client.api_client.do("GET", f"/api/2.1/unity-catalog/secrets/{name}")
         created = False
     except Exception as exc:
-        if (exc.__class__.__name__ != "NotFound"
-                and getattr(exc, "error_code", "") not in {"NOT_FOUND", "RESOURCE_DOES_NOT_EXIST"}
-                and getattr(exc, "status_code", 404) != 404):
+        if getattr(exc, "status_code", None) != 404:
             raise
         key = os.environ.get("GENIERAILS_HASH_KEY")
         if not key:

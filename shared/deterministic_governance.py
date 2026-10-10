@@ -13,43 +13,39 @@ from typing import Any, Literal, Mapping, Sequence
 
 
 ACCESS_LEVELS = {"raw", "partial", "full"}
-NEVER_RAW_TREATMENTS = frozenset({
-    "card_security_code", "card_pin", "card_track_data", "secret",
-})
+MASK_LIBRARY_PATH = Path(__file__).with_name("mask_library.json")
 
-# Version names are the public schema contract from design section 2.  The
-# implementation and typed variants land with rollout step 3.
-PARTIAL_VERSIONS: dict[str, frozenset[str]] = {
-    # Deterministic-library treatment name used by design section 2.  Its
-    # implementation lands in step 3; ssn_last4 remains a known legacy name.
-    "ssn": frozenset({"hmac_sha256", "last4"}),
-    "redact": frozenset({"redacted"}),
-    "compensation_redacted": frozenset({"rounded"}),
-    "ssn_last4": frozenset({"hmac_sha256", "last4"}),
-    "card_last4": frozenset({"last4"}),
-    "account_last4": frozenset({"last4"}),
-    "email_partial": frozenset({"partial"}),
-    "phone_partial": frozenset({"last4"}),
-    "name_partial": frozenset({"initials"}),
-    "date_year": frozenset({"year"}),
-    "tfn_partial": frozenset({"hmac_sha256", "last4"}),
-    "medicare_partial": frozenset({"hmac_sha256", "last4"}),
-    "bsb_partial": frozenset({"last4"}),
-    "aadhaar_partial": frozenset({"hmac_sha256", "last4"}),
-    "generic_partial": frozenset({"redacted", "prefix_3"}),
-    "round_amount": frozenset({"rounded"}),
-    **{treatment: frozenset({"redacted"}) for treatment in NEVER_RAW_TREATMENTS},
-}
-PARTIAL_VERSIONS = {
-    treatment: versions | {"redacted"}
-    for treatment, versions in PARTIAL_VERSIONS.items()
-}
+
+def _mask_contract(path: Path = MASK_LIBRARY_PATH) -> tuple[dict[str, frozenset[str]], frozenset[str]]:
+    data = json.loads(path.read_text())
+    versions: dict[str, frozenset[str]] = {}
+    never_raw: set[str] = set()
+    for name, treatment in data["treatments"].items():
+        partials = set(treatment.get("partial_by_type", {}).values())
+        partials.add(treatment.get("partial", treatment["full"]))
+        partials.discard(None)
+        partials.discard("$identifier_partial_default")
+        if treatment.get("partial") == "$identifier_partial_default":
+            partials.add(data["identifier_partial_default"])
+        partials.add(treatment["full"])
+        versions[name] = frozenset(partials)
+        if treatment.get("never_raw"):
+            never_raw.add(name)
+    for alias, rule in data.get("treatment_aliases", {}).items():
+        versions[alias] = frozenset(rule["allowed_partials"])
+        if rule["treatment"] in never_raw:
+            never_raw.add(alias)
+    return versions, frozenset(never_raw)
+
+
+PARTIAL_VERSIONS, NEVER_RAW_TREATMENTS = _mask_contract()
+VERSION_NAMES = frozenset(json.loads(MASK_LIBRARY_PATH.read_text())["versions"]) - {"raw"}
 
 
 def _known_treatments(registry_path: Path | None = None) -> set[str]:
     path = registry_path or Path(__file__).with_name("treatment_config.json")
     data = json.loads(path.read_text())
-    return {item["value"] for item in data.get("treatments", [])} | set(PARTIAL_VERSIONS)
+    return set(PARTIAL_VERSIONS)
 
 
 @dataclass(frozen=True)
@@ -83,6 +79,11 @@ def resolve_precedence(
     configured = list(access_tier_groups)
     member_groups = [candidate for candidate in configured if candidate in memberships]
     effective_treatment = (column_overrides or {}).get(column, {}).get("treatment", treatment)
+
+    # Invalid or drifted names can never open access. validate_config reports
+    # the schema error; direct resolver callers still fail closed.
+    if treatment not in PARTIAL_VERSIONS or effective_treatment not in PARTIAL_VERSIONS:
+        return AccessResolution("full")
 
     # Never-raw is considered first, but the deployer is its sole exception.
     is_deployer = deployer_principal is not None and principal == deployer_principal
@@ -243,7 +244,7 @@ def validate_config(
         # TODO(step 3): compare a treatment override with live class-derived
         # treatment data and refuse it unless the protection order is stricter.
         if "partial" in rule:
-            valid_versions = set().union(*PARTIAL_VERSIONS.values())
+            valid_versions = VERSION_NAMES
             if not isinstance(rule["partial"], str):
                 errors.append(f"{label}.partial must be a string")
             elif rule["partial"] not in valid_versions | {"raw"}:

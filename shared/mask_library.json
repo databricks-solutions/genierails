@@ -8,6 +8,9 @@
   },
   "protection_order": ["raw", "partial", "hmac_sha256", "redacted"],
   "never_raw_classes": ["card_security_code", "card_pin", "card_track_data", "secret"],
+  "treatment_aliases": {
+    "ssn": {"treatment": "identifier", "allowed_partials": ["hmac_sha256", "last4", "redacted"]}
+  },
   "versions": {
     "redacted": {"STRING": "redact_string", "DATE": "null_date", "TIMESTAMP": "null_timestamp", "NUMERIC": "null_numeric"},
     "null": {"STRING": "null_string", "DATE": "null_date", "TIMESTAMP": "null_timestamp", "NUMERIC": "null_numeric"},

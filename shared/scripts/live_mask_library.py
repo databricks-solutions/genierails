@@ -42,8 +42,8 @@ CASES = {
     "initials_string": ("CAST('Elodie van Lee' AS STRING)", "EVL"),
     "year_date": ("DATE'2024-12-31'", "2024-01-01"),
     "year_timestamp": ("TIMESTAMP'2024-12-31 04:05:06'", "2024-01-01T00:00:00.000Z"),
-    "age_band_10_numeric": ("CAST(10 AS DOUBLE)", "10-19"),
-    "credit_score_band_50_numeric": ("CAST(650 AS DOUBLE)", "650-699"),
+    "age_band_10_numeric": ("CAST(10 AS DOUBLE)", 10),
+    "credit_score_band_50_numeric": ("CAST(650 AS DOUBLE)", 650),
     "rounded_numeric": ("CAST(-1500 AS DOUBLE)", -2000.0),
     "location_1dp_numeric": ("CAST(-1.25 AS DOUBLE)", -1.3),
     "ip_network_string": ("CAST('2001:db8:abcd:12:1234::1' AS STRING)", "2001:db8:abcd:12::/64"),
@@ -65,7 +65,21 @@ def run(w: WorkspaceClient, warehouse_id: str, catalog: str, schema: str, genera
     mismatches: list[dict] = []
     tested = 0
     started = time.monotonic()
-    _execute(w, warehouse_id, f"CREATE SCHEMA IF NOT EXISTS `{catalog}`.`{schema}`")
+    existing = _execute(
+        w, warehouse_id,
+        f"SELECT schema_name FROM `{catalog}`.information_schema.schemata "
+        f"WHERE schema_name = '{schema.replace(chr(39), chr(39) * 2)}'",
+    )
+    if existing:
+        raise RuntimeError(f"refusing live parity run: schema already exists: {catalog}.{schema}")
+    try:
+        w.api_client.do("GET", f"/api/2.1/unity-catalog/secrets/{catalog}.{schema}.hmac_key")
+    except Exception as exc:
+        if getattr(exc, "status_code", None) != 404:
+            raise
+    else:
+        raise RuntimeError(f"refusing live parity run: hmac_key already exists: {catalog}.{schema}")
+    _execute(w, warehouse_id, f"CREATE SCHEMA `{catalog}`.`{schema}`")
     try:
         ensure_uc_secret(w, catalog, schema, generated_dir)
         for name, (literal, expected) in CASES.items():
