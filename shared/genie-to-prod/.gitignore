@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Bundle state and build output
+.databricks/
+
+# Exported space definitions. These carry a customer's real table names, column
+# names and curated content, and the tooling regenerates them on every run, so
+# this template repo does not track them.
+#
+# In a customer's OWN promotion repo these SHOULD be committed -- the exported
+# definition is the versioned artifact that makes a promotion reproducible.
+# Remove these two lines there.
+resources/
+src/
+
+# Which spaces the current run selected; regenerated each time.
+.promote-selection
+
+# Local credentials -- never commit these
+.env
+*.token
+
+# macOS
+.DS_Store

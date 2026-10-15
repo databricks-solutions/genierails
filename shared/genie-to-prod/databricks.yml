@@ -1,0 +1,43 @@
+# Bundle definition for promoting Genie spaces from dev to prod.
+#
+# Genie spaces are supported only by the `direct` deployment engine, which is
+# the default. Do not set `engine: terraform` here -- the Terraform engine has
+# no Genie space implementation and the spaces will not deploy.
+
+bundle:
+  name: genie-prod-promotion
+
+include:
+  - resources/*.yml
+
+variables:
+  warehouse_id:
+    description: SQL warehouse backing the Genie spaces in this target.
+  parent_path:
+    description: Workspace folder the Genie spaces are registered under.
+
+targets:
+  # Source workspace. Used for exporting spaces, not for deploying them.
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://REPLACE-dev-workspace.cloud.databricks.com
+    variables:
+      warehouse_id: REPLACE_DEV_WAREHOUSE_ID
+      parent_path: /Workspace/Users/REPLACE_YOU@example.com/genie
+
+  # Target workspace.
+  prod:
+    mode: production
+    workspace:
+      host: https://REPLACE-prod-workspace.cloud.databricks.com
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      warehouse_id: REPLACE_PROD_WAREHOUSE_ID
+      parent_path: /Workspace/Shared/genie
+    # In production mode the bundle refuses to deploy unless run_as is explicit.
+    # Point this at the service principal that will own the spaces, or at your
+    # own user while testing locally.
+    run_as:
+      user_name: REPLACE_YOU@example.com

@@ -1,0 +1,46 @@
+# Which Genie spaces to promote, and how dev table names map to prod.
+#
+# The interactive wizard (./promote) writes this file for you. Edit it by hand
+# only if you prefer.
+
+# How dev table references become prod ones. Every reference inside the space
+# is rewritten: structured table lists, example SQL, and curated instructions.
+#
+# A mapping key can be at any of three levels:
+#
+#   catalog                 dev_analytics: prod_analytics
+#     dev_analytics.sales.orders -> prod_analytics.sales.orders
+#
+#   catalog.schema          dev_analytics.sales: prod_analytics.retail
+#     dev_analytics.sales.orders -> prod_analytics.retail.orders
+#
+#   catalog.schema.table    dev_analytics.sales.orders: prod_analytics.retail.txns
+#     renames the table itself
+#
+# More specific keys win, so you can mix levels: put a table-level rule next to
+# a catalog-level one and the table rule applies to that table while the catalog
+# rule covers everything else.
+catalog_map:
+  dev_analytics: prod_analytics
+  # dev_analytics.sales: prod_analytics.retail
+  # dev_analytics.sales.orders: prod_analytics.retail.txns
+
+spaces:
+  # key     - the bundle resource key. Lowercase, underscores. Stable: changing
+  #           it later makes the bundle treat the space as brand new.
+  # dev_id  - Genie space ID in dev. From the URL: /genie/rooms/<dev_id>
+  # prod_id - OPTIONAL. Only set this when a space for this already exists in
+  #           prod and you want the bundle to adopt it. The script then runs
+  #           `bundle deployment bind` for you before deploying.
+  #           Leave it out for first-time creation -- no bind is needed, the
+  #           deploy records the new space ID in bundle state by itself.
+  #
+  #           WARNING: once bound, deploys overwrite the prod space with dev's
+  #           content. Prod-side UI edits are lost.
+
+  - key: sales_genie
+    dev_id: 01f0000000000000000000000000000
+    # prod_id: 01f1111111111111111111111111111
+
+  - key: finance_genie
+    dev_id: 01f0000000000000000000000000001

@@ -1,0 +1,109 @@
+# Promote Genie spaces to prod on merge to main (Azure DevOps).
+#
+# Copy to azure-pipelines.yml at the root of your repo.
+#
+# Model: a human curates the space in the dev UI and syncs it into the repo, then
+# the pipeline deploys what was reviewed. The pipeline does not export from dev,
+# because that would deploy whatever dev happens to look like at merge time
+# rather than what was approved in the pull request.
+#
+# Required variable group "genie-prod" (Pipelines -> Library):
+#   DATABRICKS_HOST           https://adb-xxxx.azuredatabricks.net
+#   DATABRICKS_CLIENT_ID      service principal application ID
+#   DATABRICKS_CLIENT_SECRET  service principal OAuth secret  (mark as secret)
+#
+# On Azure, DATABRICKS_CLIENT_ID/SECRET can be a Microsoft Entra ID service
+# principal; the CLI accepts either that or a Databricks-managed one.
+
+trigger:
+  branches:
+    include: [main]
+  paths:
+    include:
+      - resources/*
+      - src/*
+      - spaces.yml
+      - databricks.yml
+
+pr:
+  branches:
+    include: [main]
+  paths:
+    include:
+      - resources/*
+      - src/*
+      - spaces.yml
+      - databricks.yml
+
+variables:
+  - group: genie-prod
+  # Empty profiles tell the script to authenticate from the environment instead
+  # of ~/.databrickscfg, which does not exist on a hosted agent.
+  - name: DEV_PROFILE
+    value: ''
+  - name: PROD_PROFILE
+    value: ''
+  # Genie spaces are not a bundle resource before 1.3.0. Pin the version so a
+  # CLI release cannot change deployment behaviour unannounced.
+  - name: DATABRICKS_CLI_VERSION
+    value: '1.11.0'
+
+stages:
+  - stage: Plan
+    condition: eq(variables['Build.Reason'], 'PullRequest')
+    jobs:
+      - job: plan
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - script: |
+              set -euo pipefail
+              curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh \
+                | sh -s -- v$(DATABRICKS_CLI_VERSION)
+              databricks --version
+            displayName: Install Databricks CLI
+
+          - script: |
+              set -euo pipefail
+              databricks bundle validate -t prod
+              databricks bundle plan -t prod
+            displayName: Plan
+            env:
+              DATABRICKS_HOST: $(DATABRICKS_HOST)
+              DATABRICKS_CLIENT_ID: $(DATABRICKS_CLIENT_ID)
+              DATABRICKS_CLIENT_SECRET: $(DATABRICKS_CLIENT_SECRET)
+
+  - stage: Deploy
+    condition: >
+      and(succeeded(),
+          eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+          ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      # A deployment job with an environment gives you the approval gate: add
+      # "Approvals and checks" to the environment in Pipelines -> Environments.
+      - deployment: deploy
+        environment: genie-production
+        pool:
+          vmImage: ubuntu-latest
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - script: |
+                    set -euo pipefail
+                    curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh \
+                      | sh -s -- v$(DATABRICKS_CLI_VERSION)
+                    databricks --version
+                  displayName: Install Databricks CLI
+
+                - script: |
+                    set -euo pipefail
+                    databricks bundle deploy -t prod --auto-approve
+                    databricks bundle summary -t prod
+                  displayName: Deploy to prod
+                  env:
+                    DATABRICKS_HOST: $(DATABRICKS_HOST)
+                    DATABRICKS_CLIENT_ID: $(DATABRICKS_CLIENT_ID)
+                    DATABRICKS_CLIENT_SECRET: $(DATABRICKS_CLIENT_SECRET)
