@@ -188,7 +188,8 @@ def test_dev_rehearsal_keeps_runtime_files_in_the_runner_temp_dir(cloud):
     assert "GENIERAILS_STATE_DIR" not in job["env"]
     names = [s.get("name") or s.get("uses") for s in job["steps"]]
     setter = next(s for s in job["steps"] if "GENIERAILS_STATE_DIR=" in s.get("run", ""))
-    assert setter["run"] == 'echo "GENIERAILS_STATE_DIR=$RUNNER_TEMP/genierails-state" >> "$GITHUB_ENV"'
+    assert setter["run"].splitlines() == ['mkdir -p -m 700 "$RUNNER_TEMP/genierails-state"',
+                                          'echo "GENIERAILS_STATE_DIR=$RUNNER_TEMP/genierails-state" >> "$GITHUB_ENV"']
     # Set before anything that reads it.
     assert names.index(setter["name"]) < names.index("Read-only check of the merged commit")
     receipt = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/upload-artifact"))

@@ -435,7 +435,8 @@ resource "null_resource" "genie_space_acls_created" {
 
   # As for genie_space_acls. Destroyed before the agent it belongs to, so the
   # ID file still names it. The root sets genie_id_file_prefix to
-  # $LAYER_ENV_DIR/.genie_space_id.
+  # $LAYER_ENV_DIR/.genie_space_id (with GENIERAILS_STATE_DIR, the env's
+  # records/ dir, which genie_space.sh reads from GENIERAILS_GENIE_ID_DIR).
   provisioner "local-exec" {
     when    = destroy
     command = "${try(self.triggers.destroy_script, "bash ../../scripts/genie_space.sh")} revoke-acls"

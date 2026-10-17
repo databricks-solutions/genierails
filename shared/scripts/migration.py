@@ -218,8 +218,12 @@ def deterministic(env_dir: Path) -> bool:
 
 def record_path(env_dir: Path) -> Path:
     from scripts.policy_generations import ledger_dir
+    from scripts.state_layout import RecordError
 
-    return ledger_dir(Path(env_dir)) / RECORD
+    try:
+        return ledger_dir(Path(env_dir)) / RECORD
+    except RecordError as exc:
+        raise Refused(f"the migration record can't be read: {exc}") from exc
 
 
 def load_record(env_dir: Path) -> dict | None:

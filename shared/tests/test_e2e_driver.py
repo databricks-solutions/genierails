@@ -132,6 +132,7 @@ class FakeSnapshots:
 def live_args(tmp_path, scenario, *extra):
     checkout = tmp_path / "checkout"
     (checkout / "aws").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state").mkdir(exist_ok=True)  # the driver never creates a missing state dir
     return ["--cloud", "aws", "--repo", str(checkout), "--checkout", str(checkout),
             "--commit", COMMIT, "--state-dir", str(tmp_path / "state"),
             "--reports", str(tmp_path / "reports"), "--scenarios", scenario,
@@ -207,6 +208,16 @@ def live(monkeypatch):
         monkeypatch.setattr(driver.subprocess, "run", fake_subprocess(calls, **fake))
         return calls
     return setup
+
+
+def test_live_run_refuses_a_missing_state_dir_before_anything_runs(tmp_path, live):
+    calls = live(REAL_TARGETS)
+    args = live_args(tmp_path, "s1")
+    args[args.index("--state-dir") + 1] = str(tmp_path / "statee")  # a typo of the real one
+    with pytest.raises(SystemExit, match="does not exist"):
+        driver.main(args, snapshot_factory=FakeSnapshots)
+    assert not (tmp_path / "statee").exists() and not (tmp_path / "reports").exists()
+    assert calls == []
 
 
 # Blocker 1: a scenario needing a genuinely unbuilt target runs nothing at all.

@@ -140,9 +140,11 @@ def cloud_dir_of(env_dir: Path) -> Path:
 
 
 def state_root(cloud_dir: Path) -> Path:
-    base = os.environ.get(STATE_DIR_ENV, "").strip()
+    from state_layout import checked_state_dir
+
+    base = checked_state_dir()  # a missing GENIERAILS_STATE_DIR refuses, never an empty store
     cloud_dir = Path(cloud_dir).resolve()
-    return Path(base).expanduser().resolve() / cloud_dir.name if base else cloud_dir / DEFAULT_STATE
+    return base / cloud_dir.name if base else cloud_dir / DEFAULT_STATE
 
 
 def env_state(cloud_dir: Path, env: str) -> Path:

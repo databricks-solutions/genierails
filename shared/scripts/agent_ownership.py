@@ -171,8 +171,11 @@ def _get_space(api, space_id: str) -> dict:
 # ── IDs ──────────────────────────────────────────────────────────────────────
 
 def id_file(env_dir: Path, name: str) -> Path:
-    """.genie_space_id_<key>, the file the workspace root's create resource reads and writes."""
-    return env_dir / f".genie_space_id_{agent_files.key_of(env_dir, name)}"
+    """.genie_space_id_<key>, the file the workspace root's create resource reads and writes
+    (in envs/<env>, or the state dir's records/ with GENIERAILS_STATE_DIR: state_layout.record_path)."""
+    from scripts.state_layout import record_path
+
+    return record_path(Path(env_dir), f".genie_space_id_{agent_files.key_of(env_dir, name)}")
 
 
 def display_title(agent: dict) -> str:
@@ -373,6 +376,15 @@ def _same_path(a: object, b: Path) -> bool:
     return bool(a) and Path(str(a)).resolve() == Path(b).resolve()
 
 
+def _names_id_file(env_dir: Path, recorded: object, path: Path) -> bool:
+    """The state's recorded ID file path is ``path``, or the in-checkout one make migrate-state-dir
+    moved to ``path`` (state_layout.genie_id_moves) and the next apply re-records."""
+    from scripts.state_layout import genie_id_moves
+
+    return _same_path(recorded, path) or (
+        bool(recorded) and _same_path(genie_id_moves(Path(env_dir)).get(str(recorded)), path))
+
+
 # How an agent's ID was established. create: release-plan saw no ID and no create
 # resource, so the saved plan creates the agent. adopt: an ID file but no create
 # resource, so the saved plan's create resource adopts that ID. existing: the ID
@@ -404,14 +416,14 @@ def verify_created(env_dir: Path, name: str, key: str, expected: str | None) -> 
     created = create_instance(env_dir, key)
     if created is None:
         elsewhere = [k for k, attrs in _instances(env_dir, "managed", "terraform_data", "genie_space").items()
-                     if _same_path((attrs.get("input") or {}).get("id_file"), path)]
+                     if _names_id_file(env_dir, (attrs.get("input") or {}).get("id_file"), path)]
         if elsewhere:
             raise AgentError(f"the create resource for {name!r}'s ID file is in state under key "
                              f"{elsewhere[0]!r}, not {key!r}; its config was not pushed")
         raise AgentError(f"the saved workspace plan didn't create {name!r}: no create resource "
                          f"terraform_data.genie_space[{key!r}] in state; its config was not pushed")
     named = (created.get("input") or {}).get("id_file")
-    if not _same_path(named, path):
+    if not _names_id_file(env_dir, named, path):
         raise AgentError(f"the create resource for {name!r} names the ID file {named}, not {path}; "
                          "its config was not pushed")
     if adopted_marker(env_dir, name).exists():
@@ -422,7 +434,7 @@ def verify_created(env_dir: Path, name: str, key: str, expected: str | None) -> 
     if record is None:
         raise AgentError(f"the create resource for {name!r} recorded no agent ID in state "
                          f"(data.external.genie_space_id[{key!r}]); its config was not pushed")
-    if not _same_path((record.get("query") or {}).get("id_file"), path):
+    if not _names_id_file(env_dir, (record.get("query") or {}).get("id_file"), path):
         raise AgentError(f"the agent ID recorded in state for {name!r} was read from "
                          f"{(record.get('query') or {}).get('id_file')}, not {path}; its config was not pushed")
     state_id = str((record.get("result") or {}).get("id") or "")
@@ -436,8 +448,11 @@ def verify_created(env_dir: Path, name: str, key: str, expected: str | None) -> 
 
 
 def adopted_marker(env_dir: Path, name: str) -> Path:
-    """genie_space.sh create writes this when it title-adopts an agent instead of creating one."""
-    return Path(env_dir) / f".genie_adopted_{agent_files.key_of(env_dir, name)}"
+    """genie_space.sh create writes this when it title-adopts an agent instead of creating one
+    (next to the ID file)."""
+    from scripts.state_layout import record_path
+
+    return record_path(Path(env_dir), f".genie_adopted_{agent_files.key_of(env_dir, name)}")
 
 
 def _title_matches(api, title: str) -> list[str]:
@@ -509,7 +524,7 @@ def restore_ids(env_dir: Path, env: str, api=None) -> list[str]:
             if created.get("id") != resource_id:
                 raise AgentError(f"{refusal}: the receipt names create resource {resource_id}, the state holds "
                                  f"{created.get('id')}. {manual}")
-            if not _same_path((created.get("input") or {}).get("id_file"), path):
+            if not _names_id_file(env_dir, (created.get("input") or {}).get("id_file"), path):
                 raise AgentError(f"{refusal}: its create resource names the ID file "
                                  f"{(created.get('input') or {}).get('id_file')}, not {path}. {manual}")
             state_id = ((recorded_id(env_dir, key) or {}).get("result") or {}).get("id")
@@ -524,6 +539,7 @@ def restore_ids(env_dir: Path, env: str, api=None) -> list[str]:
         live = _live(api, name, recorded)
         if live is None or _sha(render(live)) != entry["config_sha256"]:
             raise AgentError(f"{refusal}: its live config isn't the one release last pushed. {manual}")
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(recorded + "\n")
         restored.append(name)
         print(f"Recovered {name}'s agent ID {recorded} from the release receipt ({path.name}); "
@@ -811,7 +827,7 @@ def _check_entry(env_dir: Path, env: str, name: str, entry: dict, api, *, applie
         if (created or {}).get("id") != entry["create_resource_id"]:
             raise AgentError(f"{name!r}'s create resource is now {(created or {}).get('id')}, the manifest planned "
                              f"{entry['create_resource_id']}; {stale}")
-        if not _same_path((created.get("input") or {}).get("id_file"), id_file(env_dir, name)):
+        if not _names_id_file(env_dir, (created.get("input") or {}).get("id_file"), id_file(env_dir, name)):
             raise AgentError(f"{name!r}'s create resource names the ID file "
                              f"{(created.get('input') or {}).get('id_file')}, not {id_file(env_dir, name)}")
         state_id = ((recorded_id(env_dir, entry["key"]) or {}).get("result") or {}).get("id")

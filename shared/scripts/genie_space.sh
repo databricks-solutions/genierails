@@ -13,7 +13,8 @@
 #                 agent's direct ACL, keeping every other direct entry (and
 #                 inherited ones, e.g. workspace admins). Run by Terraform when
 #                 an ACL it set is destroyed. Reads space_id from
-#                 GENIE_SPACE_OBJECT_ID or $LAYER_ENV_DIR/$GENIE_ID_BASENAME.
+#                 GENIE_SPACE_OBJECT_ID or $LAYER_ENV_DIR/$GENIE_ID_BASENAME
+#                 ($GENIERAILS_GENIE_ID_DIR/$GENIE_ID_BASENAME when set).
 #   trash         Move a Genie agent to trash. Reads space_id from GENIE_ID_FILE.
 #
 # Authentication (in order of precedence):
@@ -864,7 +865,9 @@ PYEOF
 load_layer_auth() {
   if [[ -n "${LAYER_ENV_DIR:-}" ]]; then
     if [[ -n "${GENIE_ID_BASENAME:-}" ]]; then
-      GENIE_ID_FILE="${LAYER_ENV_DIR}/${GENIE_ID_BASENAME}"
+      # terraform_layer.sh exports GENIERAILS_GENIE_ID_DIR when the ID files
+      # live in GENIERAILS_STATE_DIR (the env's records/).
+      GENIE_ID_FILE="${GENIERAILS_GENIE_ID_DIR:-${LAYER_ENV_DIR}}/${GENIE_ID_BASENAME}"
     fi
     local auth_tfvars="${LAYER_ENV_DIR}/auth.auto.tfvars"
     if [[ -f "$auth_tfvars" ]]; then

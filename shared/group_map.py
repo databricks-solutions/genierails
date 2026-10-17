@@ -151,8 +151,14 @@ def _workspace_groups(env_dir: Path) -> list[str]:
     return names
 
 
+def applied_record_path(env_dir: Path) -> Path:
+    """The record of the last applied group_map (under GENIERAILS_STATE_DIR when set)."""
+    from scripts.state_layout import record_path
+    return record_path(Path(env_dir), APPLIED_RECORD)
+
+
 def _applied(env_dir: Path) -> dict[str, str] | None:
-    path = Path(env_dir) / APPLIED_RECORD
+    path = applied_record_path(env_dir)
     if not path.is_file():
         return None
     try:
@@ -206,7 +212,8 @@ def ack_problems(env_dir: Path, env: str, cfg: Mapping) -> list[str]:
 
 
 def record_applied(env_dir: Path, cfg: Mapping) -> None:
-    path = Path(env_dir) / APPLIED_RECORD
+    path = applied_record_path(env_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({SETTING: mapping(cfg)}, indent=2, sort_keys=True) + "\n")
 
 

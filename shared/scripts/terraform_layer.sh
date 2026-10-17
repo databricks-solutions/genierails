@@ -315,6 +315,18 @@ RUNNER_VARS=()
 if [ "$LAYER" != "account" ]; then
   RUNNER_VARS+=(-var="env_dir=$ENV_DIR")
 fi
+# Genie ID files: with GENIERAILS_STATE_DIR, the env's records/ in the state
+# dir (state_layout.py records-dir refuses while any is still in the checkout).
+# Exported for genie_space.sh, whose destroy-time commands resolve the file
+# when they run. Unset: envs/<env>, as before.
+unset GENIERAILS_GENIE_ID_DIR
+case "$COMMAND" in plan|apply|destroy|import|console|apply-plan|print-cmd) genie_ids_used=1 ;; *) genie_ids_used=0 ;; esac
+if [ "$LAYER" = "workspace" ] && [ -n "${GENIERAILS_STATE_DIR:-}" ] && [ "$genie_ids_used" = 1 ]; then
+  GENIERAILS_GENIE_ID_DIR="$(python3 "$SCRIPT_DIR/state_layout.py" records-dir --env-dir "$ENV_DIR" --env "$ENV_NAME")" || exit 2
+  mkdir -p "$GENIERAILS_GENIE_ID_DIR"
+  export GENIERAILS_GENIE_ID_DIR
+  RUNNER_VARS+=(-var="genie_id_dir=$GENIERAILS_GENIE_ID_DIR")
+fi
 if [ "$LAYER_CONFIG_DIR" != "$ENV_DIR" ]; then
   RUNNER_VARS+=(-var="masking_sql_file=$LAYER_CONFIG_DIR/masking_functions.sql")
 fi

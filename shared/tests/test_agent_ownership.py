@@ -153,6 +153,13 @@ def test_delete_true_leaves_genie_spaces(tmp_path):
     assert agent_files.merged_config(env)["genie_spaces"] == []
 
 
+def _rec(env_dir: Path, name: str) -> Path:
+    """A Genie record (ID file, adoption marker) where the active layout keeps it (GENIERAILS_STATE_DIR or the env dir)."""
+    path = state_layout.record_path(env_dir, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _ws_state(env_dir: Path) -> Path:
     """The workspace state file where the active layout keeps it (GENIERAILS_STATE_DIR or the env dir)."""
     path = state_layout.root_state_paths(env_dir)["workspace"]
@@ -501,7 +508,7 @@ def test_gap2_release_plan_enforces_tombstone_without_capture(tmp_path):
 def _prod(tmp_path, settings='genie_space_id = ""\nacl_groups = ["a"]\n', payload=None) -> Path:
     prod = _env(tmp_path, name="prod", Sales=settings)
     ownership.write_payload(payload or _payload(), agent_files.capture_path(prod, "Sales"))
-    (prod / ".genie_space_id_sales").write_text("prod-1\n")
+    _rec(prod, ".genie_space_id_sales").write_text("prod-1\n")
     return prod
 
 
@@ -558,7 +565,7 @@ def test_sync_skips_detached_agents_and_needs_an_id(tmp_path):
     api = FakeGenie({"prod-1": {}})
     assert ownership.sync(prod, "prod", api) == {} and api.calls == []
     other = _prod(tmp_path / "x")
-    (other / ".genie_space_id_sales").unlink()
+    _rec(other, ".genie_space_id_sales").unlink()
     with pytest.raises(ownership.AgentError, match="has no ID after apply"):
         ownership.sync(other, "prod", FakeGenie())
 
@@ -590,6 +597,7 @@ def test_receipt_outside_git_records_no_commit(tmp_path, capsys):
 
 
 def test_receipt_keeps_prod_ids_out_of_git_and_restores_lost_id_files(tmp_path, monkeypatch):
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     prod = _prod(tmp_path)
     head = _git_repo(tmp_path)
@@ -598,11 +606,11 @@ def test_receipt_keeps_prod_ids_out_of_git_and_restores_lost_id_files(tmp_path, 
     receipt = ownership.write_receipt(prod, "prod")
     assert receipt["commit"] == head and receipt["agents"]["Sales"]["genie_space_id"] == "prod-1"
     assert "prod-1" not in (prod / "agents" / "Sales.auto.tfvars").read_text()
-    (prod / ".genie_space_id_sales").unlink()
+    _rec(prod, ".genie_space_id_sales").unlink()
     assert ownership.legacy_receipt_path(prod, "prod").is_relative_to(tmp_path / "state")
     api = FakeGenie({"prod-1": _payload()})
     assert ownership.restore_ids(prod, "prod", api) == ["Sales"]
-    assert (prod / ".genie_space_id_sales").read_text() == "prod-1\n"
+    assert _rec(prod, ".genie_space_id_sales").read_text() == "prod-1\n"
     assert ownership.restore_ids(prod, "prod", api) == [], "an ID file in place is never overwritten"
     # Only ignored/untracked runtime files changed: no committed file was written.
     assert subprocess.run(["git", "-C", str(tmp_path), "diff", "--stat"], text=True,
@@ -730,7 +738,7 @@ def test_round_trip_fidelity_for_every_field_type(tmp_path):
     scratch = api.do("POST", "/api/2.0/genie/spaces", body={"serialized_space": json.dumps(exported)})["space_id"]
     prod = _env(tmp_path, name="prod", Sales='acl_groups = ["a"]\n')
     (prod / "agents" / "Sales.space.json").write_text(ownership.render(exported))
-    (prod / ".genie_space_id_sales").write_text(scratch + "\n")
+    _rec(prod, ".genie_space_id_sales").write_text(scratch + "\n")
     assert ownership.sync(prod, "prod", api)["Sales"] == []
     again = ownership.payload_from_response(api.do("GET", f"/api/2.0/genie/spaces/{scratch}"))
     assert ownership.changed_fields(exported, again) == []
@@ -814,6 +822,7 @@ def test_detach_refuses_outside_its_own_env_lock(tmp_path, monkeypatch):
 
 
 def _deterministic_prod(tmp_path, monkeypatch, settings='genie_space_id = ""\nacl_groups = ["a"]\n'):
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     prod = _env(tmp_path, name="prod", env_cfg='governance_mode = "deterministic"\npromote_from = "dev"\n',
                 Sales=settings)
@@ -856,12 +865,12 @@ def _released(space_id="prod-1", **overrides) -> dict:
 
 def test_deterministic_ids_are_recovered_from_the_step9_release_receipt(tmp_path, monkeypatch):
     prod = _deterministic_prod(tmp_path, monkeypatch)
-    (prod / ".genie_space_id_sales").unlink()
+    _rec(prod, ".genie_space_id_sales").unlink()
     api = FakeGenie({"prod-1": _payload()})
     assert ownership.restore_ids(prod, "prod", api) == []
     _step9_receipt(prod, "c1", {"Sales": _released()})
     assert ownership.restore_ids(prod, "prod", api) == ["Sales"]
-    assert (prod / ".genie_space_id_sales").read_text() == "prod-1\n"
+    assert _rec(prod, ".genie_space_id_sales").read_text() == "prod-1\n"
 
 
 def test_the_release_receipt_records_each_agents_id_and_detach_state(tmp_path, monkeypatch):
@@ -870,7 +879,7 @@ def test_the_release_receipt_records_each_agents_id_and_detach_state(tmp_path, m
 
     repo = Repo(tmp_path, monkeypatch)
     repo.commit({"aws/envs/prod/agents/Sales.auto.tfvars": 'genie_space_id = ""\nacl_groups = []\ndetached = true\n'})
-    (repo.prod / ".genie_space_id_sales").write_text("prod-9\n")
+    _rec(repo.prod, ".genie_space_id_sales").write_text("prod-9\n")
     manifest = tmp_path / "m.json"
     manifest.write_text(json.dumps({"kind": "release-manifest", "version": rg.VERSION, "id": "m", "env": "prod",
                                     "commit": repo.head(), "effective_digest": "e", "live_snapshot": "l"}))
@@ -996,7 +1005,7 @@ def test_release_refuses_agent_drift_since_release_plan_and_pushes_nothing(tmp_p
     elif drift == "live":
         api.spaces["prod-1"] = {"version": 1, "edited": True}
     elif drift == "id":
-        (prod / ".genie_space_id_sales").write_text("other-1\n")
+        _rec(prod, ".genie_space_id_sales").write_text("other-1\n")
     else:
         (prod / "agents" / "Extra.auto.tfvars").write_text('acl_groups = []\n')
     api.calls.clear()
@@ -1128,7 +1137,7 @@ def _created(env_dir: Path, key: str, space_id: str, *, record: str | None = "sa
     (data.external.genie_space_id[key]) in the workspace state, and the ID file. Merged into any state."""
     path = _ws_state(env_dir)
     state = json.loads(path.read_text()) if path.is_file() else {"version": 4, "serial": 1, "resources": []}
-    named = str(id_file or env_dir / f".genie_space_id_{key}")
+    named = str(id_file or _rec(env_dir, f".genie_space_id_{key}"))
     entries = {("managed", "terraform_data"): {"id": resource_id or f"tfdata-{key}", "input": {"id_file": named}}}
     if record is not None:
         entries[("data", "external")] = {"query": {"id_file": named},
@@ -1144,12 +1153,12 @@ def _created(env_dir: Path, key: str, space_id: str, *, record: str | None = "sa
         resource["instances"].append({"index_key": key, "attributes": attributes})
     state["serial"] += 1
     path.write_text(json.dumps(state))
-    (env_dir / f".genie_space_id_{key}").write_text(space_id + "\n")
+    _rec(env_dir, f".genie_space_id_{key}").write_text(space_id + "\n")
 
 
 def _forget_state(env_dir: Path) -> None:
     _ws_state(env_dir).unlink(missing_ok=True)
-    (env_dir / ".genie_space_id_sales").unlink(missing_ok=True)
+    _rec(env_dir, ".genie_space_id_sales").unlink(missing_ok=True)
 
 
 def test_a_promoted_env_never_takes_an_agent_id_from_git(tmp_path, monkeypatch):
@@ -1175,7 +1184,7 @@ def test_a_promoted_env_never_takes_an_agent_id_from_git(tmp_path, monkeypatch):
 ])
 def test_receipt_recovery_is_bound_to_the_released_identity(tmp_path, monkeypatch, entry, outcome):
     prod = _deterministic_prod(tmp_path, monkeypatch)
-    (prod / ".genie_space_id_sales").unlink()
+    _rec(prod, ".genie_space_id_sales").unlink()
     _step9_receipt(prod, "c1", {"Sales": _released(**entry)})
     api = FakeGenie({"prod-1": _payload()})
     if outcome is None:  # released detached or deleted: an agent with the name now is a new one (name reuse)
@@ -1183,12 +1192,12 @@ def test_receipt_recovery_is_bound_to_the_released_identity(tmp_path, monkeypatc
     else:
         with pytest.raises(ownership.AgentError, match=outcome):
             ownership.restore_ids(prod, "prod", api)
-    assert not (prod / ".genie_space_id_sales").exists()
+    assert not _rec(prod, ".genie_space_id_sales").exists()
 
 
 def test_recovery_refuses_an_id_whose_live_config_drifted_or_is_gone(tmp_path, monkeypatch):
     prod = _deterministic_prod(tmp_path, monkeypatch)
-    (prod / ".genie_space_id_sales").unlink()
+    _rec(prod, ".genie_space_id_sales").unlink()
     _step9_receipt(prod, "c1", {"Sales": _released()})
     with pytest.raises(ownership.AgentError, match="isn't the one release last pushed"):
         ownership.restore_ids(prod, "prod", FakeGenie({"prod-1": {"version": 2, "someone": "else"}}))
@@ -1209,7 +1218,7 @@ def test_a_planned_new_agent_refuses_an_id_file_that_appeared_before_release(tmp
     prod, api, manifest = _new_agent_manifest(tmp_path, monkeypatch)
     entry = json.loads(manifest.read_text())["agents"]["agents"]["Sales"]
     assert entry["binding"] == "create" and entry["genie_space_id"] == ""
-    (prod / ".genie_space_id_sales").write_text("someone-else\n")  # pre-created between plan and release
+    _rec(prod, ".genie_space_id_sales").write_text("someone-else\n")  # pre-created between plan and release
     with pytest.raises(ownership.AgentError, match="appeared after release-plan"):
         ownership.preflight(prod, "prod", manifest, api)
     with pytest.raises(ownership.AgentError, match="didn't create"):
@@ -1221,7 +1230,7 @@ def test_a_planned_new_agent_is_pushed_only_if_the_saved_create_made_it(tmp_path
     prod, api, manifest = _new_agent_manifest(tmp_path, monkeypatch)
     ownership.preflight(prod, "prod", manifest, api)
     _created(prod, "other", "x")  # a create resource, but not this agent's
-    (prod / ".genie_space_id_sales").write_text("created-1\n")
+    _rec(prod, ".genie_space_id_sales").write_text("created-1\n")
     with pytest.raises(ownership.AgentError, match="didn't create 'Sales'"):
         ownership.sync_manifest(prod, "prod", manifest, api)
     _created(prod, "sales", "created-1")
@@ -1252,7 +1261,7 @@ def test_preflight_refuses_any_agent_drift_before_anything_is_applied(tmp_path, 
     if drift == "live":
         api.spaces["prod-1"] = {"version": 1, "edited": True}
     elif drift == "id":
-        (prod / ".genie_space_id_sales").write_text("other-1\n")
+        _rec(prod, ".genie_space_id_sales").write_text("other-1\n")
     elif drift == "capture":
         ownership.write_payload({"version": 3}, agent_files.capture_path(prod, "Sales"))
     elif drift == "agent":
@@ -1394,9 +1403,9 @@ def test_make_release_refuses_agent_drift_before_any_tag_policy_or_saved_plan(tm
     if drift == "live":
         spaces.write_text(json.dumps({"prod-1": {"version": 1, "edited in the prod UI": True}}))
     elif drift == "id":
-        (repo.prod / ".genie_space_id_sales").write_text("other-1\n")  # replaced between plan and release
+        _rec(repo.prod, ".genie_space_id_sales").write_text("other-1\n")  # replaced between plan and release
     else:
-        (repo.prod / ".genie_space_id_sales").write_text("pre-created-1\n")  # planned as a new agent
+        _rec(repo.prod, ".genie_space_id_sales").write_text("pre-created-1\n")  # planned as a new agent
     result = make("_release-manifest", "prod", f"MANIFEST={manifest}", stubs={"agent_ownership.py": str(script)})
     assert result.returncode != 0 and "nothing was applied" in result.stderr, result.stdout + result.stderr
     names = make.names()
@@ -1469,17 +1478,17 @@ def test_receipt_recovery_enforces_the_recorded_binding_and_create_resource(tmp_
         _created(prod, "sales", "prod-1", id_file=tmp_path / "attacker" / ".genie_space_id_sales")
     elif state == "other-record":
         _created(prod, "sales", "prod-1", record="prod-other")
-    (prod / ".genie_space_id_sales").unlink()
+    _rec(prod, ".genie_space_id_sales").unlink()
     _step9_receipt(prod, "c1", {"Sales": _released(**entry)})
     api = FakeGenie({"prod-1": _payload()})  # its live config matches: binding alone must refuse
     with pytest.raises(ownership.AgentError, match=message):
         ownership.restore_ids(prod, "prod", api)
-    assert not (prod / ".genie_space_id_sales").exists()
+    assert not _rec(prod, ".genie_space_id_sales").exists()
 
 
 def test_receipt_recovery_accepts_a_matching_binding(tmp_path, monkeypatch):
     prod = _deterministic_prod(tmp_path, monkeypatch)
-    (prod / ".genie_space_id_sales").unlink()
+    _rec(prod, ".genie_space_id_sales").unlink()
     _step9_receipt(prod, "c1", {"Sales": _released(binding="create", create_resource_id="tfdata-sales")})
     assert ownership.restore_ids(prod, "prod", FakeGenie({"prod-1": _payload()})) == ["Sales"]
 
@@ -1500,7 +1509,7 @@ def test_a_created_agent_needs_its_exact_id_file_and_the_id_its_create_recorded(
             ownership.sync_manifest(prod, "prod", manifest, api)
         assert "PATCH" not in api.methods(), case
     prod, api, manifest = _new_agent_manifest(tmp_path / "key", monkeypatch)
-    _created(prod, "sales_2", "created-1", id_file=prod / ".genie_space_id_sales")
+    _created(prod, "sales_2", "created-1", id_file=_rec(prod, ".genie_space_id_sales"))
     with pytest.raises(ownership.AgentError, match="under key 'sales_2', not 'sales'"):
         ownership.sync_manifest(prod, "prod", manifest, api)
     prod, api, manifest = _new_agent_manifest(tmp_path / "missing", monkeypatch)
@@ -1533,8 +1542,8 @@ def test_two_agents_swapping_id_files_are_refused_before_anything(tmp_path, monk
     _created(prod, "ops", "ops-1")
     api = FakeGenie({"prod-1": {"version": 1}, "ops-1": {"version": 1}})
     manifest = _manifest(tmp_path, prod, api)
-    (prod / ".genie_space_id_sales").write_text("ops-1\n")
-    (prod / ".genie_space_id_ops").write_text("prod-1\n")
+    _rec(prod, ".genie_space_id_sales").write_text("ops-1\n")
+    _rec(prod, ".genie_space_id_ops").write_text("prod-1\n")
     with pytest.raises(ownership.AgentError, match="nothing is ever pushed to another agent"):
         ownership.preflight(prod, "prod", manifest, api)
     with pytest.raises(ownership.AgentError, match="nothing is ever pushed to another agent"):
@@ -1566,7 +1575,7 @@ def test_the_receipt_refuses_a_created_agent_whose_id_file_moved_after_sync(tmp_
     repo.commit({"aws/envs/prod/agents/Sales.auto.tfvars": 'genie_space_id = ""\nacl_groups = ["a"]\n',
                  "aws/envs/prod/agents/Sales.space.json": capture})
     _created(repo.prod, "sales", "prod-9")
-    (repo.prod / ".genie_space_id_sales").write_text("someone-else\n")
+    _rec(repo.prod, ".genie_space_id_sales").write_text("someone-else\n")
     manifest = tmp_path / "m.json"
     manifest.write_text(json.dumps({
         "kind": "release-manifest", "version": rg.VERSION, "id": "m", "env": "prod", "commit": repo.head(),
@@ -1658,6 +1667,7 @@ def _split(tmp_path: Path, name: str, env_cfg: str, file_names: str = "") -> Pat
 
 
 def test_a_renamed_split_file_keeps_its_key_for_ids_markers_acks_state_and_receipts(tmp_path, monkeypatch):
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     dev = _split(tmp_path, "dev", 'genie_spaces = [{ genie_space_id = "01ef0c" }]\n', "01ef0c=walkthrough")
     agent = agent_files.load(dev, "walkthrough")
@@ -1679,6 +1689,7 @@ def test_a_renamed_split_file_keeps_its_key_for_ids_markers_acks_state_and_recei
 
 def _alike_prod(tmp_path, monkeypatch) -> tuple[Path, dict]:
     """A promoted prod whose two titles sanitize alike, split: 'A b' is a_b, 'a-b' is a_b--1."""
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     prod = _split(tmp_path, "prod", 'governance_mode = "deterministic"\npromote_from = "dev"\n'
                   'genie_spaces = [{ name = "A b", acl_groups = ["a"] }, { name = "a-b", acl_groups = ["a"] }]\n')
@@ -1708,11 +1719,11 @@ def test_recovery_of_one_of_two_alike_titles_restores_only_its_own_id_file(tmp_p
     sha = ownership._sha(ownership.render(payloads["a-b"]))
     _step9_receipt(prod, "c1", {"a-b": _released("prod-second", key="a_b--1", config_sha256=sha,
                                                  create_resource_id="tfdata-a_b--1")})
-    (prod / ".genie_space_id_a_b--1").unlink()
+    _rec(prod, ".genie_space_id_a_b--1").unlink()
     api = FakeGenie({"prod-second": payloads["a-b"], "prod-first": payloads["A b"]})
     assert ownership.restore_ids(prod, "prod", api) == ["a-b"]
-    assert (prod / ".genie_space_id_a_b--1").read_text() == "prod-second\n"
-    assert (prod / ".genie_space_id_a_b").read_text() == "prod-first\n"
+    assert _rec(prod, ".genie_space_id_a_b--1").read_text() == "prod-second\n"
+    assert _rec(prod, ".genie_space_id_a_b").read_text() == "prod-first\n"
 
 
 def test_detaching_one_of_two_alike_titles_forgets_only_its_addresses(tmp_path, monkeypatch):
@@ -1723,6 +1734,7 @@ def test_detaching_one_of_two_alike_titles_forgets_only_its_addresses(tmp_path, 
 
 
 def test_a_new_split_agent_is_checked_against_live_agents_by_its_display_title(tmp_path, monkeypatch):
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     title = "Walk (prod_cat.demo)"
     prod = _split(tmp_path, "prod", 'governance_mode = "deterministic"\npromote_from = "dev"\n'

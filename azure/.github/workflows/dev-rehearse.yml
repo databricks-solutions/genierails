@@ -87,9 +87,13 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      # The runner context is not available in a job-level env.
+      # The runner context is not available in a job-level env. GenieRails
+      # never creates a missing GENIERAILS_STATE_DIR (a mistyped one must not
+      # read as empty), so this throwaway one is created here.
       - name: Use the runner's temp dir for runtime files
-        run: echo "GENIERAILS_STATE_DIR=$RUNNER_TEMP/genierails-state" >> "$GITHUB_ENV"
+        run: |
+          mkdir -p -m 700 "$RUNNER_TEMP/genierails-state"
+          echo "GENIERAILS_STATE_DIR=$RUNNER_TEMP/genierails-state" >> "$GITHUB_ENV"
 
       # A re-run of an older run keeps its run_number, so the queue alone
       # would let it apply older code after a newer commit rehearsed: only

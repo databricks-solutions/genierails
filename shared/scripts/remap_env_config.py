@@ -515,10 +515,12 @@ def main():
                 f"         ENVS_DIR=\"$PWD/envs\" ../shared/scripts/terraform_layer.sh workspace {env} "
                 f"state-mv '{address}[{json.dumps(old_key)}]' '{address}[{json.dumps(new_key)}]'"
             )
-        id_file = Path(dest_env_dir) / f".genie_space_id_{old_key}"
+        from scripts.state_layout import record_path
+
+        id_file = record_path(Path(dest_env_dir), f".genie_space_id_{old_key}")
         if id_file.exists():
             print(f"         mv '{id_file}' '{id_file.with_name(f'.genie_space_id_{new_key}')}'")
-        adopted_marker = Path(dest_env_dir) / f".genie_adopted_{old_key}"
+        adopted_marker = record_path(Path(dest_env_dir), f".genie_adopted_{old_key}")
         if adopted_marker.exists():
             print(
                 f"         mv '{adopted_marker}' "

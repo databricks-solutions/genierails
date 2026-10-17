@@ -98,7 +98,9 @@ data_access root refuses, at plan time, any change to a live deterministic mask
 phases (`policy_stage`), so a raw `terraform apply` can't make one in one shot.
 
 **Journal.** `<env>/data_access/.policy_generations/journal.json`, next to the
-layer's state, records the active generation, the one waiting to retire and
+layer's state (with `GENIERAILS_STATE_DIR` set, the same path under
+`$GENIERAILS_STATE_DIR/<cloud>/<env>/records/`, so a fresh checkout sees it),
+records the active generation, the one waiting to retire and
 any unfinished transition with its completed phases. Writes are atomic.
 
 - A failed or crashed run is **resumed** by re-running the same command on the

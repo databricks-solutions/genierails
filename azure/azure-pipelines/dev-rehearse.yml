@@ -121,6 +121,8 @@ stages:
                       export ARM_OIDC_TOKEN="$idToken"
                       export ARM_CLIENT_ID="$servicePrincipalId"
                       export ARM_TENANT_ID="$tenantId"
+                      # GenieRails never creates a missing GENIERAILS_STATE_DIR; this throwaway one is made here.
+                      mkdir -p -m 700 "$GENIERAILS_STATE_DIR"
                       make rehearse ENV=dev
                   env:
                     DATABRICKS_AUTH_TYPE: azure-devops-oidc

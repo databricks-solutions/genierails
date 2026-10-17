@@ -250,7 +250,15 @@ locals {
   # always plans, and an unchanged ACL never errors once the gate expires.
   # Unreadable state means nothing is on record (fail closed).
   _own_state_file = var.workspace_state_file != "" ? var.workspace_state_file : "${var.env_dir}/terraform.tfstate"
-  _own_state      = fileexists(local._own_state_file) ? try(jsondecode(file(local._own_state_file)), null) : null
+  # Where the Genie ID files are: env_dir, or with GENIERAILS_STATE_DIR the
+  # state dir's records/ (genie_id_dir, set by terraform_layer.sh). There,
+  # make migrate-state-dir records each old in-checkout path the state still
+  # names, so a create resource applied from the checkout is still this
+  # agent's (and its handoff kept) until the next apply records the new path.
+  genie_id_dir   = var.genie_id_dir != "" ? var.genie_id_dir : var.env_dir
+  _genie_moves   = "${local.genie_id_dir}/.genie_id_moves.json"
+  genie_id_moves = var.genie_id_dir != "" && fileexists(local._genie_moves) ? jsondecode(file(local._genie_moves)) : {}
+  _own_state     = fileexists(local._own_state_file) ? try(jsondecode(file(local._own_state_file)), null) : null
   retain_auto_warehouse = anytrue([
     for resource in try(local._own_state.resources, []) :
     try(resource.module, "") == "module.workspace" &&
@@ -274,6 +282,11 @@ locals {
   # exactly one current object counts as nothing applied.
   _applied_candidates = { for instance in local._state_instances : "${instance.name}|${instance.key}" => instance.attrs... }
   _applied            = { for key, attrs in local._applied_candidates : key => attrs[0] if length(attrs) == 1 }
+  # The ID file path each create resource recorded (genie_id_moves maps a moved one).
+  _created_id_files = {
+    for key, space in local.merged_spaces :
+    key => try(local._applied["genie_space|${key}"].input.value.id_file, local._applied["genie_space|${key}"].input.id_file, "")
+  }
   # Create-to-ID handoffs the state supports: a space now configured by ID
   # whose create-path agent (same create ID, host and ID-file path) is
   # applied. It is a handoff only while that ID file holds the configured ID;
@@ -288,12 +301,12 @@ locals {
     && try(local._applied["genie_space_acls_created|${key}"].triggers.space_create_id, "") != ""
     && try(local._applied["genie_space_acls_created|${key}"].triggers.space_create_id, "") == try(local._applied["genie_space|${key}"].id, "-")
     && try(local._applied["genie_space|${key}"].triggers_replace.value.host, local._applied["genie_space|${key}"].triggers_replace.host, "") == var.databricks_workspace_host
-    && try(local._applied["genie_space|${key}"].input.value.id_file, local._applied["genie_space|${key}"].input.id_file, "") == "${var.env_dir}/.genie_space_id_${key}"
+    && lookup(local.genie_id_moves, local._created_id_files[key], local._created_id_files[key]) == "${local.genie_id_dir}/.genie_space_id_${key}"
   }
   created_acl_handoffs = {
     for key, handoff in local.created_acl_handoff_candidates : key => handoff
-    if fileexists("${var.env_dir}/.genie_space_id_${key}")
-    && (fileexists("${var.env_dir}/.genie_space_id_${key}") ? try(trimspace(file("${var.env_dir}/.genie_space_id_${key}")), "") == local.merged_spaces[key].genie_space_id : true)
+    if fileexists("${local.genie_id_dir}/.genie_space_id_${key}")
+    && (fileexists("${local.genie_id_dir}/.genie_space_id_${key}") ? try(trimspace(file("${local.genie_id_dir}/.genie_space_id_${key}")), "") == local.merged_spaces[key].genie_space_id : true)
   }
   applied_can_run_groups = {
     for key, space in local.merged_spaces : key => [
@@ -373,6 +386,14 @@ variable "workspace_state_file" {
 }
 
 variable "data_access_state_file" {
+  type    = string
+  default = ""
+}
+
+# The Genie ID files' dir when GENIERAILS_STATE_DIR is set (the env's
+# records/ there); empty (the default) means env_dir. Set only by
+# terraform_layer.sh.
+variable "genie_id_dir" {
   type    = string
   default = ""
 }
@@ -840,7 +861,7 @@ module "workspace" {
   warehouse_name                   = var.warehouse_name
   retain_auto_warehouse            = local.retain_auto_warehouse
   genie_spaces                     = local.merged_spaces
-  genie_id_file_prefix             = "${var.env_dir}/.genie_space_id"
+  genie_id_file_prefix             = "${local.genie_id_dir}/.genie_space_id"
   genie_script_path                = "${local.project_root}/scripts/genie_space.sh"
   record_created_agent_ids         = local.deterministic
   genie_id_reader_path             = "${local.project_root}/scripts/genie_id_record.py"

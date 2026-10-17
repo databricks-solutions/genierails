@@ -116,7 +116,8 @@ stages:
                     awsCredentials: genierails-dev-state-aws
                     regionName: $(DEV_STATE_REGION)
                     scriptType: inline
-                    inlineScript: make rehearse ENV=dev
+                    # GenieRails never creates a missing GENIERAILS_STATE_DIR; this throwaway one is made here.
+                    inlineScript: mkdir -p -m 700 "$GENIERAILS_STATE_DIR" && make rehearse ENV=dev
                     workingDirectory: aws
                   env:
                     DATABRICKS_AUTH_TYPE: azure-devops-oidc

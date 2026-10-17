@@ -237,6 +237,7 @@ def test_state_mv_backups_go_to_the_env_state_dir_never_into_shared_roots(tmp_pa
     environ |= {"LAYER_ENV_DIR": str(env_dir / "data_access"), "ENVS_DIR": str(env_dir.parent),
                 "TF_IN_AUTOMATION": "1"}
     if state_dir:
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
         environ["GENIERAILS_STATE_DIR"] = str(tmp_path / "state")
     runner = shared / "scripts" / "terraform_layer.sh"
 

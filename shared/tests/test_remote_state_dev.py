@@ -201,6 +201,7 @@ def test_remote_root_is_rebuilt_from_the_current_checkout(tmp_path, monkeypatch)
     (source / "main.tf").write_text('terraform {\n  backend "local" {}\n}\n')
     (source / "old.tf").write_text("# removed upstream later\n")
     env = _remote("aws", tmp_path / "aws" / "envs" / "dev")
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
 
     root = state_layout.prepare_root(env, "dev", "workspace", source)
@@ -228,6 +229,7 @@ def test_remote_root_is_rebuilt_from_the_current_checkout(tmp_path, monkeypatch)
 @pytest.mark.parametrize("layer", ["data_access", "workspace"])
 def test_remote_root_of_the_real_layers_has_what_they_reference(tmp_path, monkeypatch, layer):
     env = _remote("aws", tmp_path / "aws" / "envs" / "dev")
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     root = state_layout.prepare_root(env, "dev", layer, SHARED / "roots" / layer)
     project_root = (root / ".." / "..").resolve()
@@ -287,6 +289,7 @@ def _write_state(path: Path, *, serial=1) -> None:
 def state_dir_env(tmp_path, monkeypatch):
     env = tmp_path / "aws" / "envs" / "dev"
     (env / "data_access").mkdir(parents=True)
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     layers = tmp_path / "state" / "aws" / "dev" / "layers"
     _write_state(layers / "data_access" / "terraform.tfstate", serial=3)
@@ -317,6 +320,7 @@ def test_every_reader_follows_the_state_dir(state_dir_env):
 def test_a_state_left_in_the_checkout_is_a_split_not_an_empty_env(tmp_path, monkeypatch):
     env = tmp_path / "aws" / "envs" / "dev"
     _write_state(env / "data_access" / "terraform.tfstate")
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     with pytest.raises(RuntimeError, match="migrate-state-dir"):
         state_layout.state_json(env, "dev", "data_access")
@@ -405,12 +409,14 @@ def test_a_receipt_copied_from_another_store_is_ignored(tmp_path, monkeypatch):
     cloud = tmp_path / "aws"
     (cloud / "envs" / "dev").mkdir(parents=True)
     commit = "a" * 40
+    (tmp_path / "ci-runner").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "ci-runner"))
     receipt = {"kind": "rehearse", "version": rg.VERSION, "env": "dev", "commit": commit, "result": "passed",
                "clean_tree": True, "fingerprint": "f", "created_at": rg._now(), "store": rg.store_id(cloud, "dev")}
     written = rg._write_rehearse(cloud, "dev", receipt)
     assert rg.passing_receipt(cloud, "dev", commit)
 
+    (tmp_path / "deployment-machine").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "deployment-machine"))
     copied = rg.rehearse_dir(cloud, "dev") / commit / written.name  # e.g. a downloaded CI artifact
     copied.parent.mkdir(parents=True)
@@ -446,6 +452,7 @@ def _legacy_env(tmp_path) -> Path:
 def test_migration_moves_state_and_records_and_leaves_a_marker(tmp_path, monkeypatch):
     env = _legacy_env(tmp_path)
     target = tmp_path / "state" / "aws" / "dev"
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     assert state_layout.migrate(env, "dev") == 4
     assert (target / "layers/workspace/terraform.tfstate").read_text() == '{"serial": 1}'
@@ -469,6 +476,7 @@ def test_migration_moves_state_and_records_and_leaves_a_marker(tmp_path, monkeyp
 def test_migration_refuses_while_either_lock_is_held(tmp_path, monkeypatch, held):
     env = _legacy_env(tmp_path)
     state_dir = str(tmp_path / "state")
+    Path(state_dir).mkdir()  # GenieRails never creates a missing state dir
     lock_dir = "" if held == "in-checkout" else state_dir
     ok, _, _ = environment_lock.acquire(env, os.getpid(), "rehearse", state_dir=lock_dir)
     assert ok
@@ -484,6 +492,7 @@ def test_migration_refuses_while_either_lock_is_held(tmp_path, monkeypatch, held
 def test_migration_resumes_after_a_crash_and_never_overwrites(tmp_path, monkeypatch):
     env = _legacy_env(tmp_path)
     target = tmp_path / "state" / "aws" / "dev" / "layers"
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     # A crash after copying the workspace state, before removing its source,
     # and another mid-copy of the data_access state.
@@ -509,6 +518,7 @@ def test_migration_needs_the_state_dir(tmp_path):
 def test_state_dir_isolates_state_receipts_and_lock(tmp_path, monkeypatch):
     env = tmp_path / "aws" / "envs" / "dev"
     env.mkdir(parents=True)
+    (tmp_path / "outside").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "outside"))
     assert state_layout.env_state(env, "dev") == tmp_path / "outside" / "aws" / "dev"
     assert rg.rehearse_dir(tmp_path / "aws", "dev").is_relative_to(tmp_path / "outside")
@@ -599,6 +609,7 @@ def test_scheduled_job_move_uses_the_state_dir_files(tmp_path, fake_terraform, m
     (env / "data_access").mkdir(parents=True)
     layers = tmp_path / "state" / "aws" / "dev" / "layers"
     _job_state(layers / "workspace" / "terraform.tfstate")
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     _use_fake(monkeypatch, fake_terraform)
     assert move_scheduled_job.move(env, env / "data_access") == 0
@@ -642,6 +653,7 @@ def test_agent_readers_follow_the_state_dir_and_fail_closed(tmp_path, monkeypatc
 
     env = tmp_path / "aws" / "envs" / "prod"
     env.mkdir(parents=True)
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     state = {"resources": [{"module": "module.workspace", "mode": "managed", "type": "terraform_data",
                             "name": "genie_space", "instances": [{"index_key": "sales", "attributes": {"id": "t"}}]}]}
@@ -689,6 +701,7 @@ def _fd_path(fd: int) -> str:
 
 def test_migration_makes_the_marker_durable_before_removing_any_source(tmp_path, monkeypatch):
     env = _legacy_env(tmp_path)
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     monkeypatch.setenv("GENIERAILS_STATE_DIR", str(tmp_path / "state"))
     events = []
     real_fsync, real_fsync_dir, real_unlink = os.fsync, state_layout._fsync_dir, Path.unlink
@@ -774,7 +787,7 @@ def test_state_readers_import_the_helper_without_help_from_other_modules(tmp_pat
 
 # -- the runner's own variables can't be overridden --------------------------
 
-RUNNER_VARS = ("env_dir", "workspace_state_file", "data_access_state_file")
+RUNNER_VARS = ("env_dir", "workspace_state_file", "data_access_state_file", "genie_id_dir")
 OVERRIDE_FORMS = ("-var=NAME=", "-var NAME=", "--var=NAME=", "-var-file=FILE", "-var-file FILE",
                   "env tfvars", "TF_CLI_ARGS", "TF_CLI_ARGS_plan")
 
@@ -806,6 +819,7 @@ def test_a_caller_cannot_set_the_runners_state_variables(tmp_path, fake_terrafor
         (layer_dir / "abac.auto.tfvars").write_text(f'{name} = "{forged}"\n')
     else:
         extra[form] = f"-var={name}={forged}"
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     env = _hermetic_env(tmp_path, PATH=fake_terraform["PATH"], FAKE_TF_LOG=fake_terraform["FAKE_TF_LOG"],
                         FAKE_TF_STATE=fake_terraform["FAKE_TF_STATE"], LAYER_ENV_DIR=str(layer_dir),
                         ENVS_DIR=str(dev.parent), GENIERAILS_STATE_DIR=str(tmp_path / "state"), **extra)
@@ -834,6 +848,7 @@ def test_the_runners_variables_come_after_every_caller_argument(tmp_path, fake_t
     dev = tmp_path / "aws" / "envs" / "dev"
     (dev / "data_access").mkdir(parents=True)
     extra = {"GENIERAILS_STATE_DIR": str(tmp_path / "state")} if layout == "state dir" else {}
+    (tmp_path / "state").mkdir()  # GenieRails never creates a missing state dir
     env = _hermetic_env(tmp_path, PATH=fake_terraform["PATH"], FAKE_TF_LOG=fake_terraform["FAKE_TF_LOG"],
                         FAKE_TF_STATE=fake_terraform["FAKE_TF_STATE"], LAYER_ENV_DIR=str(dev),
                         ENVS_DIR=str(dev.parent), **extra)
@@ -845,5 +860,5 @@ def test_the_runners_variables_come_after_every_caller_argument(tmp_path, fake_t
                    and a.split("=", 2)[1] in RUNNER_VARS]
     caller = [plan.index("-var=policy_stage=switch"), plan.index("-no-color")]
     assert runner_vars and min(runner_vars) > max(caller), plan
-    expected = 3 if layout == "state dir" else 1
+    expected = 4 if layout == "state dir" else 1  # + genie_id_dir (the state dir's records/)
     assert len(runner_vars) == expected, plan

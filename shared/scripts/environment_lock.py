@@ -45,6 +45,10 @@ def lock_path(env_dir: Path, state_dir: str | None = None) -> Path:
         base = state_dir
     cloud = Path(env_dir).resolve().parent.parent
     if base:
+        # Never create a mistyped or unmounted state dir by taking a lock in it.
+        if not (Path(base).expanduser().is_dir() and os.access(Path(base).expanduser(), os.R_OK | os.X_OK)):
+            raise RuntimeError(f"GENIERAILS_STATE_DIR={base} does not exist or can't be read; fix the path "
+                               "(a new one is created by make migrate-state-dir)")
         return Path(base).expanduser().resolve() / cloud.name / Path(env_dir).name / "locks" / ".governance.lock"
     if (Path(env_dir) / "remote_state.hcl").is_file():
         return cloud / ".genierails-state" / Path(env_dir).name / "locks" / ".governance.lock"

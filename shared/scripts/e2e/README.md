@@ -30,7 +30,8 @@ python3 shared/scripts/e2e/driver.py --cloud aws --dry-run \
 ```
 
 Live execution is intentionally explicit and must use the persistent v1
-deployment checkout and an external state directory:
+deployment checkout and an external state directory, which must already exist
+(GenieRails never creates a missing `GENIERAILS_STATE_DIR`):
 
 ```bash
 python3 shared/scripts/e2e/driver.py --cloud aws \

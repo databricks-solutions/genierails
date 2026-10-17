@@ -33,19 +33,21 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from state_layout import state_json  # noqa: E402
+from state_layout import record_path, state_json  # noqa: E402
 
 LEGACY_TYPE = "null_resource"
 LEGACY_NAME = "genie_space_create"
 
 
 def id_file_for(env_dir: Path, key: str) -> Path:
-    return env_dir / f".genie_space_id_{key}"
+    """The agent's ID file: envs/<env>, or the state dir's records/ (state_layout.record_path)."""
+    return record_path(env_dir, f".genie_space_id_{key}")
 
 
 def marker_for(env_dir: Path, key: str) -> Path:
-    # Deliberately outside the .genie_space_id_* pattern other tooling globs.
-    return env_dir / f".genie_adopt_required_{key}"
+    # Deliberately outside the .genie_space_id_* pattern other tooling globs;
+    # next to the ID file, where genie_space.sh create looks for it.
+    return record_path(env_dir, f".genie_adopt_required_{key}")
 
 
 def legacy_agents(env_dir: Path) -> list[tuple[str, str]]:
@@ -245,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         legacy = legacy_agents(env_dir)
+        id_files = {key: id_file_for(env_dir, key) for key, _ in legacy}
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"ERROR: {exc}; nothing was applied.", file=sys.stderr)
         return 1
@@ -263,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     out(f"=== Genie adoption preflight ({env_dir.name}): {len(legacy)} legacy agent(s) on {host} ===")
     failed = 0
     for key, recorded_host in legacy:
-        id_file = id_file_for(env_dir, key)
+        id_file = id_files[key]
         agent_id = id_file.read_text().strip() if id_file.is_file() else ""
         if not agent_id:
             status, problem = "-", "ID file missing or empty"
@@ -282,13 +285,14 @@ def main(argv: list[str] | None = None) -> int:
             print(line)
         print(
             f"ERROR: {failed} legacy Genie agent(s) can't be adopted; nothing was applied.\n"
-            f"  Each needs {env_dir}/.genie_space_id_<key> holding the existing agent ID (it is\n"
+            f"  Each needs {id_file_for(env_dir, '<key>')} holding the existing agent ID (it is\n"
             f"  in the agent URL), and the agent must answer GET 200 on {host}.\n"
             f"  Fix that, then re-run: make genie-adopt-preflight ENV={env_dir.name}"
         )
         return 1
     if args.arm:
         for key, _ in legacy:
+            marker_for(env_dir, key).parent.mkdir(parents=True, exist_ok=True)
             marker_for(env_dir, key).write_text("adoption required\n")
     out("  All legacy agents will be adopted with their current IDs; none will be created.")
     return 0

@@ -146,6 +146,13 @@ CLOUD_ROOT  = Path(os.environ.get("CLOUD_ROOT", MODULE_ROOT.parent / _default_cl
 # changing it once in main() propagates everywhere.
 ENVS_DIR    = Path(os.environ.get("ENVS_DIR", CLOUD_ROOT / "envs"))
 
+
+def _genie_id_files(env_dir: Path, pattern: str) -> list[Path]:
+    """The env's Genie ID files matching ``pattern``: in envs/<env>, or the state dir's records/."""
+    from state_layout import records_dir
+
+    return list(records_dir(Path(env_dir)).glob(pattern))
+
 _parallel_state = os.environ.get("_PARALLEL_STATE_FILE", "")
 PROVISION_STATE_FILE = Path(_parallel_state) if _parallel_state else SCRIPT_DIR / f".test_env_state.{_default_cloud}.json"
 
@@ -2286,7 +2293,7 @@ def _assert_not_declared_hcl(path: Path, key: str, description: str) -> None:
 def _assert_genie_space_id_file(env: str, space_name: str) -> None:
     """Check that a .genie_space_id_<key> file was created by make apply."""
     key = re.sub(r"[^a-z0-9]+", "_", space_name.lower()).strip("_")
-    candidates = list((ENVS_DIR / env).glob(f".genie_space_id_{key}*"))
+    candidates = list(_genie_id_files((ENVS_DIR / env), f".genie_space_id_{key}*"))
     if not candidates:
         # Also accept the legacy single-space file
         legacy = ENVS_DIR / env / ".genie_space_id"
@@ -2302,7 +2309,7 @@ def _assert_genie_space_id_file(env: str, space_name: str) -> None:
 def _read_genie_space_id(env: str, space_name: str) -> str:
     """Read the Genie agent object ID from the .genie_space_id_<key> file."""
     key = re.sub(r"[^a-z0-9]+", "_", space_name.lower()).strip("_")
-    candidates = list((ENVS_DIR / env).glob(f".genie_space_id_{key}*"))
+    candidates = list(_genie_id_files((ENVS_DIR / env), f".genie_space_id_{key}*"))
     if not candidates:
         legacy = ENVS_DIR / env / ".genie_space_id"
         if legacy.exists():
@@ -3437,7 +3444,7 @@ genie_spaces = [
     _make(f"apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     _step("Asserting space NOT created by Terraform (no .genie_space_id_* file)")
-    id_files = list((ENVS_DIR / env).glob(".genie_space_id_*"))
+    id_files = list(_genie_id_files((ENVS_DIR / env), ".genie_space_id_*"))
     legacy   = ENVS_DIR / env / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
@@ -3591,7 +3598,7 @@ uc_tables = [
         )
     print(f"  {_green('PASS')}  data_access/terraform.tfstate exists in '{gov_env}' env")
 
-    id_files_gov = list(gov_env_dir.glob(".genie_space_id_*"))
+    id_files_gov = list(_genie_id_files(gov_env_dir, ".genie_space_id_*"))
     if id_files_gov:
         raise AssertionError(
             f"apply-governance created a Genie agent in '{gov_env}' env — expected none. "
@@ -3631,7 +3638,7 @@ uc_tables = [
 
     _step("Asserting BU env: .genie_space_id_* created, no data_access state")
     bu_env_dir = ENVS_DIR / bu_env
-    id_files_bu = list(bu_env_dir.glob(".genie_space_id_*"))
+    id_files_bu = list(_genie_id_files(bu_env_dir, ".genie_space_id_*"))
     if not id_files_bu:
         raise AssertionError(
             f"apply-genie did not create a .genie_space_id_* file in '{bu_env}' env. "
@@ -3673,7 +3680,7 @@ uc_tables = [
 
     _step("Asserting second BU env: .genie_space_id_* created, governance state unchanged")
     bu_clin_env_dir = ENVS_DIR / bu_clin_env
-    id_files_clin = list(bu_clin_env_dir.glob(".genie_space_id_*"))
+    id_files_clin = list(_genie_id_files(bu_clin_env_dir, ".genie_space_id_*"))
     if not id_files_clin:
         raise AssertionError(
             f"apply-genie did not create a .genie_space_id_* file in '{bu_clin_env}' env. "
@@ -3726,7 +3733,7 @@ uc_tables = [
 
     _step("Asserting prod BU env: .genie_space_id_* created, no data_access state")
     bu_prod_env_dir = ENVS_DIR / bu_prod_env
-    id_files_prod = list(bu_prod_env_dir.glob(".genie_space_id_*"))
+    id_files_prod = list(_genie_id_files(bu_prod_env_dir, ".genie_space_id_*"))
     if not id_files_prod:
         raise AssertionError(
             f"apply-genie did not create a .genie_space_id_* file in '{bu_prod_env}' env. "
@@ -3818,7 +3825,7 @@ def scenario_abac_only(
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     _step("Asserting Phase 1: no Genie agent created, data_access state exists")
-    id_files = list(env_dir.glob(".genie_space_id_*"))
+    id_files = list(_genie_id_files(env_dir, ".genie_space_id_*"))
     legacy   = env_dir / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
@@ -3979,7 +3986,7 @@ genie_spaces = [
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     _step("Asserting no .genie_space_id_* files — both spaces attached, not created")
-    id_files = list((ENVS_DIR / env).glob(".genie_space_id_*"))
+    id_files = list(_genie_id_files((ENVS_DIR / env), ".genie_space_id_*"))
     legacy   = ENVS_DIR / env / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
@@ -4416,7 +4423,7 @@ genie_only = true
     print(f"  {_green('PASS')}  No data_access/terraform.tfstate in '{env}' — workspace layer only")
 
     # 4d. Genie agent accessible via API (read space by ID using reduced SP)
-    id_files = list(env_dir.glob(".genie_space_id_*"))
+    id_files = list(_genie_id_files(env_dir, ".genie_space_id_*"))
     if id_files:
         space_id = id_files[0].read_text().strip()
         if space_id:
@@ -4588,7 +4595,7 @@ genie_spaces = [
 
     # Space was imported (attached via genie_space_id), not created — no .genie_space_id_* file
     _step("Asserting space NOT created by Terraform (attached via genie_space_id)")
-    id_files = list((ENVS_DIR / env).glob(".genie_space_id_*"))
+    id_files = list(_genie_id_files((ENVS_DIR / env), ".genie_space_id_*"))
     legacy = ENVS_DIR / env / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
@@ -4665,7 +4672,7 @@ genie_spaces = [
 
     # 5a. Prod workspace applied — space may be attached (promoted genie_space_id)
     # or newly created (manual setup without genie_space_id).  Either is valid.
-    prod_id_files = list(prod_env_dir.glob(".genie_space_id_*"))
+    prod_id_files = list(_genie_id_files(prod_env_dir, ".genie_space_id_*"))
     if prod_id_files:
         print(f"  {_green('PASS')}  .genie_space_id_* file present in '{prod_env}' env: "
               + ", ".join(f.name for f in prod_id_files))
@@ -5595,7 +5602,7 @@ genie_spaces = [
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     _step("Asserting space NOT created by Terraform (no .genie_space_id_* file)")
-    id_files = list((ENVS_DIR / env).glob(".genie_space_id_*"))
+    id_files = list(_genie_id_files((ENVS_DIR / env), ".genie_space_id_*"))
     legacy = ENVS_DIR / env / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
@@ -5884,7 +5891,7 @@ genie_spaces = [
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     _step("Asserting space NOT created by Terraform (no .genie_space_id_* file)")
-    id_files = list((ENVS_DIR / env).glob(".genie_space_id_*"))
+    id_files = list(_genie_id_files((ENVS_DIR / env), ".genie_space_id_*"))
     legacy = ENVS_DIR / env / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(
@@ -6160,7 +6167,7 @@ genie_spaces = [
     _make("apply", f"ENV={env}", retries=3, retry_delay_seconds=120)
 
     _step("Asserting space NOT created by Terraform (no .genie_space_id_* file)")
-    id_files = list((ENVS_DIR / env).glob(".genie_space_id_*"))
+    id_files = list(_genie_id_files((ENVS_DIR / env), ".genie_space_id_*"))
     legacy = ENVS_DIR / env / ".genie_space_id"
     if id_files or legacy.exists():
         raise AssertionError(

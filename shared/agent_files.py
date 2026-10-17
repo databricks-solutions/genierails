@@ -258,7 +258,8 @@ def load_all(env_dir: Path) -> list[dict[str, Any]]:
             raise AgentFileError(
                 f"{settings_path(env_dir, agent['name'])}: genie_space_id must be empty in {env_dir.name}: a "
                 "promoted env's agent IDs live in its Terraform state and release receipt, never in git (to "
-                f"adopt an existing agent, write its ID into {env_dir.name}/.genie_space_id_{agent['key']}; "
+                f"adopt an existing agent, write its ID into its ID file .genie_space_id_{agent['key']}, in "
+                f"{env_dir.name}/ or, with GENIERAILS_STATE_DIR set, the env's records/ there; "
                 "release-plan then shows it)")
     return result
 

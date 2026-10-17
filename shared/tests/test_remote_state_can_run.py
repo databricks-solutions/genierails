@@ -120,6 +120,7 @@ def test_state_dir_root_sees_the_applied_grants_and_keeps_can_run(tmp_path, copy
     for layer, state in (("data_access", _data_access_state()), ("workspace", _workspace_state())):
         (layers / layer).mkdir(parents=True)
         (layers / layer / "terraform.tfstate").write_text(json.dumps(state))
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
     proc = subprocess.run(
         [str(copy / "scripts" / "terraform_layer.sh"), "workspace", "dev", "console"], input=EXPRESSION + "\n",
         env=_tf_env(LAYER_ENV_DIR=str(env), ENVS_DIR=str(env.parent), GENIERAILS_STATE_DIR=str(tmp_path / "state")),
@@ -186,6 +187,7 @@ def test_unreadable_state_refuses_before_terraform_runs(tmp_path, broken):
         for name, state in (("data_access", _data_access_state()), ("workspace", _workspace_state())):
             (layers / name).mkdir(parents=True)
             (layers / name / "terraform.tfstate").write_text("{truncated" if name == layer else json.dumps(state))
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
         extra["GENIERAILS_STATE_DIR"] = str(tmp_path / "state")
     else:
         (env / "remote_state.hcl").write_text('backend = "s3"\nbucket = "b"\nregion = "r"\nuse_lockfile = true\n')

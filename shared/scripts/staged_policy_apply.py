@@ -34,8 +34,9 @@ applies exactly those saved plans and runs those verifications, refusing when
 the journal or the generated config moved since they were planned. Exit 10
 means phases remain for the next release-plan.
 
-The journal (``<env>/data_access/.policy_generations/journal.json``, next to
-the layer's state) records the active generation, the obsolete one waiting
+The journal (``<env>/data_access/.policy_generations/journal.json``, or under
+``$GENIERAILS_STATE_DIR/<cloud>/<env>/records/`` when that is set, so a fresh
+checkout finds it: ``policy_generations.ledger_dir``) records the active generation, the obsolete one waiting
 for retirement and the transition in progress. A failed tighten or switch
 phase restores the previous protection at once. Any unfinished transition
 makes the next run resume it, or refuse when the generated config has moved
@@ -103,7 +104,13 @@ def governance_mode(env_dir: Path) -> str:
 
 
 def journal_path(env_dir: Path) -> Path:
-    return pg.ledger_dir(env_dir) / JOURNAL_NAME
+    """The journal, wherever the ledger lives; a ledger that can't be located safely refuses."""
+    from scripts.state_layout import RecordError
+
+    try:
+        return pg.ledger_dir(env_dir) / JOURNAL_NAME
+    except RecordError as exc:
+        raise Refused(f"the policy journal can't be read: {exc}") from exc
 
 
 def empty_journal() -> dict:

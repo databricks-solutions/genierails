@@ -669,7 +669,8 @@ def _agent_ids(env_dir: Path, config: Mapping[str, Any], state_root: Path, cloud
         if match: found.append((path.stem, match.group(1)))
     for legacy in (env_dir / ".genie_space_id", cloud_root / ".genie_space_id"):
         if legacy.is_file() and legacy.read_text().strip(): found.append(("legacy", legacy.read_text().strip()))
-    for path in sorted(env_dir.glob(".genie_space_id_*")):
+    # ID files: envs/<env>, or the state dir's records/ (GENIERAILS_STATE_DIR, which the driver sets).
+    for path in sorted(env_dir.glob(".genie_space_id_*")) + sorted((state_root / "records").glob(".genie_space_id_*")):
         if path.is_file() and path.read_text().strip():
             found.append((path.name.removeprefix(".genie_space_id_"), path.read_text().strip()))
     for path in sorted(state_root.rglob("*.tfstate")) if state_root.exists() else []:
@@ -1419,6 +1420,8 @@ def main(argv: Sequence[str] | None = None, *, snapshot_factory: Callable[[Path,
     if not args.state_dir: raise SystemExit("live execution requires --state-dir outside the checkout")
     state_dir = args.state_dir.resolve()
     if state_dir == checkout_dir or checkout_dir in state_dir.parents: raise SystemExit("--state-dir must be outside the checkout")
+    # GenieRails never creates a missing GENIERAILS_STATE_DIR (a mistyped one would read as empty).
+    if not state_dir.is_dir(): raise SystemExit(f"--state-dir {state_dir} does not exist; create it (mkdir -m 700) first")
     if reports == checkout_dir or checkout_dir in reports.parents: raise SystemExit("--reports must be outside the checkout")
     # Checked before any log, switch, snapshot or make: nothing runs on a refusal.
     problems = customer_checkout_problems(checkout_dir, args.cloud, args.commit.lower())

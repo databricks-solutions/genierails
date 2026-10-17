@@ -67,6 +67,7 @@ class Repo:
         self.root = tmp_path / "repo"
         self.origin = tmp_path / "origin.git"
         self.state = tmp_path / "state"
+        self.state.mkdir(exist_ok=True)  # GenieRails never creates a missing state dir
         self.env = git_env(tmp_path) | {rg.STATE_DIR_ENV: str(self.state)}
         if monkeypatch is not None:
             for key, value in self.env.items():

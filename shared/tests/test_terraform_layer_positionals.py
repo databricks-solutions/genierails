@@ -25,7 +25,7 @@ from tests.terraform_helpers import TIMEOUT, shared_copy
 
 real_terraform = pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
 
-RUNNER_VARS = ("env_dir", "workspace_state_file", "data_access_state_file")
+RUNNER_VARS = ("env_dir", "workspace_state_file", "data_access_state_file", "genie_id_dir")
 ADDR = "terraform_data.adopted"
 ID = "0f6e2c4a-1111-2222-3333-444455556666"
 
@@ -47,6 +47,11 @@ variable "workspace_state_file" {
 variable "data_access_state_file" {
   type    = string
   default = null
+}
+
+variable "genie_id_dir" {
+  type    = string
+  default = ""
 }
 
 resource "terraform_data" "adopted" {}
@@ -72,6 +77,7 @@ def layer(tmp_path):
                     "GIT_CONFIG_GLOBAL": os.devnull, **extra}
         environ.pop("GENIERAILS_STATE_DIR", None)
         if state_dir is not None:
+            Path(state_dir).mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
             environ["GENIERAILS_STATE_DIR"] = str(state_dir)
         return subprocess.run([str(runner), "workspace", "dev", *args], text=True, capture_output=True,
                               env=environ, timeout=TIMEOUT)
@@ -115,7 +121,7 @@ def test_import_puts_every_option_before_addr_and_id(layer, tmp_path, layout, op
     assert all(a.startswith("-") for a in options_part), argv
     runner = [i for i, a in enumerate(options_part) if a.startswith("-var=") and a[5:].split("=")[0] in RUNNER_VARS]
     caller = [i for i, a in enumerate(options_part) if a in options]
-    assert len(runner) == (3 if state_dir else 1), argv
+    assert len(runner) == (4 if state_dir else 1), argv  # + genie_id_dir
     assert runner == list(range(len(options_part) - len(runner), len(options_part))), argv  # last option
     assert not caller or max(caller) < min(runner), argv
 
@@ -240,6 +246,7 @@ def test_import_argv_parses_as_terraform_parses_it(tmp_path, layout):
         "ENVS_DIR": str(env_dir.parent), "FAKE_TF_LOG": str(log)}
     environ.pop("GENIERAILS_STATE_DIR", None)
     if layout == "state dir":
+        (tmp_path / "state").mkdir(parents=True, exist_ok=True)  # GenieRails never creates a missing state dir
         environ["GENIERAILS_STATE_DIR"] = str(tmp_path / "state")
     result = subprocess.run([str(shared / "scripts" / "terraform_layer.sh"), "workspace", "dev", "import",
                              "-input=false", ADDR, ID], text=True, capture_output=True, env=environ)
@@ -247,4 +254,4 @@ def test_import_argv_parses_as_terraform_parses_it(tmp_path, layout):
     argv = [json.loads(line) for line in log.read_text().splitlines() if json.loads(line)[:1] == ["import"]][-1]
     runner = [a for a in argv if a.startswith("-var=") and a[5:].split("=")[0] in RUNNER_VARS]
     assert argv[-2:] == [ADDR, ID] and argv[-2 - len(runner):-2] == runner, argv
-    assert len(runner) == (3 if layout == "state dir" else 1), argv
+    assert len(runner) == (4 if layout == "state dir" else 1), argv  # + genie_id_dir

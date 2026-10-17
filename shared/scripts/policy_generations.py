@@ -73,8 +73,10 @@ Stages (every one keeps all retained generations' functions):
   may change no policy or treatment tag.
 
 Snapshots of every generation a hook applies are kept next to the layer's
-state, in ``<env>/data_access/.policy_generations/<fingerprint>.json``; the
-last applied stage is recorded in ``stage.json`` there for verification.
+state, in ``<env>/data_access/.policy_generations/<fingerprint>.json`` (with
+GENIERAILS_STATE_DIR set, under ``<dir>/<cloud>/<env>/records/`` instead:
+``ledger_dir``); the last applied stage is recorded in ``stage.json`` there
+for verification.
 """
 
 from __future__ import annotations
@@ -166,7 +168,10 @@ def desired_generation(env_dir: Path) -> dict:
 
 
 def ledger_dir(env_dir: Path) -> Path:
-    return env_dir / "data_access" / LEDGER
+    """The env's ledger: in the checkout, or under GENIERAILS_STATE_DIR when set (state_layout.record_path)."""
+    from scripts.state_layout import record_path
+
+    return record_path(Path(env_dir), Path("data_access") / LEDGER)
 
 
 def write_json(path: Path, value: dict) -> Path:

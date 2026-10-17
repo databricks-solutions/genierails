@@ -28,15 +28,18 @@ make maintain ENV=prod
 ## Set it up once
 
 1. **One persistent checkout.** Clone your repo once and always work there.
-   **Never re-clone, and never `git clean -x`:** Genie agent ID files
-   (`.genie_space_id*`), the `.state-moved` marker, the auth files and other
-   ignored runtime files live in it. `release-plan` can restore a lost agent
-   ID from the last release receipt, but nothing else comes back.
-2. **State outside the checkout.** Set `GENIERAILS_STATE_DIR` for every
-   command (in the operator's shell profile, or a wrapper). Then
-   Terraform state, receipts, manifests and the env locks live under
-   `$GENIERAILS_STATE_DIR/<cloud>/<env>/`, and the account layer under
-   `<cloud>/account/` ([below](#state-outside-the-checkout)).
+   Don't delete its ignored files: the `.state-moved` marker and the auth
+   files live in it. With `GENIERAILS_STATE_DIR` set (step 2), nothing else a
+   later run needs is in the checkout, so a fresh clean checkout of the
+   commit being applied works too.
+2. **State outside the checkout.** Create the state dir once
+   (`mkdir -m 700 /protected/genierails-state`, or let `make migrate-state-dir`
+   create it) and set `GENIERAILS_STATE_DIR` for every command (in the
+   operator's shell profile, or a wrapper). Then Terraform state, receipts,
+   manifests, the env locks and the runtime records (the staged policy
+   journal, the migration record, Genie agent ID files and adoption markers)
+   live under `$GENIERAILS_STATE_DIR/<cloud>/<env>/`, and the account layer
+   under `<cloud>/account/` ([below](#state-outside-the-checkout)).
 3. **Credentials.** Fill each env's `auth.auto.tfvars` with its deployer SP;
    `databricks_client_id` must equal the env's committed
    `deployer_principal_id`, or applying commands refuse before the lock.
@@ -109,10 +112,24 @@ With `GENIERAILS_STATE_DIR` unset, state, receipts and the env lock live under
 the checkout (`envs/<env>/` and `<cloud>/.genierails-state/<env>/`, all
 gitignored). That only works for one checkout that is never re-cloned. With it
 set, `$GENIERAILS_STATE_DIR/<cloud>/<env>/` holds `layers/<layer>/` (state and
-`.terraform`), `locks/`, `receipts/` and `manifests/`, and nothing is written
-under `envs/<env>/`. Every reader of Terraform state goes through
-`scripts/state_layout.py`; a state that should exist but can't be read
-refuses.
+`.terraform`), `locks/`, `receipts/`, `manifests/` and `records/`: the staged
+policy journal and generation snapshots (`records/data_access/.policy_generations/`,
+including the migration record) and group_map's last applied mapping, so a
+fresh checkout sees a pending or failed staged change, and Genie agent ID
+files and adoption markers (`records/.genie_space_id_<key>`,
+`.genie_adopted_<key>`, `.genie_adopt_required_<key>`), so it knows which
+agents GenieRails created. Only what each run re-derives
+(`generated/.runtime/`, the coverage check's files) stays in the checkout.
+Every reader of Terraform state goes through `scripts/state_layout.py`; a
+state that should exist but can't be read refuses.
+
+With `GENIERAILS_STATE_DIR` set, the directory it names must already exist:
+a mistyped or unmounted path refuses every command (state, records, receipts
+and locks alike) instead of reading as an empty store. Only
+`make migrate-state-dir` creates it; the dev rehearsal samples create their
+runner's throwaway one in a pipeline step. A record reader also refuses when
+the state dir can't be read, and when a record is still in the checkout (alone
+or next to the state dir's copy): run `make migrate-state-dir`.
 
 Move existing local state once:
 
@@ -122,7 +139,12 @@ GENIERAILS_STATE_DIR=/protected/genierails-state make migrate-state-dir ENV=prod
 GENIERAILS_STATE_DIR=/protected/genierails-state make migrate-state-dir ENV=account
 ```
 
-It refuses while the env lock is held, never overwrites a different file, and
+It moves Terraform state and the runtime records above. For each Genie ID
+file it first records, in `records/.genie_id_moves.json`, the in-checkout path
+the workspace state names, so the agent's create resource (and any
+create-to-ID handoff) is still recognised and nothing is recreated; the next
+workspace apply records the new path in place. It refuses while the
+env lock is held, never overwrites a different file, and
 copies, fsyncs and verifies each file before removing its source, so a re-run
 after a crash resumes. It writes `envs/<env>/.state-moved` first: from then on
 a run without `GENIERAILS_STATE_DIR` refuses instead of planning to create
