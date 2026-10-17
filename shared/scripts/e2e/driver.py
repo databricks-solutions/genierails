@@ -58,7 +58,7 @@ GIT_IDENTITY = {"GIT_AUTHOR_NAME": "genierails-e2e", "GIT_AUTHOR_EMAIL": "genier
 # Targets that apply to a workspace/account: the checkout must be clean and
 # pinned before them, and running one means the scenario must be restored.
 APPLYING = frozenset({"rehearse", "release-plan", "release", "maintain", "detach-agent",
-                      "apply-account"})
+                      "apply-account", "policy-abandon"})
 # Targets that author files under envs/ (committed later by a local merge) and,
 # for ungovern in a rehearse env, also apply.
 AUTHORING = frozenset({"setup", "generate", "promote-to", "capture", "ungovern", "scaffold-treatments"})
@@ -86,6 +86,11 @@ class Step:
     value: str | None = None
     assertions: tuple[str, ...] = ()
     refusal_in_ci: bool = True
+    # Patterns the step's output must not contain (``assertions`` must match).
+    forbidden: tuple[str, ...] = ()
+    # A staged policy phase failed after create: new policies that match no
+    # column may stay live, but tags, grants and existing protection may not move.
+    staged_failure: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -116,11 +121,13 @@ class Adoption:
 def mk(name: str, target: str, env: str | None = None, *,
        args: Sequence[str] = (), fail: bool = False, refusal: str | None = None,
        extra_env: Mapping[str, str | None] | None = None,
-       assertions: Sequence[str] = (), refusal_in_ci: bool = True) -> Step:
+       assertions: Sequence[str] = (), refusal_in_ci: bool = True,
+       forbidden: Sequence[str] = (), staged_failure: bool = False) -> Step:
     command = ("make", target) + ((f"ENV={env}",) if env else ()) + tuple(args)
     return Step(name, command, env, target, expect_failure=fail, refusal=refusal,
                 extra_env=tuple((extra_env or {}).items()),
-                assertions=tuple(assertions), refusal_in_ci=refusal_in_ci)
+                assertions=tuple(assertions), refusal_in_ci=refusal_in_ci,
+                forbidden=tuple(forbidden), staged_failure=staged_failure)
 
 
 def action(name: str, kind: str, value: str | None = None) -> Step:
@@ -139,6 +146,7 @@ REFUSALS = {
     "detach": r"ERROR: detach: .*?(?:not found: detach-agent works on an agent file|is not detached)",
     "tamper": r"(make release refused: \S+ no longer matches|is not a release manifest|is a manifest for \S+, not)",
     "stale": r"committed files differ from what the commit regenerates",
+    "policy_phase": r"ERROR: policy phase verify-created failed \(exit \d+\)",
 }
 REFUSAL_SOURCE_ANCHORS: Mapping[str, tuple[str, str]] = {
     REFUSALS["covered"]: ("shared/scripts/sticky_governance.py", "refusing to ungovern"),
@@ -150,6 +158,7 @@ REFUSAL_SOURCE_ANCHORS: Mapping[str, tuple[str, str]] = {
     REFUSALS["detach"]: ("shared/scripts/agent_ownership.py", "not found: detach-agent works on an agent file"),
     REFUSALS["tamper"]: ("shared/scripts/release_gate.py", "no longer matches:"),
     REFUSALS["stale"]: ("shared/scripts/check_env.py", "committed files differ from what the commit regenerates"),
+    REFUSALS["policy_phase"]: ("shared/scripts/staged_policy_apply.py", "ERROR: policy phase {phase} failed (exit {rc})"),
 }
 CI_MARKERS = (
     "CI", "TF_BUILD", "GITHUB_ACTIONS", "JENKINS_URL", "GITLAB_CI", "BUILDKITE", "CIRCLECI",
@@ -161,6 +170,10 @@ NON_CI_ENV = {key: None for key in (*CI_MARKERS, "GENIERAILS_ALLOW_CI_APPLY")}
 
 
 AUTHOR_MERGE = action("Commit and merge authored changes on the driver's local main", "local_merge")
+# make policy-status lines (scripts/staged_policy_apply.py status).
+POLICY_ACTIVE = r"active generation:\s+\S+"
+POLICY_UNFINISHED = r"Unfinished policy change"
+POLICY_WAITING = r"waiting to retire:"
 DAY2 = (
     mk("PR check (dev)", "check", "dev"),
     mk("Dev rehearsal", "rehearse", "dev"),
@@ -305,6 +318,42 @@ SCENARIOS: tuple[Scenario, ...] = (
         mk("Apply prod adopt-only release", "release", "prod", args=("MANIFEST={manifest}",)),
     ), ("Legacy values are adopted into deterministic values without weaker protection or raw exposure.",),
        ("Forward-release the pinned baseline through the same bounded staged lifecycle.",)),
+    _scenario("s17", "policy-ops: staged policy change fails, is abandoned, then completes and retires", (
+        "Dev and prod are released deterministic envs; make policy-status shows no unfinished change and nothing waiting to retire.",
+        "A reviewed mask-only change (treatment_versions or column_overrides; no tier move, no new table_readers) is ready for dev.",
+        "failing_verify_spec: absolute path outside the checkout to a reviewed VERIFY_SPEC JSON whose column_masks "
+        "check lists a tier-1 principal under masked_principals, so verify-created fails read-only after create.",
+    ), (
+        mk("Dev journal before the change", "policy-status", "dev", assertions=(POLICY_ACTIVE,),
+           forbidden=(POLICY_UNFINISHED, POLICY_WAITING)),
+        mk("Prod journal before the change", "policy-status", "prod", assertions=(POLICY_ACTIVE,),
+           forbidden=(POLICY_UNFINISHED, POLICY_WAITING)),
+        Step("Author mask-only change", human_prompt="Apply the reviewed mask-only change to dev env.auto.tfvars (no tier move)."),
+        mk("Regenerate governance", "generate", "dev"), AUTHOR_MERGE,
+        action("Record dev/prod protection before the staged change", "protection_checkpoint", "before_staged_change"),
+        mk("Staged change fails at verify-created", "rehearse", "dev", args=("VERIFY_SPEC={failing_verify_spec}",),
+           fail=True, refusal=REFUSALS["policy_phase"], refusal_in_ci=False, staged_failure=True),
+        mk("Status reports the failed phase and previous protection", "policy-status", "dev", assertions=(
+            POLICY_UNFINISHED, r"status:\s+failed at verify-created",
+            r"live:\s+the previous protection \(\S+\); no column was retagged")),
+        mk("Abandon the unfinished change", "policy-abandon", "dev",
+           assertions=(r"Abandoned generation \S+; \S+ stays live\.",)),
+        action("Protection equals the record from before the change", "protection_matches", "before_staged_change"),
+        mk("Status after abandon", "policy-status", "dev", assertions=(POLICY_ACTIVE,), forbidden=(POLICY_UNFINISHED,)),
+        mk("Staged change: create, verify, switch, verify, grant", "rehearse", "dev", assertions=(
+            r"=== Policy staged apply \([^)]*\): create -> verify-created -> switch -> verify-switched -> grant ===",
+            r"Staged policy apply: generation \S+ is live and verified; \S+ stays until a later release succeeds")),
+        mk("Superseded dev generation is confirmed", "policy-status", "dev",
+           assertions=(r"waiting to retire:\s+\S+ \(superseded by run \S+, confirmed\)",), forbidden=(POLICY_UNFINISHED,)),
+    ) + DAY2[2:-1] + (
+        mk("Retire the superseded prod generation", "maintain", "prod",
+           assertions=(r"Staged policy apply: generation \S+ is live and verified; retired \S+\.",)),
+        mk("Prod has nothing left to retire", "policy-status", "prod", assertions=(POLICY_ACTIVE,),
+           forbidden=(POLICY_UNFINISHED, POLICY_WAITING)),
+    ), ("The failed change leaves every tag, grant and earlier policy unchanged and no column switched; abandon removes its "
+        "policies; the completed change exposes nothing raw at any step, the prod release takes one fresh manifest per "
+        "changing phase, and a later maintain retires the superseded generation.",),
+       ("Forward-release the pinned baseline (a staged change back); its old generation retires on a later run.",)),
 )
 
 # Explicit top-level snapshot components each scenario is allowed to change.
@@ -319,7 +368,12 @@ ALLOWED_CHANGES: Mapping[str, frozenset[str]] = {
     "s13": frozenset(), "s14": frozenset({"uc", "state_serials", "receipts"}), "s15": _ALL_COMPONENTS,
     "s16": _ALL_COMPONENTS, "manifest": frozenset(),
     "migration": frozenset(), "migration-cutover": frozenset({"uc", "state_serials", "receipts"}),
+    "s17": frozenset({"uc", "state_serials", "receipts"}),
 }
+# Scenarios whose prod release is a staged policy change: one fresh manifest
+# (one approval) per changing phase, so at least two, never one reused.
+PHASED_RELEASE = frozenset({"s17"})
+CHECKPOINT_ACTIONS = frozenset({"protection_checkpoint", "protection_matches"})
 
 
 class SnapshotProvider(Protocol):
@@ -749,6 +803,9 @@ def unresolved_values(scenario: Scenario, values: Mapping[str, str]) -> list[str
     for step in scenario.steps:
         if step.action == "checkout_value" and values.get(step.value or "") and not re.fullmatch(r"[0-9a-fA-F]{40}", values[step.value or ""]):
             missing.append(f"{step.value} (must be a 40-hex commit)")
+        for name in (n for part in step.command for n in PLACEHOLDER.findall(part) if n.endswith("_spec")):
+            if values.get(name) and not os.path.isabs(values[name]):
+                missing.append(f"{name} (must be an absolute path)")
     return sorted(set(missing))
 
 
@@ -1261,6 +1318,51 @@ def protection_diff_envs(baseline: Mapping[str, Any], current: Mapping[str, Any]
                                         allowed_adoptions=adoptions.get(env), **kwargs))}
 
 
+def staged_protection_drift(baseline: Mapping[str, Any], current: Mapping[str, Any], *,
+                            allow_unmatched_policies: bool = False) -> dict[str, list[str]]:
+    """How ``current`` differs from ``baseline`` in protection, per env.
+
+    Tags, grants and every baseline policy must be unchanged and no mask may be
+    lost. With ``allow_unmatched_policies`` (a staged change stopped before its
+    switch) new policies may exist only if they match no value a column carries.
+    Unreferenced functions a create left behind are not protection."""
+    drift: dict[str, list[str]] = {}
+    for env in sorted(set(baseline) | set(current)):
+        before, after = _protection(baseline.get(env, {})), _protection(current.get(env, {}))
+        problems = [f"weaker: {weak}" for weak in [protection_diff(baseline.get(env, {}), current.get(env, {}),
+                                                                   include_grants=True)] if weak]
+        problems += [f"{key[0]} {key[1]}: {before['columns'].get(key)} -> {after['columns'].get(key)}"
+                     for key in sorted(set(before["columns"]) | set(after["columns"]))
+                     if before["columns"].get(key) != after["columns"].get(key)]
+        problems += [f"grant removed: {g}" for g in sorted(before["grants"] - after["grants"])]
+        problems += [f"grant added: {g}" for g in sorted(after["grants"] - before["grants"])]
+        carried = {value[2] if isinstance(value, tuple) else value
+                   for (_, tag), value in after["columns"].items() if tag == "gr_treatment"}
+        # Policies are keyed without their generation, so a created policy for
+        # the same treatment joins its predecessor's key: allowed only as growth
+        # in functions and values no column carries, with the same principals.
+        problems += [f"policy changed: {' '.join(map(str, key))}" for key in sorted(before["policies"], key=str)
+                     if key in after["policies"] and after["policies"][key] != before["policies"][key]
+                     and not (allow_unmatched_policies
+                              and _grew_unmatched(before["policies"][key], after["policies"][key], carried))]
+        for key in sorted(set(after["policies"]) - set(before["policies"]), key=str):
+            matched = sorted(after["policies"][key]["values"] & carried)
+            if not allow_unmatched_policies:
+                problems.append(f"policy added: {' '.join(map(str, key))}")
+            elif matched:
+                problems.append(f"new policy {' '.join(map(str, key))} already matches {', '.join(matched)}")
+        if problems: drift[env] = problems
+    return drift
+
+
+def _grew_unmatched(was: Mapping[str, Any], now: Mapping[str, Any], carried: set[str]) -> bool:
+    return (now["to"] == was["to"] and now["except"] == was["except"]
+            and set(was["function"]) <= set(now["function"]) and set(was["masks"]) <= set(now["masks"])
+            and was["raw_functions"] <= now["raw_functions"] and was["values"] <= now["values"]
+            and not (now["values"] - was["values"]) & carried
+            and all(now["conditions"].get(field) == hashes for field, hashes in was["conditions"].items()))
+
+
 def unexpected_changes(scenario: str, before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, list[str]]:
     allowed = ALLOWED_CHANGES[scenario]
     result: dict[str, list[str]] = {}
@@ -1485,6 +1587,7 @@ def main(argv: Sequence[str] | None = None, *, snapshot_factory: Callable[[Path,
             stop = False
             confirmations: list[dict[str, str]] = []
             allowed_adoptions: dict[str, dict[str, Adoption]] = {}
+            checkpoints: dict[str, dict[str, Any]] = {}
             try:
                 # Pin: every scenario starts at exactly the requested commit.
                 repo.switch(repo.baseline, f"{scenario.key}-pin")
@@ -1498,6 +1601,16 @@ def main(argv: Sequence[str] | None = None, *, snapshot_factory: Callable[[Path,
                     item["head"] = repo.head
                     if step.human_prompt:
                         confirmations.append(_human_gate(scenario, step))
+                        item["status"] = "passed"; continue
+                    if step.action in CHECKPOINT_ACTIONS:
+                        name = step.value or ""
+                        if step.action == "protection_checkpoint":
+                            checkpoints[name] = capture()
+                        elif name not in checkpoints:
+                            raise RuntimeError(f"no protection checkpoint {name!r} was recorded before {step.name}")
+                        elif drift := staged_protection_drift(checkpoints[name], capture()):
+                            item["status"] = "ERROR"; item["assertion"] = f"protection differs from {name}: {drift}"
+                            raise RuntimeError(f"step did not satisfy its contract: {step.name}")
                         item["status"] = "passed"; continue
                     if step.action:
                         _run_action(step, scenario, repo, values)
@@ -1525,12 +1638,25 @@ def main(argv: Sequence[str] | None = None, *, snapshot_factory: Callable[[Path,
                         ok = result.returncode != 0 and bool(step.refusal and re.search(step.refusal, result.stdout))
                         if not ok: item["assertion"] = "nonzero exit and the expected refusal message are both required"
                     else: ok = result.returncode == 0
+                    unmatched = [p for p in step.assertions if not re.search(p, result.stdout)]
+                    present = [p for p in step.forbidden if re.search(p, result.stdout)]
+                    if ok and (unmatched or present):
+                        ok = False
+                        item["assertion"] = "; ".join(
+                            [f"output lacks {p!r}" for p in unmatched] + [f"output contains {p!r}" for p in present])
                     if applying and deterministic_env(cloud_root, step.env) and import_unset_treatment(result.stdout):
                         ok = False
                         item["assertion"] = "deterministic apply attempted to clear gr_treatment"
                     item["status"] = "passed" if ok else "ERROR"
                     step_after = capture() if step_before is not None else None
-                    if step.expect_failure and step_before is not None and step_after is not None:
+                    if step.staged_failure and step_before is not None and step_after is not None:
+                        refusal_diffs.append({"step": step.name, "env": step.env or "account",
+                                              "diff": snapshot_diff(step_before, step_after)})
+                        drift = staged_protection_drift(step_before, step_after, allow_unmatched_policies=True)
+                        if drift:
+                            item["status"] = "ERROR"; ok = False
+                            item["assertion"] = f"failed staged change moved live protection: {drift}"
+                    elif step.expect_failure and step_before is not None and step_after is not None:
                         mutation = snapshot_diff(step_before, step_after)
                         refusal_diffs.append({"step": step.name, "env": step.env or "account", "diff": mutation})
                         if mutation: item["status"] = "ERROR"; item["assertion"] = "refusal changed the snapshot"; ok = False
@@ -1546,13 +1672,15 @@ def main(argv: Sequence[str] | None = None, *, snapshot_factory: Callable[[Path,
                                 item["assertion"] = f"successful apply weakened protection: {weak_step}"
                             ok = False
                     if not ok: raise RuntimeError(f"step did not satisfy its contract: {step.name}")
-                    if step.expect_failure: mutated = prior_mutated
+                    # A failed staged change created policies: it stays a mutation.
+                    if step.expect_failure and not step.staged_failure: mutated = prior_mutated
                     if scenario.key == "migration-cutover" and step.target == "migrate-plan":
                         allowed_adoptions[step.env or "prod"] = parse_migration_mappings(result.stdout)
                     if step.target == "release-plan" and not step.expect_failure:
                         manifest = parse_manifest(result.stdout)
                         release_plan_output = result.stdout
                     if step.target == "release" and not step.expect_failure:
+                        release_manifests = [manifest]
                         phase_output = release_plan_output + "\n" + result.stdout
                         for phase in range(2, MAX_RELEASE_PHASES + 1):
                             if not release_needs_another_phase(phase_output): break
@@ -1568,6 +1696,7 @@ def main(argv: Sequence[str] | None = None, *, snapshot_factory: Callable[[Path,
                             if release_plan_workspace_diff(phase_before, phase_plan_after):
                                 raise RuntimeError(f"release phase {phase} plan changed the snapshot")
                             manifest = parse_manifest(plan_result.stdout)
+                            release_manifests.append(manifest)
                             phase_release = runner.run(("make", "release", "ENV=prod", f"MANIFEST={manifest}"),
                                                        f"{label}-release-phase-{phase}")
                             if phase_release.returncode: raise RuntimeError(f"release phase {phase} failed")
@@ -1585,6 +1714,12 @@ def main(argv: Sequence[str] | None = None, *, snapshot_factory: Callable[[Path,
                         else:
                             if release_needs_another_phase(phase_output):
                                 raise RuntimeError(f"release exceeded {MAX_RELEASE_PHASES} phases")
+                        item["manifests"] = release_manifests
+                        if scenario.key in PHASED_RELEASE and (
+                                len(release_manifests) < 2 or len(set(release_manifests)) != len(release_manifests)):
+                            item["status"] = "ERROR"
+                            item["assertion"] = "a staged policy release needs one fresh manifest per changing phase"
+                            raise RuntimeError(f"step did not satisfy its contract: {step.name}")
                     if applying: repo.require_clean(f"after-{label}")
                 after = capture()
                 if scenario.key not in WEAKENING_EXPECTED:

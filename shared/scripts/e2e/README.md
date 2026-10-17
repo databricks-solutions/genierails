@@ -3,8 +3,8 @@
 The driver encodes the champion flow from
 `shared/docs/design/deterministic-governance.md` sections 9, 12, 13 and 17,
 plan scenarios S1–S16, cross-cutting
-manifest/concurrency checks, the report-only migration operation, and the
-migration cutover. A scenario that is expected to fail until a fix lands
+manifest/concurrency checks, the report-only migration operation, the
+migration cutover, and S17 (`policy-ops`, staged policy operations). A scenario that is expected to fail until a fix lands
 carries `known_failure="<branch>"`: it reports `ERROR (expected until ...)`, and
 if it passes its status is `UNEXPECTED PASS — remove known_failure ...` and the
 run fails, so the marker gets removed. No scenario carries one now: the
@@ -95,7 +95,51 @@ failure is `ERROR`. S13 runs every refusal command with `CI=true` and without
 
 Scenario values: `agent_a`, `wrong_agent`, `table` (covered), `uncovered_table`,
 `treatment`, `ack_entry` (an exact `prod:<kind>:...` line), `manifest`,
-`tampered_manifest`, and the 40-hex commits `u`, `o`, `r`, `r_plus_1`, `x`, `y`.
+`tampered_manifest`, `failing_verify_spec` (S17; an absolute path), and the 40-hex commits `u`, `o`, `r`, `r_plus_1`, `x`, `y`.
+
+S17 (`policy-ops`) covers the day-2 policy operations in design section 17 and
+`docs/deterministic-policies.md` with public targets only. It starts with
+`make policy-status` in dev and prod, which must show an active generation
+and nothing unfinished or waiting to retire. A reviewed mask-only dev change
+(no tier move, no new `table_readers`) is authored, regenerated and merged.
+Then the steps are:
+
+1. **Failure.** `make rehearse ENV=dev VERIFY_SPEC=<failing_verify_spec>`
+   fails at `verify-created`. The injection is the documented `verify-access`
+   option, which reaches the staged verification as a command-line make
+   variable, so no product backdoor is involved. The spec is a reviewed JSON
+   file outside the checkout. Its `column_masks` check lists a tier-1 principal
+   under `masked_principals`, so the read-only verification can't pass after
+   `create`. The step must print `ERROR: policy phase verify-created failed`.
+   Every tag, grant and earlier policy must be unchanged, no mask may be lost,
+   and a new policy may exist only if it matches no value a column carries
+   (nothing switched).
+2. **Status.** `make policy-status ENV=dev` must report the unfinished change,
+   `failed at verify-created`, and the previous protection with no column
+   retagged.
+3. **Abandon.** `make policy-abandon ENV=dev` must print `Abandoned
+   generation ...`. Dev and prod protection must then equal the checkpoint
+   recorded before step 1: same tags, grants and policies. Unreferenced
+   functions left by `create` are not protection.
+4. **Success.** `make rehearse ENV=dev` must run `create -> verify-created ->
+   switch -> verify-switched -> grant`. `policy-status` must then show the
+   superseded dev generation as confirmed.
+5. **Promotion and retire.** Then come the promotion steps of the day-2
+   sequence (promote, merge, prod check, `CHECK=1`, rehearse the merge) and
+   the prod release, which needs at least two `release-plan`/`release
+   MANIFEST=` pairs, each with a fresh manifest (one approval per changing
+   phase). A later `make maintain ENV=prod` must print `retired <generation>`,
+   and prod `policy-status` must show nothing waiting to retire.
+
+Every applying step is checked for weaker protection, as in the other scenarios.
+
+Output assertions (`assertions` must match, `forbidden` must not) apply to a
+step that otherwise passed. `protection_checkpoint` records dev and prod
+protection under a name, and a later `protection_matches` step compares
+against it. A positive `make apply-account` scenario is not encoded yet:
+`apply-account` has the CI guard and the account lock, but none of the
+section 17 provenance (clean `origin/main` HEAD, saved account plan and
+manifest, account receipt) it would assert. S13 keeps its CI refusal.
 
 Snapshots read `<cloud>/envs/<env>/auth.auto.tfvars`
 (`databricks_workspace_host`, `databricks_client_id`,

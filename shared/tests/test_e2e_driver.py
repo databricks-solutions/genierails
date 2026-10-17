@@ -1716,3 +1716,277 @@ def test_import_unset_log_guard_is_anchored_to_import_script_literals():
 
 def test_another_phase_signal_accepts_needs_form():
     assert driver.release_needs_another_phase("adoption needs another release-plan")
+
+
+# --- S17 policy-ops: staged policy failure, status, abandon, completion, retire ---------
+
+S17_SPEC = "/tmp/genierails-e2e-fixtures/failing-verify-spec.json"
+
+
+def _s17():
+    return next(s for s in driver.SCENARIOS if s.key == "s17")
+
+
+def _s17_shape(scenario):
+    return [(step.target or step.action or "human", step.env,
+             next((a for a in step.command[3:] if not a.startswith("MANIFEST=")), None))
+            for step in scenario.steps]
+
+
+def test_s17_steps_and_contract_are_exact():
+    scenario = _s17()
+    assert _s17_shape(scenario) == [
+        ("policy-status", "dev", None), ("policy-status", "prod", None), ("human", None, None),
+        ("generate", "dev", None), ("local_merge", None, None),
+        ("protection_checkpoint", None, None),
+        ("rehearse", "dev", "VERIFY_SPEC={failing_verify_spec}"),
+        ("policy-status", "dev", None), ("policy-abandon", "dev", None),
+        ("protection_matches", None, None), ("policy-status", "dev", None),
+        ("rehearse", "dev", None), ("policy-status", "dev", None),
+        ("promote-to", "prod", None), ("local_merge", None, None), ("check", "prod", None),
+        ("promote-to", "prod", "CHECK=1"), ("rehearse", "dev", None), ("release-plan", "prod", None),
+        ("release", "prod", None), ("maintain", "prod", None), ("policy-status", "prod", None),
+    ]
+    failing = scenario.steps[6]
+    assert failing.expect_failure and failing.staged_failure and not failing.refusal_in_ci
+    assert failing.refusal == driver.REFUSALS["policy_phase"]
+    assert driver.refusal_found_in_source(ROOT, failing.refusal)
+    assert re.search(failing.refusal, "ERROR: policy phase verify-created failed (exit 1).")
+    assert scenario.steps[5].value == scenario.steps[9].value == "before_staged_change"
+    assert "policy-abandon" in driver.APPLYING
+    assert driver.ALLOWED_CHANGES["s17"] == frozenset({"uc", "state_serials", "receipts"})
+    assert "s17" in driver.PHASED_RELEASE and "s17" not in driver.WEAKENING_EXPECTED
+    assert not scenario.read_only and scenario.known_failure is None
+    assert driver.unresolved_values(scenario, {}) == ["failing_verify_spec"]
+    assert driver.unresolved_values(scenario, {"failing_verify_spec": "spec.json"}) == [
+        "failing_verify_spec (must be an absolute path)"]
+    assert driver.unresolved_values(scenario, {"failing_verify_spec": S17_SPEC}) == []
+
+
+def test_s17_patterns_are_anchored_to_the_controller_source():
+    source = (ROOT / "shared/scripts/staged_policy_apply.py").read_text()
+    for literal in ("active generation:  ", "waiting to retire:  ", "Unfinished policy change (run ",
+                    "  status:    {t['status']}\" + (f\" at {t['failed_phase']}",
+                    "the previous protection ({t['from'] or 'none'}); no column was retagged",
+                    "Abandoned generation {t['to']}; {t['from'] or 'nothing'} stays live.",
+                    "=== Policy staged apply ({self.env_name}): {' -> '.join(t['phases'])} ===",
+                    "is live and verified", "stays until a later release succeeds", "; retired {t['retire']}",
+                    "(superseded by run {entry['superseded_by']}, ", "'confirmed' if entry['confirmed']"):
+        assert literal in source, literal
+
+
+def test_s17_dry_run_is_offline_on_both_clouds(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("dry-run must not invoke subprocess")
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    for cloud in ("aws", "azure"):
+        out = tmp_path / cloud
+        assert driver.main(["--cloud", cloud, "--repo", str(ROOT), "--dry-run", "--scenarios", "s17",
+                            "--reports", str(out)]) == 0
+        report = json.loads((out / "s17.json").read_text())
+        assert report["target_source"].endswith(f"{cloud}/Makefile")
+        assert not [s for s in report["steps"] if s["status"] == "skip"]
+        assert report["missing_values"] == ["failing_verify_spec"]
+        assert report["would_not_run"] == ["human UI gate requires typed confirmation",
+                                           "missing value: failing_verify_spec"]
+        assert report["refusal_patterns"] == [{"step": "Staged change fails at verify-created",
+                                               "pattern": driver.REFUSALS["policy_phase"],
+                                               "found_in_source": True}]
+
+
+class PolicyJournal:
+    """Fake make for the policy targets, modelled on staged_policy_apply.py."""
+
+    def __init__(self, *, retire=True, abandon_works=True):
+        self.retire, self.abandon_works = retire, abandon_works
+        self.transition = None
+        self.active = {"dev": "g1", "prod": "p1"}
+        self.pending = {"dev": [], "prod": []}
+
+    def status(self, env):
+        lines = [f"active generation:  {self.active[env]}"]
+        lines += [f"waiting to retire:  {fp} (superseded by run r1, confirmed)" for fp in self.pending[env]]
+        if self.transition and env == "dev":
+            lines += ["Unfinished policy change (run r2, commit abc): g1 -> g2",
+                      "  phases:    create -> verify-created -> switch -> verify-switched -> grant",
+                      "  completed: create", "  status:    failed at verify-created (verify-created exited 1)",
+                      "  live:      the previous protection (g1); no column was retagged"]
+        return "\n".join(lines) + "\n"
+
+    def __call__(self, argv):
+        target, env = argv[1], next((a[4:] for a in argv if a.startswith("ENV=")), "dev")
+        if target == "policy-status":
+            return 0, self.status(env)
+        if target == "policy-abandon":
+            if self.transition and self.abandon_works:
+                self.transition = None
+                return 0, "Abandoned generation g2; g1 stays live.\n"
+            return 0, "Staged policy apply: no unfinished policy change; nothing to abandon.\n"
+        if target == "rehearse" and env == "dev":
+            if any(a.startswith("VERIFY_SPEC=") for a in argv):
+                self.transition = "g2"
+                return 2, "=== Policy phase 2/5: verify-created (dev) ===\nERROR: policy phase verify-created failed (exit 1).\n"
+            if self.transition:
+                return 2, "ERROR: staged policy apply refused: unfinished change\n"
+            if self.active["dev"] == "g1":
+                self.active["dev"], self.pending["dev"] = "g2", ["g1"]
+                return 0, ("=== Policy staged apply (dev): create -> verify-created -> switch -> verify-switched -> grant ===\n"
+                           "Staged policy apply: generation g2 is live and verified; g1 stays until a later release succeeds.\n")
+        if target == "release" and env == "prod" and self.active["prod"] == "p1":
+            self.active["prod"], self.pending["prod"] = "p2", ["p1"]
+        if target == "maintain" and env == "prod" and self.pending["prod"] and self.retire:
+            retired, self.pending["prod"] = self.pending["prod"][0], []
+            return 0, f"Staged policy apply: generation {self.active['prod']} is live and verified; retired {retired}.\n"
+        return None
+
+
+@pytest.fixture
+def policy_live(live, monkeypatch):
+    def setup(journal=None, **fake):
+        journal = journal or PolicyJournal()
+        calls = live(staged_releases=fake.pop("staged_releases", 1), **fake)
+        base = driver.subprocess.run
+
+        def run(argv, **kwargs):
+            argv = list(argv)
+            handled = journal(argv) if argv and argv[0] == "make" else None
+            if handled is None:
+                return base(argv, **kwargs)
+            calls.append((argv, kwargs.get("env", {})))
+            return subprocess.CompletedProcess(argv, handled[0], handled[1], "")
+        monkeypatch.setattr(driver.subprocess, "run", run)
+        monkeypatch.setattr(driver.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _: "s17")
+        return calls, journal
+    return setup
+
+
+def _s17_args(tmp_path):
+    return live_args(tmp_path, "s17", "--value", f"failing_verify_spec={S17_SPEC}")
+
+
+def _s17_report(tmp_path):
+    return json.loads((tmp_path / "reports/s17.json").read_text())
+
+
+def test_s17_passes_through_failure_status_abandon_completion_and_retire(tmp_path, policy_live):
+    calls, journal = policy_live()
+    assert driver.main(_s17_args(tmp_path), snapshot_factory=FakeSnapshots) == 0, _s17_report(tmp_path)["error"]
+    report = _s17_report(tmp_path)
+    assert report["status"] == "passed" and report["known_failure"] is None
+    commands = [argv[1:] for argv in makes(calls)]
+    failing = commands.index(["rehearse", "ENV=dev", f"VERIFY_SPEC={S17_SPEC}"])
+    assert commands[failing + 1:failing + 4] == [["policy-status", "ENV=dev"], ["policy-abandon", "ENV=dev"],
+                                                 ["policy-status", "ENV=dev"]]
+    # The failure runs outside CI so the CI guard is not what refuses it.
+    env = next(e for argv, e in calls if argv[1:] == ["rehearse", "ENV=dev", f"VERIFY_SPEC={S17_SPEC}"])
+    assert "CI" not in env
+    release = next(item for item in report["steps"] if item["name"] == "Apply approved manifest")
+    assert release["manifests"] == ["/tmp/approved-1.json", "/tmp/approved-2.json"]
+    assert journal.pending["prod"] == [] and journal.transition is None
+    assert report["restored_lifecycle"] is True
+
+
+def _step_error(tmp_path, name):
+    report = _s17_report(tmp_path)
+    # A change left unfinished or switched also blocks the forward restore.
+    assert report["status"] in ("ERROR", "RESTORE FAILED")
+    return next(item for item in report["steps"] if item["name"] == name)
+
+
+def test_s17_fails_if_abandon_leaves_the_change(tmp_path, policy_live):
+    policy_live(PolicyJournal(abandon_works=False))
+    assert driver.main(_s17_args(tmp_path), snapshot_factory=FakeSnapshots) == 1
+    assert "lacks" in _step_error(tmp_path, "Abandon the unfinished change")["assertion"]
+
+
+def test_s17_fails_if_the_abandon_step_is_removed(tmp_path, policy_live, monkeypatch):
+    scenario = _s17()
+    trimmed = dataclasses.replace(scenario, steps=tuple(s for s in scenario.steps if s.target != "policy-abandon"))
+    monkeypatch.setattr(driver, "SCENARIOS", tuple(trimmed if s.key == "s17" else s for s in driver.SCENARIOS))
+    policy_live()
+    assert driver.main(_s17_args(tmp_path), snapshot_factory=FakeSnapshots) == 1
+    assert "contains 'Unfinished policy change'" in _step_error(tmp_path, "Status after abandon")["assertion"]
+
+
+def test_s17_fails_if_the_checkpoint_step_is_removed(tmp_path, policy_live, monkeypatch):
+    scenario = _s17()
+    trimmed = dataclasses.replace(scenario, steps=tuple(
+        s for s in scenario.steps if s.action != "protection_checkpoint"))
+    monkeypatch.setattr(driver, "SCENARIOS", tuple(trimmed if s.key == "s17" else s for s in driver.SCENARIOS))
+    policy_live()
+    assert driver.main(_s17_args(tmp_path), snapshot_factory=FakeSnapshots) == 1
+    assert "no protection checkpoint 'before_staged_change'" in _s17_report(tmp_path)["error"]
+
+
+
+def test_s17_single_manifest_release_is_an_error(tmp_path, policy_live):
+    policy_live(staged_releases=None)
+    assert driver.main(_s17_args(tmp_path), snapshot_factory=FakeSnapshots) == 1
+    assert "one fresh manifest per changing phase" in _step_error(tmp_path, "Apply approved manifest")["assertion"]
+
+
+def test_s17_maintain_that_retires_nothing_is_an_error(tmp_path, policy_live):
+    policy_live(PolicyJournal(retire=False))
+    assert driver.main(_s17_args(tmp_path), snapshot_factory=FakeSnapshots) == 1
+    assert "lacks" in _step_error(tmp_path, "Retire the superseded prod generation")["assertion"]
+
+
+def _staged(value="email_partial__string__11111111", *, policy_value=None, extra_policy=None, grants=()):
+    snap = _deterministic_snapshot(value, policy_value=policy_value)
+    if extra_policy:
+        snap["uc"]["cat"]["abac_policies"][0]["policies"].append(extra_policy)
+    snap["uc"]["cat"]["table_grants"] = [{"grantee": g, "privilege_type": "SELECT", "table_catalog": "cat",
+                                          "table_schema": "s", "table_name": "t"} for g in grants]
+    return {"dev": snap, "prod": snap}
+
+
+def _new_generation_policy(value="email_partial__string__22222222"):
+    return {"name": f"gr_mask_cat_{value}_full", "to_principals": ["account users"], "except_principals": [],
+            "column_mask": {"function_name": f"cat.s.gr_mask_{value}_full"},
+            "match_columns": [{"condition": f"hasTagValue('gr_treatment', '{value}')"}]}
+
+
+def test_staged_failure_allows_only_policies_that_match_no_column():
+    before = _staged()
+    assert driver.staged_protection_drift(before, before) == {}
+    created = _staged(extra_policy=_new_generation_policy())
+    assert driver.staged_protection_drift(before, created, allow_unmatched_policies=True) == {}
+    # After abandon the extra policy must be gone.
+    assert driver.staged_protection_drift(before, created)["dev"] == ["policy changed: cat.s.t cat email_partial string full"]
+    switched = _staged("email_partial__string__22222222", policy_value="email_partial__string__11111111",
+                       extra_policy=_new_generation_policy())
+    drift = driver.staged_protection_drift(before, switched, allow_unmatched_policies=True)
+    assert any("gr_treatment" in p for p in drift["dev"])
+    assert "policy changed: cat.s.t cat email_partial string full" in drift["dev"]
+    other = dict(_new_generation_policy("name_partial__string__33333333"))
+    tagged = _staged(extra_policy=dict(other, match_columns=[
+        {"condition": "hasTagValue('gr_treatment', 'email_partial__string__11111111')"}]))
+    assert any("already matches email_partial__string__11111111" in p for p in
+               driver.staged_protection_drift(before, tagged, allow_unmatched_policies=True)["dev"])
+    moved = dict(_new_generation_policy(), to_principals=["tier2"])
+    assert driver.staged_protection_drift(before, _staged(extra_policy=moved), allow_unmatched_policies=True)
+    widened = driver.staged_protection_drift(before, _staged(grants=("analyst",)), allow_unmatched_policies=True)
+    assert any(p.startswith("grant added: analyst SELECT") for p in widened["dev"])
+
+
+def test_s17_failed_change_that_switches_a_column_is_an_error(tmp_path, policy_live):
+    calls, journal = policy_live()
+    state = {"switched": False}
+    base = driver.subprocess.run
+
+    def run(argv, **kwargs):
+        if list(argv)[:2] == ["make", "rehearse"] and any(a.startswith("VERIFY_SPEC=") for a in argv):
+            state["switched"] = True
+        return base(argv, **kwargs)
+    driver.subprocess.run = run
+
+    class Switching(FakeSnapshots):
+        def capture(self, env):
+            return snapshot(tags=(("t", "ssn", "class.other"),) if state["switched"] else (("t", "ssn", "class.ssn"),))
+    try:
+        assert driver.main(_s17_args(tmp_path), snapshot_factory=Switching) == 1
+    finally:
+        driver.subprocess.run = base
+    assert "failed staged change moved live protection" in _step_error(
+        tmp_path, "Staged change fails at verify-created")["assertion"]
