@@ -5,7 +5,10 @@
                    only envs/dev/agents/<agent>.space.json. No governance
                    drafting, no model call, no Terraform state.
     import-new     after make generate ENV=dev: captures the agents that have a
-                   settings file but no capture yet. Never re-captures one.
+                   settings file but no capture yet. Never re-captures one: an
+                   agent whose capture was ever committed is refused (make
+                   capture replaces it on purpose). --check, run before
+                   generate writes anything, refuses the same way.
     restore-ids    release-plan (and legacy release), before planning: an agent
                    whose ID file is gone gets it back from the last release
                    receipt, only if the receipt's key, lifecycle and pushed
@@ -224,12 +227,47 @@ def capture(env_dir: Path, env: str, name: str, get: Getter | None = None) -> bo
     return changed
 
 
-def import_new(env_dir: Path, env: str, get: Getter | None = None) -> list[str]:
-    """Capture every agent with a settings file and an ID but no capture yet."""
+def capture_committed(env_dir: Path, name: str) -> bool:
+    """Whether agents/<name>.space.json is in the checkout's git history.
+
+    That is what "new" means for import-new (design section 5: generate only
+    imports agents not yet in git). Nothing else can tell: agent_tables in
+    generated/governed_tables.json also lists an agent whose tables come from
+    uc_tables, and release receipts are prod's. Outside a git checkout nothing
+    was committed, so there is nothing to overwrite.
+    """
+    path = agent_files.capture_path(env_dir, name)
+    try:
+        listed = subprocess.run(["git", "-C", str(path.parent.parent), "log", "-1", "--format=%H", "--",
+                                 str(path.relative_to(path.parent.parent))],
+                                capture_output=True, text=True)
+    except OSError:
+        return False
+    return listed.returncode == 0 and bool(listed.stdout.strip())
+
+
+def import_new(env_dir: Path, env: str, get: Getter | None = None, *, check: bool = False) -> list[str]:
+    """Capture every agent with a settings file and an ID that was never captured.
+
+    An agent whose committed capture is gone is refused before anything is
+    read or written: a plain generate must not replace a reviewed capture with
+    whatever the dev UI holds now. ``check`` refuses the same way and captures
+    nothing.
+    """
     if env != DEV_ENV:
         return []
     missing = [a["name"] for a in agent_files.load_all(env_dir)
                if a["genie_space_id"] and not agent_files.capture_path(env_dir, a["name"]).is_file()]
+    lost = [name for name in missing if capture_committed(env_dir, name)]
+    if lost:
+        raise AgentError(
+            "make generate imports only agents never captured before, and these agents' committed captures "
+            "are gone:\n" + "".join(
+                f"  {agent_files.AGENTS_DIR}/{agent_files.capture_path(env_dir, name).name}: restore it from git, "
+                f'or replace it with the live dev agent: make capture ENV={env} SPACE="{name}"\n'
+                for name in lost) + "  Nothing was written.")
+    if check:
+        return missing
     for name in missing:
         capture(env_dir, env, name, get)
     return missing
@@ -1031,6 +1069,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runner", type=Path)
     parser.add_argument("--plan-dir", type=Path, help="plan: release-plan's plan dir")
     parser.add_argument("--manifest", type=Path, help="sync: the approved release manifest")
+    parser.add_argument("--check", action="store_true", help="import-new: refuse as it would, capture nothing")
     args = parser.parse_args(argv)
     env_dir = args.env_dir
     try:
@@ -1039,7 +1078,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise AgentError('SPACE="<agent>" is required')
             capture(env_dir, args.env, args.space)
         elif args.command == "import-new":
-            import_new(env_dir, args.env)
+            import_new(env_dir, args.env, check=args.check)
         elif args.command == "restore-ids":
             restore_ids(env_dir, args.env)
         elif args.command == "check-deletes":

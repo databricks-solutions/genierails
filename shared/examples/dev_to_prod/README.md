@@ -6,7 +6,7 @@ Take a Genie agent you've curated in **dev** and ship it to **prod** with its se
 
 ```bash
 # dev
-make setup ENV=dev          # copy the template; set deployer_principal_id, agent ID, and groups
+make setup ENV=dev          # copy the templates; set deployer_principal_id and groups; per agent, its ID and acl_groups
 #   Catalog Explorer: turn on Data classification, review detections, enable auto-tagging
 make generate ENV=dev       # imports the agent, finds its tables, drafts the rules
 make rehearse ENV=dev       # applies in dev and proves the masks work
@@ -34,6 +34,7 @@ cd genierails/aws           # or: cd genierails/azure — every make command run
 |---|---|
 | The [prerequisites](../../docs/prerequisites.md) | Tools, a deploying service principal (`make bootstrap-sp`), IdP-synced groups |
 | Your Genie **Agent ID** | Genie UI → open the agent → **Configure** → *About this agent*. *No agent yet?* Use the [sample environment](SAMPLE_ENV.md) |
+| Who may run the agent | The groups that get Genie `CAN_RUN` on it (its `acl_groups`), chosen from your access-tier groups. Required: `[]` means nobody |
 | Deploying SP application ID | The `databricks_client_id` from each env's `auth.auto.tfvars`; it is committed as `deployer_principal_id` (not secret) |
 | Access-tier groups | Your existing groups, most- to least-privileged, e.g. `payments_ops`, `regional_analysts`, `viewers`. Order matters: a tier listed above a masked tier also gets the agent and sees those columns unmasked |
 | Dev and prod catalog names | e.g. `dev_finance` and `prod_finance` |
@@ -46,12 +47,20 @@ cd genierails/aws           # or: cd genierails/azure — every make command run
 ```bash
 make setup ENV=dev
 cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars
+mkdir -p envs/dev/agents
+cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example "envs/dev/agents/Finance Analytics.auto.tfvars"
 ```
-Fill in `envs/dev/auth.auto.tfvars` (service principal and workspace). The template starts new champions with `governance_mode = "deterministic"`; existing env files are not changed. In `envs/dev/env.auto.tfvars`, replace the agent, deployer, and group placeholders:
+Fill in `envs/dev/auth.auto.tfvars` (service principal and workspace). The template starts new champions with `governance_mode = "deterministic"`; existing env files are not changed. In `envs/dev/env.auto.tfvars`, replace the deployer and group placeholders:
 ```hcl
 deployer_principal_id = "<the dev auth.auto.tfvars databricks_client_id>"
 access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
 ```
+Each agent has its own file in `envs/dev/agents/`; the file name is the agent's name. In it, set the agent's ID and who may run it:
+```hcl
+genie_space_id = "01ef0000000000000000000000000000"   # Genie UI > agent > Configure > About this agent
+acl_groups     = ["regional_analysts", "viewers"]      # who gets CAN_RUN on the agent; [] means nobody
+```
+`acl_groups` is required: `make generate` stops while an agent has none. It grants only `CAN_RUN` on the agent. `SELECT` on the agent's tables comes only from `table_readers` in `env.auto.tfvars`, which `make generate` proposes for you (filled with `acl_groups`) for each table nothing covers yet. Every `acl_groups` group must be able to read every table of the agent, so pick them from `access_tier_groups` (only tier groups and `raw_exempt_principals` can be readers); otherwise `generate`, `rehearse` and `release` stop and name the table and group.
 
 <a id="dev-classify"></a>
 **2. Classify (in the UI).** In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on. When the scan finishes (the first one can take up to about a day), review the detections, exclude false positives, and turn on auto-tagging. Then wait until the columns show `class.*` tags such as `class.email_address`: open a table in Catalog Explorer and check its **Columns** tab.
@@ -60,7 +69,7 @@ access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
 ```bash
 make generate ENV=dev
 ```
-Review the drafted rules in `envs/dev/generated/` and edit them if you need to. If the tags aren't there yet, it stops and tells you to wait; re-run it later. Re-runs keep whatever is already in `envs/dev/generated/`, including your edits, and only add rules for new columns.
+It captures each new agent to `envs/dev/agents/<agent>.space.json` and proposes its `table_readers`. Review those and the drafted rules in `envs/dev/generated/`, and edit the rules if you need to. If the tags aren't there yet, it stops and tells you to wait; re-run it later. Re-runs keep whatever is already in `envs/dev/generated/`, including your edits, and only add rules for new columns.
 
 **4. Rehearse.**
 ```bash

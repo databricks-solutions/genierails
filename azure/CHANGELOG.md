@@ -85,6 +85,25 @@
 
 ### Fixed
 
+- **The champion walkthrough sets who may run the agent**: an agent given by ID
+  without `acl_groups` is refused by `make generate` (decision 4), but the
+  dev-to-prod template, README and live champion scenarios never set it, and
+  the template promised that omitting it derives it. Each agent now has its own
+  file, `envs/dev/agents/<agent name>.auto.tfvars`, from the new
+  `shared/examples/dev_to_prod/agent.auto.tfvars.example` (its `genie_space_id`
+  and `acl_groups`; `[]` means nobody), and the env template keeps
+  `genie_spaces = []`. The refusal is unchanged. The placeholder guard also
+  checks agent files (an unfilled ID or `acl_groups` group stops every guarded
+  target), `make generate` captures a new agent before writing
+  `generated/governed_tables.json` so its first run records the agent's tables,
+  and `make enable-classification` accepts an agent kept in a file.
+  `make generate` imports only agents whose capture was never committed: if a
+  committed `agents/<agent>.space.json` is gone, it stops before writing
+  anything and points to `make capture ENV=dev SPACE="<agent>"`, instead of
+  quietly re-capturing the live dev UI config. The e2e
+  driver's champion writes agent A's file from the required `dev_agent_id` and
+  `acl_groups` values. **Upgrade:** none; existing env files are not changed.
+
 - **A Genie agent configured only by `genie_space_id` promotes from a clean
   clone**: `make generate` (and `capture`) now also record such an agent's
   discovered tables in the committed `generated/governed_tables.json`, under

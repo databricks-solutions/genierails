@@ -22,6 +22,7 @@ vi envs/dev/env.auto.tfvars
 #         "dev_catalog.finance.transactions",
 #         "dev_catalog.clinical.encounters",
 #       ]
+#       acl_groups = ["<idp-tier-2>"]   # who may run it (CAN_RUN); required, [] means nobody
 #     },
 #   ]
 #
@@ -52,8 +53,9 @@ vi envs/dev/generated/abac.auto.tfvars
 #   - FGAC policies
 #   - genie_space_configs (title, instructions, benchmarks, filters, measures per agent)
 # Durable ACLs are not owned by this generated draft. Set acl_groups only on
-# matching genie_spaces[] entries in env.auto.tfvars: omit/null derives from
-# current policies, [] grants nobody, and a non-empty list is an explicit override.
+# matching genie_spaces[] entries in env.auto.tfvars: it is required (a missing
+# acl_groups stops make generate), [] grants nobody. Legacy envs only: omit/null
+# derives it from current policies.
 
 vi envs/dev/generated/masking_functions.sql
 # Review and iterate on the generated masking and row-filter functions.
@@ -100,6 +102,7 @@ genie_spaces = [
       "dev_fin.finance.customers",
       "dev_fin.accounts.*",
     ]
+    acl_groups = ["finance_analysts"]   # who may run it; required, [] means nobody
   },
   {
     name     = "Clinical Analytics"
@@ -107,6 +110,7 @@ genie_spaces = [
       "dev_clinical.clinical.encounters",
       "dev_clinical.clinical.diagnoses",
     ]
+    acl_groups = ["clinical_analysts"]
   },
 ]
 

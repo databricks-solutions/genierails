@@ -10,8 +10,8 @@ SHARED_ROOT = Path(__file__).resolve().parent.parent
 if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
 
-from genie_space_placeholder import placeholder_error  # noqa: E402
-from scripts.footprint import FootprintError, resolve_footprint
+from genie_space_placeholder import agent_files_placeholder_error, placeholder_error  # noqa: E402
+from scripts.footprint import FootprintError, load_env_config, resolve_footprint
 
 
 def main() -> int:
@@ -19,7 +19,7 @@ def main() -> int:
     with path.open() as handle:
         config = hcl2.load(handle)
 
-    placeholder = placeholder_error(config, path)
+    placeholder = agent_files_placeholder_error(path.parent) or placeholder_error(config, path)
     if placeholder:
         print(f"ERROR: {placeholder}", file=sys.stderr)
         return 1
@@ -30,6 +30,8 @@ def main() -> int:
 
     try:
         tables = resolve_footprint(path.parent)
+        # Agents in agents/<agent>.auto.tfvars count as much as inline ones.
+        merged = load_env_config(path.parent)
     except FootprintError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -37,7 +39,7 @@ def main() -> int:
     # its tables next (scripts/discover_agent_tables.py).
     agent_ids = [
         space.get("genie_space_id")
-        for space in config.get("genie_spaces") or []
+        for space in merged.get("genie_spaces") or []
         if isinstance(space, dict) and str(space.get("genie_space_id") or "").strip()
     ]
     if not tables and not agent_ids:

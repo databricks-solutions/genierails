@@ -976,8 +976,13 @@ def _legacy_promotion(tmp_path: Path, shared: Path, makefile: Path) -> dict[str,
     result = base._make(repo, tmp_path, "promote-to", "ENV=prod")
     assert result.returncode == 0, result.stdout + result.stderr
     envs = base._envs(repo)
-    return {str(p.relative_to(envs)): p.read_bytes() for p in sorted(envs.rglob("*"))
-            if p.is_file() and ".runtime" not in p.parts}
+    files = {str(p.relative_to(envs)): p.read_bytes() for p in sorted(envs.rglob("*"))
+             if p.is_file() and ".runtime" not in p.parts}
+    # make bootstraps the account env with a copy of shared/env.auto.tfvars.example,
+    # whose comments are documentation that may change; its settings may not.
+    seed = "account/env.auto.tfvars"
+    files[seed] = b"".join(line for line in files[seed].splitlines(keepends=True) if not line.startswith(b"#"))
+    return files
 
 
 def test_a_legacy_layout_env_promotes_and_plans_exactly_as_before(tmp_path):

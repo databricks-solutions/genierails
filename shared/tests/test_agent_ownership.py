@@ -304,6 +304,63 @@ def test_generate_imports_only_agents_not_yet_captured(tmp_path):
     assert ownership.import_new(env, "prod", getter) == []
 
 
+def _git_repo(env):
+    """Make the env's checkout a git repo and commit what is in it."""
+    root = env.parent.parent
+    git = ["git", "-C", str(root), "-c", "user.email=t@example.com", "-c", "user.name=t"]
+    if not (root / ".git").exists():
+        subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "commit"], check=True)
+
+
+@pytest.mark.parametrize("deleted", ["in the working tree", "in a commit"])
+def test_generate_refuses_an_agent_whose_committed_capture_is_gone(tmp_path, deleted):
+    env = _env(tmp_path, Sales='genie_space_id = "sales-1"\nacl_groups = ["a"]\n',
+               New='genie_space_id = "new-1"\nacl_groups = ["a"]\n')
+    capture = agent_files.capture_path(env, "Sales")
+    capture.write_text('{"curated": "reviewed"}\n')
+    (env / "agents" / "New.auto.tfvars").unlink()
+    _git_repo(env)
+    (env / "agents" / "New.auto.tfvars").write_text('genie_space_id = "new-1"\nacl_groups = ["a"]\n')
+    capture.unlink()
+    if deleted == "in a commit":
+        _git_repo(env)
+    calls = []
+    getter = lambda path, query: calls.append(path) or _response()  # noqa: E731
+    before = sorted(p.name for p in (env / "agents").iterdir())
+
+    for check in (True, False):
+        with pytest.raises(ownership.AgentError) as refused:
+            ownership.import_new(env, "dev", getter, check=check)
+        assert 'agents/Sales.space.json: restore it from git, or replace it with the live dev agent: ' \
+               'make capture ENV=dev SPACE="Sales"' in str(refused.value)
+        assert "Nothing was written." in str(refused.value)
+
+    # Refused before any read or write, the new agent's capture included.
+    assert calls == [] and sorted(p.name for p in (env / "agents").iterdir()) == before
+    # make capture replaces it on purpose; then the new agent imports once.
+    ownership.capture(env, "dev", "Sales", getter)
+    assert ownership.import_new(env, "dev", getter) == ["New"]
+    assert ownership.import_new(env, "dev", getter) == []
+    assert calls == ["/api/2.0/genie/spaces/sales-1", "/api/2.0/genie/spaces/new-1"]
+
+
+def test_a_new_agent_in_a_git_checkout_is_captured_once(tmp_path):
+    env = _env(tmp_path, New='genie_space_id = "new-1"\nacl_groups = ["a"]\n')
+    _git_repo(env)  # its settings file is committed; no capture ever was
+    calls = []
+    getter = lambda path, query: calls.append(path) or _response()  # noqa: E731
+
+    assert ownership.import_new(env, "dev", getter, check=True) == ["New"] and calls == []
+    assert ownership.import_new(env, "dev", getter) == ["New"]
+    assert ownership.import_new(env, "dev", getter) == []
+    assert calls == ["/api/2.0/genie/spaces/new-1"]
+    assert not ownership.capture_committed(env, "New")
+    _git_repo(env)
+    assert ownership.capture_committed(env, "New")
+
+
 # ── Remap ────────────────────────────────────────────────────────────────────
 
 def test_remap_changes_identifiers_in_values_never_keys_or_prose():

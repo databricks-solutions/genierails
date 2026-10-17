@@ -96,6 +96,12 @@ failure is `ERROR`. S13 runs every refusal command with `CI=true` and without
 Scenario values: `agent_a`, `wrong_agent`, `table` (covered), `uncovered_table`,
 `treatment`, `ack_entry` (an exact `prod:<kind>:...` line), `manifest`,
 `tampered_manifest`, and the 40-hex commits `u`, `o`, `r`, `r_plus_1`, `x`, `y`.
+The champion also needs `dev_agent_id` (dev agent A's Genie ID) and
+`acl_groups` (who may run A, comma-separated): before `make generate` it writes
+`envs/dev/agents/<agent_a>.auto.tfvars` with them, as the walkthrough's agent
+template does, so `agent_a` must be A's Terraform key (lowercase letters, digits
+and `_`). An existing file that says otherwise is refused. Its prod `GrantDelta`
+then requires CAN_RUN on A for exactly those groups.
 The typed checks below add: champion `acl_groups`, `dev_tables`, `prod_tables`;
 S2 `mask_column`; S3 `new_table_principals`, `dev_table`, `prod_table`; S4
 `new_column`; S5 `secret_column`; and `agent_a` for champion, S3 and S16. S6's

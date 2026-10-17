@@ -60,7 +60,7 @@ from access_tier_groups import (
     persisted_access_tier_groups,
     render as render_access_tier_groups,
 )
-from genie_space_placeholder import placeholder_error
+from genie_space_placeholder import agent_files_placeholder_error, placeholder_error
 from walkthrough_marker import follows_walkthrough
 from sensitivity_source import (
     ClassificationSource,
@@ -350,7 +350,7 @@ def load_auth_config(
         env_cfg = with_agents(env_file, env_cfg)
     except AgentFileError as exc:
         raise ValueError(str(exc)) from exc
-    placeholder = placeholder_error(
+    placeholder = agent_files_placeholder_error(env_file.parent) or placeholder_error(
         env_cfg, env_file, allow_access_tier_placeholders=allow_access_tier_placeholders
     )
     if placeholder:
@@ -8546,7 +8546,7 @@ Before you apply, tune for your business roles, security requirements, and Genie
   - Each space includes all groups that need access
   - Groups that should NOT see this space are excluded
   - Set durable per-agent `acl_groups` only on `genie_spaces[]` in `env.auto.tfvars`
-  - Explicit `acl_groups = []` means nobody; omission derives fresh from policies
+  - Explicit `acl_groups = []` means nobody; omission derives fresh from policies (legacy mode only)
   - ACL fields in the generated draft are ignored
 - **Validate before apply**: Run validation before `terraform apply`.
 

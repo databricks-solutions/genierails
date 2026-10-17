@@ -422,7 +422,7 @@ Before outputting, perform this coverage check:
    - benchmark SQL
    - masking function parameter and return types
 9. Every `match_condition` and `when_condition` MUST only use `hasTagValue()` and/or `hasTag()` — no other functions or operators
-10. Generate Genie agent semantic config — all nine fields below. **Derive everything from the user's actual tables, columns, and domain** — do NOT copy the finance/healthcare examples below if the user's data is from a different industry. Adapt terminology, metrics, filters, and joins to whatever vertical the tables belong to (retail, manufacturing, telecom, education, logistics, etc.). Do not emit `acl_groups` or `genie_acl_groups`: durable user ACL intent belongs on `genie_spaces[]` in `env.auto.tfvars`; when omitted there, the tool derives ACLs from policies.
+10. Generate Genie agent semantic config — all nine fields below. **Derive everything from the user's actual tables, columns, and domain** — do NOT copy the finance/healthcare examples below if the user's data is from a different industry. Adapt terminology, metrics, filters, and joins to whatever vertical the tables belong to (retail, manufacturing, telecom, education, logistics, etc.). Do not emit `acl_groups` or `genie_acl_groups`: who may run an agent is user-owned and belongs on its `genie_spaces[]` entry in `env.auto.tfvars` (or its `agents/<agent>.auto.tfvars` file). In a legacy env, the tool derives ACLs from policies when it is omitted there; deterministic envs require it (`[]` means nobody) and never use this prompt.
 
 Fields to include:
 

@@ -36,6 +36,63 @@ def test_dry_run_is_offline_and_writes_reports(tmp_path, monkeypatch):
     assert s1["target_source"].endswith("aws/Makefile")
 
 
+def test_champion_needs_agent_a_its_dev_id_and_acl_groups(tmp_path):
+    def dry_run(*values):
+        rc = driver.main(["--cloud", "aws", "--repo", str(ROOT), "--dry-run", "--scenarios", "champion",
+                          "--reports", str(tmp_path), *values])
+        assert rc == 0
+        return json.loads((tmp_path / "champion.json").read_text())
+
+    champion = dry_run()
+    assert champion["steps"][1] == {**champion["steps"][1], "action": "write_agent_file", "status": "planned"}
+    assert {"agent_a", "dev_agent_id", "acl_groups"} <= set(champion["missing_values"])
+    assert "missing value: acl_groups" in champion["would_not_run"]
+    bad = dry_run("--value", "agent_a=Finance Analytics", "--value", "dev_agent_id=<id>",
+                  "--value", "acl_groups=<group>", "--value", "prod_tables=cat.s.t", "--value", "dev_tables=cat.s.t")
+    assert bad["missing_values"] == sorted([
+        "agent_a (must be the agent's Terraform key: lowercase letters, digits and '_')",
+        "dev_agent_id (must be a Genie agent ID: letters, digits, '_' or '-')",
+        "acl_groups (must be comma-separated group names)"])
+    good = dry_run(*CHAMPION_VALUES)
+    assert good["missing_values"] == []
+
+
+def test_write_agent_file_writes_once_and_never_retargets(tmp_path):
+    values = {"agent_a": "finance_analytics", "dev_agent_id": "01ef7b3c", "acl_groups": "payments_ops, viewers"}
+    driver.write_agent_file(tmp_path, values)
+    path = tmp_path / "agents" / "finance_analytics.auto.tfvars"
+    assert driver._load_hcl(path) == {"genie_space_id": "01ef7b3c", "acl_groups": ["payments_ops", "viewers"]}
+    driver.write_agent_file(tmp_path, values)  # the same settings: unchanged
+    before = path.read_text()
+    for changed in ({"dev_agent_id": "01other"}, {"acl_groups": "viewers"}):
+        with pytest.raises(RuntimeError, match="already sets a different genie_space_id or acl_groups"):
+            driver.write_agent_file(tmp_path, {**values, **changed})
+    assert path.read_text() == before
+    with pytest.raises(RuntimeError, match="missing value: acl_groups"):
+        driver.write_agent_file(tmp_path / "new", {**values, "acl_groups": ""})
+    assert not (tmp_path / "new").exists()
+
+
+def test_champion_prod_can_run_is_exactly_its_acl_groups():
+    champion = next(s for s in driver.SCENARIOS if s.key == "champion")
+    values = {"acl_groups": "a1,a2", "agent_a": "a", "prod_tables": "cat.s.t", "dev_tables": "cat.s.t"}
+    prod = next(driver.render_check(c, values) for c in champion.checks
+                if isinstance(c, driver.GrantDelta) and c.env == "prod")
+
+    def released(*can_run, readers=("a1", "a2")):
+        acl = {"access_control_list": [
+            {"group_name": g, "all_permissions": [{"permission_level": "CAN_RUN", "inherited": False}]}
+            for g in can_run]}
+        return {"prod": with_agents(agent("a", "space-a", acl=acl), grants=readers)}
+
+    before = {"prod": with_agents(agent("a", "space-a"))}
+    assert driver._eval_grant_delta(prod, ctx(before, released("a1", "a2"))) == []
+    extra = driver._eval_grant_delta(prod, ctx(before, released("a1", "a2", "eve")))
+    assert any("unexpected grant(s) added: eve CAN RUN genie:space-a" in p for p in extra), extra
+    missing = driver._eval_grant_delta(prod, ctx(before, released("a1")))
+    assert any("expected grant(s) not newly added: a2 CAN RUN genie:space-a" in p for p in missing), missing
+
+
 def test_snapshot_diff_is_stable_and_order_insensitive():
     before = {"grants": [{"p": "b"}, {"p": "a"}], "tags": ["x"], "serial": 4}
     after = {"grants": [{"p": "a"}, {"p": "b"}], "tags": ["y"], "serial": 5}
@@ -129,7 +186,7 @@ class FakeSnapshots:
         return snapshot()
 
 
-CHAMPION_VALUES = ("--value", "agent_a=a", "--value", "acl_groups=analysts",
+CHAMPION_VALUES = ("--value", "agent_a=a", "--value", "acl_groups=analysts", "--value", "dev_agent_id=space-a",
                    "--value", "prod_tables=cat.s.t", "--value", "dev_tables=cat.s.t")
 # The columns VERIFY_PASS proves, as the scenario values that name them.
 CHECKED_COLUMNS = ("--value", "new_column=cat.s.t.ssn", "--value", "secret_column=cat.s.t.cvv")
@@ -1101,6 +1158,10 @@ def test_simulated_live_champion_commits_generate_then_promotion(sim, monkeypatc
     rehearses = [e for e in log if e["argv"][0] == "rehearse"]
     assert rehearses and not any(e["dirty"] for e in rehearses)
     assert len({e["head"] for e in rehearses[:2]}) == 2  # generate merge, then promotion merge
+    # The generate merge commits agent A's file, written from the required values.
+    agent_file = _git(sim.checkout, "show", f"{rehearses[0]['head']}:aws/envs/dev/agents/a.auto.tfvars")
+    assert agent_file == 'genie_space_id = "space-a"\nacl_groups     = ["analysts"]'
+
     assert any(e["argv"][:2] == ["maintain", "ENV=prod"] and e["head"] == sim.baseline for e in log)
     assert json.loads((sim.reports / "s4.json").read_text())["status"] == "passed"
     assert _git(sim.checkout, "rev-parse", "HEAD") == sim.baseline

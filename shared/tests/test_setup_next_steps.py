@@ -64,10 +64,14 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "envs/dev/auth.auto.tfvars" in out
     assert "manage_groups" not in out
     assert "Edit envs/account/env.auto.tfvars" not in out
+    # Each agent gets its own file with its ID and who may run it (decision 4).
     assert (
-        "  3. Edit envs/dev/env.auto.tfvars — set genie_space_id to your Genie agent ID and\n"
-        "     deployer_principal_id to the applying SP's client_id, and access_tier_groups to your IdP groups,\n"
-        "     most to least privileged (the template starts new champions in deterministic mode)\n"
+        "  3. Per agent, create its file (the file name is the agent's name) and set genie_space_id to its\n"
+        "     Genie agent ID and acl_groups to the groups that may run it ([] means nobody; required):\n"
+        "       mkdir -p envs/dev/agents\n"
+        '       cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example "envs/dev/agents/<agent name>.auto.tfvars"\n'
+        "     In envs/dev/env.auto.tfvars set deployer_principal_id to the applying SP's client_id, and\n"
+        "     access_tier_groups to your IdP groups, most to least privileged (the template starts new champions in deterministic mode)\n"
     ) in out
     # One plain generate imports the agent; no separate MODE=genie step.
     assert "MODE=genie" not in out

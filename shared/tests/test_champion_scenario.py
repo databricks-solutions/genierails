@@ -65,6 +65,12 @@ class FakeMake:
             'databricks_workspace_host = ""\n'
             'databricks_client_id = "d0000000-0000-0000-0000-00000000d001"\n'
         )
+        if env_dir.name == "prod":  # what make setup ENV=prod writes for a promoted env
+            (env_dir / "env.auto.tfvars").write_text(
+                'genie_spaces = []\nsql_warehouse_id = ""\ngovernance_mode = "deterministic"\n'
+                'deployer_principal_id = "<your-deployer-principal-id>"\n'
+                'access_tier_groups = ["<most-privileged-group>", "<least-privileged-group>"]\n'
+                'promote_from = "dev"\ncatalog_map = { "<dev_catalog>" = "<prod_catalog>" }\n')
         (self.envs / "account").mkdir(exist_ok=True)
         return self._done(args)
 
@@ -101,6 +107,10 @@ class FakeMake:
                 f'genie_space_id_to_name = {{ "{SPACE_ID}" = "{title}" }}\n'
             )
             (env_dir / "generated" / "masking_functions.sql").write_text("-- masks\n")
+        # import-new: the first dev generate captures each agent file's agent.
+        capture = env_dir / "agents" / f"{rit.CHAMPION_AGENT}.space.json"
+        if (env_dir / "agents" / f"{rit.CHAMPION_AGENT}.auto.tfvars").is_file() and not capture.exists():
+            capture.write_text(json.dumps({"data_sources": {"tables": [{"identifier": t} for t in DEV_TABLES]}}))
         return self._done(args)
 
     def _enable_classification(self, args, env_dir):
@@ -113,17 +123,23 @@ class FakeMake:
             f.write('verify_key_columns = { "dev_fin.finance.customers" = "customer_id" }\n')
         return self._done(args, 0, "  ✓ [PASS] column-mask x\n  RESULT: ALL EFFECTIVE (1 passed / 1)\n")
 
-    def _promote(self, args, env_dir):
-        src = self.envs / _var(args, "SOURCE_ENV")
-        dest = self.envs / _var(args, "DEST_ENV")
+    def _promote_to(self, args, env_dir):
+        guard = subprocess.run([sys.executable, str(SHARED / "genie_space_placeholder.py"),
+                                str(self.envs / "dev" / "env.auto.tfvars"), str(env_dir / "env.auto.tfvars")],
+                               capture_output=True, text=True)
+        assert guard.returncode == 0, guard.stdout + guard.stderr
+        src, dest = self.envs / "dev", env_dir
+        catalog_map = ",".join(f"{k}={v}" for k, v in rit._load_tfvars(dest / "env.auto.tfvars")["catalog_map"].items())
         for sub in ("generated", "data_access"):
             (dest / sub).mkdir(parents=True, exist_ok=True)
-        remap = subprocess.run(
-            [sys.executable, str(SHARED / "scripts" / "remap_env_config.py"),
-             str(src), str(dest), _var(args, "DEST_CATALOG_MAP")],
-            capture_output=True, text=True,
-        )
-        assert remap.returncode == 0, remap.stdout + remap.stderr
+        # promote-to's agent step, then promote's env remap (the real scripts).
+        for command in (["agent_promote.py", "--source-dir", str(src), "--dest-dir", str(dest),
+                         "--catalog-map", catalog_map],
+                        ["remap_env_config.py", str(src), str(dest), catalog_map]):
+            result = subprocess.run([sys.executable, str(SHARED / "scripts" / command[0]), *command[1:]],
+                                    capture_output=True, text=True)
+            assert result.returncode == 0, result.stdout + result.stderr
+            print(result.stdout, end="")
         (dest / "generated" / "masking_functions.sql").write_text("-- prod masks\n")
         return self._done(args)
 
@@ -162,6 +178,9 @@ def champion(tmp_path, monkeypatch):
     monkeypatch.setattr(rit, "_force_account_reapply", lambda *_: None)
     monkeypatch.setattr(rit, "_get_genie_space_via_api",
                         lambda _a, sid: {"space_id": sid, "title": rit.CHAMPION_SPACE_TITLE})
+    # A release grants CAN_RUN on the prod agent to exactly its agent file's acl_groups.
+    monkeypatch.setattr(rit, "_get_genie_space_acl_groups", lambda _a, _sid: {"admins", *rit._load_tfvars(
+        envs / "prod" / "agents" / f"{rit.CHAMPION_AGENT}.auto.tfvars")["acl_groups"]})
     for name in ("_try_destroy", "_try_destroy_account", "_delete_genie_space_via_api",
                  "_delete_account_groups", "_teardown_data"):
         monkeypatch.setattr(rit, name, lambda *a, _n=name, **k: teardown.append(_n))
@@ -189,7 +208,8 @@ def test_champion_dry_run_follows_the_readme_order(champion):
         ["enable-classification", "ENV=dev"],
         ["generate", "ENV=dev"],
         ["rehearse", "ENV=dev"],
-        ["promote", "SOURCE_ENV=dev", "DEST_ENV=prod", "DEST_CATALOG_MAP=dev_fin=prod_fin"],
+        ["setup", "ENV=prod"],
+        ["promote-to", "ENV=prod"],
         ["enable-classification", "ENV=prod"],
         ["enable-classification", "ENV=prod"],
         ["release", "ENV=prod"],
@@ -199,7 +219,13 @@ def test_champion_dry_run_follows_the_readme_order(champion):
     assert teardown[:3] == ["_try_destroy", "_try_destroy", "_try_destroy_account"]
 
     dev_cfg = rit._load_tfvars(envs / "dev" / "env.auto.tfvars")
-    assert dev_cfg["genie_spaces"] == [{"genie_space_id": SPACE_ID}]
+    # The agent is in its own file, with who may run it (decision 4).
+    assert dev_cfg["genie_spaces"] == []
+    groups = ["champion_full_abc123", "champion_analyst_abc123"]
+    dev_agent = rit._load_tfvars(envs / "dev" / "agents" / "Champion Finance Analytics.auto.tfvars")
+    assert dev_agent == {"genie_space_id": SPACE_ID, "acl_groups": groups, "name": rit.CHAMPION_SPACE_TITLE}
+    prod_agent = rit._load_tfvars(envs / "prod" / "agents" / "Champion Finance Analytics.auto.tfvars")
+    assert prod_agent["acl_groups"] == groups and prod_agent["genie_space_id"] == ""
     assert "uc_tables" not in dev_cfg
     assert dev_cfg["enable_auto_tagging"] is True
     assert dev_cfg["verify_key_columns"] == {"dev_fin.finance.customers": "customer_id"}

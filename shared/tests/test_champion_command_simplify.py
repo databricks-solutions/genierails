@@ -86,9 +86,11 @@ def classification_cloud(tmp_path):
                            cwd=REPO / "aws", text=True, capture_output=True, env=_clean_env())
     assert setup.returncode == 0, setup.stdout + setup.stderr
     env_file = cloud_root / "envs/dev/env.auto.tfvars"
+    # These tests edit an inline agent given only by ID (the champion template
+    # keeps agents in agents/ files; discovery treats both alike).
     env_file.write_text(
         TEMPLATE.read_text()
-        .replace("<your-genie-space-id>", SPACE_ID)
+        .replace("genie_spaces = []", f'genie_spaces = [\n  {{ genie_space_id = "{SPACE_ID}" }},\n]')
         .replace("<your-deployer-principal-id>", "d0000000-0000-0000-0000-00000000d001")
         .replace("<most-privileged-group>", "payments_ops")
         .replace("<least-privileged-group>", "viewers")

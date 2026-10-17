@@ -283,14 +283,23 @@ def _business_grants(principals: str, tables: str) -> tuple[Grant, ...]:
 
 
 APPLY_RELEASE = "Apply approved manifest"
+# The champion writes dev agent A's file (envs/dev/agents/<agent_a>.auto.tfvars)
+# from these required values: who may run an agent is its acl_groups (design
+# decision 4; a missing value stops make generate). agent_a must be its own
+# Terraform key, so ``agent:{agent_a}`` names the same agent in dev and prod.
+AGENT_FILE_VALUES = ("agent_a", "dev_agent_id", "acl_groups")
+AGENT_KEY = re.compile(r"[a-z0-9]+(?:_[a-z0-9]+)*")
+AGENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+GROUP_NAME = re.compile(r"[^\s\"'<>{}\[\],#]+(?: [^\s\"'<>{}\[\],#]+)*")
 
 
 SCENARIOS: tuple[Scenario, ...] = (
     _scenario("champion", "First champion deployment", (
-        "Fresh prefixed dev agent A and matching test-only dev/prod tables exist.",
-        "Catalog mapping, tier groups, acl_groups and external state directory are reviewed.",
+        "Fresh prefixed dev agent A (ID dev_agent_id) and matching test-only dev/prod tables exist.",
+        "Catalog mapping, tier groups, acl_groups (who may run A) and external state directory are reviewed.",
     ), (
         mk("Scaffold dev environment", "setup", "dev"),
+        action("Write dev agent A's file: genie_space_id and acl_groups", "write_agent_file"),
         Step("Review dev classification", human_prompt="In dev Catalog Explorer review classification, exclude false positives and enable auto-tagging."),
         mk("Generate reviewed dev configuration", "generate", "dev"),
         AUTHOR_MERGE,
@@ -882,6 +891,9 @@ def unresolved_values(scenario: Scenario, values: Mapping[str, str]) -> list[str
     for step in scenario.steps:
         if step.action in ("checkout_value", "add_ack") and not values.get(step.value or ""):
             missing.append(step.value or "")
+        if step.action == "write_agent_file":
+            missing += [name for name in AGENT_FILE_VALUES if not values.get(name)]
+            missing += agent_file_value_problems(values)
         for name in (n for part in step.command for n in PLACEHOLDER.findall(part)):
             if not values.get(name) and name not in produced: missing.append(name)
         for name in (n for check in step.assertions for n in check_placeholders(check)):
@@ -892,6 +904,41 @@ def unresolved_values(scenario: Scenario, values: Mapping[str, str]) -> list[str
         if step.action == "checkout_value" and values.get(step.value or "") and not re.fullmatch(r"[0-9a-fA-F]{40}", values[step.value or ""]):
             missing.append(f"{step.value} (must be a 40-hex commit)")
     return sorted(set(missing))
+
+
+def _acl_groups(value: str) -> list[str]:
+    return [group.strip() for group in value.split(",") if group.strip()]
+
+
+def agent_file_value_problems(values: Mapping[str, str]) -> list[str]:
+    """Each supplied agent-file value that can't be written as given (missing ones are reported apart)."""
+    problems = []
+    if values.get("agent_a") and not AGENT_KEY.fullmatch(values["agent_a"]):
+        problems.append("agent_a (must be the agent's Terraform key: lowercase letters, digits and '_')")
+    if values.get("dev_agent_id") and not AGENT_ID.fullmatch(values["dev_agent_id"]):
+        problems.append("dev_agent_id (must be a Genie agent ID: letters, digits, '_' or '-')")
+    if values.get("acl_groups") and not (
+            _acl_groups(values["acl_groups"])
+            and all(GROUP_NAME.fullmatch(group) for group in _acl_groups(values["acl_groups"]))):
+        problems.append("acl_groups (must be comma-separated group names)")
+    return problems
+
+
+def write_agent_file(env_dir: Path, values: Mapping[str, str]) -> None:
+    """Write dev agent A's settings file; an existing file must already say the same."""
+    problems = [f"missing value: {name}" for name in AGENT_FILE_VALUES if not values.get(name)]
+    problems += agent_file_value_problems(values)
+    if problems: raise RuntimeError("cannot write the agent file: " + "; ".join(problems))
+    groups = _acl_groups(values["acl_groups"])
+    path = env_dir / "agents" / f"{values['agent_a']}.auto.tfvars"
+    if path.exists():
+        config = _load_hcl(path)
+        if config.get("genie_space_id") != values["dev_agent_id"] or config.get("acl_groups") != groups:
+            raise RuntimeError(f"{path} already sets a different genie_space_id or acl_groups; nothing was written")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"genie_space_id = {json.dumps(values['dev_agent_id'])}\n"
+                    f"acl_groups     = [{', '.join(json.dumps(group) for group in groups)}]\n", encoding="utf-8")
 
 
 def governance_only_env(cloud_root: Path, env: str) -> bool:
@@ -1794,6 +1841,9 @@ def _run_action(step: Step, scenario: Scenario, repo: Checkout, values: Mapping[
         return
     if step.action == "local_merge":
         repo.local_merge(scenario.key)
+        return
+    if step.action == "write_agent_file":
+        write_agent_file(repo.runner.cwd / "envs" / "dev", values)
         return
     raise RuntimeError(f"unknown scenario action: {step.action}")
 

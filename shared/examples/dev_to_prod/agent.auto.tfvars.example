@@ -1,0 +1,23 @@
+# ============================================================================
+# GenieRails Dev-to-Prod Walkthrough — one Genie agent (agent file)
+# ============================================================================
+# Copy to envs/dev/agents/<agent name>.auto.tfvars, one file per agent (run
+# make from the cloud root, cd aws|azure):
+#   mkdir -p envs/dev/agents
+#   cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example "envs/dev/agents/Finance Analytics.auto.tfvars"
+# The file name is the agent's name: letters, digits, spaces, '_', '-' or '.'.
+# `make generate ENV=dev` captures the agent beside this file
+# (<agent name>.space.json) and `make promote-to ENV=prod` seeds prod's file.
+# ============================================================================
+
+# Agent ID: Genie UI > your agent > Configure > About this agent > Agent ID
+# (or the <id> in its /genie/rooms/<id> URL). Its tables are discovered from it.
+genie_space_id = "<your-genie-space-id>"
+
+# Who may run the agent: the groups that get Genie CAN_RUN on it, and nothing
+# else (SELECT on its tables comes only from table_readers in env.auto.tfvars;
+# `make generate` proposes entries for this agent's tables). Required: a
+# missing acl_groups stops the run. [] means nobody. Pick them from your
+# access_tier_groups (only tier groups and raw_exempt_principals can read the
+# agent's tables), e.g. ["regional_analysts", "viewers"].
+acl_groups = ["<group-that-may-run-the-agent>"]

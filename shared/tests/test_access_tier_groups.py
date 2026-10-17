@@ -41,9 +41,11 @@ class _Stop(Exception):
 def _dev_env(tmp_path, groups=None, genie_space_id=AGENT_ID):
     env_dir = tmp_path / "envs" / "dev"
     (env_dir / "data_access").mkdir(parents=True)
-    text = TEMPLATE.read_text().replace(PLACEHOLDER, genie_space_id)
-    # Most tests in this module exercise the legacy group-resolution contract;
-    # the template's deterministic defaults have their own contract tests.
+    # Most tests in this module exercise the legacy group-resolution contract,
+    # with the agent inline as legacy envs keep it; the template's deterministic
+    # defaults (agent files) have their own contract tests.
+    text = TEMPLATE.read_text().replace(
+        "genie_spaces = []", f'genie_spaces = [\n  {{ genie_space_id = "{genie_space_id}" }},\n]')
     text = text.replace('governance_mode = "deterministic"\n', "")
     text = text.replace('deployer_principal_id = "<your-deployer-principal-id>"\n', "")
     text = text.replace(

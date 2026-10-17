@@ -1,8 +1,8 @@
-"""Champion dev-to-prod flow: the template needs only a Genie agent ID.
+"""Champion dev-to-prod flow: an agent file needs only its Genie agent ID and acl_groups.
 
-Covers the placeholder guard (generate, enable-classification, plan/apply) and
-that a template with no uc_tables reaches classification through the
-import-discovered tables.
+Covers the placeholder guard (generate, enable-classification, plan/apply) on
+the env and agent templates, and that a champion env with no uc_tables reaches
+classification through the import-discovered tables.
 """
 
 import hashlib
@@ -18,35 +18,49 @@ import hcl2
 import pytest
 
 import generate_abac
-from genie_space_placeholder import PLACEHOLDER, placeholder_error
+from genie_space_placeholder import PLACEHOLDER, agent_files_placeholder_error, placeholder_error
 
 
 SHARED = Path(__file__).parents[1]
 TEMPLATE = SHARED / "examples/dev_to_prod/env.auto.tfvars.example"
+AGENT_TEMPLATE = SHARED / "examples/dev_to_prod/agent.auto.tfvars.example"
+ACL_PLACEHOLDER = "<group-that-may-run-the-agent>"
+# The README copies the agent template to this file name.
+AGENT = "Finance Analytics"
 VALIDATOR = SHARED / "scripts/validate_classification_config.py"
 GUARD = SHARED / "genie_space_placeholder.py"
 MAKEFILE = SHARED / "Makefile.shared"
 EXPECTED_ERROR = (
-    f"replace placeholder {PLACEHOLDER} in envs/dev/env.auto.tfvars with your Genie agent ID"
+    f"replace placeholder {PLACEHOLDER} in envs/dev/agents/{AGENT}.auto.tfvars with your Genie agent ID"
 )
 
 
-def _resolved_template(*, genie_space_id="01ef7b3c2a4d5e6f"):
+def _resolved_template():
     return (TEMPLATE.read_text()
-            .replace(PLACEHOLDER, genie_space_id)
             .replace("<your-deployer-principal-id>", "d0000000-0000-0000-0000-00000000d001")
             .replace("<most-privileged-group>", "payments_ops")
             .replace("<least-privileged-group>", "viewers"))
 
 
+def _agent_file(env_dir, genie_space_id="01ef7b3c2a4d5e6f", acl_group="viewers"):
+    """Write the README's agent file from the agent template."""
+    path = env_dir / "agents" / f"{AGENT}.auto.tfvars"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(AGENT_TEMPLATE.read_text().replace(PLACEHOLDER, genie_space_id)
+                    .replace(ACL_PLACEHOLDER, acl_group))
+    return path
+
+
+def _resolved_champion(env_dir):
+    (env_dir / "env.auto.tfvars").write_text(_resolved_template())
+    _agent_file(env_dir)
+
+
 def _dev_env(tmp_path, genie_space_id=PLACEHOLDER, discovered=None):
     env_dir = tmp_path / "envs" / "dev"
     (env_dir / "data_access").mkdir(parents=True)
-    template = _resolved_template(genie_space_id=genie_space_id)
-    template = template.replace("<your-deployer-principal-id>", "d0000000-0000-0000-0000-00000000d001")
-    template = template.replace("<most-privileged-group>", "payments_ops")
-    template = template.replace("<least-privileged-group>", "viewers")
-    (env_dir / "env.auto.tfvars").write_text(template)
+    (env_dir / "env.auto.tfvars").write_text(_resolved_template())
+    _agent_file(env_dir, genie_space_id)
     (env_dir / "auth.auto.tfvars").write_text(
         'databricks_workspace_host = "https://example.invalid"\n'
         'databricks_client_id = "client"\ndatabricks_client_secret = "secret"\n'
@@ -61,8 +75,11 @@ def _dev_env(tmp_path, genie_space_id=PLACEHOLDER, discovered=None):
 
 def test_template_genie_space_placeholder_is_the_only_active_footprint():
     cfg = hcl2.loads(TEMPLATE.read_text())
+    agent = hcl2.loads(AGENT_TEMPLATE.read_text())
 
-    assert cfg["genie_spaces"] == [{"genie_space_id": PLACEHOLDER}]
+    # The agent lives in its own file: its ID and who may run it (decision 4).
+    assert cfg["genie_spaces"] == []
+    assert agent == {"genie_space_id": PLACEHOLDER, "acl_groups": [ACL_PLACEHOLDER]}
     assert "uc_tables" not in cfg
     assert cfg["sql_warehouse_id"] == ""
     assert cfg["enable_classification"] is True
@@ -83,7 +100,15 @@ def test_placeholder_error_names_the_file_and_the_fix(tmp_path):
     env_dir = _dev_env(tmp_path)
     cfg = hcl2.loads((env_dir / "env.auto.tfvars").read_text())
 
-    assert EXPECTED_ERROR in placeholder_error(cfg, env_dir / "env.auto.tfvars")
+    assert placeholder_error(cfg, env_dir / "env.auto.tfvars") is None
+    assert EXPECTED_ERROR in agent_files_placeholder_error(env_dir)
+    _agent_file(env_dir, acl_group=ACL_PLACEHOLDER)
+    assert (f"replace placeholder {ACL_PLACEHOLDER} in envs/dev/agents/{AGENT}.auto.tfvars with the groups "
+            "that may run the agent") in agent_files_placeholder_error(env_dir)
+    inline = {"genie_spaces": [{"genie_space_id": "01ef7b3c", "acl_groups": [ACL_PLACEHOLDER]}]}
+    assert ACL_PLACEHOLDER in placeholder_error(inline, env_dir / "env.auto.tfvars")
+    _agent_file(env_dir)
+    assert agent_files_placeholder_error(env_dir) is None
     assert placeholder_error({"genie_spaces": [{"genie_space_id": "01ef7b3c"}]}, env_dir) is None
     assert placeholder_error({"genie_spaces": [{"genie_space_id": ""}]}, env_dir) is None
     assert placeholder_error({}, env_dir) is None
@@ -92,7 +117,7 @@ def test_placeholder_error_names_the_file_and_the_fix(tmp_path):
 def test_generate_config_loading_fails_fast_on_placeholder(tmp_path):
     env_dir = _dev_env(tmp_path)
 
-    with pytest.raises(ValueError, match="replace placeholder <your-genie-space-id> in envs/dev/env.auto.tfvars"):
+    with pytest.raises(ValueError, match=f"replace placeholder <your-genie-space-id> in envs/dev/agents/{AGENT}"):
         generate_abac.load_auth_config(env_dir / "auth.auto.tfvars", strict_env=True)
 
 
@@ -113,8 +138,9 @@ def test_generate_config_loading_accepts_agent_id_without_uc_tables(tmp_path):
 
     cfg = generate_abac.load_auth_config(env_dir / "auth.auto.tfvars", strict_env=True)
 
-    assert cfg["genie_spaces"] == [{"genie_space_id": "01ef7b3c2a4d5e6f"}]
-    assert "uc_tables" not in cfg
+    assert [(s["genie_space_id"], s["acl_groups"]) for s in cfg["genie_spaces"]] == [
+        ("01ef7b3c2a4d5e6f", ["viewers"])]
+    assert "uc_tables" not in cfg and not any(s.get("uc_tables") for s in cfg["genie_spaces"])
 
 
 def test_enable_classification_validator_fails_fast_on_placeholder(tmp_path):
@@ -139,9 +165,7 @@ def test_plan_apply_guard_fails_fast_on_placeholder(tmp_path):
     assert result.returncode == 1
     assert EXPECTED_ERROR in result.stderr
 
-    (env_dir / "env.auto.tfvars").write_text(
-        _resolved_template()
-    )
+    _resolved_champion(env_dir)
     result = subprocess.run(
         [sys.executable, GUARD, env_dir / "env.auto.tfvars"],
         capture_output=True, text=True,
@@ -198,6 +222,8 @@ def _prepared_cloud(tmp_path_factory):
     for env_name in ("dev", "prod"):
         assert _run_make(cloud_root, "setup", f"ENV={env_name}").returncode == 0
     (cloud_root / "envs/dev/env.auto.tfvars").write_text(TEMPLATE.read_text())
+    (cloud_root / "envs/dev/agents").mkdir()
+    shutil.copy(AGENT_TEMPLATE, cloud_root / f"envs/dev/agents/{AGENT}.auto.tfvars")
     return cloud_root
 
 
@@ -227,7 +253,7 @@ def _assert_fails_fast(result, env_name="dev"):
     output = result.stdout + result.stderr
     assert result.returncode != 0, output
     assert (
-            f"ERROR: replace placeholder {PLACEHOLDER} in envs/{env_name}/env.auto.tfvars "
+        f"ERROR: replace placeholder {PLACEHOLDER} in envs/{env_name}/agents/{AGENT}.auto.tfvars "
         "with your Genie agent ID"
     ) in result.stderr, output
     # Nothing ran past the guard: no target banner, Terraform, or Genie API call.
@@ -242,10 +268,10 @@ def test_champion_targets_fail_fast_on_placeholder(placeholder_cloud, target):
 
 
 def test_promote_fails_fast_on_placeholder_in_existing_dest(placeholder_cloud):
-    (placeholder_cloud / "envs/dev/env.auto.tfvars").write_text(
-        _resolved_template()
-    )
+    _resolved_champion(placeholder_cloud / "envs/dev")
     (placeholder_cloud / "envs/prod/env.auto.tfvars").write_text(TEMPLATE.read_text())
+    (placeholder_cloud / "envs/prod/agents").mkdir()
+    shutil.copy(AGENT_TEMPLATE, placeholder_cloud / f"envs/prod/agents/{AGENT}.auto.tfvars")
 
     result = _run_make(
         placeholder_cloud, "promote", "SOURCE_ENV=dev", "DEST_ENV=prod",
@@ -301,13 +327,11 @@ def test_setup_is_not_blocked_by_the_placeholder(placeholder_cloud):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Next steps" in result.stdout
-    assert PLACEHOLDER in (placeholder_cloud / "envs/dev/env.auto.tfvars").read_text()
+    assert PLACEHOLDER in (placeholder_cloud / f"envs/dev/agents/{AGENT}.auto.tfvars").read_text()
 
 
 def test_placeholder_guard_passes_once_agent_id_is_set(placeholder_cloud):
-    (placeholder_cloud / "envs/dev/env.auto.tfvars").write_text(
-        _resolved_template()
-    )
+    _resolved_champion(placeholder_cloud / "envs/dev")
 
     result = _run_make(placeholder_cloud, "_guard-genie-placeholder", "ENV=dev")
 
@@ -385,25 +409,29 @@ def test_sample_env_snippet_replaces_template_lines_without_duplicates():
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
-    snippet = module._tfvars(
-        "01ef7b3c2a4d5e6f", ["dev_finance.genierails_e2e.customers"], "wh-123"
-    )
+    snippet = module._tfvars(["dev_finance.genierails_e2e.customers"], "wh-123")
 
-    # Follow SAMPLE_ENV.md: replace the template's genie_spaces + sql_warehouse_id.
+    # Follow SAMPLE_ENV.md: replace the template's sql_warehouse_id, write the agent file.
     template = TEMPLATE.read_text()
-    genie_block = '\ngenie_spaces = [\n  { genie_space_id = "<your-genie-space-id>" },\n]\n'
     warehouse_line = '\nsql_warehouse_id = ""\n'
-    assert genie_block in template and warehouse_line in template
-    merged = template.replace(genie_block, "\n" + snippet + "\n").replace(warehouse_line, "\n")
+    assert warehouse_line in template
+    merged = template.replace(warehouse_line, "\n" + snippet + "\n")
     merged = (merged.replace("<your-deployer-principal-id>", "d0000000-0000-0000-0000-00000000d001")
               .replace("<most-privileged-group>", "payments_ops")
               .replace("<least-privileged-group>", "viewers"))
 
     cfg = hcl2.loads(merged)
     assert cfg["uc_tables"] == ["dev_finance.genierails_e2e.customers"]
-    assert cfg["genie_spaces"] == [{"genie_space_id": "01ef7b3c2a4d5e6f"}]
+    assert cfg["genie_spaces"] == []
     assert cfg["sql_warehouse_id"] == "wh-123"
     assert placeholder_error(cfg, TEMPLATE) is None
+    # Without created groups the agent file keeps the acl_groups placeholder for
+    # the user to fill; with them, the agent is run by the created tiers.
+    agent = hcl2.loads(module._agent_tfvars("01ef7b3c2a4d5e6f"))
+    assert agent == {"genie_space_id": "01ef7b3c2a4d5e6f", "acl_groups": [ACL_PLACEHOLDER]}
+    created = hcl2.loads(module._agent_tfvars("01ef7b3c2a4d5e6f", module.SAMPLE_GROUPS))
+    assert created["acl_groups"] == list(module.SAMPLE_GROUPS)
+    assert module.SAMPLE_AGENT == "Dev-to-Prod Walkthrough"
     for key in ("genie_spaces", "sql_warehouse_id", "uc_tables"):
         assert sum(
             line.startswith(f"{key} =") for line in merged.splitlines()

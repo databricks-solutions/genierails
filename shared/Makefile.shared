@@ -368,11 +368,15 @@ setup: _bootstrap ## Prepare the selected environment(s) and show next steps
 			echo "     and access_tier_groups to your IdP groups, most to least privileged; optionally table_readers"; \
 			echo "     (who gets SELECT; without it GenieRails grants none and masks apply to existing readers)"; step=$$((step+1)); \
 		else \
-			echo "  $$step. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — set genie_space_id to your Genie agent ID and"; \
 			if [ "$$det" = 1 ]; then \
-				echo "     deployer_principal_id to the applying SP's client_id, and access_tier_groups to your IdP groups,"; \
-				echo "     most to least privileged (the template starts new champions in deterministic mode)"; \
+				echo "  $$step. Per agent, create its file (the file name is the agent's name) and set genie_space_id to its"; \
+				echo "     Genie agent ID and acl_groups to the groups that may run it ([] means nobody; required):"; \
+				echo "       mkdir -p $(_SETUP_ENV_REL)/agents"; \
+				echo "       cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example \"$(_SETUP_ENV_REL)/agents/<agent name>.auto.tfvars\""; \
+				echo "     In $(_SETUP_ENV_REL)/env.auto.tfvars set deployer_principal_id to the applying SP's client_id, and"; \
+				echo "     access_tier_groups to your IdP groups, most to least privileged (the template starts new champions in deterministic mode)"; \
 			else \
+				echo "  $$step. Edit $(_SETUP_ENV_REL)/env.auto.tfvars — set genie_space_id to your Genie agent ID and"; \
 				echo "     access_tier_groups to your IdP groups, most to least privileged"; \
 			fi; \
 			echo "     (No agent yet? See ../shared/examples/dev_to_prod/SAMPLE_ENV.md)"; step=$$((step+1)); \
@@ -437,8 +441,13 @@ enable-classification: _guard-not-ci-apply _guarded-bootstrap _guard-workspace-t
 		echo "In Catalog Explorer, review detections and exclude false positives, then turn on auto-tagging in the UI."; \
 	fi
 
+# A new agent file is captured (import-new) before the governed-table record is
+# written: its tables come from the capture, so the first generate records them.
+# An agent whose committed capture is gone is refused before anything is written
+# (import-new --check); make capture replaces a capture on purpose.
 generate: _guarded-bootstrap _guard-workspace-target ## Run generate_abac.py in the selected workspace environment (set SPACE="Name" to regenerate only one space; set MODE=governance|genie for self-service Genie deployments)
 	@echo "=== Generate ABAC Config ($(ENV)$(if $(SPACE), — space: $(SPACE),)$(if $(MODE), — mode: $(MODE),)) ==="
+	@if [ "$(ENV)" = "$(DEFAULT_ENV)" ]; then $(_AGENT_OWNERSHIP) import-new --check --env-dir "$(ENV_DIR)" --env "$(ENV)"; fi
 	@if [ -n "$(SPACE)" ]; then \
 		if [ ! -f "$(ENV_DIR)/generated/abac.auto.tfvars" ]; then \
 			echo "ERROR: No assembled generated/abac.auto.tfvars found."; \
@@ -450,10 +459,10 @@ generate: _guarded-bootstrap _guard-workspace-target ## Run generate_abac.py in 
 	else \
 		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
+	@if [ "$(ENV)" = "$(DEFAULT_ENV)" ]; then $(_AGENT_OWNERSHIP) import-new --env-dir "$(ENV_DIR)" --env "$(ENV)"; fi
 	@if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ] && grep -Eq '^[[:space:]]*governance_mode[[:space:]]*=[[:space:]]*"deterministic"' "$(ENV_DIR)/env.auto.tfvars"; then \
 		$(_STICKY) record --env-dir "$(ENV_DIR)" --config "$(ENV_DIR)/generated/abac.auto.tfvars"; \
 	fi
-	@if [ "$(ENV)" = "$(DEFAULT_ENV)" ]; then $(_AGENT_OWNERSHIP) import-new --env-dir "$(ENV_DIR)" --env "$(ENV)"; fi
 	@if [ "$$($(_IS_DETERMINISTIC) "$(ENV_DIR)/env.auto.tfvars")" = 1 ]; then \
 		$(_TABLE_READERS) propose --env-dir "$(ENV_DIR)" && $(_ACCESS_CHECK) "make generate"; \
 	fi
@@ -463,7 +472,8 @@ generate: _guarded-bootstrap _guard-workspace-target ## Run generate_abac.py in 
 # deterministic env, the agent tables in generated/governed_tables.json (so a
 # table change is a governance-owned diff, design 18.1); no governance
 # drafting, no model call, no Terraform state written. A plain generate
-# captures only agents with no capture yet (import-new) and never re-captures.
+# captures only agents never captured before (import-new): it refuses one whose
+# committed capture is gone, and never re-captures.
 override _AGENT_OWNERSHIP = python3 "$(SHARED_ROOT)/scripts/agent_ownership.py"
 capture: _guard-workspace-target ## Export one dev Genie agent's config to envs/dev/agents/<agent>.space.json: SPACE="<agent>" (read-only)
 	@if [ -z "$(SPACE)" ]; then echo 'ERROR: SPACE="<agent>" is required.' >&2; exit 1; fi

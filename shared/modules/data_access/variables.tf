@@ -55,7 +55,7 @@ variable "table_agents" {
 variable "genie_space_acl_groups" {
   type        = map(list(string))
   default     = {}
-  description = "Tool-owned resolved mapping from Genie agent name to CAN_RUN groups; explicit [] remains nobody, while omitted/null user ACLs are derived upstream from policy to_principals plus except_principals."
+  description = "Tool-owned resolved mapping from Genie agent name to CAN_RUN groups; explicit [] remains nobody. Legacy envs: omitted/null user ACLs are derived upstream from policy to_principals plus except_principals; deterministic envs require acl_groups on every agent."
 }
 
 variable "classification_uc_tables" {

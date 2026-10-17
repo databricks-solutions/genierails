@@ -18,17 +18,12 @@ Import an existing Databricks Genie agent's supported configuration and table fo
 <details>
 <summary><strong>Step 1 — Add the Agent ID to dev configuration</strong></summary>
 
-Add the agent ID to the development environment (if you started from the walkthrough template, replace its `<your-genie-space-id>` placeholder):
+Give the agent its own file in the development environment, `envs/dev/agents/<agent name>.auto.tfvars` (the walkthrough's `agent.auto.tfvars.example`; replace its placeholders). The file name is the agent's name:
 
 ```hcl
-# envs/dev/env.auto.tfvars
-genie_spaces = [
-  {
-    genie_space_id = "01ef7b3c2a4d5e6f"
-    # Optional: omit to derive fresh from policies; [] means nobody.
-    # acl_groups = ["payments_ops"]
-  },
-]
+# envs/dev/agents/Payments.auto.tfvars
+genie_space_id = "01ef7b3c2a4d5e6f"
+acl_groups     = ["payments_ops"]   # who may run it (CAN_RUN); required, [] means nobody
 ```
 
 </details>
@@ -73,7 +68,7 @@ Continue at [Dev step 2 of the dev-to-prod walkthrough](../examples/dev_to_prod/
 
 For an imported agent:
 
-- Omit `acl_groups` on the agent's `genie_spaces[]` entry to derive it fresh from current policies. To override derivation, set the user-owned field there; an explicit `[]` means nobody. Generated drafts are not an authoritative ACL input.
+- `acl_groups` is required: a missing value stops `make generate`, and an explicit `[]` means nobody. It grants only `CAN_RUN`; `SELECT` comes from `table_readers`, which `make generate` proposes for the agent's tables. Generated drafts are not an authoritative ACL input. (Legacy mode only: omitting it on a `genie_spaces[]` entry derives it from current policies.)
 - `make apply` updates the attached agent's configuration and ACLs without creating or deleting it.
 - In production, leave `genie_space_id` empty to create a new agent, or set an existing production agent ID to attach to it.
 - Creation first lists every page of agents in the target workspace and adopts
@@ -93,7 +88,7 @@ For an imported agent:
 <details>
 <summary><strong>Optional — Import multiple agents</strong></summary>
 
-Add each agent to `genie_spaces`, then run generation once. GenieRails combines their tables into one governance footprint while keeping separate configuration and `CAN_RUN` ACLs for each agent.
+Give each agent its own file in `envs/dev/agents/` (its `genie_space_id` and `acl_groups`), then run generation once. GenieRails combines their tables into one governance footprint while keeping separate configuration and `CAN_RUN` ACLs for each agent.
 
 Before continuing:
 

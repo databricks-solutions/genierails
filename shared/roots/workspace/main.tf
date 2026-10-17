@@ -429,7 +429,7 @@ variable "genie_spaces" {
     captured         = optional(bool, false)
   }))
   default     = []
-  description = "User-owned Genie agent definitions. captured is set by the agent-file loader (agent_files.py) for an agent with agents/<name>.space.json. 'name' is the semantic-config lookup key. acl_groups omitted/null derives fresh from policy principals, [] explicitly grants nobody, and a non-empty list is the durable override; generated semantic drafts do not own ACLs."
+  description = "User-owned Genie agent definitions. captured is set by the agent-file loader (agent_files.py) for an agent with agents/<name>.space.json. 'name' is the semantic-config lookup key. acl_groups is who gets CAN_RUN: [] explicitly grants nobody and a non-empty list is the durable set. Deterministic envs: required (generate, rehearse and release refuse an agent without it; a null that reaches Terraform grants nobody). Legacy envs: omitted/null derives it fresh from policy principals. Generated semantic drafts never own ACLs."
 }
 
 variable "genie_space_id_to_name" {

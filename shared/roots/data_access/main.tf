@@ -278,13 +278,13 @@ variable "genie_spaces" {
     delete           = optional(bool, false)
   }))
   default     = []
-  description = "User-owned workspace definitions and classification footprint. acl_groups omitted/null derives fresh from policy to_principals plus except_principals; [] explicitly grants nobody; a non-empty list is the durable override."
+  description = "User-owned workspace definitions and classification footprint. acl_groups: [] explicitly grants nobody; a non-empty list is the durable set. Deterministic envs: required (generate, rehearse and release refuse an agent without it). Legacy envs: omitted/null derives it fresh from policy to_principals plus except_principals."
 }
 
 variable "genie_space_acl_groups" {
   type        = map(list(string))
   default     = {}
-  description = "Tool-owned resolved ACL mapping. Inputs come only from genie_spaces: explicit lists win (including []); omitted/null entries are freshly derived from policy to_principals plus except_principals."
+  description = "Tool-owned resolved ACL mapping. Inputs come only from genie_spaces: explicit lists win (including []). Legacy envs: omitted/null entries are freshly derived from policy to_principals plus except_principals. Deterministic envs require acl_groups on every agent."
 }
 
 variable "business_access_enabled" {

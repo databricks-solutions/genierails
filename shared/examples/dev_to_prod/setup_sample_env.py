@@ -30,6 +30,9 @@ TABLES = {
 }
 # Demo access tiers for --create-groups, most to least privileged.
 SAMPLE_GROUPS = ("dev_to_prod_payments_ops", "dev_to_prod_regional_analysts", "dev_to_prod_viewers")
+# The sample agent's file name, envs/dev/agents/<SAMPLE_AGENT>.auto.tfvars (its name).
+SAMPLE_AGENT = "Dev-to-Prod Walkthrough"
+ACL_PLACEHOLDER = "<group-that-may-run-the-agent>"
 
 
 def parser() -> argparse.ArgumentParser:
@@ -391,7 +394,8 @@ def _reconcile_existing_space(
         )
 
 
-def _tfvars(space_id: str, tables: list[str], warehouse_id: str, groups: Iterable[str] = ()) -> str:
+def _tfvars(tables: list[str], warehouse_id: str, groups: Iterable[str] = ()) -> str:
+    """The envs/dev/env.auto.tfvars lines: the sample tables, warehouse and (created) tiers."""
     lines = "\n".join(f'  "{table}",' for table in tables)
     tiers = ", ".join(f'"{group}"' for group in groups)
     groups_line = f"\n\naccess_tier_groups = [{tiers}]" if tiers else ""
@@ -399,11 +403,14 @@ def _tfvars(space_id: str, tables: list[str], warehouse_id: str, groups: Iterabl
 {lines}
 ]
 
-genie_spaces = [
-  {{ genie_space_id = "{space_id}" }}
-]
-
 sql_warehouse_id = "{warehouse_id}"{groups_line}'''
+
+
+def _agent_tfvars(space_id: str, groups: Iterable[str] = ()) -> str:
+    """The sample agent's file: its ID, and who may run it (the created tiers, else a placeholder)."""
+    acl = ", ".join(f'"{group}"' for group in (tuple(groups) or (ACL_PLACEHOLDER,)))
+    return (f'genie_space_id = "{space_id}"\n'
+            f'acl_groups     = [{acl}]   # who may run the agent (CAN_RUN); required, [] means nobody')
 
 
 def setup(args: argparse.Namespace, client: Any) -> None:
@@ -469,9 +476,13 @@ def setup(args: argparse.Namespace, client: Any) -> None:
         _ensure_groups(_account_client(args, client), state)
         _save_states(states)
         groups = SAMPLE_GROUPS
-    replaced = "genie_spaces, sql_warehouse_id, and access_tier_groups" if groups else "genie_spaces and sql_warehouse_id"
-    print(f"[4/4] Complete. In envs/dev/env.auto.tfvars, REPLACE the {replaced} lines with this snippet:\n")
-    print(_tfvars(space_id, tables, args.warehouse_id, groups))
+    replaced = "sql_warehouse_id and access_tier_groups lines" if groups else "sql_warehouse_id line"
+    print(f"[4/4] Complete. In envs/dev/env.auto.tfvars, REPLACE the {replaced} with this snippet:\n")
+    print(_tfvars(tables, args.warehouse_id, groups))
+    agent_file = f"envs/dev/agents/{SAMPLE_AGENT}.auto.tfvars"
+    fill = "" if groups else f" (replace {ACL_PLACEHOLDER} with the groups that may run it)"
+    print(f"\nThen write the agent's file, {agent_file}{fill}:\n")
+    print(_agent_tfvars(space_id, groups))
     print(f"\nGenie agent ID: {space_id}\nOwnership state: {STATE_FILE}")
 
 

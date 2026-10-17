@@ -6231,6 +6231,10 @@ genie_spaces = [
 # ---------------------------------------------------------------------------
 
 DEV_TO_PROD_TEMPLATE = MODULE_ROOT / "examples" / "dev_to_prod" / "env.auto.tfvars.example"
+DEV_TO_PROD_AGENT_TEMPLATE = MODULE_ROOT / "examples" / "dev_to_prod" / "agent.auto.tfvars.example"
+# The champion agent's file name, envs/<env>/agents/<name>.auto.tfvars (its name
+# and Terraform key); its display title is CHAMPION_SPACE_TITLE.
+CHAMPION_AGENT = "Champion Finance Analytics"
 # Names the dev catalog like the walkthrough sample does, so promote must
 # rename the space ("(dev_fin.finance)" -> "(prod_fin.finance)") consistently
 # with the remapped genie_space_configs keys (the PR #59 regression).
@@ -6515,7 +6519,8 @@ def scenario_champion(
 
        1. Setup: dev_fin + prod_fin fixtures, two access-tier account groups,
           a curated dev Genie agent via the Genie API; make setup ENV=dev; copy
-          the walkthrough template; set only genie_space_id + sql_warehouse_id.
+          the walkthrough env and agent templates; set the agent's
+          genie_space_id + acl_groups and sql_warehouse_id.
        2. Negative: with the template placeholder still present, make generate
           ENV=dev MODE=genie fails fast with the placeholder message.
        3. make generate ENV=dev MODE=genie GENERATE_ARGS='--groups "..."' once;
@@ -6523,11 +6528,13 @@ def scenario_champion(
        4. make enable-classification ENV=dev (+ auto-tagging), wait for class.*.
        5. make generate ENV=dev (no --groups); make rehearse ENV=dev (no
           key flag: verify-access picks and saves verify_key_columns in dev).
-       6. make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=...;
-          assert the promoted prod env; fill prod auth + sql_warehouse_id.
+       6. make setup ENV=prod; set its deployer, tiers and catalog_map; make
+          promote-to ENV=prod; assert the promoted prod env and agent file
+          (acl_groups seeded from dev); fill prod auth + sql_warehouse_id.
        7. make enable-classification ENV=prod (+ auto-tagging), wait; make
           release ENV=prod (no key flag); coverage check recorded
-          as passed, prod Genie agent exists, verify-access ALL EFFECTIVE.
+          as passed, prod Genie agent exists and exactly its acl_groups (of the
+          run's groups) have CAN_RUN on it, verify-access ALL EFFECTIVE.
        8. make maintain ENV=prod; the coverage check still passes.
        9. Teardown (always, unless --keep-data).
     """
@@ -6539,6 +6546,8 @@ def scenario_champion(
     # LLM names) never touches another run's champion groups.
     tier_groups = [f"champion_full_{token}", f"champion_analyst_{token}"]
     groups_arg = ",".join(tier_groups)
+    # Who may run the agent (its acl_groups, decision 4): both tiers.
+    acl_groups = list(tier_groups)
     catalog_map = f"{DEV_FIN_CAT}={PROD_FIN_CAT}"
     dev_tables = [f"{DEV_FIN_CAT}.finance.{t}" for t in CHAMPION_TABLES]
     prod_tables = [f"{PROD_FIN_CAT}.finance.{t}" for t in CHAMPION_TABLES]
@@ -6556,6 +6565,7 @@ def scenario_champion(
             (env_dir / "generated" / ".governance.lock").unlink(missing_ok=True)
             (env_dir / "data_access" / "discovered_uc_tables.auto.tfvars").unlink(missing_ok=True)
             (env_dir / "env.auto.tfvars").unlink(missing_ok=True)
+            shutil.rmtree(env_dir / "agents", ignore_errors=True)
 
         _step("Creating dev_fin + prod_fin fixture catalogs (sensitive columns)")
         resolved_wh = _setup_data(auth_file, "--prod", warehouse_id=warehouse_id) or warehouse_id
@@ -6574,6 +6584,11 @@ def scenario_champion(
         dev_env_file = dev_dir / "env.auto.tfvars"
         shutil.copy2(DEV_TO_PROD_TEMPLATE, dev_env_file)
         print(f"  Copied {DEV_TO_PROD_TEMPLATE.relative_to(MODULE_ROOT.parent)} -> envs/{dev_env}/env.auto.tfvars")
+        dev_agent_file = dev_dir / "agents" / f"{CHAMPION_AGENT}.auto.tfvars"
+        dev_agent_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(DEV_TO_PROD_AGENT_TEMPLATE, dev_agent_file)
+        print(f"  Copied {DEV_TO_PROD_AGENT_TEMPLATE.relative_to(MODULE_ROOT.parent)} -> "
+              f"envs/{dev_env}/agents/{dev_agent_file.name}")
 
         # ── 2. Negative: placeholder guard ───────────────────────────────────
         _champion_phase(2, "negative — template placeholder must fail fast")
@@ -6587,19 +6602,26 @@ def scenario_champion(
         if (dev_dir / "data_access" / "discovered_uc_tables.auto.tfvars").exists():
             raise AssertionError("placeholder run wrote discovered_uc_tables.auto.tfvars")
 
-        # Fill the deterministic champion template before any credentialed/API work.
-        text = dev_env_file.read_text()
-        if text.count('"<your-genie-space-id>"') != 1:
-            raise AssertionError("walkthrough template no longer has exactly one genie_space_id placeholder")
-        dev_env_file.write_text(text.replace('"<your-genie-space-id>"', f'"{dev_space_id}"'))
+        # Fill the deterministic champion templates before any credentialed/API work.
+        text = dev_agent_file.read_text()
+        for placeholder in ('"<your-genie-space-id>"', '"<group-that-may-run-the-agent>"'):
+            if text.count(placeholder) != 1:
+                raise AssertionError(f"agent template no longer has exactly one {placeholder} placeholder")
+        dev_agent_file.write_text(
+            text.replace('"<your-genie-space-id>"', f'"{dev_space_id}"')
+            .replace('"<group-that-may-run-the-agent>"', ", ".join(json.dumps(g) for g in acl_groups))
+            + f"name = {json.dumps(CHAMPION_SPACE_TITLE)}\n")
         deployer = str(_load_tfvars(auth_file).get("databricks_client_id") or "")
         if not deployer:
             raise AssertionError(f"{auth_file} must set databricks_client_id for deterministic governance")
         _set_tfvar(dev_env_file, "deployer_principal_id", json.dumps(deployer))
         _set_tfvar(dev_env_file, "sql_warehouse_id", f'"{resolved_wh}"')
         dev_cfg = _load_tfvars(dev_env_file)
-        if dev_cfg.get("uc_tables") or any(s.get("uc_tables") for s in dev_cfg.get("genie_spaces", [])):
-            raise AssertionError("dev env.auto.tfvars must not declare uc_tables (ID-only discovery)")
+        if (dev_cfg.get("uc_tables") or any(s.get("uc_tables") for s in dev_cfg.get("genie_spaces", []))
+                or _load_tfvars(dev_agent_file).get("uc_tables")):
+            raise AssertionError("dev env must not declare uc_tables (ID-only discovery)")
+        if _load_tfvars(dev_agent_file).get("acl_groups") != acl_groups:
+            raise AssertionError(f"dev agent file must set acl_groups = {acl_groups!r}")
 
         # ── 3. Import the agent; --groups once ───────────────────────────────
         _champion_phase(3, "make generate ENV=dev MODE=genie --groups (once)")
@@ -6646,33 +6668,44 @@ def scenario_champion(
         print(f"  {_green('PASS')}  dev verify_key_columns saved after the pass: {dev_keys}")
 
         # ── 6. Promote ───────────────────────────────────────────────────────
-        _champion_phase(6, f"make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP={catalog_map}")
-        _champion_make(
-            "promote", f"SOURCE_ENV={dev_env}", f"DEST_ENV={prod_env}",
-            f"DEST_CATALOG_MAP={catalog_map}",
-        )
+        _champion_phase(6, f"make promote-to ENV=prod (catalog_map {catalog_map})")
+        _champion_make("setup", f"ENV={prod_env}")
         prod_env_file = prod_dir / "env.auto.tfvars"
+        _set_tfvar(prod_env_file, "deployer_principal_id", json.dumps(deployer))
+        _set_tfvar(prod_env_file, "access_tier_groups", json.dumps(tier_groups))
+        _set_tfvar(prod_env_file, "catalog_map", f"{{ {json.dumps(DEV_FIN_CAT)} = {json.dumps(PROD_FIN_CAT)} }}")
+        _champion_make("promote-to", f"ENV={prod_env}")
         prod_cfg = _load_tfvars(prod_env_file)
+        prod_agent_file = prod_dir / "agents" / f"{CHAMPION_AGENT}.auto.tfvars"
+        _assert_file_exists(prod_agent_file, "prod agent file seeded by promote-to")
+        prod_agent = _load_tfvars(prod_agent_file)
+        prod_capture = json.loads((prod_dir / "agents" / f"{CHAMPION_AGENT}.space.json").read_text())
+        captured = {t.get("identifier") for t in (prod_capture.get("data_sources") or {}).get("tables") or []}
         checks = {
             "access_tier_groups": prod_cfg.get("access_tier_groups") == tier_groups,
-            "remapped catalog": set(prod_cfg.get("uc_tables") or []) == set(prod_tables),
-            "no dev catalog": DEV_FIN_CAT not in prod_env_file.read_text(),
+            "remapped catalog": captured == set(prod_tables),
+            # Outside the catalog_map line promote-to saves, nothing names the dev catalog.
+            "no dev catalog": all(DEV_FIN_CAT not in line
+                                  for path in (prod_env_file, *sorted((prod_dir / "agents").iterdir()))
+                                  for line in path.read_text().splitlines() if not line.startswith("catalog_map")),
             "verify_key_columns": prod_cfg.get("verify_key_columns") == {
                 table.replace(f"{DEV_FIN_CAT}.", f"{PROD_FIN_CAT}.", 1): key for table, key in dev_keys.items()},
             "no business_access_enabled": "business_access_enabled" not in prod_cfg,
+            "acl_groups seeded from dev": prod_agent.get("acl_groups") == acl_groups,
+            "no committed prod agent ID": not prod_agent.get("genie_space_id"),
         }
         bad = [name for name, ok in checks.items() if not ok]
         if bad:
-            raise AssertionError(f"promoted prod env.auto.tfvars is wrong ({bad}):\n{prod_env_file.read_text()}")
-        print(f"  {_green('PASS')}  prod env.auto.tfvars: {', '.join(checks)}")
-        prod_names = [s.get("name") for s in prod_cfg.get("genie_spaces") or []]
+            raise AssertionError(f"promoted prod env is wrong ({bad}):\n{prod_env_file.read_text()}\n"
+                                 f"{prod_agent_file.read_text()}")
+        print(f"  {_green('PASS')}  prod env.auto.tfvars and agent file: {', '.join(checks)}")
         expected_name = CHAMPION_SPACE_TITLE.replace(f"{DEV_FIN_CAT}.", f"{PROD_FIN_CAT}.")
-        if prod_names != [expected_name]:
+        if prod_agent.get("name") != expected_name:
             raise AssertionError(
-                f"promoted Genie space name {prod_names!r} != {[expected_name]!r} "
-                "(must be renamed like the remapped genie_space_configs keys)"
+                f"promoted Genie agent name {prod_agent.get('name')!r} != {expected_name!r} "
+                "(must be renamed like the remapped catalog)"
             )
-        print(f"  {_green('PASS')}  prod Genie space renamed to {expected_name!r}")
+        print(f"  {_green('PASS')}  prod Genie agent renamed to {expected_name!r}")
 
         _step("Filling prod auth (same workspace/SP) and sql_warehouse_id")
         _copy_auth(dev_env, prod_env)
@@ -6700,6 +6733,11 @@ def scenario_champion(
         if space.get("space_id") != prod_space_id or prod_space_id == dev_space_id:
             raise AssertionError(f"prod Genie agent {prod_space_id} not found via the Genie API: {space}")
         print(f"  {_green('PASS')}  prod Genie agent exists: {prod_space_id} ({space.get('title')})")
+        # CAN_RUN comes only from acl_groups: of this run's groups, exactly those.
+        can_run = _get_genie_space_acl_groups(auth_file, prod_space_id) & set(tier_groups)
+        if can_run != set(acl_groups):
+            raise AssertionError(f"prod CAN_RUN {sorted(can_run)} != acl_groups {sorted(acl_groups)}")
+        print(f"  {_green('PASS')}  prod CAN_RUN is exactly acl_groups: {sorted(acl_groups)}")
         if lock.exists():
             raise AssertionError(f"release left {lock} behind")
 
