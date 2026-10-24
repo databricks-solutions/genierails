@@ -302,7 +302,7 @@ def test_e2e_prod_gap_reuse_existing_mask_then_prod_coverage_passes(repo):
     assert derived[f"{PROD_TABLE}.vat_number"] == "redact"
 
 
-def _configure_promoted_stg(repo):
+def _configure_promoted_stg(repo, promoted=True):
     result = repo.make("setup", "ENV=stg")
     assert result.returncode == 0, _out(result)
     stg = repo.envs / "stg"
@@ -317,25 +317,36 @@ def _configure_promoted_stg(repo):
         'access_tier_groups = ["analysts"]\n'
         f'uc_tables = ["{PROD_TABLE}"]\n'
         'sql_warehouse_id = "wh"\n'
-        'promote_from = "dev"\n'
-        'catalog_map = { "dev_fin" = "prod_fin" }\n')
+        + ('promote_from = "dev"\n'
+           'catalog_map = { "dev_fin" = "prod_fin" }\n' if promoted else ""))
 
 
-def test_generate_end_to_end_uses_env_role_for_promoted_stg(repo):
-    """Real generate process: fake SDK includes useragent and pip stays offline."""
+def test_generate_end_to_end_refuses_promoted_stg(repo):
+    """A deterministic promoted env's generated/ comes only from promote-to."""
     _configure_promoted_stg(repo)
     result = repo.make("generate", "ENV=stg")
     out = _out(result)
+    assert result.returncode != 0, out
+    assert "make generate ENV=stg refused" in out
+    assert "then make promote-to ENV=stg" in out
+    assert not any((repo.envs / "stg" / "generated").iterdir())
+
+
+def test_generate_end_to_end_uses_env_role_for_rehearsal_stg(repo):
+    """Real generate process: fake SDK includes useragent and pip stays offline."""
+    _configure_promoted_stg(repo, promoted=False)
+    result = repo.make("generate", "ENV=stg")
+    out = _out(result)
     assert result.returncode == 0, out
-    assert "make rehearse ENV=dev" in out
-    assert "make release-plan ENV=stg" in out
-    assert "make release ENV=stg" in out
-    assert "make rehearse ENV=stg   (applies" not in out
+    assert "make rehearse ENV=stg   (applies" in out
+    assert "make release-plan ENV=stg" not in out
 
 
 def test_generate_role_failure_keeps_successful_output_and_uses_generic_hint(repo):
     _configure_promoted_stg(repo)
-    (repo.shared / "scripts/release_gate.py").write_text('raise SystemExit(1)\n')
+    # Only env-role fails: generate-guard (the recipe's first line) still passes.
+    (repo.shared / "scripts/release_gate.py").write_text(
+        'import sys\nraise SystemExit(1 if "env-role" in sys.argv else 0)\n')
     result = repo.make("generate", "ENV=stg")
     out = _out(result)
     assert result.returncode == 0, out

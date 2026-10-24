@@ -547,7 +547,10 @@ enable-classification: _guard-not-ci-apply _guarded-bootstrap _guard-workspace-t
 # An agent whose committed capture is gone is refused before anything is written
 # (import-new --check), and so is every uncaptured agent in a shallow clone or
 # outside git, where history cannot tell; make capture replaces a capture on purpose.
+# A deterministic promoted env is refused first (release_gate.py generate-guard):
+# only promote-to writes its generated/.
 generate: _guarded-bootstrap _guard-workspace-target ## Run generate_abac.py in the selected workspace environment (set SPACE="Name" to regenerate only one space; set MODE=governance|genie for self-service Genie deployments)
+	@$(_RELEASE_GATE) generate-guard --env-dir "$(ENV_DIR)" --env "$(ENV)"
 	@echo "=== Generate ABAC Config ($(ENV)$(if $(SPACE), — space: $(SPACE),)$(if $(MODE), — mode: $(MODE),)) ==="
 	@status=0; python3 "$(SHARED_ROOT)/scripts/auth_configured.py" "$(ENV_DIR)/auth.auto.tfvars" || status=$$?; \
 	if [ $$status -eq 2 ]; then \
@@ -570,7 +573,7 @@ generate: _guarded-bootstrap _guard-workspace-target ## Run generate_abac.py in 
 		cd "$(ENV_DIR)" && python3 "$(SHARED_ROOT)/generate_abac.py" $(GENERATE_ARGS) $(if $(MODE),--mode $(MODE),) $(if $(COUNTRY),--country $(COUNTRY),) $(if $(INDUSTRY),--industry $(INDUSTRY),); \
 	fi
 	@if [ "$(ENV)" = "$(DEFAULT_ENV)" ]; then $(_AGENT_OWNERSHIP) import-new --env-dir "$(ENV_DIR)" --env "$(ENV)"; fi
-	@if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ] && grep -Eq '^[[:space:]]*governance_mode[[:space:]]*=[[:space:]]*"deterministic"' "$(ENV_DIR)/env.auto.tfvars"; then \
+	@if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ] && [ "$$($(_IS_DETERMINISTIC) "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null)" = 1 ]; then \
 		$(_STICKY) record --env-dir "$(ENV_DIR)" --config "$(ENV_DIR)/generated/abac.auto.tfvars"; \
 	fi
 	@if [ "$$($(_IS_DETERMINISTIC) "$(ENV_DIR)/env.auto.tfvars")" = 1 ]; then \

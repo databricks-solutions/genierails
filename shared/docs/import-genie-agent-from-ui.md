@@ -95,8 +95,10 @@ Before continuing:
 1. Confirm that every agent imported. A failed fetch is warning-only and does not stop the remaining agents.
 2. Review the persisted aggregate and the added/disappeared summary.
 3. After promotion, set any required production warehouse IDs. Discovery is an
-   environment fact: development's discovered file is not promoted, and the
-   production file is populated by `make generate ENV=prod`.
+   environment fact: development's discovered file is not promoted. A legacy
+   production file is populated by `make generate ENV=prod`; a deterministic
+   prod never runs generate (it is refused), and promote-to takes the tables
+   from the committed `generated/governed_tables.json`.
 
 </details>
 

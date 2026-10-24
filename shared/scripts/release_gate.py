@@ -1939,6 +1939,40 @@ def env_role(env_dir: Path) -> str:
     return REHEARSE if deterministic(env_dir) else LEGACY
 
 
+def generate_guard(env_dir: Path, env: str) -> None:
+    """make generate refuses a deterministic promoted env: its generated/ comes only
+    from promote-to, and release-plan refuses a regenerated one as a stale promotion.
+    Legacy promoted envs have no release-plan and still generate (e.g. genie-only prod).
+    A config that doesn't parse is left to generate's own checks."""
+    try:
+        if not deterministic(env_dir) or env_role(env_dir) != PROMOTED:
+            return
+        source = source_env(env_dir)
+    except Exception:
+        return
+    from scripts.coverage_fix import promoted_release_steps
+
+    # A source that is itself promoted can't generate either: start where the chain does.
+    chain = [env, source]
+    try:
+        while (len(chain) <= 10 and (Path(env_dir).parent / chain[-1] / "env.auto.tfvars").is_file()
+               and deterministic(Path(env_dir).parent / chain[-1])
+               and env_role(Path(env_dir).parent / chain[-1]) == PROMOTED):
+            upstream = source_env(Path(env_dir).parent / chain[-1])
+            if upstream in chain:
+                break
+            chain.append(upstream)
+    except Exception:
+        pass
+    root, hops = chain[-1], chain[-2::-1]
+    raise Refused(f"make generate ENV={env} refused: ENV={env} is a deterministic env promoted from {source}, "
+                  f"so envs/{env}/generated/ comes only from promote-to (release-plan refuses a regenerated "
+                  f"one as a stale promotion). Change the rules in {root}: make generate ENV={root}, "
+                  f"commit, make rehearse ENV={root}, then "
+                  + ", then ".join(f"make promote-to ENV={hop}" for hop in hops)
+                  + f", then {promoted_release_steps(env, source)}.")
+
+
 def apply_guard(env_dir: Path, env: str, target: str) -> None:
     from scripts.environment_lock import held_by_ancestor
 
@@ -2068,6 +2102,7 @@ def main(argv: list[str] | None = None) -> int:
     command("apply-guard").add_argument("--target", required=True)
     command("destroy-guard").add_argument("--confirm", default="")
     command("env-role")
+    command("generate-guard")
     command("identity-check")
     command("legacy-guard").add_argument("--command-name", required=True)
     args = parser.parse_args(argv)
@@ -2190,6 +2225,8 @@ def main(argv: list[str] | None = None) -> int:
             legacy_guard(args.env_dir, args.env, args.command_name)
         elif args.command == "env-role":
             print(env_role(args.env_dir))
+        elif args.command == "generate-guard":
+            generate_guard(args.env_dir, args.env)
         elif args.command == "identity-check":
             identity_check(args.env_dir, args.env)
         elif args.command == "maintain-check":

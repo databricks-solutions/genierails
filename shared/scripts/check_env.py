@@ -359,7 +359,8 @@ def _check(args) -> None:
         scratch.add_credentials(env)
         step(1, "validate")
         if not has_generated and not (scratch.envs / env / "abac.auto.tfvars").is_file():
-            print(f"  NOTE: skipped: envs/{env} has not been generated; run make generate ENV={env}.")
+            print(f"  NOTE: skipped: envs/{env} has not been generated; run make "
+                  f"{'promote-to' if promotes and is_deterministic else 'generate'} ENV={env}.")
         elif not (scratch.envs / env / "abac.auto.tfvars").is_file():
             then = ("the regeneration below splits generated/ and validates every layer" if is_deterministic
                     else "validate-generated below checks generated/")
