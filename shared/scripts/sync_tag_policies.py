@@ -48,6 +48,7 @@ import argparse
 import json
 import os
 import random
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -132,6 +133,28 @@ REMOVAL_HINT = (
 
 class Refusal(Exception):
     pass
+
+
+class StaleRemoval(RuntimeError):
+    """A named removal a concurrent writer restored after the PATCH."""
+
+    def __init__(self, tag_key, values):
+        self.tag_key, self.values = tag_key, sorted(values)
+        super().__init__(
+            "named removal became stale after the usage check; concurrent writer restored "
+            f"{self.values} after the PATCH, so no retry was attempted"
+        )
+
+
+def stale_removal_next_steps(pending, warehouse_id):
+    """The commands that re-plan the named removals still pending, for review."""
+    removal = ",".join(f"{key}:{value}" for key, value in pending)
+    return (
+        "Next: re-run the usage check and plan the removal with "
+        f"'make account-plan ALLOW_TAG_VALUE_REMOVAL={shlex.quote(removal)} "
+        f"WAREHOUSE_ID={shlex.quote(warehouse_id or '<id>')}', review its manifest, get it approved, "
+        "then run 'make apply-account'."
+    )
 
 
 def parse_removal(text):
@@ -244,10 +267,7 @@ def _update_values_without_lost_additions(w, tag_key, desired, removed, TagPolic
         last_live = _policy_values(w, tag_key)
         reappeared = removed & last_live
         if reappeared:
-            raise RuntimeError(
-                "named removal became stale after the usage check; concurrent writer restored "
-                f"{sorted(reappeared)} after the PATCH, so no retry was attempted"
-            )
+            raise StaleRemoval(tag_key, reappeared)
         if desired <= last_live:
             return
         missing = sorted(desired - last_live)
@@ -497,7 +517,7 @@ def main(argv=None):
         return
 
     updated = 0
-    for actual_key, values, missing, removed in updates:
+    for index, (actual_key, values, missing, removed) in enumerate(updates):
         try:
             _update_values_without_lost_additions(
                 w, actual_key, values, removed, TagPolicy, Value,
@@ -511,6 +531,14 @@ def main(argv=None):
                 changes.append("reasserted desired values")
             print(f"  [SYNC] {actual_key}: {', '.join(changes)}")
             updated += 1
+        except StaleRemoval as e:
+            # Earlier keys' removals landed; this key's restored values and every
+            # later key's removals are still pending.
+            pending = [(actual_key, v) for v in e.values]
+            pending += [(k, v) for k, _values, _added, later in updates[index + 1:] for v in later]
+            print(f"  [ERROR] {actual_key}: {e}")
+            print(f"  {stale_removal_next_steps(pending, args.warehouse_id or os.environ.get('WAREHOUSE_ID', ''))}")
+            raise SystemExit(1)
         except Exception as e:
             print(f"  [ERROR] {actual_key}: {e}")
             raise SystemExit(1)

@@ -933,7 +933,7 @@ _guard-account-plan-empty:
 		&& [ "$$GENIERAILS_ALLOW_CI_APPLY" != 1 ] && [ ! -f "$(ACCOUNT_ENV_DIR)/remote_state.hcl" ]; then \
 		echo "ERROR: in CI the account plan needs $(ACCOUNT_ENV_DIR)/remote_state.hcl, so it plans against the real account state (not the runner's empty state)." >&2; exit 1; \
 	fi; \
-	set +e; "$(ROOT_RUNNER)" account $(ACCOUNT_ENV) plan -input=false -detailed-exitcode >/dev/null; status=$$?; set -e; \
+	set +e; LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)" "$(ROOT_RUNNER)" account $(ACCOUNT_ENV) plan -input=false -detailed-exitcode >/dev/null; status=$$?; set -e; \
 	if [ $$status -eq 2 ]; then \
 		echo "ERROR: account plan is non-empty; rehearse/release may only add allowed treatment-tag values." >&2; \
 		echo "Run 'make account-plan', get its manifest approved, then 'make apply-account' in the operations stage." >&2; exit 1; \
@@ -962,11 +962,11 @@ _account-plan-locked:
 	plan_dir="$$($(_RELEASE_GATE) account-plan-dir --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)")" || { rm -f "$$prov"; exit 1; }; \
 	cp "$$prov" "$$plan_dir/provenance.json"; rm -f "$$prov"; \
 	echo "=== Saved plan (account) ==="; \
-	set +e; (umask 077; "$(ROOT_RUNNER)" account "$(ACCOUNT_ENV)" plan -input=false -detailed-exitcode -out="$$plan_dir/account.tfplan"); status=$$?; set -e; \
+	set +e; (umask 077; LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)" "$(ROOT_RUNNER)" account "$(ACCOUNT_ENV)" plan -input=false -detailed-exitcode -out="$$plan_dir/account.tfplan"); status=$$?; set -e; \
 	if [ $$status -ne 0 ] && [ $$status -ne 2 ]; then rm -rf "$$plan_dir"; echo "account-plan: planning failed (above); no manifest was written." >&2; exit 1; fi; \
 	printf '{"file": "account.tfplan", "changes": %s}\n' "$$([ $$status -eq 2 ] && echo true || echo false)" > "$$plan_dir/account.json"; \
 	show_json="$$(mktemp)"; \
-	if ! "$(ROOT_RUNNER)" account "$(ACCOUNT_ENV)" show -json "$$plan_dir/account.tfplan" > "$$show_json"; then rm -f "$$show_json"; rm -rf "$$plan_dir"; echo "account-plan: terraform show failed (above); no manifest was written." >&2; exit 1; fi; \
+	if ! LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)" "$(ROOT_RUNNER)" account "$(ACCOUNT_ENV)" show -json "$$plan_dir/account.tfplan" > "$$show_json"; then rm -f "$$show_json"; rm -rf "$$plan_dir"; echo "account-plan: terraform show failed (above); no manifest was written." >&2; exit 1; fi; \
 	$(_RELEASE_GATE) account-plan-summary --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --show-json "$$show_json" --changes "$$([ $$status -eq 2 ] && echo true || echo false)" --out "$$plan_dir/account.summary.json" || { rm -f "$$show_json"; rm -rf "$$plan_dir"; exit 1; }; \
 	rm -f "$$show_json"; \
 	$(_RELEASE_GATE) account-tag-sync-diff --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --allow-removal "$(strip $(ALLOW_TAG_VALUE_REMOVAL))" --warehouse-id "$(strip $(WAREHOUSE_ID))" --out "$$plan_dir/tag_sync.json" || { rm -rf "$$plan_dir"; exit 1; }; \
@@ -1295,7 +1295,7 @@ override _SAVED_GRANT_CHANGES = python3 -c 'import json,sys; print(int(any(s.get
 _release-plan-roots:
 	@set -e; $(_DRY_RUN_GUARD); $(_IDENTITY_MAP_CHECK); $(_SCHEDULED_GOVERNANCE_GUARD); plan_dir="$(PLAN_DIR)"; target_env="$(ENV)"; \
 	echo "=== Saved plan (account) ==="; \
-	set +e; (umask 077; "$(ROOT_RUNNER)" account $(ACCOUNT_ENV) plan -input=false -detailed-exitcode -out="$$plan_dir/account.tfplan" >/dev/null); status=$$?; set -e; \
+	set +e; (umask 077; LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)" "$(ROOT_RUNNER)" account $(ACCOUNT_ENV) plan -input=false -detailed-exitcode -out="$$plan_dir/account.tfplan" >/dev/null); status=$$?; set -e; \
 	if [ $$status -ne 0 ] && [ $$status -ne 2 ]; then echo "ERROR: account plan failed." >&2; exit 1; fi; \
 	printf '{"file": "account.tfplan", "changes": %s}\n' "$$([ $$status -eq 2 ] && echo true || echo false)" > "$$plan_dir/account.json"; \
 	echo "=== Saved plans (data_access:$(ENV), staged policy phases) ==="; \

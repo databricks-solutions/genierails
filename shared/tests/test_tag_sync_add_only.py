@@ -92,7 +92,7 @@ class _Tags:
             live[tag_key] = sorted((set(live[tag_key]) - {"new_value"}) | {"other_writer"})
         elif race == "after_remove_foreign" and UPDATES == 1:
             live[tag_key] = sorted(set(live[tag_key]) - {"retired_by_hand"})
-        elif race == "named_readd" and UPDATES == 1:
+        elif race == "named_readd" and UPDATES == int(os.environ.get("FAKE_READD_AT", "1")):
             live[tag_key] = sorted(set(live[tag_key]) | {"retired_by_hand"})
         elif race == "exhaust":
             live[tag_key] = sorted((set(live[tag_key]) - {"new_value"}) | {"other_writer_" + str(UPDATES)})
@@ -392,8 +392,34 @@ def test_named_removal_readded_after_patch_fails_without_retrying_delete(tmp_pat
     assert result.returncode == 1
     assert "named removal became stale after the usage check" in result.stdout
     assert "no retry was attempted" in result.stdout
+    error = result.stdout[result.stdout.index("named removal became stale"):]
+    assert ("Next: re-run the usage check and plan the removal with 'make account-plan "
+            "ALLOW_TAG_VALUE_REMOVAL=gr_treatment:retired_by_hand WAREHOUSE_ID=wh', review its manifest, "
+            "get it approved, then run 'make apply-account'.") in error
     assert "retired_by_hand" in repo.live()["gr_treatment"]
     assert repo.wrote() == ["gr_treatment"]
+
+
+# The next command names only the removals still pending: the restored values
+# and any later key's, never one that already landed (account-plan would refuse
+# a value that is no longer live).
+@pytest.mark.parametrize("stale_at, pending, wrote", [
+    ("1", "gr_treatment:retired_by_hand,gr_second:retired_by_hand", ["gr_treatment"]),
+    ("2", "gr_second:retired_by_hand", ["gr_treatment", "gr_second"]),
+])
+def test_stale_named_removal_hint_names_only_the_pending_removals(tmp_path, stale_at, pending, wrote):
+    repo = Repo(tmp_path, {"gr_treatment": ["email_partial__string__0a1b2c3d", "new_value", "retired_by_hand"],
+                           "gr_second": ["kept", "retired_by_hand"]})
+    (repo.account / "abac.auto.tfvars").write_text(DESIRED.replace(
+        "]\n", '  { key = "gr_second", description = "d", values = ["kept"] },\n]\n'))
+    repo.race("named_readd")
+    repo.env["FAKE_READD_AT"] = stale_at
+    result = repo.script("--remove", "gr_treatment:retired_by_hand,gr_second:retired_by_hand",
+                         "--warehouse-id", "wh")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"'make account-plan ALLOW_TAG_VALUE_REMOVAL={pending} WAREHOUSE_ID=wh'" in result.stdout
+    assert "then run 'make apply-account'." in result.stdout
+    assert repo.wrote() == wrote
 
 
 def test_add_only_concurrent_writer_retry_exhaustion_fails_clearly(tmp_path):

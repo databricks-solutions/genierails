@@ -972,7 +972,8 @@ def test_no_saved_plan_file_is_written_by_the_product():
                                          '-out="$$plan_dir/workspace.tfplan");']
     assert re.findall(tf_out, account_plan) == ['-out="$$plan_dir/account.tfplan");']
     assert "account-plan-dir" in account_plan
-    assert '(umask 077; "$(ROOT_RUNNER)" account "$(ACCOUNT_ENV)" plan -input=false -detailed-exitcode -out="$$plan_dir/account.tfplan");' in account_plan
+    assert ('(umask 077; LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)" "$(ROOT_RUNNER)" account "$(ACCOUNT_ENV)" plan -input=false '
+            '-detailed-exitcode -out="$$plan_dir/account.tfplan");') in account_plan
     assert 'if [ $$status -ne 0 ] && [ $$status -ne 2 ]; then rm -rf "$$plan_dir";' in account_plan
     assert re.findall(tf_out, account_apply) == ['-out="$$account_plan_dir/account.tfplan")']
     assert 'account_plan_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/genierails-account-apply.XXXXXX")"' in account_apply
@@ -1006,7 +1007,8 @@ _ACCOUNT_PLAN_OUT = '-out="$$plan_dir/account.tfplan"); status=$$?; set -e; \\\n
     (_ACCOUNT_PLAN_OUT,
      _ACCOUNT_PLAN_OUT + '\t"$(ROOT_RUNNER)" account "$(ACCOUNT_ENV)" plan -out="$$plan_dir/stray.tfplan"; \\\n'),
     # The account plan is no longer owner-only from creation.
-    ('set +e; (umask 077; "$(ROOT_RUNNER)" account "$(ACCOUNT_ENV)" plan', 'set +e; ("$(ROOT_RUNNER)" account "$(ACCOUNT_ENV)" plan'),
+    ('set +e; (umask 077; LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)" "$(ROOT_RUNNER)" account "$(ACCOUNT_ENV)" plan',
+     'set +e; (LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)" "$(ROOT_RUNNER)" account "$(ACCOUNT_ENV)" plan'),
     # A failed account plan leaves its saved plan behind.
     ('if [ $$status -ne 0 ] && [ $$status -ne 2 ]; then rm -rf "$$plan_dir"; echo "account-plan: planning failed',
      'if [ $$status -ne 0 ] && [ $$status -ne 2 ]; then echo "account-plan: planning failed'),

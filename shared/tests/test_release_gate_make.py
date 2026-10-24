@@ -323,11 +323,8 @@ if args[:2] == ["show", "-json"]:
     make = Make(tmp_path, repo)
     checkout_account = ROOT / "aws/envs/account"
     existed = checkout_account.exists()
-    # account-plan runs the runner without LAYER_ENV_DIR, so the real runner
-    # would use CLOUD_ROOT/envs/account: this checkout's, not ACCOUNT_ENV_DIR.
     result = make("account-plan", "account", root_runner=ROOT / "shared/scripts/terraform_layer.sh",
-                  environ_extra={"PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-                                 "LAYER_ENV_DIR": str(repo.cloud / "envs" / "account")})
+                  environ_extra={"PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"})
     assert checkout_account.exists() is existed
     assert result.returncode == 0, result.stdout + result.stderr
     manifest = Path(next(line.split(":", 1)[1].strip() for line in result.stdout.splitlines()
@@ -337,6 +334,48 @@ if args[:2] == ["show", "-json"]:
     assert "+ terraform" not in result.stdout
     assert secret not in "".join(p.read_text(errors="ignore") for p in manifest.parent.iterdir()
                                  if p.name != "account.tfplan")
+
+
+def test_account_plan_and_apply_account_use_the_same_overridden_account_env_dir(tmp_path, repo):
+    """ACCOUNT_ENV_DIR (here the tmp checkout's envs/account, not this checkout's
+    CLOUD_ROOT/envs/account) is where account-plan plans and writes its manifest,
+    and where apply-account selects that manifest and applies its plan."""
+    calls = tmp_path / "terraform.jsonl"
+    terraform = tmp_path / "terraform"
+    terraform.write_text(f'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+with open({str(calls)!r}, "a") as log:
+    log.write(json.dumps({{"args": args, "layer_env_dir": os.environ.get("LAYER_ENV_DIR")}}) + "\\n")
+if args[:1] == ["plan"]:
+    pathlib.Path(next(a.split("=", 1)[1] for a in args if a.startswith("-out="))).write_text("saved plan")
+    sys.exit(2)
+if args[:2] == ["show", "-json"]:
+    print(json.dumps({{"resource_changes": [{{"change": {{"actions": ["create"]}}}}]}}))
+''')
+    terraform.chmod(0o755)
+    override = repo.cloud / "envs" / "account"
+    checkout_account = ROOT / "aws/envs/account"
+    existed = checkout_account.exists()
+    make = Make(tmp_path, repo, passthrough=("_apply-account-locked",))
+    runner = ROOT / "shared/scripts/terraform_layer.sh"
+    path = {"PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"}
+    planned = make("account-plan", "account", root_runner=runner, environ_extra=path)
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    manifest = Path(next(line.split(":", 1)[1].strip() for line in planned.stdout.splitlines()
+                         if "Manifest (immutable):" in line))
+    assert manifest.is_relative_to(rg.env_state(repo.cloud, "account"))
+    applied = make("apply-account", "account", root_runner=runner, environ_extra=path)
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert f"Selected account manifest {manifest.parent.name} " in applied.stderr
+    assert rg.account_receipts(repo.cloud, "account")[-1]["manifest"]["path"] == str(manifest)
+    runs = [json.loads(line) for line in calls.read_text().splitlines()]
+    commands = [run["args"][0] for run in runs if run["args"][0] != "init"]
+    assert commands == ["plan", "show", "apply"]
+    assert {run["layer_env_dir"] for run in runs} == {str(override)}
+    plan = next(run["args"] for run in runs if run["args"][0] == "plan")
+    assert f"-var-file={override / 'env.auto.tfvars'}" in plan
+    assert checkout_account.exists() is existed
 
 
 def test_apply_account_deletes_the_secret_bearing_saved_plan(tmp_path, repo):
