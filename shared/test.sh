@@ -130,6 +130,10 @@ if ! $SKIP_TF; then
   cp auth.auto.tfvars.example "$TMPDIR_TF/auth.auto.tfvars" 2>/dev/null || true
   cp env.auto.tfvars.example "$TMPDIR_TF/env.auto.tfvars" 2>/dev/null || true
 
+  # Never the shell's Databricks or Azure auth (scripts/terraform_env.sh).
+  # shellcheck source=scripts/terraform_env.sh
+  . "$SCRIPT_DIR/scripts/terraform_env.sh"
+  genierails_terraform_env
   if terraform -chdir="$SCRIPT_DIR" validate -no-color > "$TMPDIR_TF/tf_validate.log" 2>&1; then
     report "PASS" "terraform validate passed"
   else

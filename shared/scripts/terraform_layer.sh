@@ -178,6 +178,15 @@ else
   esac
   INIT_CMD+=(-backend-config="path=$STATE_BASE/terraform.tfstate")
 fi
+
+# Only the env's auth.auto.tfvars authenticates Terraform (scripts/terraform_env.sh).
+AZURERM_BACKEND=
+for arg in ${REMOTE_BACKEND_ARGS[@]+"${REMOTE_BACKEND_ARGS[@]}"}; do
+  case "$arg" in -backend-config=storage_account_name=*) AZURERM_BACKEND=azurerm ;; esac
+done
+# shellcheck source=terraform_env.sh
+. "$SCRIPT_DIR/terraform_env.sh"
+genierails_terraform_env "$AZURERM_BACKEND"
 WRITABLE_INIT_CMD=("${INIT_CMD[@]}")
 if [ -f .terraform.lock.hcl ]; then
   INIT_CMD+=(-lockfile=readonly)

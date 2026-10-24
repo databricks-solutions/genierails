@@ -97,7 +97,7 @@ Service principal requirements:
 - `Workspace Admin` to configure workspace entitlements, warehouses, and Genie resources
 - `Metastore Admin` to create tag policies, FGAC policies, grants, and masking functions
 
-If you already use the Databricks CLI, the same service principal details are often visible in the account console pages you used to create the CLI credentials. This quickstart intentionally stores them in `auth.auto.tfvars` instead of reading `~/.databrickscfg`.
+If you already use the Databricks CLI, the same service principal details are often visible in the account console pages you used to create the CLI credentials. This quickstart intentionally stores them in `auth.auto.tfvars` instead of reading `~/.databrickscfg`. Terraform reads neither that file nor the shell's `DATABRICKS_*` and `ARM_*` auth variables: `scripts/terraform_env.sh` (used by `scripts/terraform_layer.sh` and `test.sh`) unsets them, keeping only the pipelines' OIDC `DATABRICKS_AUTH_TYPE` and token variables inside a real GitHub Actions or Azure Pipelines job and, for an `azurerm` remote-state backend, its `ARM_*` identity.
 
 ### `env.auto.tfvars`
 
