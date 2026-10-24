@@ -410,7 +410,7 @@ Agreed in design discussion after the rollout above was set. It starts once roll
 
 ### 18.3 First deployment in git
 
-- `make setup` writes the section 9 `.gitignore`. It decides from the `origin` remote: with `origin` at `github.com/databricks-solutions/genierails` (https or ssh) it is GenieRails' own repo, so it writes nothing and prints the opt-in hint (as outside git), and the upstream repo never commits `envs/`. Any other checkout (a customer fork, an internal mirror, no origin) gets the block, even with a GenieRails `upstream` remote. An existing managed block in `<cloud>/.gitignore` is always refreshed; `GITIGNORE=customer` forces the write and `GITIGNORE=off` skips it (contributor forks; setup names it when it writes in a repo with a GenieRails remote) ([pipelines.md](../pipelines.md#setting-up-git-tracking)).
+- `make setup` writes the section 9 `.gitignore`. It decides from the `origin` remote: with `origin` at `github.com/databricks-solutions/genierails` (https or ssh) it is GenieRails' own repo, so it writes nothing and prints the opt-in hint (as outside git), and the upstream repo never commits `envs/`. Any other checkout (a customer fork, an internal mirror, no origin) gets the block, even with a GenieRails `upstream` remote. An existing managed block in `<cloud>/.gitignore` is always refreshed; `GITIGNORE=customer` forces the write and `GITIGNORE=off` skips it. Contributors use `GITIGNORE=off`; customer-facing output does not try to distinguish customer clones from contributor forks ([pipelines.md](../pipelines.md#setting-up-git-tracking)).
 - The champion walkthrough ends with a commit step: what to `git add`, and opening the first PR.
 
 ### 18.4 Optional AI helpers (decision 5)

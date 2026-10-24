@@ -7,6 +7,7 @@ from the Genie API import; no model endpoint is configured or needed.
 import json
 import socket
 import sys
+import types
 from pathlib import Path
 
 import hcl2
@@ -911,6 +912,158 @@ def test_fresh_env_agent_without_acl_groups_stops_cleanly(env_dir, monkeypatch, 
     assert exc.value.code == 1
     assert "ERROR: Cannot derive ACL for Genie space 'Payments Agent'" in capfd.readouterr().out
     assert not (env_dir / "generated/abac.auto.tfvars").exists()
+
+
+@pytest.mark.parametrize("mode", ["full", "governance", "genie"])
+@pytest.mark.parametrize(
+    "bad_input",
+    [
+        "deployer", "inline_acl", "agent_acl", "inline_prefix_collision",
+            "agent_prefix_collision", "require_nonbool_agents_only",
+            "nondict_inline_then_bad_agent", "nondict_only_no_agents",
+            "valid_then_nondict_no_agents",
+    ],
+)
+def test_bad_deterministic_identity_or_agent_acl_stops_before_any_live_call(
+    env_dir, monkeypatch, capfd, mode, bad_input
+):
+    import databricks
+
+    env_file = env_dir / "env.auto.tfvars"
+    if bad_input == "deployer":
+        env_file.write_text(ENV.replace(DEPLOYER, "not-an-application-id"))
+        expected = "deployer_principal_id must be a service principal application ID"
+        expected_file = "env.auto.tfvars"
+    elif bad_input == "inline_acl":
+        env_file.write_text(ENV.replace(f"acl_groups = {json.dumps(TIERS)}", 'acl_groups = "viewers"'))
+        expected = "acl_groups must be a list of non-empty strings"
+        expected_file = "env.auto.tfvars"
+    elif bad_input == "agent_acl":
+        env_file.write_text(
+            ENV.replace(
+                f'genie_spaces = [{{ genie_space_id = "{SPACE_ID}", acl_groups = {json.dumps(TIERS)} }}]\n',
+                "require_acl_groups = true\n",
+            )
+        )
+        agents = env_dir / "agents"
+        agents.mkdir()
+        (agents / "Payments.auto.tfvars").write_text(
+            f'genie_space_id = "{SPACE_ID}"\nuc_tables = {json.dumps(TABLES)}\n'
+        )
+        expected = "agent Payments has no acl_groups — set the groups allowed to run it"
+        expected_file = "agents/Payments.auto.tfvars"
+    elif bad_input in ("inline_prefix_collision", "agent_prefix_collision"):
+        inline_name, agent_name = (
+            ("Payments Agent", "Payments")
+            if bad_input == "inline_prefix_collision"
+            else ("Payments", "Payments Agent")
+        )
+        inline_acl, agent_acl = (
+            (["a", "a"], ["a"])
+            if bad_input == "inline_prefix_collision"
+            else (["a"], ["a", "a"])
+        )
+        env_file.write_text(
+            ENV.replace(
+                f'genie_spaces = [{{ genie_space_id = "{SPACE_ID}", acl_groups = {json.dumps(TIERS)} }}]\n',
+                f'genie_spaces = [{{ name = "{inline_name}", acl_groups = {json.dumps(inline_acl)} }}]\n',
+            )
+        )
+        agents = env_dir / "agents"
+        agents.mkdir()
+        (agents / "pay.auto.tfvars").write_text(
+            f'name = "{agent_name}"\nacl_groups = {json.dumps(agent_acl)}\n'
+        )
+        bad_name = inline_name if bad_input == "inline_prefix_collision" else agent_name
+        expected = f"agent {bad_name} acl_groups must not contain duplicates"
+        expected_file = (
+            "env.auto.tfvars"
+            if bad_input == "inline_prefix_collision"
+            else "agents/pay.auto.tfvars"
+        )
+    elif bad_input == "require_nonbool_agents_only":
+        env_file.write_text(
+            ENV.replace(
+                f'genie_spaces = [{{ genie_space_id = "{SPACE_ID}", acl_groups = {json.dumps(TIERS)} }}]\n',
+                'require_acl_groups = "yes"\n',
+            )
+        )
+        agents = env_dir / "agents"
+        agents.mkdir()
+        (agents / "pay.auto.tfvars").write_text(
+            'name = "Payments"\nacl_groups = ["viewers"]\n'
+        )
+        expected = "require_acl_groups must be a boolean"
+        expected_file = "env.auto.tfvars"
+    elif bad_input == "nondict_inline_then_bad_agent":
+        env_file.write_text(
+            ENV.replace(
+                f'genie_spaces = [{{ genie_space_id = "{SPACE_ID}", acl_groups = {json.dumps(TIERS)} }}]\n',
+                'genie_spaces = ["not an object"]\n',
+            )
+        )
+        agents = env_dir / "agents"
+        agents.mkdir()
+        (agents / "pay.auto.tfvars").write_text(
+            'name = "Payments"\nacl_groups = ["a", "a"]\n'
+        )
+        expected = "agent Payments acl_groups must not contain duplicates"
+        expected_file = "agents/pay.auto.tfvars"
+    else:
+        spaces = (
+            '["junk"]'
+            if bad_input == "nondict_only_no_agents"
+            else '[{ name = "Valid", acl_groups = ["a"] }, "junk"]'
+        )
+        env_file.write_text(
+            ENV.replace(
+                f'genie_spaces = [{{ genie_space_id = "{SPACE_ID}", acl_groups = {json.dumps(TIERS)} }}]\n',
+                f"genie_spaces = {spaces}\n",
+            )
+        )
+        bad_index = 0 if bad_input == "nondict_only_no_agents" else 1
+        expected = f"genie_spaces[{bad_index}] must be an object"
+        expected_file = "env.auto.tfvars"
+
+    live_calls = []
+
+    def live_call(*args, **kwargs):
+        live_calls.append((args, kwargs))
+        return None
+
+    fake_sdk = types.ModuleType("databricks.sdk")
+    fake_sdk.WorkspaceClient = live_call
+    fake_sdk.AccountClient = live_call
+    monkeypatch.setitem(sys.modules, "databricks.sdk", fake_sdk)
+    monkeypatch.setattr(databricks, "sdk", fake_sdk)
+    for helper in (
+        "list_account_group_names", "fetch_tables_from_genie_space",
+        "fetch_tables_from_databricks", "_fetch_live_classification_source",
+    ):
+        monkeypatch.setattr(generate_abac, helper, live_call)
+    monkeypatch.setattr(socket.socket, "connect", live_call)
+    with pytest.raises(SystemExit) as exc:
+        _generate(env_dir, monkeypatch, "--mode", mode)
+    assert exc.value.code == 1
+    out = capfd.readouterr().out
+    assert expected in out
+    assert f"in {expected_file}" in out
+    assert live_calls == []
+
+
+def test_deterministic_native_classification_failure_never_suggests_llm_opt_out(
+    env_dir, monkeypatch, capfd
+):
+    def missing_native(*_args, **_kwargs):
+        raise generate_abac.NativeClassificationRequiredError("class.* tags are unavailable")
+
+    monkeypatch.setattr(generate_abac, "_fetch_live_classification_source", missing_native)
+    with pytest.raises(SystemExit) as exc:
+        _generate(env_dir, monkeypatch)
+    assert exc.value.code == 1
+    out = capfd.readouterr().out
+    assert "Deterministic governance requires native class.* tags" in out
+    assert "--allow-llm-sensitivity" not in out
 
 
 def test_opted_in_legacy_env_refuses_until_rebuild_governed_tables(env_dir, monkeypatch, capfd):

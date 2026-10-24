@@ -430,7 +430,10 @@ def validate_source_catalogs(source_dir: Path, catalog_map: str, env_file: Path)
     if unknown:
         raise ValueError(f"{setting} has unknown source catalog(s): {', '.join(unknown)}")
     if missing:
-        raise ValueError(f"{setting} is missing source catalog(s): {', '.join(missing)}")
+        raise ValueError(
+            f"{setting} is missing source catalog(s): {', '.join(missing)} "
+            f"(source catalogs: {', '.join(catalogs)})"
+        )
 
 
 def _env_name(label: str, value: str) -> str:

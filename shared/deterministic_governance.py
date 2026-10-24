@@ -178,6 +178,37 @@ from table_readers import is_everyone  # noqa: E402
 import deployer_identity  # noqa: E402
 
 
+def genie_acl_group_errors(cfg: dict) -> list[str]:
+    """Validate only the per-agent ACL inputs needed before live discovery."""
+    errors: list[str] = []
+    require_acls = cfg.get("require_acl_groups", False)
+    if not isinstance(require_acls, bool):
+        errors.append("require_acl_groups must be a boolean")
+    spaces = cfg.get("genie_spaces", [])
+    if not isinstance(spaces, list):
+        errors.append("genie_spaces must be a list")
+        return errors
+    for index, space in enumerate(spaces):
+        if not isinstance(space, dict):
+            errors.append(f"genie_spaces[{index}] must be an object")
+            continue
+        name = space.get("name") or space.get("genie_space_id") or str(index)
+        missing = "acl_groups" not in space or space["acl_groups"] is None
+        if require_acls is True and missing:
+            errors.append(f"agent {name} has no acl_groups — set the groups allowed to run it")
+        if not missing:
+            acl_groups = space["acl_groups"]
+            if not isinstance(acl_groups, list) or not all(
+                isinstance(group, str) and group for group in acl_groups
+            ):
+                errors.append(f"agent {name} acl_groups must be a list of non-empty strings")
+            elif len(acl_groups) != len(set(acl_groups)):
+                errors.append(f"agent {name} acl_groups must not contain duplicates")
+        if "delete" in space and not isinstance(space["delete"], bool):
+            errors.append(f"agent {name} delete must be a boolean")
+    return errors
+
+
 def validate_config(
     cfg: Mapping[str, Any], *, ack_unclassified: str | None = None,
     ack_weaken: str | None = None, library: Mapping | None = None,
@@ -343,31 +374,7 @@ def validate_config(
                 errors.append(f"{label} conflicts with an earlier row-filter rule for {key[0]}.{key[1]}")
             seen.setdefault(key, values)
 
-    require_acls = cfg.get("require_acl_groups", False)
-    if not isinstance(require_acls, bool):
-        errors.append("require_acl_groups must be a boolean")
-    spaces = cfg.get("genie_spaces", [])
-    if not isinstance(spaces, list):
-        errors.append("genie_spaces must be a list")
-    else:
-        for index, space in enumerate(spaces):
-            if not isinstance(space, dict):
-                errors.append(f"genie_spaces[{index}] must be an object")
-                continue
-            name = space.get("name") or space.get("genie_space_id") or str(index)
-            missing = "acl_groups" not in space or space["acl_groups"] is None
-            if require_acls is True and missing:
-                errors.append(f"agent {name} has no acl_groups — list the groups that may run it")
-            if not missing:
-                acl_groups = space["acl_groups"]
-                if not isinstance(acl_groups, list) or not all(
-                    isinstance(group, str) and group for group in acl_groups
-                ):
-                    errors.append(f"agent {name} acl_groups must be a list of non-empty strings")
-                elif len(acl_groups) != len(set(acl_groups)):
-                    errors.append(f"agent {name} acl_groups must not contain duplicates")
-            if "delete" in space and not isinstance(space["delete"], bool):
-                errors.append(f"agent {name} delete must be a boolean")
+    errors.extend(genie_acl_group_errors(cfg))
     from governance_policies import tag_treatment_errors
     errors.extend(tag_treatment_errors(cfg.get("tag_treatments"), library))
     from table_readers import validation_errors as table_readers_errors

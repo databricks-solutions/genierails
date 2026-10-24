@@ -22,9 +22,8 @@ The rule (``--mode``, make setup's GITIGNORE):
                 customer repo: write or refresh the block and print the diff,
                 like customer. That holds even if another remote (say
                 ``upstream``) points at GenieRails, as it does when a customer
-                keeps GenieRails around for upgrades. A contributor working on
-                a fork passes GITIGNORE=off; whenever the block is written in a
-                repo with a GenieRails remote, a one-line note names it.
+                keeps GenieRails around for upgrades. Contributors working on
+                GenieRails itself pass GITIGNORE=off, as documented in pipelines.md.
   off       do nothing
 Only the lines between the markers are ever rewritten; every other line is
 kept byte for byte. Re-running is a no-op; every change is printed as a diff.
@@ -231,9 +230,6 @@ def main(argv: list[str] | None = None) -> int:
         text.splitlines(keepends=True), new.splitlines(keepends=True), f"a/{rel}", f"b/{rel}"))
     path.write_text(new)
     print(f"{rel}: {'updated' if has_block else 'wrote'} the GenieRails block above (lines outside it are unchanged).")
-    if any(_is_upstream(url) for url in (remotes or {}).values()):
-        print(f"{rel}: this repo also has a GenieRails remote; in a GenieRails contributor fork, "
-              f"revert {rel} and pass GITIGNORE=off.")
     return 0
 
 

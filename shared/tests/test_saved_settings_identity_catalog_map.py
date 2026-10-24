@@ -230,6 +230,23 @@ def test_the_shared_guard_refuses_except_for_a_promotion_destination(tmp_path, m
     assert genie_space_placeholder.main() == 0
 
 
+def test_missing_catalog_map_error_lists_all_source_catalogs(tmp_path):
+    source = tmp_path / "envs" / "dev"
+    source.mkdir(parents=True)
+    (source / "env.auto.tfvars").write_text(
+        'uc_tables = ["paycat.s.t", "hrcat.s.u"]\n'
+    )
+    env_file = tmp_path / "envs" / "prod" / "env.auto.tfvars"
+    env_file.parent.mkdir()
+    env_file.write_text('catalog_map = { "paycat" = "prod_pay" }\n')
+
+    with pytest.raises(ValueError) as exc:
+        saved_settings.validate_source_catalogs(source, "paycat=prod_pay", env_file)
+    message = str(exc.value)
+    assert "missing source catalog(s): hrcat" in message
+    assert "source catalogs: hrcat, paycat" in message
+
+
 def test_the_staged_controller_and_the_overlay_refuse_before_writing(tmp_path, capsys):
     prod = tmp_path / "envs" / "prod"
     prod.mkdir(parents=True)

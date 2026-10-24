@@ -93,9 +93,10 @@ to opt in (as it does outside a git checkout). Any other checkout (your fork, an
 internal mirror, no origin yet) gets the block, even if it keeps GenieRails as
 an `upstream` remote for upgrades. An existing block is always refreshed. The
 overrides: `GITIGNORE=customer` forces the write anywhere, `GITIGNORE=off`
-leaves the file alone. If you contribute to GenieRails from a fork, pass
-`GITIGNORE=off`; setup prints a note naming it whenever it writes the block in a
-repo with a GenieRails remote.
+leaves the file alone. If you contribute to GenieRails from a fork, always pass
+`GITIGNORE=off` so setup leaves the upstream cloud `.gitignore` files unchanged.
+Customer repositories may keep a GenieRails remote for upgrades; setup does not
+print contributor-only advice in customer-facing output.
 
 Only the lines between the block's markers are rewritten. The block names each
 deterministic env, so re-run `make setup ENV=<env>` after adding an env or

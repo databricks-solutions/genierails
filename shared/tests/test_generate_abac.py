@@ -2163,6 +2163,22 @@ def test_required_native_classification_fails_without_warehouse(monkeypatch):
     ) is None
 
 
+def test_native_classification_stop_does_not_suggest_llm_opt_out_in_deterministic_mode():
+    lines = generate_abac.native_classification_stop(
+        RuntimeError("tags unavailable"), ["cat.sch.tbl"], "dev", deterministic=True,
+    )
+    text = "\n".join(lines)
+    assert "Deterministic governance requires native class.* tags" in text
+    assert "--allow-llm-sensitivity" not in text
+
+
+def test_native_classification_stop_keeps_llm_opt_out_for_legacy_mode():
+    lines = generate_abac.native_classification_stop(
+        RuntimeError("tags unavailable"), ["cat.sch.tbl"], "dev", deterministic=False,
+    )
+    assert "--allow-llm-sensitivity" in "\n".join(lines)
+
+
 def test_required_native_classification_fails_for_unresolvable_footprint():
     with pytest.raises(
         generate_abac.NativeClassificationRequiredError,
