@@ -235,6 +235,7 @@ def source_env_dir(envs_dir: Path, env: str, env_dir: Path) -> Path:
     path = destination_env_dir(envs_dir, env, env_dir)
     if not path.is_dir():
         raise ValueError(f"envs/{env} does not exist; run make setup ENV={env} first")
+    refuse_deterministic(path, env)
     source = promote_source(path)
     if env == "prod" or source:
         from_env = source or "dev"
@@ -246,6 +247,18 @@ def source_env_dir(envs_dir: Path, env: str, env_dir: Path) -> Path:
             f"make promote-to ENV={env}, {release_steps(path, from_env, env)}"
         )
     return path
+
+
+def refuse_deterministic(env_dir: Path, env: str) -> None:
+    """materialize-treatment is legacy-only: a deterministic generate derives every column mask from
+    tag_treatments and replaces the rest, so a materialized mask would never reach a release."""
+    from scripts.coverage_fix import _deterministic, deterministic_mask_lines
+
+    if _deterministic(env_dir):
+        raise ValueError(
+            f"materialize-treatment is legacy-only and {env} is deterministic; nothing was written. "
+            "A deterministic env derives every column mask from tag_treatments, and make generate "
+            "replaces any other.\n" + "\n".join(deterministic_mask_lines(env, env_dir)))
 
 
 def release_steps(env_dir: Path | None, source: str, dest: str) -> str:
@@ -291,6 +304,8 @@ def main(argv: list[str] | None = None) -> int:
             args.env_dir = source_env_dir(args.envs_dir, args.env_name, args.env_dir)
             args.tfvars = args.env_dir / "generated" / "abac.auto.tfvars"
             args.sql = args.env_dir / "generated" / "masking_functions.sql"
+        elif args.env_dir is not None:
+            refuse_deterministic(args.env_dir, args.env_name or args.env_dir.name)
         if args.check_env:
             if args.envs_dir is None:
                 raise ValueError("--check-env needs --envs-dir")
@@ -323,14 +338,8 @@ def main(argv: list[str] | None = None) -> int:
         changed.append(f"envs/{env}/generated/abac.auto.tfvars")
     if result["functions"]:
         changed.append(f"envs/{env}/generated/masking_functions.sql")
-    from scripts.coverage_fix import _deterministic
-
     commit = f" Commit {', '.join(changed)}." if changed else ""
-    if args.env_dir is not None and _deterministic(args.env_dir):
-        print(f"Next:{commit} Then make rehearse ENV={env}, make promote-to ENV={dest}, "
-              f"{release_steps(args.env_dir, env, dest)}.")
-    else:
-        print(f"Next: make rehearse ENV={env}, make promote-to ENV={dest}, make release ENV={dest}.{commit}")
+    print(f"Next: make rehearse ENV={env}, make promote-to ENV={dest}, make release ENV={dest}.{commit}")
     return 0
 
 

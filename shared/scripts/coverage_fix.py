@@ -7,7 +7,8 @@ A class.* tag no rule maps (a "coverage gap") is fixed one of two ways:
      maps the class to it in shared/treatment_config.json (in a deterministic
      env, to a mask-library treatment in the env's tag_treatments);
   b) a new kind of mask: make scaffold-treatments adds a REVIEW stub, and in a
-     promoted env make materialize-treatment carries its mask through dev.
+     promoted env make materialize-treatment carries its mask through dev (legacy
+     envs; a deterministic env adopts a custom mask and maps it in tag_treatments).
 
 This module finds each treatment's UDF input type and each column's data type
 so (a) can refuse an incompatible pairing, and prints both options with exact
@@ -253,7 +254,7 @@ def fix_lines(
     source = promote_source(env_dir)
     rerun = rerun_command(env_name, bool(source))
     if _deterministic(env_dir):
-        return deterministic_fix_lines(env_name, env_dir, source, rerun)
+        return deterministic_fix_lines(env_name, env_dir, rerun)
     config = config or load_treatment_config()
     sql_path = env_dir / "generated" / "masking_functions.sql"
     sql_text = sql_path.read_text() if sql_path.is_file() else ""
@@ -291,6 +292,31 @@ def promoted_release_steps(env_name: str, source: str) -> str:
             f"on that commit, make release-plan ENV={env_name} and make release ENV={env_name}")
 
 
+def recovery_steps(chain: list[str], changed: str, rerun: str = "") -> str:
+    """The one deterministic sequence after a coverage fix changes envs/<chain[0]>/ (the dev_to_prod
+    README's "If it stops on coverage or drift"). ``chain`` is promotion_chain's root-first list
+    ending in the env that stopped: commit, generate, check and rehearse the root; then promote-to
+    and check each env after it; then release the last one, which release-plan allows only when
+    its source is the rehearsed root (make rehearse refuses a promoted env)."""
+    owner, env_name = chain[0], chain[-1]
+    steps = [f"commit {changed}", f"make generate ENV={owner}", f"make check ENV={owner}",
+             f"make rehearse ENV={owner}"]
+    for env in chain[1:]:
+        steps += [f"make promote-to ENV={env}", f"make check ENV={env}"]
+    if len(chain) == 2:
+        steps.append(promoted_release_steps(env_name, owner))
+    elif len(chain) > 2:
+        source = chain[-2]
+        steps.append(
+            f"commit and push envs/; the release stops there: release-plan ENV={env_name} needs a passing "
+            f"rehearsal of {source}, and make rehearse refuses envs/{source} while it has promote_from "
+            f"(a deterministic {env_name} is released only from an env with no promote_from, e.g. "
+            f'promote_from = "{owner}")')
+    elif rerun and rerun != steps[-1]:
+        steps.append(rerun)
+    return ", ".join(steps) + "; commit and push after each step that changes envs/"
+
+
 def release_steps(env_name: str, env_dir: Path, source: str = "") -> str:
     """What follows promote-to, for this env's mode: the deterministic sequence, or a legacy release."""
     if _deterministic(env_dir):
@@ -317,38 +343,94 @@ def _deterministic(env_dir: Path) -> bool:
         return False
 
 
-def deterministic_fix_lines(env_name: str, env_dir: Path, source: str, rerun: str) -> list[str]:
+CUSTOM_MASK_ENV = "dev"  # the only env make adopt-custom-mask runs in (custom_masks.HELPER_ENV)
+
+
+def _promoted(env_dir: Path) -> bool:
+    """A deterministic promote-to target (promote_from set, or prod), as release_gate.env_role says."""
+    path = env_dir / "env.auto.tfvars"
+    try:
+        cfg = hcl2.loads(path.read_text()) if path.is_file() else {}
+    except Exception:
+        return False
+    return cfg.get("governance_mode") == "deterministic" and bool(cfg.get("promote_from") or env_dir.name == "prod")
+
+
+def promotion_chain(env_dir: Path, env_name: str = "") -> list[str]:
+    """The envs a deterministic env's rules come through, root first, ending in this env.
+
+    promote-to rewrites a promoted env's tag_treatments and column_overrides from its source, so
+    only the root (the first env with no promote_from) owns them; the walk stops at a source that
+    does not exist, or one already seen.
+    """
+    chain, current = [env_name or env_dir.name], env_dir
+    while _promoted(current):
+        source = promote_source(current) or "dev"
+        source_dir = env_dir.parent / source
+        if source in chain or not (source_dir / "env.auto.tfvars").is_file():
+            break
+        chain.insert(0, source)
+        current = source_dir
+    return chain
+
+
+def custom_mask_line(owner: str, treatment: str = "custom_<name>") -> str:
+    """How a custom mask reaches envs/<owner>: adopted in dev, else not at all (promote-to carries
+    custom_masks/ only from a source env, and a root other than dev has none)."""
+    if owner == CUSTOM_MASK_ENV:
+        return f"make adopt-custom-mask ENV={CUSTOM_MASK_ENV} TREATMENT={treatment}"
+    return (f"custom masks are adopted only in envs/{CUSTOM_MASK_ENV} (make adopt-custom-mask "
+            f"ENV={CUSTOM_MASK_ENV}) and reach another env only by promote-to from it; envs/{owner} has no "
+            "promote_from, so map a mask-library treatment there")
+
+
+def deterministic_mask_lines(env_name: str, env_dir: Path, rerun: str = "") -> list[str]:
+    """Deterministic envs derive every column mask from tag_treatments (and column_overrides), and
+    generate replaces any other, so a missing mask is fixed by mapping, never materialize-treatment."""
+    chain = promotion_chain(env_dir, env_name)
+    changed = f"envs/{chain[0]}/env.auto.tfvars"
+    return [
+        f"  How to fix (map it in {changed}; generate derives every column mask "
+        "from it, so materialize-treatment is legacy-only):",
+        f"    make scaffold-treatments ENV={env_name} TREATMENT=<mask-library treatment>",
+        _new_mask_line(chain[0], changed),
+        f"       then {recovery_steps(chain, changed, rerun)}",
+    ]
+
+
+def _new_mask_line(owner: str, changed: str) -> str:
+    if owner == CUSTOM_MASK_ENV:
+        return (f"       or, for a new kind of mask, {custom_mask_line(owner)} and add its line to "
+                f"tag_treatments (or column_overrides) in {changed}")
+    return f"       (a new kind of mask: {custom_mask_line(owner)})"
+
+
+def deterministic_fix_lines(env_name: str, env_dir: Path, rerun: str) -> list[str]:
     """Deterministic envs: a class mapping is env governance config (tag_treatments), never shared/."""
-    owner = source if source and (env_dir.parent / source / "env.auto.tfvars").is_file() else env_name
-    lines = [
-        f"  How to fix (a governance change in envs/{owner}/env.auto.tfvars; shared/ is product code):",
+    chain = promotion_chain(env_dir, env_name)
+    changed = f"envs/{chain[0]}/env.auto.tfvars"
+    return [
+        f"  How to fix (a governance change in {changed}; shared/ is product code):",
         f"    make scaffold-treatments ENV={env_name} TREATMENT=<mask-library treatment>",
         f'       maps each unmapped class to it in tag_treatments ("class.<name>" = "<treatment>");',
         "       TREATMENT=redact keeps full redaction for every masked tier",
+        _new_mask_line(chain[0], changed),
+        f"       then {recovery_steps(chain, changed, rerun)}",
     ]
-    if owner != env_name:
-        lines.append(f"       then commit envs/{owner}/env.auto.tfvars, make rehearse ENV={owner}, "
-                     f"make promote-to ENV={env_name}")
-        lines.append(f"       then {promoted_release_steps(env_name, owner)}")
-    else:
-        lines.append(f"       then make generate ENV={env_name} and {rerun}; commit envs/{env_name}/")
-    return lines
 
 
 def materialize_lines(env_name: str, env_dir: Path, treatments: list[str]) -> list[str]:
     """How to add a mapped treatment's missing mask policy, for this env."""
     source = promote_source(env_dir)
     rerun = rerun_command(env_name, bool(source))
+    if _deterministic(env_dir):
+        return deterministic_mask_lines(env_name, env_dir, rerun)
     lines = ["  How to fix (add the mask; no column needs the tag):"]
     for treatment in treatments:
         lines.append(
             f"    make materialize-treatment ENV={source or env_name} TREATMENT={treatment}"
         )
-    if source and _deterministic(env_dir):
-        lines.append(f"    then commit envs/{source}/generated/, make rehearse ENV={source}, "
-                     f"make promote-to ENV={env_name}")
-        lines.append(f"    then {promoted_release_steps(env_name, source)}")
-    elif source:
+    if source:
         lines.append(
             f"    then make rehearse ENV={source}, make promote-to ENV={env_name}, {rerun}; "
             f"commit envs/{source}/generated/"

@@ -91,11 +91,14 @@ DOC_ORDER = [
      ["`promote-to`", "push to `origin/main`", "`make rehearse ENV=dev` on that commit",
       "`make release-plan ENV=prod`", "`make release ENV=prod`"]),
     ("shared/examples/dev_to_prod/REFERENCE.md", "Deterministic envs (`governance_mode = \"deterministic\"`) never",
-     ["`make promote-to ENV=prod`", "commit and push", "`make rehearse ENV=dev` again", "`make release-plan ENV=prod`",
-      "`make release ENV=prod`"]),
+     ["`make generate ENV=dev`", "`make check ENV=dev`", "`make promote-to ENV=prod`", "`make check ENV=prod`",
+      "commit and push", "`make rehearse ENV=dev` again", "`make release-plan ENV=prod`", "`make release ENV=prod`"]),
+    ("shared/examples/dev_to_prod/REFERENCE.md", "A new kind of mask is a custom mask:",
+     ["`make adopt-custom-mask ENV=dev TREATMENT=custom_<name>`", "`tag_treatments`", "then the same steps"]),
+    ("shared/examples/dev_to_prod/REFERENCE.md", "Later legacy `make generate ENV=dev` runs keep the mask",
+     ["It refuses a deterministic env and writes nothing", "map the class or adopt a custom mask"]),
     ("shared/examples/dev_to_prod/REFERENCE.md", "- Then `make rehearse ENV=dev`, `make promote-to ENV=prod`",
-     ["`make promote-to ENV=prod`", "push to `origin/main`", "`make rehearse ENV=dev` again",
-      "`make release-plan ENV=prod`", "`make release ENV=prod`"]),
+     ["`make promote-to ENV=prod`", "`make release ENV=prod`", "legacy envs have no `release-plan`"]),
     ("REFERENCE.md", "| `make release-plan` |",
      ["a passing clean rehearsal of HEAD in the env's source env, its `promote_from` (default `dev`)"]),
     ("README.md", "promote the *rules* to prod", ["release a rehearsed commit", *PLAN]),
@@ -417,6 +420,127 @@ def test_prod_setup_advice_does_not_ask_to_replace_tier_placeholders(tmp_path):
     }
     assert "access_tier_groups placeholder" in advice["0"]
     assert advice["1"] == ""
+
+
+# ── A coverage gap's recovery sequence: one builder, the README's list ──────
+
+README = SHARED / "examples" / "dev_to_prod" / "README.md"
+DETERMINISTIC_PROD = 'governance_mode = "deterministic"\npromote_from = "dev"\n'
+MAKE_STEP = r"make [a-z-]+ ENV=[a-z]+"
+
+
+def _readme_recovery() -> list[str]:
+    """The make commands the README lists after a reused mask's commit, in order."""
+    line = next(line for line in README.read_text().splitlines() if line.startswith("- **Reuse an existing mask**"))
+    tail = line[line.index("Commit it, then"):]
+    assert "committing and pushing after each step that changes `envs/`" in tail
+    return re.findall(rf"`({MAKE_STEP})`", tail)
+
+
+def _gap_envs(tmp_path: Path) -> tuple[Path, Path]:
+    for name, text in (("dev", DETERMINISTIC), ("prod", DETERMINISTIC_PROD)):
+        (tmp_path / "envs" / name).mkdir(parents=True)
+        (tmp_path / "envs" / name / "env.auto.tfvars").write_text(text)
+    return tmp_path / "envs" / "dev", tmp_path / "envs" / "prod"
+
+
+def _scaffold_output(capsys, env_name: str, env_dir: Path, target: Path) -> str:
+    from scripts import scaffold_treatments
+
+    scaffold_treatments._print_deterministic({
+        "already": [], "labels": ["class.loyalty_id"], "treatment": "redact", "columns": [],
+        "types": ["STRING"], "target": target, "env_dir": env_dir}, env_name)
+    return capsys.readouterr().out
+
+
+def test_every_coverage_gap_fix_prints_the_readme_recovery_sequence(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("GENIERAILS_RERUN_TARGET", raising=False)
+    dev, prod = _gap_envs(tmp_path)
+    readme = _readme_recovery()
+    assert readme == ["make generate ENV=dev", "make check ENV=dev", "make rehearse ENV=dev",
+                      "make promote-to ENV=prod", "make check ENV=prod", "make rehearse ENV=dev",
+                      "make release-plan ENV=prod", "make release ENV=prod"]
+    builder = coverage_fix.recovery_steps(["dev", "prod"], "envs/dev/env.auto.tfvars")
+    assert builder.startswith("commit envs/dev/env.auto.tfvars, make generate ENV=dev")
+    assert builder.endswith("; commit and push after each step that changes envs/")
+    assert re.findall(MAKE_STEP, builder) == readme
+
+    scaffold = _scaffold_output(capsys, "prod", prod, dev)
+    assert f"Next: {builder}\n" in scaffold
+    fix = "\n".join(coverage_fix.fix_lines("prod", prod, [("ppay.s.t.loyalty", "class.loyalty_id")]))
+    assert f"then {builder}" in fix
+    assert re.findall(MAKE_STEP, fix.split("then ", 1)[1]) == readme
+    # A missing mask is fixed by mapping too: a deterministic generate replaces a materialized one.
+    mask = "\n".join(coverage_fix.materialize_lines("prod", prod, ["generic_partial"]))
+    assert "make materialize-treatment" not in mask
+    assert "make adopt-custom-mask ENV=dev TREATMENT=custom_<name>" in mask
+    assert f"then {builder}" in mask
+    assert re.findall(MAKE_STEP, mask.split("then ", 1)[1]) == readme
+
+
+def test_an_unpromoted_envs_coverage_gap_fix_generates_checks_and_rehearses_itself(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("GENIERAILS_RERUN_TARGET", raising=False)
+    dev, _prod = _gap_envs(tmp_path)
+    expected = ["make generate ENV=dev", "make check ENV=dev", "make rehearse ENV=dev"]
+    builder = coverage_fix.recovery_steps(["dev"], "envs/dev/env.auto.tfvars", "make rehearse ENV=dev")
+    assert re.findall(MAKE_STEP, builder) == expected
+    assert f"Next: {builder}\n" in _scaffold_output(capsys, "dev", dev, dev)
+    fix = "\n".join(coverage_fix.fix_lines("dev", dev, [("paycat.s.t.loyalty", "class.loyalty_id")]))
+    assert f"then {builder}" in fix
+    monkeypatch.setenv("GENIERAILS_RERUN_TARGET", "maintain")
+    fix = "\n".join(coverage_fix.fix_lines("dev", dev, [("paycat.s.t.loyalty", "class.loyalty_id")]))
+    assert re.findall(MAKE_STEP, fix.split("then ", 1)[1]) == expected + ["make maintain ENV=dev"]
+
+
+def _chain_envs(tmp_path: Path, stg_from: str) -> tuple[Path, Path, Path]:
+    """dev, stg and a prod promoted from stg; stg is promoted from ``stg_from`` (or is a root)."""
+    texts = {"dev": DETERMINISTIC, "stg": DETERMINISTIC + (f'promote_from = "{stg_from}"\n' if stg_from else ""),
+             "prod": DETERMINISTIC_STG}
+    for name, text in texts.items():
+        (tmp_path / "envs" / name).mkdir(parents=True)
+        (tmp_path / "envs" / name / "env.auto.tfvars").write_text(text)
+    return tuple(tmp_path / "envs" / name for name in texts)
+
+
+def _all_fixes(prod: Path) -> list[str]:
+    return ["\n".join(coverage_fix.fix_lines("prod", prod, [("ppay.s.t.loyalty", "class.loyalty_id")])),
+            "\n".join(coverage_fix.materialize_lines("prod", prod, ["generic_partial"]))]
+
+
+def test_a_prod_promoted_from_a_rehearsed_stg_maps_and_rehearses_in_stg(tmp_path, capsys, monkeypatch):
+    """stg has no promote_from: it owns tag_treatments and is the env release-plan ENV=prod needs rehearsed."""
+    monkeypatch.delenv("GENIERAILS_RERUN_TARGET", raising=False)
+    _dev, stg, prod = _chain_envs(tmp_path, "")
+    assert coverage_fix.promotion_chain(prod) == ["stg", "prod"]
+    expected = ["make generate ENV=stg", "make check ENV=stg", "make rehearse ENV=stg", "make promote-to ENV=prod",
+                "make check ENV=prod", "make rehearse ENV=stg", "make release-plan ENV=prod", "make release ENV=prod"]
+    builder = coverage_fix.recovery_steps(["stg", "prod"], "envs/stg/env.auto.tfvars")
+    assert re.findall(MAKE_STEP, builder) == expected
+    for text in _all_fixes(prod):
+        assert f"then {builder}" in text and "envs/stg/env.auto.tfvars" in text
+        # adopt-custom-mask runs only in dev, and dev's custom_masks/ never reach a root stg.
+        assert "make adopt-custom-mask ENV=dev TREATMENT=" not in text
+        assert "envs/stg has no promote_from, so map a mask-library treatment there" in text
+    assert f"Next: {builder}\n" in _scaffold_output(capsys, "prod", prod, stg)
+
+
+def test_a_prod_promoted_through_a_promoted_stg_maps_in_dev_and_never_hand_edits_stg(tmp_path, capsys, monkeypatch):
+    """promote-to ENV=stg rewrites stg's tag_treatments from dev, so dev owns the mapping (and the custom mask)."""
+    monkeypatch.delenv("GENIERAILS_RERUN_TARGET", raising=False)
+    dev, _stg, prod = _chain_envs(tmp_path, "dev")
+    assert coverage_fix.promotion_chain(prod) == ["dev", "stg", "prod"]
+    builder = coverage_fix.recovery_steps(["dev", "stg", "prod"], "envs/dev/env.auto.tfvars")
+    assert re.findall(MAKE_STEP, builder) == [
+        "make generate ENV=dev", "make check ENV=dev", "make rehearse ENV=dev", "make promote-to ENV=stg",
+        "make check ENV=stg", "make promote-to ENV=prod", "make check ENV=prod"]
+    # make rehearse refuses a promoted stg, so no rehearse of stg and no release-plan of prod is offered.
+    assert "release-plan ENV=prod needs a passing rehearsal of stg, and make rehearse refuses envs/stg" in builder
+    for text in _all_fixes(prod):
+        assert f"then {builder}" in text
+        assert "make adopt-custom-mask ENV=dev TREATMENT=custom_<name> and add its line to tag_treatments " \
+            "(or column_overrides) in envs/dev/env.auto.tfvars" in text
+        assert "envs/stg/env.auto.tfvars" not in text and "make generate ENV=stg" not in text
+    assert f"Next: {builder}\n" in _scaffold_output(capsys, "prod", prod, dev)
 
 
 def test_rehearse_reuse_docs_warn_that_live_dev_is_not_rechecked():

@@ -2,8 +2,9 @@
 """promote-to's agent step: carry captured agents from the source env to the target.
 
 It reads committed source and target files and never live Databricks. Before
-seeding a missing target agent file it also reads the target's last release
-receipt, so a removed detached agent cannot be silently recreated.
+seeding a missing target agent file it also reads the target's detached agent
+files and the detached-agent lines in its ack.txt, so a removed detached agent
+cannot be silently recreated.
 
 - agents/<agent>.space.json is promote-to output: rewritten every time from
   the source capture through remap_payload (JSON-aware: catalog names and the

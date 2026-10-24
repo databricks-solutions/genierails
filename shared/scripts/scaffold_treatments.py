@@ -46,7 +46,8 @@ from scripts.coverage_fix import (  # noqa: E402
     env_column_types,
     fitting_treatments,
     promote_source,
-    promoted_release_steps,
+    promotion_chain,
+    recovery_steps,
     rerun_command,
     treatment_input_type,
     types_compatible,
@@ -365,20 +366,19 @@ def _live_deterministic_markers(auth_path: Path, env_path: Path, tag_treatments:
 
 
 def mapping_env_dir(env_dir: Path) -> Path:
-    """Where an env's tag_treatments live: the env itself, or for a promote-to
-    target the env it is promoted from (promote-to rewrites the target's copy)."""
-    import agent_files
-    from scripts.coverage_fix import promote_source
+    """Where an env's tag_treatments live: the env itself, or for a promote-to target the root of
+    its promotion chain (promote-to rewrites every promoted env's copy from its source)."""
+    from scripts.coverage_fix import _promoted, promote_source, promotion_chain
 
-    if not agent_files.promoted(env_dir):
+    if not _promoted(env_dir):
         return env_dir
-    source = promote_source(env_dir) or "dev"
-    source_dir = env_dir.parent / source
-    if not (source_dir / "env.auto.tfvars").is_file():
+    root_dir = env_dir.parent / promotion_chain(env_dir)[0]
+    if _promoted(root_dir):
+        source = promote_source(root_dir) or "dev"
         raise ValueError(
-            f"{env_dir.name} is promoted from {source}, so its tag_treatments come from "
+            f"{root_dir.name} is promoted from {source}, so its tag_treatments come from "
             f"envs/{source}/env.auto.tfvars, which does not exist")
-    return source_dir
+    return root_dir
 
 
 def render_tag_treatments(mapping: dict[str, str]) -> str:
@@ -409,9 +409,13 @@ def map_deterministic(
 ) -> dict:
     """Map every unmapped class.* to a mask-library treatment (or an adopted custom mask) in tag_treatments."""
     from governance_policies import tag_treatment_errors
+    from scripts.coverage_fix import CUSTOM_MASK_ENV, custom_mask_line
     from scripts.custom_masks import effective_library
 
-    library = effective_library(env_dir)
+    # The mapping is written to (and later validated in) target_dir, so its
+    # adopted custom masks are the ones that count, not env_dir's.
+    target_dir = mapping_env_dir(env_dir)
+    library = effective_library(target_dir)
     if not treatment:
         raise ValueError(
             "deterministic envs map a new class to a mask-library treatment; nothing was changed. "
@@ -421,9 +425,10 @@ def map_deterministic(
         raise ValueError(
             f"TREATMENT={treatment} is not a mask-library treatment or an adopted custom mask; nothing was "
             f"changed. Treatments: {', '.join(sorted(library['treatments']))}"
-            + (f". Adopt it first: make adopt-custom-mask ENV=dev TREATMENT={treatment}"
+            + (f". It is not adopted in envs/{target_dir.name}/custom_masks/, where this mapping goes. "
+               + (f"Adopt it first: {custom_mask_line(target_dir.name, treatment)}"
+                  if target_dir.name == CUSTOM_MASK_ENV else "C" + custom_mask_line(target_dir.name)[1:])
                if treatment.startswith("custom_") else ""))
-    target_dir = mapping_env_dir(env_dir)
     target_file = target_dir / "env.auto.tfvars"
     existing = dict(hcl2.loads(target_file.read_text()).get("tag_treatments") or {})
     markers = _offline_markers(tfvars_path)
@@ -466,13 +471,10 @@ def _print_deterministic(result: dict, env_name: str) -> None:
     print(f"Changed: {rel} tag_treatments (a governance file; shared/ is unchanged).")
     print(f"  Column types outside {', '.join(result['types'])} get the treatment's full version.")
     source = promote_source(result["env_dir"])
+    chain = promotion_chain(result["env_dir"], env_name)
     if target != result["env_dir"]:
-        print(f"Next: commit {rel}, then make generate ENV={target.name}, make rehearse ENV={target.name}, "
-              f"make promote-to ENV={env_name} (it carries tag_treatments), then "
-              f"{promoted_release_steps(env_name, target.name)}")
-    else:
-        print(f"Next: make generate ENV={env_name}, then {rerun_command(env_name, bool(source))}; "
-              f"commit {rel} and envs/{env_name}/generated/")
+        print(f"promote-to carries tag_treatments from envs/{target.name} to {', '.join(chain[1:])}.")
+    print(f"Next: {recovery_steps(chain, rel, rerun_command(env_name, bool(source)))}")
 
 
 def _live_column_types(auth_path: Path, env_path: Path, columns: list[str]) -> dict[str, str]:
