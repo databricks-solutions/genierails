@@ -335,6 +335,26 @@ def deterministic_fix_lines(env_name: str, env_dir: Path, source: str, rerun: st
     return lines
 
 
+def regenerate_lines(env_name: str, env_dir: Path) -> list[str]:
+    """Deterministic envs: a mapped class.* tag whose generated gr_treatment or masks
+    are stale or missing. No class needs mapping, so scaffold-treatments would not help."""
+    source = promote_source(env_dir)
+    rerun = rerun_command(env_name, bool(source))
+    owner = source if source and (env_dir.parent / source / "env.auto.tfvars").is_file() else env_name
+    lines = [
+        "  How to fix (the class is mapped; the generated treatment or its masks are stale or missing):",
+        f"    make generate ENV={owner}",
+        "       re-derives each column's gr_treatment and its column masks from the live class.* tags",
+    ]
+    if owner != env_name:
+        lines.append(f"       then commit envs/{owner}/generated/, make rehearse ENV={owner}, "
+                     f"make promote-to ENV={env_name}")
+        lines.append(f"       then {promoted_release_steps(env_name, owner)}")
+    else:
+        lines.append(f"       then {rerun}; commit envs/{env_name}/generated/")
+    return lines
+
+
 def materialize_lines(env_name: str, env_dir: Path, treatments: list[str]) -> list[str]:
     """How to add a mapped treatment's missing mask policy, for this env."""
     source = promote_source(env_dir)

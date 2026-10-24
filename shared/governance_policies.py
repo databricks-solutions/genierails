@@ -292,6 +292,18 @@ def partial_tier_exposes_fragment(item: ColumnTreatment) -> bool:
             and item.partial_sql != item.full_sql)
 
 
+def value_sql_type(value: str) -> str | None:
+    """The exact SQL type a deterministic treatment value was generated for, else None."""
+    parsed = parse_treatment_value(value)
+    if not parsed:
+        return None
+    type_token = parsed[1]
+    token_types = {re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_"): value
+                   for value in set(_SCALAR_TYPES.values())}
+    decimal = re.fullmatch(r"decimal_(\d+)_(\d+)", type_token)
+    return f"DECIMAL({decimal.group(1)},{decimal.group(2)})" if decimal else token_types.get(type_token)
+
+
 def treatment_value_column(
     column: str, value: str, settings: Mapping, library: dict,
 ) -> ColumnTreatment | None:
@@ -299,11 +311,8 @@ def treatment_value_column(
     parsed = parse_treatment_value(value)
     if not parsed:
         return None
-    treatment, type_token, _generation = parsed
-    token_types = {re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_"): value
-                   for value in set(_SCALAR_TYPES.values())}
-    decimal = re.fullmatch(r"decimal_(\d+)_(\d+)", type_token)
-    exact_type = f"DECIMAL({decimal.group(1)},{decimal.group(2)})" if decimal else token_types.get(type_token)
+    treatment = parsed[0]
+    exact_type = value_sql_type(value)
     if not exact_type or treatment not in library["treatments"]:
         return None
     configured = dict(normalize_column_overrides(settings.get("column_overrides")).get(column.lower()) or {})

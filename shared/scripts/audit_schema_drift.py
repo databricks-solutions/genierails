@@ -17,7 +17,10 @@ Three independent checks, selected with --mode:
     promotion, orphaned tag left behind" case: the RULEBOOK is derived from the
     PROMOTED config only (account + data_access tag_policies + column-mask
     fgac_policies; the local generated/ draft is excluded), so a tag whose key
-    was dropped from promotion has no coverage and is flagged.
+    was dropped from promotion has no coverage and is flagged.  In a
+    deterministic env a class.* tag is covered through the env's generation:
+    its column's versioned gr_treatment and that value's column masks
+    (deterministic_class_coverage).
 
 --mode drift    (default) runs forward + reverse — the original behaviour.
 --mode rulebook runs only the rulebook check.
@@ -175,6 +178,12 @@ def extract_fgac_policies(env_dir: Path) -> list[dict]:
     """
     cfg = _load_hcl(env_dir / "data_access" / "abac.auto.tfvars")
     return list(cfg.get("fgac_policies", []) or [])
+
+
+def extract_promoted_tag_assignments(env_dir: Path) -> list[dict]:
+    """tag_assignments from the PROMOTED config only (see extract_fgac_policies)."""
+    cfg = _load_hcl(env_dir / "data_access" / "abac.auto.tfvars")
+    return list(cfg.get("tag_assignments", []) or [])
 
 
 def _get_sdk_client(env_dir: Path):
@@ -382,7 +391,9 @@ def build_rulebook(tag_policies: list[dict], fgac_policies: list[dict]) -> dict:
     # Native classifier tags are facts, not a second enforcement vocabulary.
     # Resolve each mapped class.* semantic through the same governed-source ->
     # gr_treatment derivation used by generation. The class fact is covered
-    # when its derived treatment is present in the promoted rulebook.
+    # when its derived treatment is present in the promoted rulebook. This is
+    # the legacy vocabulary; a deterministic env resolves its class.* tags per
+    # column instead (deterministic_class_coverage, find_uncovered_tags).
     from sensitivity_source import CLASS_NAMESPACE, _CLASS_TO_GOVERNED, _normalize_semantic
     from treatment_derivation import load_treatment_config
 
@@ -451,15 +462,130 @@ def _coverage_gap(catalog: str, tag_key: str, tag_value: str, rulebook: dict) ->
     return "value not covered — key is governed but no policy value or in-catalog column mask covers this value"
 
 
+CLASS_GAP_UNMAPPED = "unmapped"
+CLASS_GAP_GENERATION = "generation"
+
+
+def deterministic_class_coverage(
+    env_dir: Path,
+    classes_by_column: dict[str, list[str]],
+    fgac_policies: list[dict],
+    tag_assignments: list[dict],
+) -> dict:
+    """Coverage of a deterministic env's class.* tags, through its generation.
+
+    A deterministic env doesn't map a class through treatment_config.json (the
+    legacy vocabulary): generation resolves each column's classes to a
+    versioned gr_treatment value (governance_policies.resolve_column) masked by
+    the policies build_policies names for it. A class.* tag is covered only
+    when all of these hold, else it is drift (fail closed):
+
+      - the env's library (mask library, adopted custom masks, tag_treatments)
+        maps the class;
+      - the promoted config assigns the column a gr_treatment, and it is the
+        value resolve_column gives the column's live classes now;
+      - every column mask build_policies names for that value (the full one,
+        and the partial one when a middle tier exists) is promoted in the
+        column's catalog.
+
+    ``classes_by_column``: live class semantics per column, as generation reads
+    them (ClassificationSource.classes_by_column). Returns ``unmapped``
+    {(column, semantic)} and ``columns`` {column: gap reason, "" if covered},
+    keyed by lowercase column.
+    """
+    from governance_policies import (
+        TAG_KEY, build_policies, normalize_column_overrides, resolve_column,
+        value_sql_type, with_tag_treatments,
+    )
+    from scripts.custom_masks import effective_library
+
+    settings = _load_hcl(env_dir / "env.auto.tfvars")
+    library = with_tag_treatments(effective_library(env_dir), settings.get("tag_treatments"))
+    overrides = normalize_column_overrides(settings.get("column_overrides"))
+    known = {name for item in library["treatments"].values() for name in item["classes"]}
+    promoted = {
+        str(a.get("entity_name", "")).lower(): str(a.get("tag_value", ""))
+        for a in tag_assignments or []
+        if a.get("entity_type") == "columns" and a.get("tag_key") == TAG_KEY
+    }
+    masks: set[tuple[str, str, str]] = set()
+    for p in fgac_policies or []:
+        if not _is_column_mask(p):
+            continue
+        value_refs, _key_refs = _parse_condition_tag_refs(p.get("match_condition") or "")
+        for key, value in value_refs:
+            if key == TAG_KEY:
+                masks.add((str(p.get("catalog", "")).lower(), value, str(p.get("function_name", ""))))
+
+    unmapped: set[tuple[str, str]] = set()
+    columns: dict[str, str] = {}
+    for column in sorted(classes_by_column):
+        key = column.lower()
+        names = sorted({c.removeprefix("class.") for c in classes_by_column[column] if c})
+        unmapped.update((key, name) for name in names if name not in known)
+        value = promoted.get(key, "")
+        sql_type = value_sql_type(value)
+        if not value:
+            columns[key] = f"no {TAG_KEY} for this column in the promoted config"
+            continue
+        if not sql_type:
+            columns[key] = f"promoted {TAG_KEY}={value} is not a deterministic treatment value"
+            continue
+        derived = resolve_column(
+            column, names, sql_type, library=library,
+            treatment_versions=settings.get("treatment_versions") or {},
+            column_overrides=overrides,
+        ).value
+        if derived != value:
+            columns[key] = (f"the column's class.* tags derive {TAG_KEY}={derived}, "
+                            f"but the promoted config assigns {value}")
+            continue
+        catalog = key.split(".", 1)[0]
+        expected = build_policies(
+            values_by_catalog={catalog: [value]},
+            access_tier_groups=settings.get("access_tier_groups") or [],
+        )
+        missing = [p["function_name"] for p in expected
+                   if (catalog, value, p["function_name"]) not in masks]
+        columns[key] = (f"no promoted column mask in catalog {catalog} applies "
+                        f"{', '.join(missing)} to {TAG_KEY}={value}") if missing else ""
+    return {"unmapped": unmapped, "columns": columns}
+
+
+def _deterministic_class_gap(tag: dict, coverage: dict) -> tuple[str, str] | None:
+    """(kind, reason) when a class.* tag is uncovered in a deterministic env, else None."""
+    from sensitivity_source import _semantic_from_tag
+
+    column = f"{tag['catalog']}.{tag['schema']}.{tag['table']}.{tag['column']}".lower()
+    semantic = _semantic_from_tag(tag["tag_key"], tag["tag_value"])
+    if (column, semantic) in coverage["unmapped"]:
+        return CLASS_GAP_UNMAPPED, (
+            f"class not mapped — no mask-library treatment or tag_treatments entry maps "
+            f"class.{semantic} (the column is fail-safe redacted)")
+    reason = coverage["columns"].get(column)
+    if reason is None:
+        return CLASS_GAP_GENERATION, "no live class.* reading for this column"
+    return (CLASS_GAP_GENERATION, f"treatment not covered — {reason}") if reason else None
+
+
 def find_uncovered_tags(applied_tags: list[dict], rulebook: dict) -> list[dict]:
     """Filter applied tags down to those the rulebook does not cover.
 
     applied_tags: dicts with keys catalog, schema, table, column, tag_key, tag_value.
-    Returns the uncovered subset, each annotated with a ``reason``.
+    Returns the uncovered subset, each annotated with a ``reason``. In a
+    deterministic env (``rulebook["deterministic_classes"]``, from
+    deterministic_class_coverage) a class.* tag is also annotated with its
+    ``class_gap`` kind, which picks the fix to print.
     """
+    deterministic = rulebook.get("deterministic_classes")
     uncovered: list[dict] = []
     for t in applied_tags:
         catalog = t["catalog"]
+        if deterministic is not None and t["tag_key"].lower().startswith("class."):
+            gap = _deterministic_class_gap(t, deterministic)
+            if gap:
+                uncovered.append({**t, "reason": gap[1], "class_gap": gap[0]})
+            continue
         if is_tag_covered(catalog, t["tag_key"], t["tag_value"], rulebook):
             continue
         uncovered.append({**t, "reason": _coverage_gap(catalog, t["tag_key"], t["tag_value"], rulebook)})
@@ -502,6 +628,16 @@ def _query_applied_tags(w, warehouse_id: str, managed_tables: list[str]) -> list
             "tag_value": row[5] if len(row) > 5 else "",
         })
     return applied
+
+
+def _query_live_classes(w, warehouse_id: str, managed_tables: list[str]) -> dict[str, list[str]]:
+    """Live class semantics per column, read as deterministic generation reads them."""
+    from sensitivity_source import ClassificationSource
+
+    source = ClassificationSource.from_run_sql(
+        lambda sql: _run_sql(w, warehouse_id, sql), managed_tables, require_native=True,
+    )
+    return source.classes_by_column()
 
 
 def detect_rulebook_drift(
@@ -604,9 +740,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if run_rulebook:
         print("\n  Checking rulebook drift (prod tags with no covering policy/mask)...")
-        rulebook = build_rulebook(
-            extract_tag_policies(env_dir), extract_fgac_policies(env_dir),
-        )
+        fgac_policies = extract_fgac_policies(env_dir)
+        rulebook = build_rulebook(extract_tag_policies(env_dir), fgac_policies)
+        if deterministic:
+            rulebook["deterministic_classes"] = deterministic_class_coverage(
+                env_dir, _query_live_classes(w, warehouse_id, managed_tables),
+                fgac_policies, extract_promoted_tag_assignments(env_dir),
+            )
         uncovered = detect_rulebook_drift(w, warehouse_id, managed_tables, rulebook)
         if uncovered:
             drift_found = True
@@ -617,11 +757,18 @@ def main(argv: list[str] | None = None) -> int:
             gaps = [
                 (f"{t['catalog']}.{t['schema']}.{t['table']}.{t['column']}", t["tag_key"].lower())
                 for t in uncovered if t["tag_key"].lower().startswith("class.")
+                and t.get("class_gap") != CLASS_GAP_GENERATION
             ]
             if gaps and args.env_name:
                 from scripts.coverage_fix import fix_lines
 
                 print("\n".join(fix_lines(args.env_name, env_dir, gaps)))
+            # A mapped class whose generated treatment or masks are stale or
+            # missing: scaffold-treatments would change nothing; regenerate.
+            if args.env_name and any(t.get("class_gap") == CLASS_GAP_GENERATION for t in uncovered):
+                from scripts.coverage_fix import regenerate_lines
+
+                print("\n".join(regenerate_lines(args.env_name, env_dir)))
 
     if not drift_found:
         print("\n  No drift detected.")
