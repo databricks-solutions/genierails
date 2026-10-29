@@ -6,8 +6,7 @@ Take a Genie agent you've curated in **dev** and ship it to **prod** with its se
 
 ```bash
 # dev
-make setup ENV=dev REPO=<your-repo-url>   # first run: origin -> genierails (kept for upgrades), origin = your repo; writes the .gitignore that commits envs/; copy the templates; set deployer_principal_id and groups; per agent, its ID and acl_groups
-git add .gitignore envs/ && git commit -m "Govern the first agent in dev" && git push -u origin main
+make setup ENV=dev REPO=<your-repo-url>   # first run: origin -> genierails (kept for upgrades), origin = your repo; writes the .gitignore and env templates, then offers to commit + push them; set deployer_principal_id and groups; per agent, its ID and acl_groups
 #   Catalog Explorer: turn on Data classification, review detections, enable auto-tagging
 make generate ENV=dev       # imports the agent, finds its tables, drafts the rules; shows the diff, offers to commit + push (y)
 make account-plan           # first deploy: plan the shared account layer (gr_treatment tag policy) for approval
@@ -68,14 +67,7 @@ acl_groups     = ["regional_analysts", "viewers"]      # who gets CAN_RUN on the
 **Also accepted:** the same fields inline in `env.auto.tfvars` as `genie_spaces = [{ name = "...", genie_space_id = "...", acl_groups = [...] }]` (leave `genie_spaces = []` when using agent files). Prefer `agents/` files so agent and governance PRs stay separate; `make split-agent-files` moves an inline list into files later.
 `acl_groups` is required: `make generate` stops while an agent has none. It grants only `CAN_RUN` on the agent. `SELECT` on the agent's tables comes only from `table_readers` in `env.auto.tfvars`, which `make generate` proposes for you (filled with `acl_groups`) for each table nothing covers yet. Every `acl_groups` group must be able to read every table of the agent, so pick them from `access_tier_groups` (only tier groups and `raw_exempt_principals` can be readers); otherwise `generate`, `rehearse` and `release` stop and name the table and group.
 
-**2. Commit it (own repo).** `make check` reads only committed env files, a rehearse receipt counts only for a clean checkout, and `make release-plan` needs that commit on your `origin/main`. Step 1's `REPO=` made `origin` your repo ([before you start](#prerequisites--gather-required-values)), so `make setup` already wrote the customer `.gitignore` block that commits `envs/` while ignoring credentials and runtime files:
-```bash
-git add .gitignore envs/
-git status                               # pass looks like: no auth.auto.tfvars, *.tfstate or .genie_* files
-git commit -m "Govern the first agent in dev"
-git push -u origin main
-```
-Commit (and push) again after each step below that changes `envs/`. Later changes go through PRs: [Commit it](#commit-it).
+**2. Commit it (own repo).** At the end of step 1, `make setup` previews exactly the `.gitignore` and env files it created, then asks whether to commit and push them. Answer `y`; credentials and runtime files such as `auth.auto.tfvars` are never staged. With no `origin`, it commits locally only. `make check` reads only committed env files, a rehearse receipt counts only for a clean checkout, and `make release-plan` needs that commit on your `origin/main`. Commit (and push) again after each later step that changes `envs/`; `make generate` and `make promote-to` make the same offer. Later changes go through PRs: [Commit it](#commit-it).
 
 <a id="dev-classify"></a>
 **3. Classify (in the UI).** In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on. When the scan finishes (the first one can take up to about a day), review the detections, exclude false positives, and turn on auto-tagging. Then wait until the columns show `class.*` tags such as `class.email_address`: open a table in Catalog Explorer and check its **Columns** tab.

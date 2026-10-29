@@ -1,4 +1,4 @@
-"""make generate / make promote-to's commit offer (scripts/commit_envs.py), on real git repos.
+"""make setup / generate / promote-to's commit offer (scripts/commit_envs.py), on real git repos.
 
 Each test builds a GenieRails-shaped checkout (shared/, aws/ with the customer
 .gitignore block) in a temp dir and drives the offer through a pseudo-terminal
@@ -559,6 +559,91 @@ def _make_env(tmp_path, **extra):
 
 def _make_cmd(repo, *args):
     return ["make", "--no-print-directory", "-C", str(repo / "aws"), "promote-to", "ENV=prod", *args]
+
+
+def _fresh_setup_clone(tmp_path):
+    """A fresh /tmp clone with this working tree's setup implementation overlaid."""
+    checkout = tmp_path / "setup-clone"
+    subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(ROOT), str(checkout)], check=True, env=_environ())
+    _git(checkout, "remote", "remove", "origin")
+    for rel in ("shared/Makefile.shared", "shared/scripts/commit_envs.py"):
+        shutil.copy2(ROOT / rel, checkout / rel)
+    _git(checkout, "checkout", "-q", "-B", "main")
+    _git(checkout, "add", "shared/Makefile.shared", "shared/scripts/commit_envs.py")
+    if _git(checkout, "status", "--porcelain"):
+        _git(checkout, "commit", "-q", "-m", "test setup implementation")
+    return checkout
+
+
+def _setup_cmd(repo, *args):
+    return ["make", "--no-print-directory", "-C", str(repo / "aws"), "setup", "ENV=dev", *args]
+
+
+def test_make_setup_y_commits_only_its_safe_paths_and_leaves_rehearse_clean(repo, tmp_path):
+    checkout = _fresh_setup_clone(tmp_path)
+    head = _git(checkout, "rev-parse", "HEAD")
+    code, out = _pty_run(_setup_cmd(checkout), "y", _make_env(tmp_path))
+    assert code == 0, out
+    assert "Commit these changes and keep them local (no origin remote)? [y/N]" in out
+    assert _git(checkout, "rev-parse", "HEAD~1") == head
+    committed = _committed(checkout)
+    assert committed
+    assert all(path == "aws/.gitignore" or path.startswith(("aws/envs/dev/", "aws/envs/account/"))
+               for path in committed), committed
+    assert not any(path.endswith("auth.auto.tfvars") for path in committed)
+    assert not _git(checkout, "diff", "--cached", "--name-only")
+    assert not _git(checkout, "status", "--porcelain")  # rehearse's clean-check sees a clean checkout
+
+
+def test_make_setup_n_leaves_head_and_index_untouched(tmp_path):
+    checkout = _fresh_setup_clone(tmp_path)
+    head = _git(checkout, "rev-parse", "HEAD")
+    code, out = _pty_run(_setup_cmd(checkout), "n", _make_env(tmp_path))
+    assert code == 0, out
+    assert "Not committed; git is unchanged." in out
+    assert _git(checkout, "rev-parse", "HEAD") == head
+    assert not _git(checkout, "diff", "--cached", "--name-only")
+    assert (checkout / "aws/envs/dev/auth.auto.tfvars").is_file()
+
+
+def test_make_setup_refuses_preexisting_scoped_edits(tmp_path):
+    checkout = _fresh_setup_clone(tmp_path)
+    env = checkout / "aws/envs/dev"
+    env.mkdir(parents=True)
+    (env / "notes.md").write_text("mine before setup\n")
+    head = _git(checkout, "rev-parse", "HEAD")
+    code, out = _pty_run(_setup_cmd(checkout), "y", _make_env(tmp_path))
+    assert code != 0, out
+    assert "already had uncommitted changes before setup (aws/envs/dev/notes.md)" in out
+    assert PROMPT not in out
+    assert _git(checkout, "rev-parse", "HEAD") == head
+    assert not _git(checkout, "diff", "--cached", "--name-only")
+
+
+def test_make_setup_hook_staging_an_extra_file_is_rolled_back(tmp_path):
+    checkout = _fresh_setup_clone(tmp_path)
+    _hook(checkout, "echo hook > notes.txt\ngit add notes.txt\n")
+    head = _git(checkout, "rev-parse", "HEAD")
+    code, out = _pty_run(_setup_cmd(checkout), "y", _make_env(tmp_path))
+    assert code != 0, out
+    assert "a commit hook changed what was committed, so the commit was undone" in out
+    assert "notes.txt: outside .gitignore, envs/dev/ and envs/account/" in out
+    assert _git(checkout, "rev-parse", "HEAD") == head
+    assert not _git(checkout, "diff", "--cached", "--name-only")
+
+
+@pytest.mark.parametrize("mode", ["no-tty", "ci", "commit-0", "exported-commit"])
+def test_make_setup_ci_no_tty_and_opt_out_keep_git_unchanged(tmp_path, mode):
+    checkout = _fresh_setup_clone(tmp_path)
+    head = _git(checkout, "rev-parse", "HEAD")
+    extra = {"ci": {"CI": "true"}, "exported-commit": {"COMMIT": "1"}}.get(mode, {})
+    args = ("COMMIT=0",) if mode == "commit-0" else ()
+    result = subprocess.run(_setup_cmd(checkout, *args), text=True, capture_output=True,
+                            stdin=subprocess.DEVNULL, env=_make_env(tmp_path, **extra), timeout=300)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert PROMPT not in result.stdout and "=== Commit" not in result.stdout
+    assert _git(checkout, "rev-parse", "HEAD") == head
+    assert not _git(checkout, "diff", "--cached", "--name-only")
 
 
 def test_make_promote_to_on_a_terminal_commits_prod_after_y(repo, tmp_path):

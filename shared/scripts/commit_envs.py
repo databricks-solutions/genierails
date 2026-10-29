@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""make generate and make promote-to offer to commit what they wrote (option A).
+"""make setup, generate and promote-to offer to commit what they wrote (option A).
 
 After a successful run, ``offer`` shows ``git diff --stat`` for exactly
 ``.gitignore`` and ``envs/<env>/`` (the cloud folder's; for make promote-to also
@@ -83,6 +83,7 @@ import customer_gitignore  # noqa: E402
 import setup_repo  # noqa: E402
 
 STEPS = {
+    "setup": "GenieRails: set up {env} (make setup ENV={env})",
     "generate": "GenieRails: draft the {env} rules (make generate ENV={env})",
     "promote-to": "GenieRails: promote the rules to {env} (make promote-to ENV={env})",
 }
@@ -123,7 +124,7 @@ def scope(cloud_rel: str, env: str, step: str, account_env: str = "account",
     account layer (envs/<account>/), so its offer covers it too: rehearse and release-plan need a
     clean checkout. generate writes only envs/<env>/."""
     paths = [f"{cloud_rel}/.gitignore", f"{cloud_rel}/envs/{env}"]
-    if step == "promote-to" and account_exists and account_env != env:
+    if step in ("setup", "promote-to") and account_exists and account_env != env:
         paths.append(f"{cloud_rel}/envs/{account_env}")
         return paths, f".gitignore, envs/{env}/ and envs/{account_env}/"
     return paths, f".gitignore and envs/{env}/"
@@ -264,16 +265,35 @@ def _off_branch(root: Path, branch: str, sha: str = "") -> str:
 
 
 def dirty(cloud_dir: Path, env: str, step: str, account_env: str = "account") -> list[str]:
-    """Repo-relative paths under envs/<account>/ that already differ from HEAD (staged, unstaged
-    or untracked) when make promote-to starts: its offer refuses to sweep them into its commit."""
+    """Scoped paths that already differ from HEAD before a command starts.
+
+    promote-to protects envs/<account>/; setup protects every path it may offer,
+    so neither command can sweep a user's earlier edit into its own commit.
+    """
     cloud_dir = Path(cloud_dir).resolve()
-    if step != "promote-to" or account_env == env or not (cloud_dir / "envs" / account_env).is_dir():
+    if step not in ("setup", "promote-to"):
         return []
-    out = _git(cloud_dir.parent, "status", "--porcelain", "-z", "--no-renames", "--untracked-files=all", "--",
-               f"{cloud_dir.name}/envs/{account_env}")
+    if step == "promote-to":
+        if account_env == env or not (cloud_dir / "envs" / account_env).is_dir():
+            return []
+        paths = [f"{cloud_dir.name}/envs/{account_env}"]
+    else:
+        paths, _label = scope(cloud_dir.name, env, step, account_env,
+                              (cloud_dir / "envs" / account_env).is_dir())
+    out = _git(cloud_dir.parent, "status", "--porcelain", "-z", "--no-renames", "--untracked-files=all",
+               "--", *paths)
     if out.returncode:
         return []
-    return sorted(entry[3:] for entry in out.stdout.split("\0") if len(entry) > 3)
+    found = {entry[3:] for entry in out.stdout.split("\0") if len(entry) > 3}
+    # Before a first setup writes the customer .gitignore block, the root
+    # GenieRails rules ignore envs/. Include ignored files so an existing edit
+    # cannot become visible later and ride setup's commit.
+    if step == "setup":
+        ignored = _git(cloud_dir.parent, "ls-files", "--others", "--ignored", "--exclude-standard", "-z",
+                       "--", *paths)
+        if ignored.returncode == 0:
+            found.update(path for path in ignored.stdout.split("\0") if path)
+    return sorted(found)
 
 
 def _in_progress(root: Path) -> str:
@@ -287,7 +307,8 @@ def _in_progress(root: Path) -> str:
 
 def offer(cloud_dir: Path, env: str, env_dir: Path, step: str, *, remote: str = "origin",
           branch: str = "main", environ: Mapping[str, str] | None = None, tty: bool | None = None,
-          account_env: str = "account", account_dirty: list[str] | None = None) -> int:
+          account_env: str = "account", account_dirty: list[str] | None = None,
+          preexisting_dirty: list[str] | None = None) -> int:
     environ = os.environ if environ is None else environ
     how = mode(environ, interactive() if tty is None else tty)
     if not how:
@@ -323,6 +344,12 @@ def offer(cloud_dir: Path, env: str, env_dir: Path, step: str, *, remote: str = 
                       + ", ".join(before[:5]) + (", ..." if len(before) > 5 else "")
                       + "), so they'd be swept into its commit; commit or revert them first, then re-run "
                       f"make promote-to ENV={env}.")
+    before = sorted(p for p in preexisting_dirty or [] if _inside(p, paths))
+    if before:
+        return refuse("these paths already had uncommitted changes before setup ("
+                      + ", ".join(before[:5]) + (", ..." if len(before) > 5 else "")
+                      + "), so they'd be swept into its commit; commit or revert them first, then re-run "
+                      f"make setup ENV={env}.")
     other = sorted(p for _s, p in _staged(root) if not _inside(p, paths))
     if other:
         return refuse("other changes are already staged (" + ", ".join(other[:5])
@@ -462,6 +489,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--account-env", default="account")
     parser.add_argument("--account-dirty", default="",
                         help="dirty's output (one path per line), taken when make promote-to started")
+    parser.add_argument("--preexisting-dirty", default="",
+                        help="dirty's output (one path per line), taken when make setup started")
     args = parser.parse_args(argv)
     if args.command == "dirty":
         for path in dirty(args.cloud_dir, args.env, args.step, args.account_env):
@@ -470,7 +499,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "will-offer":
         return 0 if will_offer(args.cloud_dir, args.env, args.env_dir, args.step, branch=args.branch) else 1
     return offer(args.cloud_dir, args.env, args.env_dir, args.step, remote=args.remote, branch=args.branch,
-                 account_env=args.account_env, account_dirty=args.account_dirty.splitlines())
+                 account_env=args.account_env, account_dirty=args.account_dirty.splitlines(),
+                 preexisting_dirty=args.preexisting_dirty.splitlines())
 
 
 if __name__ == "__main__":

@@ -219,8 +219,8 @@ def main(argv: list[str] | None = None) -> int:
     if mode == "auto" and not has_block and not _is_customer_repo(remotes):
         print(f"Version control: GenieRails ignores envs/ in its own repo. In your own repo (an origin "
               f"that isn't github.com/databricks-solutions/genierails), make setup ENV={args.env} "
-              f"writes {rel} so envs/ is committed and runtime files are ignored; then "
-              f"git add .gitignore envs/. Force it anywhere with GITIGNORE=customer.")
+              f"writes {rel} so envs/ is committed and runtime files are ignored, then offers the safe files. "
+              f"Force the block anywhere with GITIGNORE=customer.")
         return 0
     new = merged(text, block(args.cloud_dir, args.account_env))
     if new == text:
