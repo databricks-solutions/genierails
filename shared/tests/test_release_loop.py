@@ -216,8 +216,8 @@ def test_a_refused_apply_stops_the_loop_without_planning_again(loop_make, repo):
 PRIMITIVE = ["--no-print-directory", "_release-manifest", "ENV=prod"]
 
 
-def _primitive_only(make: Make, repo) -> bool:
-    return make.calls() == [PRIMITIVE + [f"ENV_DIR={repo.prod}", "MANIFEST=", "APPROVAL="]]
+def _primitive_only(make: Make, repo, manifest: str = "") -> bool:
+    return make.calls() == [PRIMITIVE + [f"ENV_DIR={repo.prod}", f"MANIFEST={manifest}", "APPROVAL="]]
 
 
 @pytest.mark.parametrize("environ_extra", [{}, {"YES": "1"}, {"APPROVE": "1"}, {"GENIERAILS_INTERACTIVE": "1"},
@@ -251,6 +251,18 @@ def test_on_a_terminal_manifest_names_one_release(make, repo):
     rc, shown = _on_a_pty(make, ["y"], "MANIFEST=/m/manifest.json")
     assert rc == 0 and PROMPT not in shown, shown
     assert make.calls() == [PRIMITIVE + [f"ENV_DIR={repo.prod}", "MANIFEST=/m/manifest.json", "APPROVAL="]]
+
+
+def test_on_a_terminal_empty_command_line_manifest_names_one_release(make, repo):
+    rc, shown = _on_a_pty(make, ["y"], "MANIFEST=")
+    assert rc == 0 and PROMPT not in shown, shown
+    assert _primitive_only(make, repo)
+
+
+def test_on_a_terminal_exported_manifest_names_one_release(make, repo):
+    rc, shown = _on_a_pty(make, ["y"], environ_extra={"MANIFEST": ""})
+    assert rc == 0 and PROMPT not in shown, shown
+    assert _primitive_only(make, repo)
 
 
 def test_on_a_terminal_ci_still_refuses(make, repo):

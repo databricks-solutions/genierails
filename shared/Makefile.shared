@@ -1328,17 +1328,18 @@ certify:
 	exit 1
 
 # make release ENV=<deterministic env> typed at a terminal (outside CI, the
-# top-level make, no MANIFEST=) is the interactive release
+# top-level make, MANIFEST undefined) is the interactive release
 # (scripts/release_loop.py): each round it plans (or offers the still
 # releasable current manifest), shows the manifest, asks y/N and releases it
 # through _release-manifest, until the release is complete. Anything else
-# (MANIFEST=, CI, no terminal, GENIERAILS_INTERACTIVE=0, a nested make) runs
+# (MANIFEST given by the command line or environment, even empty; CI; no
+# terminal; GENIERAILS_INTERACTIVE=0; a nested make) runs
 # _release-manifest once, exactly as before.
 release: _guard-not-ci-apply _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify access (deterministic envs, at a terminal: plan, y/N, release, round by round; else the current manifest from make release-plan; MANIFEST=<path> to name one)
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); \
 	if [ "$$($(_IS_DETERMINISTIC) "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null)" = 1 ]; then \
-		if [ -z "$(strip $(MANIFEST))" ]; then \
+		if [ "$(origin MANIFEST)" = undefined ]; then \
 			answer="$$(mktemp)" || exit 1; \
 			python3 "$(SHARED_ROOT)/scripts/approval.py" interactive --answer-file "$$answer" 2>/dev/null; ap_rc=$$?; \
 			ap_out="$$(cat "$$answer")"; rm -f "$$answer"; \
