@@ -77,6 +77,8 @@ def parse_makefile(path, variables=None, _seen=None):
             continue
         if words[0] in _DIRECTIVES:
             continue
+        if stripped.startswith(("$(error ", "$(warning ", "$(info ")):
+            continue  # a parse-time message (e.g. the -i/-k refusal), even one with a colon in it
         match = _RULE.match(stripped)
         if not match:
             continue
@@ -267,6 +269,11 @@ def test_parser_follows_includes_and_expands_known_variables(tmp_path):
 def test_parser_fails_loudly_on_what_it_cannot_check(tmp_path, text, message):
     with pytest.raises(MakefileParseError, match=re.escape(message)):
         _parse(tmp_path, text)
+
+
+def test_parser_skips_parse_time_messages_with_a_colon(tmp_path):
+    text = "ifneq ($(X),)\n$(error make $(GOALS) refused: -i/-k are not supported)\nendif\n$(info a: b)\ntop:\n"
+    assert _parse(tmp_path, text) == {"top": False}
 
 
 def test_parser_survives_an_include_cycle(tmp_path):
