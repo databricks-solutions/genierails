@@ -273,6 +273,13 @@ def dirty(cloud_dir: Path, env: str, step: str, account_env: str = "account") ->
     cloud_dir = Path(cloud_dir).resolve()
     if step not in ("setup", "promote-to"):
         return []
+    probe = _git(cloud_dir.parent, "rev-parse", "--show-toplevel")
+    if probe.returncode and "not a git repository" in probe.stderr.lower():
+        # CHECK=1 runs setup/promote-to in a deliberately unversioned scratch
+        # copy. There is no pre-existing Git state to protect there.
+        return []
+    if probe.returncode:
+        raise RuntimeError((probe.stderr or probe.stdout).strip() or "git rev-parse failed")
     if step == "promote-to":
         if account_env == env or not (cloud_dir / "envs" / account_env).is_dir():
             return []
@@ -283,7 +290,7 @@ def dirty(cloud_dir: Path, env: str, step: str, account_env: str = "account") ->
     out = _git(cloud_dir.parent, "status", "--porcelain", "-z", "--no-renames", "--untracked-files=all",
                "--", *paths)
     if out.returncode:
-        return []
+        raise RuntimeError((out.stderr or out.stdout).strip() or "git status failed")
     found = {entry[3:] for entry in out.stdout.split("\0") if len(entry) > 3}
     # Before a first setup writes the customer .gitignore block, the root
     # GenieRails rules ignore envs/. Include ignored files so an existing edit
@@ -291,8 +298,9 @@ def dirty(cloud_dir: Path, env: str, step: str, account_env: str = "account") ->
     if step == "setup":
         ignored = _git(cloud_dir.parent, "ls-files", "--others", "--ignored", "--exclude-standard", "-z",
                        "--", *paths)
-        if ignored.returncode == 0:
-            found.update(path for path in ignored.stdout.split("\0") if path)
+        if ignored.returncode:
+            raise RuntimeError((ignored.stderr or ignored.stdout).strip() or "git ls-files failed")
+        found.update(path for path in ignored.stdout.split("\0") if path)
     return sorted(found)
 
 
@@ -344,12 +352,6 @@ def offer(cloud_dir: Path, env: str, env_dir: Path, step: str, *, remote: str = 
                       + ", ".join(before[:5]) + (", ..." if len(before) > 5 else "")
                       + "), so they'd be swept into its commit; commit or revert them first, then re-run "
                       f"make promote-to ENV={env}.")
-    before = sorted(p for p in preexisting_dirty or [] if _inside(p, paths))
-    if before:
-        return refuse("these paths already had uncommitted changes before setup ("
-                      + ", ".join(before[:5]) + (", ..." if len(before) > 5 else "")
-                      + "), so they'd be swept into its commit; commit or revert them first, then re-run "
-                      f"make setup ENV={env}.")
     other = sorted(p for _s, p in _staged(root) if not _inside(p, paths))
     if other:
         return refuse("other changes are already staged (" + ", ".join(other[:5])
@@ -367,6 +369,13 @@ def offer(cloud_dir: Path, env: str, env_dir: Path, step: str, *, remote: str = 
             if how == "ask":
                 print(f"  Nothing to commit: {label} match HEAD.")
             return 0
+        staged_paths = {path for _status, path in staged}
+        before = sorted(p for p in preexisting_dirty or [] if p in staged_paths)
+        if before:
+            return refuse("these paths already had uncommitted changes before setup ("
+                          + ", ".join(before[:5]) + (", ..." if len(before) > 5 else "")
+                          + "), so they'd be swept into its commit; commit or revert them first, then re-run "
+                          f"make setup ENV={env}.")
         problems = _problems(root, cloud_rel, staged, preview)
         if problems:
             return refuse("these would be committed:\n    " + "\n    ".join(problems)
@@ -376,7 +385,9 @@ def offer(cloud_dir: Path, env: str, env_dir: Path, step: str, *, remote: str = 
     print(f"\n=== Commit {env}'s changes ({label}) ===")
     print(stat.rstrip("\n"))
     rest = sorted({line[3:] for line in _git(root, "status", "--porcelain").stdout.splitlines()
-                   if not _inside(line[3:].strip('"').rstrip("/"), paths)})
+                   if not _inside(line[3:].strip('"').rstrip("/"), paths)
+                   and not (line[3:].endswith("/")
+                            and any(path.startswith(line[3:]) for _status, path in staged))})
     if rest:
         print("  Not included (left as they are): " + ", ".join(rest[:5]) + (", ..." if len(rest) > 5 else ""))
     target = f"push them to {remote}/{branch}" if has_remote else f"keep them local (no {remote} remote)"
@@ -493,7 +504,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="dirty's output (one path per line), taken when make setup started")
     args = parser.parse_args(argv)
     if args.command == "dirty":
-        for path in dirty(args.cloud_dir, args.env, args.step, args.account_env):
+        try:
+            paths = dirty(args.cloud_dir, args.env, args.step, args.account_env)
+        except RuntimeError as exc:
+            print(f"ERROR: cannot snapshot pre-existing setup changes: {exc}", file=sys.stderr)
+            return 1
+        for path in paths:
             print(path)
         return 0
     if args.command == "will-offer":

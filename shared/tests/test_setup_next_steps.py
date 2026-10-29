@@ -98,7 +98,7 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "existing agent:" not in out
     assert "pick one" not in out
     # Setup offers its own files; make check, rehearse receipts and release-plan read only committed files.
-    assert "When this list ends, setup offers to commit and push the .gitignore and env files it created; answer y.\n" in out
+    assert "setup offers to commit and push" not in out  # captured output is not a terminal
     assert "git add .gitignore envs/" not in out
     assert "  4. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.\n" in out
     assert "     When the scan finishes, review the detections and exclude any false positives, then turn on\n" in out
@@ -137,7 +137,6 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
         < steps.index("set genie_space_id")
         < steps.index("access_tier_groups")
         < steps.index("SAMPLE_ENV.md")
-        < steps.index("setup offers to commit and push")
         < steps.index("enable-classification")
         < steps.rindex("make generate")
         < steps.index("then commit and push envs/")
@@ -300,12 +299,12 @@ def test_setup_legacy_dev_banner_commits_and_checks_but_skips_the_account_manife
 
     assert result.returncode == 0, result.stderr
     out = result.stdout
-    assert "setup offers to commit and push the .gitignore and env files it created" in out
+    assert "setup offers to commit and push" not in out
     assert "Run: make check ENV=dev" in out
     assert "account-plan" not in out and "apply-account" not in out
     assert "     verify-access picks a row-pairing key per masked table; the proven keys are saved and promoted.\n" in out
     assert "prints the keys it proved" not in out
-    assert (out.index("setup offers to commit") < out.index("make generate ENV=dev")
+    assert (out.index("make generate ENV=dev")
             < out.index("make check ENV=dev") < out.index("make rehearse ENV=dev"))
 
 
@@ -328,7 +327,8 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
         "     (FROM=/CATALOG_MAP= remain optional command-line overrides.)\n",
         "In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on",
         "Prefer a script? make enable-classification ENV=prod turns it on",
-        "  5. Commit and push .gitignore and envs/ to origin/main (promote-to offers it on a terminal: answer y); on that commit run:\n",
+        "  5. Commit and push .gitignore and envs/ to origin/main (promote-to offers it on a terminal: answer y;\n"
+        "     or git add .gitignore envs/prod/ envs/account/ && git commit yourself); on that commit run:\n",
         "     make rehearse ENV=dev   (release-plan needs a passing rehearsal of this commit), then:\n",
         "     make release-plan ENV=prod   (runs make check ENV=prod and promote-to CHECK=1, checks the commit "
         "was rehearsed",

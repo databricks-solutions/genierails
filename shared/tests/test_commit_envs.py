@@ -584,7 +584,9 @@ def test_make_setup_y_commits_only_its_safe_paths_and_leaves_rehearse_clean(repo
     head = _git(checkout, "rev-parse", "HEAD")
     code, out = _pty_run(_setup_cmd(checkout), "y", _make_env(tmp_path))
     assert code == 0, out
+    assert "setup offers to commit and push the .gitignore and env files it created; answer y" in out
     assert "Commit these changes and keep them local (no origin remote)? [y/N]" in out
+    assert "Not included (left as they are): aws/envs/" not in out
     assert _git(checkout, "rev-parse", "HEAD~1") == head
     committed = _committed(checkout)
     assert committed
@@ -604,6 +606,62 @@ def test_make_setup_n_leaves_head_and_index_untouched(tmp_path):
     assert _git(checkout, "rev-parse", "HEAD") == head
     assert not _git(checkout, "diff", "--cached", "--name-only")
     assert (checkout / "aws/envs/dev/auth.auto.tfvars").is_file()
+
+
+def test_make_setup_twice_second_run_is_a_no_op(tmp_path):
+    checkout = _fresh_setup_clone(tmp_path)
+    first, first_out = _pty_run(_setup_cmd(checkout), "y", _make_env(tmp_path))
+    assert first == 0, first_out
+    head = _git(checkout, "rev-parse", "HEAD")
+
+    second, second_out = _pty_run(_setup_cmd(checkout), None, _make_env(tmp_path))
+
+    assert second == 0, second_out
+    assert "Nothing to commit: .gitignore, envs/dev/ and envs/account/ match HEAD." in second_out
+    assert "already had uncommitted changes" not in second_out
+    assert PROMPT not in second_out
+    assert _git(checkout, "rev-parse", "HEAD") == head
+
+    # Command-line COMMIT=1 must preserve the same no-op behavior; ignored
+    # runtime files from the first setup are not candidates for this commit.
+    forced, forced_out = _pty_run(_setup_cmd(checkout, "COMMIT=1"), None, _make_env(tmp_path))
+    assert forced == 0, forced_out
+    assert "already had uncommitted changes" not in forced_out and PROMPT not in forced_out
+    assert _git(checkout, "rev-parse", "HEAD") == head
+
+
+def test_make_setup_prod_after_committed_dev_ignores_existing_runtime_files(tmp_path):
+    checkout = _fresh_setup_clone(tmp_path)
+    first, first_out = _pty_run(_setup_cmd(checkout), "y", _make_env(tmp_path))
+    assert first == 0, first_out
+    head = _git(checkout, "rev-parse", "HEAD")
+
+    code, out = _pty_run(["make", "--no-print-directory", "-C", str(checkout / "aws"),
+                          "setup", "ENV=prod"], "y", _make_env(tmp_path))
+
+    assert code == 0, out
+    assert "Commit these changes and keep them local (no origin remote)? [y/N]" in out
+    assert "already had uncommitted changes" not in out
+    assert "auth.auto.tfvars" not in out[out.index("=== Commit prod's changes"):]
+    assert _git(checkout, "rev-parse", "HEAD~1") == head
+
+
+def test_make_setup_repo_rerun_after_local_commit_then_manual_push(tmp_path):
+    checkout = _fresh_setup_clone(tmp_path)
+    first, first_out = _pty_run(_setup_cmd(checkout), "y", _make_env(tmp_path))
+    assert first == 0, first_out
+    head = _git(checkout, "rev-parse", "HEAD").strip()
+    bare = tmp_path / "customer.git"
+    _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(bare))
+
+    code, out = _pty_run(_setup_cmd(checkout, f"REPO={bare}"), None, _make_env(tmp_path))
+
+    assert code == 0, out
+    assert f"Git: added remote origin = {bare}" in out
+    assert "Nothing to commit: .gitignore, envs/dev/ and envs/account/ match HEAD." in out
+    assert "already had uncommitted changes" not in out
+    _git(checkout, "push", "-q", "-u", "origin", "main")
+    assert _git(bare, "rev-parse", "main").strip() == head
 
 
 def test_make_setup_refuses_preexisting_scoped_edits(tmp_path):
@@ -632,6 +690,22 @@ def test_make_setup_hook_staging_an_extra_file_is_rolled_back(tmp_path):
     assert not _git(checkout, "diff", "--cached", "--name-only")
 
 
+def test_setup_dirty_snapshot_failure_is_fail_closed(checkout, monkeypatch, capsys):
+    real = commit_envs._git
+
+    def fail_status(cwd, *args, **kwargs):
+        if args[:1] == ("status",):
+            return subprocess.CompletedProcess(args, 1, "", "cannot read index")
+        return real(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(commit_envs, "_git", fail_status)
+    cloud = _cloud(checkout)
+    rc = commit_envs.main(["dirty", "--cloud-dir", str(cloud), "--env", "dev",
+                           "--env-dir", str(cloud / "envs/dev"), "--step", "setup"])
+    assert rc == 1
+    assert "cannot snapshot pre-existing setup changes: cannot read index" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("mode", ["no-tty", "ci", "commit-0", "exported-commit"])
 def test_make_setup_ci_no_tty_and_opt_out_keep_git_unchanged(tmp_path, mode):
     checkout = _fresh_setup_clone(tmp_path)
@@ -644,6 +718,16 @@ def test_make_setup_ci_no_tty_and_opt_out_keep_git_unchanged(tmp_path, mode):
     assert PROMPT not in result.stdout and "=== Commit" not in result.stdout
     assert _git(checkout, "rev-parse", "HEAD") == head
     assert not _git(checkout, "diff", "--cached", "--name-only")
+
+
+def test_direct_internal_setup_target_never_enables_the_commit_offer(tmp_path):
+    checkout = _fresh_setup_clone(tmp_path)
+    head = _git(checkout, "rev-parse", "HEAD")
+    code, out = _pty_run(["make", "--no-print-directory", "-C", str(checkout / "aws"),
+                          "_setup", "ENV=dev"], None, _make_env(tmp_path))
+    assert code == 0, out
+    assert PROMPT not in out and "=== Commit" not in out and "setup offers to commit and push" not in out
+    assert _git(checkout, "rev-parse", "HEAD") == head
 
 
 def test_make_promote_to_on_a_terminal_commits_prod_after_y(repo, tmp_path):

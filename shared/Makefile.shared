@@ -469,16 +469,18 @@ setup: export GENIERAILS_SETUP_REPO = $(if $(filter command line,$(origin REPO))
 setup: ## Prepare the selected environment(s) and show next steps
 	@$(_SCHEDULED_GOVERNANCE_GUARD)
 	@$(_SETUP_REPO) --check
-	@preexisting="$$($(_COMMIT_ENVS) dirty --env "$(ENV)" --env-dir "$(ENV_DIR)" --step setup)"; \
+	@preexisting="$$($(_COMMIT_ENVS) dirty --env "$(ENV)" --env-dir "$(ENV_DIR)" --step setup)" || exit 1; \
 		GENIERAILS_SETUP_DIRTY="$$preexisting" $(MAKE) --no-print-directory _setup ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"
 
 _setup:
 	@$(MAKE) --no-print-directory _bootstrap ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"
 	@$(_SETUP_REPO)
+	@$(_CUSTOMER_GITIGNORE)
 	@echo "=== Setup ($(ENV)) ==="
 	@allow=0; [ "$$($(_RELEASE_GATE) env-role --env-dir "$(ENV_DIR)" --env "$(ENV)" 2>/dev/null)" = promoted ] && allow=1; \
 	GENIERAILS_ALLOW_ACCESS_TIER_PLACEHOLDERS=$$allow python3 "$(SHARED_ROOT)/genie_space_placeholder.py" --advice "$(ENV_DIR)/env.auto.tfvars"
 	@gov_only="$$($(_GOVERNANCE_ONLY) "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null)"; \
+	setup_offer=0; $(_COMMIT_ENVS) will-offer --env "$(ENV)" --env-dir "$(ENV_DIR)" --step setup && setup_offer=1; \
 	role="$$($(_RELEASE_GATE) env-role --env-dir "$(ENV_DIR)" --env "$(ENV)" 2>/dev/null)" || role=unknown; \
 	if python3 -c 'import sys,hcl2; c=hcl2.load(open(sys.argv[1])); raise SystemExit(0 if any(str(g).startswith("<") for g in c.get("access_tier_groups",[])) else 1)' "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null; then gov_only=0; fi; \
 	dest_det="$$($(_IS_DETERMINISTIC) "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null)"; det="$$dest_det"; mode_note=""; \
@@ -537,7 +539,8 @@ _setup:
 		if [ "$$det" = 1 ]; then \
 			src="$$(python3 -c 'import sys,hcl2; print(hcl2.load(open(sys.argv[1])).get("promote_from") or "dev")' "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null)"; \
 			[ -n "$$src" ] || src=dev; \
-			echo "  5. Commit and push .gitignore and envs/ to origin/main (promote-to offers it on a terminal: answer y); on that commit run:"; \
+			echo "  5. Commit and push .gitignore and envs/ to origin/main (promote-to offers it on a terminal: answer y;"; \
+			echo "     or git add .gitignore envs/$(ENV)/ envs/$(ACCOUNT_ENV)/ && git commit yourself); on that commit run:"; \
 			echo "     make rehearse ENV=$$src   (release-plan needs a passing rehearsal of this commit), then:"; \
 			echo "     make release-plan ENV=$(ENV)   (runs make check ENV=$(ENV) and promote-to CHECK=1, checks the commit was rehearsed; saves every plan in one manifest)"; \
 			echo "     Get that manifest approved, then: make release ENV=$(ENV)"; \
@@ -580,7 +583,7 @@ _setup:
 			fi; \
 			echo "     (No agent yet? See ../shared/examples/dev_to_prod/SAMPLE_ENV.md)"; step=$$((step+1)); \
 		fi; \
-		echo "     When this list ends, setup offers to commit and push the .gitignore and env files it created; answer y."; \
+		if [ "$$setup_offer" = 1 ]; then echo "     When this list ends, setup offers to commit and push the .gitignore and env files it created; answer y."; fi; \
 		echo "     make check, rehearse receipts and release-plan read only committed files. Commit and push again"; \
 		echo "     after each step below that changes envs/."; \
 		echo "  $$step. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on."; \
@@ -615,7 +618,6 @@ _setup:
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (the walkthrough's Dev section)"; \
 	fi
 	@echo ""
-	@$(_CUSTOMER_GITIGNORE)
 	@$(_COMMIT_ENVS) offer --env "$(ENV)" --env-dir "$(ENV_DIR)" --step setup --preexisting-dirty "$$GENIERAILS_SETUP_DIRTY"
 
 # A customer repo commits envs/; GenieRails' own .gitignore ignores it. In any
@@ -689,10 +691,10 @@ enable-classification: _guard-not-ci-apply _guarded-bootstrap _guard-workspace-t
 # turn the offer off. make can't tell a COMMIT inherited through MAKEFLAGS apart, so it counts
 # too (an accident guard, not a security boundary); a shell COMMIT never does.
 ifeq ($(MAKELEVEL),0)
-ifneq ($(and $(filter setup _setup generate promote-to,$(MAKECMDGOALS)),$(filter command line,$(origin COMMIT)),$(filter-out 0 1,$(value COMMIT))),)
+ifneq ($(and $(filter setup generate promote-to,$(MAKECMDGOALS)),$(filter command line,$(origin COMMIT)),$(filter-out 0 1,$(value COMMIT))),)
 $(error COMMIT=$(value COMMIT): use COMMIT=0 (never commit) or COMMIT=1 (commit without asking); leave it off to be asked)
 endif
-override GENIERAILS_COMMIT := $(if $(or $(filter 1,$(CHECK)),$(and $(filter environment,$(origin GENIERAILS_COMMIT)),$(filter 0,$(GENIERAILS_COMMIT)))),0,$(if $(filter setup _setup generate promote-to,$(MAKECMDGOALS)),$(if $(filter command line,$(origin COMMIT)),$(or $(value COMMIT),ask),ask),0))
+override GENIERAILS_COMMIT := $(if $(or $(filter 1,$(CHECK)),$(and $(filter environment,$(origin GENIERAILS_COMMIT)),$(filter 0,$(GENIERAILS_COMMIT)))),0,$(if $(filter setup generate promote-to,$(MAKECMDGOALS)),$(if $(filter command line,$(origin COMMIT)),$(or $(value COMMIT),ask),ask),0))
 else
 GENIERAILS_COMMIT ?= 0
 endif
