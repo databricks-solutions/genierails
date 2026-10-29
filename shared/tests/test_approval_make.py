@@ -30,10 +30,10 @@ from tests.test_release_gate_make import ROOT, Make, _account_planned, _planned,
 
 EXTERNAL = {"via": "external"}
 # What a recipe of the top-level make runs under, typed by hand: MAKELEVEL, and even this run's nonce.
-NESTED = {"MAKELEVEL": "1", approval.NONCE_ENV: NONCE}
+NESTED = {"MAKELEVEL": "1", approval.RUN_ENV: NONCE}
 CONSUMER = """include {root}/aws/Makefile
 _test-approve-then:
-\t@GENIERAILS_APPROVAL_NONCE="$$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n')"; export GENIERAILS_APPROVAL_NONCE; \\
+\t@GENIERAILS_APPROVAL_RUN="$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \\n')"; export GENIERAILS_APPROVAL_RUN; \\
 \tanswer="$$(mktemp)"; \\
 \tpython3 "$(SHARED_ROOT)/scripts/approval.py" approve --env-dir "$(ENV_DIR)" --env "$(ENV)" --manifest "$(TEST_MANIFEST)" --question "{question}" --answer-file "$$answer" || exit 1; \\
 \trecord="$$(sed 's/^genierails-approval:v1:approved://' "$$answer")"; rm -f "$$answer"; \\
@@ -125,12 +125,27 @@ def test_a_nested_make_forged_from_outside_the_run_refuses_a_record_even_with_it
         result = account_make("_apply-account-locked", "account", f"MANIFEST={manifest}",
                               environ_extra=NESTED | {"MAKEFLAGS": f"APPROVAL={record}"})
     assert result.returncode != 0, result.stdout + result.stderr
-    assert "wasn't written by this run's own prompt" in result.stderr
+    assert "was not written by this run's own prompt (its asker is not running above" in result.stderr
     assert "apply-account: the approval record doesn't approve this manifest (above); nothing was applied." \
         in result.stderr
     assert "sync-tags" not in account_make.names()
     assert not [c for c in account_make.calls() if c[:1] == ["runner"] and "apply-plan" in c]
     assert not rg.account_receipts(repo.cloud, "account") and _unlocked(_account_dir(repo))
+
+
+@pytest.mark.parametrize("how", ["makelevel", "makeflags"])
+def test_without_a_run_nonce_a_forged_nested_make_ignores_approval_and_records_external(account_make, repo,
+                                                                                          monkeypatch, how):
+    """MAKELEVEL=1 (or APPROVAL in MAKEFLAGS) by hand, no GENIERAILS_APPROVAL_RUN: APPROVAL= is ignored."""
+    manifest = _account_planned(account_make)
+    record = _record(_account_dir(repo), "account", manifest)
+    monkeypatch.delenv(approval.RUN_ENV)
+    extra = (f"APPROVAL={record}",) if how == "makelevel" else ()
+    environ = {"MAKELEVEL": "1"} | ({"MAKEFLAGS": f"APPROVAL={record}"} if how == "makeflags" else {})
+    result = account_make("_apply-account-locked", "account", f"MANIFEST={manifest}", *extra, environ_extra=environ)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Approval record" not in result.stdout
+    assert _account_receipt(repo)["approval"] == EXTERNAL
 
 
 @pytest.mark.parametrize("how", ["0644", "symlink", "hand-written"])
@@ -146,7 +161,7 @@ def test_a_nested_make_refuses_a_record_this_run_never_wrote(account_make, repo,
         link.symlink_to(record)
         record = link
     else:
-        record = _forge(record, nonce_sha256="0" * 64)
+        record = _forge(record, run_sha256="0" * 64)
     account_make.reset()
     result = account_make("_apply-account-locked", "account", f"MANIFEST={manifest}", f"APPROVAL={record}",
                           environ_extra=NESTED)
@@ -261,7 +276,7 @@ def test_a_nested_release_forged_from_outside_the_run_refuses_a_record_even_with
     record = _record(repo.prod, "prod", manifest)
     result = make("_release-manifest", "prod", f"MANIFEST={manifest}", f"APPROVAL={record}", environ_extra=NESTED)
     assert result.returncode != 0
-    assert "wasn't written by this run's own prompt" in result.stderr
+    assert "was not written by this run's own prompt (its asker is not running above" in result.stderr
     assert not [c for c in make.calls() if c[0] in ("staged", "runner")]
     assert not _phases(repo) and not rg.release_receipts(repo.cloud, "prod") and _unlocked(repo.prod)
 

@@ -47,7 +47,7 @@ def pty_make(make: Make, target: str, env: str, *extra: str, answer, environ_ext
 
     with mock.patch.object(subprocess, "run", run):
         make(target, env, *extra, **kwargs)
-    environ = {k: v for k, v in seen["env"].items() if k not in (approval.INTERACTIVE_ENV, approval.NONCE_ENV)}
+    environ = {k: v for k, v in seen["env"].items() if k not in (approval.INTERACTIVE_ENV, approval.RUN_ENV)}
     return pty_run(seen["args"], answer, environ | (environ_extra or {}), cwd=seen["cwd"],
                    before_answer=before_answer)
 
@@ -294,5 +294,5 @@ def test_it_accepts_only_the_exact_answers_and_fails_closed_on_anything_else():
     assert pairs == answers and answers <= approval.ANSWERS["interactive"] | approval.ANSWERS["approve"]
     assert block.count('\t\t*) echo "ERROR: ') == 2 and block.count("exit 1 ;;") >= 4  # any other answer
     # The record path comes only from approve's own answer; the nonce only from /dev/urandom, never a variable.
-    assert 'APPROVAL="$$record"' in block and "GENIERAILS_APPROVAL_NONCE=\"$$(od -An -N32 -tx1 /dev/urandom" in block
+    assert 'APPROVAL="$$record"' in block and "GENIERAILS_APPROVAL_RUN=\"$$(od -An -N16 -tx1 /dev/urandom" in block
     assert not re.search(r"\$\((APPROVE|YES|ASSUME_YES|AUTO_APPROVE|GENIERAILS_APPROVE)\)", block)

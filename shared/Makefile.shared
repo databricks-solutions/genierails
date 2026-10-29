@@ -1064,13 +1064,15 @@ RELEASE_BRANCH ?= main
 # _apply-account-locked and _release-manifest. It is audit, not a gate: it
 # approves nothing and skips no check. It counts only as a command-line
 # variable of a nested make (never from the environment or a top-level make;
-# apply-account and release clear it), is checked under the lock before
-# anything applies, and the receipt embeds it. The check accepts only a record
-# this run's own prompt wrote (approval.py: 0600, this uid, no symlink, the
-# asking flow's per-run nonce and recipe shell), so a nested make started from
-# outside that run (MAKELEVEL or MAKEFLAGS set by hand) refuses any record. Without it a receipt records
-# {"via": "external"} (approved outside GenieRails), as every receipt did before.
-override _APPROVAL = $(if $(and $(filter command line,$(origin APPROVAL)),$(filter-out 0,$(MAKELEVEL))),$(abspath $(strip $(APPROVAL))))
+# apply-account and release clear it) run by a flow that asked, i.e. with that
+# flow's per-run nonce GENIERAILS_APPROVAL_RUN in the environment (so a forged
+# MAKELEVEL or MAKEFLAGS alone is ignored, and a record of another run is
+# refused). It is checked under the lock before anything applies, and the
+# receipt embeds it. Without it a receipt records {"via": "external"}
+# (approved outside GenieRails), as every receipt did before. The check also
+# needs the record's asker (the top-level make's recipe that asked) still
+# running above it, so a nonce set by hand outside that run still refuses.
+override _APPROVAL = $(if $(and $(filter command line,$(origin APPROVAL)),$(filter-out 0,$(MAKELEVEL)),$(filter environment,$(origin GENIERAILS_APPROVAL_RUN))),$(abspath $(strip $(APPROVAL))))
 override _APPROVAL_CHECK = approval='$(subst ','\'',$(_APPROVAL))'; \
 	if [ -n "$$approval" ]; then \
 		ap_out="$$(python3 "$(SHARED_ROOT)/scripts/approval.py" check --env-dir "$(ENV_DIR)" --env "$(ENV)" --manifest "$$manifest" --approval "$$approval")"; ap_rc=$$?; \
@@ -1219,7 +1221,7 @@ _apply-account-locked: _guard-not-databricks-compute
 # _guard-account-plan-empty refuses a non-empty account plan); no flag or
 # variable approves. A macro, not a target: approval.py asks only in the
 # top-level make's own recipe. The subshell keeps its per-run approval nonce
-# (approval.py NONCE_ENV) out of the rest of rehearse. Only the y/N answers
+# (approval.py RUN_ENV) out of the rest of rehearse. Only the y/N answers
 # below are accepted, as exact (exit code, line) pairs.
 override _ACCOUNT_MANIFEST_OUT = $(if $(filter-out 0,$(MAKELEVEL)),$(GENIERAILS_ACCOUNT_MANIFEST_OUT))
 override _ACCOUNT_APPROVE_QUESTION = Approve and apply this account manifest?
@@ -1252,8 +1254,8 @@ override _ACCOUNT_APPROVE_APPLY = ( \
 		manifest="$$(cat "$$ap_tmp/manifest")"; \
 		if [ -z "$$manifest" ]; then echo "ERROR: _account-plan-locked named no account manifest; nothing was approved or applied." >&2; exit 1; fi; \
 	fi; \
-	GENIERAILS_APPROVAL_NONCE="$$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"; export GENIERAILS_APPROVAL_NONCE; \
-	case "$$GENIERAILS_APPROVAL_NONCE" in ""|*[!0-9a-f]*) echo "ERROR: couldn't make a per-run approval nonce; nothing was approved." >&2; exit 1 ;; esac; \
+	GENIERAILS_APPROVAL_RUN="$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; export GENIERAILS_APPROVAL_RUN; \
+	case "$$GENIERAILS_APPROVAL_RUN" in ""|*[!0-9a-f]*) echo "ERROR: couldn't make a per-run approval nonce; nothing was approved." >&2; exit 1 ;; esac; \
 	: > "$$ap_tmp/approve"; \
 	python3 "$(SHARED_ROOT)/scripts/approval.py" approve --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --manifest "$$manifest" --question "$(_ACCOUNT_APPROVE_QUESTION)" --answer-file "$$ap_tmp/approve"; ap_rc=$$?; \
 	ap_out="$$(cat "$$ap_tmp/approve")"; record=; \

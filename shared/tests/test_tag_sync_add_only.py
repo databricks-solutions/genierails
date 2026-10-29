@@ -975,7 +975,7 @@ def _account_flow_on_a_terminal(repo, answer):
 
     flow = repo.tmp / "account-flow.mk"
     flow.write_text(ACCOUNT_FLOW.format(root=ROOT))
-    env = {k: v for k, v in repo.env.items() if k not in (approval.INTERACTIVE_ENV, approval.NONCE_ENV)}
+    env = {k: v for k, v in repo.env.items() if k not in (approval.INTERACTIVE_ENV, approval.RUN_ENV)}
     return pty_run(["make", "--no-print-directory", "-f", str(flow), "_test-account-flow", "ENV=dev",
                     f"CLOUD_ROOT={repo.cloud}", f"SHARED_ROOT={SHARED}", f"ROOT_RUNNER={repo.runner}",
                     "ALLOW_TAG_VALUE_REMOVAL=gr_treatment:retired_by_hand", "WAREHOUSE_ID=wh"], answer, env, cwd=ROOT)
