@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -36,7 +37,19 @@ class Tty:
         return self.tty
 
 
-ON_A_TERMINAL = {"MAKELEVEL": "1"}
+NONCE = "ab" * 32
+# The asking flow's process chain, as approval._chain sees it in-process: its recipe
+# shell directly under the top-level make (tests/test_approval_make.py and
+# tests/test_rehearse_account_approval.py use real ones).
+THIS_RUN = [(4242, "sh"), (4241, "make"), (4240, "zsh")]
+ON_A_TERMINAL = {"MAKELEVEL": "1", approval.NONCE_ENV: NONCE}
+
+
+@pytest.fixture(autouse=True)
+def this_run(monkeypatch):
+    """In-process record and check run as this run's asking flow: its nonce, its process chain."""
+    monkeypatch.setenv(approval.NONCE_ENV, NONCE)
+    monkeypatch.setattr(approval, "_chain", lambda pid: list(THIS_RUN))
 
 
 def _terminal(**environ):
@@ -45,8 +58,16 @@ def _terminal(**environ):
 
 def _environ(**extra) -> dict:
     env = {k: v for k, v in without_ci(os.environ).items()
-           if k not in ("MAKELEVEL", "MAKEFLAGS", "MFLAGS", approval.INTERACTIVE_ENV)}
+           if k not in ("MAKELEVEL", "MAKEFLAGS", "MFLAGS", approval.INTERACTIVE_ENV, approval.NONCE_ENV)}
     return env | extra
+
+
+def under_make(tmp_path: Path, *commands: list[str]) -> list[str]:
+    """``commands`` (each an argv), in order, as one recipe of a top-level make: how an asking flow runs them."""
+    makefile = tmp_path / "consumer.mk"
+    makefile.write_text("run:\n\t@$(CMD); exit $$?\n")
+    recipe = " && ".join(shlex.join(command) for command in commands)
+    return ["make", "--no-print-directory", "-s", "-f", str(makefile), "run", f"CMD={recipe}"]
 
 
 def _approvals(env_dir: Path, env: str) -> list[Path]:
@@ -170,7 +191,8 @@ def test_record_is_written_once_0600_in_a_0700_dir_and_says_who_approved(repo, m
         "kind": "approval", "version": 1, "env": "prod", "manifest_kind": "release-manifest",
         "manifest_id": m["id"], "manifest_path": str(manifest.resolve()), "manifest_sha256": rg.sha256_file(manifest),
         "commit": repo.head(), "via": "terminal", "user": "", "git_user": {}, "host": data["host"], "tty": "",
-        "approved_at": "", "question": f"{QUESTION} [y/N] ", "round": 2}
+        "approved_at": "", "question": f"{QUESTION} [y/N] ", "round": 2,
+        "nonce_sha256": approval._nonce_sha256(ON_A_TERMINAL), "asker": {"pid": 4242, "make_pid": 4241}}
     assert data["user"] and data["approved_at"] >= m["created_at"]
     assert set(data["git_user"]) == {"name", "email"}
 
@@ -252,10 +274,12 @@ def test_check_returns_the_record_to_embed(repo, manifest):
     assert approval.embed(repo.prod, "prod", manifest, None) == {"via": "external"}
 
 
-def _forge(path: Path, **changes) -> Path:
+def _forge(path: Path, mode: int = 0o600, **changes) -> Path:
+    """A copy of the record with ``changes``, written by hand (0600 unless ``mode``) beside it."""
     data = json.loads(path.read_text()) | changes
     forged = path.with_name(path.stem + "-forged.json")
     forged.write_text(json.dumps(data))
+    forged.chmod(mode)
     return forged
 
 
@@ -315,6 +339,163 @@ def test_check_refuses_a_record_of_another_env(repo, manifest, account_manifest)
         approval.check(repo.prod, "prod", manifest, record)
 
 
+# -- check: only a record this run's own prompt wrote counts ----------------------------
+
+def test_check_refuses_a_hand_written_record_without_this_runs_nonce(repo, manifest):
+    genuine = json.loads(_record(repo, manifest).read_text())
+    for nonce in ({"nonce_sha256": None}, {"nonce_sha256": "0" * 64}):
+        with pytest.raises(approval.Refused, match="wasn't written by this run's own prompt .its nonce is not"):
+            approval.check(repo.prod, "prod", manifest, _forge(_record(repo, manifest), **nonce))
+    hand = approval.approvals_dir(repo.prod, "prod") / "by-hand.json"
+    hand.write_text(json.dumps({k: v for k, v in genuine.items() if k not in ("nonce_sha256", "asker")}))
+    hand.chmod(0o600)
+    with pytest.raises(approval.Refused, match="its nonce is not this run's"):
+        approval.check(repo.prod, "prod", manifest, hand)
+
+
+def test_check_refuses_a_record_from_another_run(repo, manifest, monkeypatch):
+    record = _record(repo, manifest)
+    monkeypatch.setenv(approval.NONCE_ENV, "cd" * 32)  # the next run's own nonce
+    with pytest.raises(approval.Refused, match="its nonce is not this run's"):
+        approval.check(repo.prod, "prod", manifest, record)
+    monkeypatch.delenv(approval.NONCE_ENV)  # a run that never asked
+    with pytest.raises(approval.Refused, match="no per-run GENIERAILS_APPROVAL_NONCE"):
+        approval.check(repo.prod, "prod", manifest, record)
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o604, 0o400, 0o700])
+def test_check_refuses_a_record_that_is_not_0600(repo, manifest, mode):
+    forged = _forge(_record(repo, manifest), mode=mode)
+    with pytest.raises(approval.Refused, match=f"is mode {mode:04o}, not 0600"):
+        approval.check(repo.prod, "prod", manifest, forged)
+
+
+def test_check_refuses_a_record_owned_by_another_user(repo, manifest, monkeypatch):
+    record = _record(repo, manifest)
+    info = os.lstat(record)
+    real_fstat = os.fstat
+    monkeypatch.setattr(approval.os, "fstat", lambda fd: os.stat_result(
+        (*real_fstat(fd)[:4], info.st_uid + 1, *real_fstat(fd)[5:])))
+    with pytest.raises(approval.Refused, match=f"is owned by uid {info.st_uid + 1}, not this user"):
+        approval.check(repo.prod, "prod", manifest, record)
+
+
+def test_check_refuses_an_approvals_dir_owned_by_another_user_or_a_symlink(repo, manifest, monkeypatch, tmp_path):
+    record = _record(repo, manifest)
+    monkeypatch.setattr(approval.os, "getuid", lambda: os.lstat(record).st_uid + 1)
+    with pytest.raises(approval.Refused, match="is a symlink or not owned by this user"):
+        approval.check(repo.prod, "prod", manifest, record)
+    monkeypatch.undo()
+    monkeypatch.setenv(approval.NONCE_ENV, NONCE)
+    monkeypatch.setattr(approval, "_chain", lambda pid: list(THIS_RUN))
+    directory = record.parent
+    moved = tmp_path / "moved-approvals"
+    directory.rename(moved)
+    directory.symlink_to(moved)
+    with pytest.raises(approval.Refused, match="is a symlink or not owned by this user|is not in"):
+        approval.check(repo.prod, "prod", manifest, directory / record.name)
+
+
+def test_check_refuses_a_symlink_to_a_genuine_record(repo, manifest):
+    record = _record(repo, manifest)
+    link = record.with_name("link.json")
+    link.symlink_to(record)
+    with pytest.raises(approval.Refused, match="not a regular file"):
+        approval.check(repo.prod, "prod", manifest, link)
+
+
+@pytest.mark.parametrize("chain,why", [
+    ([(9, "sh"), (8, "make"), (7, "zsh")], "its asking shell is not running above this one"),
+    ([(5, "python3"), (4242, "sh"), (4241, "make")], "not this run's top-level make recipe"),  # e.g. a test runner
+    ([(4242, "sh"), (4241, "zsh"), (1, "launchd")], "not this run's top-level make recipe"),  # not under a make
+    ([(4242, "sh"), (4000, "make"), (1, "launchd")], "not this run's top-level make recipe"),  # another make
+    ([(4242, "python3"), (4241, "make"), (1, "launchd")], "not this run's top-level make recipe"),
+    ([(4242, "sh")], "its asking shell is not running above this one"),
+    ([], "its asking shell is not running above this one"),
+])
+def test_check_refuses_a_record_whose_asking_shell_is_not_this_runs_make_recipe(repo, manifest, monkeypatch,
+                                                                              chain, why):
+    record = _record(repo, manifest)
+    monkeypatch.setattr(approval, "_chain", lambda pid: list(chain))
+    with pytest.raises(approval.Refused, match=re.escape(why)):
+        approval.check(repo.prod, "prod", manifest, record)
+
+
+@pytest.mark.parametrize("asker", [None, {}, {"pid": 4242}, {"pid": "4242", "make_pid": 4241}, [4242, 4241]])
+def test_check_refuses_a_record_with_a_malformed_asker(repo, manifest, asker):
+    with pytest.raises(approval.Refused, match="wasn't written by this run's own prompt"):
+        approval.check(repo.prod, "prod", manifest, _forge(_record(repo, manifest), asker=asker))
+
+
+def test_the_nested_makes_and_shells_between_the_check_and_the_asker_are_fine(repo, manifest, monkeypatch):
+    record = _record(repo, manifest)
+    nested = [(30, "python3"), (29, "bash"), (28, "sh"), (27, "gmake"), (26, "dash"), (4242, "sh"),
+              (4241, "make")]
+    monkeypatch.setattr(approval, "_chain", lambda pid: nested[1:])  # the check's parent and up
+    assert approval.check(repo.prod, "prod", manifest, record)["via"] == "terminal"
+
+
+def test_record_refuses_without_a_nonce_or_an_asking_make_recipe(repo, manifest, monkeypatch):
+    with pytest.raises(approval.Refused, match="no per-run GENIERAILS_APPROVAL_NONCE"):
+        approval.record(repo.prod, "prod", manifest, QUESTION, environ={"MAKELEVEL": "1"}, stdin=Tty(), stdout=Tty())
+    with pytest.raises(approval.Refused, match="no per-run GENIERAILS_APPROVAL_NONCE"):
+        approval.record(repo.prod, "prod", manifest, QUESTION, environ={"MAKELEVEL": "1", approval.NONCE_ENV: "ab"},
+                        stdin=Tty(), stdout=Tty())
+    for chain in ([(10, "python3"), (9, "make")], [(10, "sh"), (9, "zsh"), (1, "launchd")], []):
+        monkeypatch.setattr(approval, "_chain", lambda pid, c=chain: list(c))
+        with pytest.raises(approval.Refused, match="didn't run in a make recipe"):
+            _record(repo, manifest)
+    assert not _approvals(repo.prod, "prod")
+
+
+def test_the_asker_is_the_first_shell_directly_under_a_make():
+    assert approval._asker([(12, "sh"), (11, "bash"), (10, "make"), (9, "zsh")]) == {"pid": 11, "make_pid": 10}
+    assert approval._asker([(12, "sh"), (10, "gnumake")]) == {"pid": 12, "make_pid": 10}
+
+
+def test_the_real_process_chain_names_this_process_and_its_parents(monkeypatch):
+    monkeypatch.undo()
+    chain = approval._chain(os.getpid())
+    assert chain[0][0] == os.getpid() and chain[0][1].startswith("python")
+    assert len(chain) >= 2 and all("/" not in name for _, name in chain)
+
+
+# -- tag-value removals: the same y/N, louder ---------------------------------------------
+
+def test_an_account_manifest_that_removes_values_names_each_one_above_a_louder_question():
+    manifest = {"kind": "account-manifest", "tag_value_removal": {"removed": ["gr_treatment:old", "pii:ssn_v1"]}}
+    lines, question = approval.removal_warning(manifest, QUESTION)
+    assert lines[1] == ("!! WARNING: approving this account manifest REMOVES 2 tag value(s) from every workspace "
+                        "on the metastore:")
+    assert lines[2:4] == ["!!   gr_treatment:old", "!!   pii:ssn_v1"]
+    assert question == "Approve and apply this account manifest, INCLUDING REMOVING THE 2 TAG VALUE(S) ABOVE?"
+    assert approval.prompt(question).endswith("ABOVE? [y/N] ")
+
+
+@pytest.mark.parametrize("manifest", [
+    {"kind": "account-manifest", "tag_value_removal": {"removed": []}},
+    {"kind": "account-manifest"},
+    {"kind": "release-manifest", "tag_value_removal": {"removed": ["x:y"]}},
+])
+def test_no_removals_no_warning(manifest):
+    assert approval.removal_warning(manifest, QUESTION) == ([], QUESTION)
+
+
+def test_approve_shows_the_removal_warning_right_above_the_prompt_and_records_the_louder_question(
+        repo, account_manifest, tmp_path):
+    env_dir = repo.cloud / "envs" / "account"
+    args = ["approve", "--env-dir", str(env_dir), "--env", "account", "--manifest", str(account_manifest),
+            "--question", QUESTION]
+    rc, line, shown = _pty_under_make(args, "y", _environ() | repo.env | {approval.NONCE_ENV: NONCE}, tmp_path)
+    assert rc == 0, shown
+    warning = shown.index("!! WARNING: approving this account manifest REMOVES 1 tag value(s)")
+    assert warning < shown.index("!!   gr_treatment:old") < shown.index(
+        "Approve and apply this account manifest, INCLUDING REMOVING THE 1 TAG VALUE(S) ABOVE? [y/N] ")
+    [record] = _approvals(env_dir, "account")
+    assert json.loads(record.read_text())["question"] == (
+        "Approve and apply this account manifest, INCLUDING REMOVING THE 1 TAG VALUE(S) ABOVE? [y/N] ")
+
+
 # -- the CLI: one exact versioned answer ----------------------------------------------
 
 def _cli(*args, env=None, stdin=subprocess.DEVNULL):
@@ -351,13 +532,34 @@ def test_cli_off_a_terminal(repo, manifest):
     assert (rc, out) == (1, approval.REFUSED + "\n") and not _approvals(repo.prod, "prod")
 
 
-def test_cli_check(repo, manifest):
-    record = _record(repo, manifest)
+def test_cli_check(repo, manifest, tmp_path):
+    record = _record(repo, manifest)  # this test's in-process run, so no other process's
     args = ("check", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest))
-    env = _environ() | repo.env
-    assert _cli(*args, "--approval", str(record), env=env) == (0, approval.VALID + "\n", "")
+    env = _environ() | repo.env | {approval.NONCE_ENV: NONCE}
     rc, out, err = _cli(*args, "--approval", str(_forge(record, host="elsewhere")), env=env)
     assert (rc, out) == (1, approval.INVALID + "\n") and "host differ" in err
+    rc, out, err = _cli(*args, "--approval", str(record), env=env)
+    assert (rc, out) == (1, approval.INVALID + "\n") and "wasn't written by this run's own prompt" in err
+
+
+def test_cli_check_is_valid_only_inside_the_run_that_asked(repo, manifest, tmp_path):
+    approve = [sys.executable, str(SCRIPT), "approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest",
+               str(manifest), "--question", QUESTION, "--answer-file", str(tmp_path / "answer")]
+    check = [sys.executable, str(SCRIPT), "check", "--env-dir", str(repo.prod), "--env", "prod", "--manifest",
+             str(manifest), "--approval"]
+    (tmp_path / "answer").touch()
+    script = tmp_path / "approve-then-check.sh"
+    script.write_text(f'{shlex.join(approve)} || exit 1\n'
+                      f'record="$(sed "s/^{approval.APPROVED}://" {tmp_path / "answer"})"\n'
+                      f'{shlex.join(check)} "$record"\n')
+    env = _environ() | repo.env | {approval.NONCE_ENV: NONCE}
+    rc, shown = pty_run(under_make(tmp_path, ["sh", str(script)]), "y", env)
+    assert rc == 0 and shown.rstrip().endswith(approval.VALID), shown
+    [record] = _approvals(repo.prod, "prod")
+    # The same record, checked by another make run (same nonce even): not this run's prompt.
+    rc, shown = pty_run(under_make(tmp_path, [*check, str(record)]), None, env)
+    assert rc != 0 and "its asking shell is not running above this one" in shown, shown
+    assert shown.rstrip().splitlines()[-2] == approval.INVALID
 
 
 def test_cli_an_internal_error_answers_nothing(repo, tmp_path):
@@ -388,28 +590,54 @@ def test_ask_on_a_terminal(tmp_path, answer, expected):
     assert f"{QUESTION} [y/N] " in shown
 
 
+def _pty_under_make(args, answer, env, tmp_path):
+    answer_file = tmp_path / "answer"
+    answer_file.unlink(missing_ok=True)
+    answer_file.touch()
+    rc, shown = pty_run(under_make(tmp_path, [sys.executable, str(SCRIPT), *args, "--answer-file",
+                                              str(answer_file)]), answer, env)
+    return rc, answer_file.read_text(), shown
+
+
 def test_ctrl_c_at_the_terminal_exits_130_answers_nothing_and_writes_no_record(repo, manifest, tmp_path):
     args = ["approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest),
             "--question", QUESTION]
-    rc, line, shown = _pty(args, CTRL_C, _environ(MAKELEVEL="1") | repo.env, tmp_path)
-    assert (rc, line) == (130, ""), shown
+    rc, line, shown = _pty_under_make(args, CTRL_C, _environ() | repo.env | {approval.NONCE_ENV: NONCE}, tmp_path)
+    assert rc != 0 and line == "", shown
     assert not _approvals(repo.prod, "prod")
 
 
-def test_approve_on_a_terminal_writes_the_record_only_on_y(repo, manifest, tmp_path):
+def test_approve_on_a_terminal_writes_the_record_only_on_y(repo, manifest, tmp_path, monkeypatch):
     args = ["approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest),
             "--question", QUESTION, "--round", "3"]
-    env = _environ(MAKELEVEL="1") | repo.env
-    for answer in ("n", CTRL_D, "Y es"):
-        rc, line, shown = _pty(args, answer, env, tmp_path)
-        assert (rc, line) == (1, approval.NO + "\n"), shown
+    env = _environ() | repo.env | {approval.NONCE_ENV: NONCE}
+    for answer in ("n", "", CTRL_D, "Y es"):
+        rc, line, shown = _pty_under_make(args, answer, env, tmp_path)
+        assert (rc, line) == (2, approval.NO + "\n"), shown  # make's own exit code for a failing recipe
     assert not _approvals(repo.prod, "prod")
-    rc, line, shown = _pty(args, "y", env, tmp_path)
+    rc, line, shown = _pty_under_make(args, "y", env, tmp_path)
     [record] = _approvals(repo.prod, "prod")
     assert (rc, line) == (0, f"{approval.APPROVED}:{record}\n"), shown
     data = json.loads(record.read_text())
     assert data["via"] == "terminal" and data["round"] == 3 and data["tty"].startswith("/dev/")
+    assert data["nonce_sha256"] == approval._nonce_sha256(env)
+    # The recipe shell that asked, directly under the top-level make.
+    asker = data["asker"]
+    assert set(asker) == {"pid", "make_pid"} and asker["pid"] != asker["make_pid"]
+    monkeypatch.setattr(approval, "_chain", lambda pid: [(asker["pid"], "sh"), (asker["make_pid"], "make")])
     assert approval.check(repo.prod, "prod", manifest, record)["manifest_sha256"] == rg.sha256_file(manifest)
+
+
+def test_approve_refuses_before_asking_without_a_nonce_or_outside_a_make_recipe(repo, manifest, tmp_path):
+    args = ["approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest),
+            "--question", QUESTION]
+    rc, line, shown = _pty_under_make(args, "y", _environ() | repo.env, tmp_path)  # no nonce
+    assert line == approval.REFUSED + "\n" and "no per-run GENIERAILS_APPROVAL_NONCE" in shown, shown
+    assert "[y/N]" not in shown
+    # MAKELEVEL=1 typed by hand, not under a make: no asking recipe shell.
+    rc, line, shown = _pty(args, "y", _environ(MAKELEVEL="1") | repo.env | {approval.NONCE_ENV: NONCE}, tmp_path)
+    assert (rc, line) == (1, approval.REFUSED + "\n") and "didn't run in a make recipe" in shown, shown
+    assert "[y/N]" not in shown and not _approvals(repo.prod, "prod")
 
 
 @pytest.mark.parametrize("extra", [{"CI": "true"}, {"GENIERAILS_ALLOW_CI_APPLY": "1"},
@@ -455,4 +683,5 @@ def test_the_cli_has_no_command_that_records_without_asking():
 def test_approval_reads_no_variable_that_could_switch_it_on():
     text = SCRIPT.read_text()
     read = set(re.findall(r"environ\.get\(\s*\"?([A-Z_]+)\"?", text)) | set(re.findall(r"environ\[\"([A-Z_]+)\"\]", text))
-    assert read <= {"MAKELEVEL", "INTERACTIVE_ENV"}, read
+    # NONCE_ENV only binds a record to the run that asked; it never makes anything interactive.
+    assert read <= {"MAKELEVEL", "INTERACTIVE_ENV", "NONCE_ENV"}, read

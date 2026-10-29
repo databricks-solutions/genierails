@@ -35,6 +35,27 @@ a manifest offered again after an aborted apply get a second record.
 host, approved after the manifest was written); a receipt embeds what it
 returns.
 
+A record counts only for the run whose prompt wrote it. The flow that asks
+(the consumer: rehearse's account sub-flow) exports a fresh random
+``GENIERAILS_APPROVAL_NONCE`` (NONCE_ENV) to its own subprocesses only, never
+on a command line; ``approve`` refuses without one and records its sha256 and
+the asking recipe shell (the shell directly under the top-level make, and that
+make's pid). ``check`` then requires, besides the manifest match, that:
+
+- the record is a regular file (not a symlink), owned by this uid, mode 0600,
+  in an approvals dir that is a real directory owned by this uid;
+- its nonce sha256 is that of this process's NONCE_ENV;
+- its asking shell is an ancestor of this process, still directly under the
+  same make, with only shells and makes between them.
+
+So a hand-written, copied (0644), foreign-owned or symlinked record, one from
+another or an earlier run, and a nested make started from outside the
+top-level make (``MAKELEVEL=1 make _apply-account-locked APPROVAL=...`` typed
+or scripted: no asking shell under a make above it) are all refused: the apply
+stops before anything changes, and no receipt ever embeds such a record.
+Someone with this uid who writes their own Makefile to replay all of it forges
+only the audit field, as above.
+
 Commands. Each answers with exactly one versioned line (ANSWERS) and the exit
 code that goes with it; callers accept only an exact (exit code, line) pair, as
 for scripts/ci_guard.py. The line goes to stdout, or with ``--answer-file F``
@@ -45,7 +66,8 @@ read the answer while stdin and stdout stay the terminal. ``approve`` answers
   ask --question Q                                      YES (0), NO (1) or REFUSED (1: not interactive)
   approve --env-dir E --env N --manifest M --question Q [--round K]
                                                         asks, and on y writes the record: APPROVED:<path> (0),
-                                                        NO (1) or REFUSED (1)
+                                                        NO (1) or REFUSED (1: not interactive, or no NONCE_ENV
+                                                        or asking recipe shell, so no record could count)
   check --env-dir E --env N --manifest M --approval A   VALID (0) or INVALID (1, the reason on stderr)
 Ctrl-C at a prompt exits 130 with no answer. An internal error prints no answer and exits 3.
 There is deliberately no command that writes a record without asking.
@@ -55,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import socket
@@ -76,6 +99,10 @@ EXTERNAL = {"via": "external"}
 MANIFEST_KINDS = ("account-manifest", "release-manifest")
 APPROVALS_DIR = "approvals"
 INTERACTIVE_ENV = "GENIERAILS_INTERACTIVE"
+NONCE_ENV = "GENIERAILS_APPROVAL_NONCE"  # set by the asking flow for its own run (module docstring)
+NONCE_MIN_LENGTH = 32
+SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
+MAKES = frozenset({"make", "gmake", "gnumake"})
 SUFFIX = "[y/N]"
 YES_ANSWERS = ("y", "yes")
 ERROR = 3
@@ -133,6 +160,25 @@ def prompt(question: str) -> str:
     return f"{question} " if question.endswith(SUFFIX) else f"{question} {SUFFIX} "
 
 
+def removal_warning(manifest: Mapping, question: str) -> tuple[list[str], str]:
+    """For an account manifest that removes tag values: the warning naming each one, and the louder question.
+
+    Owner decision: the same y/N (no typed confirmation), but shown right
+    above the prompt, value by value. Anything else: no warning, the question as is.
+    """
+    removal = manifest.get("tag_value_removal") if manifest.get("kind") == "account-manifest" else None
+    removed = [str(value) for value in ((removal or {}).get("removed") or [])]
+    if not removed:
+        return [], question
+    lines = ["", f"!! WARNING: approving this account manifest REMOVES {len(removed)} tag value(s) from every "
+             "workspace on the metastore:"]
+    lines += [f"!!   {value}" for value in removed]
+    lines += ["!! Columns or policies still using a removed value lose it. Answer y only if you mean to remove "
+              "exactly these.", ""]
+    base = question.strip().removesuffix(SUFFIX).strip().removesuffix("?")
+    return lines, f"{base}, INCLUDING REMOVING THE {len(removed)} TAG VALUE(S) ABOVE?"
+
+
 def is_yes(answer: str) -> bool:
     return answer.strip().lower() in YES_ANSWERS
 
@@ -153,6 +199,63 @@ def ask(question: str, *, environ: Mapping[str, str] | None = None, stdin: IO | 
     except KeyboardInterrupt:
         print("\nInterrupted: nothing was approved.", file=sys.stderr)
         raise SystemExit(INTERRUPTED) from None
+
+
+def _nonce_sha256(environ: Mapping[str, str]) -> str:
+    """sha256 of this run's NONCE_ENV; refuses when the asking flow set none (or a short one)."""
+    nonce = environ.get(NONCE_ENV) or ""
+    if len(nonce) < NONCE_MIN_LENGTH:
+        raise Refused(f"no per-run {NONCE_ENV} from the flow that asks (an approval record counts only for the "
+                      "run that asked)")
+    return hashlib.sha256(nonce.encode()).hexdigest()
+
+
+def _process(pid: int) -> tuple[int, str] | None:
+    """(parent pid, command name) of ``pid``, or None when ps can't say."""
+    try:
+        out = subprocess.run(["ps", "-o", "ppid=", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True,
+                             timeout=30).stdout.split(None, 1)
+        return int(out[0]), os.path.basename(out[1].strip()).lstrip("-")
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+
+
+def _chain(pid: int) -> list[tuple[int, str]]:
+    """``pid`` and its ancestors, nearest first, as (pid, command name)."""
+    chain: list[tuple[int, str]] = []
+    while pid > 1 and len(chain) < 64:
+        info = _process(pid)
+        if info is None:
+            break
+        chain.append((pid, info[1]))
+        pid = info[0]
+    return chain
+
+
+def _asker(chain: list[tuple[int, str]]) -> dict:
+    """The recipe shell that asked: up through shells only, the first one directly under a make."""
+    for index, (pid, name) in enumerate(chain[:-1]):
+        if name not in SHELLS:
+            break
+        if chain[index + 1][1] in MAKES:
+            return {"pid": pid, "make_pid": chain[index + 1][0]}
+    raise Refused("the prompt didn't run in a make recipe (no shell directly under a make above it); "
+                  "nothing was approved")
+
+
+def _asked_in_this_run(asker) -> None:
+    """Refuse unless the record's asking shell is this process's ancestor, under the same make (docstring)."""
+    chain = _chain(os.getppid())
+    pids = [pid for pid, _ in chain]
+    pid = asker.get("pid") if isinstance(asker, dict) else None
+    if pid not in pids[:-1]:
+        raise Refused("its asking shell is not running above this one (written by another run, or by hand)")
+    index = pids.index(pid)
+    if (chain[index][1] not in SHELLS or chain[index + 1][0] != asker.get("make_pid")
+            or chain[index + 1][1] not in MAKES
+            or any(name not in SHELLS | MAKES for _, name in chain[:index])):
+        raise Refused("its asking shell is not this run's top-level make recipe (a nested make started from "
+                      "outside it)")
 
 
 def _load_manifest(env_dir: Path, env: str, manifest_path: Path) -> dict:
@@ -222,6 +325,8 @@ def record(env_dir: Path, env: str, manifest_path: Path, question: str, *, round
 
     if not interactive(environ, stdin, stdout):
         raise Refused(NOT_A_TERMINAL)
+    nonce_sha256 = _nonce_sha256(os.environ if environ is None else environ)
+    asker = _asker(_chain(os.getppid()))
     env_dir, manifest_path = Path(env_dir), Path(manifest_path).resolve()
     manifest = _load_manifest(env_dir, env, manifest_path)
     approved_at = rg._now()
@@ -231,6 +336,7 @@ def record(env_dir: Path, env: str, manifest_path: Path, question: str, *, round
         "manifest_sha256": rg.sha256_file(manifest_path), "commit": manifest["commit"],
         "via": VIA_TERMINAL, "user": _user(), "git_user": _git_user(env_dir), "host": socket.gethostname(),
         "tty": _tty(), "approved_at": approved_at, "question": prompt(question), "round": round_no,
+        "nonce_sha256": nonce_sha256, "asker": asker,
     }
     directory = _private_dir(approvals_dir(env_dir, env))
     stamp = approved_at.replace(":", "").replace(".", "")
@@ -252,7 +358,8 @@ def check(env_dir: Path, env: str, manifest_path: Path, approval_path: Path) -> 
     Refuses unless it is a regular file in this env's approvals dir, of this
     kind and version, via the terminal, for this env, naming this manifest's
     kind, id, sha256 and commit, written on this host, at or after the
-    manifest was written.
+    manifest was written, and written by this run's own prompt (module
+    docstring: 0600, this uid, not a symlink, this run's nonce and asking shell).
     """
     from scripts import release_gate as rg
 
@@ -268,7 +375,10 @@ def check(env_dir: Path, env: str, manifest_path: Path, approval_path: Path) -> 
     directory = approvals_dir(env_dir, env)
     if os.path.realpath(approval_path.parent) != os.path.realpath(directory):
         raise Refused(f"approval record {approval_path} is not in {directory}")
-    data = rg._read_json(approval_path)
+    dir_info = os.lstat(directory)
+    if stat.S_ISLNK(dir_info.st_mode) or dir_info.st_uid != os.getuid():
+        raise Refused(f"approvals dir {directory} is a symlink or not owned by this user")
+    data = _read_private(approval_path)
     if data is None or data.get("kind") != KIND or data.get("version") != VERSION:
         raise Refused(f"{approval_path} is not a version {VERSION} approval record")
     manifest = _load_manifest(env_dir, env, manifest_path)
@@ -281,7 +391,36 @@ def check(env_dir: Path, env: str, manifest_path: Path, approval_path: Path) -> 
                       f"({', '.join(wrong)} differ)")
     if not isinstance(data.get("approved_at"), str) or data["approved_at"] < str(manifest.get("created_at") or ""):
         raise Refused(f"approval record {approval_path} predates the manifest {manifest_path}")
+    try:
+        if data.get("nonce_sha256") != _nonce_sha256(os.environ):
+            raise Refused("its nonce is not this run's")
+        _asked_in_this_run(data.get("asker"))
+    except Refused as exc:
+        raise Refused(f"approval record {approval_path} wasn't written by this run's own prompt ({exc})") from exc
     return dict(data) | {"record": str(approval_path), "record_sha256": rg.sha256_file(approval_path)}
+
+
+def _read_private(path: Path) -> dict | None:
+    """The JSON of a record this user wrote privately: a 0600 regular file owned by this uid, read without
+    following a symlink (the file read is the one checked)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise Refused(f"approval record {path} can't be read ({exc.strerror})") from exc
+    with os.fdopen(fd) as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise Refused(f"approval record {path} is not a regular file (a symlink or something else)")
+        if info.st_uid != os.getuid():
+            raise Refused(f"approval record {path} is owned by uid {info.st_uid}, not this user")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise Refused(f"approval record {path} is mode {stat.S_IMODE(info.st_mode):04o}, not 0600 (a record "
+                          "counts only as approval.py wrote it)")
+        try:
+            data = json.loads(handle.read())
+        except (ValueError, UnicodeDecodeError):
+            return None
+    return data if isinstance(data, dict) else None
 
 
 def embed(env_dir: Path, env: str, manifest_path: Path, approval_path: Path | None) -> dict:
@@ -351,10 +490,17 @@ def _run(args) -> int:
             return 1
         _answer(VALID, args.answer_file)
         return 0
+    question = args.question
     if args.command == "approve":
-        _load_manifest(args.env_dir, args.env, args.manifest)  # refuse an unreadable manifest before asking
+        manifest = _load_manifest(args.env_dir, args.env, args.manifest)  # refuse an unreadable one before asking
     try:
-        yes = ask(args.question)
+        if args.command == "approve" and interactive():  # a record it couldn't write: refuse before asking
+            _nonce_sha256(os.environ)
+            _asker(_chain(os.getppid()))
+            warning, question = removal_warning(manifest, question)
+            if warning:
+                print("\n".join(warning), flush=True)
+        yes = ask(question)
     except Refused as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         _answer(REFUSED, args.answer_file)
@@ -365,7 +511,7 @@ def _run(args) -> int:
     if args.command == "ask":
         _answer(YES, args.answer_file)
         return 0
-    path = record(args.env_dir, args.env, args.manifest, args.question, round_no=args.round)
+    path = record(args.env_dir, args.env, args.manifest, question, round_no=args.round)
     _answer(f"{APPROVED}:{path}", args.answer_file)
     return 0
 

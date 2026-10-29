@@ -4,14 +4,17 @@ APPROVAL=<record> is private to GenieRails' own interactive flows: it counts
 only as a command-line variable of a nested make, is checked under the lock
 before anything applies, and lands in the receipt. The public apply-account and
 release clear it, so typing it gains nothing, and without it every receipt says
-{"via": "external"}. Real make and release_gate.py run against the
-test_release_gate_make harness (stubs for terraform and the live checks).
+{"via": "external"}. A record counts only inside the run whose prompt wrote it
+(its nonce and asking shell): a nested make started from outside that run
+(MAKELEVEL or MAKEFLAGS set by hand) refuses it. Real make and release_gate.py
+run against the test_release_gate_make harness (stubs for terraform and the
+live checks); CONSUMER is a test-only asking flow (approve, then the nested
+make), run on a pseudo-terminal.
 """
 
 from __future__ import annotations
 
 import json
-import sys
 import time
 from pathlib import Path
 
@@ -20,12 +23,30 @@ import pytest
 from scripts import approval
 from scripts import environment_lock
 from scripts import release_gate as rg
-from tests.pty_harness import pty_run
-from tests.test_approval import QUESTION, Tty, _environ, _forge
-from tests.test_release_gate_make import Make, _account_planned, _planned, make, repo  # noqa: F401 (fixtures)
+from tests.pty_harness import CTRL_D
+from tests.test_approval import NONCE, QUESTION, Tty, _forge, this_run  # noqa: F401 (autouse fixture)
+from tests.test_rehearse_account_approval import pty_make
+from tests.test_release_gate_make import ROOT, Make, _account_planned, _planned, make, repo  # noqa: F401 (fixtures)
 
 EXTERNAL = {"via": "external"}
-NESTED = {"MAKELEVEL": "1"}  # what a recipe of the top-level make (the interactive flows) runs under
+# What a recipe of the top-level make runs under, typed by hand: MAKELEVEL, and even this run's nonce.
+NESTED = {"MAKELEVEL": "1", approval.NONCE_ENV: NONCE}
+CONSUMER = """include {root}/aws/Makefile
+_test-approve-then:
+\t@GENIERAILS_APPROVAL_NONCE="$$(od -An -N32 -tx1 /dev/urandom | tr -d ' \\n')"; export GENIERAILS_APPROVAL_NONCE; \\
+\tanswer="$$(mktemp)"; \\
+\tpython3 "$(SHARED_ROOT)/scripts/approval.py" approve --env-dir "$(ENV_DIR)" --env "$(ENV)" --manifest "$(TEST_MANIFEST)" --question "{question}" --answer-file "$$answer" || exit 1; \\
+\trecord="$$(sed 's/^genierails-approval:v1:approved://' "$$answer")"; rm -f "$$answer"; \\
+\t$(MAKE) --no-print-directory $(THEN) ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" MANIFEST="$(TEST_MANIFEST)" APPROVAL="$$record"
+"""
+
+
+def _approve_then(make: Make, env: str, then: str, manifest: Path, answer: str = "y"):
+    """On a pty, the test asking flow: approve ``manifest``, then ``make <then> MANIFEST= APPROVAL=<record>``."""
+    consumer = make.tmp / "consumer.mk"
+    consumer.write_text(CONSUMER.format(root=ROOT, question=QUESTION))
+    return pty_make(make, "_test-approve-then", env, "-f", str(consumer), f"THEN={then}",
+                    f"TEST_MANIFEST={manifest}", answer=answer)
 
 
 def _account_dir(repo) -> Path:
@@ -70,34 +91,68 @@ def test_apply_account_ignores_an_approval_typed_on_its_command_line(account_mak
     assert _account_receipt(repo)["approval"] == EXTERNAL
 
 
-def test_a_nested_apply_with_a_terminal_record_embeds_it(account_make, repo):
+def test_a_record_approved_on_a_real_terminal_in_this_run_lands_in_the_receipt(account_make, repo):
     manifest = _account_planned(account_make)
-    record = _record(_account_dir(repo), "account", manifest)
-    result = account_make("_apply-account-locked", "account", f"MANIFEST={manifest}", f"APPROVAL={record}",
-                          environ_extra=NESTED)
-    assert result.returncode == 0, result.stdout + result.stderr
-    out = result.stdout
-    assert out.index("environment lock acquired (account, apply-account)") \
-        < out.index(f"Approval record {record}: approves this manifest.") < out.index("=== Apply saved plan (account) ===")
-    approved = _account_receipt(repo)["approval"]
-    assert approved["via"] == "terminal" and approved["record"] == str(record)
-    assert approved["manifest_sha256"] == rg.sha256_file(manifest)
-
-
-def test_a_record_approved_on_a_real_terminal_lands_in_the_receipt(account_make, repo, tmp_path):
-    manifest = _account_planned(account_make)
-    answer = tmp_path / "answer"
-    answer.touch()
-    rc, shown = pty_run([sys.executable, approval.__file__, "approve", "--env-dir", str(_account_dir(repo)),
-                         "--env", "account", "--manifest", str(manifest), "--question", QUESTION,
-                         "--answer-file", str(answer)], "y", _environ(MAKELEVEL="1") | repo.env)
+    rc, shown = _approve_then(account_make, "account", "_apply-account-locked", manifest)
     assert rc == 0, shown
-    record = Path(answer.read_text().strip().split(approval.APPROVED + ":", 1)[1])
+    [record] = sorted(approval.approvals_dir(_account_dir(repo), "account").iterdir())
+    assert shown.index("environment lock acquired (account, apply-account)") \
+        < shown.index(f"Approval record {record}: approves this manifest.") \
+        < shown.index("=== Apply saved plan (account) ===")
+    approved = _account_receipt(repo)["approval"]
+    assert approved["via"] == "terminal" and approved["record"] == str(record) and approved["user"]
+    assert approved["tty"].startswith("/dev/") and approved["manifest_sha256"] == rg.sha256_file(manifest)
+
+
+def test_no_at_the_asking_flow_applies_nothing(account_make, repo):
+    manifest = _account_planned(account_make)
+    for answer in ("n", "", CTRL_D):
+        rc, shown = _approve_then(account_make, "account", "_apply-account-locked", manifest, answer)
+        assert rc != 0, shown
+    assert "_apply-account-locked" not in account_make.names() and not rg.account_receipts(repo.cloud, "account")
+
+
+@pytest.mark.parametrize("how", ["makelevel", "makeflags"])
+def test_a_nested_make_forged_from_outside_the_run_refuses_a_record_even_with_its_nonce(account_make, repo, how):
+    """MAKELEVEL=1 (or APPROVAL in MAKEFLAGS) typed by hand, with a well-formed 0600 record and this run's nonce."""
+    manifest = _account_planned(account_make)
+    record = _record(_account_dir(repo), "account", manifest)  # perfect but for its asking shell
+    account_make.reset()
+    if how == "makelevel":
+        result = account_make("_apply-account-locked", "account", f"MANIFEST={manifest}", f"APPROVAL={record}",
+                              environ_extra=NESTED)
+    else:
+        result = account_make("_apply-account-locked", "account", f"MANIFEST={manifest}",
+                              environ_extra=NESTED | {"MAKEFLAGS": f"APPROVAL={record}"})
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "wasn't written by this run's own prompt" in result.stderr
+    assert "apply-account: the approval record doesn't approve this manifest (above); nothing was applied." \
+        in result.stderr
+    assert "sync-tags" not in account_make.names()
+    assert not [c for c in account_make.calls() if c[:1] == ["runner"] and "apply-plan" in c]
+    assert not rg.account_receipts(repo.cloud, "account") and _unlocked(_account_dir(repo))
+
+
+@pytest.mark.parametrize("how", ["0644", "symlink", "hand-written"])
+def test_a_nested_make_refuses_a_record_this_run_never_wrote(account_make, repo, how):
+    manifest = _account_planned(account_make)
+    rc, shown = _approve_then(account_make, "account", "_apply-account-locked", manifest, answer="n")
+    assert rc != 0
+    record = _record(_account_dir(repo), "account", manifest)
+    if how == "0644":
+        record.chmod(0o644)
+    elif how == "symlink":
+        link = record.with_name("link.json")
+        link.symlink_to(record)
+        record = link
+    else:
+        record = _forge(record, nonce_sha256="0" * 64)
+    account_make.reset()
     result = account_make("_apply-account-locked", "account", f"MANIFEST={manifest}", f"APPROVAL={record}",
                           environ_extra=NESTED)
-    assert result.returncode == 0, result.stdout + result.stderr
-    approved = _account_receipt(repo)["approval"]
-    assert approved["via"] == "terminal" and approved["tty"].startswith("/dev/") and approved["user"]
+    assert result.returncode != 0
+    assert "the approval record doesn't approve this manifest (above); nothing was applied." in result.stderr
+    assert not rg.account_receipts(repo.cloud, "account") and "sync-tags" not in account_make.names()
 
 
 @pytest.mark.parametrize("how", ["host", "sha", "other-manifest", "missing", "outside", "release-record"])
@@ -175,26 +230,40 @@ def test_primitive_release_records_external_approvals(make, repo):
     assert receipt["phase_approvals"] == {json.loads(manifest.read_text())["id"]: EXTERNAL}
 
 
-def test_a_nested_release_with_terminal_records_puts_every_round_on_the_receipt(make, repo):
+def _records(repo) -> list[Path]:
+    directory = approval.approvals_dir(repo.prod, "prod")
+    return sorted(directory.iterdir()) if directory.is_dir() else []
+
+
+def test_a_nested_release_with_terminal_records_puts_every_round_on_the_receipt(tmp_path, repo):
+    make = Make(tmp_path, repo, passthrough=("_release-manifest",))
     manifest = _planned(make)
     make.exit_code("staged", 10)
-    phase_record = _record(repo.prod, "prod", manifest)
-    result = make("_release-manifest", "prod", f"MANIFEST={manifest}", f"APPROVAL={phase_record}",
-                  environ_extra=NESTED)
-    assert result.returncode == 0, result.stdout + result.stderr
+    rc, shown = _approve_then(make, "prod", "_release-manifest", manifest)
+    assert rc == 0, shown
+    [phase_record] = _records(repo)
     assert [p["approval"]["record"] for p in _phases(repo)] == [str(phase_record)]
     make.exit_code("staged", 0)
     time.sleep(1.1)  # manifest ids are per second
     final = _planned(make)
-    final_record = _record(repo.prod, "prod", final)
-    result = make("_release-manifest", "prod", f"MANIFEST={final}", f"APPROVAL={final_record}", environ_extra=NESTED)
-    assert result.returncode == 0, result.stdout + result.stderr
-    out = result.stdout
-    assert out.index("live snapshot match.") < out.index(f"Approval record {final_record}: approves this manifest.") \
-        < out.index("=== Apply saved plan (workspace:prod) ===")
+    rc, shown = _approve_then(make, "prod", "_release-manifest", final)
+    assert rc == 0, shown
+    [final_record] = [r for r in _records(repo) if r != phase_record]
+    assert shown.index("live snapshot match.") < shown.index(f"Approval record {final_record}: approves this manifest.") \
+        < shown.index("=== Apply saved plan (workspace:prod) ===")
     receipt = rg.last_release(repo.cloud, "prod")
     assert receipt["approval"]["record"] == str(final_record)
     assert receipt["phase_approvals"][json.loads(manifest.read_text())["id"]]["record"] == str(phase_record)
+
+
+def test_a_nested_release_forged_from_outside_the_run_refuses_a_record_even_with_its_nonce(make, repo):
+    manifest = _planned(make)
+    record = _record(repo.prod, "prod", manifest)
+    result = make("_release-manifest", "prod", f"MANIFEST={manifest}", f"APPROVAL={record}", environ_extra=NESTED)
+    assert result.returncode != 0
+    assert "wasn't written by this run's own prompt" in result.stderr
+    assert not [c for c in make.calls() if c[0] in ("staged", "runner")]
+    assert not _phases(repo) and not rg.release_receipts(repo.cloud, "prod") and _unlocked(repo.prod)
 
 
 @pytest.mark.parametrize("phase", [False, True])
