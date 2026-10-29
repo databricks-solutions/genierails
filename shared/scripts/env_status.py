@@ -186,16 +186,22 @@ def _git(env_dir: Path, cloud_dir: Path, remote: str, branch: str) -> dict:
     remotes = rg.remote_names(repo)
     known = bool(commit) and rg.commit_known(repo, upstream)
     remote_url = rg.git(repo, "remote", "get-url", remote, check=False)
-    local_only = bool(commit) and not remotes
+    local_ref = f"refs/heads/{branch}"
+    local_known = bool(commit) and not remotes and not rg._ci_detected_strict() and rg.commit_known(repo, local_ref)
+    local_commit = rg.git(repo, "rev-parse", local_ref).stdout.strip() if local_known else ""
+    local_only = bool(commit) and local_known
     return {
         "checkout": True, "repo": repo, "head": commit, "cloud_rel": rg._rel(repo, cloud_dir),
         "env_dirty": [line for line in dirty if line[3:].strip('"').startswith(env_rel + "/")],
         "dirty": dirty,
         "env_file_committed": bool(commit) and rg.tracked(repo, env_dir / "env.auto.tfvars"),
-        "remote": upstream, "remotes": remotes, "local_only": local_only,
+        "remote": "local " + branch if local_only else upstream, "remote_ref": local_ref if local_only else upstream,
+        "remote_commit": local_commit if local_only else rg.git(repo, "rev-parse", upstream).stdout.strip() if known else "",
+        "remotes": remotes, "local_only": local_only,
         "remote_configured": remote_url.returncode == 0, "remote_known": known,
-        "head_on_remote": True if local_only else rg.is_ancestor(repo, commit, upstream) if known else None,
-        "head_is_remote": True if local_only else known and rg.git(repo, "rev-parse", upstream).stdout.strip() == commit,
+        "head_on_remote": rg.is_ancestor(repo, commit, local_ref) if local_only
+        else rg.is_ancestor(repo, commit, upstream) if known else None,
+        "head_is_remote": local_commit == commit if local_only else known and rg.git(repo, "rev-parse", upstream).stdout.strip() == commit,
     }
 
 
@@ -584,13 +590,13 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
     if rehearsal.get("target_digest") == "missing":
         return live(f"make rehearse ENV={source}", f"the rehearsal of {source} at HEAD recorded no promote-to "
                     f"ENV={env} digest ({env} was not a promotion target then)")
-    provenance_where = "the committed local HEAD" if git.get("local_only") else git["remote"]
-    step = push_first(f"release-plan plans only commits on {provenance_where}")
+    step = push_first(f"release-plan plans only commits on {git['remote']}")
     if step:
         return step
     if last.get("commit") and last["commit"] != git["head"] and rg.is_ancestor(
             rg.repo_root(env_dir), git["head"], last["commit"]):
-        return (f"merge {env}:rollback:{git['head']} into {rel}/ack.txt on {git['remote']} in a reviewed PR",
+        where = git["remote"] if git.get("local_only") else f"{git['remote']} in a reviewed PR"
+        return (f"merge {env}:rollback:{git['head']} into {rel}/ack.txt on {where}",
                 f"HEAD {git['head'][:12]} is older than the last release {last['commit'][:12]}; release-plan "
                 "refuses an out-of-order release without that acknowledgement")
     why = f"{source} is rehearsed at HEAD {git['head'][:12]} and {rel}/generated matches it"
@@ -632,7 +638,7 @@ def _text(report: dict) -> list[str]:
     elif not git.get("head"):
         lines.append("  Git:         no commit yet")
     else:
-        where = ("local-only repo (no remotes; committed HEAD is deployable)" if git.get("local_only")
+        where = (f"local-only repo ({git['remote']}; no remotes)" if git.get("local_only")
                  else "no remote " + git["remote"].split("/")[0] + " (other remote(s): "
                  + ", ".join(git.get("remotes") or []) + ")" if not git["remote_configured"] and git.get("remotes")
                  else "no remote " + git["remote"].split("/")[0] + " (local-only repo)" if not git["remote_configured"]

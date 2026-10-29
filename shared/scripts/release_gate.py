@@ -93,6 +93,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
@@ -872,12 +873,69 @@ def source_env(env_dir: Path) -> str:
     return source
 
 
+@dataclass(frozen=True)
+class ProvenanceRef:
+    ref: str
+    display: str
+    commit: str
+    local_only: bool
+    problems: tuple[str, ...] = ()
+
+
 def remote_names(repo: Path) -> list[str]:
-    return sorted(filter(None, git(repo, "remote").stdout.splitlines()))
+    names = set(filter(None, git(repo, "remote").stdout.splitlines()))
+    common = git(repo, "rev-parse", "--git-common-dir").stdout.strip()
+    common_dir = (Path(common) if Path(common).is_absolute() else Path(repo) / common).resolve()
+    for directory in (common_dir / "remotes", common_dir / "branches"):
+        if directory.is_dir():
+            names.update(path.name for path in directory.iterdir() if path.name)
+    refs = git(repo, "for-each-ref", "--format=%(refname)", "refs/remotes", check=False)
+    if refs.returncode == 0:
+        for ref in filter(None, refs.stdout.splitlines()):
+            parts = Path(ref).parts
+            if len(parts) >= 3:
+                names.add(parts[2])
+    return sorted(names)
+
+
+def _ci_detected_strict() -> bool:
+    """ci_guard's exact CI answer; any error or unexpected answer is CI."""
+    try:
+        from scripts import ci_guard
+
+        line = ci_guard.status_line()
+        if line == ci_guard.STATUS_CI:
+            return True
+        if line == ci_guard.STATUS_NOT_CI:
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _remote_backed_provenance(record: Mapping) -> str:
+    provenance = record.get("provenance") if isinstance(record.get("provenance"), Mapping) else {}
+    remote = str(provenance.get("remote") or record.get("remote") or "")
+    if remote and not remote.startswith("local ") and not _COMMIT.fullmatch(remote):
+        return remote
+    return ""
+
+
+def remote_backed_provenance_recorded(cloud_dir: Path, env: str) -> str:
+    for path in sorted(manifests_dir(cloud_dir, env).glob("*/manifest.json")):
+        record = _read_json(path) or {}
+        remote = _remote_backed_provenance(record)
+        if remote:
+            return f"{path} recorded {remote}"
+    for record in _receipts(env_state(cloud_dir, env) / "receipts"):
+        remote = _remote_backed_provenance(record)
+        if remote:
+            return f"{record.get('_path')} recorded {remote}"
+    return ""
 
 
 def provenance_ref(repo: Path, *, remote: str = "origin", branch: str = "main", fetch: bool = True,
-                   exact: bool = False) -> tuple[str | None, str | None, list[str]]:
+                   exact: bool = False, cloud_dir: Path | None = None, env: str = "") -> ProvenanceRef:
     """Return the reviewed provenance ref, its commit, and refusal reasons.
 
     A checkout with no remotes is a user-managed local-only repo: its committed
@@ -886,8 +944,28 @@ def provenance_ref(repo: Path, *, remote: str = "origin", branch: str = "main", 
     """
     commit = head(repo)
     remotes = remote_names(repo)
-    if not remotes:
-        return commit, commit, []
+    if not remotes and not _ci_detected_strict():
+        local = f"refs/heads/{branch}"
+        display = f"local {branch}"
+        problems: list[str] = []
+        local_commit = ""
+        if cloud_dir is not None and env:
+            recorded = remote_backed_provenance_recorded(cloud_dir, env)
+            if recorded:
+                problems.append(f"local-only provenance refused: {recorded}; restore the {remote} remote and "
+                                f"release from freshly fetched {remote}/{branch}")
+        if not commit_known(repo, local):
+            problems.append(f"{display} is unknown; create branch {branch} first")
+        else:
+            local_commit = git(repo, "rev-parse", local).stdout.strip()
+            if exact:
+                if commit != local_commit:
+                    problems.append(f"HEAD {commit[:12]} is not exactly {display} ({local_commit[:12]}); "
+                                    "account operations run only from the current local main commit")
+            elif not is_ancestor(repo, commit, local):
+                problems.append(f"HEAD {commit[:12]} is not on {display} ({local_commit[:12]}); "
+                                "release only commits on the local main branch")
+        return ProvenanceRef(local, display, local_commit, True, tuple(problems))
     upstream = f"{remote}/{branch}"
     problems: list[str] = []
     if fetch:
@@ -904,7 +982,7 @@ def provenance_ref(repo: Path, *, remote: str = "origin", branch: str = "main", 
         elif not is_ancestor(repo, commit, upstream):
             problems.append(f"HEAD {commit[:12]} is not on {upstream} (freshly fetched); "
                             "release only merged commits")
-    return upstream, upstream_commit, problems
+    return ProvenanceRef(upstream, upstream, upstream_commit, False, tuple(problems))
 
 
 def provenance(env_dir: Path, env: str, *, remote: str = "origin", branch: str = "main",
@@ -926,8 +1004,8 @@ def provenance(env_dir: Path, env: str, *, remote: str = "origin", branch: str =
         )
     if not status["clean_tree"]:
         problems.append("the checkout is not clean:\n      " + "\n      ".join(status["dirty"][:10]))
-    ref, ref_commit, ref_problems = provenance_ref(repo, remote=remote, branch=branch, fetch=fetch)
-    problems.extend(ref_problems)
+    prov_ref = provenance_ref(repo, remote=remote, branch=branch, fetch=fetch, cloud_dir=cloud_dir, env=env)
+    problems.extend(prov_ref.problems)
     receipt = passing_receipt(cloud_dir, source, commit)
     fp = inputs_fingerprint(repo, cloud_dir, source)
     committed = generated_digest(env_dir / "generated")
@@ -971,21 +1049,21 @@ def provenance(env_dir: Path, env: str, *, remote: str = "origin", branch: str =
     if last and last.get("commit") and last["commit"] != commit:
         older = not commit_known(repo, last["commit"]) or is_ancestor(repo, commit, last["commit"])
         if older:
-            acks = [e for e in _committed_acks(repo, env_dir, env, ref or commit) if e.kind == "rollback"
+            acks = [e for e in _committed_acks(repo, env_dir, env, prov_ref.ref) if e.kind == "rollback"
                     and commit.startswith(e.object_name)]
             if acks:
-                rollback = {"key": acks[0].key, "source": ref or commit, "consequence":
+                rollback = {"key": acks[0].key, "source": prov_ref.display, "consequence":
                             f"releases {commit[:12]}, older than the last release {last['commit'][:12]}"}
             else:
-                where = ref or commit
                 problems.append(
                     f"{commit[:12]} is older than the last release {last['commit'][:12]} (an out-of-order or "
                     f"stale approval). To roll back to it on purpose, merge {env}:rollback:{commit} into "
-                    f"envs/{env}/ack.txt on {where} in a reviewed PR, then re-run release-plan at {commit[:12]}")
+                    f"envs/{env}/ack.txt on {prov_ref.display}, then re-run release-plan at {commit[:12]}")
     if problems:
         raise Refused("release-plan refused:\n  - " + "\n  - ".join(problems))
     return {
-        "commit": commit, "remote": ref or commit, "remote_commit": ref_commit or commit, "source_env": source,
+        "commit": commit, "remote": prov_ref.display, "remote_ref": prov_ref.ref,
+        "remote_commit": prov_ref.commit, "local_only": prov_ref.local_only, "source_env": source,
         "receipt": receipt.get("_path"), "fingerprint": fp["fingerprint"], "fingerprint_parts": fp,
         "generated_digest": committed, "last_release": (last or {}).get("commit"), "rollback": rollback,
         "checked_at": _now(),
@@ -1003,11 +1081,13 @@ def account_provenance(env_dir: Path, env: str = ACCOUNT_ENV, *, remote: str = "
         problems.append(f"account operations use ENV={ACCOUNT_ENV}, not {env}")
     if not status["clean_tree"]:
         problems.append("the checkout is not clean:\n      " + "\n      ".join(status["dirty"][:10]))
-    ref, ref_commit, ref_problems = provenance_ref(repo, remote=remote, branch=branch, fetch=fetch, exact=True)
-    problems.extend(ref_problems)
+    prov_ref = provenance_ref(repo, remote=remote, branch=branch, fetch=fetch, exact=True,
+                              cloud_dir=cloud_dir_of(env_dir), env=env)
+    problems.extend(prov_ref.problems)
     if problems:
         raise Refused("account operation refused:\n  - " + "\n  - ".join(problems))
-    return {"commit": commit, "remote": ref or commit, "remote_commit": ref_commit or commit, "checked_at": _now()}
+    return {"commit": commit, "remote": prov_ref.display, "remote_ref": prov_ref.ref,
+            "remote_commit": prov_ref.commit, "local_only": prov_ref.local_only, "checked_at": _now()}
 
 
 def _committed_acks(repo: Path, env_dir: Path, env: str, ref: str):

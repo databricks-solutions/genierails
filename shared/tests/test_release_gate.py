@@ -636,7 +636,21 @@ def test_provenance_accepts_committed_head_in_a_repo_with_no_remotes(repo):
     rehearse(repo)
     prov = rg.provenance(repo.prod, "prod")
     assert prov["commit"] == local
-    assert prov["remote"] == local and prov["remote_commit"] == local
+    assert prov["remote"] == "local main"
+    assert prov["remote_ref"] == "refs/heads/main"
+    assert prov["remote_commit"] == local
+    assert prov["local_only"] is True
+
+
+def test_provenance_refuses_local_only_head_not_on_local_main(repo):
+    repo.git("remote", "remove", "origin")
+    base = repo.head()
+    repo.commit({"aws/envs/prod/ack.txt": "# main\n"}, push=False)
+    repo.git("checkout", "-q", "-b", "side", base)
+    repo.commit({"aws/envs/prod/ack.txt": "# side\n"}, push=False)
+    rehearse(repo)
+    with pytest.raises(rg.Refused, match="is not on local main"):
+        rg.provenance(repo.prod, "prod")
 
 
 def test_provenance_refuses_when_origin_is_missing_but_another_remote_exists(repo):
@@ -644,6 +658,31 @@ def test_provenance_refuses_when_origin_is_missing_but_another_remote_exists(rep
     repo.git("remote", "add", "fork", str(repo.origin))
     repo.commit({"aws/envs/prod/ack.txt": "# local only\n"}, push=False)
     rehearse(repo)
+    with pytest.raises(rg.Refused, match="git fetch .* origin main failed"):
+        rg.provenance(repo.prod, "prod")
+
+
+@pytest.mark.parametrize("legacy_dir", ["remotes", "branches"])
+def test_provenance_refuses_local_only_when_legacy_remote_files_exist(repo, legacy_dir):
+    repo.git("remote", "remove", "origin")
+    common = Path(repo.git("rev-parse", "--git-common-dir"))
+    common = common if common.is_absolute() else repo.root / common
+    legacy = common / legacy_dir / "origin"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(f"URL: {repo.origin}\nPull: refs/heads/main:refs/remotes/origin/main\n")
+    repo.commit({"aws/envs/prod/ack.txt": f"# legacy {legacy_dir}\n"}, push=False)
+    rehearse(repo)
+    assert "origin" in rg.remote_names(repo.root)
+    with pytest.raises(rg.Refused, match="is not on origin/main|git fetch .* origin main failed"):
+        rg.provenance(repo.prod, "prod")
+
+
+def test_provenance_refuses_local_only_when_remote_tracking_refs_exist(repo):
+    repo.git("remote", "remove", "origin")
+    repo.git("update-ref", "refs/remotes/fork/main", repo.head())
+    repo.commit({"aws/envs/prod/ack.txt": "# hidden fork\n"}, push=False)
+    rehearse(repo)
+    assert rg.remote_names(repo.root) == ["fork"]
     with pytest.raises(rg.Refused, match="git fetch .* origin main failed"):
         rg.provenance(repo.prod, "prod")
 
@@ -728,19 +767,18 @@ def test_provenance_allows_a_rollback_acknowledged_on_origin_main(repo):
     assert prov["commit"] == older and prov["rollback"]["key"] == f"prod:rollback:{older}"
 
 
-def test_local_only_rollback_ack_is_read_from_committed_head(repo):
+def test_local_only_rollback_ack_is_read_from_local_main(repo):
     repo.git("remote", "remove", "origin")
     older = repo.head()
     released = repo.commit({"aws/envs/prod/env.auto.tfvars": PROD_ENV + "# v2\n"}, push=False)
     _release_receipt_at(repo, released)
     repo.commit({"aws/envs/prod/ack.txt": f"prod:rollback:{older}\n"}, push=False)
-    assert [e.key for e in rg._committed_acks(repo.root, repo.prod, "prod", repo.head())] == [
-        f"prod:rollback:{older}"
-    ]
-    (repo.prod / "ack.txt").write_text("prod:rollback:" + "ab" * 20 + "\n")
-    assert [e.key for e in rg._committed_acks(repo.root, repo.prod, "prod", repo.head())] == [
-        f"prod:rollback:{older}"
-    ]
+    repo.git("checkout", "-q", "--detach", older)
+    rehearse(repo)
+    prov = rg.provenance(repo.prod, "prod")
+    assert prov["commit"] == older
+    assert prov["rollback"]["key"] == f"prod:rollback:{older}"
+    assert prov["rollback"]["source"] == "local main"
 
 
 def test_provenance_accepts_an_abbreviated_rollback_commit(repo):
@@ -807,7 +845,28 @@ def test_account_provenance_accepts_committed_head_in_a_repo_with_no_remotes(rep
     local = repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
     prov = rg.account_provenance(repo.cloud / "envs" / "account")
     assert prov["commit"] == local
-    assert prov["remote"] == local and prov["remote_commit"] == local
+    assert prov["remote"] == "local main"
+    assert prov["remote_ref"] == "refs/heads/main"
+    assert prov["remote_commit"] == local
+    assert prov["local_only"] is True
+
+
+def test_account_provenance_refuses_local_only_head_not_exactly_local_main(repo):
+    repo.git("remote", "remove", "origin")
+    older = repo.head()
+    repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+    repo.git("checkout", "-q", "--detach", older)
+    with pytest.raises(rg.Refused, match="not exactly local main"):
+        rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+def test_account_provenance_refuses_local_only_in_ci(repo, monkeypatch):
+    repo.git("remote", "remove", "origin")
+    repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GENIERAILS_ALLOW_CI_APPLY", "1")
+    with pytest.raises(rg.Refused, match="git fetch .* origin main failed"):
+        rg.account_provenance(repo.cloud / "envs" / "account")
 
 
 def test_account_provenance_refuses_local_head_when_any_remote_exists(repo):
@@ -815,6 +874,33 @@ def test_account_provenance_refuses_local_head_when_any_remote_exists(repo):
     repo.git("remote", "add", "genierails", str(repo.origin))
     repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
     with pytest.raises(rg.Refused, match="git fetch .* origin main failed"):
+        rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+def test_provenance_refuses_local_only_after_remote_backed_release_manifest(repo):
+    directory = rg.manifests_dir(repo.cloud, "prod") / "remote-backed"
+    directory.mkdir(parents=True)
+    (directory / "manifest.json").write_text(json.dumps({
+        "kind": "release-manifest", "version": rg.VERSION, "env": "prod", "id": "remote-backed",
+        "commit": repo.head(), "provenance": {"remote": "origin/main"}, "created_at": rg._now(),
+    }))
+    repo.git("remote", "remove", "origin")
+    repo.commit({"aws/envs/prod/ack.txt": "# local only\n"}, push=False)
+    rehearse(repo)
+    with pytest.raises(rg.Refused, match="restore the origin remote"):
+        rg.provenance(repo.prod, "prod")
+
+
+def test_account_provenance_refuses_local_only_after_remote_backed_account_manifest(repo):
+    directory = rg.manifests_dir(repo.cloud, "account") / "remote-backed"
+    directory.mkdir(parents=True)
+    (directory / "manifest.json").write_text(json.dumps({
+        "kind": "account-manifest", "version": rg.VERSION, "env": "account", "id": "remote-backed",
+        "commit": repo.head(), "provenance": {"remote": "origin/main"}, "created_at": rg._now(),
+    }))
+    repo.git("remote", "remove", "origin")
+    repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+    with pytest.raises(rg.Refused, match="restore the origin remote"):
         rg.account_provenance(repo.cloud / "envs" / "account")
 
 
@@ -1119,7 +1205,9 @@ def test_release_manifest_write_accepts_local_only_committed_head(repo):
     rehearse(repo)
     prov = rg.provenance(repo.prod, "prod")
     manifest = rg.manifest_write(repo.prod, "prod", _plan_dir(repo), prov, "live-1", {"ok": True})
-    assert json.loads(manifest.read_text())["provenance"]["remote"] == repo.head()
+    data = json.loads(manifest.read_text())
+    assert data["provenance"]["remote"] == "local main"
+    assert data["provenance"]["remote_ref"] == "refs/heads/main"
     assert rg.manifest_check(repo.prod, "prod", manifest, live="live-1")["commit"] == repo.head()
 
 

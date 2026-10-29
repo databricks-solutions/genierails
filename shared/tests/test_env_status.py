@@ -246,6 +246,8 @@ def test_account_plan_accepts_committed_head_in_local_only_repo(world, repo):
     assert world.next("dev")[0] == "make account-plan"
     status = world.status("dev")
     assert status["git"]["local_only"] is True
+    assert status["git"]["remote"] == "local main"
+    assert status["git"]["remote_ref"] == "refs/heads/main"
     assert status["git"]["head_is_remote"] is True
 
 
@@ -306,7 +308,22 @@ def test_no_remote_local_only_repo_plans_release(world, repo):
     assert command == "make release-plan ENV=prod"
     assert why == f"dev is rehearsed at HEAD {repo.head()[:12]} and envs/prod/generated matches it"
     text = world.run("status", "prod").stdout
-    assert "local-only repo (no remotes; committed HEAD is deployable)" in text
+    assert "local-only repo (local main; no remotes)" in text
+
+
+def test_local_only_rollback_next_hint_names_local_main(world, repo):
+    account_applied(repo)
+    repo.git("remote", "remove", "origin")
+    older = repo.head()
+    newer = repo.commit({"aws/envs/prod/env.auto.tfvars": PROD_ENV + "# v2\n"}, push=False)
+    path = rg.release_dir(repo.cloud, "prod") / f"{rg._now().replace(':', '')}-{newer[:12]}.json"
+    rg._write_once(path, {"kind": "release", "version": rg.VERSION, "env": "prod", "commit": newer,
+                          "created_at": rg._now()})
+    repo.git("checkout", "-q", "--detach", older)
+    rehearse(repo)
+    command, why = world.next("prod")
+    assert command == f"merge prod:rollback:{older} into envs/prod/ack.txt on local main"
+    assert "older than the last release" in why
 
 
 def test_missing_origin_with_another_remote_still_pushes_or_fixes_origin(world, repo):
