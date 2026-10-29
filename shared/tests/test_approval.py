@@ -26,6 +26,14 @@ from tests.test_release_gate import (  # noqa: F401 (fixtures)
 
 SCRIPT = Path(approval.__file__)
 QUESTION = "Approve and apply this account manifest?"
+RUN = "0123456789abcdef" * 2  # the consumer's per-run nonce (approval.new_run)
+
+
+@pytest.fixture(autouse=True)
+def approval_run(monkeypatch):
+    """The run the records are written and checked in, as the asking flow exports it to its nested makes."""
+    monkeypatch.setenv(approval.RUN_ENV, RUN)
+    return RUN
 
 
 class Tty:
@@ -155,7 +163,7 @@ def test_the_prompt_shown_ends_in_y_n_once():
 
 def _record(repo, manifest_path, env="prod", **kwargs):
     env_dir = repo.prod if env == "prod" else repo.cloud / "envs" / env
-    return approval.record(env_dir, env, manifest_path, QUESTION, **(_terminal() | kwargs))
+    return approval.record(env_dir, env, manifest_path, QUESTION, **(_terminal() | {"run": RUN} | kwargs))
 
 
 def test_record_is_written_once_0600_in_a_0700_dir_and_says_who_approved(repo, manifest):
@@ -170,7 +178,7 @@ def test_record_is_written_once_0600_in_a_0700_dir_and_says_who_approved(repo, m
         "kind": "approval", "version": 1, "env": "prod", "manifest_kind": "release-manifest",
         "manifest_id": m["id"], "manifest_path": str(manifest.resolve()), "manifest_sha256": rg.sha256_file(manifest),
         "commit": repo.head(), "via": "terminal", "user": "", "git_user": {}, "host": data["host"], "tty": "",
-        "approved_at": "", "question": f"{QUESTION} [y/N] ", "round": 2}
+        "approved_at": "", "question": f"{QUESTION} [y/N] ", "round": 2, "run_sha256": approval.run_sha256(RUN)}
     assert data["user"] and data["approved_at"] >= m["created_at"]
     assert set(data["git_user"]) == {"name", "email"}
 
@@ -231,8 +239,8 @@ def test_record_refuses_a_symlinked_approvals_dir(repo, manifest, tmp_path):
                                                   ({"GENIERAILS_INTERACTIVE": "0"}, True, True)])
 def test_record_refuses_without_a_person_at_a_terminal(repo, manifest, environ, stdin, stdout):
     with pytest.raises(approval.Refused, match="no person at a terminal"):
-        approval.record(repo.prod, "prod", manifest, QUESTION, environ=ON_A_TERMINAL | environ, stdin=Tty(stdin),
-                        stdout=Tty(stdout))
+        approval.record(repo.prod, "prod", manifest, QUESTION, run=RUN, environ=ON_A_TERMINAL | environ,
+                        stdin=Tty(stdin), stdout=Tty(stdout))
     assert not _approvals(repo.prod, "prod")
 
 
@@ -256,6 +264,7 @@ def _forge(path: Path, **changes) -> Path:
     data = json.loads(path.read_text()) | changes
     forged = path.with_name(path.stem + "-forged.json")
     forged.write_text(json.dumps(data))
+    forged.chmod(0o600)  # as record() writes it, so only the changed fields differ
     return forged
 
 
@@ -455,4 +464,6 @@ def test_the_cli_has_no_command_that_records_without_asking():
 def test_approval_reads_no_variable_that_could_switch_it_on():
     text = SCRIPT.read_text()
     read = set(re.findall(r"environ\.get\(\s*\"?([A-Z_]+)\"?", text)) | set(re.findall(r"environ\[\"([A-Z_]+)\"\]", text))
-    assert read <= {"MAKELEVEL", "INTERACTIVE_ENV"}, read
+    # RUN_ENV (the per-run nonce) only narrows which records count; it never turns prompting on.
+    assert read <= {"MAKELEVEL", "INTERACTIVE_ENV", "RUN_ENV"}, read
+    assert "RUN_ENV" not in SCRIPT.read_text().split("def interactive(", 1)[1].split("\ndef ", 1)[0]
