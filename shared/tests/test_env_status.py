@@ -240,6 +240,15 @@ def test_account_plan_needs_head_exactly_on_origin_main(world, repo):
                                  "fetch); make account-plan runs only from exactly origin/main")
 
 
+def test_account_plan_accepts_committed_head_in_local_only_repo(world, repo):
+    repo.git("remote", "remove", "origin")
+    repo.commit({"aws/envs/dev/ack.txt": "\n"}, push=False)
+    assert world.next("dev")[0] == "make account-plan"
+    status = world.status("dev")
+    assert status["git"]["local_only"] is True
+    assert status["git"]["head_is_remote"] is True
+
+
 def test_committed_rehearses(world, repo):
     account_applied(repo)
     assert world.next("dev") == ("make rehearse ENV=dev", f"no passing rehearsal of HEAD {repo.head()[:12]} from "
@@ -289,13 +298,25 @@ def test_rehearsed_but_not_on_origin_main_pushes(world, repo):
     assert world.next("prod")[0] == "git push origin HEAD:main (or merge its PR, then pull)"
 
 
-def test_no_origin_remote(world, repo):
+def test_no_remote_local_only_repo_plans_release(world, repo):
     account_applied(repo)
     rehearse(repo)
     repo.git("remote", "remove", "origin")
     command, why = world.next("prod")
-    assert command == "make setup ENV=prod REPO=<your repo URL> && git push -u origin HEAD:main"
-    assert "local-only repo" in why
+    assert command == "make release-plan ENV=prod"
+    assert why == f"dev is rehearsed at HEAD {repo.head()[:12]} and envs/prod/generated matches it"
+    text = world.run("status", "prod").stdout
+    assert "local-only repo (no remotes; committed HEAD is deployable)" in text
+
+
+def test_missing_origin_with_another_remote_still_pushes_or_fixes_origin(world, repo):
+    account_applied(repo)
+    rehearse(repo)
+    repo.git("remote", "remove", "origin")
+    repo.git("remote", "add", "fork", str(repo.origin))
+    command, why = world.next("prod")
+    assert command == "git remote add origin <your repo URL> && git push origin HEAD:main"
+    assert "there is no origin remote, but other remote(s) exist (fork)" in why
 
 
 def test_mid_first_release(world, repo):

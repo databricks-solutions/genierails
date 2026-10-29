@@ -29,11 +29,11 @@ rehearse-reuse
 
 provenance
     ``make release-plan``: HEAD has a passing clean rehearse receipt, the tree
-    is clean, HEAD is on freshly fetched origin/main, the fingerprint and the
-    committed envs/<env>/generated digest match the receipt, and HEAD isn't
-    older than the last release unless ``<env>:rollback:<commit>`` names it in
-    envs/<env>/ack.txt on origin/main (a commit can't name itself, so the
-    reviewed rollback acknowledgement is merged to main after it).
+    is clean, HEAD is on freshly fetched origin/main (or, in a repo with no
+    remotes at all, HEAD is the committed local branch tip), the fingerprint
+    and the committed envs/<env>/generated digest match the receipt, and HEAD
+    isn't older than the last release unless ``<env>:rollback:<commit>`` names
+    it in envs/<env>/ack.txt on that reviewed committed ref.
 
 reports
     The reader inventory (scripts/reader_inventory.py) for tables governance
@@ -872,6 +872,41 @@ def source_env(env_dir: Path) -> str:
     return source
 
 
+def remote_names(repo: Path) -> list[str]:
+    return sorted(filter(None, git(repo, "remote").stdout.splitlines()))
+
+
+def provenance_ref(repo: Path, *, remote: str = "origin", branch: str = "main", fetch: bool = True,
+                   exact: bool = False) -> tuple[str | None, str | None, list[str]]:
+    """Return the reviewed provenance ref, its commit, and refusal reasons.
+
+    A checkout with no remotes is a user-managed local-only repo: its committed
+    HEAD is the reviewed ref. The moment any remote exists, keep the remote gate
+    fail-closed exactly as before; no missing-origin or failed-fetch fallback.
+    """
+    commit = head(repo)
+    remotes = remote_names(repo)
+    if not remotes:
+        return commit, commit, []
+    upstream = f"{remote}/{branch}"
+    problems: list[str] = []
+    if fetch:
+        git(repo, "fetch", "--quiet", remote, branch)
+    upstream_commit = ""
+    if not commit_known(repo, upstream):
+        problems.append(f"{upstream} is unknown; fetch it first")
+    else:
+        upstream_commit = git(repo, "rev-parse", upstream).stdout.strip()
+        if exact:
+            if commit != upstream_commit:
+                problems.append(f"HEAD {commit[:12]} is not exactly {upstream} ({upstream_commit[:12]}); "
+                                "account operations run only from the current main commit")
+        elif not is_ancestor(repo, commit, upstream):
+            problems.append(f"HEAD {commit[:12]} is not on {upstream} (freshly fetched); "
+                            "release only merged commits")
+    return upstream, upstream_commit, problems
+
+
 def provenance(env_dir: Path, env: str, *, remote: str = "origin", branch: str = "main",
                fetch: bool = True) -> dict:
     """Everything release-plan requires of the checkout and the receipts; raises Refused."""
@@ -891,13 +926,8 @@ def provenance(env_dir: Path, env: str, *, remote: str = "origin", branch: str =
         )
     if not status["clean_tree"]:
         problems.append("the checkout is not clean:\n      " + "\n      ".join(status["dirty"][:10]))
-    if fetch:
-        git(repo, "fetch", "--quiet", remote, branch)
-    upstream = f"{remote}/{branch}"
-    if not commit_known(repo, upstream):
-        problems.append(f"{upstream} is unknown; fetch it first")
-    elif not is_ancestor(repo, commit, upstream):
-        problems.append(f"HEAD {commit[:12]} is not on {upstream} (freshly fetched); release only merged commits")
+    ref, ref_commit, ref_problems = provenance_ref(repo, remote=remote, branch=branch, fetch=fetch)
+    problems.extend(ref_problems)
     receipt = passing_receipt(cloud_dir, source, commit)
     fp = inputs_fingerprint(repo, cloud_dir, source)
     committed = generated_digest(env_dir / "generated")
@@ -941,20 +971,21 @@ def provenance(env_dir: Path, env: str, *, remote: str = "origin", branch: str =
     if last and last.get("commit") and last["commit"] != commit:
         older = not commit_known(repo, last["commit"]) or is_ancestor(repo, commit, last["commit"])
         if older:
-            acks = [e for e in _upstream_acks(repo, env_dir, env, upstream) if e.kind == "rollback"
+            acks = [e for e in _committed_acks(repo, env_dir, env, ref or commit) if e.kind == "rollback"
                     and commit.startswith(e.object_name)]
             if acks:
-                rollback = {"key": acks[0].key, "source": upstream, "consequence":
+                rollback = {"key": acks[0].key, "source": ref or commit, "consequence":
                             f"releases {commit[:12]}, older than the last release {last['commit'][:12]}"}
             else:
+                where = ref or commit
                 problems.append(
                     f"{commit[:12]} is older than the last release {last['commit'][:12]} (an out-of-order or "
                     f"stale approval). To roll back to it on purpose, merge {env}:rollback:{commit} into "
-                    f"envs/{env}/ack.txt on {upstream} in a reviewed PR, then re-run release-plan at {commit[:12]}")
+                    f"envs/{env}/ack.txt on {where} in a reviewed PR, then re-run release-plan at {commit[:12]}")
     if problems:
         raise Refused("release-plan refused:\n  - " + "\n  - ".join(problems))
     return {
-        "commit": commit, "remote": upstream, "source_env": source,
+        "commit": commit, "remote": ref or commit, "remote_commit": ref_commit or commit, "source_env": source,
         "receipt": receipt.get("_path"), "fingerprint": fp["fingerprint"], "fingerprint_parts": fp,
         "generated_digest": committed, "last_release": (last or {}).get("commit"), "rollback": rollback,
         "checked_at": _now(),
@@ -972,27 +1003,18 @@ def account_provenance(env_dir: Path, env: str = ACCOUNT_ENV, *, remote: str = "
         problems.append(f"account operations use ENV={ACCOUNT_ENV}, not {env}")
     if not status["clean_tree"]:
         problems.append("the checkout is not clean:\n      " + "\n      ".join(status["dirty"][:10]))
-    if fetch:
-        git(repo, "fetch", "--quiet", remote, branch)
-    upstream = f"{remote}/{branch}"
-    upstream_commit = ""
-    if not commit_known(repo, upstream):
-        problems.append(f"{upstream} is unknown; fetch it first")
-    else:
-        upstream_commit = git(repo, "rev-parse", upstream).stdout.strip()
-        if commit != upstream_commit:
-            problems.append(f"HEAD {commit[:12]} is not exactly {upstream} ({upstream_commit[:12]}); "
-                            "account operations run only from the current main commit")
+    ref, ref_commit, ref_problems = provenance_ref(repo, remote=remote, branch=branch, fetch=fetch, exact=True)
+    problems.extend(ref_problems)
     if problems:
         raise Refused("account operation refused:\n  - " + "\n  - ".join(problems))
-    return {"commit": commit, "remote": upstream, "remote_commit": upstream_commit, "checked_at": _now()}
+    return {"commit": commit, "remote": ref or commit, "remote_commit": ref_commit or commit, "checked_at": _now()}
 
 
-def _upstream_acks(repo: Path, env_dir: Path, env: str, upstream: str):
-    """The acknowledgements in envs/<env>/ack.txt at the tip of upstream (reviewed, code-owned)."""
+def _committed_acks(repo: Path, env_dir: Path, env: str, ref: str):
+    """The acknowledgements in envs/<env>/ack.txt at the reviewed committed ref."""
     from ack_file import parse_text
 
-    shown = git(repo, "show", f"{upstream}:{_rel(repo, Path(env_dir) / 'ack.txt')}", check=False)
+    shown = git(repo, "show", f"{ref}:{_rel(repo, Path(env_dir) / 'ack.txt')}", check=False)
     return parse_text(shown.stdout, env) if shown.returncode == 0 else ()
 
 

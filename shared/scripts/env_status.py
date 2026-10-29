@@ -183,16 +183,19 @@ def _git(env_dir: Path, cloud_dir: Path, remote: str, branch: str) -> dict:
         dirty = rg.dirty_paths(repo, [cloud_dir])
     env_rel = rg._rel(repo, env_dir)
     upstream = f"{remote}/{branch}"
+    remotes = rg.remote_names(repo)
     known = bool(commit) and rg.commit_known(repo, upstream)
     remote_url = rg.git(repo, "remote", "get-url", remote, check=False)
+    local_only = bool(commit) and not remotes
     return {
         "checkout": True, "repo": repo, "head": commit, "cloud_rel": rg._rel(repo, cloud_dir),
         "env_dirty": [line for line in dirty if line[3:].strip('"').startswith(env_rel + "/")],
         "dirty": dirty,
         "env_file_committed": bool(commit) and rg.tracked(repo, env_dir / "env.auto.tfvars"),
-        "remote": upstream, "remote_configured": remote_url.returncode == 0, "remote_known": known,
-        "head_on_remote": rg.is_ancestor(repo, commit, upstream) if known else None,
-        "head_is_remote": known and rg.git(repo, "rev-parse", upstream).stdout.strip() == commit,
+        "remote": upstream, "remotes": remotes, "local_only": local_only,
+        "remote_configured": remote_url.returncode == 0, "remote_known": known,
+        "head_on_remote": True if local_only else rg.is_ancestor(repo, commit, upstream) if known else None,
+        "head_is_remote": True if local_only else known and rg.git(repo, "rev-parse", upstream).stdout.strip() == commit,
     }
 
 
@@ -428,7 +431,13 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
         return None
 
     def push_first(why: str) -> tuple[str, str] | None:
+        if git.get("local_only"):
+            return None
         if not git["remote_configured"]:
+            if git.get("remotes"):
+                return (f"git remote add {remote} <your repo URL> && git push {remote} HEAD:{branch}",
+                        f"there is no {remote} remote, but other remote(s) exist ({', '.join(git['remotes'])}); "
+                        f"{why}")
             if remote != "origin":
                 return (f"git remote add {remote} <your repo URL> && git push {remote} HEAD:{branch}",
                         f"there is no {remote} remote; {why}")
@@ -575,7 +584,8 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
     if rehearsal.get("target_digest") == "missing":
         return live(f"make rehearse ENV={source}", f"the rehearsal of {source} at HEAD recorded no promote-to "
                     f"ENV={env} digest ({env} was not a promotion target then)")
-    step = push_first(f"release-plan plans only commits on {git['remote']}")
+    provenance_where = "the committed local HEAD" if git.get("local_only") else git["remote"]
+    step = push_first(f"release-plan plans only commits on {provenance_where}")
     if step:
         return step
     if last.get("commit") and last["commit"] != git["head"] and rg.is_ancestor(
@@ -622,10 +632,14 @@ def _text(report: dict) -> list[str]:
     elif not git.get("head"):
         lines.append("  Git:         no commit yet")
     else:
-        where = ("no remote " + git["remote"].split("/")[0] + " (local-only repo)" if not git["remote_configured"]
+        where = ("local-only repo (no remotes; committed HEAD is deployable)" if git.get("local_only")
+                 else "no remote " + git["remote"].split("/")[0] + " (other remote(s): "
+                 + ", ".join(git.get("remotes") or []) + ")" if not git["remote_configured"] and git.get("remotes")
+                 else "no remote " + git["remote"].split("/")[0] + " (local-only repo)" if not git["remote_configured"]
                  else f"{git['remote']} unknown (never fetched)" if not git["remote_known"]
                  else f"on {git['remote']}" if git["head_on_remote"] else f"not on {git['remote']}")
-        lines.append(f"  Git:         HEAD {git['head'][:12]}, {where} (as last fetched)")
+        suffix = "" if git.get("local_only") else " (as last fetched)"
+        lines.append(f"  Git:         HEAD {git['head'][:12]}, {where}{suffix}")
         lines.append(f"  {report['env_dir']}: " + (f"{len(git['env_dirty'])} uncommitted file(s)" if git["env_dirty"]
                                                    else "committed" if git["env_file_committed"]
                                                    else "env.auto.tfvars not committed"))
