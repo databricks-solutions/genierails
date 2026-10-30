@@ -1070,10 +1070,13 @@ RELEASE_BRANCH ?= main
 # _apply-account-locked and _release-manifest. It is audit, not a gate: it
 # approves nothing and skips no check. It counts only as a command-line
 # variable of a nested make (never from the environment or a top-level make;
-# apply-account and release clear it), is checked under the lock before
-# anything applies, and the receipt embeds it. Without it a receipt records
-# {"via": "external"} (approved outside GenieRails), as every receipt did before.
-override _APPROVAL = $(if $(and $(filter command line,$(origin APPROVAL)),$(filter-out 0,$(MAKELEVEL))),$(abspath $(strip $(APPROVAL))))
+# apply-account and release clear it) run by a flow that asked, i.e. with that
+# flow's per-run nonce GENIERAILS_APPROVAL_RUN in the environment (so a forged
+# MAKELEVEL or MAKEFLAGS alone is ignored, and a record of another run is
+# refused). It is checked under the lock before anything applies, and the
+# receipt embeds it. Without it a receipt records {"via": "external"}
+# (approved outside GenieRails), as every receipt did before.
+override _APPROVAL = $(if $(and $(filter command line,$(origin APPROVAL)),$(filter-out 0,$(MAKELEVEL)),$(filter environment,$(origin GENIERAILS_APPROVAL_RUN))),$(abspath $(strip $(APPROVAL))))
 override _APPROVAL_CHECK = approval='$(subst ','\'',$(_APPROVAL))'; \
 	if [ -n "$$approval" ]; then \
 		ap_out="$$(python3 "$(SHARED_ROOT)/scripts/approval.py" check --env-dir "$(ENV_DIR)" --env "$(ENV)" --manifest "$$manifest" --approval "$$approval")"; ap_rc=$$?; \
@@ -1331,10 +1334,27 @@ certify:
 	fi; \
 	exit 1
 
-release: _guard-not-ci-apply _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify access (deterministic envs: the current manifest from make release-plan; MANIFEST=<path> to name one)
+# make release ENV=<deterministic env> typed at a terminal (outside CI, the
+# top-level make, MANIFEST undefined) is the interactive release
+# (scripts/release_loop.py): each round it plans (or offers the still
+# releasable current manifest), shows the manifest, asks y/N and releases it
+# through _release-manifest, until the release is complete. Anything else
+# (MANIFEST given by the command line or environment, even empty; CI; no
+# terminal; GENIERAILS_INTERACTIVE=0; a nested make) runs
+# _release-manifest once, exactly as before.
+release: _guard-not-ci-apply _guard-genie-placeholder ## Derive, validate, prove coverage, audit, apply all layers, and verify access (deterministic envs, at a terminal: plan, y/N, release, round by round; else the current manifest from make release-plan; MANIFEST=<path> to name one)
 	@$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); \
 	if [ "$$($(_IS_DETERMINISTIC) "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null)" = 1 ]; then \
+		if [ "$(origin MANIFEST)" = undefined ]; then \
+			answer="$$(mktemp)" || exit 1; \
+			python3 "$(SHARED_ROOT)/scripts/approval.py" interactive --answer-file "$$answer" 2>/dev/null; ap_rc=$$?; \
+			ap_out="$$(cat "$$answer")"; rm -f "$$answer"; \
+			if [ "$$ap_rc:$$ap_out" = "0:genierails-approval:v1:interactive" ]; then \
+				python3 "$(SHARED_ROOT)/scripts/release_loop.py" --env "$(ENV)" --env-dir "$(ENV_DIR)" --make '$(subst ','\'',$(MAKE))'$(if $(strip $(VERIFY_KEY_COLUMN)), --verify-key-column "$(strip $(VERIFY_KEY_COLUMN))",); \
+				exit $$?; \
+			fi; \
+		fi; \
 		$(MAKE) --no-print-directory _release-manifest ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" MANIFEST="$(MANIFEST)" APPROVAL=$(if $(strip $(VERIFY_KEY_COLUMN)), VERIFY_KEY_COLUMN="$(strip $(VERIFY_KEY_COLUMN))",); \
 		exit $$?; \
 	fi; \

@@ -78,7 +78,6 @@ for _path in (SHARED, SHARED / "scripts"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-import ci_guard  # noqa: E402
 import customer_gitignore  # noqa: E402
 import setup_repo  # noqa: E402
 
@@ -134,10 +133,20 @@ def _inside(path: str, paths: list[str]) -> bool:
     return any(path == p or path.startswith(p + "/") for p in paths)
 
 
+def _in_ci(environ: Mapping[str, str]) -> bool:
+    """ci_guard's exact not-CI answer, or CI; fail closed."""
+    try:
+        from scripts import ci_guard
+
+        return ci_guard.status_line(environ, allow_opt_out=False) != ci_guard.STATUS_NOT_CI
+    except Exception:  # a missing or failing CI check counts as CI
+        return True
+
+
 def mode(environ: Mapping[str, str], interactive: bool) -> str:
     """"ask", "auto" (COMMIT=1) or "" (no git writes, no output)."""
     commit = environ.get("GENIERAILS_COMMIT", "0")
-    if commit not in ("ask", "1") or ci_guard.in_ci(environ):
+    if commit not in ("ask", "1") or _in_ci(environ):
         return ""
     if commit == "1":
         return "auto"

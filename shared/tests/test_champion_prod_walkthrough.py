@@ -4,8 +4,9 @@ The repo starts as a GenieRails clone (the upstream root .gitignore) with
 its own origin, like the walkthrough's "your own repo first". Dev is
 committed and rehearsed at an earlier commit (dev step 5). Then every command
 in shared/examples/dev_to_prod/README.md's Prod section runs in order, read
-from the README itself, up to make release-plan ENV=prod: setup, promote-to,
-the commit command and release-plan (which runs make check itself).
+from the README itself, up to make release ENV=prod: setup, promote-to,
+the commit offer and release, which at a terminal runs release-plan (and
+make check) and stops at its first y/N, answered n here.
 
 setup and promote-to run the real recipes (Terraform is a stub); rehearse
 and release-plan run with tests/test_release_gate_make.py's stubbed
@@ -65,8 +66,8 @@ def prod_commands() -> list[str]:
             commands.append("answer y")
         else:
             commands += [match.group(2), "git commit", match.group(3)]
-    assert "make release-plan ENV=prod" in commands, commands
-    return commands[:commands.index("make release-plan ENV=prod") + 1]
+    assert "make release ENV=prod" in commands, commands
+    return commands[:commands.index("make release ENV=prod") + 1]
 
 
 class Customer:
@@ -164,7 +165,7 @@ def _fill_in_prod(repo: Customer) -> None:
 def test_the_prod_section_reads_as_expected():
     assert prod_commands() == [
         "make setup ENV=prod", "make promote-to ENV=prod", "answer y",
-        "make release-plan ENV=prod",
+        "make release ENV=prod",
     ]
     # The whole flow's promote-to commits the same files itself.
     flow = _section("The whole flow")
@@ -244,8 +245,11 @@ def test_prod_step_3_says_a_first_release_takes_several_rounds_in_the_real_messa
     positions = [row.index(f"`{message}`") for message in (RELEASE_PHASE_HEADING, RELEASE_NEXT, RELEASE_COMPLETE)]
     assert positions == sorted(positions), row
     flow = _section("The whole flow")
-    assert 'make release ENV=prod       # applies exactly the approved plan, proves the masks; ' \
-        'a first release repeats release-plan + release until "Release complete"' in flow
+    assert 'make release ENV=prod       # at a terminal, each round: plans prod after checking the committed ' \
+        'files (reusing dev\'s rehearsal; dev ' \
+        'isn\'t re-applied), shows the manifest, asks y/N, applies exactly it and proves the masks; until ' \
+        '"Release complete"' in flow
+    assert "make release-plan" not in flow and "repeats release-plan + release" not in _section("Prod")
 
 
 def test_prod_step_3_tells_legacy_envs_to_skip_release_plan():
@@ -274,6 +278,14 @@ def test_following_the_prod_section_word_for_word_reaches_a_release_manifest(cus
         target, env = words[1], words[2].split("=", 1)[1]
         if target in ("rehearse", "release-plan"):
             result = repo.stub_make(target, env)
+        elif target == "release":
+            # At a terminal: the first round's release-plan runs (stubbed below make), then n at its y/N.
+            planning = Make(repo.tmp, repo, passthrough=("release-plan",))
+            args, environ = planning.command("release", env)
+            code, tty_out = _pty_run(args, "n", environ, cwd=repo.cloud)
+            result = subprocess.CompletedProcess(command, 0 if "Not released. Manifest" in tty_out else code,
+                                                 tty_out, "")
+            assert code != 0 and "Approve and release manifest" in tty_out, tty_out
         elif commands[i + 1:i + 2] == ["answer y"]:
             code, tty_out = _pty_run(["make", "--no-print-directory", target, f"ENV={env}"], "y",
                                      _env(repo.tmp, **repo.env), cwd=repo.cloud)
@@ -300,8 +312,9 @@ def test_following_the_prod_section_word_for_word_reaches_a_release_manifest(cus
     promoted = repo.head()
     assert repo.git("status", "--porcelain") == ""
     # No second make rehearse ENV=dev: release-plan reused dev's rehearsal for the promotion commit.
-    plan_out = out["make release-plan ENV=prod"]
+    plan_out = out["make release ENV=prod"]
     assert "reusing dev's passing rehearsal of" in plan_out and "without re-applying" in plan_out, plan_out
     assert rg.passing_receipt(repo.cloud, "dev", promoted)["applied"] is False
     manifest = rg.current_manifest(repo.cloud / "envs" / "prod", "prod")
-    assert manifest and manifest.is_file(), out["make release-plan ENV=prod"]
+    assert manifest and manifest.is_file(), out["make release ENV=prod"]
+    assert f"Manifest: {manifest}" in plan_out and not rg.release_receipts(repo.cloud, "prod")

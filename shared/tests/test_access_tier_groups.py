@@ -565,12 +565,11 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     dev = readme[readme.index("## Dev"):readme.index("## Prod")]
     prod = readme[readme.index("## Prod"):readme.index("## Keep it safe")]
 
-    # The whole flow: own repo (setup REPO=) and first commit first; rehearse and release-plan run
-    # make check themselves, so the flow has no separate check line.
+    # The whole flow: own repo (setup REPO=) and first commit first; rehearse and release (its release-plan)
+    # run make check themselves, so the flow has no separate check line.
     order = ["make setup ENV=dev REPO=<your-repo-url>", "offers to commit + push those defaults",
              "make generate ENV=dev", "make rehearse ENV=dev       # checks the committed files",
-             "make promote-to ENV=prod", "make release-plan ENV=prod", "after checking the committed files",
-             "make release ENV=prod"]
+             "make promote-to ENV=prod", "make release ENV=prod", "after checking the committed files"]
     positions = [flow.index(step) for step in order]
     assert positions == sorted(positions)
     assert "make check ENV=" not in flow
@@ -619,14 +618,14 @@ def test_champion_walkthrough_lets_release_plan_reuse_the_dev_rehearsal_on_the_p
     prod = readme[readme.index("## Prod"):readme.index("## Keep it safe")]
     gap = prod[prod.index("**Reuse an existing mask**"):prod.index("**A new kind of mask**")]
 
-    # The whole flow: promote-to (which offers the commit + push), then release-plan (no second dev rehearse).
+    # The whole flow: promote-to (which offers the commit + push), then release (no second dev rehearse).
     promoted = flow.index("offers to commit + push (y)", flow.index("make promote-to ENV=prod"))
-    assert flow.index("make promote-to ENV=prod") < promoted < flow.index("make release-plan ENV=prod")
+    assert flow.index("make promote-to ENV=prod") < promoted < flow.index("make release ENV=prod")
     assert "make rehearse ENV=dev" not in flow[promoted:]
 
     # Prod: promote-to offers to commit and push the promoted files, then plan; release-plan reuses dev's rehearsal.
     steps = ["It then offers to commit and push `.gitignore`, `envs/prod/`", "**3. Plan, release.**",
-             "make release-plan ENV=prod", "make release ENV=prod"]
+             "make release ENV=prod", "make release-plan ENV=prod"]
     positions = [prod.index(step) for step in steps]
     assert positions == sorted(positions)
     step3 = prod[prod.index("**3. Plan, release.**"):]
