@@ -36,6 +36,26 @@ class MakefileParseError(Exception):
     pass
 
 
+def _has_rule_separator(line):
+    """Whether line has a colon outside a make variable/function reference."""
+    closers = []
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == "$" and index + 1 < len(line) and line[index + 1] in "({":
+            closers.append(")" if line[index + 1] == "(" else "}")
+            index += 2
+            continue
+        if closers and char in "({":
+            closers.append(")" if char == "(" else "}")
+        elif closers and char == closers[-1]:
+            closers.pop()
+        elif char == ":" and not closers:
+            return True
+        index += 1
+    return False
+
+
 def parse_makefile(path, variables=None, _seen=None):
     """Explicit targets of a makefile and its includes: name -> has a ## description.
 
@@ -76,6 +96,8 @@ def parse_makefile(path, variables=None, _seen=None):
         if _ASSIGNMENT.match(stripped):
             continue
         if words[0] in _DIRECTIVES:
+            continue
+        if not _has_rule_separator(stripped):
             continue
         match = _RULE.match(stripped)
         if not match:
@@ -244,6 +266,23 @@ def test_parser_ignores_assignments_patterns_special_targets_and_recipes(tmp_pat
         "ifneq ($(X),y)\nelse\nendif\n"
     ))
     assert rules == {"real": True}
+
+
+@pytest.mark.parametrize("directive", [
+    "$(error message: not a rule)",
+    "$(warning message: not a rule)",
+    "$(info message: not a rule)",
+    "$(eval VALUE := text)",
+    "$(foreach item,$(ITEMS),$(info $(item): value))",
+])
+def test_parser_ignores_standalone_make_function_lines(tmp_path, directive):
+    rules = _parse(tmp_path, f"{directive}\nreal: ## Real\n")
+    assert rules == {"real": True}
+
+
+def test_parser_still_rejects_computed_targets(tmp_path):
+    with pytest.raises(MakefileParseError, match="can't check computed target"):
+        _parse(tmp_path, "$(TARGET): dependency\n")
 
 
 def test_parser_follows_includes_and_expands_known_variables(tmp_path):
