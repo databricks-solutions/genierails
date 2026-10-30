@@ -97,30 +97,31 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "uc_tables" not in out
     assert "existing agent:" not in out
     assert "pick one" not in out
-    # make check, rehearse receipts and release-plan read only committed files.
-    assert "  4. Commit and push .gitignore and envs/ (git add .gitignore envs/) to origin/main:\n" in out
-    assert "  5. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.\n" in out
+    # Setup offers its own files; make check, rehearse receipts and release-plan read only committed files.
+    assert "setup offers to commit and push" not in out  # captured output is not a terminal
+    assert "git add .gitignore envs/" not in out
+    assert "  4. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.\n" in out
     assert "     When the scan finishes, review the detections and exclude any false positives, then turn on\n" in out
     assert "     auto-tagging. Wait until the class.* tags appear.\n" in out
     assert "     Prefer a script? make enable-classification ENV=dev turns it on (you still review detections in the UI).\n" in out
-    assert "  6. Run: make generate ENV=dev   (one run: imports the agent, finds its tables, drafts rules)\n" in out
+    assert "  5. Run: make generate ENV=dev   (one run: imports the agent, finds its tables, drafts rules)\n" in out
     assert "     Review envs/dev/generated/, then commit and push envs/ (generate offers it on a terminal: answer y).\n" in out
     # No separate make check step: a deterministic rehearse runs it first.
     assert "Run: make check" not in out
     # A first deterministic rehearse refuses a non-empty account plan (finding #5).
     assert (
-        "  7. First deploy only: the account layer (e.g. the new gr_treatment tag policy) needs an approved account "
+        "  6. First deploy only: the account layer (e.g. the new gr_treatment tag policy) needs an approved account "
         "manifest.\n"
         "       On a terminal, the rehearse below shows its plan and asks y/N. Off a terminal (rehearse refuses it), "
         "run:\n"
         "       make account-plan    (plans the shared account layer and writes the manifest to approve; changes nothing live)\n"
         "       make apply-account   (applies exactly that approved manifest)\n"
     ) in out
-    assert ("  8. Run: make rehearse ENV=dev   (runs make check ENV=dev first: refuses before any lock or live "
+    assert ("  7. Run: make rehearse ENV=dev   (runs make check ENV=dev first: refuses before any lock or live "
             "call if the committed files fail it)\n") in out
     assert "business_access_enabled" not in out
     assert "     (grants SELECT only from table_readers after its coverage check passes, and Genie CAN_RUN only from acl_groups after the live agent coverage check)\n" in out
-    assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == [str(n) for n in range(1, 9)]
+    assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == [str(n) for n in range(1, 8)]
     assert "shared/examples/dev_to_prod/README.md" in out
     # The champion flow relies on native Data Classification, not the country overlay.
     assert "APJ" not in out
@@ -139,7 +140,6 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
         < steps.index("set genie_space_id")
         < steps.index("access_tier_groups")
         < steps.index("SAMPLE_ENV.md")
-        < steps.index("Commit and push .gitignore and envs/")
         < steps.index("enable-classification")
         < steps.rindex("make generate")
         < steps.index("then commit and push envs/")
@@ -200,7 +200,7 @@ def test_setup_omits_completed_walkthrough_copy_and_renumbers(cloud, tmp_path):
     result = _make(cloud, tmp_path, "setup", "ENV=dev")
     assert result.returncode == 0, result.stderr
     assert "cp ../shared/examples/dev_to_prod/env.auto.tfvars.example" not in result.stdout
-    assert re.findall(r"^  (\d+)\. ", result.stdout, flags=re.MULTILINE) == [str(n) for n in range(1, 8)]
+    assert re.findall(r"^  (\d+)\. ", result.stdout, flags=re.MULTILINE) == [str(n) for n in range(1, 7)]
 
 
 def test_setup_existing_legacy_env_does_not_request_a_deployer_principal(tmp_path):
@@ -302,12 +302,12 @@ def test_setup_legacy_dev_banner_commits_and_checks_but_skips_the_account_manife
 
     assert result.returncode == 0, result.stderr
     out = result.stdout
-    assert "Commit and push .gitignore and envs/ (git add .gitignore envs/) to origin/main:" in out
+    assert "setup offers to commit and push" not in out
     assert "Run: make check ENV=dev" in out
     assert "account-plan" not in out and "apply-account" not in out
     assert "     verify-access picks a row-pairing key per masked table; the proven keys are saved and promoted.\n" in out
     assert "prints the keys it proved" not in out
-    assert (out.index("Commit and push") < out.index("make generate ENV=dev")
+    assert (out.index("make generate ENV=dev")
             < out.index("make check ENV=dev") < out.index("make rehearse ENV=dev"))
 
 
@@ -331,7 +331,7 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
         "In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on",
         "Prefer a script? make enable-classification ENV=prod turns it on",
         "  5. Commit and push .gitignore and envs/ to origin/main (promote-to offers it on a terminal: answer y;\n"
-        "     or git add .gitignore envs/ yourself); on that commit run:\n",
+        "     or git add .gitignore envs/prod/ envs/account/ && git commit yourself); on that commit run:\n",
         "     make rehearse ENV=dev   (release-plan needs a passing rehearsal of this commit), then:\n",
         "     make release-plan ENV=prod   (runs make check ENV=prod and promote-to CHECK=1, checks the commit "
         "was rehearsed",

@@ -433,7 +433,7 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
                 return (f"git remote add {remote} <your repo URL> && git push {remote} HEAD:{branch}",
                         f"there is no {remote} remote; {why}")
             return (f"make setup ENV={env} REPO=<your repo URL> && git push -u origin HEAD:{branch}",
-                    f"this is a local-only repo (no origin remote; setup's REPO= adds it and never pushes); {why}")
+                    f"this is a local-only repo (no origin remote; setup's REPO= adds it, and setup may then offer to push); {why}")
         if not git["remote_known"] or not git["head_on_remote"]:
             return (f"git push {remote} HEAD:{branch} (or merge its PR, then pull)",
                     f"HEAD {git['head'][:12]} isn't on {git['remote']} (as last fetched; status doesn't fetch); "

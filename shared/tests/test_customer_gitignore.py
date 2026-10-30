@@ -60,7 +60,8 @@ def test_plain_setup_outside_git_never_writes_the_gitignore(cloud, tmp_path):
     assert (cloud_root / ".gitignore").read_text() == USER_LINES
     # tmp_path is not a git checkout, so auto detects no customer repo and prints the hint.
     assert f"make setup ENV=dev writes {cloud}/.gitignore" in result.stdout
-    assert "git add .gitignore envs/" in result.stdout and "GITIGNORE=customer" in result.stdout
+    assert "offers the safe files" in result.stdout and "GITIGNORE=customer" in result.stdout
+    assert "git add .gitignore envs/" not in result.stdout
     # No .gitignore at all: still nothing written.
     (cloud_root / ".gitignore").unlink()
     assert _setup(cloud, cloud_root, "ENV=dev").returncode == 0
