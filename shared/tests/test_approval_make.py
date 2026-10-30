@@ -21,7 +21,7 @@ from scripts import approval
 from scripts import environment_lock
 from scripts import release_gate as rg
 from tests.pty_harness import pty_run
-from tests.test_approval import QUESTION, Tty, _environ, _forge
+from tests.test_approval import QUESTION, RUN, Tty, _environ, _forge, approval_run  # noqa: F401 (fixture)
 from tests.test_release_gate_make import Make, _account_planned, _planned, make, repo  # noqa: F401 (fixtures)
 
 EXTERNAL = {"via": "external"}
@@ -33,7 +33,7 @@ def _account_dir(repo) -> Path:
 
 
 def _record(env_dir: Path, env: str, manifest: Path) -> Path:
-    return approval.record(env_dir, env, manifest, QUESTION, environ=NESTED, stdin=Tty(), stdout=Tty())
+    return approval.record(env_dir, env, manifest, QUESTION, run=RUN, environ=NESTED, stdin=Tty(), stdout=Tty())
 
 
 def _unlocked(env_dir: Path) -> bool:
