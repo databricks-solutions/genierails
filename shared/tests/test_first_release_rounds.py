@@ -132,12 +132,17 @@ sys.exit(rc)
 
 @pytest.fixture
 def world(tmp_path, monkeypatch):
+    return build_world(tmp_path, monkeypatch)
+
+
+def build_world(tmp_path, monkeypatch, passthrough=()):
+    """(make, repo, world.json, script stubs); ``passthrough``: more recursive makes to run for real."""
     repo = Repo(tmp_path, monkeypatch)
     # Agents in prod, so the workspace layer (CAN_RUN) is part of the release.
     repo.commit({"aws/envs/prod/abac.auto.tfvars": "genie_spaces = []\n",
                  "aws/envs/prod/agents/sales.auto.tfvars": "# an agent\n"})
     (repo.prod / "data_access").mkdir()  # the split layer dir (empty, so the checkout stays clean)
-    make = Make(tmp_path, repo, passthrough=("_release-plan-roots", "_release-manifest"))
+    make = Make(tmp_path, repo, passthrough=("_release-plan-roots", "_release-manifest", *passthrough))
     state = tmp_path / "world.json"
     state.write_text(json.dumps({"masks": False, "select": False, "can_run": False, "coverage": False,
                                  "can_run_desired": False, "finished": False, "completed": [],

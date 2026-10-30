@@ -26,7 +26,7 @@ from scripts import environment_lock
 from scripts import release_gate as rg
 from tests import script_stubs
 from tests.pty_harness import CTRL_D
-from tests.test_approval import NONCE, QUESTION, Tty, _forge, this_run  # noqa: F401 (autouse fixture)
+from tests.test_approval import NONCE, QUESTION, RUN, Tty, _forge, this_run  # noqa: F401 (autouse fixture)
 from tests.test_rehearse_account_approval import pty_make
 from tests.test_release_gate_make import ROOT, Make, _account_planned, _planned, make, repo  # noqa: F401 (fixtures)
 
@@ -117,7 +117,7 @@ def _account_dir(repo) -> Path:
 
 
 def _record(env_dir: Path, env: str, manifest: Path) -> Path:
-    return approval.record(env_dir, env, manifest, QUESTION, environ=NESTED, stdin=Tty(), stdout=Tty())
+    return approval.record(env_dir, env, manifest, QUESTION, run=RUN, environ=NESTED, stdin=Tty(), stdout=Tty())
 
 
 def _unlocked(env_dir: Path) -> bool:

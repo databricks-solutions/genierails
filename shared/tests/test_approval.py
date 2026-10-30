@@ -27,6 +27,14 @@ from tests.test_release_gate import (  # noqa: F401 (fixtures)
 
 SCRIPT = Path(approval.__file__)
 QUESTION = "Approve and apply this account manifest?"
+RUN = "0123456789abcdef" * 2  # the consumer's per-run nonce (approval.new_run)
+
+
+@pytest.fixture(autouse=True)
+def approval_run(monkeypatch):
+    """The run the records are written and checked in, as the asking flow exports it to its nested makes."""
+    monkeypatch.setenv(approval.RUN_ENV, RUN)
+    return RUN
 
 
 class Tty:
@@ -37,7 +45,7 @@ class Tty:
         return self.tty
 
 
-NONCE = "ab" * 16
+NONCE = RUN  # one per-run nonce for both fixtures (approval_run, this_run)
 # The asking flow's process chain, as approval._chain sees it in-process: its recipe
 # shell directly under the top-level make (tests/test_approval_make.py and
 # tests/test_rehearse_account_approval.py use real ones).
@@ -176,7 +184,7 @@ def test_the_prompt_shown_ends_in_y_n_once():
 
 def _record(repo, manifest_path, env="prod", **kwargs):
     env_dir = repo.prod if env == "prod" else repo.cloud / "envs" / env
-    return approval.record(env_dir, env, manifest_path, QUESTION, **(_terminal() | kwargs))
+    return approval.record(env_dir, env, manifest_path, QUESTION, **(_terminal() | {"run": RUN} | kwargs))
 
 
 def test_record_is_written_once_0600_in_a_0700_dir_and_says_who_approved(repo, manifest):
@@ -207,6 +215,17 @@ def test_an_account_manifest_record(repo, account_manifest):
 def test_a_second_y_gets_its_own_record(repo, manifest):
     first, second = _record(repo, manifest), _record(repo, manifest)
     assert first != second and len(_approvals(repo.prod, "prod")) == 2
+
+
+def test_record_refuses_when_the_manifest_changed_after_review(repo, manifest):
+    reviewed = approval.manifest_sha256(manifest)
+    data = json.loads(manifest.read_text())
+    data["host"] = "changed-after-review"
+    manifest.chmod(0o600)
+    manifest.write_text(json.dumps(data))
+    with pytest.raises(approval.Refused, match="changed after it was shown"):
+        _record(repo, manifest, expected_manifest_sha256=reviewed)
+    assert not _approvals(repo.prod, "prod")
 
 
 def test_record_never_overwrites(repo, manifest, monkeypatch):
@@ -253,8 +272,8 @@ def test_record_refuses_a_symlinked_approvals_dir(repo, manifest, tmp_path):
                                                   ({"GENIERAILS_INTERACTIVE": "0"}, True, True)])
 def test_record_refuses_without_a_person_at_a_terminal(repo, manifest, environ, stdin, stdout):
     with pytest.raises(approval.Refused, match="no person at a terminal"):
-        approval.record(repo.prod, "prod", manifest, QUESTION, environ=ON_A_TERMINAL | environ, stdin=Tty(stdin),
-                        stdout=Tty(stdout))
+        approval.record(repo.prod, "prod", manifest, QUESTION, run=RUN, environ=ON_A_TERMINAL | environ,
+                        stdin=Tty(stdin), stdout=Tty(stdout))
     assert not _approvals(repo.prod, "prod")
 
 
@@ -787,3 +806,4 @@ def test_approval_reads_no_variable_that_could_switch_it_on():
     read = set(re.findall(r"environ\.get\(\s*\"?([A-Z_]+)\"?", text)) | set(re.findall(r"environ\[\"([A-Z_]+)\"\]", text))
     # RUN_ENV only binds a record to the run that asked; it never makes anything interactive.
     assert read <= {"MAKELEVEL", "INTERACTIVE_ENV", "RUN_ENV"}, read
+    assert "RUN_ENV" not in SCRIPT.read_text().split("def interactive(", 1)[1].split("\ndef ", 1)[0]

@@ -123,9 +123,14 @@ class Make:
             "check_env.py": str(self.stubs["check"]), **(extra or {}),
         }
 
-    def __call__(self, target: str, env: str, *extra: str, stub_make: bool = True, ci: bool = False,
-                 stubs: dict[str, str] | None = None, environ_extra: dict[str, str] | None = None,
-                 cwd: Path | None = None, root_runner: Path | None = None):
+    def __call__(self, target: str, env: str, *extra: str, cwd: Path | None = None, **kwargs):
+        args, environ = self.command(target, env, *extra, **kwargs)
+        return subprocess.run(args, cwd=cwd or ROOT / self.cloud, text=True, capture_output=True, env=environ)
+
+    def command(self, target: str, env: str, *extra: str, stub_make: bool = True, ci: bool = False,
+                stubs: dict[str, str] | None = None, environ_extra: dict[str, str] | None = None,
+                root_runner: Path | None = None) -> tuple[list[str], dict[str, str]]:
+        """The make command line and environment __call__ runs (e.g. to run it on a pty instead)."""
         env_dir = self.repo.cloud / "envs" / env
         args = ["make", "--no-print-directory", target, f"ENV={env}", f"ENV_DIR={env_dir}",
                 f"ACCOUNT_ENV_DIR={self.repo.cloud / 'envs' / 'account'}",
@@ -137,7 +142,7 @@ class Make:
                    if k not in ("MAKEFLAGS", "MAKELEVEL", "VERIFY_KEY_COLUMN", "APPLY_FLAGS", "MANIFEST")}
         environ |= self.repo.env | ({"CI": "true"} if ci else {}) | (environ_extra or {})
         environ["PATH"] = f"{bin_dir}:{environ['PATH']}"
-        return subprocess.run(args, cwd=cwd or ROOT / self.cloud, text=True, capture_output=True, env=environ)
+        return args, environ
 
     def all_calls(self) -> list[list[str]]:
         if not self.log.exists():

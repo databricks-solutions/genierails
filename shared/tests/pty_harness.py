@@ -27,14 +27,17 @@ def pty_run(cmd, answer, env, cwd=None, timeout=300, prompt=PROMPT, before_answe
 
     ``answer`` is followed by Enter, except CTRL_D, which is typed alone, and
     CTRL_C, which sends SIGINT to the command's process group (its own
-    session, so nothing else is hit), as the terminal's Ctrl-C does.
+    session, so nothing else is hit), as the terminal's Ctrl-C does. A list
+    of answers types the k-th at the k-th prompt (a round-by-round flow) and
+    leaves any later prompt unanswered.
     Returns (exit code, everything the terminal showed, CRLF as LF).
     """
+    answers = [answer] if answer is None or isinstance(answer, str) or callable(answer) else list(answer)
     master, slave = pty.openpty()
     proc = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave, env=env, cwd=cwd, close_fds=True,
                             start_new_session=True, preexec_fn=_default_sigint)
     os.close(slave)
-    out, answered, deadline = b"", False, time.monotonic() + timeout
+    out, answered, deadline = b"", 0, time.monotonic() + timeout
     try:
         while time.monotonic() < deadline:
             ready, _, _ = select.select([master], [], [], 0.2)
@@ -46,14 +49,18 @@ def pty_run(cmd, answer, env, cwd=None, timeout=300, prompt=PROMPT, before_answe
                 if not chunk:
                     break
                 out += chunk
-            if answer is not None and not answered and prompt.encode() in out:
-                if before_answer is not None:
+            while answered < len(answers) and answers[answered] is not None \
+                    and out.count(prompt.encode()) > answered:
+                if answered == 0 and before_answer is not None:
                     before_answer()
-                if answer == CTRL_C:
+                typed = answers[answered]
+                if callable(typed):
+                    typed = typed()
+                if typed == CTRL_C:
                     os.killpg(proc.pid, signal.SIGINT)
                 else:
-                    os.write(master, answer.encode() + (b"" if answer == CTRL_D else b"\n"))
-                answered = True
+                    os.write(master, typed.encode() + (b"" if typed == CTRL_D else b"\n"))
+                answered += 1
             if proc.poll() is not None and not ready:
                 break
         else:
