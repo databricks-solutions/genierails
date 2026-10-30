@@ -618,6 +618,7 @@ def test_make_setup_twice_second_run_is_a_no_op(tmp_path):
 
     assert second == 0, second_out
     assert "Nothing to commit: .gitignore, envs/dev/ and envs/account/ match HEAD." in second_out
+    assert "setup offers to commit and push the .gitignore and env files it created; answer y" not in second_out
     assert "already had uncommitted changes" not in second_out
     assert PROMPT not in second_out
     assert _git(checkout, "rev-parse", "HEAD") == head
@@ -671,11 +672,46 @@ def test_make_setup_refuses_preexisting_scoped_edits(tmp_path):
     (env / "notes.md").write_text("mine before setup\n")
     head = _git(checkout, "rev-parse", "HEAD")
     code, out = _pty_run(_setup_cmd(checkout), "y", _make_env(tmp_path))
-    assert code != 0, out
-    assert "already had uncommitted changes before setup (aws/envs/dev/notes.md)" in out
+    assert code == 0, out
+    assert "Setup did not commit because these paths already had edits: aws/envs/dev/notes.md." in out
+    assert "They remain unstaged for the make generate commit offer; git is unchanged." in out
     assert PROMPT not in out
     assert _git(checkout, "rev-parse", "HEAD") == head
     assert not _git(checkout, "diff", "--cached", "--name-only")
+
+    forced_root = tmp_path / "forced"
+    forced_root.mkdir()
+    forced_checkout = _fresh_setup_clone(forced_root)
+    forced_env = forced_checkout / "aws/envs/dev"
+    forced_env.mkdir(parents=True)
+    (forced_env / "notes.md").write_text("mine before setup\n")
+    forced_head = _git(forced_checkout, "rev-parse", "HEAD")
+    forced, forced_out = _pty_run(_setup_cmd(forced_checkout, "COMMIT=1"), None, _make_env(tmp_path))
+    assert forced != 0, forced_out
+    assert "already had uncommitted changes before setup (aws/envs/dev/notes.md)" in forced_out
+    assert _git(forced_checkout, "rev-parse", "HEAD") == forced_head
+    assert not _git(forced_checkout, "diff", "--cached", "--name-only")
+
+
+def test_make_setup_repo_rerun_with_step_one_edit_adds_origin_and_leaves_edit_for_generate(tmp_path):
+    checkout = _fresh_setup_clone(tmp_path)
+    first, first_out = _pty_run(_setup_cmd(checkout), "y", _make_env(tmp_path))
+    assert first == 0, first_out
+    head = _git(checkout, "rev-parse", "HEAD").strip()
+    env_file = checkout / "aws/envs/dev/env.auto.tfvars"
+    env_file.write_text(env_file.read_text().replace("<your-deployer-principal-id>", "deployer-app-id"))
+    bare = tmp_path / "customer.git"
+    _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(bare))
+
+    code, out = _pty_run(_setup_cmd(checkout, f"REPO=file://{bare}"), None, _make_env(tmp_path))
+
+    assert code == 0, out
+    assert f"Git: added remote origin = file://{bare}" in out
+    assert "They remain unstaged for the make generate commit offer; git is unchanged." in out
+    assert _git(checkout, "diff", "--cached", "--name-only") == ""
+    assert "aws/envs/dev/env.auto.tfvars" in _git(checkout, "diff", "--name-only")
+    _git(checkout, "push", "-q", "-u", "origin", "HEAD:main")
+    assert _git(bare, "rev-parse", "main").strip() == head
 
 
 def test_make_setup_hook_staging_an_extra_file_is_rolled_back(tmp_path):

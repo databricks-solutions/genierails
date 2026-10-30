@@ -184,8 +184,13 @@ def will_offer(cloud_dir: Path, env: str, env_dir: Path, step: str, *, environ: 
                tty: bool | None = None, branch: str = "main") -> bool:
     """Whether offer would ask (or, with COMMIT=1, commit): what the banners print."""
     environ = os.environ if environ is None else environ
-    return bool(mode(environ, interactive() if tty is None else tty)) and not unusable(
-        Path(cloud_dir), env, Path(env_dir), step, branch)
+    cloud_dir = Path(cloud_dir).resolve()
+    if not mode(environ, interactive() if tty is None else tty) or unusable(
+            cloud_dir, env, Path(env_dir), step, branch):
+        return False
+    paths, _label = scope(cloud_dir.name, env, step, "account", (cloud_dir / "envs/account").is_dir())
+    changed = _git(cloud_dir.parent, "status", "--porcelain", "--untracked-files=all", "--", *paths)
+    return changed.returncode == 0 and bool(changed.stdout)
 
 
 def denied(rel: str) -> str:
@@ -372,6 +377,11 @@ def offer(cloud_dir: Path, env: str, env_dir: Path, step: str, *, remote: str = 
         staged_paths = {path for _status, path in staged}
         before = sorted(p for p in preexisting_dirty or [] if p in staged_paths)
         if before:
+            if how == "ask":
+                print("  Setup did not commit because these paths already had edits: "
+                      + ", ".join(before[:5]) + (", ..." if len(before) > 5 else "") + ".")
+                print("  They remain unstaged for the make generate commit offer; git is unchanged.")
+                return 0
             return refuse("these paths already had uncommitted changes before setup ("
                           + ", ".join(before[:5]) + (", ..." if len(before) > 5 else "")
                           + "), so they'd be swept into its commit; commit or revert them first, then re-run "
