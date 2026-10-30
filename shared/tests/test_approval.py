@@ -524,6 +524,9 @@ def test_pin_reads_once_and_refuses_another_digest(repo, manifest):
         approval.pin(manifest, "prod", "0" * 64)
     with pytest.raises(approval.Refused, match="is not a sha256 digest"):
         approval.require_digest(manifest, "abc")
+    assert approval.manifest_sha256(manifest) == digest == approval.manifest_sha256(manifest, digest)
+    with pytest.raises(approval.Refused, match="changed after it was shown for approval"):
+        approval.manifest_sha256(manifest, "0" * 64)
     with pytest.raises(approval.Refused, match="is a manifest for prod, not dev"):
         approval.pin(manifest, "dev")
     link = manifest.with_name("link.json")
@@ -534,11 +537,11 @@ def test_pin_reads_once_and_refuses_another_digest(repo, manifest):
 
 def test_record_with_a_digest_pins_it_and_refuses_a_changed_manifest(repo, manifest):
     digest = rg.sha256_file(manifest)
-    record = _record(repo, manifest, expect_digest=digest)
+    record = _record(repo, manifest, expected_manifest_sha256=digest)
     assert json.loads(record.read_text())["manifest_sha256"] == digest
     _mutate(manifest, host="mutated-after-display")
     with pytest.raises(approval.Refused, match="changed after it was shown"):
-        _record(repo, manifest, expect_digest=digest)
+        _record(repo, manifest, expected_manifest_sha256=digest)
     assert _approvals(repo.prod, "prod") == [record]
     with pytest.raises(approval.Refused, match="manifest_sha256 differ"):  # and under the apply's lock
         approval.check(repo.prod, "prod", manifest, record)
@@ -558,7 +561,7 @@ def test_show_prints_the_summary_and_the_digest_of_the_bytes_it_read(repo, accou
 
 def test_digest_check_against_a_digest_or_the_records(repo, manifest):
     digest = rg.sha256_file(manifest)
-    record = _record(repo, manifest, expect_digest=digest)
+    record = _record(repo, manifest, expected_manifest_sha256=digest)
     env = _environ() | repo.env
     for how in (("--expect-digest", digest), ("--approval", str(record))):
         assert _cli("digest-check", "--manifest", str(manifest), *how, env=env) == (0, approval.VALID + "\n", "")

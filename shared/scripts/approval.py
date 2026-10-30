@@ -67,7 +67,8 @@ from those bytes with their sha256 and answers that digest. ``approve
 and again when it records (the record names that digest), and ``check`` and
 ``digest-check`` refuse, under the apply's lock, unless the file still has the
 record's digest. A manifest changed after it was shown is never approved or
-applied (pin, require_digest: reusable by any flow that shows then asks).
+applied (pin, manifest_sha256, require_digest; record(expected_manifest_sha256=):
+the names #285's release loop uses, reusable by any flow that shows then asks).
 
 Commands. Each answers with exactly one versioned line (ANSWERS) and the exit
 code that goes with it; callers accept only an exact (exit code, line) pair, as
@@ -299,10 +300,10 @@ def _is_digest(value) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
-def pin(manifest_path: Path, env: str, expect_digest: str | None = None) -> tuple[dict, str]:
+def pin(manifest_path: Path, env: str, expected_manifest_sha256: str | None = None) -> tuple[dict, str]:
     """The manifest as read once (a single read, never through a symlink), and the sha256 of those bytes.
 
-    With ``expect_digest``, refuses unless those bytes still have it: what is
+    With ``expected_manifest_sha256``, refuses unless those bytes still have it: what is
     shown, asked about, recorded and applied is one fixed set of bytes.
     """
     from scripts import release_gate as rg
@@ -314,8 +315,8 @@ def pin(manifest_path: Path, env: str, expect_digest: str | None = None) -> tupl
     with os.fdopen(fd, "rb") as handle:
         raw = handle.read()
     digest = rg.sha256_bytes(raw)
-    if expect_digest is not None:
-        require_digest(manifest_path, expect_digest, actual=digest)
+    if expected_manifest_sha256 is not None:
+        require_digest(manifest_path, expected_manifest_sha256, actual=digest)
     try:
         data = json.loads(raw)
     except (ValueError, UnicodeDecodeError) as exc:
@@ -328,20 +329,28 @@ def pin(manifest_path: Path, env: str, expect_digest: str | None = None) -> tupl
     return data, digest
 
 
-def require_digest(manifest_path: Path, expect_digest: str, *, actual: str | None = None) -> None:
-    """Refuse unless the manifest file's sha256 is ``expect_digest`` (the bytes shown and approved)."""
+def manifest_sha256(manifest_path: Path, expected_manifest_sha256: str | None = None) -> str:
+    """The manifest's digest, refusing if it changed from the bytes the caller reviewed (as in #285)."""
     from scripts import release_gate as rg
 
-    if not _is_digest(expect_digest):
-        raise Refused(f"{expect_digest!r} is not a sha256 digest")
+    try:
+        digest = rg.sha256_file(Path(manifest_path))
+    except OSError as exc:
+        raise Refused(f"manifest {manifest_path} can't be read ({exc.strerror})") from exc
+    if expected_manifest_sha256 is not None:
+        require_digest(manifest_path, expected_manifest_sha256, actual=digest)
+    return digest
+
+
+def require_digest(manifest_path: Path, expected_manifest_sha256: str, *, actual: str | None = None) -> None:
+    """Refuse unless the manifest file's sha256 is ``expected_manifest_sha256`` (the bytes shown and approved)."""
+    if not _is_digest(expected_manifest_sha256):
+        raise Refused(f"{expected_manifest_sha256!r} is not a sha256 digest")
     if actual is None:
-        try:
-            actual = rg.sha256_file(Path(manifest_path))
-        except OSError as exc:
-            raise Refused(f"manifest {manifest_path} can't be read ({exc.strerror})") from exc
-    if actual != expect_digest:
-        raise Refused(f"the manifest {manifest_path} changed after it was shown (sha256 {actual}, shown "
-                      f"{expect_digest}); nothing was approved or applied")
+        actual = manifest_sha256(manifest_path)
+    if actual != expected_manifest_sha256:
+        raise Refused(f"manifest {manifest_path} changed after it was shown for approval (sha256 {actual}, shown "
+                      f"{expected_manifest_sha256}); nothing was approved or applied")
 
 
 def summary(manifest_path: Path, manifest: Mapping, digest: str) -> list[str]:
@@ -410,7 +419,7 @@ def _user() -> str:
 
 
 def record(env_dir: Path, env: str, manifest_path: Path, question: str, *, run: str | None = None,
-           round_no: int | None = None, expect_digest: str | None = None, environ: Mapping[str, str] | None = None,
+           round_no: int | None = None, expected_manifest_sha256: str | None = None, environ: Mapping[str, str] | None = None,
            stdin: IO | None = None, stdout: IO | None = None) -> Path:
     """Write the write-once record of a y just typed at this terminal for ``manifest_path``, in run ``run``
     (default: RUN_ENV), asked by this process's make recipe (module docstring).
@@ -425,10 +434,10 @@ def record(env_dir: Path, env: str, manifest_path: Path, question: str, *, run: 
     run = run_of((os.environ if environ is None else environ) if run is None else {RUN_ENV: run})
     asker = _asker(_chain(os.getpid()))
     env_dir, manifest_path = Path(env_dir), Path(manifest_path).resolve()
-    if expect_digest is None:
-        manifest, digest = _load_manifest(env_dir, env, manifest_path), rg.sha256_file(manifest_path)
+    if expected_manifest_sha256 is None:
+        manifest, digest = _load_manifest(env_dir, env, manifest_path), manifest_sha256(manifest_path)
     else:  # the bytes shown, still the file's now (record time)
-        manifest, digest = pin(manifest_path, env, expect_digest)
+        manifest, digest = pin(manifest_path, env, expected_manifest_sha256)
     approved_at = rg._now()
     payload = {
         "kind": KIND, "version": VERSION, "env": env, "manifest_kind": manifest["kind"],
@@ -633,7 +642,7 @@ def _run(args) -> int:
         return 0
     try:  # record time: refuses if the manifest changed while the question was up
         path = record(args.env_dir, args.env, args.manifest, question, round_no=args.round,
-                      expect_digest=args.expect_digest)
+                      expected_manifest_sha256=args.expect_digest)
     except Refused as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         _answer(REFUSED, args.answer_file)
