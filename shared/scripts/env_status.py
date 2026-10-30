@@ -190,6 +190,7 @@ def _git(env_dir: Path, cloud_dir: Path, remote: str, branch: str) -> dict:
     local_known = bool(commit) and not remotes and not rg._ci_detected_strict() and rg.commit_known(repo, local_ref)
     local_commit = rg.git(repo, "rev-parse", local_ref).stdout.strip() if local_known else ""
     local_only = bool(commit) and local_known
+    remote_backed = rg.remote_backed_provenance_recorded(cloud_dir, env_dir.name) if local_only else ""
     return {
         "checkout": True, "repo": repo, "head": commit, "cloud_rel": rg._rel(repo, cloud_dir),
         "env_dirty": [line for line in dirty if line[3:].strip('"').startswith(env_rel + "/")],
@@ -197,7 +198,7 @@ def _git(env_dir: Path, cloud_dir: Path, remote: str, branch: str) -> dict:
         "env_file_committed": bool(commit) and rg.tracked(repo, env_dir / "env.auto.tfvars"),
         "remote": "local " + branch if local_only else upstream, "remote_ref": local_ref if local_only else upstream,
         "remote_commit": local_commit if local_only else rg.git(repo, "rev-parse", upstream).stdout.strip() if known else "",
-        "remotes": remotes, "local_only": local_only,
+        "remotes": remotes, "local_only": local_only, "remote_backed_marker": remote_backed,
         "remote_configured": remote_url.returncode == 0, "remote_known": known,
         "head_on_remote": rg.is_ancestor(repo, commit, local_ref) if local_only
         else rg.is_ancestor(repo, commit, upstream) if known else None,
@@ -436,8 +437,20 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
                     "release-plan and account-plan read only committed files")
         return None
 
-    def push_first(why: str) -> tuple[str, str] | None:
+    def push_first(why: str, *, exact: bool = False) -> tuple[str, str] | None:
         if git.get("local_only"):
+            if git.get("remote_backed_marker"):
+                return (f"git remote add {remote} <your repo URL> && git fetch {remote} {branch}",
+                        f"local-only provenance is refused because {git['remote_backed_marker']}; restore the "
+                        f"{remote} remote and release from freshly fetched {remote}/{branch}")
+            if exact and not git["head_is_remote"]:
+                command = f"git switch {branch}" if git["head_on_remote"] else f"git switch {branch} && git merge {git['head']}"
+                return (command,
+                        f"HEAD {git['head'][:12]} isn't exactly {git['remote']} ({git['remote_commit'][:12]}); "
+                        f"{why}")
+            if not exact and not git["head_on_remote"]:
+                return (f"git switch {branch} && git merge {git['head']}",
+                        f"HEAD {git['head'][:12]} isn't on {git['remote']} ({git['remote_commit'][:12]}); {why}")
             return None
         if not git["remote_configured"]:
             if git.get("remotes"):
@@ -509,7 +522,7 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
             if due or first:
                 command = "make apply-account" if due else "make account-plan"
                 if not git["head_is_remote"]:
-                    return push_first(f"{command} runs only from exactly {git['remote']}") or (
+                    return push_first(f"{command} runs only from exactly {git['remote']}", exact=True) or (
                         f"git pull --ff-only {remote} {branch}",
                         f"{command} runs only from exactly {git['remote']}, and HEAD is behind it")
                 return live(command, f"the approved account manifest {due[0]['id']} for HEAD is not applied yet"

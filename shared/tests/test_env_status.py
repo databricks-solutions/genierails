@@ -251,6 +251,16 @@ def test_account_plan_accepts_committed_head_in_local_only_repo(world, repo):
     assert status["git"]["head_is_remote"] is True
 
 
+def test_account_plan_local_only_feature_branch_merges_to_local_main(world, repo):
+    repo.git("remote", "remove", "origin")
+    repo.git("checkout", "-q", "-b", "feature")
+    head = repo.commit({"aws/envs/dev/ack.txt": "# feature\n"}, push=False)
+    command, why = world.next("dev")
+    assert command == f"git switch main && git merge {head}"
+    assert "exactly local main" in why
+    assert "origin" not in command + why
+
+
 def test_committed_rehearses(world, repo):
     account_applied(repo)
     assert world.next("dev") == ("make rehearse ENV=dev", f"no passing rehearsal of HEAD {repo.head()[:12]} from "
@@ -309,6 +319,48 @@ def test_no_remote_local_only_repo_plans_release(world, repo):
     assert why == f"dev is rehearsed at HEAD {repo.head()[:12]} and envs/prod/generated matches it"
     text = world.run("status", "prod").stdout
     assert "local-only repo (local main; no remotes)" in text
+
+
+def test_local_only_release_plan_feature_branch_merges_to_local_main(world, repo):
+    account_applied(repo)
+    repo.git("remote", "remove", "origin")
+    base = repo.head()
+    repo.commit({"aws/envs/prod/ack.txt": "# main\n"}, push=False)
+    repo.git("checkout", "-q", "-b", "feature", base)
+    head = repo.commit({"aws/envs/prod/ack.txt": "# feature\n"}, push=False)
+    rehearse(repo)
+    command, why = world.next("prod")
+    assert command == f"git switch main && git merge {head}"
+    assert "isn't on local main" in why
+    assert "origin" not in command + why
+
+
+def test_local_only_release_plan_after_remote_backed_manifest_restores_origin(world, repo):
+    account_applied(repo)
+    rehearse(repo)
+    directory = rg.manifests_dir(repo.cloud, "prod") / "remote-backed"
+    directory.mkdir(parents=True)
+    (directory / "manifest.json").write_text(json.dumps({
+        "kind": "release-manifest", "version": rg.VERSION, "env": "prod", "id": "remote-backed",
+        "commit": repo.head(), "provenance": {"remote": "origin/main"}, "created_at": rg._now(),
+    }))
+    repo.git("remote", "remove", "origin")
+    command, why = world.next("prod")
+    assert command == "git remote add origin <your repo URL> && git fetch origin main"
+    assert "restore the origin remote" in why
+    assert "make release-plan" not in command
+
+
+def test_local_only_corrupt_manifest_restores_origin(world, repo):
+    account_applied(repo)
+    rehearse(repo)
+    directory = rg.manifests_dir(repo.cloud, "prod") / "corrupt"
+    directory.mkdir(parents=True)
+    (directory / "manifest.json").write_text("{")
+    repo.git("remote", "remove", "origin")
+    command, why = world.next("prod")
+    assert command == "git remote add origin <your repo URL> && git fetch origin main"
+    assert "restore the origin remote" in why
 
 
 def test_local_only_rollback_next_hint_names_local_main(world, repo):

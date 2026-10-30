@@ -923,7 +923,9 @@ def _remote_backed_provenance(record: Mapping) -> str:
 
 def remote_backed_provenance_recorded(cloud_dir: Path, env: str) -> str:
     for path in sorted(manifests_dir(cloud_dir, env).glob("*/manifest.json")):
-        record = _read_json(path) or {}
+        record = _read_json(path)
+        if record is None:
+            return f"{path} is unreadable"
         remote = _remote_backed_provenance(record)
         if remote:
             return f"{path} recorded {remote}"
