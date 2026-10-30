@@ -346,7 +346,7 @@ def main(argv: list[str] | None = None) -> int:
               f"Add your own repo later with make setup ENV={args.env} REPO=<url>. "
               f"Undo: git remote rename {UPSTREAM_REMOTE} origin")
     elif done:
-        print(f"Git: nothing was pushed; the first push is git push -u origin {BRANCH}.")
+        print("Git: origin is ready; setup may offer to commit and push its safe files at the end.")
     return 0
 
 
