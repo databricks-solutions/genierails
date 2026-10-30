@@ -373,7 +373,8 @@ How the operator runs them: [deployment machine](deployment-machine.md#release-p
 - **`make release-plan ENV=prod`** refuses unless HEAD has a passing receipt
   of prod's source env (`promote_from`, dev by default) from a clean
   checkout, the checkout is still clean, HEAD is on freshly
-  fetched `origin/main`, the fingerprint and the committed
+  fetched `origin/main` (or, only when the repo has no remotes at all, the
+  committed local HEAD), the fingerprint and the committed
   `envs/prod/generated` digest match the receipt, and HEAD isn't older than
   the last release. Then, under the prod lock, it re-derives prod from live
   tags into `envs/prod/generated/.runtime/` (ignored), keeps the policy names
@@ -391,12 +392,14 @@ How the operator runs them: [deployment machine](deployment-machine.md#release-p
   approved manifest explicitly; a superseded or already released one refuses.
 - **`make account-plan` / `make apply-account`** is the account
   operation equivalent: `account-plan` refuses unless the checkout is clean and
-  exactly current `origin/main`, saves one account plan and immutable manifest,
+  exactly current `origin/main`, or the committed local HEAD when the repo has
+  no remotes at all, saves one account plan and immutable manifest,
   and changes nothing live. The manifest records the saved plan hash, account
   input hashes and the tag-policy diff (additions and approved removals). `apply-account` chooses
   the single unreceipted manifest for `HEAD` (or accepts `MANIFEST=<path>` as an
   explicit override) and refuses in CI, from a dirty checkout, from any commit
-  other than the manifest commit and the exact current `origin/main` tip, if
+  other than the manifest commit and the exact current `origin/main` tip (or
+  the committed local HEAD when there are no remotes), if
   the account state, manifest, saved plan, input hashes or tag-policy diff
   changed, or if the manifest already has a receipt. Under the account lock it
   applies the saved plan and writes an account receipt.

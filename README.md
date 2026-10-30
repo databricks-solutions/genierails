@@ -17,6 +17,8 @@ After the first deployment: [one team doing both](shared/docs/playbooks/one-team
 
 Lost? Run `make next ENV=<env>` (from `aws/` or `azure/`): it prints the one next command and why; `make status ENV=<env>` shows the whole picture. Both are read-only.
 
+Git provenance is managed by GenieRails for you: normal repos release only reviewed commits on `origin/main`; a repo with no remotes at all can still deploy from its clean committed local `main`. If any remote exists, the `origin/main` gate applies.
+
 ## How it works
 
 1. **Unity Catalog decides what's sensitive.** Its built-in [Data Classification](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) scanner reads your data and tags each sensitive column.

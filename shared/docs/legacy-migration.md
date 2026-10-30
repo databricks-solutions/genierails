@@ -118,8 +118,9 @@ deterministic `gr_treatment` retag. `make plan` may describe the same pending
 migration without a lock, but all mutation remains behind the env lock.
 
 In prod each changing phase is one `release-plan` manifest and approval, with
-release-plan's provenance (clean checkout on freshly fetched `origin/main`, a
-matching passing dev receipt, not older than the last release unless
+release-plan's provenance (clean checkout on freshly fetched `origin/main`, or
+the committed local HEAD when the repo has no remotes at all; a matching
+passing dev receipt; not older than the last release unless
 `prod:rollback:<commit>` is acknowledged). The legacy policies stay live until
 a later successful release retires them; legacy functions are never dropped.
 Once migrated, an env can't be applied in legacy mode again; undo a change by
