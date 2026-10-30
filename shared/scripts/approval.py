@@ -67,8 +67,8 @@ from those bytes with their sha256 and answers that digest. ``approve
 and again when it records (the record names that digest), and ``check`` and
 ``digest-check`` refuse, under the apply's lock, unless the file still has the
 record's digest. A manifest changed after it was shown is never approved or
-applied (pin, manifest_sha256, require_digest; record(expected_manifest_sha256=):
-the names #285's release loop uses, reusable by any flow that shows then asks).
+applied: one digest check, #285's manifest_sha256(expected_manifest_sha256=),
+which pin, record and digest-check all use (release_loop.py calls it too).
 
 Commands. Each answers with exactly one versioned line (ANSWERS) and the exit
 code that goes with it; callers accept only an exact (exit code, line) pair, as
@@ -296,12 +296,23 @@ def _asked_above(asker) -> None:
                       "nested make started from outside the run)")
 
 
-def _is_digest(value) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+def manifest_sha256(manifest_path: Path, expected_manifest_sha256: str | None = None, *,
+                    raw: bytes | None = None) -> str:
+    """The manifest's digest, refusing if it changed from the bytes the caller reviewed.
+
+    ``raw``: the bytes the caller already read (pin), so the digest checked is
+    the digest of exactly what it shows; otherwise the file is read here.
+    """
+    from scripts import release_gate as rg
+
+    digest = rg.sha256_bytes(raw) if raw is not None else rg.sha256_file(Path(manifest_path))
+    if expected_manifest_sha256 is not None and digest != expected_manifest_sha256:
+        raise Refused(f"manifest {manifest_path} changed after it was shown for approval; nothing was approved")
+    return digest
 
 
 def pin(manifest_path: Path, env: str, expected_manifest_sha256: str | None = None) -> tuple[dict, str]:
-    """The manifest as read once (a single read, never through a symlink), and the sha256 of those bytes.
+    """The manifest as read once (a single read, never through a symlink), and its manifest_sha256.
 
     With ``expected_manifest_sha256``, refuses unless those bytes still have it: what is
     shown, asked about, recorded and applied is one fixed set of bytes.
@@ -314,9 +325,7 @@ def pin(manifest_path: Path, env: str, expected_manifest_sha256: str | None = No
         raise Refused(f"manifest {manifest_path} can't be read ({exc.strerror})") from exc
     with os.fdopen(fd, "rb") as handle:
         raw = handle.read()
-    digest = rg.sha256_bytes(raw)
-    if expected_manifest_sha256 is not None:
-        require_digest(manifest_path, expected_manifest_sha256, actual=digest)
+    digest = manifest_sha256(manifest_path, expected_manifest_sha256, raw=raw)
     try:
         data = json.loads(raw)
     except (ValueError, UnicodeDecodeError) as exc:
@@ -327,30 +336,6 @@ def pin(manifest_path: Path, env: str, expected_manifest_sha256: str | None = No
     if data.get("env") != env:
         raise Refused(f"{manifest_path} is a manifest for {data.get('env')}, not {env}")
     return data, digest
-
-
-def manifest_sha256(manifest_path: Path, expected_manifest_sha256: str | None = None) -> str:
-    """The manifest's digest, refusing if it changed from the bytes the caller reviewed (as in #285)."""
-    from scripts import release_gate as rg
-
-    try:
-        digest = rg.sha256_file(Path(manifest_path))
-    except OSError as exc:
-        raise Refused(f"manifest {manifest_path} can't be read ({exc.strerror})") from exc
-    if expected_manifest_sha256 is not None:
-        require_digest(manifest_path, expected_manifest_sha256, actual=digest)
-    return digest
-
-
-def require_digest(manifest_path: Path, expected_manifest_sha256: str, *, actual: str | None = None) -> None:
-    """Refuse unless the manifest file's sha256 is ``expected_manifest_sha256`` (the bytes shown and approved)."""
-    if not _is_digest(expected_manifest_sha256):
-        raise Refused(f"{expected_manifest_sha256!r} is not a sha256 digest")
-    if actual is None:
-        actual = manifest_sha256(manifest_path)
-    if actual != expected_manifest_sha256:
-        raise Refused(f"manifest {manifest_path} changed after it was shown for approval (sha256 {actual}, shown "
-                      f"{expected_manifest_sha256}); nothing was approved or applied")
 
 
 def summary(manifest_path: Path, manifest: Mapping, digest: str) -> list[str]:
@@ -544,7 +529,7 @@ def _answer(line: str, answer_file: Path | None) -> None:
 
 def _record_digest(path: Path) -> str:
     data = _read_private(Path(path)) or {}
-    if not _is_digest(data.get("manifest_sha256")):
+    if not isinstance(data.get("manifest_sha256"), str) or not data["manifest_sha256"]:
         raise Refused(f"approval record {path} names no manifest digest")
     return data["manifest_sha256"]
 
@@ -602,7 +587,7 @@ def _run(args) -> int:
         return 0
     if args.command == "digest-check":
         try:
-            require_digest(args.manifest, args.expect_digest or _record_digest(args.approval))
+            manifest_sha256(args.manifest, args.expect_digest or _record_digest(args.approval))
         except Refused as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             _answer(INVALID, args.answer_file)

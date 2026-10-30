@@ -541,8 +541,6 @@ def test_pin_reads_once_and_refuses_another_digest(repo, manifest):
     assert approval.pin(manifest, "prod", digest)[1] == digest
     with pytest.raises(approval.Refused, match="changed after it was shown"):
         approval.pin(manifest, "prod", "0" * 64)
-    with pytest.raises(approval.Refused, match="is not a sha256 digest"):
-        approval.require_digest(manifest, "abc")
     assert approval.manifest_sha256(manifest) == digest == approval.manifest_sha256(manifest, digest)
     with pytest.raises(approval.Refused, match="changed after it was shown for approval"):
         approval.manifest_sha256(manifest, "0" * 64)
