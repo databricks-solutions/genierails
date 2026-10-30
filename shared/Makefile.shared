@@ -1139,7 +1139,7 @@ _apply-account-for-workspace: _guard-not-databricks-compute
 		$(MAKE) --no-print-directory _apply-layer LAYER=account TARGET_ENV=$(ACCOUNT_ENV) LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)"; \
 	fi
 
-account-plan: _guard-not-databricks-compute _guarded-bootstrap ## Plan shared account resources: clean origin/main HEAD -> immutable account manifest to approve
+account-plan: _guard-not-databricks-compute _guarded-bootstrap ## Plan shared account resources: clean provenance HEAD -> immutable account manifest to approve
 	@$(MAKE) --no-print-directory _account-plan-locked ENV="$(ACCOUNT_ENV)" ENV_DIR="$(ACCOUNT_ENV_DIR)"
 
 _account-plan-locked: _guard-not-databricks-compute
@@ -1427,8 +1427,9 @@ release: _guard-not-ci-apply _guard-genie-placeholder ## Derive, validate, prove
 # make rehearse ENV=dev would write without re-applying, under the dev lock;
 # it never applies), then checks provenance (release_gate.py provenance:
 # a passing clean rehearsal of HEAD, a clean checkout, HEAD on freshly fetched
-# origin/main, matching fingerprints and envs/prod/generated digest, not older
-# than the last release unless prod:rollback:<commit> is acknowledged), then,
+# origin/main (or committed local HEAD when the repo has no remotes), matching
+# fingerprints and envs/prod/generated digest, not older than the last release
+# unless prod:rollback:<commit> is acknowledged), then,
 # under the prod lock, re-derives prod's config from live tags into the
 # runtime overlay with the deployed policy names kept, runs the reader and
 # refuse-weakening checks, saves a Terraform plan for every root (data_access
