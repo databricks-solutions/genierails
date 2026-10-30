@@ -180,13 +180,13 @@ def test_deterministic_prod_banner_pushes_then_release_plan_reuses_the_source_re
     prod = readme[readme.index("## Prod"):readme.index("## Keep it safe")]
     step = prod[prod.index("**3. Plan, release.**"):prod.index("**4. Record evidence.**")]
     block = step[step.index("```bash"):step.index("```", step.index("```bash") + 3)]
-    # release-plan runs make check itself, so the block has no separate check line.
-    assert block.split("\n")[1:] == ["make release-plan ENV=prod", "make release ENV=prod", ""]
+    # At a terminal release runs release-plan (and make check) each round: the block is one line.
+    assert block.split("\n")[1:] == ["make release ENV=prod", ""]
     flat = " ".join(step.split())
     order = ["plans only a commit on your `origin/main` that has a passing `make rehearse ENV=dev` of that same commit",
              "release-plan reuses that rehearsal itself and applies nothing in dev",
              "run make rehearse ENV=dev on this commit",
-             "run the full `make rehearse ENV=dev`, then `make release-plan ENV=prod` again"]
+             "run the full `make rehearse ENV=dev`, then `make release ENV=prod` again"]
     positions = [flat.index(step) for step in order]
     assert positions == sorted(positions)
 

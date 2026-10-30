@@ -77,6 +77,8 @@ def parse_makefile(path, variables=None, _seen=None):
             continue
         if words[0] in _DIRECTIVES:
             continue
+        if re.match(r"^\$\((error|warning|info|eval)\b", stripped):
+            continue
         match = _RULE.match(stripped)
         if not match:
             continue

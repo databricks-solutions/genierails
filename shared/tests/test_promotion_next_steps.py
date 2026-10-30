@@ -82,8 +82,11 @@ REUSE = "it reuses the"
 # with its reuse, then release, and never asks for a rehearse on that commit.
 DOC_REUSE = [
     ("shared/examples/dev_to_prod/README.md", "make promote-to ENV=prod # copies the reviewed rules",
-     ["offers to commit + push (y)", "make release-plan ENV=prod # reuses dev's rehearsal", "make release ENV=prod"]),
-    ("shared/examples/dev_to_prod/README.md", "**3. Plan, release.**", MAKE_PLAN),
+     ["offers to commit + push (y)", "make release ENV=prod # at a terminal, each round: plans prod", "(reusing dev's "
+      "rehearsal"]),
+    ("shared/examples/dev_to_prod/README.md", "**3. Plan, release.**",
+     ["make release ENV=prod", "Each round it plans (`make release-plan ENV=prod`)",
+      "the next `make release ENV=prod` offers it first"]),
     ("shared/examples/dev_to_prod/README.md", "**Reuse an existing mask** (the common case)",
      ["`make promote-to ENV=prod`", "`make release-plan ENV=prod`", REUSE,
       "`make release ENV=prod`"]),
@@ -140,7 +143,8 @@ DOC_REUSE = [
 DOC_ORDER = [
     ("shared/examples/dev_to_prod/REFERENCE.md", "- Then `make rehearse ENV=dev`, `make promote-to ENV=prod`",
      ["`make promote-to ENV=prod`", "`make release ENV=prod`", "legacy envs have no `release-plan`"]),
-    ("README.md", "promote the *rules* to prod", ["release a rehearsed commit", *PLAN]),
+    ("README.md", "promote the *rules* to prod",
+     ["release a rehearsed commit", "`make release ENV=prod`", "a y/N per manifest"]),
     ("shared/docs/pipelines.md", "**`make release-plan ENV=prod`** refuses",
      ["of prod's source env (`promote_from`, dev by default)"]),
     ("shared/docs/legacy-migration.md", "make promote-to ENV=prod # 2d.",

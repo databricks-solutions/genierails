@@ -20,7 +20,7 @@ import pytest
 
 from scripts import approval
 from scripts import release_gate as rg
-from tests.test_approval import QUESTION, _forge, _record
+from tests.test_approval import QUESTION, _forge, _record, approval_run  # noqa: F401 (fixture)
 from tests.test_release_gate import (  # noqa: F401 (fixtures)
     _second_manifest, account_manifest, manifest, repo,
 )
