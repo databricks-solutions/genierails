@@ -298,7 +298,8 @@ def test_following_the_prod_section_word_for_word_reaches_a_release_manifest(cus
         if target == "setup":
             # make setup ENV=prod adds prod's lines to the .gitignore the next commit must include.
             assert "/envs/prod/abac.auto.tfvars" in (repo.cloud / ".gitignore").read_text()
-            assert "git add .gitignore envs/" in text, text
+            assert "git add .gitignore envs/prod/ envs/account/ && git commit" in text, text
+            assert "promote-to offers it on a terminal: answer y" in text, text
             _fill_in_prod(repo)
         elif target == "check":
             # Offline, check's plan step (6) needs prod's live classification config.

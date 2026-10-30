@@ -90,7 +90,7 @@ def test_fresh_clone_with_repo_renames_origin_adds_repo_and_pushes_nothing(cloud
     assert _remotes(repo) == {"genierails": UPSTREAM, "origin": url}
     assert "Git: renamed remote origin -> genierails" in result.stdout
     assert f"Git: added remote origin = {url}" in result.stdout
-    assert "nothing was pushed" in result.stdout
+    assert "origin is ready; setup may offer to commit and push its safe files at the end" in result.stdout
     assert _no_refs(url)
     # origin is now the customer's, so the same setup run wrote the .gitignore block.
     assert cg.BEGIN in (repo / cloud / ".gitignore").read_text()
