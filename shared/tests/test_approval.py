@@ -195,6 +195,17 @@ def test_a_second_y_gets_its_own_record(repo, manifest):
     assert first != second and len(_approvals(repo.prod, "prod")) == 2
 
 
+def test_record_refuses_when_the_manifest_changed_after_review(repo, manifest):
+    reviewed = approval.manifest_sha256(manifest)
+    data = json.loads(manifest.read_text())
+    data["host"] = "changed-after-review"
+    manifest.chmod(0o600)
+    manifest.write_text(json.dumps(data))
+    with pytest.raises(approval.Refused, match="changed after it was shown"):
+        _record(repo, manifest, expected_manifest_sha256=reviewed)
+    assert not _approvals(repo.prod, "prod")
+
+
 def test_record_never_overwrites(repo, manifest, monkeypatch):
     monkeypatch.setattr(rg, "_now", lambda: "2030-01-01T00:00:00.000000Z")
     first = _record(repo, manifest)
@@ -421,6 +432,23 @@ def test_approve_on_a_terminal_writes_the_record_only_on_y(repo, manifest, tmp_p
     assert approval.check(repo.prod, "prod", manifest, record)["manifest_sha256"] == rg.sha256_file(manifest)
 
 
+def test_approve_cli_expect_digest_refuses_a_change_while_waiting_for_y(repo, manifest, tmp_path):
+    reviewed = rg.sha256_file(manifest)
+    args = ["approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest),
+            "--question", QUESTION, "--expect-digest", reviewed]
+
+    def mutate_then_approve():
+        changed = json.loads(manifest.read_text())
+        changed["host"] = "changed-after-display"
+        manifest.chmod(0o600)
+        manifest.write_text(json.dumps(changed))
+        return "y"
+
+    rc, line, shown = _pty(args, mutate_then_approve, _environ(MAKELEVEL="1") | repo.env, tmp_path)
+    assert (rc, line) == (1, approval.REFUSED + "\n"), shown
+    assert "changed after it was shown for approval" in shown and not _approvals(repo.prod, "prod")
+
+
 @pytest.mark.parametrize("extra", [{"CI": "true"}, {"GENIERAILS_ALLOW_CI_APPLY": "1"},
                                    {"GENIERAILS_INTERACTIVE": "0"}, {"MAKELEVEL": "2"}, {"MAKELEVEL": ""}])
 def test_on_a_terminal_ci_or_an_opt_out_still_refuses(repo, manifest, tmp_path, extra):
@@ -457,7 +485,7 @@ def test_the_cli_has_no_command_that_records_without_asking():
                for name, cmd in sub.choices.items()}
     assert options == {
         "interactive": ["--answer-file"], "ask": ["--answer-file", "--question"],
-        "approve": ["--answer-file", "--env", "--env-dir", "--manifest", "--question", "--round"],
+        "approve": ["--answer-file", "--env", "--env-dir", "--expect-digest", "--manifest", "--question", "--round"],
         "check": ["--answer-file", "--approval", "--env", "--env-dir", "--manifest"]}
 
 

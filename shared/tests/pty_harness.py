@@ -29,7 +29,7 @@ def pty_run(cmd, answer, env, cwd=None, timeout=300, prompt=PROMPT):
     leaves any later prompt unanswered.
     Returns (exit code, everything the terminal showed, CRLF as LF).
     """
-    answers = [answer] if answer is None or isinstance(answer, str) else list(answer)
+    answers = [answer] if answer is None or isinstance(answer, str) or callable(answer) else list(answer)
     master, slave = pty.openpty()
     proc = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave, env=env, cwd=cwd, close_fds=True,
                             start_new_session=True, preexec_fn=_default_sigint)
@@ -49,6 +49,8 @@ def pty_run(cmd, answer, env, cwd=None, timeout=300, prompt=PROMPT):
             while answered < len(answers) and answers[answered] is not None \
                     and out.count(prompt.encode()) > answered:
                 typed = answers[answered]
+                if callable(typed):
+                    typed = typed()
                 if typed == CTRL_C:
                     os.killpg(proc.pid, signal.SIGINT)
                 else:

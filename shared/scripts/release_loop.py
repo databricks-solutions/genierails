@@ -173,13 +173,16 @@ def release(env: str, env_dir: Path, make: list[str], verify_key_column: str = "
         else:
             _say(f"=== Release round {round_no} ({env}): the current manifest, planned earlier, can still be "
                  "released ===")
+        manifest_sha256 = approval.manifest_sha256(current)
         try:
             manifest = rg.load_manifest(current, env)
         except rg.Refused as exc:
             print(f"ERROR: {exc}; nothing was released.", file=sys.stderr)
             return 1
         _say()
-        for line in rg.manifest_summary(current, manifest):
+        summary = rg.manifest_summary(current, manifest)
+        summary.insert(1, f"  SHA256:   {manifest_sha256}")
+        for line in summary:
             _say(line)
         question = (f"Approve and release manifest {manifest['id']} (commit {manifest['commit'][:12]}, round "
                     f"{round_no} of at most {MAX_ROUNDS})?")
@@ -187,7 +190,8 @@ def release(env: str, env_dir: Path, make: list[str], verify_key_column: str = "
             _say(f"Not released. Manifest {manifest['id']} stays current: re-run make release ENV={env} to be "
                  f"asked again; a pipeline releases it with make release ENV={env} MANIFEST={current}")
             return 1
-        record = approval.record(env_dir, env, current, question, run=run, round_no=round_no)
+        record = approval.record(env_dir, env, current, question, run=run, round_no=round_no,
+                                 expected_manifest_sha256=manifest_sha256)
         _say(f"Approved at this terminal: {record}")
         cmd = [*base, "_release-manifest", *env_args, f"MANIFEST={current}", f"APPROVAL={record}"]
         if verify_key_column:

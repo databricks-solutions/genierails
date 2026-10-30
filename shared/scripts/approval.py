@@ -53,7 +53,7 @@ read the answer while stdin and stdout stay the terminal. ``approve`` answers
 ``approved:<record path>``.
   interactive                                           INTERACTIVE or NOT_INTERACTIVE, both exit 0
   ask --question Q                                      YES (0), NO (1) or REFUSED (1: not interactive)
-  approve --env-dir E --env N --manifest M --question Q [--round K]
+  approve --env-dir E --env N --manifest M --question Q [--round K] [--expect-digest SHA]
                                                         asks, and on y writes the record of the RUN_ENV run:
                                                         APPROVED:<path> (0), NO (1) or REFUSED (1; no run either)
   check --env-dir E --env N --manifest M --approval A   VALID (0) or INVALID (1, the reason on stderr; a record
@@ -256,8 +256,19 @@ def _user() -> str:
         return ""
 
 
+def manifest_sha256(manifest_path: Path, expected_manifest_sha256: str | None = None) -> str:
+    """The manifest's digest, refusing if it changed from the bytes the caller reviewed."""
+    from scripts import release_gate as rg
+
+    digest = rg.sha256_file(Path(manifest_path))
+    if expected_manifest_sha256 is not None and digest != expected_manifest_sha256:
+        raise Refused(f"manifest {manifest_path} changed after it was shown for approval; nothing was approved")
+    return digest
+
+
 def record(env_dir: Path, env: str, manifest_path: Path, question: str, *, run: str, round_no: int | None = None,
-           environ: Mapping[str, str] | None = None, stdin: IO | None = None, stdout: IO | None = None) -> Path:
+           expected_manifest_sha256: str | None = None, environ: Mapping[str, str] | None = None,
+           stdin: IO | None = None, stdout: IO | None = None) -> Path:
     """Write the write-once record of a y just typed at this terminal for ``manifest_path``, in run ``run``.
 
     Called only after ask() returned True; it refuses, too, when no one is at
@@ -270,11 +281,12 @@ def record(env_dir: Path, env: str, manifest_path: Path, question: str, *, run: 
     run = run_of({RUN_ENV: run})
     env_dir, manifest_path = Path(env_dir), Path(manifest_path).resolve()
     manifest = _load_manifest(env_dir, env, manifest_path)
+    digest = manifest_sha256(manifest_path, expected_manifest_sha256)
     approved_at = rg._now()
     payload = {
         "kind": KIND, "version": VERSION, "env": env, "manifest_kind": manifest["kind"],
         "manifest_id": manifest["id"], "manifest_path": str(manifest_path),
-        "manifest_sha256": rg.sha256_file(manifest_path), "commit": manifest["commit"],
+        "manifest_sha256": digest, "commit": manifest["commit"],
         "via": VIA_TERMINAL, "user": _user(), "git_user": _git_user(env_dir), "host": socket.gethostname(),
         "tty": _tty(), "approved_at": approved_at, "question": prompt(question), "round": round_no,
         "run_sha256": run_sha256(run),
@@ -368,6 +380,7 @@ def _parser() -> argparse.ArgumentParser:
     approve = sub.choices["approve"]
     approve.add_argument("--question", required=True)
     approve.add_argument("--round", type=int, default=None)
+    approve.add_argument("--expect-digest", default=None)
     sub.choices["check"].add_argument("--approval", type=Path, required=True)
     return parser
 
@@ -413,8 +426,13 @@ def _run(args) -> int:
     if args.command == "ask":
         _answer(YES, args.answer_file)
         return 0
-    path = record(args.env_dir, args.env, args.manifest, args.question, run=os.environ.get(RUN_ENV, ""),
-                  round_no=args.round)
+    try:
+        path = record(args.env_dir, args.env, args.manifest, args.question, run=os.environ.get(RUN_ENV, ""),
+                      round_no=args.round, expected_manifest_sha256=args.expect_digest)
+    except Refused as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        _answer(REFUSED, args.answer_file)
+        return 1
     _answer(f"{APPROVED}:{path}", args.answer_file)
     return 0
 

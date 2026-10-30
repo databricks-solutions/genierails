@@ -211,6 +211,25 @@ def test_a_refused_apply_stops_the_loop_without_planning_again(loop_make, repo):
     assert rg.current_manifest(repo.prod, "prod") == manifest and _unlocked(repo.prod)
 
 
+def test_manifest_changed_after_display_is_not_approved_or_applied(loop_make, repo):
+    manifest = _planned(loop_make)
+    shown_digest = rg.sha256_file(manifest)
+
+    def mutate_then_approve():
+        changed = json.loads(manifest.read_text())
+        changed["host"] = "changed-after-display"
+        manifest.chmod(0o600)
+        manifest.write_text(json.dumps(changed))
+        return "y"
+
+    rc, shown = _on_a_pty(loop_make, [mutate_then_approve])
+    assert rc == MAKE_FAILED and f"SHA256:   {shown_digest}" in shown, shown
+    assert "changed after it was shown for approval" in shown
+    assert "_release-manifest" not in loop_make.names()
+    assert not _approvals(repo) and not _phase_records(repo) and not rg.release_receipts(repo.cloud, "prod")
+    assert _unlocked(repo.prod)
+
+
 # -- everything else releases once, exactly as before ------------------------------------
 
 PRIMITIVE = ["--no-print-directory", "_release-manifest", "ENV=prod"]
