@@ -328,11 +328,13 @@ def test_every_in_recipe_same_env_promote_clears_cross_env_variables():
         assert setting in definition
     # release, release-plan, apply, apply-governance and plan's PROMOTE_AFTER all use it;
     # the only raw promote calls left are the explicit cross-env test targets
-    # and promote-to, which passes every cross-env variable explicitly.
+    # and promote-to, which passes every cross-env variable explicitly (under its promote
+    # token since #261: promote_token.py run passes the command through unchanged).
     raw = [line.strip() for line in makefile.splitlines()
            if re.search(r"\$\(MAKE\)[^\n]*\bpromote\b", line) and "_SAME_ENV_PROMOTE =" not in line]
     assert raw == [
-        '$(MAKE) --no-print-directory promote ENV="$$src" ENV_DIR="$$src_dir" SOURCE_ENV="$$src" SOURCE_ENV_DIR="$$src_dir" \\',
+        '$(_PROMOTE_TO_TOKEN) run --env-dir "$$dest_dir" -- $(MAKE) --no-print-directory promote ENV="$$src" '
+        'ENV_DIR="$$src_dir" SOURCE_ENV="$$src" SOURCE_ENV_DIR="$$src_dir" \\',
         "$(MAKE) --no-print-directory promote \\",
     ], raw
     to = makefile[makefile.index("\npromote-to:"):]
