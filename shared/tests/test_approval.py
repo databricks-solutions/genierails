@@ -497,7 +497,7 @@ def test_approve_shows_the_removal_warning_right_above_the_prompt_and_records_th
         repo, account_manifest, tmp_path):
     env_dir = repo.cloud / "envs" / "account"
     args = ["approve", "--env-dir", str(env_dir), "--env", "account", "--manifest", str(account_manifest),
-            "--question", QUESTION]
+            "--question", QUESTION, "--expect-digest", rg.sha256_file(account_manifest)]
     rc, line, shown = _pty_under_make(args, "y", _environ() | repo.env | {approval.RUN_ENV: NONCE}, tmp_path)
     assert rc == 0, shown
     warning = shown.index("!! WARNING: approving this account manifest REMOVES 1 tag value(s)")
@@ -506,6 +506,88 @@ def test_approve_shows_the_removal_warning_right_above_the_prompt_and_records_th
     [record] = _approvals(env_dir, "account")
     assert json.loads(record.read_text())["question"] == (
         "Approve and apply this account manifest, INCLUDING REMOVING THE 1 TAG VALUE(S) ABOVE? [y/N] ")
+
+
+# -- the bytes approved are the bytes shown -------------------------------------------------
+
+def _mutate(manifest: Path, **changes) -> None:
+    manifest.chmod(0o600)
+    manifest.write_text(json.dumps(json.loads(manifest.read_text()) | changes, indent=2))
+    manifest.chmod(0o400)
+
+
+def test_pin_reads_once_and_refuses_another_digest(repo, manifest):
+    data, digest = approval.pin(manifest, "prod")
+    assert digest == rg.sha256_file(manifest) and data == json.loads(manifest.read_text())
+    assert approval.pin(manifest, "prod", digest)[1] == digest
+    with pytest.raises(approval.Refused, match="changed after it was shown"):
+        approval.pin(manifest, "prod", "0" * 64)
+    with pytest.raises(approval.Refused, match="is not a sha256 digest"):
+        approval.require_digest(manifest, "abc")
+    with pytest.raises(approval.Refused, match="is a manifest for prod, not dev"):
+        approval.pin(manifest, "dev")
+    link = manifest.with_name("link.json")
+    link.symlink_to(manifest)
+    with pytest.raises(approval.Refused, match="can't be read"):
+        approval.pin(link, "prod")
+
+
+def test_record_with_a_digest_pins_it_and_refuses_a_changed_manifest(repo, manifest):
+    digest = rg.sha256_file(manifest)
+    record = _record(repo, manifest, expect_digest=digest)
+    assert json.loads(record.read_text())["manifest_sha256"] == digest
+    _mutate(manifest, host="mutated-after-display")
+    with pytest.raises(approval.Refused, match="changed after it was shown"):
+        _record(repo, manifest, expect_digest=digest)
+    assert _approvals(repo.prod, "prod") == [record]
+    with pytest.raises(approval.Refused, match="manifest_sha256 differ"):  # and under the apply's lock
+        approval.check(repo.prod, "prod", manifest, record)
+
+
+def test_show_prints_the_summary_and_the_digest_of_the_bytes_it_read(repo, account_manifest, tmp_path):
+    env_dir = repo.cloud / "envs" / "account"
+    (tmp_path / "answer").touch()
+    rc, out, err = _cli("show", "--env-dir", str(env_dir), "--env", "account", "--manifest", str(account_manifest),
+                        "--answer-file", str(tmp_path / "answer"), env=_environ() | repo.env)
+    digest = rg.sha256_file(account_manifest)
+    assert rc == 0, err
+    assert (tmp_path / "answer").read_text() == f"{approval.DIGEST}:{digest}\n"
+    assert f"  Manifest: {account_manifest.resolve()}" in out and "!! TAG VALUES THIS MANIFEST REMOVES" in out
+    assert out.rstrip().endswith(f"  Manifest sha256: {digest} (approving approves exactly these bytes)")
+
+
+def test_digest_check_against_a_digest_or_the_records(repo, manifest):
+    digest = rg.sha256_file(manifest)
+    record = _record(repo, manifest, expect_digest=digest)
+    env = _environ() | repo.env
+    for how in (("--expect-digest", digest), ("--approval", str(record))):
+        assert _cli("digest-check", "--manifest", str(manifest), *how, env=env) == (0, approval.VALID + "\n", "")
+    _mutate(manifest, host="mutated-after-approval")
+    for how in (("--expect-digest", digest), ("--approval", str(record))):
+        rc, out, err = _cli("digest-check", "--manifest", str(manifest), *how, env=env)
+        assert (rc, out) == (1, approval.INVALID + "\n") and "changed after it was shown" in err
+
+
+def test_approve_refuses_before_asking_when_the_manifest_is_not_the_one_shown(repo, manifest, tmp_path):
+    args = ["approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest),
+            "--question", QUESTION, "--expect-digest", "0" * 64]
+    rc, line, shown = _pty_under_make(args, "y", _environ() | repo.env | {approval.RUN_ENV: NONCE}, tmp_path)
+    assert line == approval.REFUSED + "\n" and "changed after it was shown" in shown, shown
+    assert "[y/N]" not in shown and not _approvals(repo.prod, "prod")
+
+
+def test_approve_refuses_a_manifest_changed_while_the_question_was_up_and_records_nothing(repo, manifest,
+                                                                                        tmp_path):
+    """Codex's repro on approve itself: the file changes between the prompt and the y."""
+    args = ["approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest),
+            "--question", QUESTION, "--expect-digest", rg.sha256_file(manifest)]
+    answer_file = tmp_path / "answer"
+    answer_file.touch()
+    rc, shown = pty_run(under_make(tmp_path, [sys.executable, str(SCRIPT), *args, "--answer-file", str(answer_file)]),
+                        "y", _environ() | repo.env | {approval.RUN_ENV: NONCE},
+                        before_answer=lambda: _mutate(manifest, host="mutated-at-the-prompt"))
+    assert rc != 0 and answer_file.read_text() == approval.REFUSED + "\n", shown
+    assert "changed after it was shown" in shown and not _approvals(repo.prod, "prod")
 
 
 # -- the CLI: one exact versioned answer ----------------------------------------------
@@ -523,7 +605,9 @@ def test_the_answers_are_the_documented_lines():
                 (1, "genierails-approval:v1:refused")},
         "approve": {(0, "genierails-approval:v1:approved"), (1, "genierails-approval:v1:no"),
                     (1, "genierails-approval:v1:refused")},
-        "check": {(0, "genierails-approval:v1:valid"), (1, "genierails-approval:v1:invalid")}}
+        "check": {(0, "genierails-approval:v1:valid"), (1, "genierails-approval:v1:invalid")},
+        "show": {(0, "genierails-approval:v1:digest")},
+        "digest-check": {(0, "genierails-approval:v1:valid"), (1, "genierails-approval:v1:invalid")}}
 
 
 def test_the_makefile_accepts_only_the_exact_check_answers():
@@ -540,7 +624,7 @@ def test_cli_off_a_terminal(repo, manifest):
     rc, out, err = _cli("ask", "--question", QUESTION)
     assert (rc, out) == (1, approval.REFUSED + "\n") and "no person at a terminal" in err
     rc, out, err = _cli("approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest),
-                        "--question", QUESTION, env=_environ(MAKELEVEL="1") | repo.env)
+                        "--question", QUESTION, "--expect-digest", rg.sha256_file(manifest), env=_environ(MAKELEVEL="1") | repo.env)
     assert (rc, out) == (1, approval.REFUSED + "\n") and not _approvals(repo.prod, "prod")
 
 
@@ -556,7 +640,8 @@ def test_cli_check(repo, manifest, tmp_path):
 
 def test_cli_check_is_valid_only_inside_the_run_that_asked(repo, manifest, tmp_path):
     approve = [sys.executable, str(SCRIPT), "approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest",
-               str(manifest), "--question", QUESTION, "--answer-file", str(tmp_path / "answer")]
+               str(manifest), "--question", QUESTION, "--expect-digest", rg.sha256_file(manifest), "--answer-file",
+               str(tmp_path / "answer")]
     check = [sys.executable, str(SCRIPT), "check", "--env-dir", str(repo.prod), "--env", "prod", "--manifest",
              str(manifest), "--approval"]
     (tmp_path / "answer").touch()
@@ -613,7 +698,7 @@ def _pty_under_make(args, answer, env, tmp_path):
 
 def test_ctrl_c_at_the_terminal_exits_130_answers_nothing_and_writes_no_record(repo, manifest, tmp_path):
     args = ["approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest),
-            "--question", QUESTION]
+            "--question", QUESTION, "--expect-digest", rg.sha256_file(manifest)]
     rc, line, shown = _pty_under_make(args, CTRL_C, _environ() | repo.env | {approval.RUN_ENV: NONCE}, tmp_path)
     assert rc != 0 and line == "", shown
     assert not _approvals(repo.prod, "prod")
@@ -621,7 +706,7 @@ def test_ctrl_c_at_the_terminal_exits_130_answers_nothing_and_writes_no_record(r
 
 def test_approve_on_a_terminal_writes_the_record_only_on_y(repo, manifest, tmp_path, monkeypatch):
     args = ["approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest),
-            "--question", QUESTION, "--round", "3"]
+            "--question", QUESTION, "--expect-digest", rg.sha256_file(manifest), "--round", "3"]
     env = _environ() | repo.env | {approval.RUN_ENV: NONCE}
     for answer in ("n", "", CTRL_D, "Y es"):
         rc, line, shown = _pty_under_make(args, answer, env, tmp_path)
@@ -642,7 +727,7 @@ def test_approve_on_a_terminal_writes_the_record_only_on_y(repo, manifest, tmp_p
 
 def test_approve_refuses_before_asking_without_a_nonce_or_outside_a_make_recipe(repo, manifest, tmp_path):
     args = ["approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest),
-            "--question", QUESTION]
+            "--question", QUESTION, "--expect-digest", rg.sha256_file(manifest)]
     rc, line, shown = _pty_under_make(args, "y", _environ() | repo.env, tmp_path)  # no nonce
     assert line == approval.REFUSED + "\n" and "no approval run (GENIERAILS_APPROVAL_RUN)" in shown, shown
     assert "[y/N]" not in shown
@@ -656,7 +741,7 @@ def test_approve_refuses_before_asking_without_a_nonce_or_outside_a_make_recipe(
                                    {"GENIERAILS_INTERACTIVE": "0"}, {"MAKELEVEL": "2"}, {"MAKELEVEL": ""}])
 def test_on_a_terminal_ci_or_an_opt_out_still_refuses(repo, manifest, tmp_path, extra):
     args = ["approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest),
-            "--question", QUESTION]
+            "--question", QUESTION, "--expect-digest", rg.sha256_file(manifest)]
     rc, line, shown = _pty(args, "y", _environ(MAKELEVEL="1") | repo.env | extra, tmp_path)
     assert (rc, line) == (1, approval.REFUSED + "\n"), shown
     assert "[y/N]" not in shown and not _approvals(repo.prod, "prod")
@@ -670,7 +755,7 @@ APPROVE_ENV = {"YES": "1", "APPROVE": "1", "APPROVAL": "1", "GENIERAILS_APPROVE"
 
 def test_no_flag_or_variable_approves_off_a_terminal(repo, manifest):
     base = ["approve", "--env-dir", str(repo.prod), "--env", "prod", "--manifest", str(manifest),
-            "--question", QUESTION]
+            "--question", QUESTION, "--expect-digest", rg.sha256_file(manifest)]
     for flag in ("--yes", "-y", "--force", "--assume-yes", "--approve", "--non-interactive", "--answer=y"):
         rc, out, err = _cli(*base, flag, env=_environ() | repo.env | APPROVE_ENV)
         assert rc == 2 and out == "" and "unrecognized arguments" in err, flag
@@ -683,12 +768,14 @@ def test_no_flag_or_variable_approves_off_a_terminal(repo, manifest):
 def test_the_cli_has_no_command_that_records_without_asking():
     parser = approval._parser()
     sub = next(a for a in parser._actions if isinstance(a.choices, dict))
-    assert set(sub.choices) == {"interactive", "ask", "approve", "check"}
+    assert set(sub.choices) == {"interactive", "ask", "show", "approve", "check", "digest-check"}
     options = {name: sorted(o for a in cmd._actions for o in a.option_strings if o not in ("-h", "--help"))
                for name, cmd in sub.choices.items()}
     assert options == {
         "interactive": ["--answer-file"], "ask": ["--answer-file", "--question"],
-        "approve": ["--answer-file", "--env", "--env-dir", "--manifest", "--question", "--round"],
+        "show": ["--answer-file", "--env", "--env-dir", "--manifest"],
+        "approve": ["--answer-file", "--env", "--env-dir", "--expect-digest", "--manifest", "--question", "--round"],
+        "digest-check": ["--answer-file", "--approval", "--expect-digest", "--manifest"],
         "check": ["--answer-file", "--approval", "--env", "--env-dir", "--manifest"]}
 
 

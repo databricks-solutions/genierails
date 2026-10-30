@@ -60,6 +60,15 @@ The nonce narrows which records count; it can never turn prompting on. Someone
 with this uid who writes their own Makefile to replay all of it forges only
 the audit field, as above.
 
+The bytes approved are the bytes shown. The asking flow pins the manifest
+once, before it is displayed: ``show`` reads the file once, prints its summary
+from those bytes with their sha256 and answers that digest. ``approve
+--expect-digest`` refuses unless the file still has that digest when it asks
+and again when it records (the record names that digest), and ``check`` and
+``digest-check`` refuse, under the apply's lock, unless the file still has the
+record's digest. A manifest changed after it was shown is never approved or
+applied (pin, require_digest: reusable by any flow that shows then asks).
+
 Commands. Each answers with exactly one versioned line (ANSWERS) and the exit
 code that goes with it; callers accept only an exact (exit code, line) pair, as
 for scripts/ci_guard.py. The line goes to stdout, or with ``--answer-file F``
@@ -68,12 +77,16 @@ read the answer while stdin and stdout stay the terminal. ``approve`` answers
 ``approved:<record path>``.
   interactive                                           INTERACTIVE or NOT_INTERACTIVE, both exit 0
   ask --question Q                                      YES (0), NO (1) or REFUSED (1: not interactive)
-  approve --env-dir E --env N --manifest M --question Q [--round K]
+  show --env-dir E --env N --manifest M                 prints the summary of the bytes read once: DIGEST:<sha256> (0)
+  approve --env-dir E --env N --manifest M --question Q --expect-digest D [--round K]
                                                         asks, and on y writes the record: APPROVED:<path> (0),
                                                         NO (1) or REFUSED (1: not interactive, or no RUN_ENV run
                                                         or make recipe above it, so no record could count)
   check --env-dir E --env N --manifest M --approval A   VALID (0) or INVALID (1, the reason on stderr; a record
                                                         of another run, or with no RUN_ENV set, is invalid)
+  digest-check --manifest M (--expect-digest D | --approval A)
+                                                        VALID (0) or INVALID (1): the file still has digest D,
+                                                        or the digest record A approved
 Ctrl-C at a prompt exits 130 with no answer. An internal error prints no answer and exits 3.
 There is deliberately no command that writes a record without asking.
 """
@@ -118,10 +131,12 @@ YES = _PREFIX + "yes"
 NO = _PREFIX + "no"
 REFUSED = _PREFIX + "refused"
 APPROVED = _PREFIX + "approved"  # approve answers APPROVED + ":" + the record's path
+DIGEST = _PREFIX + "digest"  # show answers DIGEST + ":" + the sha256 of the bytes it showed
 VALID = _PREFIX + "valid"
 INVALID = _PREFIX + "invalid"
 ANSWERS = {"interactive": {(0, INTERACTIVE), (0, NOT_INTERACTIVE)}, "ask": {(0, YES), (1, NO), (1, REFUSED)},
-           "approve": {(0, APPROVED), (1, NO), (1, REFUSED)}, "check": {(0, VALID), (1, INVALID)}}
+           "approve": {(0, APPROVED), (1, NO), (1, REFUSED)}, "check": {(0, VALID), (1, INVALID)},
+           "show": {(0, DIGEST)}, "digest-check": {(0, VALID), (1, INVALID)}}
 NOT_A_TERMINAL = (
     "no person at a terminal to approve this (it needs the top-level make, outside CI, with stdin and stdout "
     "a terminal, and GENIERAILS_INTERACTIVE not 0). Nothing was approved.")
@@ -280,6 +295,64 @@ def _asked_above(asker) -> None:
                       "nested make started from outside the run)")
 
 
+def _is_digest(value) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def pin(manifest_path: Path, env: str, expect_digest: str | None = None) -> tuple[dict, str]:
+    """The manifest as read once (a single read, never through a symlink), and the sha256 of those bytes.
+
+    With ``expect_digest``, refuses unless those bytes still have it: what is
+    shown, asked about, recorded and applied is one fixed set of bytes.
+    """
+    from scripts import release_gate as rg
+
+    try:
+        fd = os.open(manifest_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise Refused(f"manifest {manifest_path} can't be read ({exc.strerror})") from exc
+    with os.fdopen(fd, "rb") as handle:
+        raw = handle.read()
+    digest = rg.sha256_bytes(raw)
+    if expect_digest is not None:
+        require_digest(manifest_path, expect_digest, actual=digest)
+    try:
+        data = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise Refused(f"{manifest_path} is not an account or release manifest") from exc
+    kind = data.get("kind") if isinstance(data, dict) else None
+    if kind not in MANIFEST_KINDS or data.get("version") != rg.VERSION:
+        raise Refused(f"{manifest_path} is not an account or release manifest")
+    if data.get("env") != env:
+        raise Refused(f"{manifest_path} is a manifest for {data.get('env')}, not {env}")
+    return data, digest
+
+
+def require_digest(manifest_path: Path, expect_digest: str, *, actual: str | None = None) -> None:
+    """Refuse unless the manifest file's sha256 is ``expect_digest`` (the bytes shown and approved)."""
+    from scripts import release_gate as rg
+
+    if not _is_digest(expect_digest):
+        raise Refused(f"{expect_digest!r} is not a sha256 digest")
+    if actual is None:
+        try:
+            actual = rg.sha256_file(Path(manifest_path))
+        except OSError as exc:
+            raise Refused(f"manifest {manifest_path} can't be read ({exc.strerror})") from exc
+    if actual != expect_digest:
+        raise Refused(f"the manifest {manifest_path} changed after it was shown (sha256 {actual}, shown "
+                      f"{expect_digest}); nothing was approved or applied")
+
+
+def summary(manifest_path: Path, manifest: Mapping, digest: str) -> list[str]:
+    """What ``show`` prints: the manifest's own summary, then the digest of exactly those bytes."""
+    from scripts import release_gate as rg
+
+    lines = (rg.account_manifest_summary if manifest.get("kind") == "account-manifest" else rg.manifest_summary)(
+        manifest_path, manifest)
+    return lines + [f"  Manifest sha256: {digest} (approving approves exactly these bytes)"]
+
+
 def _load_manifest(env_dir: Path, env: str, manifest_path: Path) -> dict:
     from scripts import release_gate as rg
 
@@ -337,8 +410,8 @@ def _user() -> str:
 
 
 def record(env_dir: Path, env: str, manifest_path: Path, question: str, *, run: str | None = None,
-           round_no: int | None = None, environ: Mapping[str, str] | None = None, stdin: IO | None = None,
-           stdout: IO | None = None) -> Path:
+           round_no: int | None = None, expect_digest: str | None = None, environ: Mapping[str, str] | None = None,
+           stdin: IO | None = None, stdout: IO | None = None) -> Path:
     """Write the write-once record of a y just typed at this terminal for ``manifest_path``, in run ``run``
     (default: RUN_ENV), asked by this process's make recipe (module docstring).
 
@@ -352,12 +425,15 @@ def record(env_dir: Path, env: str, manifest_path: Path, question: str, *, run: 
     run = run_of((os.environ if environ is None else environ) if run is None else {RUN_ENV: run})
     asker = _asker(_chain(os.getpid()))
     env_dir, manifest_path = Path(env_dir), Path(manifest_path).resolve()
-    manifest = _load_manifest(env_dir, env, manifest_path)
+    if expect_digest is None:
+        manifest, digest = _load_manifest(env_dir, env, manifest_path), rg.sha256_file(manifest_path)
+    else:  # the bytes shown, still the file's now (record time)
+        manifest, digest = pin(manifest_path, env, expect_digest)
     approved_at = rg._now()
     payload = {
         "kind": KIND, "version": VERSION, "env": env, "manifest_kind": manifest["kind"],
         "manifest_id": manifest["id"], "manifest_path": str(manifest_path),
-        "manifest_sha256": rg.sha256_file(manifest_path), "commit": manifest["commit"],
+        "manifest_sha256": digest, "commit": manifest["commit"],
         "via": VIA_TERMINAL, "user": _user(), "git_user": _git_user(env_dir), "host": socket.gethostname(),
         "tty": _tty(), "approved_at": approved_at, "question": prompt(question), "round": round_no,
         "run_sha256": run_sha256(run), "asker": asker,
@@ -457,6 +533,13 @@ def _answer(line: str, answer_file: Path | None) -> None:
         handle.write(line + "\n")
 
 
+def _record_digest(path: Path) -> str:
+    data = _read_private(Path(path)) or {}
+    if not _is_digest(data.get("manifest_sha256")):
+        raise Refused(f"approval record {path} names no manifest digest")
+    return data["manifest_sha256"]
+
+
 def _parser() -> argparse.ArgumentParser:
     # No abbreviations: --answer=y must never be read as an option (--answer-file=y).
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], allow_abbrev=False)
@@ -469,15 +552,21 @@ def _parser() -> argparse.ArgumentParser:
 
     command("interactive")
     command("ask").add_argument("--question", required=True)
-    for name in ("approve", "check"):
+    for name in ("show", "approve", "check"):
         cmd = command(name)
         cmd.add_argument("--env-dir", type=Path, required=True)
         cmd.add_argument("--env", required=True)
         cmd.add_argument("--manifest", type=Path, required=True)
     approve = sub.choices["approve"]
     approve.add_argument("--question", required=True)
+    approve.add_argument("--expect-digest", required=True)
     approve.add_argument("--round", type=int, default=None)
     sub.choices["check"].add_argument("--approval", type=Path, required=True)
+    digest_check = command("digest-check")
+    digest_check.add_argument("--manifest", type=Path, required=True)
+    expected = digest_check.add_mutually_exclusive_group(required=True)
+    expected.add_argument("--expect-digest")
+    expected.add_argument("--approval", type=Path)
     return parser
 
 
@@ -497,6 +586,20 @@ def _run(args) -> int:
     if args.command == "interactive":
         _answer(INTERACTIVE if interactive() else NOT_INTERACTIVE, args.answer_file)
         return 0
+    if args.command == "show":
+        manifest, digest = pin(args.manifest, args.env)
+        print("\n".join(summary(Path(args.manifest).resolve(), manifest, digest)), flush=True)
+        _answer(f"{DIGEST}:{digest}", args.answer_file)
+        return 0
+    if args.command == "digest-check":
+        try:
+            require_digest(args.manifest, args.expect_digest or _record_digest(args.approval))
+        except Refused as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            _answer(INVALID, args.answer_file)
+            return 1
+        _answer(VALID, args.answer_file)
+        return 0
     if args.command == "check":
         try:
             check(args.env_dir, args.env, args.manifest, args.approval)
@@ -513,6 +616,7 @@ def _run(args) -> int:
         if args.command == "approve" and interactive():  # a record it couldn't write: refuse before asking
             run_of()
             _asker(_chain(os.getpid()))
+            manifest, _ = pin(args.manifest, args.env, args.expect_digest)  # prompt time: still the bytes shown
             warning, question = removal_warning(manifest, question)
             if warning:
                 print("\n".join(warning), flush=True)
@@ -527,7 +631,13 @@ def _run(args) -> int:
     if args.command == "ask":
         _answer(YES, args.answer_file)
         return 0
-    path = record(args.env_dir, args.env, args.manifest, question, round_no=args.round)
+    try:  # record time: refuses if the manifest changed while the question was up
+        path = record(args.env_dir, args.env, args.manifest, question, round_no=args.round,
+                      expect_digest=args.expect_digest)
+    except Refused as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        _answer(REFUSED, args.answer_file)
+        return 1
     _answer(f"{APPROVED}:{path}", args.answer_file)
     return 0
 

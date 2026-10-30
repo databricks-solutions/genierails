@@ -15,6 +15,7 @@ make), run on a pseudo-terminal.
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -23,6 +24,7 @@ import pytest
 from scripts import approval
 from scripts import environment_lock
 from scripts import release_gate as rg
+from tests import script_stubs
 from tests.pty_harness import CTRL_D
 from tests.test_approval import NONCE, QUESTION, Tty, _forge, this_run  # noqa: F401 (autouse fixture)
 from tests.test_rehearse_account_approval import pty_make
@@ -35,18 +37,79 @@ CONSUMER = """include {root}/aws/Makefile
 _test-approve-then:
 \t@GENIERAILS_APPROVAL_RUN="$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \\n')"; export GENIERAILS_APPROVAL_RUN; \\
 \tanswer="$$(mktemp)"; \\
-\tpython3 "$(SHARED_ROOT)/scripts/approval.py" approve --env-dir "$(ENV_DIR)" --env "$(ENV)" --manifest "$(TEST_MANIFEST)" --question "{question}" --answer-file "$$answer" || exit 1; \\
+\tshown="$$(mktemp)"; python3 "$(SHARED_ROOT)/scripts/approval.py" show --env-dir "$(ENV_DIR)" --env "$(ENV)" --manifest "$(TEST_MANIFEST)" --answer-file "$$shown" || exit 1; \\
+\tdigest="$$(sed 's/^genierails-approval:v1:digest://' "$$shown")"; rm -f "$$shown"; \\
+\tpython3 "$(SHARED_ROOT)/scripts/approval.py" approve --env-dir "$(ENV_DIR)" --env "$(ENV)" --manifest "$(TEST_MANIFEST)" --question "{question}" --expect-digest "$$digest" --answer-file "$$answer" || exit 1; \\
 \trecord="$$(sed 's/^genierails-approval:v1:approved://' "$$answer")"; rm -f "$$answer"; \\
+\t$(BETWEEN) \\
 \t$(MAKE) --no-print-directory $(THEN) ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" MANIFEST="$(TEST_MANIFEST)" APPROVAL="$$record"
 """
 
 
-def _approve_then(make: Make, env: str, then: str, manifest: Path, answer: str = "y"):
-    """On a pty, the test asking flow: approve ``manifest``, then ``make <then> MANIFEST= APPROVAL=<record>``."""
+def _approve_then(make: Make, env: str, then: str, manifest: Path, answer: str = "y", between: str = "",
+                  **kwargs):
+    """On a pty, the test asking flow: show and approve ``manifest``, run ``between``, then
+    ``make <then> MANIFEST= APPROVAL=<record>``."""
     consumer = make.tmp / "consumer.mk"
     consumer.write_text(CONSUMER.format(root=ROOT, question=QUESTION))
     return pty_make(make, "_test-approve-then", env, "-f", str(consumer), f"THEN={then}",
-                    f"TEST_MANIFEST={manifest}", answer=answer)
+                    f"TEST_MANIFEST={manifest}", f"BETWEEN={between}", answer=answer, **kwargs)
+
+
+MUTATE = """import json, os, sys
+path = sys.argv[1]
+os.chmod(path, 0o600)
+data = json.load(open(path))
+data["host"] = "mutated-" + sys.argv[2]
+open(path, "w").write(json.dumps(data, indent=2))
+os.chmod(path, 0o400)
+"""
+# release_gate.py account-manifest-check, mutating the manifest when _apply-account-locked reads its
+# removals under the lock (after the approval check), then the real command.
+CHECK_THEN_MUTATE = """import os, subprocess, sys
+args = sys.argv[1:]
+if "--field" in args and args[args.index("--field") + 1] == "tag_value_removal.allowed_arg":
+    subprocess.run([sys.executable, {mutate!r}, args[args.index("--manifest") + 1], "under-the-lock"], check=True)
+os.execv(sys.executable, [sys.executable, {gate!r}, "account-manifest-check", *args])
+"""
+
+
+def _mutator(make: Make) -> Path:
+    path = make.tmp / "mutate.py"
+    path.write_text(MUTATE)
+    return path
+
+
+def _not_applied(make: Make, repo) -> None:
+    assert "sync-tags" not in make.names()
+    assert not [c for c in make.calls() if c[:1] == ["runner"] and "apply-plan" in c]
+    assert not rg.account_receipts(repo.cloud, "account") and _unlocked(_account_dir(repo))
+
+
+def test_a_manifest_changed_after_approval_is_refused_under_the_lock_before_anything_applies(account_make, repo):
+    manifest = _account_planned(account_make)
+    mutate = _mutator(account_make)
+    rc, shown = _approve_then(account_make, "account", "_apply-account-locked", manifest,
+                              between=f"{sys.executable} {mutate} {manifest} after-approval;")
+    assert rc != 0, shown
+    lock = shown.index("environment lock acquired (account, apply-account)")
+    assert shown.index("manifest_sha256 differ") > lock
+    assert "apply-account: the approval record doesn't approve this manifest (above); nothing was applied." in shown
+    _not_applied(account_make, repo)
+
+
+def test_a_manifest_changed_under_the_lock_after_its_check_never_reaches_sync_tags_or_terraform(account_make, repo):
+    manifest = _account_planned(account_make)
+    stub = account_make.tmp / "check-then-mutate.py"
+    stub.write_text(CHECK_THEN_MUTATE.format(mutate=str(_mutator(account_make)), gate=rg.__file__))
+    rc, shown = _approve_then(account_make, "account", "_apply-account-locked", manifest,
+                              stubs={"release_gate.py account-manifest-check": script_stubs.python_file(stub)})
+    assert rc != 0, shown
+    assert shown.index(f"Approval record") < shown.index("changed after it was shown")
+    assert "apply-account: the manifest is not the one approved (above); nothing more was applied." in shown
+    assert json.loads(manifest.read_text())["host"] == "mutated-under-the-lock"
+    _not_applied(account_make, repo)
+    assert (manifest.parent / "account.tfplan").exists()
 
 
 def _account_dir(repo) -> Path:

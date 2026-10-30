@@ -169,6 +169,41 @@ def test_head_not_exactly_origin_main_stops_at_account_plans_provenance_before_a
     _nothing_in_dev(amake, repo)
 
 
+def _mutate(manifest: Path, field: str = "host") -> None:
+    manifest.chmod(0o600)
+    manifest.write_text(json.dumps(json.loads(manifest.read_text()) | {field: "mutated-at-the-prompt"}, indent=2))
+    manifest.chmod(0o400)
+
+
+def test_a_manifest_changed_after_it_was_shown_is_never_approved_or_applied(amake, repo):
+    """Codex's repro on #288 @f43e909: mutate the manifest after display, before y; it was applied."""
+    def mutate():  # the one manifest this run planned and showed
+        [path] = rg.account_manifest_paths(repo.cloud, "account")
+        _mutate(path)
+
+    rc, shown = pty_make(amake, "rehearse", "dev", answer="y", before_answer=mutate)
+    assert rc != 0, shown
+    manifest = _manifest(shown)
+    digest_line = next(line for line in shown.splitlines() if line.startswith("  Manifest sha256: "))
+    assert shown.index(digest_line) < shown.index(QUESTION) < shown.index("changed after it was shown")
+    assert "rehearse: the approval prompt refused (above); nothing was approved or applied." in shown
+    assert json.loads(manifest.read_text())["host"] == "mutated-at-the-prompt"
+    assert "_apply-account-locked" not in amake.names() and "sync-tags" not in amake.names()
+    assert not rg.account_receipts(repo.cloud, "account") and not _approvals(repo)
+    _nothing_in_dev(amake, repo)
+
+
+def test_the_digest_shown_is_the_one_approved_and_applied(amake, repo):
+    rc, shown = pty_make(amake, "rehearse", "dev", answer="y")
+    assert rc == 0, shown
+    manifest = _manifest(shown)
+    digest = rg.sha256_file(manifest)
+    assert (f"  Manifest sha256: {digest} (approving approves exactly these bytes)"
+            in shown.split(QUESTION)[0])
+    [receipt] = rg.account_receipts(repo.cloud, "account")
+    assert receipt["approval"]["manifest_sha256"] == digest == receipt["manifest"]["sha256"]
+
+
 def test_a_manifest_superseded_while_the_prompt_is_up_is_refused_by_apply_account(amake, repo, tmp_path):
     (tmp_path / "other").mkdir()
     superseding = Make(tmp_path / "other", repo)
@@ -289,10 +324,11 @@ def test_it_accepts_only_the_exact_answers_and_fails_closed_on_anything_else():
 
     block = _block(MAKEFILE.read_text(), "override _ACCOUNT_APPROVE_APPLY = ")
     pairs = {(int(rc), line) for rc, line in re.findall(r'"(\d+):(genierails-approval:v\d+:[a-z-]+)', block)}
-    answers = {(0, approval.INTERACTIVE), (0, approval.NOT_INTERACTIVE), (0, approval.APPROVED), (1, approval.NO),
-               (1, approval.REFUSED)}
-    assert pairs == answers and answers <= approval.ANSWERS["interactive"] | approval.ANSWERS["approve"]
-    assert block.count('\t\t*) echo "ERROR: ') == 2 and block.count("exit 1 ;;") >= 4  # any other answer
+    answers = {(0, approval.INTERACTIVE), (0, approval.NOT_INTERACTIVE), (0, approval.DIGEST), (0, approval.APPROVED),
+               (1, approval.NO), (1, approval.REFUSED)}
+    assert pairs == answers and answers <= (approval.ANSWERS["interactive"] | approval.ANSWERS["show"]
+                                            | approval.ANSWERS["approve"])
+    assert block.count('\t\t*) echo "ERROR: ') == 3 and block.count("exit 1 ;;") >= 4  # any other answer
     # The record path comes only from approve's own answer; the nonce only from /dev/urandom, never a variable.
-    assert 'APPROVAL="$$record"' in block and "GENIERAILS_APPROVAL_RUN=\"$$(od -An -N16 -tx1 /dev/urandom" in block
+    assert 'APPROVAL="$$record"' in block and '--expect-digest "$$digest"' in block and "GENIERAILS_APPROVAL_RUN=\"$$(od -An -N16 -tx1 /dev/urandom" in block
     assert not re.search(r"\$\((APPROVE|YES|ASSUME_YES|AUTO_APPROVE|GENIERAILS_APPROVE)\)", block)
