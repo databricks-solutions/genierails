@@ -233,6 +233,20 @@ def test_committed_first_deploy_plans_the_account_layer(world, repo):
     assert world.status("dev")["account"]["pending"][0]["id"] == "a1"
 
 
+def test_local_only_pending_remote_backed_account_manifest_restores_origin(world, repo):
+    account_manifest(repo, changes=True)
+    path = rg.manifests_dir(repo.cloud, "account") / "a1" / "manifest.json"
+    data = json.loads(path.read_text())
+    data["provenance"] = {"remote": "origin/main"}
+    path.write_text(json.dumps(data))
+    repo.git("remote", "remove", "origin")
+    command, why = world.next("dev")
+    assert command == "git remote add origin <your repo URL> && git fetch origin main"
+    assert "restore the origin remote" in why
+    assert "/account/manifests/a1/manifest.json recorded origin/main" in why
+    assert "make apply-account" not in command
+
+
 def test_account_plan_needs_head_exactly_on_origin_main(world, repo):
     repo.commit({"aws/envs/dev/ack.txt": "\n"}, push=False)
     assert world.next("dev") == ("git push origin HEAD:main (or merge its PR, then pull)",
@@ -359,8 +373,9 @@ def test_local_only_corrupt_manifest_restores_origin(world, repo):
     (directory / "manifest.json").write_text("{")
     repo.git("remote", "remove", "origin")
     command, why = world.next("prod")
-    assert command == "git remote add origin <your repo URL> && git fetch origin main"
-    assert "restore the origin remote" in why
+    assert command.endswith("/prod/manifests/corrupt/manifest.json")
+    assert command.startswith("repair or remove ")
+    assert "unreadable manifest" in why
 
 
 def test_local_only_rollback_next_hint_names_local_main(world, repo):

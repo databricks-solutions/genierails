@@ -437,12 +437,19 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
                     "release-plan and account-plan read only committed files")
         return None
 
+    def local_only_marker(marker: str) -> tuple[str, str]:
+        if marker.endswith(" is unreadable"):
+            path = marker.removesuffix(" is unreadable")
+            return (f"repair or remove {path}",
+                    f"local-only provenance is refused because {marker}; fix the unreadable manifest first")
+        return (f"git remote add {remote} <your repo URL> && git fetch {remote} {branch}",
+                f"local-only provenance is refused because {marker}; restore the {remote} remote and release from "
+                f"freshly fetched {remote}/{branch}")
+
     def push_first(why: str, *, exact: bool = False) -> tuple[str, str] | None:
         if git.get("local_only"):
             if git.get("remote_backed_marker"):
-                return (f"git remote add {remote} <your repo URL> && git fetch {remote} {branch}",
-                        f"local-only provenance is refused because {git['remote_backed_marker']}; restore the "
-                        f"{remote} remote and release from freshly fetched {remote}/{branch}")
+                return local_only_marker(git["remote_backed_marker"])
             if exact and not git["head_is_remote"]:
                 command = f"git switch {branch}" if git["head_on_remote"] else f"git switch {branch} && git merge {git['head']}"
                 return (command,
@@ -521,6 +528,10 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
             first = not rehearsal["receipts"] and not account["receipts"] and not account["manifests"]
             if due or first:
                 command = "make apply-account" if due else "make account-plan"
+                account_marker = (rg.remote_backed_provenance_recorded(cloud_dir, rg.ACCOUNT_ENV)
+                                  if git.get("local_only") else "")
+                if account_marker:
+                    return local_only_marker(account_marker)
                 if not git["head_is_remote"]:
                     return push_first(f"{command} runs only from exactly {git['remote']}", exact=True) or (
                         f"git pull --ff-only {remote} {branch}",
