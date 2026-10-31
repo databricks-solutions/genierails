@@ -1075,3 +1075,21 @@ def test_dry_runs_have_no_side_effects(tmp_path, cloud, args):
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert not (cloud_root / "envs/prod").exists()
+
+
+@pytest.mark.parametrize("cloud", ["aws", "azure"])
+def test_promote_without_dry_run_still_refuses_an_unreadable_destination(tmp_path, cloud):
+    # make -n skips _guarded-bootstrap's guards; a real run keeps them, before any write.
+    cloud_root = tmp_path / cloud
+    cloud_root.mkdir()
+    result = subprocess.run(
+        ["make", "--no-print-directory", "promote", "SOURCE_ENV=dev", "DEST_ENV=prod",
+         "DEST_CATALOG_MAP=a=b", f"CLOUD_ROOT={cloud_root}", f"SHARED_ROOT={SHARED}"],
+        cwd=REPO / cloud, text=True, capture_output=True, env=_clean_env(), timeout=120)
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert result.stderr.startswith(
+        "ERROR: cannot read governance_mode for destination prod; refusing make promote.\n"
+        '       Set governance_mode = "legacy" or "deterministic" in envs/prod/env.auto.tfvars.\n'
+    ), result.stderr
+    assert list(cloud_root.iterdir()) == []
