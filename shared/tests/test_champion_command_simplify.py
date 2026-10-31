@@ -95,6 +95,7 @@ def classification_cloud(tmp_path):
         .replace("<most-privileged-group>", "payments_ops")
         .replace("<least-privileged-group>", "viewers")
     )
+    (cloud_root / "envs/dev/agents/Finance Analytics.auto.tfvars").unlink()  # the agent is inline here
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     (fake_bin / "terraform").write_text(FAKE_TERRAFORM)

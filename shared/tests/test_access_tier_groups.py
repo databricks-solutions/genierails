@@ -569,7 +569,7 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     # run make check themselves, so the flow has no separate check line, and the commit offers and the
     # y/N questions replace the git, account-plan and release-plan lines.
     order = ["make setup ENV=dev REPO=<your-repo-url>", "offers to commit (y)",
-             "copy the env + agent templates and fill them in (Dev step 1)",
+             "fill in the env + agent files setup copied from the templates (Dev step 1)",
              "make generate ENV=dev", "offers to commit + push (y)",
              "make rehearse ENV=dev       # checks; first deploy: account plan y/N",
              "make setup ENV=prod", "make promote-to ENV=prod", "make release ENV=prod",
@@ -599,15 +599,15 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     step_1 = dev[dev.index("**1. Set up.**"):dev.index("**2. Commit it (own repo).**")]
     committed = dev[dev.index("**2. Commit it (own repo).**"):]
     assert "make setup ENV=dev REPO=<your-repo-url>" in step_1
-    assert "GenieRails previews the `.gitignore` and placeholder env defaults" in committed
+    assert "GenieRails previews the `.gitignore`, placeholder env defaults and agent file" in committed
     assert "git add .gitignore envs/" not in committed
-    steps = ["GenieRails previews the `.gitignore` and placeholder env defaults", "**4. Generate.**", "**5. Rehearse.**", "make rehearse ENV=dev",
+    steps = ["GenieRails previews the `.gitignore`, placeholder env defaults and agent file", "**4. Generate.**", "**5. Rehearse.**", "make rehearse ENV=dev",
              "It first runs `make check ENV=dev`", "before it takes the lock, writes anything or reads live dev"]
     positions = [committed.index(step) for step in steps]
     assert positions == sorted(positions)
     assert "**5. Check.**" not in dev and "**6. Rehearse.**" not in dev
     detailed_positions = [readme.index("make setup ENV=dev REPO=", readme.index("## Dev")),
-                          readme.index("GenieRails previews the `.gitignore` and placeholder env defaults", readme.index("**2. Commit it (own repo).**"))]
+                          readme.index("GenieRails previews the `.gitignore`, placeholder env defaults and agent file", readme.index("**2. Commit it (own repo).**"))]
     assert detailed_positions == sorted(detailed_positions)
     assert "The same `make check` runs alone as the PR check." in dev
     assert "`verify-access` as its last gate (`_verify-access-gate`)" in dev
@@ -623,6 +623,41 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     assert "Does **not** run `make check`" not in ref
     assert "`make check ENV=dev` first (refuses before the lock, any write or live call if it fails)" in ref
     assert "**Preferred:**" in ref and "**Also accepted:**" in ref
+
+
+def test_champion_walkthrough_dev_setup_has_no_manual_template_copy():
+    """make setup ENV=dev copies the env and agent templates itself, so Dev step 1 is one command."""
+    readme = (SHARED / "examples/dev_to_prod/README.md").read_text()
+    dev = readme[readme.index("## Dev"):readme.index("## Prod")]
+    step_1 = dev[dev.index("**1. Set up.**"):dev.index("**2. Commit it (own repo).**")]
+    start = step_1.index("```bash\n") + len("```bash\n")
+    assert step_1[start:step_1.index("```", start)] == "make setup ENV=dev REPO=<your-repo-url>\n"
+    for gone in ("cp ../shared/examples/dev_to_prod/", "cp ../shared/examples", "mkdir -p envs/dev/agents",
+                 "copy the env + agent templates"):
+        assert gone not in readme, gone
+    # What setup copied, then what to fill in, then the agent file's rename, in that order.
+    order = ["make setup ENV=dev REPO=<your-repo-url>",
+             "Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`]",
+             "to `envs/dev/env.auto.tfvars` and [`agent.auto.tfvars.example`]",
+             "to `envs/dev/agents/Finance Analytics.auto.tfvars`",
+             "It copies only files that don't exist yet",
+             "never overwrites your edits and a re-run changes nothing",
+             "Fill in `envs/dev/auth.auto.tfvars`",
+             "**Agents (preferred):**",
+             "rename setup's `Finance Analytics.auto.tfvars` to your agent's name"]
+    positions = [step_1.index(step) for step in order]
+    assert positions == sorted(positions)
+    # Prod keeps promote-to as the source of its agent files.
+    flow = readme[readme.index("## The whole flow"):readme.index("## Before you start")]
+    row = next(line for line in flow.splitlines() if line.startswith("| `make setup ENV=prod` |"))
+    assert "(no agent file: `promote-to` writes prod's)" in row
+    # The templates' own headers say setup copies them, with no copy-it-yourself recipe for the first file.
+    env_template = (SHARED / "examples/dev_to_prod/env.auto.tfvars.example").read_text()
+    agent_template = (SHARED / "examples/dev_to_prod/agent.auto.tfvars.example").read_text()
+    assert "`make setup ENV=dev` copies this to envs/dev/env.auto.tfvars" in env_template
+    assert "then copy this file" not in env_template
+    assert "copies this to envs/dev/agents/Finance Analytics.auto.tfvars" in agent_template
+    assert "mkdir -p envs/dev/agents" not in agent_template
 
 
 def test_champion_walkthrough_lets_release_plan_reuse_the_dev_rehearsal_on_the_promotion_commit():

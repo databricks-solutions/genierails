@@ -896,6 +896,15 @@ def _write_env_tfvars(env: str, spaces_hcl: str, warehouse_id: str = "") -> None
     wh_line = f'sql_warehouse_id = "{warehouse_id}"' if warehouse_id else 'sql_warehouse_id = ""'
     content = f"{spaces_hcl}\n{wh_line}\n"
     (env_dir / "env.auto.tfvars").write_text(content)
+    _drop_setup_agent_template(env_dir)
+
+
+def _drop_setup_agent_template(env_dir: Path) -> None:
+    """Delete the untouched agent template make setup ENV=dev copied (README: inline lists delete it)."""
+    seeded = env_dir / "agents" / SETUP_AGENT_FILE
+    if (not seeded.is_symlink() and seeded.is_file()
+            and seeded.read_bytes() == DEV_TO_PROD_AGENT_TEMPLATE.read_bytes()):
+        seeded.unlink()
 
 
 def _patch_warehouse_id_in_env_tfvars(env: str, auth_file: Path) -> str:
@@ -3566,6 +3575,7 @@ uc_tables = [
     wh_line = f'sql_warehouse_id = "{resolved_wh}"' if resolved_wh else 'sql_warehouse_id = ""'
     gov_env_dir = ENVS_DIR / gov_env
     (gov_env_dir / "env.auto.tfvars").write_text(gov_tables_hcl + wh_line + "\n")
+    _drop_setup_agent_template(gov_env_dir)
     _copy_auth("dev", gov_env)
 
     _step("Phase 1 — Generating ABAC config (governance MODE)")
@@ -3812,6 +3822,7 @@ def scenario_abac_only(
     wh_line = f'sql_warehouse_id = "{resolved_wh}"' if resolved_wh else 'sql_warehouse_id = ""'
     env_dir = ENVS_DIR / env
     (env_dir / "env.auto.tfvars").write_text(TABLES_FINANCE_ONLY_HCL + wh_line + "\n")
+    _drop_setup_agent_template(env_dir)
 
     _step("Phase 1 — Generating ABAC config (plain make generate, no genie_spaces)")
     _make("generate", f"ENV={env}", retries=3)
@@ -4365,6 +4376,7 @@ genie_only = true
 {wh_line}
 """
     (env_dir / "env.auto.tfvars").write_text(env_tfvars_content)
+    _drop_setup_agent_template(env_dir)
 
     # Write auth using the REDUCED-PRIVILEGE SP (workspace USER + SQL entitlement only)
     _step("Phase 2 — Writing auth.auto.tfvars with minimal-privilege SP credentials")
@@ -4566,6 +4578,7 @@ genie_spaces = [
 {wh_line}
 """
     (env_dir / "env.auto.tfvars").write_text(import_hcl)
+    _drop_setup_agent_template(env_dir)
     _copy_auth("dev", env)
 
     _step("Phase 3 — Generating Genie config (MODE=genie, no ABAC)")
@@ -4657,6 +4670,7 @@ genie_spaces = [
 {wh_line}
 """
         (prod_env_dir / "env.auto.tfvars").write_text(prod_hcl)
+        _drop_setup_agent_template(prod_env_dir)
         _make("generate", f"ENV={prod_env}", "MODE=genie", retries=3)
 
     _copy_auth("dev", prod_env)
@@ -6236,6 +6250,8 @@ genie_spaces = [
 
 DEV_TO_PROD_TEMPLATE = MODULE_ROOT / "examples" / "dev_to_prod" / "env.auto.tfvars.example"
 DEV_TO_PROD_AGENT_TEMPLATE = MODULE_ROOT / "examples" / "dev_to_prod" / "agent.auto.tfvars.example"
+# The agent file make setup ENV=dev copies DEV_TO_PROD_AGENT_TEMPLATE to (_SETUP_AGENT_FILE).
+SETUP_AGENT_FILE = "Finance Analytics.auto.tfvars"
 # The champion agent's file name, envs/<env>/agents/<name>.auto.tfvars (its name
 # and Terraform key); its display title is CHAMPION_SPACE_TITLE.
 CHAMPION_AGENT = "Champion Finance Analytics"
@@ -6524,8 +6540,9 @@ def scenario_champion(
     including the `make release` / `make maintain` steps:
 
        1. Setup: dev_fin + prod_fin fixtures, two access-tier account groups,
-          a curated dev Genie agent via the Genie API; make setup ENV=dev; copy
-          the walkthrough env and agent templates; set the agent's
+          a curated dev Genie agent via the Genie API; make setup ENV=dev (it
+          copies the walkthrough env and agent templates); rename the agent
+          file to the champion agent's name; set the agent's
           genie_space_id + acl_groups and sql_warehouse_id.
        2. Negative: with the template placeholder still present, make generate
           ENV=dev MODE=genie fails fast with the placeholder message.
@@ -6587,14 +6604,15 @@ def scenario_champion(
 
         _step("make setup ENV=dev")
         _champion_make("setup", f"ENV={dev_env}")
+        # README Dev step 1: setup copied both templates; rename the agent file to the agent's name.
         dev_env_file = dev_dir / "env.auto.tfvars"
-        shutil.copy2(DEV_TO_PROD_TEMPLATE, dev_env_file)
-        print(f"  Copied {DEV_TO_PROD_TEMPLATE.relative_to(MODULE_ROOT.parent)} -> envs/{dev_env}/env.auto.tfvars")
+        seeded_agent = dev_dir / "agents" / SETUP_AGENT_FILE
+        for copied, template in ((dev_env_file, DEV_TO_PROD_TEMPLATE), (seeded_agent, DEV_TO_PROD_AGENT_TEMPLATE)):
+            if not copied.is_file() or copied.read_bytes() != template.read_bytes():
+                raise AssertionError(f"make setup ENV={dev_env} did not copy {template.name} to {copied}")
         dev_agent_file = dev_dir / "agents" / f"{CHAMPION_AGENT}.auto.tfvars"
-        dev_agent_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(DEV_TO_PROD_AGENT_TEMPLATE, dev_agent_file)
-        print(f"  Copied {DEV_TO_PROD_AGENT_TEMPLATE.relative_to(MODULE_ROOT.parent)} -> "
-              f"envs/{dev_env}/agents/{dev_agent_file.name}")
+        seeded_agent.rename(dev_agent_file)
+        print(f"  Renamed envs/{dev_env}/agents/{SETUP_AGENT_FILE} -> envs/{dev_env}/agents/{dev_agent_file.name}")
 
         # ── 2. Negative: placeholder guard ───────────────────────────────────
         _champion_phase(2, "negative — template placeholder must fail fast")
