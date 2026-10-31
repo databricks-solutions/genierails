@@ -536,9 +536,13 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
                     return push_first(f"{command} runs only from exactly {git['remote']}", exact=True) or (
                         f"git pull --ff-only {remote} {branch}",
                         f"{command} runs only from exactly {git['remote']}, and HEAD is behind it")
+                # On a terminal rehearse itself shows the account plan and asks y/N (Makefile
+                # _ACCOUNT_APPROVE_APPLY); next can't see the caller's terminal, so the primitive leads.
+                on_a_terminal = f"; or, on a terminal, make rehearse ENV={env} shows it and asks y/N"
                 return live(command, f"the approved account manifest {due[0]['id']} for HEAD is not applied yet"
-                            if due else "first deploy: rehearse refuses a non-empty account plan (the new "
-                            "gr_treatment tag policy), so plan the account layer and get its manifest approved")
+                            + on_a_terminal if due else "first deploy: rehearse refuses a non-empty account plan "
+                            "(the new gr_treatment tag policy), so plan the account layer and get its manifest "
+                            "approved" + on_a_terminal)
             why = f"no passing rehearsal of HEAD {git['head'][:12]} from this receipt store"
             if rehearsal["failed"]:
                 why += " (one at HEAD failed: fix what stopped it)"

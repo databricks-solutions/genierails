@@ -46,7 +46,7 @@ read-only SP that already holds more than it should. Fix that and re-run.
 | 3. Dev rehearsal | dev pipeline, each merge to `main`, in order | `make rehearse ENV=dev` | dev |
 | 4. Prod release | deployment machine in v1, after stage 3 passes on the commit | `make release-plan ENV=prod`, approve its manifest, `make release ENV=prod` ([release gating](#release-gating-deterministic-envs)) | prod |
 | 5. Keep protected | deployment machine in v1, on a schedule, at the last released commit | `make maintain ENV=prod` | prod, governance only |
-| 6. Operations | deployment machine, one approval per operation | `make detach-agent`, `make account-plan` then `make apply-account`, migration phases | prod or account |
+| 6. Operations | deployment machine, one approval per operation | `make detach-agent`, `make account-plan` then `make apply-account` (on a terminal, `make rehearse` offers the same account manifest y/N; pipelines and non-terminals: unchanged), migration phases | prod or account |
 
 - **Stage 3 runs in CI once dev has remote state.** Until then the operator
   runs it. Stages 4 to 6 stay on the [deployment machine](deployment-machine.md)

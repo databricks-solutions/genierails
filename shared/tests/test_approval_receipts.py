@@ -20,7 +20,7 @@ import pytest
 
 from scripts import approval
 from scripts import release_gate as rg
-from tests.test_approval import QUESTION, _forge, _record, approval_run  # noqa: F401 (fixture)
+from tests.test_approval import QUESTION, THIS_RUN, _forge, _record, this_run  # noqa: F401 (autouse fixture)
 from tests.test_release_gate import (  # noqa: F401 (fixtures)
     _second_manifest, account_manifest, manifest, repo,
 )
@@ -170,9 +170,15 @@ def test_the_validators_stay_strict(repo, manifest):
 
 # -- the CLI flags -------------------------------------------------------------------
 
+# release_gate.py's CLI as this test's asking run (the records' process chain, as in-process):
+# tests/test_approval_make.py runs the real chain under make.
+AS_THIS_RUN = ("import runpy, sys; from scripts import approval; approval._chain = lambda pid: {chain!r}; "
+               "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')")
+
+
 def _gate(repo, *args):
-    return subprocess.run([sys.executable, str(GATE), *args], capture_output=True, text=True,
-                          env=os.environ | repo.env)
+    return subprocess.run([sys.executable, "-c", AS_THIS_RUN.format(chain=THIS_RUN), str(GATE), *args],
+                          capture_output=True, text=True, env=os.environ | repo.env | {"PYTHONPATH": str(GATE.parents[1])})
 
 
 def test_receipt_commands_take_approval_and_refuse_a_bad_one_with_exit_1(repo, manifest, account_manifest):

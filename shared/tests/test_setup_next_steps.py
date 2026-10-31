@@ -110,7 +110,10 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert "Run: make check" not in out
     # A first deterministic rehearse refuses a non-empty account plan (finding #5).
     assert (
-        "  6. First deploy only (rehearse refuses a non-empty account plan, e.g. the new gr_treatment tag policy):\n"
+        "  6. First deploy only: the account layer (e.g. the new gr_treatment tag policy) needs an approved account "
+        "manifest.\n"
+        "       On a terminal, the rehearse below shows its plan and asks y/N. Off a terminal (rehearse refuses it), "
+        "run:\n"
         "       make account-plan    (plans the shared account layer and writes the manifest to approve; changes nothing live)\n"
         "       make apply-account   (applies exactly that approved manifest)\n"
     ) in out

@@ -19,8 +19,11 @@ CTRL_C = "\x03"  # what the terminal does for it: SIGINT to the foreground proce
 CTRL_D = "\x04"  # at the start of a line: EOF
 
 
-def pty_run(cmd, answer, env, cwd=None, timeout=300, prompt=PROMPT):
+def pty_run(cmd, answer, env, cwd=None, timeout=300, prompt=PROMPT, before_answer=None):
     """Run ``cmd`` on a pty; type ``answer`` at the first ``prompt`` (None: never answer).
+
+    ``before_answer``, if given, is called once the prompt is shown and before
+    the answer is typed (something else happening while the person reads it).
 
     ``answer`` is followed by Enter, except CTRL_D, which is typed alone, and
     CTRL_C, which sends SIGINT to the command's process group (its own
@@ -48,6 +51,8 @@ def pty_run(cmd, answer, env, cwd=None, timeout=300, prompt=PROMPT):
                 out += chunk
             while answered < len(answers) and answers[answered] is not None \
                     and out.count(prompt.encode()) > answered:
+                if answered == 0 and before_answer is not None:
+                    before_answer()
                 typed = answers[answered]
                 if callable(typed):
                     typed = typed()

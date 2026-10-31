@@ -9,9 +9,7 @@ Take a Genie agent you've curated in **dev** and ship it to **prod** with its se
 make setup ENV=dev REPO=<your-repo-url>   # first run: origin -> genierails (kept for upgrades), origin = your repo; writes the .gitignore and placeholder env templates, then offers to commit + push those defaults; set deployer_principal_id and groups; per agent, its ID and acl_groups
 #   Catalog Explorer: turn on Data classification, review detections, enable auto-tagging
 make generate ENV=dev       # imports the agent, finds its tables, drafts the rules; shows the diff, offers to commit + push (y)
-make account-plan           # first deploy: plan the shared account layer (gr_treatment tag policy) for approval
-make apply-account          # applies exactly that approved account manifest (rehearse refuses a non-empty account plan)
-make rehearse ENV=dev       # checks the committed files, applies in dev and proves the masks work (verify-access: ALL EFFECTIVE)
+make rehearse ENV=dev       # checks the committed files; first deploy: shows the account plan (gr_treatment tag policy), asks y/N, applies it; then applies in dev and proves the masks work (verify-access: ALL EFFECTIVE)
 
 # prod (same for stg or any env)
 make setup ENV=prod         # set deployer_principal_id, catalog_map and group_map; leave access_tier_groups placeholders
@@ -80,16 +78,12 @@ It captures each new agent to `envs/dev/agents/<agent>.space.json` and proposes 
 - **Legacy**: re-runs keep whatever is already in `envs/dev/generated/`, including your edits, and only add rules for new columns.
 
 **5. Rehearse.**
-On a fresh repo, apply the shared account layer first. `make rehearse` (like `make release`) only adds allowed treatment-tag values to it, and stops while the account plan has anything else to apply (`ERROR: account plan is non-empty`): on a first deploy, the `gr_treatment` tag policy (and the groups, with `manage_groups = true`). From a clean checkout at your pushed `origin/main`:
-```bash
-make account-plan           # saves the account plan and writes the account manifest to approve; changes nothing live
-make apply-account          # applies exactly that manifest
-```
-Run the pair again whenever a later `rehearse` or `release-plan` stops on a non-empty account plan. Then:
+From a clean checkout at your pushed `origin/main`, in a terminal:
 ```bash
 make rehearse ENV=dev
 ```
 It first runs `make check ENV=dev`: a read-only check of what git tracks under `envs/`, in a scratch copy (validate, generated files current, validate-generated, the offline coverage check, mask tests and a structural plan). If a step fails, it refuses with that step's message before it takes the lock, writes anything or reads live dev. The same `make check` runs alone as the PR check.
+On a fresh repo the shared account layer comes next: the `gr_treatment` tag policy (and the groups, with `manage_groups = true`). Rehearse only adds allowed treatment-tag values to it by itself, so when the account plan has anything else to apply it shows that plan (the account manifest, tag-value removals first) and asks `Approve and apply this account manifest? [y/N]`. `y` applies exactly that manifest, then rehearse goes on in dev. Anything else applies nothing and stops: the manifest stays, for `make apply-account` once it is approved, or for the next `make rehearse ENV=dev` to offer again. A later rehearse asks the same way whenever the account plan has changes. Off a terminal (CI, piped output, `GENIERAILS_INTERACTIVE=0`) it never asks: it stops with `ERROR: account plan is non-empty`, and `make account-plan` then `make apply-account` apply the account layer ([command reference](../../../REFERENCE.md)).
 It applies in dev, then runs `verify-access` as its last gate (`_verify-access-gate`), querying as each test tier. A first deploy applies in phases: the masking functions and policies first, then the column tags, then (once the masks are verified live) the tier groups' `USE_CATALOG`, `USE_SCHEMA` and `SELECT`; Genie `CAN_RUN` follows the SELECT. If it stops at the first phase, nothing is live yet: fix what it reports and re-run `make rehearse ENV=dev` (it resumes), or drop the change with `make policy-abandon ENV=dev`.
 **Pass looks like:** `ALL EFFECTIVE`: each test tier sees masked values, the authorized tier sees raw ones. To re-run only that proof later: `make verify-access ENV=dev`.
 You don't set a row-pairing key: it picks one per masked table (a single-column primary key, else an untagged id-like column such as `customer_id`) and proves it unique, non-null and unmasked. A deterministic env then prints the proven `verify_key_columns` line; committing it is optional and pins those keys. Only a table with no provable key needs `verify_key_columns` set ([how keys are picked](../../docs/effective-access-verification.md#how-genierails-picks-the-row-pairing-key)).

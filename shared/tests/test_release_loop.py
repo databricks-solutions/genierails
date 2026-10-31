@@ -17,6 +17,7 @@ import signal
 import stat
 import subprocess
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -25,7 +26,7 @@ from scripts import environment_lock
 from scripts import release_gate as rg
 from scripts import release_loop
 from tests.pty_harness import CTRL_C, CTRL_D, pty_run
-from tests.test_approval import QUESTION, RUN, Tty
+from tests.test_approval import QUESTION, RUN, THIS_RUN, Tty
 from tests.test_first_release_rounds import build_world
 from tests.test_release_gate_make import LEGACY_ENV, ROOT, Make, _planned, make, repo  # noqa: F401 (fixtures)
 
@@ -310,7 +311,11 @@ NESTED = {"MAKELEVEL": "1"}
 
 
 def _record_of_run(repo, manifest: Path, run: str = RUN) -> Path:
-    return approval.record(repo.prod, "prod", manifest, QUESTION, run=run, environ=NESTED, stdin=Tty(), stdout=Tty())
+    # Written in-process, as if by an asking make recipe (its asker: THIS_RUN); a make run here
+    # isn't under that recipe, so the record never counts there (#288's asker binding).
+    with mock.patch.object(approval, "_chain", lambda pid: list(THIS_RUN)):
+        return approval.record(repo.prod, "prod", manifest, QUESTION, run=run, environ=NESTED, stdin=Tty(),
+                               stdout=Tty())
 
 
 @pytest.mark.parametrize("how", ["forged MAKELEVEL", "MAKEFLAGS"])
@@ -346,7 +351,7 @@ def test_a_record_not_written_by_this_runs_prompt_refuses_before_applying(tmp_pa
         record = link
     else:
         monkeypatch.setattr(os, "getuid", lambda: 12345)
-        with pytest.raises(approval.Refused, match="owned by uid"):
+        with pytest.raises(approval.Refused, match="owned by uid|not owned by this user"):
             approval.check(repo.prod, "prod", manifest, record)
         return
     make.reset()
@@ -364,7 +369,8 @@ def test_the_approve_command_refuses_without_a_run_before_asking(repo, tmp_path,
     answer.touch()
     environ = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MAKELEVEL", approval.RUN_ENV)}
     rc, shown = pty_run(["python3", approval.__file__, "approve", "--env-dir", str(repo.prod), "--env", "prod",
-                         "--manifest", str(manifest), "--question", QUESTION, "--answer-file", str(answer)], "y",
+                         "--manifest", str(manifest), "--question", QUESTION, "--expect-digest",
+                         rg.sha256_file(manifest), "--answer-file", str(answer)], "y",
                         environ | repo.env | NESTED, timeout=120)
     assert (rc, answer.read_text()) == (1, approval.REFUSED + "\n"), shown
     assert PROMPT not in shown and "no approval run" in shown and not _approvals(repo)

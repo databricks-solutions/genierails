@@ -602,7 +602,8 @@ _setup:
 			step=$$((step+1)); echo "  $$step. Run: make check ENV=$(ENV)   (read-only check of the committed files; a legacy rehearse doesn't run it)"; \
 		fi; \
 		if [ "$$det" = 1 ]; then \
-			step=$$((step+1)); echo "  $$step. First deploy only (rehearse refuses a non-empty account plan, e.g. the new gr_treatment tag policy):"; \
+			step=$$((step+1)); echo "  $$step. First deploy only: the account layer (e.g. the new gr_treatment tag policy) needs an approved account manifest."; \
+			echo "       On a terminal, the rehearse below shows its plan and asks y/N. Off a terminal (rehearse refuses it), run:"; \
 			echo "       make account-plan    (plans the shared account layer and writes the manifest to approve; changes nothing live)"; \
 			echo "       make apply-account   (applies exactly that approved manifest)"; \
 		fi; \
@@ -1075,7 +1076,9 @@ RELEASE_BRANCH ?= main
 # MAKELEVEL or MAKEFLAGS alone is ignored, and a record of another run is
 # refused). It is checked under the lock before anything applies, and the
 # receipt embeds it. Without it a receipt records {"via": "external"}
-# (approved outside GenieRails), as every receipt did before.
+# (approved outside GenieRails), as every receipt did before. The check also
+# needs the record's asker (the top-level make's recipe that asked) still
+# running above it, so a nonce set by hand outside that run still refuses.
 override _APPROVAL = $(if $(and $(filter command line,$(origin APPROVAL)),$(filter-out 0,$(MAKELEVEL)),$(filter environment,$(origin GENIERAILS_APPROVAL_RUN))),$(abspath $(strip $(APPROVAL))))
 override _APPROVAL_CHECK = approval='$(subst ','\'',$(_APPROVAL))'; \
 	if [ -n "$$approval" ]; then \
@@ -1087,6 +1090,17 @@ override _APPROVAL_CHECK = approval='$(subst ','\'',$(_APPROVAL))'; \
 		esac; \
 	fi
 override _APPROVAL_ARG = $${approval:+--approval "$$approval"}
+# With an approval record, the manifest must still have the digest the record
+# approved (approval.py digest-check), re-checked under the lock right before
+# each live change, so a manifest changed after its check never applies.
+override _APPROVAL_PIN = if [ -n "$$approval" ]; then \
+		pin_out="$$(python3 "$(SHARED_ROOT)/scripts/approval.py" digest-check --manifest "$$manifest" --approval "$$approval")"; pin_rc=$$?; \
+		case "$$pin_rc:$$pin_out" in \
+			"0:genierails-approval:v1:valid") ;; \
+			"1:genierails-approval:v1:invalid") echo "$(1): the manifest is not the one approved (above); nothing more was applied." >&2; exit 1 ;; \
+			*) echo "ERROR: the manifest digest check ($(SHARED_ROOT)/scripts/approval.py digest-check) gave no valid answer (exit $$pin_rc); nothing more was applied." >&2; exit 1 ;; \
+		esac; \
+	fi
 # Live UC as release-plan saw it, and again (re-derived) before release applies.
 override _LIVE_SNAPSHOT = $(_RELEASE_GATE) live-snapshot --env-dir "$(ENV_DIR)" --env "$(ENV)"
 override _RELEASE_REPORTS = $(_RELEASE_GATE) reports --env-dir "$(ENV_DIR)" --env "$(ENV)"
@@ -1161,6 +1175,7 @@ _account-plan-locked: _guard-not-databricks-compute
 	rm -f "$$show_json"; \
 	$(_RELEASE_GATE) account-tag-sync-diff --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --allow-removal "$(strip $(ALLOW_TAG_VALUE_REMOVAL))" --warehouse-id "$(strip $(WAREHOUSE_ID))" --out "$$plan_dir/tag_sync.json" || { rm -rf "$$plan_dir"; exit 1; }; \
 	manifest="$$($(_RELEASE_GATE) account-manifest-write --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --plan-dir "$$plan_dir" --provenance "$$plan_dir/provenance.json")" || { rm -rf "$$plan_dir"; exit 1; }; \
+	if [ -n "$(_ACCOUNT_MANIFEST_OUT)" ]; then printf '%s\n' "$$manifest" > "$(_ACCOUNT_MANIFEST_OUT)" || exit 1; exit 0; fi; \
 	echo ""; \
 	echo "=== Account plan ==="; \
 	$(_RELEASE_GATE) account-manifest-summary --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --manifest "$$manifest" || exit 1; \
@@ -1196,7 +1211,9 @@ _apply-account-locked: _guard-not-databricks-compute
 	$(_RELEASE_GATE) account-manifest-summary --env-dir "$(ENV_DIR)" --env "$(ENV)" --manifest "$$manifest" || { rm -rf "$$apply_dir"; exit 1; }; \
 	removals="$$($(_RELEASE_GATE) account-manifest-check --env-dir "$(ENV_DIR)" --env "$(ENV)" --manifest "$$manifest" --field tag_value_removal.allowed_arg)" || { rm -rf "$$apply_dir"; exit 1; }; \
 	warehouse="$$($(_RELEASE_GATE) account-manifest-check --env-dir "$(ENV_DIR)" --env "$(ENV)" --manifest "$$manifest" --field tag_value_removal.warehouse_id)" || { rm -rf "$$apply_dir"; exit 1; }; \
+	( $(call _APPROVAL_PIN,apply-account) ) || { rm -rf "$$apply_dir"; exit 1; }; \
 	$(MAKE) --no-print-directory sync-tags TAG_SYNC_REMOVE="$$removals" WAREHOUSE_ID="$$warehouse" || { rm -rf "$$apply_dir"; exit 1; }; \
+	( $(call _APPROVAL_PIN,apply-account) ) || { rm -rf "$$apply_dir"; exit 1; }; \
 	echo "=== Apply saved plan (account) ==="; \
 	LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)" "$(ROOT_RUNNER)" account "$(ACCOUNT_ENV)" apply-plan "$$apply_dir/account.tfplan" || { rm -rf "$$apply_dir"; exit 1; }; \
 	rm -rf "$$apply_dir"; \
@@ -1204,6 +1221,89 @@ _apply-account-locked: _guard-not-databricks-compute
 	if ! rm -f "$$plans/account.tfplan"; then echo "WARNING: account apply succeeded and its receipt was written, but $$plans/account.tfplan contains credentials and could not be deleted; delete it." >&2; fi; \
 	echo ""; \
 	echo "=== Account apply complete ==="
+
+# The account sub-flow of a deterministic rehearse (simplification step 6b).
+# On a terminal (scripts/approval.py interactive: the top-level make's recipe,
+# outside CI, stdin and stdout a terminal, GENIERAILS_INTERACTIVE not 0), when
+# the account plan has changes (or the command line names ALLOW_TAG_VALUE_REMOVAL:
+# Terraform ignores tag-policy values, so removals alone plan no changes), it
+# shows the account manifest and asks
+# 'Approve and apply this account manifest? [y/N]' (default No; tag-value
+# removals are named in a louder warning above the same question), records the
+# y (approval.py approve), then applies exactly that manifest through
+# _apply-account-locked MANIFEST= APPROVAL=. The manifest is the one valid
+# unreceipted one for HEAD (account-manifest-select + account-manifest-check),
+# else a new one from _account-plan-locked. Every account-plan and
+# apply-account refusal stays in those recipes; nothing is skipped. It holds no
+# env lock (each recipe takes and releases the account lock) and runs before
+# rehearse locks dev. Off a terminal, in CI, or with GENIERAILS_INTERACTIVE=0
+# it does nothing, so rehearse behaves exactly as before (apply's
+# _guard-account-plan-empty refuses a non-empty account plan); no flag or
+# variable approves. A macro, not a target: approval.py asks only in the
+# top-level make's own recipe. The subshell keeps its per-run approval nonce
+# (approval.py RUN_ENV) out of the rest of rehearse. Only the y/N answers
+# below are accepted, as exact (exit code, line) pairs. The manifest is pinned
+# once, before it is shown (approval.py show: one read, its summary and sha256);
+# approve refuses unless the file still has that digest when it asks and when
+# it records, and _apply-account-locked refuses under the lock unless the file
+# has the record's digest (_APPROVAL_CHECK, _APPROVAL_PIN).
+override _ACCOUNT_MANIFEST_OUT = $(if $(filter-out 0,$(MAKELEVEL)),$(GENIERAILS_ACCOUNT_MANIFEST_OUT))
+override _ACCOUNT_APPROVE_QUESTION = Approve and apply this account manifest?
+override _ACCOUNT_APPROVE_APPLY = ( \
+	ap_tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/genierails-approval.XXXXXX")" || exit 1; \
+	trap 'rm -rf "$$ap_tmp"' EXIT; \
+	: > "$$ap_tmp/interactive"; \
+	python3 "$(SHARED_ROOT)/scripts/approval.py" interactive --answer-file "$$ap_tmp/interactive"; ap_rc=$$?; \
+	case "$$ap_rc:$$(cat "$$ap_tmp/interactive")" in \
+		"0:genierails-approval:v1:not-interactive") exit 0 ;; \
+		"0:genierails-approval:v1:interactive") ;; \
+		*) echo "ERROR: the terminal check ($(SHARED_ROOT)/scripts/approval.py interactive) gave no valid answer (exit $$ap_rc); nothing was locked, approved or applied." >&2; exit 1 ;; \
+	esac; \
+	plan_rc=0; LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)" "$(ROOT_RUNNER)" account $(ACCOUNT_ENV) plan -input=false -detailed-exitcode >/dev/null || plan_rc=$$?; \
+	if [ $$plan_rc -ne 0 ] && [ $$plan_rc -ne 2 ]; then echo "$(1): the account plan failed (above); nothing was locked, approved or applied." >&2; exit 1; fi; \
+	if [ $$plan_rc -eq 2 ]; then \
+		echo ""; echo "=== make $(1): the account plan has changes; they need an approved account manifest first ==="; \
+	elif [ -n "$(strip $(ALLOW_TAG_VALUE_REMOVAL))" ]; then \
+		echo ""; echo "=== make $(1): ALLOW_TAG_VALUE_REMOVAL names tag values to remove; that needs an approved account manifest first ==="; \
+	else exit 0; fi; \
+	manifest="$$($(_RELEASE_GATE) account-manifest-select --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" 2>/dev/null)" && \
+		$(_RELEASE_GATE) account-manifest-check --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --manifest "$$manifest" --remote "$(RELEASE_REMOTE)" --branch "$(RELEASE_BRANCH)" --allow-removal "$(strip $(ALLOW_TAG_VALUE_REMOVAL))" >/dev/null 2>&1 || manifest=; \
+	if [ -n "$$manifest" ]; then \
+		heading="Account plan (already planned for HEAD, not applied yet)"; \
+	else \
+		heading="Account plan"; \
+		: > "$$ap_tmp/manifest"; \
+		GENIERAILS_ACCOUNT_MANIFEST_OUT="$$ap_tmp/manifest" $(MAKE) --no-print-directory _account-plan-locked ENV="$(ACCOUNT_ENV)" ENV_DIR="$(ACCOUNT_ENV_DIR)" || { \
+			echo "$(1): the account layer needs an approved account manifest, but make account-plan stopped (above). Nothing was locked, approved or applied in $(ENV)." >&2; exit 1; }; \
+		manifest="$$(cat "$$ap_tmp/manifest")"; \
+		if [ -z "$$manifest" ]; then echo "ERROR: _account-plan-locked named no account manifest; nothing was approved or applied." >&2; exit 1; fi; \
+	fi; \
+	echo ""; echo "=== $$heading ==="; \
+	: > "$$ap_tmp/show"; \
+	python3 "$(SHARED_ROOT)/scripts/approval.py" show --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --manifest "$$manifest" --answer-file "$$ap_tmp/show"; ap_rc=$$?; \
+	ap_out="$$(cat "$$ap_tmp/show")"; digest=; \
+	case "$$ap_rc:$$ap_out" in \
+		"0:genierails-approval:v1:digest:"?*) digest="$${ap_out\#genierails-approval:v1:digest:}" ;; \
+		*) echo "ERROR: the manifest display ($(SHARED_ROOT)/scripts/approval.py show) gave no valid answer (exit $$ap_rc); nothing was approved or applied." >&2; exit 1 ;; \
+	esac; \
+	echo "  Manifest (immutable): $$manifest"; \
+	GENIERAILS_APPROVAL_RUN="$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; export GENIERAILS_APPROVAL_RUN; \
+	case "$$GENIERAILS_APPROVAL_RUN" in ""|*[!0-9a-f]*) echo "ERROR: couldn't make a per-run approval nonce; nothing was approved." >&2; exit 1 ;; esac; \
+	: > "$$ap_tmp/approve"; \
+	python3 "$(SHARED_ROOT)/scripts/approval.py" approve --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --manifest "$$manifest" --question "$(_ACCOUNT_APPROVE_QUESTION)" --expect-digest "$$digest" --answer-file "$$ap_tmp/approve"; ap_rc=$$?; \
+	ap_out="$$(cat "$$ap_tmp/approve")"; record=; \
+	case "$$ap_rc:$$ap_out" in \
+		"0:genierails-approval:v1:approved:"?*) record="$${ap_out\#genierails-approval:v1:approved:}" ;; \
+		"1:genierails-approval:v1:no") \
+			echo "$(1): not applied. The account manifest $$manifest stays; apply it later with make apply-account, or re-run make $(1) ENV=$(ENV) to be asked again. Nothing was locked or applied in $(ENV)." >&2; exit 1 ;; \
+		"1:genierails-approval:v1:refused") echo "$(1): the approval prompt refused (above); nothing was approved or applied." >&2; exit 1 ;; \
+		*) echo "ERROR: the approval prompt ($(SHARED_ROOT)/scripts/approval.py approve) gave no valid answer (exit $$ap_rc); nothing was approved or applied." >&2; exit 1 ;; \
+	esac; \
+	$(MAKE) --no-print-directory _apply-account-locked ENV="$(ACCOUNT_ENV)" ENV_DIR="$(ACCOUNT_ENV_DIR)" MANIFEST="$$manifest" APPROVAL="$$record" || { \
+		echo "$(1): the approved account manifest was not applied (above); nothing was locked or applied in $(ENV). Fix it, then re-run make $(1) ENV=$(ENV)." >&2; exit 1; }; \
+	echo ""; \
+	echo "=== Account layer applied; continuing make $(1) ENV=$(ENV) ===" \
+	) || exit 1
 
 # A deterministic env's rehearse first runs the read-only make check
 # (_RUN_CHECK), then takes the env lock and writes an append-only
@@ -1244,6 +1344,7 @@ rehearse: _guard-not-ci-apply _guard-genie-placeholder ## Run serial rehearsal (
 		$(_GROUP_CHECK) "make rehearse" || exit 1; \
 		$(_RELEASE_GATE) clean-check --env-dir "$(ENV_DIR)" --env "$(ENV)" --command-name "make rehearse" || exit 1; \
 		$(call _RUN_CHECK,rehearse); \
+		$(call _ACCOUNT_APPROVE_APPLY,rehearse); \
 		$(_CUSTOM_MASK_CASES) || exit 1; \
 		$(call _ENV_LOCK,rehearse); \
 		gate=0; $(_RELEASE_GATE) rehearse-start --env-dir "$(ENV_DIR)" --env "$(ENV)" $(_RELEASE_GATE_MAKE) || gate=$$?; \

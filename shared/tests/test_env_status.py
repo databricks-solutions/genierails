@@ -229,7 +229,8 @@ def test_committed_first_deploy_plans_the_account_layer(world, repo):
     assert world.next("dev")[0] == "make account-plan"
     account_manifest(repo, changes=True)
     assert world.next("dev") == ("make apply-account",
-                                 "the approved account manifest a1 for HEAD is not applied yet")
+                                 "the approved account manifest a1 for HEAD is not applied yet; or, on a "
+                                 "terminal, make rehearse ENV=dev shows it and asks y/N")
     assert world.status("dev")["account"]["pending"][0]["id"] == "a1"
 
 
