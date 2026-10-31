@@ -18,9 +18,15 @@ git add envs/dev/ && git commit        # open a PR; after merge the dev pipeline
 make promote-to ENV=prod               # carries the capture to envs/prod/agents/
 make check ENV=prod
 git add envs/prod/ && git commit       # the promotion PR; merge it
-make release-plan ENV=prod             # on the deployment machine (reuses dev's rehearsal); approve the manifest
-make release ENV=prod                  # releases the approved manifest
+# on the deployment machine (it reuses dev's rehearsal):
+make release ENV=prod                  # at a terminal: per round, plans, shows the manifest, asks y/N, applies it
+#   separate approver: per round make release-plan ENV=prod, approve, make release ENV=prod MANIFEST=<path>
 ```
+
+On a PR branch, `make generate` and `make promote-to` don't offer to commit
+(the offer appears only on `main`, at a terminal): commit yourself, as above.
+`make check` is the PR check; `make rehearse` and `make release-plan` run it
+again themselves.
 
 ## Before you start
 
@@ -83,9 +89,10 @@ keeps its last captured version.
 3. **Merge.** The operator runs `make release-plan ENV=prod`. When only
    `envs/prod/` changed it reuses the source env's (`promote_from`, dev by
    default) earlier rehearsal; when the PR also changed the source env, it
-   names `make rehearse` to run on the merge commit first. Then get the
-   manifest approved and run
-   `make release ENV=prod` ([deployment machine](../deployment-machine.md#release-prod)).
+   names `make rehearse` to run on the merge commit first. At a terminal
+   `make release ENV=prod` does that round by round, asking `y/N` per
+   manifest; with a separate approver, get the manifest approved and run
+   `make release ENV=prod MANIFEST=<path>` ([deployment machine](../deployment-machine.md#release-prod)).
    **Pass looks like:** `ALL EFFECTIVE` and `=== Release complete (prod) ===`.
 
 Every release replaces the prod agent's config with the capture in git and

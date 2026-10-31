@@ -82,8 +82,10 @@ REUSE = "it reuses the"
 # with its reuse, then release, and never asks for a rehearse on that commit.
 DOC_REUSE = [
     ("shared/examples/dev_to_prod/README.md", "make promote-to ENV=prod # copies the reviewed rules",
-     ["offers to commit + push (y)", "make release ENV=prod # at a terminal, each round: plans prod", "(reusing dev's "
-      "rehearsal"]),
+     ["offers to commit + push (y)", "make release ENV=prod # each round: plans, shows the manifest, asks y/N"]),
+    ("shared/examples/dev_to_prod/README.md", "| `make promote-to ENV=prod` | Copies dev's reviewed rules",
+     ["The same commit question", "| `make release ENV=prod` |", "Per round: `make release-plan`",
+      "reuses dev's rehearsal", "applies exactly it"]),
     ("shared/examples/dev_to_prod/README.md", "**3. Plan, release.**",
      ["make release ENV=prod", "Each round it plans (`make release-plan ENV=prod`)",
       "the next `make release ENV=prod` offers it first"]),
@@ -91,14 +93,15 @@ DOC_REUSE = [
      ["`make promote-to ENV=prod`", "`make release-plan ENV=prod`", REUSE,
       "`make release ENV=prod`"]),
     ("shared/examples/dev_to_prod/REFERENCE.md", "Stops at `coverage-gate` or `audit-rulebook`",
-     ["`promote-to`", "push to `origin/main`", "`make release-plan ENV=prod`", REUSE, "`make release ENV=prod`"]),
-    ("shared/examples/dev_to_prod/REFERENCE.md", "Deterministic envs (`governance_mode = \"deterministic\"`) never",
      ["`make generate ENV=dev`", "`make rehearse ENV=dev`", "`make promote-to ENV=prod`",
-      "commit and push", "`make release-plan ENV=prod`", REUSE, "`make release ENV=prod`"]),
+      "answer `y` to the commit offers", "`make release ENV=prod`", "`release-plan` reuses the"]),
+    ("shared/examples/dev_to_prod/REFERENCE.md", "Deterministic envs (`governance_mode = \"deterministic\"`) never",
+     ["`make generate ENV=dev`", "its commit offer includes that edit", "`make rehearse ENV=dev`",
+      "`make promote-to ENV=prod`", "answer `y` to its commit offer", "`make release ENV=prod`", "`release-plan` reuses the"]),
     ("shared/docs/access.md", "`make promote-to ENV=prod` (seeds prod's",
-     ["push that to `origin/main`", "`make release-plan ENV=prod`", REUSE, "`make release ENV=prod`"]),
+     ["answer `y` to its commit offer", "`make release ENV=prod`", "`release-plan` reuses the"]),
     ("shared/docs/import-genie-agent-from-ui.md", "The remaining workflow is unchanged",
-     ["promote", "merge the promotion", "`release-plan`", REUSE, "`release`"]),
+     ["promote", "`make release ENV=prod` runs `release-plan` round by round", REUSE]),
     ("shared/docs/design/deterministic-governance.md", "6. Approve and merge the promotion PR",
      ["`make release-plan ENV=prod`", REUSE, "`make release ENV=prod`"]),
     *[("shared/docs/design/deterministic-governance.md", row, ["merge", "`release-plan`", REUSE, "`release`"])
@@ -110,20 +113,23 @@ DOC_REUSE = [
     ("shared/docs/design/deterministic-governance.md", "Prod-only PRs (`acl_groups`, `table_readers`, `ack.txt`",
      ["no rehearse is needed", "`release-plan` writes the source env's receipt itself"]),
     ("shared/docs/playbooks/agents.md", "make promote-to ENV=prod # carries the capture",
-     ["merge it", "make release-plan ENV=prod # on the deployment machine (reuses dev's rehearsal)",
-      "make release ENV=prod"]),
+     ["merge it", "# on the deployment machine (it reuses dev's rehearsal):",
+      "make release ENV=prod # at a terminal: per round, plans, shows the manifest, asks y/N",
+      "separate approver: per round make release-plan ENV=prod, approve, make release ENV=prod MANIFEST=<path>"]),
     ("shared/docs/playbooks/agents.md", "3. **Merge.** The operator runs `make release-plan ENV=prod`.",
      ["When only `envs/prod/` changed it reuses", "when the PR also changed the source env",
-      "names `make rehearse` to run on the merge commit first", "`make release ENV=prod`"]),
+      "names `make rehearse` to run on the merge commit first", "`make release ENV=prod` does that round by round",
+      "`make release ENV=prod MANIFEST=<path>`"]),
     ("shared/docs/playbooks/agents.md", "governance adds it to `table_readers` in the same PR",
      ["merge", "`release-plan`", "it reuses the source env's rehearsal, so no rehearse is needed", "`release`"]),
     ("shared/docs/playbooks/governance.md", "make promote-to ENV=prod # the promotion PR",
-     ["merge it", "make release-plan ENV=prod # on the deployment machine (reuses dev's rehearsal)",
-      "make release ENV=prod"]),
-    ("shared/docs/playbooks/governance.md", "make promote-to ENV=prod # commit envs/prod/, PR, merge",
-     ["make release-plan ENV=prod # on the deployment machine (reuses dev's rehearsal)", "make release ENV=prod"]),
+     ["merge it", "# on the deployment machine (it reuses dev's rehearsal):",
+      "make release ENV=prod # at a terminal: per round, plans, shows the manifest, asks y/N",
+      "separate approver: per round make release-plan ENV=prod, approve, make release ENV=prod MANIFEST=<path>"]),
+    ("shared/docs/playbooks/governance.md", "make promote-to ENV=prod # offers to commit + push envs/prod/ (y)",
+     ["make release ENV=prod # each round: plans (reusing dev's rehearsal), shows the manifest, asks y/N"]),
     ("shared/docs/playbooks/governance.md", "`catalog_map = { \"dev_finance\" = \"prod_finance\" }`, promote",
-     ["merge the promotion", "`release-plan`", REUSE, "`release`"]),
+     ["promote (answer `y`)", "`make release ENV=prod`", "`release-plan` reuses the"]),
     ("shared/docs/playbooks/governance.md", "promoted from. Then generate",
      ["`promote-to`", "merge to `origin/main`", "`release-plan`", REUSE, "`release`"]),
     ("shared/docs/playbooks/one-team.md", "| Give another group an agent in prod |",
@@ -134,7 +140,7 @@ DOC_REUSE = [
     ("shared/examples/dev_to_prod/REFERENCE.md", "| `make release-plan ENV=prod` | 4 |",
      ["writes the receipt `make rehearse ENV=dev` would", "applying nothing", "`make rehearse ENV=dev` receipt",
       "dev is prod's `promote_from` here", "`make rehearse ENV=stg`"]),
-    ("shared/examples/dev_to_prod/README.md", "plans only a commit on your `origin/main`",
+    ("shared/examples/dev_to_prod/README.md", "`make release-plan ENV=prod` plans only a commit on your `origin/main`",
      ["make rehearse ENV=dev", "dev is prod's `promote_from` in this walkthrough", "make rehearse ENV=stg",
       "release-plan reuses that rehearsal itself"]),
 ]
@@ -158,8 +164,8 @@ DOC_ORDER = [
     ("shared/docs/playbooks/one-team.md", "make promote-to ENV=prod # same PR",
      ["after rehearse passes on the merge commit", *MAKE_PLAN]),
     ("shared/docs/playbooks/one-team.md", "5. **Merge.**",
-     ["`make rehearse ENV=dev` on the merge commit", "6. **Release.**", "`make release-plan ENV=prod`",
-      "`make release ENV=prod`"]),
+     ["`make rehearse ENV=dev` on the merge commit", "6. **Release.**", "`make release ENV=prod` at a terminal",
+      "`make release-plan ENV=prod`", "`make release ENV=prod MANIFEST=<path>`"]),
     *[("shared/docs/playbooks/one-team.md", row, ["merge, rehearse dev on the merge commit", *PLAN])
       for row in ("| Remove an agent |", "| Remove a table from an agent |")],
 ]
@@ -597,3 +603,56 @@ def test_rehearse_reuse_docs_warn_that_live_dev_is_not_rechecked():
         assert "does **not** re-check live dev for out-of-band drift" in text
         assert "revert the live change and run a real apply/rehearse" in text
         assert "abandon/re-stage the unfinished policy change" in text
+
+
+# The cross-env make promote form: SOURCE_ENV= / DEST_ENV= / DEST_CATALOG_MAP= arguments, or the reference row's
+# `make promote` with its `DEST_ENV` parameter.
+CROSS_ENV_PROMOTE = re.compile(r"make promote\b(?!-)[^\n|]*?\b(?:SOURCE_ENV|DEST_ENV|DEST_CATALOG_MAP)=|"
+                               r"`make promote` \|[^\n]*`DEST_ENV`")
+
+
+def _doc_units(text: str) -> list[str]:
+    """A table row with its table's header row, a list item, or a paragraph."""
+    units, block = [], []
+    for line in text.splitlines() + [""]:
+        if line.strip():
+            block.append(line)
+            continue
+        header = None
+        for row in block:
+            if row.lstrip().startswith("|"):
+                header = header or row
+                units.append(row if row is header else f"{header}\n{row}")
+            elif row.lstrip().startswith(("- ", "* ")) or re.match(r"\s*\d+\. ", row):
+                header = None
+                units.append(row)
+            else:
+                header = None
+        prose = [row for row in block if not row.lstrip().startswith(("|", "- ", "* "))
+                 and not re.match(r"\s*\d+\. ", row)]
+        if prose:
+            units.append("\n".join(prose))
+        block = []
+    return units
+
+
+def test_no_doc_offers_cross_env_make_promote_without_scoping_it_to_legacy_destinations():
+    """make promote SOURCE_ENV= DEST_ENV= refuses a deterministic destination, so every doc that shows it says
+    it is for legacy destinations and names make promote-to (the legacy demos' own READMEs are legacy throughout)."""
+    tracked = subprocess.run(["git", "ls-files", "*.md"], cwd=ROOT, text=True, capture_output=True, check=True)
+    found, seen = [], 0
+    for path in tracked.stdout.split():
+        if "CHANGELOG" in path or path.startswith("shared/examples/legacy/"):
+            continue
+        for unit in _doc_units((ROOT / path).read_text()):
+            if not CROSS_ENV_PROMOTE.search(unit):
+                continue
+            seen += 1
+            if not (re.search(r"\blegacy\b", unit, re.IGNORECASE) and "promote-to" in unit):
+                found.append(f"{path}: {unit[-300:]}")
+    assert not found, "\n".join(found)
+    assert seen >= 10, seen  # the reference rows, the walkthrough reference, architecture, integration scenarios
+    # ...because the guard refuses it for a deterministic destination and names promote-to.
+    makefile = (SHARED / "Makefile.shared").read_text()
+    assert 'echo "ERROR: make promote SOURCE_ENV=... DEST_ENV=$(DEST_ENV) is refused for deterministic destinations." >&2; \\\n' \
+        '\t\t\t\t\techo "       Use: make promote-to ENV=$(DEST_ENV)" >&2;' in makefile

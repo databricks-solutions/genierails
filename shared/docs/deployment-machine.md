@@ -17,9 +17,10 @@ git clone <your-repo-url> /srv/genierails && cd /srv/genierails/aws   # the one 
 # every release: move to the commit the pipeline names
 git fetch && git checkout --force --detach <sha>
 git status --porcelain                         # pass looks like: prints nothing
-make release-plan ENV=prod                     # prints the manifest path; changes nothing
-#   get the manifest approved
-make release ENV=prod                          # applies exactly that manifest
+make release ENV=prod                          # at a terminal: each round plans, shows the manifest, asks y/N, applies it
+#   a separate approver instead, per round:
+#   make release-plan ENV=prod                 # prints the manifest path; changes nothing
+#   make release ENV=prod MANIFEST=<path>      # applies exactly that approved manifest
 
 # on a schedule, at the last released commit
 make maintain ENV=prod
@@ -59,18 +60,25 @@ refuse there ([pipelines](pipelines.md#databricks-compute)).
 2. **Move the checkout.** `git fetch && git checkout --force --detach <sha>`.
    `--force` drops any edit to tracked files and leaves ignored state alone.
    **Pass looks like:** `git status --porcelain` prints nothing.
-3. **Plan.** `make release-plan ENV=prod`. **Pass looks like:**
+3. **Release, if you approve it yourself.** At a terminal, `make release ENV=prod`
+   runs steps 4 to 7 for you, round by round: it runs `release-plan`, prints the
+   manifest and asks `Approve and release manifest <id> (commit <sha>, round <n>
+   of at most 8)? [y/N]`. `y` is recorded as the approval (OS user, git
+   identity, host, terminal, time) and exactly that manifest is applied; `n`, a
+   refusal or a failure stops it. **Pass looks like:** `ALL EFFECTIVE` and
+   `=== Release complete (prod) ===`. With a separate approver, use steps 4 to 7.
+4. **Plan.** `make release-plan ENV=prod`. **Pass looks like:**
    `=== Release plan (prod) ===` and `Manifest (immutable): <path>`, then the
    `make release` command to run. That manifest is now prod's current one; a
    later `release-plan` supersedes it.
-4. **Approve.** A governance code owner reviews the manifest's reports
+5. **Approve.** A governance code owner reviews the manifest's reports
    (readers, weakening, field-level agent overwrite) and saved plans.
-5. **Release.** `make release ENV=prod`. It prints the current manifest's
-   path, commit and changes before applying; check they are what was
-   approved (a pipeline passes `MANIFEST=<path>` instead). **Pass looks
-   like:** `ALL EFFECTIVE` and `=== Release complete (prod) ===`.
-6. **More phases?** If it says to run `release-plan` again (a staged policy
-   change, tier move or recorded imports), repeat steps 3 to 5 until
+6. **Release.** `make release ENV=prod MANIFEST=<path>` applies exactly that
+   manifest, printing its path, commit and changes first (without
+   `MANIFEST=`, a terminal would start step 3's loop). **Pass looks like:**
+   `ALL EFFECTIVE` and `=== Release complete (prod) ===`.
+7. **More phases?** If it says to run `release-plan` again (a staged policy
+   change, tier move or recorded imports), repeat steps 4 to 6 until
    "Release complete".
 
 **If it stops** before the manifest, nothing changed. The message names the

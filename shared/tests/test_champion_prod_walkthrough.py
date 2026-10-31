@@ -169,8 +169,12 @@ def test_the_prod_section_reads_as_expected():
     ]
     # The whole flow's promote-to commits the same files itself.
     flow = _section("The whole flow")
-    assert "make promote-to ENV=prod    # copies the reviewed rules; shows the diff, offers to commit + push (y)" in flow
+    assert "make promote-to ENV=prod    # copies the reviewed rules; offers to commit + push (y)" in flow.splitlines()
     assert "Promote the rules to prod" not in flow
+    # ...and the table says which files that offer commits.
+    assert "| `make promote-to ENV=prod` | Copies dev's reviewed rules into prod, renamed to prod's catalogs and " \
+        "groups; prints the changed files by owner | The same commit question, for `.gitignore`, `envs/prod/` and " \
+        "`envs/account/` |" in flow.splitlines()
 
 
 def _step(section: str, title: str) -> str:
@@ -245,11 +249,15 @@ def test_prod_step_3_says_a_first_release_takes_several_rounds_in_the_real_messa
     positions = [row.index(f"`{message}`") for message in (RELEASE_PHASE_HEADING, RELEASE_NEXT, RELEASE_COMPLETE)]
     assert positions == sorted(positions), row
     flow = _section("The whole flow")
-    assert 'make release ENV=prod       # at a terminal, each round: plans prod after checking the committed ' \
-        'files (reusing dev\'s rehearsal; dev ' \
-        'isn\'t re-applied), shows the manifest, asks y/N, applies exactly it and proves the masks; until ' \
-        '"Release complete"' in flow
-    assert "make release-plan" not in flow and "repeats release-plan + release" not in _section("Prod")
+    assert 'make release ENV=prod       # each round: plans, shows the manifest, asks y/N, applies it; until ' \
+        '"Release complete"' in flow.splitlines()
+    # The flow's commands have no release-plan line: release runs it each round, which the table says,
+    # with the exact question it asks.
+    code = flow[flow.index("```bash"):flow.index("```", flow.index("```bash") + 3)]
+    assert "make release-plan" not in code and "repeats release-plan + release" not in _section("Prod")
+    row = next(line for line in flow.splitlines() if line.startswith("| `make release ENV=prod` |"))
+    assert "Per round: `make release-plan` (runs `make check ENV=prod`, reuses dev's rehearsal" in row
+    assert "`Approve and release manifest <id> (commit <sha>, round <n> of at most 8)? [y/N]`, once per round" in row
 
 
 def test_prod_step_3_tells_legacy_envs_to_skip_release_plan():
@@ -318,3 +326,73 @@ def test_following_the_prod_section_word_for_word_reaches_a_release_manifest(cus
     manifest = rg.current_manifest(repo.cloud / "envs" / "prod", "prod")
     assert manifest and manifest.is_file(), out["make release ENV=prod"]
     assert f"Manifest: {manifest}" in plan_out and not rg.release_receipts(repo.cloud, "prod")
+
+
+def test_the_ask_table_quotes_the_questions_the_code_asks():
+    """Each y/N the walkthrough's table promises is the exact question its command asks."""
+    flow = _section("The whole flow")
+    asks = flow[flow.index("### What each command does and what it asks"):]
+    rows = {line.split("|")[1].strip(): line for line in asks.splitlines() if line.startswith("| `make ")}
+    assert list(rows) == ["`make setup ENV=dev REPO=<url>`", "`make generate ENV=dev`", "`make rehearse ENV=dev`",
+                          "`make setup ENV=prod`", "`make promote-to ENV=prod`", "`make release ENV=prod`",
+                          "`make evidence ENV=prod`", "`make maintain ENV=prod`",
+                          "`make next ENV=<env>` / `make status ENV=<env>`"]
+    commit_envs = (SHARED / "scripts" / "commit_envs.py").read_text()
+    assert "`Commit these changes and push them to origin/main? [y/N]`" in rows["`make setup ENV=dev REPO=<url>`"]
+    assert "`... and keep them local (no origin remote)? [y/N]`" in rows["`make setup ENV=dev REPO=<url>`"]
+    assert 'input(f"Commit these changes and {target}? [y/N] ")' in commit_envs
+    assert 'f"push them to {remote}/{branch}" if has_remote else f"keep them local (no {remote} remote)"' in commit_envs
+    assert "`Approve and apply this account manifest? [y/N]`" in rows["`make rehearse ENV=dev`"]
+    assert "override _ACCOUNT_APPROVE_QUESTION = Approve and apply this account manifest?" in \
+        (SHARED / "Makefile.shared").read_text()
+    assert "`Approve and release manifest <id> (commit <sha>, round <n> of at most 8)? [y/N]`" in \
+        rows["`make release ENV=prod`"]
+    loop = (SHARED / "scripts" / "release_loop.py").read_text()
+    assert 'question = (f"Approve and release manifest {manifest[\'id\']} (commit {manifest[\'commit\'][:12]}, round "' in loop
+    assert 'f"{round_no} of at most {MAX_ROUNDS})?")' in loop and "MAX_ROUNDS = 8" in loop
+    for quiet in ("`make evidence ENV=prod`", "`make maintain ENV=prod`", "`make next ENV=<env>` / `make status ENV=<env>`"):
+        assert rows[quiet].rstrip().endswith("| nothing |"), quiet
+    # Acks stay a committed file, never a question.
+    assert "committing `envs/prod/ack.txt`" in asks and "(an ack is never a `y/N`)" in asks
+
+
+def test_the_ci_section_names_the_low_level_commands_and_what_they_do_off_a_terminal():
+    section = _section("CI / scripted")
+    rows = [line for line in section.splitlines() if line.startswith("| ") and not line.startswith("| Champion")
+            and not line.startswith("|---")]
+    assert [row.split("|")[1].strip() for row in rows] == [
+        "`make setup`, `make generate`, `make promote-to`", "`make rehearse ENV=dev`", "`make release ENV=prod`",
+        "(inside `rehearse` and `release-plan`)"]
+    commit, rehearse, release, check = rows
+    assert "No commit offer" in commit and "`git add .gitignore envs/`, commit, `git push`" in commit
+    assert "Stops with `ERROR: account plan is non-empty`" in rehearse
+    assert "`make account-plan`" in rehearse and "then `make apply-account`" in rehearse
+    assert rehearse.index("`make account-plan`") < rehearse.index("`make apply-account`")
+    assert "Releases the current manifest once (one round)" in release
+    assert release.index("`make release-plan ENV=prod`") < release.index("`make release ENV=prod MANIFEST=<path>`") \
+        < release.index("`=== Release complete (prod) ===`")
+    assert "`make check ENV=<env>`: the read-only PR check" in check
+    assert "no flag or variable answers an approval `y` for you" in section
+    assert "`GENIERAILS_INTERACTIVE=0` turns off the two approval questions and `COMMIT=0` the commit offers" in section
+    # ...as the code does: the account refusal, and release with MANIFEST= (or off a terminal) is one release.
+    makefile = (SHARED / "Makefile.shared").read_text()
+    assert 'echo "ERROR: account plan is non-empty; rehearse/release may only add allowed treatment-tag values."' in makefile
+    release_recipe = makefile[makefile.index("\nrelease:"):]
+    release_recipe = release_recipe[:release_recipe.index("\n\n")]
+    assert 'if [ "$(origin MANIFEST)" = undefined ]; then' in release_recipe
+    assert "INTERACTIVE_ENV = \"GENIERAILS_INTERACTIVE\"" in (SHARED / "scripts" / "approval.py").read_text()
+    assert "GENIERAILS_INTERACTIVE" not in (SHARED / "scripts" / "commit_envs.py").read_text()
+
+
+def test_the_walkthrough_says_setup_without_repo_keeps_the_genierails_remote():
+    """Local-only provenance needs no remotes at all; setup without REPO= keeps the genierails one."""
+    before = _section("Before you start")
+    assert "setup renames `origin` to `genierails` and adds no `origin`" in before
+    assert "the `genierails` remote counts" in before
+    assert "`git remote remove genierails`" in before and "a repo with no remotes at all deploys from its committed " \
+        "local `main`" in before
+    assert "(no remote, no GitHub account)" not in before
+    # ...because provenance takes the local-only path only with no remote names at all.
+    gate = (SHARED / "scripts" / "release_gate.py").read_text()
+    assert "    if not remotes and not _ci_detected_strict():\n" in gate
+    assert 'UPSTREAM_REMOTE = "genierails"' in (SHARED / "scripts" / "setup_repo.py").read_text()

@@ -566,18 +566,32 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     prod = readme[readme.index("## Prod"):readme.index("## Keep it safe")]
 
     # The whole flow: own repo (setup REPO=) and first commit first; rehearse and release (its release-plan)
-    # run make check themselves, so the flow has no separate check line.
-    order = ["make setup ENV=dev REPO=<your-repo-url>", "offers to commit + push those defaults",
-             "make generate ENV=dev", "make rehearse ENV=dev       # checks the committed files",
-             "make promote-to ENV=prod", "make release ENV=prod", "after checking the committed files"]
+    # run make check themselves, so the flow has no separate check line, and the commit offers and the
+    # y/N questions replace the git, account-plan and release-plan lines.
+    order = ["make setup ENV=dev REPO=<your-repo-url>", "offers to commit (y)",
+             "copy the env + agent templates and fill them in (Dev step 1)",
+             "make generate ENV=dev", "offers to commit + push (y)",
+             "make rehearse ENV=dev       # checks; first deploy: account plan y/N",
+             "make setup ENV=prod", "make promote-to ENV=prod", "make release ENV=prod",
+             "make evidence ENV=prod", "make maintain ENV=prod", "# lost? make next ENV=<env>"]
     positions = [flow.index(step) for step in order]
     assert positions == sorted(positions)
-    assert "make check ENV=" not in flow
+    commands = [line.split("#")[0].strip() for line in flow.splitlines()
+                if line.startswith("make ") and "```" not in line]
+    assert commands == ["make setup ENV=dev REPO=<your-repo-url>", "make generate ENV=dev", "make rehearse ENV=dev",
+                        "make setup ENV=prod", "make promote-to ENV=prod", "make release ENV=prod",
+                        "make evidence ENV=prod", "make maintain ENV=prod"]
+    code = flow[flow.index("```bash"):flow.index("```", flow.index("```bash") + 3)]
+    for gone in ("make check ENV=", "make release-plan", "account-plan", "apply-account", "git add", "git commit",
+                 "git push", "git remote", "GENIERAILS_EVIDENCE_INTEGRATION", "generated/evidence"):
+        assert gone not in code, gone
     assert "Data classification" in flow
-    assert (
-        "make setup ENV=prod         # set deployer_principal_id, catalog_map and group_map; "
-        "leave access_tier_groups placeholders"
-    ) in flow
+    assert "make setup ENV=prod         # then set deployer_principal_id, catalog_map, group_map" in flow
+    # The table says what each command asks; release's own check is its release-plan's.
+    asks = flow[flow.index("### What each command does and what it asks"):]
+    assert "| `make release ENV=prod` | Per round: `make release-plan` (runs `make check ENV=prod`, reuses dev's " \
+        "rehearsal, plans and writes one manifest)" in asks
+    assert "| `make rehearse ENV=dev` | Runs `make check ENV=dev` on the committed files" in asks
 
     # Detailed walkthrough: setup's REPO= (explained before you start), then commit before generate/check/rehearse.
     assert "git remote" not in flow
@@ -604,6 +618,7 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     assert ("`make release-plan` first runs `make check ENV=prod`, which for a promoted env also runs "
             "`promote-to CHECK=1`; if a step fails, it refuses before any lock, live call or write.") in prod
     assert "make verify-access ENV=prod" in prod
+    assert "Leave the `access_tier_groups` placeholders" in prod
     assert "`rehearse` (deterministic envs) and `release-plan` run it first" in ref
     assert "Does **not** run `make check`" not in ref
     assert "`make check ENV=dev` first (refuses before the lock, any write or live call if it fails)" in ref
@@ -619,9 +634,13 @@ def test_champion_walkthrough_lets_release_plan_reuse_the_dev_rehearsal_on_the_p
     gap = prod[prod.index("**Reuse an existing mask**"):prod.index("**A new kind of mask**")]
 
     # The whole flow: promote-to (which offers the commit + push), then release (no second dev rehearse).
-    promoted = flow.index("offers to commit + push (y)", flow.index("make promote-to ENV=prod"))
-    assert flow.index("make promote-to ENV=prod") < promoted < flow.index("make release ENV=prod")
-    assert "make rehearse ENV=dev" not in flow[promoted:]
+    code = flow[flow.index("```bash"):flow.index("```", flow.index("```bash") + 3)]
+    promoted = code.index("offers to commit + push (y)", code.index("make promote-to ENV=prod"))
+    assert code.index("make promote-to ENV=prod") < promoted < code.index("make release ENV=prod")
+    assert "make rehearse ENV=dev" not in code[promoted:]
+    # ...and the table: release reuses dev's rehearsal (it never rehearses dev).
+    row = next(line for line in flow.splitlines() if line.startswith("| `make release ENV=prod` |"))
+    assert "reuses dev's rehearsal" in row and "make rehearse" not in row
 
     # Prod: promote-to offers to commit and push the promoted files, then plan; release-plan reuses dev's rehearsal.
     steps = ["It then offers to commit and push `.gitignore`, `envs/prod/`", "**3. Plan, release.**",

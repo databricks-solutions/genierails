@@ -525,7 +525,7 @@ Validates the full dev → prod promotion from the legacy playbook § 5.
 | 2 | Configure dev: two spaces (Finance + Clinical) |
 | 3 | `make generate ENV=dev` + `make apply ENV=dev` |
 | 4 | Verify dev data + ABAC |
-| 5 | `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=dev_fin=prod_fin,dev_clinical=prod_clinical` |
+| 5 | `make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=dev_fin=prod_fin,dev_clinical=prod_clinical` (legacy envs: these scenarios set no `governance_mode`; a deterministic destination refuses this form, use `make promote-to`) |
 | 6 | `make apply ENV=prod` |
 | 7 | `setup_test_data.py --verify-prod` |
 | 8 | Teardown both envs |
@@ -588,7 +588,7 @@ only on `existing_spaces` resources — no `genie_space_create` provisioner runs
 
 **Phase 4 — Promote:**
 
-`make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=dev_fin=prod_fin` followed
+`make promote SOURCE_ENV=dev DEST_ENV=prod DEST_CATALOG_MAP=dev_fin=prod_fin` (legacy envs: these scenarios set no `governance_mode`; a deterministic destination refuses this form, use `make promote-to`) followed
 by `make apply ENV=prod` applies the same governance to prod.
 
 **Steps:**
@@ -604,7 +604,7 @@ by `make apply ENV=prod` applies the same governance to prod.
 | 7 | `make apply ENV=dev` — applies ABAC; no new space created |
 | 8 | Assert **no** `.genie_space_id_*` file was created (space not created by Terraform) |
 | 9 | `setup_test_data.py --verify` — row counts, column tags, masks |
-| 10 | `make promote ... DEST_CATALOG_MAP=dev_fin=prod_fin` |
+| 10 | `make promote ... DEST_CATALOG_MAP=dev_fin=prod_fin` (legacy envs: these scenarios set no `governance_mode`; a deterministic destination refuses this form, use `make promote-to`) |
 | 11 | `make apply ENV=prod` |
 | 12 | `setup_test_data.py --verify-prod` |
 | 13 | Delete the UI-created space via `DELETE /api/2.0/genie/spaces/{id}` (teardown) |
@@ -636,7 +636,7 @@ A `bu_clin` env is set up with a Clinical Analytics space. `make generate MODE=g
 
 **Phase 4 — BU Finance team promote to prod:**
 
-`make promote SOURCE_ENV=bu_fin DEST_ENV=bu_fin_prod DEST_CATALOG_MAP=dev_fin=prod_fin` followed by `make apply-genie ENV=bu_fin_prod` (not `make apply`). Asserts `bu_fin_prod` has a `.genie_space_id_*` file but no `data_access/terraform.tfstate`, and that the governance state remains unmodified.
+`make promote SOURCE_ENV=bu_fin DEST_ENV=bu_fin_prod DEST_CATALOG_MAP=dev_fin=prod_fin` (legacy envs: these scenarios set no `governance_mode`; a deterministic destination refuses this form, use `make promote-to`) followed by `make apply-genie ENV=bu_fin_prod` (not `make apply`). Asserts `bu_fin_prod` has a `.genie_space_id_*` file but no `data_access/terraform.tfstate`, and that the governance state remains unmodified.
 
 **Steps:**
 
@@ -656,7 +656,7 @@ A `bu_clin` env is set up with a Clinical Analytics space. `make generate MODE=g
 | 12 | **Snapshot** `governance/data_access/terraform.tfstate` content |
 | 13 | Configure `bu_clin` env with Clinical Analytics space; `make generate MODE=genie` + `make apply-genie` |
 | 14 | Assert `bu_clin` has `.genie_space_id_clinical_analytics`; governance state byte-for-byte unchanged |
-| 15 | `make promote SOURCE_ENV=bu_fin DEST_ENV=bu_fin_prod DEST_CATALOG_MAP=dev_fin=prod_fin` |
+| 15 | `make promote SOURCE_ENV=bu_fin DEST_ENV=bu_fin_prod DEST_CATALOG_MAP=dev_fin=prod_fin` (legacy envs: these scenarios set no `governance_mode`; a deterministic destination refuses this form, use `make promote-to`) |
 | 16 | `make apply-genie ENV=bu_fin_prod` |
 | 17 | Assert `bu_fin_prod` has `.genie_space_id_*`; no `data_access/terraform.tfstate`; governance state still unchanged |
 | 18 | Teardown all envs |
@@ -778,7 +778,7 @@ Validates the full workflow of importing an existing Genie agent and deploying i
 | 6 | Assert: `genie_space_configs` present, `tag_assignments` / `fgac_policies` absent, no `masking_functions.sql` |
 | 7 | `make apply-genie ENV=import_noabac` — deploy workspace layer |
 | 8 | Assert: no `.genie_space_id_*` file (space attached, not created); space accessible via API |
-| 9 | `make promote SOURCE_ENV=import_noabac DEST_ENV=import_noabac_prod DEST_CATALOG_MAP=dev_fin=prod_fin` — promote remaps genie config or gracefully skips |
+| 9 | `make promote SOURCE_ENV=import_noabac DEST_ENV=import_noabac_prod DEST_CATALOG_MAP=dev_fin=prod_fin` (legacy envs: these scenarios set no `governance_mode`; a deterministic destination refuses this form, use `make promote-to`) — promote remaps genie config or gracefully skips |
 | 10 | `make apply-genie ENV=import_noabac_prod` — deploy prod workspace |
 | 11 | Assert: no `data_access/terraform.tfstate`, no account resources, no `masking_functions.sql`, no `tag_assignments` / `fgac_policies` |
 
@@ -871,7 +871,7 @@ make integration-test WAREHOUSE_ID=abc123ef
 | 5 | `make apply ENV=dev` | Deploy dev governance |
 | 6 | `setup_test_data.py --verify` | Assert dev ABAC governance |
 | 7 | `make generate SPACE="Finance Analytics"` | Per-space isolation check |
-| 8 | `make promote ... DEST_CATALOG_MAP=...` | Remap dev → prod catalogs |
+| 8 | `make promote ... DEST_CATALOG_MAP=...` (legacy envs: these scenarios set no `governance_mode`; a deterministic destination refuses this form, use `make promote-to`) | Remap dev → prod catalogs |
 | 9 | `make apply ENV=prod` | Deploy prod governance |
 | 10 | `setup_test_data.py --verify-prod` | Assert prod ABAC governance |
 | 11 | Teardown | Drop data + destroy Terraform (skipped if `KEEP_DATA=1`) |
