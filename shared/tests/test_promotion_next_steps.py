@@ -90,8 +90,9 @@ DOC_REUSE = [
      ["make release ENV=prod", "Each round it plans (`make release-plan ENV=prod`)",
       "the next `make release ENV=prod` offers it first"]),
     ("shared/examples/dev_to_prod/README.md", "**Reuse an existing mask** (the common case)",
-     ["`make promote-to ENV=prod`", "`make release-plan ENV=prod`", REUSE,
-      "`make release ENV=prod`"]),
+     ["`make generate ENV=dev`", "offers to commit the fix", "`make rehearse ENV=dev`",
+      "`make promote-to ENV=prod`", "offers to commit the promotion", "`make release ENV=prod`",
+      "runs its release-plan loop"]),
     ("shared/examples/dev_to_prod/REFERENCE.md", "Stops at `coverage-gate` or `audit-rulebook`",
      ["`make generate ENV=dev`", "`make rehearse ENV=dev`", "`make promote-to ENV=prod`",
       "answer `y` to the commit offers", "`make release ENV=prod`", "`release-plan` reuses the"]),
@@ -482,10 +483,10 @@ MAKE_STEP = r"make [a-z-]+ ENV=[a-z]+"
 
 
 def _readme_recovery() -> list[str]:
-    """The make commands the README lists after a reused mask's commit, in order."""
+    """The make commands the README lists after a reused mask's fix, in order."""
     line = next(line for line in README.read_text().splitlines() if line.startswith("- **Reuse an existing mask**"))
-    tail = line[line.index("Commit it, then"):]
-    assert "committing and pushing after each step that changes `envs/`" in tail
+    tail = line[line.index("Review it in dev, then"):]
+    assert "offers to commit the fix" in tail and "runs its release-plan loop" in tail
     return re.findall(rf"`({MAKE_STEP})`", tail)
 
 
@@ -512,10 +513,9 @@ def test_every_coverage_gap_fix_prints_the_readme_recovery_sequence(tmp_path, ca
     # No second make rehearse ENV=dev: release-plan reuses the rehearsal of the commit before the promotion.
     # No make check either: rehearse and release-plan run it first.
     assert readme == ["make generate ENV=dev", "make rehearse ENV=dev", "make promote-to ENV=prod",
-                      "make release-plan ENV=prod", "make release ENV=prod"]
+                      "make release ENV=prod"]
     builder = coverage_fix.recovery_steps(["dev", "prod"], "envs/dev/env.auto.tfvars")
-    assert builder.startswith("commit envs/dev/env.auto.tfvars, make generate ENV=dev")
-    assert builder.endswith("; commit and push after each step that changes envs/")
+    assert builder.startswith("review envs/dev/env.auto.tfvars, make generate ENV=dev")
     assert re.findall(MAKE_STEP, builder) == readme
 
     scaffold = _scaffold_output(capsys, "prod", prod, dev)
@@ -566,7 +566,7 @@ def test_a_prod_promoted_from_a_rehearsed_stg_maps_and_rehearses_in_stg(tmp_path
     _dev, stg, prod = _chain_envs(tmp_path, "")
     assert coverage_fix.promotion_chain(prod) == ["stg", "prod"]
     expected = ["make generate ENV=stg", "make rehearse ENV=stg", "make promote-to ENV=prod",
-                "make release-plan ENV=prod", "make release ENV=prod"]
+                "make release ENV=prod"]
     builder = coverage_fix.recovery_steps(["stg", "prod"], "envs/stg/env.auto.tfvars")
     assert re.findall(MAKE_STEP, builder) == expected
     for text in _all_fixes(prod):
