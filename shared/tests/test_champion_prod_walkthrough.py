@@ -288,8 +288,9 @@ def test_following_the_prod_section_word_for_word_reaches_a_release_manifest(cus
             result = repo.stub_make(target, env)
         elif target == "release":
             # At a terminal: the first round's release-plan runs (stubbed below make), then n at its y/N.
+            # Dev step 5's rehearse applied the account layer, so release's account step finds no changes.
             planning = Make(repo.tmp, repo, passthrough=("release-plan",))
-            args, environ = planning.command("release", env)
+            args, environ = planning.command("release", env, root_runner=planning.empty_account_runner())
             code, tty_out = _pty_run(args, "n", environ, cwd=repo.cloud)
             result = subprocess.CompletedProcess(command, 0 if "Not released. Manifest" in tty_out else code,
                                                  tty_out, "")

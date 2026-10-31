@@ -40,21 +40,10 @@ WORLD_ARGS = ("IMPORT_EXISTING_SCRIPT=true",)
 MAKE_FAILED = 2  # make's exit code when the release recipe (the loop) fails
 
 
-# The account step's probe (account plan, no -out=) finds no changes; anything else goes to the runner.
-EMPTY_ACCOUNT_PROBE = """#!/bin/sh
-if [ "$1" = account ] && [ "$3" = plan ]; then
-    case " $* " in *" -out="*) ;; *) exit 0 ;; esac
-fi
-exec {runner} "$@"
-"""
-
-
 def _on_a_pty(make: Make, answers, *extra, environ_extra=None, stubs=None, timeout=900, account_changes=False,
               root_runner=None):
-    if root_runner is None and not account_changes:
-        root_runner = make.tmp / "empty-account-probe"
-        root_runner.write_text(EMPTY_ACCOUNT_PROBE.format(runner=make.stubs["runner"]))
-        root_runner.chmod(0o755)
+    if root_runner is None and not account_changes:  # the account step's probe finds no changes
+        root_runner = make.empty_account_runner()
     args, environ = make.command("release", "prod", *extra, stubs=stubs, environ_extra=environ_extra,
                                  root_runner=root_runner)
     environ = {k: v for k, v in environ.items() if k != approval.RUN_ENV}
