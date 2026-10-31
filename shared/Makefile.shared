@@ -1533,7 +1533,7 @@ release: _guard-not-ci-apply _guard-genie-placeholder ## Derive, validate, prove
 # make rehearse ENV=dev would write without re-applying, under the dev lock;
 # it never applies), then checks provenance (release_gate.py provenance:
 # a passing clean rehearsal of HEAD, a clean checkout, HEAD on freshly fetched
-# origin/main (or committed local HEAD when the repo has no remotes), matching
+# origin/main (or committed local HEAD when local-only provenance is allowed),
 # fingerprints and envs/prod/generated digest, not older than the last release
 # unless prod:rollback:<commit> is acknowledged), then,
 # under the prod lock, re-derives prod's config from live tags into the

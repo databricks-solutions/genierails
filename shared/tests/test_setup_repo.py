@@ -4,8 +4,9 @@ A fresh GenieRails clone (origin at GenieRails) run with REPO= keeps
 GenieRails as the ``genierails`` remote and makes origin the customer's repo;
 re-running with the same REPO changes nothing, and a different REPO once
 origin exists is refused before anything is written (no env file, no remote
-change). Without REPO a fresh clone becomes a local-only repo (no origin), so
-only the git binary is needed. Nothing is ever pushed: REPO is a local bare
+change). Without REPO a fresh clone becomes a local-only repo (only the
+``genierails`` upgrade remote, no origin), so only the git binary is needed.
+Nothing is ever pushed: REPO is a local bare
 repo here and must stay empty. Real make setup runs in temporary repos, with
 GIT_CONFIG_GLOBAL=/dev/null so the developer's global hooks and signing don't
 apply.
@@ -24,6 +25,7 @@ SHARED = ROOT / "shared"
 sys.path.insert(0, str(SHARED))
 
 from scripts import customer_gitignore as cg  # noqa: E402
+from scripts import release_gate as rg  # noqa: E402
 from scripts import setup_repo as sr  # noqa: E402
 
 UPSTREAM = "https://github.com/databricks-solutions/genierails.git"
@@ -79,6 +81,11 @@ def _snapshot(repo):
 
 def _no_refs(bare):
     return _git(bare, "for-each-ref") == ""
+
+
+def _commit_all(repo, message="commit"):
+    _git(repo, "add", "-A")
+    _git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", message)
 
 
 @pytest.mark.parametrize("cloud", CLOUDS)
@@ -178,6 +185,21 @@ def test_no_repo_makes_a_fresh_clone_local_only(tmp_path):
     assert later.returncode == 0, later.stdout + later.stderr
     assert _remotes(repo) == {"genierails": UPSTREAM, "origin": url} and "renamed" not in later.stdout
     assert _no_refs(url)
+
+
+def test_setup_without_repo_leaves_provenance_on_committed_local_main(tmp_path, monkeypatch):
+    for key in ("CI", "TF_BUILD", "JENKINS_URL", "GITLAB_CI", "BUILDKITE", "CIRCLECI",
+                "GENIERAILS_ALLOW_CI_APPLY"):
+        monkeypatch.delenv(key, raising=False)
+    repo = _clone(tmp_path)
+    result = _setup(repo / "aws", "ENV=dev")
+    assert result.returncode == 0, result.stdout + result.stderr
+    _git(repo, "branch", "-M", "main")
+    _commit_all(repo, "setup")
+    prov = rg.account_provenance(repo / "aws" / "envs" / "account")
+    assert prov["remote"] == "local main"
+    assert prov["remote_ref"] == "refs/heads/main"
+    assert prov["local_only"] is True
 
 
 @pytest.mark.parametrize("opt_out", [("GITIGNORE=off",), ()])

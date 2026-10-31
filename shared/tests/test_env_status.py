@@ -266,6 +266,27 @@ def test_account_plan_accepts_committed_head_in_local_only_repo(world, repo):
     assert status["git"]["head_is_remote"] is True
 
 
+def test_account_plan_accepts_setup_genierails_remote_as_local_only(world, repo):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    repo.commit({"aws/envs/dev/ack.txt": "\n"}, push=False)
+    assert world.next("dev")[0] == "make account-plan"
+    status = world.status("dev")
+    assert status["git"]["local_only"] is True
+    assert status["git"]["remotes"] == ["genierails"]
+    assert status["git"]["remote"] == "local main"
+
+
+def test_next_refuses_bad_genierails_remote_before_account_plan(world, repo):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", "https://github.com/example/not-genierails.git")
+    repo.commit({"aws/envs/dev/ack.txt": "\n"}, push=False)
+    command, why = world.next("dev")
+    assert command == f"git remote set-url genierails {rg.UPSTREAM_URL}"
+    assert "local-only provenance is refused because genierails points at" in why
+    assert "make account-plan" not in command
+
+
 def test_account_plan_local_only_feature_branch_merges_to_local_main(world, repo):
     repo.git("remote", "remove", "origin")
     repo.git("checkout", "-q", "-b", "feature")
@@ -334,6 +355,17 @@ def test_no_remote_local_only_repo_plans_release(world, repo):
     assert why == f"dev is rehearsed at HEAD {repo.head()[:12]} and envs/prod/generated matches it"
     text = world.run("status", "prod").stdout
     assert "local-only repo (local main; no remotes)" in text
+
+
+def test_setup_genierails_remote_plans_release_as_local_only(world, repo):
+    account_applied(repo)
+    rehearse(repo)
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    command, why = world.next("prod")
+    assert command == "make release-plan ENV=prod"
+    assert why == f"dev is rehearsed at HEAD {repo.head()[:12]} and envs/prod/generated matches it"
+    assert "local-only repo (local main; only genierails upgrade remote)" in world.run("status", "prod").stdout
 
 
 def test_local_only_release_plan_feature_branch_merges_to_local_main(world, repo):

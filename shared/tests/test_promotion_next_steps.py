@@ -141,8 +141,8 @@ DOC_REUSE = [
      ["writes the receipt `make rehearse ENV=dev` would", "applying nothing", "`make rehearse ENV=dev` receipt",
       "dev is prod's `promote_from` here", "`make rehearse ENV=stg`"]),
     ("shared/examples/dev_to_prod/README.md", "`make release-plan ENV=prod` plans only a commit on your `origin/main`",
-     ["make rehearse ENV=dev", "dev is prod's `promote_from` in this walkthrough", "make rehearse ENV=stg",
-      "release-plan reuses that rehearsal itself"]),
+     ["option-A local-only repo", "make rehearse ENV=dev", "dev is prod's `promote_from` in this walkthrough",
+      "make rehearse ENV=stg", "release-plan reuses that rehearsal itself"]),
 ]
 # A second rehearse is required (and asked for) only when the source env's inputs changed too:
 # a PR that also edits envs/dev, or a GenieRails upgrade (shared/ changed).
