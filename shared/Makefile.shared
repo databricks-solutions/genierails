@@ -151,6 +151,15 @@ _is_own_env_dir = { [ -n "$(GENIERAILS_CLOUD_DIR)" ] && _own=$$(CDPATH= cd -P "$
 # dirs, symlinks and tfvars are created), nothing is deleted, and one line
 # notes any leftovers kept. Every step fails the target (|| exit 1): a half-made
 # env dir must never reach setup's next-steps banner.
+# make setup / init-env ENV=$(DEFAULT_ENV) (_SEED_WALKTHROUGH=1) starts a missing
+# env.auto.tfvars from the walkthrough's template instead and, first (so a failed
+# copy leaves no env file behind), copies the agent template to
+# agents/$(_SETUP_AGENT_FILE) while agents/ holds no agent file. It never
+# overwrites a file and never writes through a symlinked agents/. Promoted envs
+# get neither: promote-to writes their agent files.
+override _WALKTHROUGH_DIR = $(SHARED_ROOT)/examples/dev_to_prod
+override _SETUP_AGENT_NAME = Finance Analytics
+override _SETUP_AGENT_FILE = $(_SETUP_AGENT_NAME).auto.tfvars
 _prepare-env:
 	@envs="$(ENV)"; \
 	if [ "$(ENV)" != "$(ACCOUNT_ENV)" ] && [ "$(ENV)" != "$(DATA_ACCESS_SUBDIR)" ]; then \
@@ -218,7 +227,21 @@ _prepare-env:
 			echo "ERROR: $$env_dir/env.auto.tfvars is a dangling symlink; fix or remove it before setup."; exit 1; \
 		fi; \
 		if [ ! -e "$$env_dir/env.auto.tfvars" ] && [ ! -L "$$env_dir/env.auto.tfvars" ]; then \
-			cp "$(SHARED_ROOT)/env.auto.tfvars.example" "$$env_dir/env.auto.tfvars" || exit 1; \
+			if [ "$${_SEED_WALKTHROUGH:-0}" = 1 ] && [ "$${_SEED_PROMOTION_SETTINGS:-1}" != 0 ] && [ "$$env_name" = "$(ENV)" ] && [ "$$env_name" = "$(DEFAULT_ENV)" ]; then \
+				agents_dir="$$env_dir/agents"; \
+				if [ -L "$$agents_dir" ] || { [ -e "$$agents_dir" ] && [ ! -d "$$agents_dir" ]; }; then \
+					echo "Not copying the agent template: $$agents_dir is a symlink or not a directory."; \
+				else \
+					set -- "$$agents_dir"/*.auto.tfvars; \
+					if [ ! -e "$$1" ] && [ ! -L "$$1" ]; then \
+						mkdir -p "$$agents_dir" || exit 1; \
+						cp "$(_WALKTHROUGH_DIR)/agent.auto.tfvars.example" "$$agents_dir/$(_SETUP_AGENT_FILE)" || exit 1; \
+					fi; \
+				fi; \
+				cp "$(_WALKTHROUGH_DIR)/env.auto.tfvars.example" "$$env_dir/env.auto.tfvars" || exit 1; \
+			else \
+				cp "$(SHARED_ROOT)/env.auto.tfvars.example" "$$env_dir/env.auto.tfvars" || exit 1; \
+			fi; \
 			if [ "$$env_name" = "$(ACCOUNT_ENV)" ] || [ "$${_SEED_PROMOTION_SETTINGS:-1}" = 0 ]; then \
 				python3 -c 'from pathlib import Path; import sys; p=Path(sys.argv[1]); s=p.read_text(); a="# GENIERAILS_DETERMINISTIC_DEFAULTS_BEGIN\n"; b="# GENIERAILS_DETERMINISTIC_DEFAULTS_END\n"; before, rest=s.split(a,1); _, after=rest.split(b,1); p.write_text(before+after.lstrip("\n"))' "$$env_dir/env.auto.tfvars" || exit 1; \
 			fi; \
@@ -478,7 +501,7 @@ setup: ## Prepare the selected environment(s) and show next steps
 		GENIERAILS_SETUP_DIRTY="$$preexisting" $(MAKE) --no-print-directory _setup ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"
 
 _setup:
-	@$(MAKE) --no-print-directory _bootstrap ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"
+	@_SEED_WALKTHROUGH=1 $(MAKE) --no-print-directory _bootstrap ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"
 	@$(_SETUP_REPO)
 	@$(_CUSTOMER_GITIGNORE)
 	@echo "=== Setup ($(ENV)) ==="
@@ -576,10 +599,20 @@ _setup:
 			echo "     (who gets SELECT; without it GenieRails grants none and masks apply to existing readers)"; step=$$((step+1)); \
 		else \
 			if [ "$$det" = 1 ]; then \
-				echo "  $$step. Per agent, create its file (the file name is the agent's name) and set genie_space_id to its"; \
-				echo "     Genie agent ID and acl_groups to the groups that may run it ([] means nobody; required):"; \
-				echo "       mkdir -p $(_SETUP_ENV_REL)/agents"; \
-				echo "       cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example \"$(_SETUP_ENV_REL)/agents/<agent name>.auto.tfvars\""; \
+				set -- "$(ENV_DIR)/agents"/*.auto.tfvars; \
+				if [ -e "$$1" ] && [ ! -L "$(ENV_DIR)/agents" ]; then \
+					echo "  $$step. Per agent, in its file in $(_SETUP_ENV_REL)/agents/ (the file name is the agent's name), set"; \
+					echo "     genie_space_id to its Genie agent ID and acl_groups to the groups that may run it ([] means nobody; required)."; \
+					if [ -f "$(ENV_DIR)/agents/$(_SETUP_AGENT_FILE)" ] && [ ! -e "$(ENV_DIR)/agents/$(_SETUP_AGENT_NAME).space.json" ]; then \
+						echo "     Setup copied the agent template to \"$(_SETUP_ENV_REL)/agents/$(_SETUP_AGENT_FILE)\": before the first"; \
+						echo "     make generate, rename it to your agent's name; for another agent, copy it under that agent's name."; \
+					fi; \
+				else \
+					echo "  $$step. Per agent, create its file (the file name is the agent's name) and set genie_space_id to its"; \
+					echo "     Genie agent ID and acl_groups to the groups that may run it ([] means nobody; required):"; \
+					echo "       mkdir -p $(_SETUP_ENV_REL)/agents"; \
+					echo "       cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example \"$(_SETUP_ENV_REL)/agents/<agent name>.auto.tfvars\""; \
+				fi; \
 				echo "     In $(_SETUP_ENV_REL)/env.auto.tfvars set deployer_principal_id to the applying SP's client_id, and"; \
 				echo "     access_tier_groups to your IdP groups, most to least privileged (the template starts new champions in deterministic mode)"; \
 			else \
@@ -635,6 +668,7 @@ _setup:
 override _CUSTOMER_GITIGNORE = python3 "$(SHARED_ROOT)/scripts/customer_gitignore.py" --cloud-dir "$(CLOUD_ROOT)" \
 	--mode "$(GITIGNORE)" --account-env "$(ACCOUNT_ENV)" --env "$(ENV)"
 
+init-env: export _SEED_WALKTHROUGH = 1
 init-env: _bootstrap ## Prepare env directories and default config files
 	@echo "Environment bootstrap ready for $(ENV)."
 

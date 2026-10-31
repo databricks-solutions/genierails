@@ -12,6 +12,7 @@ env proves every runtime file is ignored and every committed file is tracked.
 """
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -411,9 +412,11 @@ def test_git_status_ignores_every_runtime_file_and_tracks_every_committed_one(
     for env, mode in envs.items():
         assert _setup(cloud, cloud_root, f"ENV={env}").returncode == 0
         env_file = cloud_root / "envs" / env / "env.auto.tfvars"
-        env_file.write_text(env_file.read_text().replace(
-            'governance_mode       = "deterministic"', f'governance_mode       = "{mode}"'
-        ))
+        # dev starts from the walkthrough template, prod from shared/env.auto.tfvars.example.
+        text, count = re.subn(r'^governance_mode( +)= "deterministic"$', rf'governance_mode\1= "{mode}"',
+                              env_file.read_text(), flags=re.MULTILINE)
+        assert count == 1, env_file
+        env_file.write_text(text)
     result = _setup(cloud, cloud_root, "ENV=prod", "GITIGNORE=customer")
     assert result.returncode == 0, result.stdout + result.stderr
 

@@ -130,6 +130,7 @@ def customer(tmp_path, monkeypatch):
     assert result.returncode == 0, result.stdout + result.stderr
     dev = repo.cloud / "envs" / "dev"
     (dev / "env.auto.tfvars").write_text(DEV_ENV)
+    (dev / "agents" / "Finance Analytics.auto.tfvars").unlink()  # DEV_ENV lists its agent inline
     (dev / "auth.auto.tfvars").write_text(_auth(DEPLOYER))
     (repo.cloud / "envs" / "account" / "abac.auto.tfvars").write_text(LEGACY_ACCOUNT)
     (dev / "generated").rmdir()  # setup's empty dir; _write_generated writes generate's output
