@@ -1227,7 +1227,8 @@ _apply-account-locked: _guard-not-databricks-compute
 	echo ""; \
 	echo "=== Account apply complete ==="
 
-# The account sub-flow of a deterministic rehearse (simplification step 6b).
+# The account sub-flow of a deterministic rehearse (simplification step 6b),
+# and of an interactive make release before its round 1.
 # On a terminal (scripts/approval.py interactive: the top-level make's recipe,
 # outside CI, stdin and stdout a terminal, GENIERAILS_INTERACTIVE not 0), when
 # the account plan has changes (or the command line names ALLOW_TAG_VALUE_REMOVAL:
@@ -1252,6 +1253,9 @@ _apply-account-locked: _guard-not-databricks-compute
 # approve refuses unless the file still has that digest when it asks and when
 # it records, and _apply-account-locked refuses under the lock unless the file
 # has the record's digest (_APPROVAL_CHECK, _APPROVAL_PIN).
+# $(2) set (make release's loop): use the nonce the calling recipe already made
+# from /dev/urandom and exported, so the account record and every release
+# round's record are of one run.
 override _ACCOUNT_MANIFEST_OUT = $(if $(filter-out 0,$(MAKELEVEL)),$(GENIERAILS_ACCOUNT_MANIFEST_OUT))
 override _ACCOUNT_APPROVE_QUESTION = Approve and apply this account manifest?
 override _ACCOUNT_APPROVE_APPLY = ( \
@@ -1292,7 +1296,7 @@ override _ACCOUNT_APPROVE_APPLY = ( \
 		*) echo "ERROR: the manifest display ($(SHARED_ROOT)/scripts/approval.py show) gave no valid answer (exit $$ap_rc); nothing was approved or applied." >&2; exit 1 ;; \
 	esac; \
 	echo "  Manifest (immutable): $$manifest"; \
-	GENIERAILS_APPROVAL_RUN="$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; export GENIERAILS_APPROVAL_RUN; \
+	$(if $(2),,GENIERAILS_APPROVAL_RUN="$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; export GENIERAILS_APPROVAL_RUN;) \
 	case "$$GENIERAILS_APPROVAL_RUN" in ""|*[!0-9a-f]*) echo "ERROR: couldn't make a per-run approval nonce; nothing was approved." >&2; exit 1 ;; esac; \
 	: > "$$ap_tmp/approve"; \
 	python3 "$(SHARED_ROOT)/scripts/approval.py" approve --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --manifest "$$manifest" --question "$(_ACCOUNT_APPROVE_QUESTION)" --expect-digest "$$digest" --answer-file "$$ap_tmp/approve"; ap_rc=$$?; \
@@ -1444,7 +1448,11 @@ certify:
 # top-level make, MANIFEST undefined) is the interactive release
 # (scripts/release_loop.py): each round it plans (or offers the still
 # releasable current manifest), shows the manifest, asks y/N and releases it
-# through _release-manifest, until the release is complete. Anything else
+# through _release-manifest, until the release is complete. Before round 1,
+# when the account plan has changes, it first runs rehearse's account step
+# (_ACCOUNT_APPROVE_APPLY: the account manifest, y/N, apply-account's path);
+# anything but y there stops make release before any release-plan. One
+# per-run nonce covers the account record and every round's. Anything else
 # (MANIFEST given by the command line or environment, even empty; CI; no
 # terminal; GENIERAILS_INTERACTIVE=0; a nested make) runs
 # _release-manifest once, exactly as before.
@@ -1457,7 +1465,10 @@ release: _guard-not-ci-apply _guard-genie-placeholder ## Derive, validate, prove
 			python3 "$(SHARED_ROOT)/scripts/approval.py" interactive --answer-file "$$answer" 2>/dev/null; ap_rc=$$?; \
 			ap_out="$$(cat "$$answer")"; rm -f "$$answer"; \
 			if [ "$$ap_rc:$$ap_out" = "0:genierails-approval:v1:interactive" ]; then \
-				python3 "$(SHARED_ROOT)/scripts/release_loop.py" --env "$(ENV)" --env-dir "$(ENV_DIR)" --make '$(subst ','\'',$(MAKE))'$(if $(strip $(VERIFY_KEY_COLUMN)), --verify-key-column "$(strip $(VERIFY_KEY_COLUMN))",); \
+				GENIERAILS_APPROVAL_RUN="$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"; export GENIERAILS_APPROVAL_RUN; \
+				case "$$GENIERAILS_APPROVAL_RUN" in ""|*[!0-9a-f]*) echo "ERROR: couldn't make a per-run approval nonce; nothing was approved." >&2; exit 1 ;; esac; \
+				$(call _ACCOUNT_APPROVE_APPLY,release,run); \
+				python3 "$(SHARED_ROOT)/scripts/release_loop.py" --env "$(ENV)" --env-dir "$(ENV_DIR)" --make '$(subst ','\'',$(MAKE))' --run-from-env$(if $(strip $(VERIFY_KEY_COLUMN)), --verify-key-column "$(strip $(VERIFY_KEY_COLUMN))",); \
 				exit $$?; \
 			fi; \
 		fi; \
