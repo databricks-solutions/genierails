@@ -4,8 +4,11 @@ Real make runs the real release, release-plan, _release-plan-roots and
 _release-manifest recipes on a pseudo-terminal (tests/pty_harness.py), with
 the test as the person answering each round's y/N. The multi-round cases use
 test_first_release_rounds' fake Unity Catalog ("the world"); the rest use
-test_release_gate_make's stubs. Off a terminal, in CI, with MANIFEST= or
-GENIERAILS_INTERACTIVE=0, release runs _release-manifest once, as before.
+test_release_gate_make's stubs. Before round 1, an account plan with changes
+gets rehearse's account step (the account manifest, y/N, apply-account's path);
+elsewhere the account plan is stubbed empty. Off a terminal, in CI, with
+MANIFEST= or GENIERAILS_INTERACTIVE=0, release runs _release-manifest once, as
+before.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from scripts import approval
 from scripts import environment_lock
 from scripts import release_gate as rg
 from scripts import release_loop
+from tests import script_stubs
 from tests.pty_harness import CTRL_C, CTRL_D, pty_run
 from tests.test_approval import QUESTION, RUN, THIS_RUN, Tty
 from tests.test_first_release_rounds import build_world
@@ -36,8 +40,13 @@ WORLD_ARGS = ("IMPORT_EXISTING_SCRIPT=true",)
 MAKE_FAILED = 2  # make's exit code when the release recipe (the loop) fails
 
 
-def _on_a_pty(make: Make, answers, *extra, environ_extra=None, stubs=None, timeout=900):
-    args, environ = make.command("release", "prod", *extra, stubs=stubs, environ_extra=environ_extra)
+def _on_a_pty(make: Make, answers, *extra, environ_extra=None, stubs=None, timeout=900, account_changes=False,
+              root_runner=None):
+    if root_runner is None and not account_changes:  # the account step's probe finds no changes
+        root_runner = make.empty_account_runner()
+    args, environ = make.command("release", "prod", *extra, stubs=stubs, environ_extra=environ_extra,
+                                 root_runner=root_runner)
+    environ = {k: v for k, v in environ.items() if k != approval.RUN_ENV}
     return pty_run(args, answers, environ, cwd=ROOT / make.cloud, timeout=timeout)
 
 
@@ -231,6 +240,223 @@ def test_manifest_changed_after_display_is_not_approved_or_applied(loop_make, re
     assert _unlocked(repo.prod)
 
 
+# -- the account step before round 1: rehearse's, reused ------------------------------------
+
+ACCOUNT_QUESTION = "Approve and apply this account manifest? [y/N] "
+ACCOUNT_APPLIED = "=== Account layer applied; continuing make release ENV=prod ==="
+PROBE = ["runner", "account", "account", "plan", "-input=false", "-detailed-exitcode"]
+# release_gate.py account-manifest-check: its first call (apply-account's, after the y's record, before the
+# lock) mutates the manifest, then the real command runs.
+MUTATE_AFTER_APPROVAL = """import os, subprocess, sys
+from pathlib import Path
+args, marker = sys.argv[1:], Path({marker!r})
+if "--field" not in args and not marker.exists():
+    marker.touch()
+    subprocess.run([sys.executable, {mutate!r}, args[args.index("--manifest") + 1], "after-approval"], check=True)
+os.execv(sys.executable, [sys.executable, {gate!r}, "account-manifest-check", *args])
+"""
+
+
+@pytest.fixture
+def account_loop(tmp_path, repo):
+    """loop_make, with apply-account's _apply-account-locked run for real too; prod has a releasable manifest."""
+    make = Make(tmp_path, repo, passthrough=("release-plan", "_release-manifest", "_apply-account-locked"))
+    manifest = _planned(make)
+    return make, manifest
+
+
+def _account_dir(repo) -> Path:
+    return repo.cloud / "envs" / "account"
+
+
+def _account_approvals(repo) -> list[Path]:
+    directory = approval.approvals_dir(_account_dir(repo), "account")
+    return sorted(directory.iterdir()) if directory.is_dir() else []
+
+
+def _account_manifest(shown: str) -> Path:
+    return Path(shown.split("Manifest (immutable):", 1)[1].split()[0])
+
+
+def _nothing_released(make: Make, repo) -> None:
+    names = make.names()
+    assert "_apply-account-locked" not in names and "sync-tags" not in names, names
+    assert "release-plan" not in names and "_release-manifest" not in names, names
+    assert not rg.account_receipts(repo.cloud, "account") and not _account_approvals(repo)
+    assert not _approvals(repo) and not _phase_records(repo) and not rg.release_receipts(repo.cloud, "prod")
+    assert _unlocked(repo.prod, _account_dir(repo))
+
+
+def test_account_changes_are_approved_and_applied_through_apply_account_then_the_rounds_run(account_loop, repo):
+    make, prod_manifest = account_loop
+    rc, shown = _on_a_pty(make, ["y", "y"], account_changes=True)
+    assert rc == 0, shown
+    assert shown.count(PROMPT) == 2 and shown.count(ACCOUNT_QUESTION) == 1
+    manifest = _account_manifest(shown)
+    digest = rg.sha256_file(manifest)
+    # Shown with its digest, asked, applied under the account lock, then round 1.
+    assert shown.index("=== make release: the account plan has changes; they need an approved account manifest "
+                       "first ===") < shown.index("=== Account plan ===") \
+        < shown.index(f"  Manifest sha256: {digest} (approving approves exactly these bytes)") \
+        < shown.index(ACCOUNT_QUESTION) < shown.index("environment lock acquired (account, apply-account)") \
+        < shown.index(ACCOUNT_APPLIED) < shown.index("=== Release round 1 (prod)") \
+        < shown.index("Approve and release manifest")
+    calls, names = make.calls(), make.names()
+    assert calls[0] == PROBE
+    assert names.index("_account-plan-locked") < names.index("_apply-account-locked") < names.index("sync-tags") \
+        < names.index("_release-manifest")
+    assert f"MANIFEST={manifest}" in calls[names.index("_apply-account-locked")]
+    assert f"MANIFEST={prod_manifest}" in calls[names.index("_release-manifest")]
+    [account_receipt] = rg.account_receipts(repo.cloud, "account")
+    account_approval = account_receipt["approval"]
+    assert account_approval["via"] == "terminal" and account_approval["question"] == ACCOUNT_QUESTION
+    assert account_approval["manifest_sha256"] == digest == account_receipt["manifest"]["sha256"]
+    [account_record] = _account_approvals(repo)
+    assert account_approval["record"] == str(account_record)
+    release_approval = rg.last_release(repo.cloud, "prod")["approval"]
+    assert release_approval["via"] == "terminal"
+    # One run: the account record and the round's record carry this make release's one nonce.
+    [release_record] = _approvals(repo)
+    assert json.loads(account_record.read_text())["run_sha256"] == json.loads(release_record.read_text())["run_sha256"]
+    assert COMPLETE.format(n=1) in shown
+    assert _unlocked(repo.prod, _account_dir(repo))
+
+
+@pytest.mark.parametrize("answer", ["n", "", CTRL_D], ids=["n", "blank", "eof"])
+def test_anything_but_y_for_the_account_manifest_applies_nothing_and_stops_before_round_1(account_loop, repo,
+                                                                                         answer):
+    make, _ = account_loop
+    rc, shown = _on_a_pty(make, [answer, "y"], account_changes=True)
+    assert rc == MAKE_FAILED, shown
+    manifest = _account_manifest(shown)
+    assert (f"release: not applied. The account manifest {manifest} stays; apply it later with make "
+            "apply-account, or re-run make release ENV=prod to be asked again. Nothing was locked or applied in "
+            "prod.") in shown
+    assert shown.count(PROMPT) == 1 and "Release round 1" not in shown
+    assert (manifest.parent / "account.tfplan").exists()  # still there for make apply-account
+    _nothing_released(make, repo)
+
+
+def test_ctrl_c_at_the_account_prompt_approves_and_releases_nothing(account_loop, repo):
+    make, _ = account_loop
+    rc, shown = _on_a_pty(make, [CTRL_C], account_changes=True)
+    assert rc != 0, shown
+    assert ACCOUNT_QUESTION in shown and "Interrupted: nothing was approved." in shown
+    assert "Release round 1" not in shown
+    _nothing_released(make, repo)
+
+
+def _mutate(manifest: Path, how: str) -> None:
+    manifest.chmod(0o600)
+    manifest.write_text(json.dumps(json.loads(manifest.read_text()) | {"host": f"mutated-{how}"}, indent=2))
+    manifest.chmod(0o400)
+
+
+def test_an_account_manifest_changed_between_display_and_y_is_never_approved_or_applied(account_loop, repo):
+    make, _ = account_loop
+
+    def mutate_then_approve():  # the one account manifest this run planned and showed
+        [path] = rg.account_manifest_paths(repo.cloud, "account")
+        _mutate(path, "at-the-prompt")
+        return "y"
+
+    rc, shown = _on_a_pty(make, [mutate_then_approve, "y"], account_changes=True)
+    assert rc == MAKE_FAILED, shown
+    assert shown.index(ACCOUNT_QUESTION) < shown.index("changed after it was shown")
+    assert "release: the approval prompt refused (above); nothing was approved or applied." in shown
+    assert json.loads(_account_manifest(shown).read_text())["host"] == "mutated-at-the-prompt"
+    _nothing_released(make, repo)
+
+
+@pytest.mark.parametrize("when", ["before the lock", "under the lock"])
+def test_an_account_manifest_changed_between_approval_and_apply_is_refused_and_nothing_is_released(
+        account_loop, repo, when):
+    from tests.test_approval_make import CHECK_THEN_MUTATE, _mutator
+
+    make, _ = account_loop
+    stub = make.tmp / "account-check-stub.py"
+    if when == "before the lock":
+        stub.write_text(MUTATE_AFTER_APPROVAL.format(marker=str(make.tmp / "mutated"), mutate=str(_mutator(make)),
+                                                     gate=rg.__file__))
+    else:
+        stub.write_text(CHECK_THEN_MUTATE.format(mutate=str(_mutator(make)), gate=rg.__file__))
+    rc, shown = _on_a_pty(make, ["y", "y"], account_changes=True,
+                          stubs={"release_gate.py account-manifest-check": script_stubs.python_file(stub)})
+    assert rc == MAKE_FAILED, shown
+    manifest = _account_manifest(shown)
+    assert shown.count(PROMPT) == 1
+    lock = shown.index("environment lock acquired (account, apply-account)")
+    if when == "before the lock":
+        assert json.loads(manifest.read_text())["host"] == "mutated-after-approval"
+        assert shown.index("manifest_sha256 differ") > lock
+        assert "apply-account: the approval record doesn't approve this manifest (above); nothing was applied." \
+            in shown
+    else:
+        assert json.loads(manifest.read_text())["host"] == "mutated-under-the-lock"
+        assert shown.index("changed after it was shown") > lock
+        assert "apply-account: the manifest is not the one approved (above); nothing more was applied." in shown
+    assert ("release: the approved account manifest was not applied (above); nothing was locked or applied in "
+            "prod.") in shown
+    assert not [c for c in make.calls() if c[:1] == ["runner"] and "apply-plan" in c]
+    assert "sync-tags" not in make.names() and "release-plan" not in make.names()
+    assert "_release-manifest" not in make.names()
+    assert not rg.account_receipts(repo.cloud, "account") and not rg.release_receipts(repo.cloud, "prod")
+    assert not _approvals(repo) and _unlocked(repo.prod, _account_dir(repo))
+    assert (manifest.parent / "account.tfplan").exists()
+
+
+def test_an_empty_account_plan_asks_nothing_about_the_account_and_releases(account_loop, repo, tmp_path):
+    from tests.test_rehearse_account_approval import _runner
+
+    make, prod_manifest = account_loop
+    rc, shown = _on_a_pty(make, ["y"], root_runner=_runner(tmp_path, make, 0))
+    assert rc == 0, shown
+    assert shown.count(PROMPT) == 1 and ACCOUNT_QUESTION not in shown and "account manifest" not in shown
+    assert make.calls()[0] == ["runner", "account", "account", "plan"]  # the probe ran
+    assert "_account-plan-locked" not in make.names() and "_apply-account-locked" not in make.names()
+    assert not rg.account_receipts(repo.cloud, "account") and not _account_approvals(repo)
+    assert f"MANIFEST={prod_manifest}" in make.calls()[make.names().index("_release-manifest")]
+    assert COMPLETE.format(n=1) in shown
+
+
+def test_a_failing_account_plan_stops_before_round_1(account_loop, repo, tmp_path):
+    from tests.test_rehearse_account_approval import _runner
+
+    make, _ = account_loop
+    rc, shown = _on_a_pty(make, ["y"], root_runner=_runner(tmp_path, make, 1))
+    assert rc == MAKE_FAILED, shown
+    assert "release: the account plan failed (above); nothing was locked, approved or applied." in shown
+    assert make.calls() == [["runner", "account", "account", "plan"]]
+    _nothing_released(make, repo)
+
+
+@pytest.mark.parametrize("environ_extra", [{"GENIERAILS_INTERACTIVE": "0"}, {"GENIERAILS_ALLOW_CI_APPLY": "1"},
+                                          {"MAKELEVEL": "1"}])
+def test_off_the_interactive_path_a_non_empty_account_plan_is_never_probed_or_asked(make, repo, environ_extra):
+    rc, shown = _on_a_pty(make, ["y"], account_changes=True, environ_extra=environ_extra)
+    assert PROMPT not in shown and "account manifest" not in shown, shown
+    assert PROBE not in make.calls() and _primitive_only(make, repo), make.calls()
+    assert not rg.account_receipts(repo.cloud, "account") and not _account_approvals(repo)
+
+
+def test_on_a_terminal_manifest_never_runs_the_account_step(make, repo):
+    rc, shown = _on_a_pty(make, ["y"], "MANIFEST=/m/manifest.json", account_changes=True)
+    assert rc == 0 and PROMPT not in shown, shown
+    assert make.calls() == [PRIMITIVE + [f"ENV_DIR={repo.prod}", "MANIFEST=/m/manifest.json", "APPROVAL="]]
+
+
+def test_release_runs_rehearses_account_step_once_on_the_interactive_path_only():
+    """The same macro as rehearse (no second copy), with the loop's nonce, right before release_loop.py."""
+    text = (Path(release_loop.__file__).parents[1] / "Makefile.shared").read_text()
+    recipe = text.split("\nrelease: ", 1)[1].split("\n\n", 1)[0]
+    interactive = recipe.split('"0:genierails-approval:v1:interactive" ]; then', 1)[1].split("\t\t\tfi; ", 1)[0]
+    order = ['GENIERAILS_APPROVAL_RUN="$$(od -An -N16 -tx1 /dev/urandom', "$(call _ACCOUNT_APPROVE_APPLY,release,run)",
+             "release_loop.py", "--run-from-env"]
+    assert [interactive.index(step) for step in order] == sorted(interactive.index(step) for step in order)
+    assert recipe.count("_ACCOUNT_APPROVE_APPLY") == 1 and text.count("override _ACCOUNT_APPROVE_APPLY") == 1
+    assert text.count("$(call _ACCOUNT_APPROVE_APPLY,") == 2  # rehearse and release
+
+
 # -- everything else releases once, exactly as before ------------------------------------
 
 PRIMITIVE = ["--no-print-directory", "_release-manifest", "ENV=prod"]
@@ -301,7 +527,7 @@ def test_on_a_terminal_a_legacy_env_keeps_its_release(make, repo):
 def test_no_setting_changes_the_round_cap_or_answers_for_you():
     text = Path(release_loop.__file__).read_text()
     assert "MAX_ROUNDS = 8" in text and "environ.get" not in text and "getenv" not in text
-    parser_options = {"--env", "--env-dir", "--make", "--verify-key-column"}
+    parser_options = {"--env", "--env-dir", "--make", "--verify-key-column", "--run-from-env"}
     assert set(re.findall(r'add_argument\("(--[a-z-]+)"', text)) == parser_options
 
 
