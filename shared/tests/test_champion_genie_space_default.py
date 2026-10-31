@@ -8,6 +8,7 @@ classification through the import-discovered tables.
 import hashlib
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -174,6 +175,11 @@ def test_plan_apply_guard_fails_fast_on_placeholder(tmp_path):
 
 
 REPO = SHARED.parent
+CROSS_ENV_PROMOTE = ("promote", "SOURCE_ENV=dev", "DEST_ENV=prod", "DEST_CATALOG_MAP=dev_finance=prod_finance")
+DETERMINISTIC_PROMOTE_REFUSAL = (
+    "ERROR: make promote SOURCE_ENV=... DEST_ENV=prod is refused for deterministic destinations.\n"
+    "       Use: make promote-to ENV=prod\n"
+)
 GUARDED_TARGETS = [
     ("generate", "ENV=dev", "MODE=genie"),
     ("generate", "ENV=dev"),
@@ -189,7 +195,7 @@ GUARDED_TARGETS = [
     ("validate", "ENV=dev"),
     ("rehearse", "ENV=dev"),
     ("promote", "ENV=dev"),
-    ("promote", "SOURCE_ENV=dev", "DEST_ENV=prod", "DEST_CATALOG_MAP=dev_finance=prod_finance"),
+    CROSS_ENV_PROMOTE,
     ("promote-to", "ENV=prod", "FROM=dev", "CATALOG_MAP=dev_finance=prod_finance"),
     ("plan", "ENV=dev"),
     ("apply", "ENV=dev"),
@@ -234,6 +240,17 @@ def placeholder_cloud(_prepared_cloud, tmp_path):
     return cloud_root
 
 
+def _legacy_destination(cloud_root):
+    """make promote SOURCE_ENV=... refuses a deterministic destination (the setup
+    default) before the placeholder guard, so its placeholder cases use legacy."""
+    path = cloud_root / "envs/prod/env.auto.tfvars"
+    text, count = re.subn(r'(?m)^governance_mode\s*=\s*"deterministic"\s*$',
+                          'governance_mode = "legacy"', path.read_text())
+    assert count == 1, text
+    path.write_text(text)
+    assert hcl2.loads(text)["governance_mode"] == "legacy"
+
+
 def _snapshot(root):
     """Every path under root with its type, symlink target or content hash, and mtime."""
     entries = {}
@@ -256,7 +273,9 @@ def _assert_fails_fast(result, env_name="dev"):
         f"ERROR: replace placeholder {PLACEHOLDER} in envs/{env_name}/agents/{AGENT}.auto.tfvars "
         "with your Genie agent ID"
     ) in result.stderr, output
-    # Nothing ran past the guard: no target banner, Terraform, or Genie API call.
+    # Nothing ran past the guard: no other refusal, target banner, Terraform, or Genie API call.
+    errors = [line for line in result.stderr.splitlines() if line.startswith("ERROR:")]
+    assert all(line.startswith("ERROR: replace placeholder ") for line in errors), output
     assert "===" not in result.stdout, output
     assert "Querying Genie agent" not in output
     assert "Terraform" not in output
@@ -264,6 +283,8 @@ def _assert_fails_fast(result, env_name="dev"):
 
 @pytest.mark.parametrize("target", GUARDED_TARGETS, ids=" ".join)
 def test_champion_targets_fail_fast_on_placeholder(placeholder_cloud, target):
+    if target == CROSS_ENV_PROMOTE:
+        _legacy_destination(placeholder_cloud)
     _assert_fails_fast(_run_make(placeholder_cloud, *target))
 
 
@@ -272,13 +293,9 @@ def test_promote_fails_fast_on_placeholder_in_existing_dest(placeholder_cloud):
     (placeholder_cloud / "envs/prod/env.auto.tfvars").write_text(TEMPLATE.read_text())
     (placeholder_cloud / "envs/prod/agents").mkdir()
     shutil.copy(AGENT_TEMPLATE, placeholder_cloud / f"envs/prod/agents/{AGENT}.auto.tfvars")
+    _legacy_destination(placeholder_cloud)
 
-    result = _run_make(
-        placeholder_cloud, "promote", "SOURCE_ENV=dev", "DEST_ENV=prod",
-        "DEST_CATALOG_MAP=dev_finance=prod_finance",
-    )
-
-    _assert_fails_fast(result, env_name="prod")
+    _assert_fails_fast(_run_make(placeholder_cloud, *CROSS_ENV_PROMOTE), env_name="prod")
 
 
 @pytest.mark.parametrize("jobs", [[], ["-j4"]], ids=["serial", "j4"])
@@ -301,10 +318,35 @@ def test_placeholder_guard_runs_before_any_bootstrap_side_effect(placeholder_clo
     (dev / "scripts/old.sh").write_text("# stale\n")
     (dev / "data_access/env.auto.tfvars").unlink()
     shutil.rmtree(placeholder_cloud / "envs/account")
+    if target == CROSS_ENV_PROMOTE:
+        _legacy_destination(placeholder_cloud)
     before = _snapshot(placeholder_cloud)
 
     _assert_fails_fast(_run_make(placeholder_cloud, *jobs, *target))
 
+    assert _snapshot(placeholder_cloud) == before
+
+
+@pytest.mark.parametrize("jobs", [[], ["-j4"]], ids=["serial", "j4"])
+@pytest.mark.parametrize("dest_agent", [False, True], ids=["dest-without-agent", "dest-with-placeholder-agent"])
+def test_promote_to_deterministic_dest_is_refused_before_the_placeholder_guard(
+        placeholder_cloud, dest_agent, jobs):
+    # make setup seeds a deterministic destination, which make promote SOURCE_ENV=...
+    # refuses first (promote-to is the path); nothing is bootstrapped or written.
+    if dest_agent:
+        (placeholder_cloud / "envs/prod/agents").mkdir()
+        shutil.copy(AGENT_TEMPLATE, placeholder_cloud / f"envs/prod/agents/{AGENT}.auto.tfvars")
+    shutil.rmtree(placeholder_cloud / "envs/account")
+    before = _snapshot(placeholder_cloud)
+
+    result = _run_make(placeholder_cloud, *jobs, *CROSS_ENV_PROMOTE)
+
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert result.stderr.startswith(DETERMINISTIC_PROMOTE_REFUSAL), output
+    assert "replace placeholder" not in output
+    assert "===" not in result.stdout, output
+    assert "Terraform" not in output
     assert _snapshot(placeholder_cloud) == before
 
 

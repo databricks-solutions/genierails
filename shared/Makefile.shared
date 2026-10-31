@@ -246,15 +246,20 @@ override _PROMOTE_MODE_HINT = echo "       Set governance_mode = \"legacy\" or \
 # With generate among the goals, generate-guard runs here too, so a
 # deterministic promoted env, or any env but $(DEFAULT_ENV) with no
 # env.auto.tfvars yet (make setup writes it), is refused before anything is written.
+# The $(MAKE) line runs even under make -n; its guards don't (they read files that
+# a dry run hasn't written), and the nested make inherits -n, so it writes nothing.
+# set -e ignores a failure on the left of &&, so every guard ends in || exit 1.
 _guarded-bootstrap:
 	@set -e; \
+	if [ -z "$(_MAKE_DRY_RUN)" ]; then \
 	if [ -n "$(and $(filter promote,$(MAKECMDGOALS)),$(strip $(DEST_ENV)))" ]; then \
 		dest_mode="$$($(_GOVERNANCE_MODE_OF) "$(DEST_ENV_DIR)/env.auto.tfvars" 2>/dev/null)" || { echo "ERROR: cannot read governance_mode for destination $(DEST_ENV); refusing make promote." >&2; $(_PROMOTE_MODE_HINT); exit 1; }; \
 		case "$$dest_mode" in legacy) ;; deterministic) $(_PROMOTE_TO_TOKEN) check --env-dir "$(DEST_ENV_DIR)" || { echo "ERROR: make promote SOURCE_ENV=... DEST_ENV=$(DEST_ENV) is refused for deterministic destinations." >&2; echo "       Use: make promote-to ENV=$(DEST_ENV)" >&2; exit 1; } ;; *) echo "ERROR: unsupported governance_mode '$$dest_mode' for destination $(DEST_ENV); refusing make promote." >&2; $(_PROMOTE_MODE_HINT); exit 1 ;; esac; \
 	fi; \
-	$(_GENIE_PLACEHOLDER_GUARD); \
-	$(_SCHEDULED_GOVERNANCE_GUARD); \
-	$(if $(filter generate,$(MAKECMDGOALS)),$(_RELEASE_GATE) generate-guard --env-dir "$(ENV_DIR)" --env "$(ENV)" --default-env "$(DEFAULT_ENV)",:); \
+	$(_GENIE_PLACEHOLDER_GUARD) || exit 1; \
+	$(_SCHEDULED_GOVERNANCE_GUARD) || exit 1; \
+	$(if $(filter generate,$(MAKECMDGOALS)),$(_RELEASE_GATE) generate-guard --env-dir "$(ENV_DIR)" --env "$(ENV)" --default-env "$(DEFAULT_ENV)" || exit 1,:); \
+	fi; \
 	$(MAKE) --no-print-directory _bootstrap ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"
 
 _guard-workspace-target:
@@ -1988,7 +1993,7 @@ _PROMOTE_TO_MAP = $(if $(filter command line,$(origin CATALOG_MAP)),$(CATALOG_MA
 # credentials or state) and fails if the committed output differs.
 promote-to: $(if $(filter 1,$(CHECK)),,_guard-not-databricks-compute) ## Promote configured rules into ENV: set envs/prod/env.auto.tfvars, then make promote-to ENV=prod (CHECK=1: read-only, fail if the committed output differs)
 	@set -e; \
-	$(_PROMOTE_TO_PLACEHOLDER_GUARD); \
+	$(_PROMOTE_TO_PLACEHOLDER_GUARD) || exit 1; \
 	$(_SCHEDULED_GOVERNANCE_GUARD); \
 	$(_GUARD_WORKSPACE_ENV); \
 	$(_DRY_RUN_GUARD); \
