@@ -37,7 +37,7 @@ them or don't need them; the replacement is on the right.
 | `make generate COUNTRY=... INDUSTRY=...` ([country](country-overlays.md), [industry](industry-overlays.md) overlays tune the model's draft) | the fixed [mask library](../REFERENCE.md), `tag_treatments` for customer classes |
 | `make generate-delta` | `make maintain ENV=prod` |
 | `make release ENV=prod` (one step) | `make release ENV=prod` at a terminal (per round: plan, `y/N`, apply exactly that manifest); pipelines: `make release-plan ENV=prod`, then `make release ENV=prod MANIFEST=<path>` (releases the approved manifest) |
-| `make promote SOURCE_ENV=... DEST_ENV=... DEST_CATALOG_MAP=...` | `make promote-to ENV=prod` |
+| `make promote SOURCE_ENV=... DEST_ENV=... DEST_CATALOG_MAP=...` (legacy destinations only; a deterministic one refuses it) | `make promote-to ENV=prod` |
 | `make apply ENV=prod` | refused in a promoted deterministic env |
 | `make scaffold-treatments` stubs in `shared/treatment_config.json` | `tag_treatments` in the env ([map a new class](playbooks/governance.md#map-a-new-class)) |
 | layer files `envs/<env>/abac.auto.tfvars`, `data_access/` committed | runtime outputs, not committed ([what to commit](pipelines.md#what-to-commit)) |

@@ -603,3 +603,56 @@ def test_rehearse_reuse_docs_warn_that_live_dev_is_not_rechecked():
         assert "does **not** re-check live dev for out-of-band drift" in text
         assert "revert the live change and run a real apply/rehearse" in text
         assert "abandon/re-stage the unfinished policy change" in text
+
+
+# The cross-env make promote form: SOURCE_ENV= / DEST_ENV= / DEST_CATALOG_MAP= arguments, or the reference row's
+# `make promote` with its `DEST_ENV` parameter.
+CROSS_ENV_PROMOTE = re.compile(r"make promote\b(?!-)[^\n|]*?\b(?:SOURCE_ENV|DEST_ENV|DEST_CATALOG_MAP)=|"
+                               r"`make promote` \|[^\n]*`DEST_ENV`")
+
+
+def _doc_units(text: str) -> list[str]:
+    """A table row with its table's header row, a list item, or a paragraph."""
+    units, block = [], []
+    for line in text.splitlines() + [""]:
+        if line.strip():
+            block.append(line)
+            continue
+        header = None
+        for row in block:
+            if row.lstrip().startswith("|"):
+                header = header or row
+                units.append(row if row is header else f"{header}\n{row}")
+            elif row.lstrip().startswith(("- ", "* ")) or re.match(r"\s*\d+\. ", row):
+                header = None
+                units.append(row)
+            else:
+                header = None
+        prose = [row for row in block if not row.lstrip().startswith(("|", "- ", "* "))
+                 and not re.match(r"\s*\d+\. ", row)]
+        if prose:
+            units.append("\n".join(prose))
+        block = []
+    return units
+
+
+def test_no_doc_offers_cross_env_make_promote_without_scoping_it_to_legacy_destinations():
+    """make promote SOURCE_ENV= DEST_ENV= refuses a deterministic destination, so every doc that shows it says
+    it is for legacy destinations and names make promote-to (the legacy demos' own READMEs are legacy throughout)."""
+    tracked = subprocess.run(["git", "ls-files", "*.md"], cwd=ROOT, text=True, capture_output=True, check=True)
+    found, seen = [], 0
+    for path in tracked.stdout.split():
+        if "CHANGELOG" in path or path.startswith("shared/examples/legacy/"):
+            continue
+        for unit in _doc_units((ROOT / path).read_text()):
+            if not CROSS_ENV_PROMOTE.search(unit):
+                continue
+            seen += 1
+            if not (re.search(r"\blegacy\b", unit, re.IGNORECASE) and "promote-to" in unit):
+                found.append(f"{path}: {unit[-300:]}")
+    assert not found, "\n".join(found)
+    assert seen >= 10, seen  # the reference rows, the walkthrough reference, architecture, integration scenarios
+    # ...because the guard refuses it for a deterministic destination and names promote-to.
+    makefile = (SHARED / "Makefile.shared").read_text()
+    assert 'echo "ERROR: make promote SOURCE_ENV=... DEST_ENV=$(DEST_ENV) is refused for deterministic destinations." >&2; \\\n' \
+        '\t\t\t\t\techo "       Use: make promote-to ENV=$(DEST_ENV)" >&2;' in makefile
