@@ -130,7 +130,8 @@ def _git_state(root):
 
 
 def _committed(root):
-    return sorted(_git(root, "show", "--name-only", "--format=", "HEAD").split())
+    # One path per line: agent file names hold spaces.
+    return sorted(p for p in _git(root, "show", "--name-only", "--format=", "HEAD").splitlines() if p)
 
 
 EXPECTED = ["aws/envs/dev/env.auto.tfvars", "aws/envs/dev/generated/abac.auto.tfvars",
@@ -566,10 +567,13 @@ def _fresh_setup_clone(tmp_path):
     checkout = tmp_path / "setup-clone"
     subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(ROOT), str(checkout)], check=True, env=_environ())
     _git(checkout, "remote", "remove", "origin")
-    for rel in ("shared/Makefile.shared", "shared/scripts/commit_envs.py"):
+    overlay = ("shared/Makefile.shared", "shared/scripts/commit_envs.py",
+               "shared/examples/dev_to_prod/env.auto.tfvars.example",
+               "shared/examples/dev_to_prod/agent.auto.tfvars.example")
+    for rel in overlay:
         shutil.copy2(ROOT / rel, checkout / rel)
     _git(checkout, "checkout", "-q", "-B", "main")
-    _git(checkout, "add", "shared/Makefile.shared", "shared/scripts/commit_envs.py")
+    _git(checkout, "add", *overlay)
     if _git(checkout, "status", "--porcelain"):
         _git(checkout, "commit", "-q", "-m", "test setup implementation")
     return checkout
@@ -593,6 +597,10 @@ def test_make_setup_y_commits_only_its_safe_paths_and_leaves_rehearse_clean(repo
     assert all(path == "aws/.gitignore" or path.startswith(("aws/envs/dev/", "aws/envs/account/"))
                for path in committed), committed
     assert not any(path.endswith("auth.auto.tfvars") for path in committed)
+    # The walkthrough templates setup copied ride the same offer (README Dev steps 1 and 2).
+    assert "aws/envs/dev/env.auto.tfvars" in committed
+    assert "aws/envs/dev/agents/Finance Analytics.auto.tfvars" in committed
+    assert "Finance Analytics.auto.tfvars" in out[out.index("=== Commit"):]
     assert not _git(checkout, "diff", "--cached", "--name-only")
     assert not _git(checkout, "status", "--porcelain")  # rehearse's clean-check sees a clean checkout
 
@@ -618,6 +626,7 @@ def test_make_setup_twice_second_run_is_a_no_op(tmp_path):
 
     assert second == 0, second_out
     assert "Nothing to commit: .gitignore, envs/dev/ and envs/account/ match HEAD." in second_out
+    assert sorted(p.name for p in (checkout / "aws/envs/dev/agents").iterdir()) == ["Finance Analytics.auto.tfvars"]
     assert "setup offers to commit and push the .gitignore and env files it created; answer y" not in second_out
     assert "already had uncommitted changes" not in second_out
     assert PROMPT not in second_out
@@ -645,6 +654,12 @@ def test_make_setup_prod_after_committed_dev_ignores_existing_runtime_files(tmp_
     assert "already had uncommitted changes" not in out
     assert "auth.auto.tfvars" not in out[out.index("=== Commit prod's changes"):]
     assert _git(checkout, "rev-parse", "HEAD~1") == head
+    # prod's agent files come from promote-to: setup commits none, and leaves dev's commit alone.
+    committed = _committed(checkout)
+    assert "aws/envs/prod/env.auto.tfvars" in committed
+    assert not any("/agents/" in path for path in committed), committed
+    assert not any(path.startswith("aws/envs/dev/") for path in committed), committed
+    assert not (checkout / "aws/envs/prod/agents").exists()
 
 
 def test_make_setup_repo_rerun_after_local_commit_then_manual_push(tmp_path):

@@ -1,10 +1,11 @@
 # ============================================================================
 # GenieRails Dev-to-Prod Walkthrough — one Genie agent (agent file)
 # ============================================================================
-# Copy to envs/dev/agents/<agent name>.auto.tfvars, one file per agent (run
-# make from the cloud root, cd aws|azure):
-#   mkdir -p envs/dev/agents
-#   cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example "envs/dev/agents/Finance Analytics.auto.tfvars"
+# One file per agent: envs/dev/agents/<agent name>.auto.tfvars. `make setup
+# ENV=dev` copies this to envs/dev/agents/Finance Analytics.auto.tfvars (only
+# with a new env.auto.tfvars and no agent file yet): rename it to your agent's
+# name. For another agent, from the cloud root (cd aws|azure):
+#   cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example "envs/dev/agents/<agent name>.auto.tfvars"
 # The file name is the agent's name: letters, digits, spaces, '_', '-' or '.'.
 # `make generate ENV=dev` captures the agent beside this file
 # (<agent name>.space.json) and `make promote-to ENV=prod` seeds prod's file.

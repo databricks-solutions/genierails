@@ -7,7 +7,7 @@ Take a Genie agent you've curated in **dev** and ship it to **prod** with its se
 ```bash
 # dev
 make setup ENV=dev REPO=<your-repo-url>   # REPO= optional; makes the clone yours; offers to commit (y)
-#   copy the env + agent templates and fill them in (Dev step 1)
+#   fill in the env + agent files setup copied from the templates (Dev step 1)
 #   Catalog Explorer: turn on Data classification, review detections, enable auto-tagging
 make generate ENV=dev       # drafts the rules from the class.* tags; offers to commit + push (y)
 make rehearse ENV=dev       # checks; first deploy: account plan y/N; applies dev, proves the masks
@@ -30,10 +30,10 @@ Every command runs from `aws/` (or `azure/`). The questions appear only at a ter
 
 | Command | What it does | What it asks |
 |---|---|---|
-| `make setup ENV=dev REPO=<url>` | Makes the clone your repo (`origin` -> `genierails`, `origin` = your repo), writes the `.gitignore` that commits `envs/`, creates the env files and prints the next steps | `Commit these changes and push them to origin/main? [y/N]` for the `.gitignore` and env defaults it created (no `origin`: `... and keep them local (no origin remote)? [y/N]`) |
+| `make setup ENV=dev REPO=<url>` | Makes the clone your repo (`origin` -> `genierails`, `origin` = your repo), writes the `.gitignore` that commits `envs/`, creates the env files (dev's from the walkthrough's env and agent templates) and prints the next steps | `Commit these changes and push them to origin/main? [y/N]` for the `.gitignore` and env defaults it created (no `origin`: `... and keep them local (no origin remote)? [y/N]`) |
 | `make generate ENV=dev` | Imports the agent, finds its tables, proposes `table_readers` and drafts the rules in `envs/dev/generated/` | The same commit question, for `.gitignore` and `envs/dev/` |
 | `make rehearse ENV=dev` | Runs `make check ENV=dev` on the committed files, applies the account layer when it has changes, applies dev, runs `verify-access` (`ALL EFFECTIVE`) and writes the receipt prod's release needs | `Approve and apply this account manifest? [y/N]`, only when the account plan has changes (a first deploy) |
-| `make setup ENV=prod` | Creates prod's env files, seeded with `promote_from` and a placeholder `catalog_map` | The same commit question as dev's setup |
+| `make setup ENV=prod` | Creates prod's env files, seeded with `promote_from` and a placeholder `catalog_map` (no agent file: `promote-to` writes prod's) | The same commit question as dev's setup |
 | `make promote-to ENV=prod` | Copies dev's reviewed rules into prod, renamed to prod's catalogs and groups; prints the changed files by owner | The same commit question, for `.gitignore`, `envs/prod/` and `envs/account/` |
 | `make release ENV=prod` | Per round: `make release-plan` (runs `make check ENV=prod`, reuses dev's rehearsal, plans and writes one manifest), shows it, applies exactly it and proves the masks; at most 8 rounds. Before round 1 it applies the account layer when it has changes, as rehearse does | `Approve and apply this account manifest? [y/N]` first, only when the account plan has changes; then `Approve and release manifest <id> (commit <sha>, round <n> of at most 8)? [y/N]`, once per round |
 | `make evidence ENV=prod` | Reads prod's live tags, masks and grants into a JSON and Markdown record under `.genierails-state/prod/evidence/` | nothing |
@@ -69,24 +69,22 @@ No repo of your own yet? Leave `REPO=` off: setup renames `origin` to `genierail
 **1. Set up.**
 ```bash
 make setup ENV=dev REPO=<your-repo-url>
-cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars
-mkdir -p envs/dev/agents
-cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example "envs/dev/agents/Finance Analytics.auto.tfvars"
 ```
+Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`](env.auto.tfvars.example) to `envs/dev/env.auto.tfvars` and [`agent.auto.tfvars.example`](agent.auto.tfvars.example) to `envs/dev/agents/Finance Analytics.auto.tfvars`. It copies only files that don't exist yet (the agent file only along with a new `env.auto.tfvars`, while `envs/dev/agents/` has no agent file), so it never overwrites your edits and a re-run changes nothing.
 Fill in `envs/dev/auth.auto.tfvars` (service principal and workspace). The template starts new champions with `governance_mode = "deterministic"`; existing env files are not changed. In `envs/dev/env.auto.tfvars`, replace the deployer and group placeholders:
 ```hcl
 deployer_principal_id = "<the dev auth.auto.tfvars databricks_client_id>"
 access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
 ```
-**Agents (preferred):** one file per agent in `envs/dev/agents/`; the file name is the agent's name. In it, set the agent's ID and who may run it:
+**Agents (preferred):** one file per agent in `envs/dev/agents/`; the file name is the agent's name. Before the first `make generate`, rename setup's `Finance Analytics.auto.tfvars` to your agent's name (for each further agent, copy it under that agent's name). In it, set the agent's ID and who may run it:
 ```hcl
 genie_space_id = "01ef0000000000000000000000000000"   # Genie UI > agent > Configure > About this agent
 acl_groups     = ["regional_analysts", "viewers"]      # who gets CAN_RUN on the agent; [] means nobody
 ```
-**Also accepted:** the same fields inline in `env.auto.tfvars` as `genie_spaces = [{ name = "...", genie_space_id = "...", acl_groups = [...] }]` (leave `genie_spaces = []` when using agent files). Prefer `agents/` files so agent and governance PRs stay separate; `make split-agent-files` moves an inline list into files later.
+**Also accepted:** the same fields inline in `env.auto.tfvars` as `genie_spaces = [{ name = "...", genie_space_id = "...", acl_groups = [...] }]` (leave `genie_spaces = []` when using agent files; with the inline list, delete setup's agent file). Prefer `agents/` files so agent and governance PRs stay separate; `make split-agent-files` moves an inline list into files later.
 `acl_groups` is required: `make generate` stops while an agent has none. It grants only `CAN_RUN` on the agent. `SELECT` on the agent's tables comes only from `table_readers` in `env.auto.tfvars`, which `make generate` proposes for you (filled with `acl_groups`) for each table nothing covers yet. Every `acl_groups` group must be able to read every table of the agent, so pick them from `access_tier_groups` (only tier groups and `raw_exempt_principals` can be readers); otherwise `generate`, `rehearse` and `release` stop and name the table and group.
 
-**2. Commit it (own repo).** At the end of step 1's `make setup`, GenieRails previews the `.gitignore` and placeholder env defaults setup created, then asks whether to commit and push them. Answer `y`; credentials and runtime files such as `auth.auto.tfvars` are never staged. With no `origin`, it commits locally only. The deployer, group and agent edits you make after setup remain uncommitted until `make generate` finishes and offers to commit them with its generated rules. `make check` reads only committed env files, a rehearse receipt counts only for a clean checkout, and `make release` releases only a commit on your `origin/main`. Each later step that changes `envs/` (`make generate`, `make promote-to`) makes the same offer: answer `y` there too. Later changes go through PRs: [Commit it](#commit-it).
+**2. Commit it (own repo).** At the end of step 1's `make setup`, GenieRails previews the `.gitignore`, placeholder env defaults and agent file setup created, then asks whether to commit and push them. Answer `y`; credentials and runtime files such as `auth.auto.tfvars` are never staged. With no `origin`, it commits locally only. The deployer, group and agent edits you make after setup remain uncommitted until `make generate` finishes and offers to commit them with its generated rules. `make check` reads only committed env files, a rehearse receipt counts only for a clean checkout, and `make release` releases only a commit on your `origin/main`. Each later step that changes `envs/` (`make generate`, `make promote-to`) makes the same offer: answer `y` there too. Later changes go through PRs: [Commit it](#commit-it).
 
 <a id="dev-classify"></a>
 **3. Classify (in the UI).** In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on. When the scan finishes (the first one can take up to about a day), review the detections, exclude false positives, and turn on auto-tagging. Then wait until the columns show `class.*` tags such as `class.email_address`: open a table in Catalog Explorer and check its **Columns** tab.
