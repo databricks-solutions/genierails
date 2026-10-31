@@ -187,10 +187,10 @@ by surprise on upgrade:
    lock or applying anything.
 2. `make generate ENV=dev` proposes `table_readers` for every agent table
    (each agent counts as newly imported, since no proposal record exists).
-   Review, commit, `make rehearse`, `make promote-to ENV=prod` (seeds prod's
-   `table_readers`). Commit and push that to `origin/main`, then
-   `make release-plan ENV=prod` (it reuses the dev rehearsal, or names the
-   command to run) and `make release ENV=prod`.
+   Review, commit (generate's commit offer: answer `y`), `make rehearse`,
+   `make promote-to ENV=prod` (seeds prod's `table_readers`; answer `y` to
+   its commit offer), then `make release ENV=prod` (its `release-plan`
+   reuses the dev rehearsal, or names the command to run).
 3. If an env's data_access state already holds `SELECT` grants (for example
    from an earlier mode), Terraform refuses to plan while `table_readers` is
    unset instead of revoking them. Set `table_readers` to the readers to keep,

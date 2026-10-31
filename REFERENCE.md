@@ -4,6 +4,9 @@ Every `make` target in [`shared/Makefile.shared`](shared/Makefile.shared) and ev
 
 For the champion flow step by step, see the [Dev-to-Prod Walkthrough](shared/examples/dev_to_prod/README.md) and its [reference](shared/examples/dev_to_prod/REFERENCE.md), which covers the same release commands in more depth plus the deterministic-governance setting rules. For where each stage runs, see [design section 17](shared/docs/design/deterministic-governance.md#17-where-each-command-runs) and [Pipelines](shared/docs/pipelines.md).
 
+<a id="champion-and-low-level-commands"></a>
+**Champion and low-level commands.** The walkthrough's commands (`setup`, `generate` and `rehearse` in dev; `promote-to` and `release` for prod; then `evidence` and `maintain`; and the read-only `next` and `status`) run the low-level steps for you and, at a terminal, ask before they commit or apply: `setup`, `generate` and `promote-to` offer to commit (and push) what they wrote; a deterministic `rehearse` asks about the account manifest when the account plan has changes; a deterministic `release` asks about each round's manifest. Off a terminal (CI, a pipeline, piped output; `GENIERAILS_INTERACTIVE=0` for the approvals, `COMMIT=0` for the commit offers) none of them asks, and each behaves like the low-level commands pipelines, four-eyes approval and experts run directly: commit `envs/` yourself; `make account-plan`, approve, `make apply-account`; per round `make release-plan`, approve, `make release MANIFEST=<path>`. `make check` is the PR check; `rehearse` and `release-plan` run it themselves. No flag or variable approves a manifest. See [CI / scripted](shared/examples/dev_to_prod/README.md#ci--scripted).
+
 `shared/tests/test_reference_coverage.py` fails when this page misses a target or names one that doesn't exist.
 
 ## Stages
@@ -16,7 +19,7 @@ The **Stage** column uses the stages of [design section 17](shared/docs/design/d
 | **PR check** | CI, every PR (`make check`) | no |
 | **dev rehearse** | dev pipeline, or the deployment machine (`make rehearse ENV=dev`) | dev only |
 | **promotion PR** | a person's machine; the output is committed in a PR (`make promote-to`) | no |
-| **prod release-plan/release** | prod pipeline or the deployment machine, two phases with an approval between | prod |
+| **prod release-plan/release** | prod pipeline or the deployment machine, two phases with an approval between (at a terminal, one `make release` asks for that approval round by round) | prod |
 | **maintain** | prod, on a schedule (`make maintain`) | prod, governance only |
 | **operations** | deployment machine, manual, one approval per operation | prod or the account layer |
 

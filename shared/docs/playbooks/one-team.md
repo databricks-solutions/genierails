@@ -15,9 +15,14 @@ make promote-to ENV=prod               # same PR: dev change and its promotion t
 make check ENV=prod
 git add envs/ && git commit            # one PR; after merge the dev pipeline rehearses it
 # on the deployment machine, after rehearse passes on the merge commit:
-make release-plan ENV=prod             # approve the manifest
-make release ENV=prod                  # releases the approved manifest
+make release ENV=prod                  # at a terminal: per round, plans, shows the manifest, asks y/N, applies it
+#   separate approver: per round make release-plan ENV=prod, approve, make release ENV=prod MANIFEST=<path>
 ```
+
+On a PR branch, `make generate` and `make promote-to` don't offer to commit
+(the offer appears only on `main`, at a terminal): commit yourself, as above.
+`make check` is the PR check; `make rehearse` and `make release-plan` run it
+again themselves.
 
 1. **Curate and edit.** Change agent A in the dev UI and governance in
    `envs/dev/env.auto.tfvars`. Agent B's unfinished edits stay in dev.
@@ -32,7 +37,9 @@ make release ENV=prod                  # releases the approved manifest
    runs `make rehearse ENV=dev` on the merge commit. **Pass looks like:**
    `ALL EFFECTIVE`.
 6. **Release.** On the [deployment machine](../deployment-machine.md#release-prod):
-   `make release-plan ENV=prod`, approve the manifest, `make release ENV=prod`.
+   `make release ENV=prod` at a terminal (a `y/N` per manifest), or with a
+   separate approver `make release-plan ENV=prod`, approve the manifest,
+   `make release ENV=prod MANIFEST=<path>`.
    **Pass looks like:** `ALL EFFECTIVE` and `=== Release complete (prod) ===`.
    If A now uses a new table, its masks are applied before anyone gets access.
 

@@ -21,9 +21,15 @@ git add envs/dev/ && git commit           # PR; after merge the dev pipeline reh
 make promote-to ENV=prod       # the promotion PR shows only mask and policy changes
 make check ENV=prod
 git add envs/prod/ && git commit          # PR; merge it
-make release-plan ENV=prod     # on the deployment machine (reuses dev's rehearsal); approve the manifest
-make release ENV=prod          # releases the approved manifest
+# on the deployment machine (it reuses dev's rehearsal):
+make release ENV=prod          # at a terminal: per round, plans, shows the manifest, asks y/N, applies it
+#   separate approver: per round make release-plan ENV=prod, approve, make release ENV=prod MANIFEST=<path>
 ```
+
+On a PR branch, `make generate` and `make promote-to` don't offer to commit
+(the offer appears only on `main`, at a terminal): commit yourself, as above.
+`make check` is the PR check; `make rehearse` and `make release-plan` run it
+again themselves.
 
 A governance change applies to every table and agent that uses it, and changes
 no agent's config, so it never waits for an agent that's mid-curation.
@@ -56,18 +62,16 @@ Use this when GenieRails manages table protection by itself, for example:
   protection.
 
 ```bash
-make setup ENV=dev
+make setup ENV=dev REPO=<your-repo-url>    # REPO= optional, as in the walkthrough; offers to commit (y)
 #   envs/dev/env.auto.tfvars: governance_mode, deployer_principal_id, access_tier_groups,
 #   genie_spaces = [], uc_tables, and table_readers if GenieRails should grant SELECT
 #   Catalog Explorer: Data classification on, review detections, auto-tagging on; wait for class.* tags
-make generate ENV=dev
-make check ENV=dev                         # commit envs/dev/, PR, merge
-make rehearse ENV=dev                      # the dev pipeline, or the operator
+make generate ENV=dev                      # offers to commit + push envs/dev/ (y)
+make rehearse ENV=dev                      # checks; first deploy: account plan y/N; applies dev, proves the masks
 make setup ENV=prod                        # set governance_mode, deployer_principal_id, catalog_map
-make promote-to ENV=prod                   # commit envs/prod/, PR, merge
+make promote-to ENV=prod                   # offers to commit + push envs/prod/ (y)
 #   Catalog Explorer: the same classification review on the prod catalog
-make release-plan ENV=prod                 # on the deployment machine (reuses dev's rehearsal); approve the manifest
-make release ENV=prod                     # releases the approved manifest
+make release ENV=prod                      # each round: plans (reusing dev's rehearsal), shows the manifest, asks y/N, applies it
 make maintain ENV=prod                     # on a schedule
 ```
 
@@ -82,11 +86,13 @@ make maintain ENV=prod                     # on a schedule
    `uc_tables` governs and never grants. Without `table_readers`, masks apply
    to whoever already has access, after the reader check.
 2. **Classify** dev in Catalog Explorer, as in the [walkthrough](../../examples/dev_to_prod/README.md#dev-classify).
-3. **Generate, check, PR, rehearse.** **Pass looks like:** `ALL EFFECTIVE`.
+3. **Generate and rehearse.** Answer `y` to generate's commit offer (or commit
+   `envs/dev/` in a PR and merge it); rehearse runs `make check` first.
+   **Pass looks like:** `ALL EFFECTIVE`.
 4. **Prod.** Set `governance_mode`, prod's `deployer_principal_id` and
-   `catalog_map = { "dev_finance" = "prod_finance" }`, promote, classify prod;
-   then merge the promotion, `release-plan` (it reuses the source env's
-   rehearsal, or names the command to run) and `release`. **Pass looks
+   `catalog_map = { "dev_finance" = "prod_finance" }`, promote (answer `y`),
+   classify prod; then `make release ENV=prod` (its `release-plan` reuses the
+   source env's rehearsal, or names the command to run). **Pass looks
    like:** `ALL EFFECTIVE` and
    `=== Release complete (prod) ===`.
 

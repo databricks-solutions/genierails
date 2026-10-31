@@ -29,8 +29,11 @@ def test_the_whole_flow_records_evidence_after_release_and_before_maintain():
     flow = _section(README.read_text(), "## The whole flow", "## Before you start")
     lines = [line.split("#")[0].strip() for line in flow.splitlines()]
     assert EVIDENCE in lines
-    order = ["make release-plan ENV=prod", "make release ENV=prod", EVIDENCE, "make maintain ENV=prod"]
+    # make release runs release-plan itself, round by round: no separate release-plan line.
+    assert "make release-plan ENV=prod" not in lines
+    order = ["make promote-to ENV=prod", "make release ENV=prod", EVIDENCE, "make maintain ENV=prod"]
     assert [lines.index(step) for step in order] == sorted(lines.index(step) for step in order)
+    assert "make evidence ENV=prod      # live compliance record" in flow.splitlines()
 
 
 def test_prod_step_4_records_evidence_after_the_release_and_its_stop_advice():
@@ -180,7 +183,9 @@ def test_reference_scopes_the_direct_release_and_apply_paths_to_legacy():
     legacy, manifest = _rows(reference, "make release ENV=prod")
     assert legacy.startswith("| `make release ENV=prod` | 4 | (legacy prod only; a deterministic prod uses the "
                              "`release-plan` and manifest `release` rows below) Placeholder guard"), legacy
-    assert manifest.startswith("| `make release ENV=prod` | 4 | (deterministic prod) Releases the current manifest")
+    assert manifest.startswith("| `make release ENV=prod` | 4 | (deterministic prod) At a terminal (outside CI, no "
+                               "`MANIFEST=`): the whole release, round by round"), manifest
+    assert "Otherwise (pipelines, CI, no terminal) one round: releases the current manifest" in manifest
     [apply] = _rows(reference, "make apply ENV=<e>")
     assert "(legacy envs; a deterministic env runs it only inside `make rehearse` (dev), and a promoted one " \
         "refuses it: release through `release-plan`/`release`)" in apply
@@ -189,17 +194,23 @@ def test_reference_scopes_the_direct_release_and_apply_paths_to_legacy():
         "(promoted envs))" in governance
     details = reference[reference.index("**`make release ENV=prod`**"):reference.index("**`make maintain ENV=prod`**")]
     bullets = [line for line in details.splitlines() if line.startswith("- ")]
-    assert bullets[0].startswith("- Deterministic envs: `make release` applies only the current manifest that "
-                                 "`make release-plan` wrote"), bullets[0]
+    assert bullets[0].startswith("- Deterministic envs: at a terminal, `make release` runs the whole release round "
+                                 "by round: `make release-plan`, the manifest, `y/N`, then exactly that manifest. "
+                                 "Off a terminal (or with `MANIFEST=`) it applies only the current manifest that "
+                                 "`make release-plan` wrote, one round per call."), bullets[0]
     assert bullets[1].startswith("- Legacy envs, order: placeholder guard"), bullets[1]
     withdraw = next(line for line in bullets if line.startswith("- To withdraw access"))
-    assert "run `make apply ENV=prod` (legacy) or commit it and run `make release-plan ENV=prod` and " \
-        "`make release ENV=prod` (deterministic, where `make apply ENV=prod` refuses)" in withdraw
+    assert "run `make apply ENV=prod` (legacy) or commit it and run `make release ENV=prod` (deterministic, " \
+        "where `make apply ENV=prod` refuses; a pipeline runs `make release-plan ENV=prod`, then " \
+        "`make release ENV=prod MANIFEST=<path>`)" in withdraw
     # ...because a deterministic release is the manifest path and the apply guard owns apply there.
     makefile = MAKEFILE.read_text()
     release = makefile[makefile.index("\nrelease:"):]
     release = release[:release.index("\n\n")]
-    assert '= 1 ]; then \\\n\t\t$(MAKE) --no-print-directory _release-manifest' in release
+    # At a terminal (no MANIFEST on the command line) the round loop; otherwise exactly one manifest release.
+    loop = release.index('if [ "$(origin MANIFEST)" = undefined ]; then')
+    assert loop < release.index('python3 "$(SHARED_ROOT)/scripts/release_loop.py" --env "$(ENV)"') \
+        < release.index("$(MAKE) --no-print-directory _release-manifest")
     from scripts import release_gate as rg
     assert rg.APPLY_OWNERS[rg.PROMOTED]["apply"] == ()
     assert rg.APPLY_OWNERS[rg.PROMOTED]["apply-governance"] == ("maintain",)

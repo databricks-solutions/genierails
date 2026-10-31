@@ -113,6 +113,10 @@ make account-plan ALLOW_TAG_VALUE_REMOVAL=gr_treatment:redact WAREHOUSE_ID=<id>
 make apply-account   # after the manifest is approved
 ```
 
+At a terminal, `make rehearse ENV=dev` with the same `ALLOW_TAG_VALUE_REMOVAL`
+and `WAREHOUSE_ID` runs that `account-plan` itself, names each removal and
+asks `Approve and apply this account manifest? [y/N]`.
+
 This deletes the values from the tag policy for every workspace on the
 metastore. `account-plan` refuses a value that is:
 

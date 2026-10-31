@@ -44,7 +44,7 @@ read-only SP that already holds more than it should. Fix that and re-run.
 | 1. Author | a person's machine | `make capture ENV=dev SPACE="<agent>"`, `make generate ENV=dev`, `make scaffold-treatments`, `make promote-to ENV=prod`; commit, open a PR | no |
 | 2. PR check | CI, every PR | `make check ENV=dev`; also `make check ENV=prod` when the PR touches `envs/prod/**` or `shared/**` | no |
 | 3. Dev rehearsal | dev pipeline, each merge to `main`, in order | `make rehearse ENV=dev` | dev |
-| 4. Prod release | deployment machine in v1, after stage 3 passes on the commit | `make release-plan ENV=prod`, approve its manifest, `make release ENV=prod` ([release gating](#release-gating-deterministic-envs)) | prod |
+| 4. Prod release | deployment machine in v1, after stage 3 passes on the commit | `make release-plan ENV=prod`, approve its manifest, `make release ENV=prod MANIFEST=<path>`, per round; or, when the operator is the approver, `make release ENV=prod` at a terminal (a `y/N` per round) ([release gating](#release-gating-deterministic-envs)) | prod |
 | 5. Keep protected | deployment machine in v1, on a schedule, at the last released commit | `make maintain ENV=prod` | prod, governance only |
 | 6. Operations | deployment machine, one approval per operation | `make detach-agent`, `make account-plan` then `make apply-account` (on a terminal, `make rehearse` offers the same account manifest y/N; pipelines and non-terminals: unchanged), migration phases | prod or account |
 
