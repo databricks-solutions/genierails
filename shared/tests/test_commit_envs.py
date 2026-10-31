@@ -522,9 +522,10 @@ def test_promote_release_steps_name_the_offer_instead_of_git(tmp_path):
     assert "make release-plan ENV=prod" in offered
 
 
-def test_will_offer_follows_the_same_rules(checkout):
+@pytest.mark.parametrize("step", ["generate", "promote-to"])
+def test_will_offer_follows_the_same_rules(checkout, step):
     cloud = _cloud(checkout)
-    args = (cloud, "dev", cloud / "envs" / "dev", "generate")
+    args = (cloud, "dev", cloud / "envs" / "dev", step)
     assert commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "ask"}, tty=True)
     assert not commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "ask"}, tty=False)
     assert not commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "0"}, tty=True)
@@ -813,12 +814,15 @@ def test_make_promote_to_answer_n_leaves_git_unchanged(repo, tmp_path):
     assert not _git(repo, "diff", "--cached", "--name-only")
 
 
-@pytest.mark.parametrize("how", ["no-tty", "shell-commit-1", "shell-genierails-commit-1", "commit-0-tty"])
+@pytest.mark.parametrize("how", ["no-tty", "shell-commit-1", "shell-genierails-commit-1", "commit-0-tty",
+                                 "interactive-0-tty"])
 def test_make_promote_to_without_a_prompt_is_unchanged(repo, tmp_path, how):
     repo = _customer_promote_repo(repo)
     head = _git(repo, "rev-parse", "HEAD")
-    if how == "commit-0-tty":
-        code, out = _pty_run(_make_cmd(repo, "COMMIT=0"), None, _make_env(tmp_path))
+    if how in ("commit-0-tty", "interactive-0-tty"):
+        args = _make_cmd(repo, "COMMIT=0") if how == "commit-0-tty" else _make_cmd(repo)
+        extra = {"GENIERAILS_INTERACTIVE": "0"} if how == "interactive-0-tty" else {}
+        code, out = _pty_run(args, None, _make_env(tmp_path, **extra))
     else:
         extra = {"shell-commit-1": {"COMMIT": "1"}, "shell-genierails-commit-1": {"GENIERAILS_COMMIT": "1"}}.get(how, {})
         result = subprocess.run(_make_cmd(repo), text=True, capture_output=True, stdin=subprocess.DEVNULL,

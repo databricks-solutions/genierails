@@ -485,7 +485,7 @@ MAKE_STEP = r"make [a-z-]+ ENV=[a-z]+"
 def _readme_recovery() -> list[str]:
     """The make commands the README lists after a reused mask's fix, in order."""
     line = next(line for line in README.read_text().splitlines() if line.startswith("- **Reuse an existing mask**"))
-    tail = line[line.index("Fix it in dev, then"):]
+    tail = line[line.index("Review it in dev, then"):]
     assert "offers to commit the fix" in tail and "runs its release-plan loop" in tail
     return re.findall(rf"`({MAKE_STEP})`", tail)
 
@@ -515,7 +515,7 @@ def test_every_coverage_gap_fix_prints_the_readme_recovery_sequence(tmp_path, ca
     assert readme == ["make generate ENV=dev", "make rehearse ENV=dev", "make promote-to ENV=prod",
                       "make release ENV=prod"]
     builder = coverage_fix.recovery_steps(["dev", "prod"], "envs/dev/env.auto.tfvars")
-    assert builder.startswith("fix envs/dev/env.auto.tfvars, make generate ENV=dev")
+    assert builder.startswith("review envs/dev/env.auto.tfvars, make generate ENV=dev")
     assert re.findall(MAKE_STEP, builder) == readme
 
     scaffold = _scaffold_output(capsys, "prod", prod, dev)

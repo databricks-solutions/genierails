@@ -391,7 +391,7 @@ def test_setup_prod_banner_uses_legacy_promote_from_mode(tmp_path):
 
 
 @pytest.mark.parametrize("env", ["prod", "stg"])
-def test_setup_legacy_promoted_env_keeps_the_promotion_banner(env, tmp_path):
+def test_setup_legacy_promoted_env_banner_is_byte_identical_to_main(env, tmp_path):
     dev = tmp_path / "aws/envs/dev"
     target = tmp_path / f"aws/envs/{env}"
     dev.mkdir(parents=True)
@@ -410,6 +410,25 @@ def test_setup_legacy_promoted_env_keeps_the_promotion_banner(env, tmp_path):
     assert f"make rehearse ENV={env}" not in out
     assert "make release-plan" not in out
     assert "cp ../shared/examples/dev_to_prod/env.auto.tfvars.example" not in out
+    banner = out[out.index("Next steps"):].rstrip()
+    assert banner == (
+        f"Next steps ({env} promotion — the walkthrough's Prod section; finish the source rehearsal first):\n"
+        f"  1. Create or confirm the {env} deployment SP (none yet? ../shared/docs/prerequisites.md, make bootstrap-sp), then edit\n"
+        f"     envs/{env}/auth.auto.tfvars — its client_id / client_secret + {env} workspace host & id\n"
+        f"  2. In envs/{env}/env.auto.tfvars, also set sql_warehouse_id (or leave \"\" to auto-create)\n"
+        f"  3. Replace the seeded promote_from and catalog_map values in envs/{env}/env.auto.tfvars, then run:\n"
+        f"       make promote-to ENV={env}\n"
+        "     (FROM=/CATALOG_MAP= remain optional command-line overrides.)\n"
+        "  4. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.\n"
+        "     When the scan finishes, review the detections and exclude any false positives, then turn on\n"
+        "     auto-tagging. Wait until the class.* tags appear.\n"
+        f"     Prefer a script? make enable-classification ENV={env} turns it on (you still review detections in the UI).\n"
+        f"  5. Run: make release ENV={env}\n"
+        "     (grants business SELECT + Genie CAN_RUN once its coverage check passes; no access flag to set)\n"
+        "     It proves a row-pairing key for every masked table before applying (no key to set).\n"
+        f"  6. Steady state (scheduled): make maintain ENV={env}\n\n"
+        "Walkthrough: ../shared/examples/dev_to_prod/README.md (the walkthrough's Prod section)"
+    )
 
 
 @pytest.mark.parametrize("cloud", CLOUDS)

@@ -307,8 +307,9 @@ def test_following_the_prod_section_word_for_word_reaches_a_release_manifest(cus
             # make setup ENV=prod adds prod's lines to the .gitignore the next commit must include.
             assert "/envs/prod/abac.auto.tfvars" in (repo.cloud / ".gitignore").read_text()
             shown = re.findall(r"make [a-z-]+ ENV=prod", text)
-            assert shown[-4:] == ["make promote-to ENV=prod", "make release ENV=prod",
-                                  "make evidence ENV=prod", "make maintain ENV=prod"], shown
+            assert shown[-5:] == ["make promote-to ENV=prod", "make enable-classification ENV=prod",
+                                  "make release ENV=prod", "make evidence ENV=prod",
+                                  "make maintain ENV=prod"], shown
             assert "make rehearse ENV=" not in text and "make release-plan ENV=prod" not in text
             _fill_in_prod(repo)
         elif target == "check":

@@ -304,7 +304,7 @@ def recovery_steps(chain: list[str], changed: str, rerun: str = "") -> str:
     env after it; then use the champion release loop. A chain longer than two cannot release
     because make rehearse refuses its promoted penultimate env, so it stops after valid checks."""
     owner, env_name = chain[0], chain[-1]
-    steps = [f"fix {changed}", f"make generate ENV={owner} (offers to commit the fix)",
+    steps = [f"review {changed}", f"make generate ENV={owner} (offers to commit the fix)",
              f"make rehearse ENV={owner}"]
     for env in chain[1:]:
         steps.append(f"make promote-to ENV={env} (offers to commit the promotion)")
