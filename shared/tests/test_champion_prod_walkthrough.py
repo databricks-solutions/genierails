@@ -250,7 +250,7 @@ def test_prod_step_3_says_a_first_release_takes_several_rounds_in_the_real_messa
     assert positions == sorted(positions), row
     flow = _section("The whole flow")
     assert 'make release ENV=prod       # each round: plans, shows the manifest, asks y/N, applies it; until ' \
-        '"Release complete"' in flow.splitlines()
+        '"Release complete" (first: account plan y/N, if it has changes)' in flow.splitlines()
     # The flow's commands have no release-plan line: release runs it each round, which the table says,
     # with the exact question it asks.
     code = flow[flow.index("```bash"):flow.index("```", flow.index("```bash") + 3)]
@@ -288,8 +288,9 @@ def test_following_the_prod_section_word_for_word_reaches_a_release_manifest(cus
             result = repo.stub_make(target, env)
         elif target == "release":
             # At a terminal: the first round's release-plan runs (stubbed below make), then n at its y/N.
+            # Dev step 5's rehearse applied the account layer, so release's account step finds no changes.
             planning = Make(repo.tmp, repo, passthrough=("release-plan",))
-            args, environ = planning.command("release", env)
+            args, environ = planning.command("release", env, root_runner=planning.empty_account_runner())
             code, tty_out = _pty_run(args, "n", environ, cwd=repo.cloud)
             result = subprocess.CompletedProcess(command, 0 if "Not released. Manifest" in tty_out else code,
                                                  tty_out, "")
@@ -354,6 +355,45 @@ def test_the_ask_table_quotes_the_questions_the_code_asks():
         assert rows[quiet].rstrip().endswith("| nothing |"), quiet
     # Acks stay a committed file, never a question.
     assert "committing `envs/prod/ack.txt`" in asks and "(an ack is never a `y/N`)" in asks
+
+
+def test_release_describes_the_account_step_before_round_1_as_the_code_runs_it():
+    """make release at a terminal asks about a non-empty account plan first (rehearse's step), then round 1."""
+    flow = _section("The whole flow")
+    asks = flow[flow.index("### What each command does and what it asks"):]
+    row = next(line for line in asks.splitlines() if line.startswith("| `make release ENV=prod` |"))
+    assert "Before round 1 it applies the account layer when it has changes, as rehearse does" in row
+    assert row.index("`Approve and apply this account manifest? [y/N]` first, only when the account plan has "
+                     "changes") < row.index("`Approve and release manifest <id>")
+    step = _step(_section("Prod"), "3. Plan, release.")
+    account = step[step.index("Before round 1 it checks the shared account layer"):]
+    account = account[:account.index("\n")]
+    assert step.index("Each round it plans") < step.index("Before round 1 it checks the shared account layer")
+    for part in ("its sha256", "`Approve and apply this account manifest? [y/N]`", "louder warning",
+                 "through `make apply-account`'s path, under the account lock", "provenance included",
+                 "then round 1 starts", "Anything else applies nothing and stops before round 1",
+                 "An empty account plan asks nothing."):
+        assert part in account, part
+    ci = next(line for line in _section("CI / scripted").splitlines() if line.startswith("| `make release ENV=prod` |"))
+    assert "never asks about the account layer (`release-plan` refuses a non-empty account plan)" in ci
+    assert ci.index("`make account-plan`") < ci.index("`make apply-account`") < ci.index("`make release-plan ENV=prod`")
+    reference = (ROOT / "REFERENCE.md").read_text()
+    release = next(line for line in reference.splitlines() if line.startswith("| `make release` |"))
+    assert "`ALLOW_TAG_VALUE_REMOVAL` (at a terminal)" in release
+    assert release.index("Before round 1, when the account plan has changes") \
+        < release.index("`Approve and apply this account manifest? [y/N]`") \
+        < release.index("with the same per-run nonce as every round's") \
+        < release.index("anything else applies nothing and stops before any `release-plan`") \
+        < release.index("Then each round")
+    assert "a deterministic `release` asks the same account question first (before round 1)" in reference
+    # ...as the code does: the release recipe runs rehearse's own account step before the loop.
+    makefile = (SHARED / "Makefile.shared").read_text()
+    recipe = makefile[makefile.index("\nrelease:"):]
+    recipe = recipe[:recipe.index("\n\n")]
+    assert recipe.index("$(call _ACCOUNT_APPROVE_APPLY,release,run)") < recipe.index("release_loop.py")
+    gate = (SHARED / "scripts" / "release_gate.py").read_text()
+    assert 'raise Refused(f"the account plan is not empty; rehearse and release may only add treatment-tag values. "' \
+        in gate
 
 
 def test_the_ci_section_names_the_low_level_commands_and_what_they_do_off_a_terminal():

@@ -3,7 +3,11 @@
 
 A first (or staged) release takes several manifests: imports, each staged
 policy phase, the SELECT round, then the workspace. At a terminal, plain
-``make release`` runs them for you. Each round:
+``make release`` runs them for you. Before round 1, when the account plan has
+changes, the release recipe runs make rehearse's account step
+(_ACCOUNT_APPROVE_APPLY in Makefile.shared: the account manifest and its
+digest, y/N, apply-account's path); anything but y there stops make release
+before this loop starts. Each round:
 
 1. offers the env's current manifest if it can still be released at HEAD
    (round 1 only: what an earlier release-plan wrote), otherwise runs
@@ -25,6 +29,9 @@ answer.
 The Makefile runs this only when approval.py says a person is at the
 terminal; MANIFEST=, CI, no terminal, GENIERAILS_INTERACTIVE=0 and nested
 makes release once, exactly as before. There is no flag that answers for you.
+With ``--run-from-env`` (what the recipe passes) the loop keeps the per-run
+nonce the recipe made for the account step, so the account record and every
+round's record are of one run; otherwise it makes its own.
 """
 
 from __future__ import annotations
@@ -58,8 +65,8 @@ _HINTS = (
      "make release never rehearses or applies {source}: run make rehearse ENV={source} on this commit, then "
      "make release ENV={env} again."),
     (("the account plan is not empty",),
-     "The account layer changes only through its own approved manifest: make account-plan, then make "
-     "apply-account; then re-run make release ENV={env}."),
+     "The account layer changes only through its own approved manifest: re-run make release ENV={env} at "
+     "this terminal to be asked about it first, or make account-plan, then make apply-account."),
 )
 
 
@@ -141,13 +148,14 @@ def _outcome(env_dir: Path, env: str, manifest_id: str) -> str | None:
     return None
 
 
-def release(env: str, env_dir: Path, make: list[str], verify_key_column: str = "") -> int:
+def release(env: str, env_dir: Path, make: list[str], verify_key_column: str = "",
+            run_from_env: bool = False) -> int:
     env_dir = Path(env_dir).resolve()
     if not approval.interactive():
         print(f"ERROR: {approval.NOT_A_TERMINAL}", file=sys.stderr)
         return 1
     # This run's nonce: only the records its own prompt writes count (scripts/approval.py).
-    run = os.environ[approval.RUN_ENV] = approval.new_run()
+    run = os.environ[approval.RUN_ENV] = approval.run_of() if run_from_env else approval.new_run()
     child, source = Child(), _source(env_dir)
     base = [*make, "--no-print-directory"]
     env_args = [f"ENV={env}", f"ENV_DIR={env_dir}"]
@@ -225,9 +233,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-dir", type=Path, required=True)
     parser.add_argument("--make", required=True, help="$(MAKE), as the recipe would run it")
     parser.add_argument("--verify-key-column", default="")
+    parser.add_argument("--run-from-env", action="store_true",
+                        help="keep the recipe's per-run approval nonce (its account step's) instead of a new one")
     args = parser.parse_args(argv)
     try:
-        return release(args.env, args.env_dir, shlex.split(args.make), args.verify_key_column)
+        return release(args.env, args.env_dir, shlex.split(args.make), args.verify_key_column, args.run_from_env)
     except (approval.Refused, rg.Refused) as exc:
         print(f"ERROR: {exc}; nothing more was released.", file=sys.stderr)
         return 1
