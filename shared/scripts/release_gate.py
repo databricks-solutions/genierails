@@ -104,9 +104,12 @@ for _path in (SHARED, SHARED / "scripts"):
         sys.path.insert(0, str(_path))
 
 from state_layout import data_access_subdir, root_state_paths, state_json  # noqa: E402
+from scripts import setup_repo  # noqa: E402
 
 STATE_DIR_ENV = "GENIERAILS_STATE_DIR"
 DEFAULT_STATE = ".genierails-state"
+UPSTREAM_REMOTE = "genierails"
+UPSTREAM_URL = "https://github.com/databricks-solutions/genierails.git"
 # manifests/CURRENT: the id of the manifest a plain make release ENV=<env> releases.
 CURRENT_MANIFEST = "CURRENT"
 VERSION = 1
@@ -302,7 +305,13 @@ def _read_json(path: Path) -> dict | None:
 # -- git ----------------------------------------------------------------------
 
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    result = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=False)
+    scrub = {
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_PREFIX",
+    }
+    env = {k: v for k, v in os.environ.items() if k not in scrub}
+    result = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=False, env=env)
     if check and result.returncode:
         raise Refused(f"git {' '.join(args)} failed: {(result.stderr or result.stdout).strip()}")
     return result
@@ -882,6 +891,14 @@ class ProvenanceRef:
     problems: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class LocalMainMode:
+    allowed: bool
+    reason: str
+    remotes: tuple[str, ...]
+    problems: tuple[str, ...] = ()
+
+
 def remote_names(repo: Path) -> list[str]:
     names = set(filter(None, git(repo, "remote").stdout.splitlines()))
     common = git(repo, "rev-parse", "--git-common-dir").stdout.strip()
@@ -896,6 +913,60 @@ def remote_names(repo: Path) -> list[str]:
             if len(parts) >= 3:
                 names.add(parts[2])
     return sorted(names)
+
+
+def _config_values(repo: Path, key: str) -> list[str]:
+    out = git(repo, "config", "--get-all", key, check=False)
+    return out.stdout.splitlines() if out.returncode == 0 else []
+
+
+def _url_rewrites(repo: Path) -> list[str]:
+    out = git(repo, "config", "--get-regexp", r"^url\..*\.(insteadOf|pushInsteadOf)$", check=False)
+    return [line for line in out.stdout.splitlines() if line.strip()] if out.returncode == 0 else []
+
+
+def _remote_url(repo: Path, remote: str) -> str:
+    urls = _config_values(repo, f"remote.{remote}.url")
+    return urls[0] if len(urls) == 1 else ""
+
+
+def _remote_pushurls(repo: Path, remote: str) -> list[str]:
+    return _config_values(repo, f"remote.{remote}.pushurl")
+
+
+def _canonical_upstream_url(url: str) -> bool:
+    return setup_repo.same_repo(url, UPSTREAM_URL)
+
+
+def local_main_mode(repo: Path, *, remote: str = "origin", branch: str = "main") -> LocalMainMode:
+    """Whether provenance may use committed local ``branch`` instead of ``remote/branch``.
+
+    Local-main provenance is intentionally narrow: either the repo has no remotes,
+    or its only remote is setup's upgrade remote, ``genierails``, and every URL on
+    it is unquestionably the canonical GenieRails upstream. All ambiguous git
+    layouts keep the normal remote-backed gate.
+    """
+    remotes = tuple(remote_names(repo))
+    rewrites = _url_rewrites(repo)
+    if rewrites:
+        return LocalMainMode(False, "", remotes, (f"git url rewrite config is present ({rewrites[0]}); "
+                                                  f"remove it before using local-only provenance",))
+    if not remotes:
+        return LocalMainMode(True, f"no {remote} remote", remotes)
+    if remotes != (UPSTREAM_REMOTE,):
+        return LocalMainMode(False, "", remotes)
+    url = _remote_url(repo, UPSTREAM_REMOTE)
+    if not url:
+        return LocalMainMode(False, "", remotes, (f"{UPSTREAM_REMOTE} has no fetch URL; local-only provenance "
+                                                  "needs the setup upgrade remote to point at GenieRails",))
+    if not _canonical_upstream_url(url):
+        return LocalMainMode(False, "", remotes, (f"{UPSTREAM_REMOTE} points at {url}, not the GenieRails upstream; "
+                                                  f"fix that remote or add {remote}",))
+    for pushurl in _remote_pushurls(repo, UPSTREAM_REMOTE):
+        if not _canonical_upstream_url(pushurl):
+            return LocalMainMode(False, "", remotes, (f"{UPSTREAM_REMOTE} pushurl points at {pushurl}, not the "
+                                                      "GenieRails upstream; fix that remote or remove the pushurl",))
+    return LocalMainMode(True, f"only the {UPSTREAM_REMOTE} upgrade remote", remotes)
 
 
 def _ci_detected_strict() -> bool:
@@ -940,13 +1011,14 @@ def provenance_ref(repo: Path, *, remote: str = "origin", branch: str = "main", 
                    exact: bool = False, cloud_dir: Path | None = None, env: str = "") -> ProvenanceRef:
     """Return the reviewed provenance ref, its commit, and refusal reasons.
 
-    A checkout with no remotes is a user-managed local-only repo: its committed
-    HEAD is the reviewed ref. The moment any remote exists, keep the remote gate
+    A checkout with no remotes, or with only setup's canonical ``genierails``
+    upgrade remote, is a user-managed local-only repo: its committed HEAD is
+    the reviewed ref. Every other remote layout keeps the remote gate
     fail-closed exactly as before; no missing-origin or failed-fetch fallback.
     """
     commit = head(repo)
-    remotes = remote_names(repo)
-    if not remotes and not _ci_detected_strict():
+    local_mode = local_main_mode(repo, remote=remote, branch=branch)
+    if local_mode.allowed and not _ci_detected_strict():
         local = f"refs/heads/{branch}"
         display = f"local {branch}"
         problems: list[str] = []
@@ -968,6 +1040,11 @@ def provenance_ref(repo: Path, *, remote: str = "origin", branch: str = "main", 
                 problems.append(f"HEAD {commit[:12]} is not on {display} ({local_commit[:12]}); "
                                 "release only commits on the local main branch")
         return ProvenanceRef(local, display, local_commit, True, tuple(problems))
+    if local_mode.allowed and _ci_detected_strict():
+        return ProvenanceRef(f"{remote}/{branch}", f"{remote}/{branch}", "", False,
+                             ("local-only provenance is refused in CI; run this from the deployment machine",))
+    if local_mode.problems:
+        return ProvenanceRef(f"{remote}/{branch}", f"{remote}/{branch}", "", False, local_mode.problems)
     upstream = f"{remote}/{branch}"
     problems: list[str] = []
     if fetch:

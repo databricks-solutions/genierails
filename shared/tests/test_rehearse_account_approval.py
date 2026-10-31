@@ -205,7 +205,7 @@ def test_the_digest_shown_is_the_one_approved_and_applied(amake, repo):
 
 
 def test_a_repo_with_no_remotes_approves_and_applies_from_committed_local_main(amake, repo):
-    """#283: with no remotes at all, the sub-flow's account-plan and apply-account use local main."""
+    """#283: with no remotes, the sub-flow's account-plan and apply-account use local main."""
     repo.git("remote", "remove", "origin")
     rc, shown = pty_make(amake, "rehearse", "dev", answer="y")
     assert rc == 0, shown
@@ -217,13 +217,22 @@ def test_a_repo_with_no_remotes_approves_and_applies_from_committed_local_main(a
     assert [r["result"] for r in rg.rehearse_receipts(repo.cloud, "dev")] == ["passed"]
 
 
-def test_any_remote_keeps_the_strict_origin_main_rule_before_any_prompt(amake, repo):
-    """#283: a remote that isn't origin (setup's kept genierails one) still means origin/main is required."""
+def test_setup_genierails_remote_approves_and_applies_from_committed_local_main(amake, repo):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    rc, shown = pty_make(amake, "rehearse", "dev", answer="y")
+    assert rc == 0, shown
+    manifest = json.loads(_manifest(shown).read_text())
+    assert manifest["provenance"]["local_only"] is True and manifest["provenance"]["remote"] == "local main"
+    assert [r["result"] for r in rg.rehearse_receipts(repo.cloud, "dev")] == ["passed"]
+
+
+def test_noncanonical_genierails_remote_keeps_the_strict_origin_main_rule_before_any_prompt(amake, repo):
     repo.git("remote", "rename", "origin", "genierails")
     rc, shown = pty_make(amake, "rehearse", "dev", answer="y")
     assert rc != 0, shown
     assert "[y/N]" not in shown
-    assert "git fetch --quiet origin main failed" in shown  # no local-main fallback once any remote exists
+    assert "genierails points at" in shown
     assert ("rehearse: the account layer needs an approved account manifest, but make account-plan stopped "
             "(above). Nothing was locked, approved or applied in dev.") in shown
     assert not list(rg.manifests_dir(repo.cloud, "account").glob("*/manifest.json"))
