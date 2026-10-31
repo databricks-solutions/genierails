@@ -18,7 +18,7 @@ Import an existing Databricks Genie agent's supported configuration and table fo
 <details>
 <summary><strong>Step 1 — Add the Agent ID to dev configuration</strong></summary>
 
-Give the agent its own file in the development environment, `envs/dev/agents/<agent name>.auto.tfvars` (the walkthrough's `agent.auto.tfvars.example`; replace its placeholders). The file name is the agent's name:
+Give the agent its own file in the development environment, `envs/dev/agents/<agent name>.auto.tfvars` (the walkthrough's `agent.auto.tfvars.example`, which `make setup ENV=dev` copies to `envs/dev/agents/Finance Analytics.auto.tfvars`: rename it to the agent's name and replace its placeholders). The file name is the agent's name:
 
 ```hcl
 # envs/dev/agents/Payments.auto.tfvars

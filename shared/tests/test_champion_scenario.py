@@ -67,6 +67,12 @@ class FakeMake:
             'databricks_workspace_host = ""\n'
             'databricks_client_id = "d0000000-0000-0000-0000-00000000d001"\n'
         )
+        if env_dir.name == "dev" and not (env_dir / "env.auto.tfvars").exists():
+            # What make setup ENV=dev copies from the walkthrough (README Dev step 1).
+            shutil.copy2(rit.DEV_TO_PROD_TEMPLATE, env_dir / "env.auto.tfvars")
+            (env_dir / "agents").mkdir(exist_ok=True)
+            if not any((env_dir / "agents").glob("*.auto.tfvars")):
+                shutil.copy2(rit.DEV_TO_PROD_AGENT_TEMPLATE, env_dir / "agents" / rit.SETUP_AGENT_FILE)
         if env_dir.name == "prod":  # what make setup ENV=prod writes for a promoted env
             (env_dir / "env.auto.tfvars").write_text(
                 'genie_spaces = []\nsql_warehouse_id = ""\ngovernance_mode = "deterministic"\n'
@@ -426,6 +432,7 @@ def test_real_generate_commits_the_id_only_agents_tables_before_promotion(tmp_pa
         "\ngenie_spaces = []\n",
         f'\ngenie_spaces = [{{ genie_space_id = "{SPACE_ID}", acl_groups = ["analyst"] }}]\n').replace(
         '"<your-deployer-principal-id>"', '"d0000000-0000-0000-0000-00000000d001"'))
+    (dev / "agents" / rit.SETUP_AGENT_FILE).unlink()  # README: with the inline list, delete setup's agent file
     (dev / "auth.auto.tfvars").write_text(
         'databricks_workspace_host = "https://dev.example.invalid"\n'
         'databricks_client_id = "d0000000-0000-0000-0000-00000000d001"\n'

@@ -91,7 +91,7 @@ cause:
 | checkout is not clean | step 2 again |
 | reader or weakening check | add the reviewed lines to `envs/prod/ack.txt` in a PR, or fix the config ([governance](playbooks/governance.md#acknowledge-an-exception)) |
 | coverage check, or an unmapped class | map it in dev and promote ([governance](playbooks/governance.md#map-a-new-class)) |
-| the account plan isn't empty | run `make account-plan`, get its manifest approved, then `make apply-account` ([operations](#operations)) |
+| the account plan isn't empty | run `make account-plan`, get its manifest approved, then `make apply-account` ([operations](#operations)); at a terminal, plain `make release ENV=prod` asks about the account manifest before round 1 instead |
 | env is locked | another command holds the env lock; wait for it |
 | `release` refuses the manifest | something moved since `release-plan`; run `release-plan` again and get the new manifest approved |
 

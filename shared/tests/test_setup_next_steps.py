@@ -66,16 +66,19 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     assert result.returncode == 0, result.stderr
     out = result.stdout
 
-    assert "cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars" in out
+    # Setup copied the walkthrough's env and agent templates itself: no copy step (README Dev step 1).
+    assert "cp ../shared/examples/dev_to_prod/" not in out
+    assert "Start from the walkthrough template" not in out
     assert "envs/dev/auth.auto.tfvars" in out
     assert "manage_groups" not in out
     assert "Edit envs/account/env.auto.tfvars" not in out
     # Each agent gets its own file with its ID and who may run it (decision 4).
     assert (
-        "  3. Per agent, create its file (the file name is the agent's name) and set genie_space_id to its\n"
-        "     Genie agent ID and acl_groups to the groups that may run it ([] means nobody; required):\n"
-        "       mkdir -p envs/dev/agents\n"
-        '       cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example "envs/dev/agents/<agent name>.auto.tfvars"\n'
+        "  2. Per agent, in its file in envs/dev/agents/ (the file name is the agent's name), set\n"
+        "     genie_space_id to its Genie agent ID and acl_groups to the groups that may run it "
+        "([] means nobody; required).\n"
+        '     Setup copied the agent template to "envs/dev/agents/Finance Analytics.auto.tfvars": before the first\n'
+        "     make generate, rename it to your agent's name; for another agent, copy it under that agent's name.\n"
         "     In envs/dev/env.auto.tfvars set deployer_principal_id to the applying SP's client_id, and\n"
         "     access_tier_groups to your IdP groups, most to least privileged (the template starts new champions in deterministic mode)\n"
     ) in out
@@ -100,28 +103,28 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     # Setup offers its own files; make check, rehearse receipts and release-plan read only committed files.
     assert "setup offers to commit and push" not in out  # captured output is not a terminal
     assert "git add .gitignore envs/" not in out
-    assert "  4. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.\n" in out
+    assert "  3. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on.\n" in out
     assert "     When the scan finishes, review the detections and exclude any false positives, then turn on\n" in out
     assert "     auto-tagging. Wait until the class.* tags appear.\n" in out
     assert "     Prefer a script? make enable-classification ENV=dev turns it on (you still review detections in the UI).\n" in out
-    assert "  5. Run: make generate ENV=dev   (one run: imports the agent, finds its tables, drafts rules)\n" in out
+    assert "  4. Run: make generate ENV=dev   (one run: imports the agent, finds its tables, drafts rules)\n" in out
     assert "     Review envs/dev/generated/, then commit and push envs/ (generate offers it on a terminal: answer y).\n" in out
     # No separate make check step: a deterministic rehearse runs it first.
     assert "Run: make check" not in out
     # A first deterministic rehearse refuses a non-empty account plan (finding #5).
     assert (
-        "  6. First deploy only: the account layer (e.g. the new gr_treatment tag policy) needs an approved account "
+        "  5. First deploy only: the account layer (e.g. the new gr_treatment tag policy) needs an approved account "
         "manifest.\n"
         "       On a terminal, the rehearse below shows its plan and asks y/N. Off a terminal (rehearse refuses it), "
         "run:\n"
         "       make account-plan    (plans the shared account layer and writes the manifest to approve; changes nothing live)\n"
         "       make apply-account   (applies exactly that approved manifest)\n"
     ) in out
-    assert ("  7. Run: make rehearse ENV=dev   (runs make check ENV=dev first: refuses before any lock or live "
+    assert ("  6. Run: make rehearse ENV=dev   (runs make check ENV=dev first: refuses before any lock or live "
             "call if the committed files fail it)\n") in out
     assert "business_access_enabled" not in out
     assert "     (grants SELECT only from table_readers after its coverage check passes, and Genie CAN_RUN only from acl_groups after the live agent coverage check)\n" in out
-    assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == [str(n) for n in range(1, 8)]
+    assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == [str(n) for n in range(1, 7)]
     assert "shared/examples/dev_to_prod/README.md" in out
     # The champion flow relies on native Data Classification, not the country overlay.
     assert "APJ" not in out
@@ -132,12 +135,14 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
     # Setup names every unfilled placeholder at once, above the steps (finding #21).
     advice = out[:out.index("Next steps")]
     assert re.findall(r"Setup required: replace placeholder (<[^>]+>)", advice) == [
+        "<your-genie-space-id>", "<group-that-may-run-the-agent>",
         "<your-deployer-principal-id>", "<most-privileged-group>"], advice
     # The README's Dev order: commit, classify, generate (commit), account layer, rehearse (which checks).
     steps = out[out.index("Next steps"):]
     assert (
         steps.index("envs/dev/auth.auto.tfvars")
-        < steps.index("set genie_space_id")
+        < steps.index("genie_space_id to its Genie agent ID")
+        < steps.index("rename it to your agent's name")
         < steps.index("access_tier_groups")
         < steps.index("SAMPLE_ENV.md")
         < steps.index("enable-classification")
@@ -192,9 +197,15 @@ def test_bootstrap_auth_overwrite_only_honored_on_command_line(tmp_path):
 
 @pytest.mark.parametrize("cloud", CLOUDS)
 def test_setup_omits_completed_walkthrough_copy_and_renumbers(cloud, tmp_path):
+    # An env file from before setup copied the walkthrough template: setup keeps it and says how to start over.
+    env_file = tmp_path / cloud / "envs/dev/env.auto.tfvars"
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text((SHARED_ROOT / "env.auto.tfvars.example").read_text())
     first = _make(cloud, tmp_path, "setup", "ENV=dev")
     assert first.returncode == 0
-    env_file = tmp_path / cloud / "envs/dev/env.auto.tfvars"
+    assert "       cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars\n" in first.stdout
+    assert not (env_file.parent / "agents").exists()
+    assert re.findall(r"^  (\d+)\. ", first.stdout, flags=re.MULTILINE) == [str(n) for n in range(1, 8)]
     env_file.write_text((SHARED_ROOT / "examples/dev_to_prod/env.auto.tfvars.example").read_text())
 
     result = _make(cloud, tmp_path, "setup", "ENV=dev")

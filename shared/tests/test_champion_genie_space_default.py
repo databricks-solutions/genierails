@@ -227,9 +227,9 @@ def _prepared_cloud(tmp_path_factory):
     cloud_root.mkdir()
     for env_name in ("dev", "prod"):
         assert _run_make(cloud_root, "setup", f"ENV={env_name}").returncode == 0
-    (cloud_root / "envs/dev/env.auto.tfvars").write_text(TEMPLATE.read_text())
-    (cloud_root / "envs/dev/agents").mkdir()
-    shutil.copy(AGENT_TEMPLATE, cloud_root / f"envs/dev/agents/{AGENT}.auto.tfvars")
+    # make setup ENV=dev copies both walkthrough templates itself.
+    assert (cloud_root / "envs/dev/env.auto.tfvars").read_bytes() == TEMPLATE.read_bytes()
+    assert (cloud_root / f"envs/dev/agents/{AGENT}.auto.tfvars").read_bytes() == AGENT_TEMPLATE.read_bytes()
     return cloud_root
 
 

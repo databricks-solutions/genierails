@@ -1,9 +1,9 @@
 """The champion README, run through the real make recipes with the shipped templates.
 
 Only generate_abac.py (its Genie and Databricks reads) and the SDK's one Genie
-GET that capture makes are stubbed. The env and agent templates are copied
-as the README says and only their placeholders are filled, so a template that
-omits a required setting (an agent's acl_groups, decision 4) fails here.
+GET that capture makes are stubbed. make setup copies the env and agent
+templates, as the README says, and only their placeholders are filled, so a
+template that omits a required setting (an agent's acl_groups, decision 4) fails here.
 """
 
 import json
@@ -101,13 +101,12 @@ def _commit(root, message):
 
 
 def _readme_dev_setup(cloud, acl_groups='["viewers"]'):
-    """README Dev step 1: copy both templates; fill only their placeholders."""
+    """README Dev step 1: setup copies both templates; fill only their placeholders."""
     assert cloud("setup", "ENV=dev").returncode == 0
     dev = cloud.root / "envs" / "dev"
-    shutil.copy(EXAMPLES / "env.auto.tfvars.example", dev / "env.auto.tfvars")
-    (dev / "agents").mkdir()
     agent = dev / "agents" / f"{AGENT}.auto.tfvars"
-    shutil.copy(EXAMPLES / "agent.auto.tfvars.example", agent)
+    assert (dev / "env.auto.tfvars").read_bytes() == (EXAMPLES / "env.auto.tfvars.example").read_bytes()
+    assert agent.read_bytes() == (EXAMPLES / "agent.auto.tfvars.example").read_bytes()
     env_file = dev / "env.auto.tfvars"
     env_file.write_text(env_file.read_text().replace("<your-deployer-principal-id>", DEPLOYER)
                         .replace('"<most-privileged-group>", "<least-privileged-group>"',
