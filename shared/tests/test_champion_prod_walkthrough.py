@@ -306,8 +306,10 @@ def test_following_the_prod_section_word_for_word_reaches_a_release_manifest(cus
         if target == "setup":
             # make setup ENV=prod adds prod's lines to the .gitignore the next commit must include.
             assert "/envs/prod/abac.auto.tfvars" in (repo.cloud / ".gitignore").read_text()
-            assert "git add .gitignore envs/prod/ envs/account/ && git commit" in text, text
-            assert "promote-to offers it on a terminal: answer y" in text, text
+            shown = re.findall(r"make [a-z-]+ ENV=prod", text)
+            assert shown[-4:] == ["make promote-to ENV=prod", "make release ENV=prod",
+                                  "make evidence ENV=prod", "make maintain ENV=prod"], shown
+            assert "make rehearse ENV=" not in text and "make release-plan ENV=prod" not in text
             _fill_in_prod(repo)
         elif target == "check":
             # Offline, check's plan step (6) needs prod's live classification config.
@@ -373,7 +375,8 @@ def test_the_ci_section_names_the_low_level_commands_and_what_they_do_off_a_term
         < release.index("`=== Release complete (prod) ===`")
     assert "`make check ENV=<env>`: the read-only PR check" in check
     assert "no flag or variable answers an approval `y` for you" in section
-    assert "`GENIERAILS_INTERACTIVE=0` turns off the two approval questions and `COMMIT=0` the commit offers" in section
+    assert "`GENIERAILS_INTERACTIVE=0` is the one switch that turns off both approval questions and commit offers" in section
+    assert "An explicit `COMMIT=1` still commits and pushes without asking" in section
     # ...as the code does: the account refusal, and release with MANIFEST= (or off a terminal) is one release.
     makefile = (SHARED / "Makefile.shared").read_text()
     assert 'echo "ERROR: account plan is non-empty; rehearse/release may only add allowed treatment-tag values."' in makefile
@@ -381,7 +384,7 @@ def test_the_ci_section_names_the_low_level_commands_and_what_they_do_off_a_term
     release_recipe = release_recipe[:release_recipe.index("\n\n")]
     assert 'if [ "$(origin MANIFEST)" = undefined ]; then' in release_recipe
     assert "INTERACTIVE_ENV = \"GENIERAILS_INTERACTIVE\"" in (SHARED / "scripts" / "approval.py").read_text()
-    assert "GENIERAILS_INTERACTIVE" not in (SHARED / "scripts" / "commit_envs.py").read_text()
+    assert 'environ.get("GENIERAILS_INTERACTIVE") == "0"' in (SHARED / "scripts" / "commit_envs.py").read_text()
 
 
 def test_the_walkthrough_says_setup_without_repo_keeps_the_genierails_remote():

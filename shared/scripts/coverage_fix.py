@@ -300,19 +300,18 @@ def promoted_release_steps(env_name: str, source: str, commit_offer: bool = Fals
 def recovery_steps(chain: list[str], changed: str, rerun: str = "") -> str:
     """The one deterministic sequence after a coverage fix changes envs/<chain[0]>/ (the dev_to_prod
     README's "If it stops on coverage or drift"). ``chain`` is promotion_chain's root-first list
-    ending in the env that stopped: commit, generate and rehearse the root; then promote-to each
-    env after it; then release the last one, which release-plan allows only when its source is the
-    rehearsed root (make rehearse refuses a promoted env). rehearse and release-plan run make check
-    themselves, so a promoted env gets its own make check only when no release-plan follows (a
-    chain longer than two stops before one)."""
+    ending in the env that stopped: fix, generate and rehearse the root; then promote-to each
+    env after it; then use the champion release loop. A chain longer than two cannot release
+    because make rehearse refuses its promoted penultimate env, so it stops after valid checks."""
     owner, env_name = chain[0], chain[-1]
-    steps = [f"commit {changed}", f"make generate ENV={owner}", f"make rehearse ENV={owner}"]
+    steps = [f"fix {changed}", f"make generate ENV={owner} (offers to commit the fix)",
+             f"make rehearse ENV={owner}"]
     for env in chain[1:]:
-        steps.append(f"make promote-to ENV={env}")
+        steps.append(f"make promote-to ENV={env} (offers to commit the promotion)")
         if len(chain) > 2:
             steps.append(f"make check ENV={env}")
     if len(chain) == 2:
-        steps.append(promoted_release_steps(env_name, owner))
+        steps.append(f"make release ENV={env_name}")
     elif len(chain) > 2:
         source = chain[-2]
         steps.append(
@@ -322,7 +321,7 @@ def recovery_steps(chain: list[str], changed: str, rerun: str = "") -> str:
             f'promote_from = "{owner}")')
     elif rerun and rerun != steps[-1]:
         steps.append(rerun)
-    return ", ".join(steps) + "; commit and push after each step that changes envs/"
+    return ", ".join(steps)
 
 
 def release_steps(env_name: str, env_dir: Path, source: str = "", commit_offer: bool = False) -> str:

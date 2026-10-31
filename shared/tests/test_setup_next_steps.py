@@ -330,12 +330,8 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
         "     (FROM=/CATALOG_MAP= remain optional command-line overrides.)\n",
         "In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on",
         "Prefer a script? make enable-classification ENV=prod turns it on",
-        "  5. Commit and push .gitignore and envs/ to origin/main (promote-to offers it on a terminal: answer y;\n"
-        "     or git add .gitignore envs/prod/ envs/account/ && git commit yourself); on that commit run:\n",
-        "     make rehearse ENV=dev   (release-plan needs a passing rehearsal of this commit), then:\n",
-        "     make release-plan ENV=prod   (runs make check ENV=prod and promote-to CHECK=1, checks the commit "
-        "was rehearsed",
-        "Get that manifest approved, then: make release ENV=prod\n",
+        "  5. Run: make release ENV=prod\n",
+        "  6. Run: make evidence ENV=prod",
         "make maintain ENV=prod",
     ]
     positions = [out.index(step) for step in order]
@@ -354,7 +350,7 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
     assert "make apply ENV=prod" not in out
     assert "make verify-access ENV=prod" not in out
     assert "make certify" not in out
-    assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == ["1", "2", "3", "4", "5", "6"]
+    assert re.findall(r"^  (\d+)\. ", out, flags=re.MULTILINE) == ["1", "2", "3", "4", "5", "6", "7"]
     assert "shared/examples/dev_to_prod/README.md" in out
     env_text = (tmp_path / cloud / "envs/prod/env.auto.tfvars").read_text()
     env_cfg = hcl2.loads(env_text)
@@ -366,8 +362,7 @@ def test_setup_prod_prints_promote_release_maintain_steps(cloud, tmp_path):
     assert 'catalog_map  = { "<dev_catalog>" = "<prod_catalog>" }' in env_text
 
 
-def test_setup_prod_rehearses_its_promote_from_source_before_release_plan(tmp_path):
-    """release-plan needs a same-commit receipt from promote_from's env, not always dev."""
+def test_setup_prod_banner_never_tells_a_promoted_source_to_rehearse(tmp_path):
     assert _make("aws", tmp_path, "setup", "ENV=prod").returncode == 0
     env_file = tmp_path / "aws" / "envs" / "prod" / "env.auto.tfvars"
     text = env_file.read_text()
@@ -378,9 +373,9 @@ def test_setup_prod_rehearses_its_promote_from_source_before_release_plan(tmp_pa
 
     assert result.returncode == 0, result.stderr
     out = result.stdout
-    assert "     make rehearse ENV=stg   (release-plan needs a passing rehearsal of this commit), then:\n" in out
-    assert "make rehearse ENV=dev" not in out
-    assert out.index("make rehearse ENV=stg") < out.index("make release-plan ENV=prod")
+    assert "make rehearse ENV=stg" not in out and "make rehearse ENV=dev" not in out
+    assert "make release-plan ENV=prod" not in out
+    assert "make promote-to ENV=prod" in out and "make release ENV=prod" in out
 
 
 def test_setup_prod_banner_uses_legacy_promote_from_mode(tmp_path):
@@ -434,7 +429,7 @@ def test_setup_stg_promoted_uses_the_promotion_banner_without_overwrite_or_rehea
     assert "stg workspace host & id" in out
     assert "prod workspace host & id" not in out
     assert "make promote-to ENV=stg" in out
-    assert "make rehearse ENV=dev" in out
+    assert "make rehearse ENV=dev" not in out
     assert "make rehearse ENV=stg" not in out
     assert "cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/stg/env.auto.tfvars" not in out
 

@@ -156,8 +156,8 @@ Legacy envs skip `make release-plan`: run `make release ENV=prod` directly (`rel
 **Pass looks like:** `ALL EFFECTIVE` (from its `verify-access` gate) and "Release complete". Business users can now open the agent and get masked answers. To re-run only that proof later: `make verify-access ENV=prod`.
 
 **If it stops on coverage or drift**, prod found a sensitive tag your rules don't cover. Nothing new was granted. The message prints both fixes with exact commands:
-- **Reuse an existing mask** (the common case): `make scaffold-treatments ENV=prod TREATMENT=<name>` adds the class to `tag_treatments` in `envs/dev/env.auto.tfvars` (`shared/` is unchanged). Commit it, then `make generate ENV=dev`, `make rehearse ENV=dev`, `make promote-to ENV=prod`, `make release-plan ENV=prod` (it reuses the dev rehearsal, or names the command to run) and `make release ENV=prod`, committing and pushing after each step that changes `envs/`.
-  That is the sequence the message prints. At a terminal it is shorter: the commit offers of `make generate` (which includes the `tag_treatments` edit) and `make promote-to` do the commits, and `make release ENV=prod` runs `make release-plan` itself.
+- **Reuse an existing mask** (the common case): `make scaffold-treatments ENV=prod TREATMENT=<name>` adds the class to `tag_treatments` in `envs/dev/env.auto.tfvars` (`shared/` is unchanged). Fix it in dev, then `make generate ENV=dev` (offers to commit the fix), `make rehearse ENV=dev`, `make promote-to ENV=prod` (offers to commit the promotion) and `make release ENV=prod` (runs its release-plan loop).
+  That is the sequence the message prints.
 - **A new kind of mask**: draft and test it with the dev-only helpers (`make draft-custom-mask` / `make test-custom-mask`, see the [governance playbook](../../docs/playbooks/governance.md)). Once it passes, `make adopt-custom-mask ENV=dev TREATMENT=custom_<name>` copies it into `envs/dev/custom_masks/` and prints the `tag_treatments` line to add to `envs/dev/env.auto.tfvars`. Add it, then continue from `make generate ENV=dev` as above (its commit offer includes both). The bare `make scaffold-treatments` stub and `materialize-treatment` are legacy-mode only ([legacy mode](../../docs/legacy-mode.md)).
 
 Details: [Fixing a coverage gap found in prod](REFERENCE.md#fixing-a-coverage-gap-found-in-prod).
@@ -179,7 +179,7 @@ Run it from the [deployment machine](../../docs/deployment-machine.md). It masks
 <a id="ci--scripted"></a>
 ## CI / scripted
 
-The questions above appear only at a terminal: the top-level make, outside CI, stdin and stdout a terminal. `GENIERAILS_INTERACTIVE=0` turns off the two approval questions and `COMMIT=0` the commit offers. Anywhere else (a pipeline, CI, piped output) each command runs its non-interactive form, and no flag or variable answers an approval `y` for you. The low-level commands stay for pipelines, four-eyes approval and experts ([command reference](../../../REFERENCE.md#commands)):
+The questions above appear only at a terminal: the top-level make, outside CI, stdin and stdout a terminal. `GENIERAILS_INTERACTIVE=0` is the one switch that turns off both approval questions and commit offers; it can only turn interactivity off. An explicit `COMMIT=1` still commits and pushes without asking (never in CI), while `COMMIT=0` turns off commit offers alone. Anywhere else (a pipeline, CI, piped output) each command runs its non-interactive form, and no flag or variable answers an approval `y` for you. The low-level commands stay for pipelines, four-eyes approval and experts ([command reference](../../../REFERENCE.md#commands)):
 
 | Champion command | Off a terminal | The low-level steps |
 |---|---|---|

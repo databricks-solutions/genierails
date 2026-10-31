@@ -536,25 +536,22 @@ _setup:
 		echo "  2. In $(_SETUP_ENV_REL)/env.auto.tfvars, also set sql_warehouse_id (or leave \"\" to auto-create)"; \
 		echo "  3. Replace the seeded promote_from and catalog_map values in $(_SETUP_ENV_REL)/env.auto.tfvars, then run:"; \
 		echo "       make promote-to ENV=$(ENV)"; \
+		echo "     (offers to commit and push the promotion on a terminal.)"; \
 		echo "     (FROM=/CATALOG_MAP= remain optional command-line overrides.)"; \
 		echo "  4. In Catalog Explorer, open the catalog > Details tab > Data classification: turn it on."; \
 		echo "     When the scan finishes, review the detections and exclude any false positives, then turn on"; \
 		echo "     auto-tagging. Wait until the class.* tags appear."; \
 		echo "     Prefer a script? make enable-classification ENV=$(ENV) turns it on (you still review detections in the UI)."; \
 		if [ "$$det" = 1 ]; then \
-			src="$$(python3 -c 'import sys,hcl2; print(hcl2.load(open(sys.argv[1])).get("promote_from") or "dev")' "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null)"; \
-			[ -n "$$src" ] || src=dev; \
-			echo "  5. Commit and push .gitignore and envs/ to origin/main (promote-to offers it on a terminal: answer y;"; \
-			echo "     or git add .gitignore envs/$(ENV)/ envs/$(ACCOUNT_ENV)/ && git commit yourself); on that commit run:"; \
-			echo "     make rehearse ENV=$$src   (release-plan needs a passing rehearsal of this commit), then:"; \
-			echo "     make release-plan ENV=$(ENV)   (runs make check ENV=$(ENV) and promote-to CHECK=1, checks the commit was rehearsed; saves every plan in one manifest)"; \
-			echo "     Get that manifest approved, then: make release ENV=$(ENV)"; \
+			echo "  5. Run: make release ENV=$(ENV)"; \
+			echo "     (each round plans, shows the manifest, asks y/N, and applies it; repeat until Release complete)"; \
 		else \
 			echo "  5. Run: make release ENV=$(ENV)"; \
 		fi; \
 		echo "$$access_note"; \
 		echo "     It proves a row-pairing key for every masked table before applying (no key to set)."; \
-		echo "  6. Steady state (scheduled): make maintain ENV=$(ENV)"; \
+		echo "  6. Run: make evidence ENV=$(ENV)   (writes the live compliance record)"; \
+		echo "  7. Steady state (scheduled): make maintain ENV=$(ENV)"; \
 		echo ""; \
 		echo "Walkthrough: $(_SETUP_WALKTHROUGH) (the walkthrough's Prod section)"; \
 	else \
@@ -700,7 +697,7 @@ ifeq ($(MAKELEVEL),0)
 ifneq ($(and $(filter setup generate promote-to,$(MAKECMDGOALS)),$(filter command line,$(origin COMMIT)),$(filter-out 0 1,$(value COMMIT))),)
 $(error COMMIT=$(value COMMIT): use COMMIT=0 (never commit) or COMMIT=1 (commit without asking); leave it off to be asked)
 endif
-override GENIERAILS_COMMIT := $(if $(or $(filter 1,$(CHECK)),$(and $(filter environment,$(origin GENIERAILS_COMMIT)),$(filter 0,$(GENIERAILS_COMMIT)))),0,$(if $(filter setup generate promote-to,$(MAKECMDGOALS)),$(if $(filter command line,$(origin COMMIT)),$(or $(value COMMIT),ask),ask),0))
+override GENIERAILS_COMMIT := $(if $(or $(filter 1,$(CHECK)),$(and $(filter environment,$(origin GENIERAILS_COMMIT)),$(filter 0,$(GENIERAILS_COMMIT)))),0,$(if $(filter setup generate promote-to,$(MAKECMDGOALS)),$(if $(filter command line,$(origin COMMIT)),$(or $(value COMMIT),ask),$(if $(filter 0,$(GENIERAILS_INTERACTIVE)),0,ask)),0))
 else
 GENIERAILS_COMMIT ?= 0
 endif

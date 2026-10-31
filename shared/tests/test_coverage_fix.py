@@ -127,7 +127,9 @@ def _follow(repo, next_line: str) -> dict[str, str]:
         elif target in ("rehearse", "release-plan"):
             result = _stub(repo, target, env)
         elif target == "release":
-            break  # release applies; release-plan's manifest is the end of what runs offline
+            # The champion command's first terminal round is release-plan; exercise that
+            # guarded path with this suite's offline stub, then stop before apply.
+            result = _stub(repo, "release-plan", env)
         else:
             result = repo.make(target, f"ENV={env}")
         text = out[step] = (result.stdout + result.stderr) if result else ""
@@ -140,6 +142,8 @@ def _follow(repo, next_line: str) -> dict[str, str]:
         elif result is not None:
             assert result.returncode == 0, f"{step}:\n{text}"
         _push_if_changed(repo, step)
+        if target == "release":
+            break
     return out
 
 
@@ -167,8 +171,7 @@ def test_a_prod_promoted_from_a_rehearsed_stg_follows_the_printed_steps_to_a_rel
     assert hcl2.loads((stg / "env.auto.tfvars").read_text())["tag_treatments"] == {LABEL: "redact"}
     assert re.findall(r"make [a-z-]+ ENV=[a-z]+", next_line) == [
         "make generate ENV=stg", "make rehearse ENV=stg", "make promote-to ENV=prod",
-        "make release-plan ENV=prod", "make release ENV=prod"]
-    assert "make release-plan ENV=prod (it reuses the stg rehearsal, or names the command to run)" in next_line
+        "make release ENV=prod"]
 
     out = _follow(repo, next_line)
 
@@ -177,12 +180,12 @@ def test_a_prod_promoted_from_a_rehearsed_stg_follows_the_printed_steps_to_a_rel
     assert "Rehearse receipt (passed)" in out["make rehearse ENV=stg"], out["make rehearse ENV=stg"]
     # No second make rehearse ENV=stg: the promotion commit changed only envs/prod/, so release-plan wrote
     # stg's receipt for it from the earlier rehearsal, applying nothing in stg.
-    plan_out = out["make release-plan ENV=prod"]
+    plan_out = out["make release ENV=prod"]
     assert "reusing stg's passing rehearsal of" in plan_out and "without re-applying" in plan_out, plan_out
     receipt = rg.passing_receipt(repo.cloud, "stg", repo.head())
     assert receipt and receipt["applied"] is False, receipt
     manifest = rg.current_manifest(prod, "prod")
-    assert manifest and manifest.is_file(), out["make release-plan ENV=prod"]
+    assert manifest and manifest.is_file(), out["make release ENV=prod"]
 
 
 def test_a_prod_promoted_through_a_promoted_stg_maps_and_adopts_in_dev_then_stops_where_rehearse_refuses(customer):

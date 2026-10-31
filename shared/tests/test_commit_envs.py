@@ -529,6 +529,9 @@ def test_will_offer_follows_the_same_rules(checkout):
     assert not commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "ask"}, tty=False)
     assert not commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "0"}, tty=True)
     assert not commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "ask", "CI": "true"}, tty=True)
+    assert not commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "ask", "GENIERAILS_INTERACTIVE": "0"}, tty=True)
+    # The shared switch can only turn the implicit question off; explicit COMMIT=1 remains automatic.
+    assert commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "1", "GENIERAILS_INTERACTIVE": "0"}, tty=False)
     assert commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "1"}, tty=False)
     assert not commit_envs.will_offer(*args, environ={}, tty=True)  # outside make: never
 
@@ -754,6 +757,24 @@ def test_make_setup_ci_no_tty_and_opt_out_keep_git_unchanged(tmp_path, mode):
     assert PROMPT not in result.stdout and "=== Commit" not in result.stdout
     assert _git(checkout, "rev-parse", "HEAD") == head
     assert not _git(checkout, "diff", "--cached", "--name-only")
+
+
+def test_genierails_interactive_zero_disables_setup_offer_but_explicit_commit_one_wins(tmp_path):
+    quiet = _fresh_setup_clone(tmp_path / "quiet")
+    quiet_head = _git(quiet, "rev-parse", "HEAD")
+    code, out = _pty_run(_setup_cmd(quiet), None,
+                         _make_env(tmp_path, GENIERAILS_INTERACTIVE="0"))
+    assert code == 0, out
+    assert PROMPT not in out and "=== Commit" not in out
+    assert _git(quiet, "rev-parse", "HEAD") == quiet_head
+
+    forced = _fresh_setup_clone(tmp_path / "forced")
+    forced_head = _git(forced, "rev-parse", "HEAD")
+    code, out = _pty_run(_setup_cmd(forced, "COMMIT=1"), None,
+                         _make_env(tmp_path, GENIERAILS_INTERACTIVE="0"))
+    assert code == 0, out
+    assert PROMPT not in out and "=== Commit dev's changes (.gitignore, envs/dev/ and envs/account/) ===" in out
+    assert _git(forced, "rev-parse", "HEAD~1") == forced_head
 
 
 def test_direct_internal_setup_target_never_enables_the_commit_offer(tmp_path):
