@@ -431,6 +431,8 @@ def test_make_rehearse_of_a_pending_legacy_migration_passes_create_and_switch(tm
         "staged_policy_apply.py": script_stubs.python_file(controller),
         "release_gate.py rehearse-start": "true", "release_gate.py rehearse-finish": "true",
         "release_gate.py env-role": "true",
+        # rehearse's clean-checkout refusal and its make check (#274) have their own tests.
+        "release_gate.py clean-check": "true", "check_env.py": "true",
         "deployer_identity.py": "true", "table_readers.py": "true", "group_map.py": "true",
         "exposure_token.py": "true", "saved_settings.py": "true",
         "prepare_classification_config.py": str(catalogs),

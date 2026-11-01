@@ -1046,8 +1046,8 @@ MUTATIONS = {
     # CAN_RUN comes from drafted/derived ACLs instead of acl_groups.
     "can_run_from_drafted_acls": (
         "roots/workspace/main.tf",
-        "      config = (local.deterministic\n",
-        "      config = (false\n",
+        "      config = local.deterministic ? merge(\n",
+        "      config = false ? merge(\n",
         "roots/workspace", "tests/agent_coverage_gate.tftest.hcl",
     ),
 }

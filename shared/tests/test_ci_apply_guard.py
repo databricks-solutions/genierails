@@ -284,7 +284,8 @@ MAKE_CALL_SITES = {
 # Python modules that import ci_guard (or its wrapper staged_policy_apply._in_ci), each proven fail-closed below.
 PY_CALL_SITES = {"scripts/env_status.py": "ci_guard", "scripts/setup_repo.py": "ci_guard",
                  "scripts/policy_generations.py": "_in_ci", "scripts/approval.py": "ci_guard",
-                 "scripts/staged_policy_apply.py": "ci_guard", "scripts/commit_envs.py": "ci_guard"}
+                 "scripts/staged_policy_apply.py": "ci_guard", "scripts/commit_envs.py": "ci_guard",
+                 "scripts/release_gate.py": "ci_guard"}
 # Each broken ci_guard.py, as a script body. LINE is the permissive answer for the subcommand it was asked
 # (ci-status: not CI; apply/rebind: allowed), so a stub can print the right words with the wrong exit code.
 # ci_guard.py's answer protocol (versioned; test_every_ci_guard_call_site_is_listed checks ci_guard.ANSWERS).
@@ -487,6 +488,9 @@ def test_python_call_sites_count_a_broken_ci_guard_as_ci(monkeypatch, failure):
 
     assert approval._in_ci({}) is True  # nobody is asked
     assert commit_envs.mode({"GENIERAILS_COMMIT": "1"}, True) == ""  # CI never commits, COMMIT=1 included
+    from scripts import release_gate
+
+    assert release_gate._ci_detected_strict() is True  # no local-only provenance for a remote-less checkout
     assert staged_policy_apply._in_ci({"GENIERAILS_ALLOW_CI_APPLY": "1"}) is True
     with pytest.raises(policy_generations.StageError, match="can't run in CI"):
         policy_generations.rebind(Path("/nonexistent/envs/dev"), {}, "rebind-protect")

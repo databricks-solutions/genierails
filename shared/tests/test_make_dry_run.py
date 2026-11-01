@@ -105,13 +105,15 @@ def test_integration_test_dest_env_guard_only_rejects_nonempty_command_line(
     env = _clean_env()
     env.update(extra_env)
 
+    # A dry run still runs integration-test's $(MAKE) lines and their guards:
+    # 8-11 s on a lightly loaded host, so allow a minute.
     result = subprocess.run(
         args,
         cwd=CLOUD_ROOT,
         text=True,
         capture_output=True,
         env=env,
-        timeout=10,
+        timeout=60,
     )
 
     output = result.stdout + result.stderr
@@ -627,7 +629,6 @@ def test_real_make_options_execute_apply_layer(tmp_path, make_args, extra_env):
         ["--recon"],
         ["--just-print"],
         ["-n", "-j2"],
-        ["-kn"],
         ["-s", "-n"],
     ],
 )
@@ -635,5 +636,15 @@ def test_dry_run_options_do_not_execute_apply_layer(tmp_path, make_args):
     result, runner_log, fingerprint = _run_recorded_apply(tmp_path, make_args)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "apply -parallelism=1 -auto-approve" in result.stdout
+    assert not runner_log.exists()
+    assert not fingerprint.exists()
+
+
+def test_keep_going_dry_run_is_refused_before_apply_layer_runs(tmp_path):
+    # -k is refused at parse time for every guarded goal, dry run or not.
+    result, runner_log, fingerprint = _run_recorded_apply(tmp_path, ["-kn"])
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "make _apply-layer refused: -i/-k are not supported" in result.stderr
+    assert "apply -parallelism=1 -auto-approve" not in result.stdout
     assert not runner_log.exists()
     assert not fingerprint.exists()

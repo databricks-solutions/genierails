@@ -1,5 +1,5 @@
 ### EXIT 0
-### OUTPUT 3256
+### OUTPUT 3267
 ============================================================
   ABAC Configuration Generator
 ============================================================
@@ -62,7 +62,7 @@
     1. Review the draft:
        <TMP>/env/generated/masking_functions.sql
        <TMP>/env/generated/abac.auto.tfvars
-    2. git add envs/ && git commit, then: make check ENV=env   (reads committed files only)
+    2. git add envs/ && git commit   (rehearse and release-plan run make check on the committed files)
     3. make rehearse ENV=env   (applies, then proves the masks: ALL EFFECTIVE)
 ============================================================
 
