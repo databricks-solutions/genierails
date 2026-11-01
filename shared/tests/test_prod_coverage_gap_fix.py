@@ -198,6 +198,7 @@ class Repo:
             if env == "prod":
                 text += 'promote_from = "dev"\ncatalog_map = { dev_fin = "prod_fin" }\n'
             (self.envs / env / "env.auto.tfvars").write_text(text)
+        (self.envs / "dev" / "agents" / "Finance Analytics.auto.tfvars").unlink()  # governance only: no agent
         (self.envs / "dev" / "generated" / "abac.auto.tfvars").write_text(DEV_ABAC)
         (self.envs / "dev" / "generated" / "masking_functions.sql").write_text(DEV_SQL)
         (self.envs / "dev" / "ddl" / "_fetched.sql").write_text(self.ddl(DEV_TABLE))

@@ -59,6 +59,13 @@ if "_release-plan-roots" in args:
         "final": True}}))
 '''
 
+EMPTY_ACCOUNT_PROBE = """#!/bin/sh
+if [ "$1" = account ] && [ "$3" = plan ]; then
+    case " $* " in *" -out="*) ;; *) exit 0 ;; esac
+fi
+exec {runner} "$@"
+"""
+
 RECORDER = r'''#!{python}
 import json, sys
 from pathlib import Path
@@ -104,6 +111,11 @@ class Make:
     def _recorder(self, name: str) -> Path:
         return self._write(f"{name}-stub", RECORDER.format(python=sys.executable, log=str(self.log), name=name,
                                                            live=str(self.live), rc=str(self.tmp / f"{name}.rc")))
+
+    def empty_account_runner(self) -> Path:
+        """ROOT_RUNNER whose account plan without -out= (make release's account probe at a terminal) finds no
+        changes, as after the account layer was applied; every other call goes to the runner stub."""
+        return self._write("empty-account-probe", EMPTY_ACCOUNT_PROBE.format(runner=self.stubs["runner"]))
 
     def exit_code(self, name: str, rc: int) -> None:
         (self.tmp / f"{name}.rc").write_text(str(rc))

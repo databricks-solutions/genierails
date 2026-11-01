@@ -213,6 +213,7 @@ def test_make_generate_and_capture_refuse_unusable_auth_before_sdk(
         'genie_spaces = [{ name = "Payments", genie_space_id = "space-1", '
         'uc_tables = ["cat.sch.tbl"], acl_groups = ["analysts"] }]\n'
     )
+    (env_dir / "agents" / "Finance Analytics.auto.tfvars").unlink()  # the agent is inline here
     config = tmp_path / "ambient.cfg"
     config.write_text(
         "[DEFAULT]\nhost = https://wrong-profile.example\ntoken = wrong-profile-token\n"

@@ -7,7 +7,7 @@ Take a Genie agent you've curated in **dev** and ship it to **prod** with its se
 ```bash
 # dev
 make setup ENV=dev REPO=<your-repo-url>   # REPO= optional; makes the clone yours; offers to commit (y)
-#   copy the env + agent templates and fill them in (Dev step 1)
+#   fill in the env + agent files setup copied from the templates (Dev step 1)
 #   Catalog Explorer: turn on Data classification, review detections, enable auto-tagging
 make generate ENV=dev       # drafts the rules from the class.* tags; offers to commit + push (y)
 make rehearse ENV=dev       # checks; first deploy: account plan y/N; applies dev, proves the masks
@@ -16,7 +16,7 @@ make rehearse ENV=dev       # checks; first deploy: account plan y/N; applies de
 make setup ENV=prod         # then set deployer_principal_id, catalog_map, group_map
 make promote-to ENV=prod    # copies the reviewed rules; offers to commit + push (y)
 #   Catalog Explorer: same classification review on the prod catalog
-make release ENV=prod       # each round: plans, shows the manifest, asks y/N, applies it; until "Release complete"
+make release ENV=prod       # each round: plans, shows the manifest, asks y/N, applies it; until "Release complete" (first: account plan y/N, if it has changes)
 make evidence ENV=prod      # live compliance record
 make maintain ENV=prod      # deployment machine, cron, at the last released commit
 
@@ -30,12 +30,12 @@ Every command runs from `aws/` (or `azure/`). The questions appear only at a ter
 
 | Command | What it does | What it asks |
 |---|---|---|
-| `make setup ENV=dev REPO=<url>` | Makes the clone your repo (`origin` -> `genierails`, `origin` = your repo), writes the `.gitignore` that commits `envs/`, creates the env files and prints the next steps | `Commit these changes and push them to origin/main? [y/N]` for the `.gitignore` and env defaults it created (no `origin`: `... and keep them local (no origin remote)? [y/N]`) |
+| `make setup ENV=dev REPO=<url>` | Makes the clone your repo (`origin` -> `genierails`, `origin` = your repo), writes the `.gitignore` that commits `envs/`, creates the env files (dev's from the walkthrough's env and agent templates) and prints the next steps | `Commit these changes and push them to origin/main? [y/N]` for the `.gitignore` and env defaults it created (no `origin`: `... and keep them local (no origin remote)? [y/N]`) |
 | `make generate ENV=dev` | Imports the agent, finds its tables, proposes `table_readers` and drafts the rules in `envs/dev/generated/` | The same commit question, for `.gitignore` and `envs/dev/` |
 | `make rehearse ENV=dev` | Runs `make check ENV=dev` on the committed files, applies the account layer when it has changes, applies dev, runs `verify-access` (`ALL EFFECTIVE`) and writes the receipt prod's release needs | `Approve and apply this account manifest? [y/N]`, only when the account plan has changes (a first deploy) |
-| `make setup ENV=prod` | Creates prod's env files, seeded with `promote_from` and a placeholder `catalog_map` | The same commit question as dev's setup |
+| `make setup ENV=prod` | Creates prod's env files, seeded with `promote_from` and a placeholder `catalog_map` (no agent file: `promote-to` writes prod's) | The same commit question as dev's setup |
 | `make promote-to ENV=prod` | Copies dev's reviewed rules into prod, renamed to prod's catalogs and groups; prints the changed files by owner | The same commit question, for `.gitignore`, `envs/prod/` and `envs/account/` |
-| `make release ENV=prod` | Per round: `make release-plan` (runs `make check ENV=prod`, reuses dev's rehearsal, plans and writes one manifest), shows it, applies exactly it and proves the masks; at most 8 rounds | `Approve and release manifest <id> (commit <sha>, round <n> of at most 8)? [y/N]`, once per round |
+| `make release ENV=prod` | Per round: `make release-plan` (runs `make check ENV=prod`, reuses dev's rehearsal, plans and writes one manifest), shows it, applies exactly it and proves the masks; at most 8 rounds. Before round 1 it applies the account layer when it has changes, as rehearse does | `Approve and apply this account manifest? [y/N]` first, only when the account plan has changes; then `Approve and release manifest <id> (commit <sha>, round <n> of at most 8)? [y/N]`, once per round |
 | `make evidence ENV=prod` | Reads prod's live tags, masks and grants into a JSON and Markdown record under `.genierails-state/prod/evidence/` | nothing |
 | `make maintain ENV=prod` | Masks newly tagged columns, from the last released commit; never grants past a passing coverage check | nothing |
 | `make next ENV=<env>` / `make status ENV=<env>` | Read-only: the one next command and why / the whole picture | nothing |
@@ -69,24 +69,22 @@ No repo of your own yet? Leave `REPO=` off: setup renames `origin` to `genierail
 **1. Set up.**
 ```bash
 make setup ENV=dev REPO=<your-repo-url>
-cp ../shared/examples/dev_to_prod/env.auto.tfvars.example envs/dev/env.auto.tfvars
-mkdir -p envs/dev/agents
-cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example "envs/dev/agents/Finance Analytics.auto.tfvars"
 ```
+Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`](env.auto.tfvars.example) to `envs/dev/env.auto.tfvars` and [`agent.auto.tfvars.example`](agent.auto.tfvars.example) to `envs/dev/agents/Finance Analytics.auto.tfvars`. It copies only files that don't exist yet (the agent file only along with a new `env.auto.tfvars`, while `envs/dev/agents/` has no agent file), so it never overwrites your edits and a re-run changes nothing.
 Fill in `envs/dev/auth.auto.tfvars` (service principal and workspace). The template starts new champions with `governance_mode = "deterministic"`; existing env files are not changed. In `envs/dev/env.auto.tfvars`, replace the deployer and group placeholders:
 ```hcl
 deployer_principal_id = "<the dev auth.auto.tfvars databricks_client_id>"
 access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
 ```
-**Agents (preferred):** one file per agent in `envs/dev/agents/`; the file name is the agent's name. In it, set the agent's ID and who may run it:
+**Agents (preferred):** one file per agent in `envs/dev/agents/`; the file name is the agent's name. Before the first `make generate`, rename setup's `Finance Analytics.auto.tfvars` to your agent's name (for each further agent, copy it under that agent's name). In it, set the agent's ID and who may run it:
 ```hcl
 genie_space_id = "01ef0000000000000000000000000000"   # Genie UI > agent > Configure > About this agent
 acl_groups     = ["regional_analysts", "viewers"]      # who gets CAN_RUN on the agent; [] means nobody
 ```
-**Also accepted:** the same fields inline in `env.auto.tfvars` as `genie_spaces = [{ name = "...", genie_space_id = "...", acl_groups = [...] }]` (leave `genie_spaces = []` when using agent files). Prefer `agents/` files so agent and governance PRs stay separate; `make split-agent-files` moves an inline list into files later.
+**Also accepted:** the same fields inline in `env.auto.tfvars` as `genie_spaces = [{ name = "...", genie_space_id = "...", acl_groups = [...] }]` (leave `genie_spaces = []` when using agent files; with the inline list, delete setup's agent file). Prefer `agents/` files so agent and governance PRs stay separate; `make split-agent-files` moves an inline list into files later.
 `acl_groups` is required: `make generate` stops while an agent has none. It grants only `CAN_RUN` on the agent. `SELECT` on the agent's tables comes only from `table_readers` in `env.auto.tfvars`, which `make generate` proposes for you (filled with `acl_groups`) for each table nothing covers yet. Every `acl_groups` group must be able to read every table of the agent, so pick them from `access_tier_groups` (only tier groups and `raw_exempt_principals` can be readers); otherwise `generate`, `rehearse` and `release` stop and name the table and group.
 
-**2. Commit it (own repo).** At the end of step 1's `make setup`, GenieRails previews the `.gitignore` and placeholder env defaults setup created, then asks whether to commit and push them. Answer `y`; credentials and runtime files such as `auth.auto.tfvars` are never staged. With no `origin`, it commits locally only. The deployer, group and agent edits you make after setup remain uncommitted until `make generate` finishes and offers to commit them with its generated rules. `make check` reads only committed env files, a rehearse receipt counts only for a clean checkout, and `make release` releases only a commit on your `origin/main` or, for an option-A local-only repo, committed local `main`. Each later step that changes `envs/` (`make generate`, `make promote-to`) makes the same offer: answer `y` there too. Later changes go through PRs: [Commit it](#commit-it).
+**2. Commit it (own repo).** At the end of step 1's `make setup`, GenieRails previews the `.gitignore`, placeholder env defaults and agent file setup created, then asks whether to commit and push them. Answer `y`; credentials and runtime files such as `auth.auto.tfvars` are never staged. With no `origin`, it commits locally only. The deployer, group and agent edits you make after setup remain uncommitted until `make generate` finishes and offers to commit them with its generated rules. `make check` reads only committed env files, a rehearse receipt counts only for a clean checkout, and `make release` releases only a commit on your `origin/main` or, for an option-A local-only repo, committed local `main`. Each later step that changes `envs/` (`make generate`, `make promote-to`) makes the same offer: answer `y` there too. Later changes go through PRs: [Commit it](#commit-it).
 
 <a id="dev-classify"></a>
 **3. Classify (in the UI).** In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on. When the scan finishes (the first one can take up to about a day), review the detections, exclude false positives, and turn on auto-tagging. Then wait until the columns show `class.*` tags such as `class.email_address`: open a table in Catalog Explorer and check its **Columns** tab.
@@ -148,6 +146,7 @@ It then offers to commit and push `.gitignore`, `envs/prod/` and `envs/account/`
 make release ENV=prod
 ```
 Each round it plans (`make release-plan ENV=prod`), prints the manifest (its commit and what it changes) and asks `Approve and release manifest <id> (commit <sha>, round <n> of at most 8)? [y/N]`. Your `y` is the approval: it is recorded (OS user, git identity, host, terminal, time) in that round's phase record or release receipt, then exactly that manifest's saved plans are applied and the masks proved. Anything but `y` applies nothing and stops; the manifest stays current, and the next `make release ENV=prod` offers it first.
+Before round 1 it checks the shared account layer the way `make rehearse` does. If the account plan has changes (an account change merged since the last apply, e.g. a new treatment-tag value, a group, or `ALLOW_TAG_VALUE_REMOVAL=<key>:<value>,...` with `WAREHOUSE_ID` on its command line), it shows the account manifest and its sha256 and asks `Approve and apply this account manifest? [y/N]` (tag-value removals are named value by value in a louder warning above the same question). `y` is recorded and applies exactly that manifest through `make apply-account`'s path, under the account lock and with every `account-plan` and `apply-account` refusal (provenance included); then round 1 starts. Anything else applies nothing and stops before round 1: the account manifest stays, for `make apply-account` or the next `make release ENV=prod` to offer again. An empty account plan asks nothing.
 `make release-plan ENV=prod` plans only a commit on your `origin/main` (or committed local `main` in an option-A local-only repo) that has a passing `make rehearse ENV=dev` of that same commit (dev is prod's `promote_from` in this walkthrough; with `promote_from = "stg"` it is `make rehearse ENV=stg`); the dev step 5 rehearsal was of an earlier commit. Since the promotion changed only `envs/prod/`, release-plan reuses that rehearsal itself and applies nothing in dev: it prints `reusing dev's passing rehearsal of <earlier commit> (nothing is applied)`, then `code and dev inputs are unchanged since the passing rehearsal of <earlier commit>; wrote a receipt for <this commit> without re-applying` and the `promote-to ENV=prod digest` it recorded. If code or `envs/dev/` changed since (or the checkout isn't clean, or dev was rehearsed only in CI), it stops with `did not reuse a rehearsal for this commit: <why>; run make rehearse ENV=dev on this commit` and `no passing rehearsal of <commit>`: run the full `make rehearse ENV=dev`, then `make release ENV=prod` again (`make release` never rehearses or applies dev itself).
 Legacy envs skip `make release-plan`: run `make release ENV=prod` directly (`release-plan` refuses them with `Legacy envs keep: make release ENV=prod`).
 `make release-plan` first runs `make check ENV=prod`, which for a promoted env also runs `promote-to CHECK=1`; if a step fails, it refuses before any lock, live call or write. Each round's release refuses if its manifest was already released, if a newer `release-plan` replaced it, or if anything changed since it was planned; any refusal or failure stops `make release` (it never plans past one). Off a terminal (a pipeline, CI, piped output) `make release ENV=prod` asks nothing and releases the current manifest once, one round per call: [CI / scripted](#ci--scripted). No flag answers `y` for you.
@@ -185,7 +184,7 @@ The questions above appear only at a terminal: the top-level make, outside CI, s
 |---|---|---|
 | `make setup`, `make generate`, `make promote-to` | No commit offer (`COMMIT=0` turns it off at a terminal too; `COMMIT=1` commits and pushes without asking, never in CI) | Commit and push yourself: `git add .gitignore envs/`, commit, `git push` |
 | `make rehearse ENV=dev` | Stops with `ERROR: account plan is non-empty` while the account layer has changes | `make account-plan` (writes the account manifest; changes nothing live), get it approved, then `make apply-account` (applies exactly it; refused in CI) |
-| `make release ENV=prod` | Releases the current manifest once (one round), printing its path, commit and changes first | Per round: `make release-plan ENV=prod` (prints the manifest path), get it approved, then `make release ENV=prod MANIFEST=<path>`, until `=== Release complete (prod) ===` |
+| `make release ENV=prod` | Releases the current manifest once (one round), printing its path, commit and changes first; never asks about the account layer (`release-plan` refuses a non-empty account plan) | When the account plan has changes, first `make account-plan`, get it approved, `make apply-account`; then per round: `make release-plan ENV=prod` (prints the manifest path), get it approved, then `make release ENV=prod MANIFEST=<path>`, until `=== Release complete (prod) ===` |
 | (inside `rehearse` and `release-plan`) | The same | `make check ENV=<env>`: the read-only PR check of the committed files |
 
 Need a second person to approve each manifest? Use the low-level steps: plain `make release ENV=prod` at a terminal records the `y` of whoever types it. Where each stage runs: [Pipelines](../../docs/pipelines.md) and the [deployment machine](../../docs/deployment-machine.md).

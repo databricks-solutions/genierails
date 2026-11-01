@@ -962,28 +962,36 @@ def test_dry_run_takes_no_lock_and_writes_nothing(tmp_path, args):
 # -- simplification step 6b: rehearse's account sub-flow on a terminal --------------------
 # The same y/N, but the removals are named, value by value, right above a louder
 # question (owner decision: no typed confirmation). The sub-flow is the macro
-# rehearse runs (tests/test_rehearse_account_approval.py drives rehearse itself);
-# Terraform ignores tag-policy values, so a named removal alone starts it.
+# rehearse runs (tests/test_rehearse_account_approval.py drives rehearse itself),
+# and make release runs before its round 1 with the loop's nonce
+# (tests/test_release_loop.py drives release); Terraform ignores tag-policy
+# values, so a named removal alone starts it.
 
-ACCOUNT_FLOW = "include {root}/aws/Makefile\n_test-account-flow:\n\t@$(call _ACCOUNT_APPROVE_APPLY,rehearse)\n"
+ACCOUNT_FLOW = "include {{root}}/aws/Makefile\n_test-account-flow:\n\t@{flow}\n"
+FLOWS = {
+    "rehearse": "$(call _ACCOUNT_APPROVE_APPLY,rehearse)",
+    "release": ("GENIERAILS_APPROVAL_RUN=\"$$(od -An -N16 -tx1 /dev/urandom | tr -d ' \\n')\"; "
+                "export GENIERAILS_APPROVAL_RUN; $(call _ACCOUNT_APPROVE_APPLY,release,run)"),
+}
 LOUDER = "Approve and apply this account manifest, INCLUDING REMOVING THE 1 TAG VALUE(S) ABOVE? [y/N] "
 
 
-def _account_flow_on_a_terminal(repo, answer):
+def _account_flow_on_a_terminal(repo, answer, command="rehearse"):
     from scripts import approval
     from tests.pty_harness import pty_run
 
     flow = repo.tmp / "account-flow.mk"
-    flow.write_text(ACCOUNT_FLOW.format(root=ROOT))
+    flow.write_text(ACCOUNT_FLOW.format(flow=FLOWS[command]).format(root=ROOT))
     env = {k: v for k, v in repo.env.items() if k not in (approval.INTERACTIVE_ENV, approval.RUN_ENV)}
     return pty_run(["make", "--no-print-directory", "-f", str(flow), "_test-account-flow", "ENV=dev",
                     f"CLOUD_ROOT={repo.cloud}", f"SHARED_ROOT={SHARED}", f"ROOT_RUNNER={repo.runner}",
                     "ALLOW_TAG_VALUE_REMOVAL=gr_treatment:retired_by_hand", "WAREHOUSE_ID=wh"], answer, env, cwd=ROOT)
 
 
-def test_rehearse_names_each_removed_value_above_the_same_y_n_and_y_removes_exactly_it(tmp_path):
+@pytest.mark.parametrize("command", ["rehearse", "release"])
+def test_rehearse_names_each_removed_value_above_the_same_y_n_and_y_removes_exactly_it(tmp_path, command):
     repo = Repo(tmp_path, LIVE)
-    rc, shown = _account_flow_on_a_terminal(repo, "y")
+    rc, shown = _account_flow_on_a_terminal(repo, "y", command)
     assert rc == 0, shown
     assert shown.count("[y/N]") == 1
     assert shown.index("!! TAG VALUES THIS MANIFEST REMOVES") \
@@ -996,10 +1004,11 @@ def test_rehearse_names_each_removed_value_above_the_same_y_n_and_y_removes_exac
     assert receipt["approval"]["via"] == "terminal" and receipt["approval"]["question"] == LOUDER
 
 
+@pytest.mark.parametrize("command", ["rehearse", "release"])
 @pytest.mark.parametrize("answer", ["n", ""])
-def test_rehearse_removes_nothing_unless_the_louder_question_gets_y(tmp_path, answer):
+def test_rehearse_removes_nothing_unless_the_louder_question_gets_y(tmp_path, answer, command):
     repo = Repo(tmp_path, LIVE)
-    rc, shown = _account_flow_on_a_terminal(repo, answer)
+    rc, shown = _account_flow_on_a_terminal(repo, answer, command)
     assert rc != 0 and LOUDER in shown, shown
-    assert "rehearse: not applied. The account manifest" in shown
+    assert f"{command}: not applied. The account manifest" in shown
     assert repo.live() == {k: sorted(v) for k, v in LIVE.items()} and repo.wrote() == []

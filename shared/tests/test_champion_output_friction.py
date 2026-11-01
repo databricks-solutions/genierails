@@ -819,6 +819,7 @@ def real_cloud(tmp_path):
         .replace("<least-privileged-group>", "viewers")
         + '\nuc_tables = ["dev_finance.genierails_e2e.customers"]\n'
     )
+    (cloud_root / "envs/dev/agents/Finance Analytics.auto.tfvars").unlink()  # governance only: no agent
     (cloud_root / "envs/dev/auth.auto.tfvars").write_text(
         'databricks_workspace_host = "https://selected.example"\n'
         'databricks_client_id = "selected-client"\n'
