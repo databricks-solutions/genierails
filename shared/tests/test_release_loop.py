@@ -322,6 +322,20 @@ def test_account_changes_are_approved_and_applied_through_apply_account_then_the
     assert _unlocked(repo.prod, _account_dir(repo))
 
 
+def test_account_step_accepts_setup_genierails_remote_as_committed_local_main(account_loop, repo):
+    make, _ = account_loop
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    rc, shown = _on_a_pty(make, ["y", "y"], account_changes=True)
+    assert rc == 0, shown
+    manifest = json.loads(_account_manifest(shown).read_text())
+    assert manifest["provenance"]["local_only"] is True
+    assert manifest["provenance"]["remote"] == "local main"
+    [account_receipt] = rg.account_receipts(repo.cloud, "account")
+    assert account_receipt["commit"] == repo.head()
+    assert COMPLETE.format(n=1) in shown
+
+
 @pytest.mark.parametrize("answer", ["n", "", CTRL_D], ids=["n", "blank", "eof"])
 def test_anything_but_y_for_the_account_manifest_applies_nothing_and_stops_before_round_1(account_loop, repo,
                                                                                          answer):

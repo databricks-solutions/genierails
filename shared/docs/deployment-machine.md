@@ -87,7 +87,7 @@ cause:
 | Message | What to do |
 |---|---|
 | no passing receipt for HEAD | the dev rehearsal hasn't passed on this commit; wait for it, or run `make rehearse ENV=dev` here until dev has remote state |
-| not on freshly fetched `origin/main` (unless the repo has no remotes at all and HEAD is the committed local tip), or older than the last release | release the newer commit; to roll back on purpose, merge `prod:rollback:<commit>` into `envs/prod/ack.txt` first |
+| not on freshly fetched `origin/main` (unless local-only provenance is allowed: no remotes, or only the canonical `genierails` upgrade remote, and HEAD is the committed local tip), or older than the last release | release the newer commit; to roll back on purpose, merge `prod:rollback:<commit>` into `envs/prod/ack.txt` first |
 | checkout is not clean | step 2 again |
 | reader or weakening check | add the reviewed lines to `envs/prod/ack.txt` in a PR, or fix the config ([governance](playbooks/governance.md#acknowledge-an-exception)) |
 | coverage check, or an unmapped class | map it in dev and promote ([governance](playbooks/governance.md#map-a-new-class)) |
@@ -117,7 +117,7 @@ One approval per operation, each from a clean checkout of `main`:
 | Operation | Command | Provenance it checks |
 |---|---|---|
 | Forget a detached agent | `make detach-agent ENV=prod SPACE="<agent>"` | HEAD is the last released commit, and that release had the agent with `detached = true` and `acl_groups = []` ([agents](playbooks/agents.md#remove-an-agent)) |
-| Change the account layer | `make account-plan`, approve its manifest, then `make apply-account` | clean checkout at the exact current `origin/main` tip, or the committed local HEAD when the repo has no remotes at all; saved account plan hash, account input hashes, account state and tag-policy diff (planned additions and removals) still match; refuses in CI; takes the account lock; writes an account receipt; manifests are single-use; the only command that removes tag-policy values, and only those `account-plan ALLOW_TAG_VALUE_REMOVAL=...` named and proved unused ([tag-policy values](deterministic-policies.md#tag-policy-values)) |
+| Change the account layer | `make account-plan`, approve its manifest, then `make apply-account` | clean checkout at the exact current `origin/main` tip, or the committed local HEAD when local-only provenance is allowed (no remotes, or only the canonical `genierails` upgrade remote); saved account plan hash, account input hashes, account state and tag-policy diff (planned additions and removals) still match; refuses in CI; takes the account lock; writes an account receipt; manifests are single-use; the only command that removes tag-policy values, and only those `account-plan ALLOW_TAG_VALUE_REMOVAL=...` named and proved unused ([tag-policy values](deterministic-policies.md#tag-policy-values)) |
 | Migrate a legacy env | `make migrate-plan`, then `release-plan` / `release` per phase | [legacy-migration.md](legacy-migration.md) |
 | Inspect or drop a staged policy change | `make policy-status ENV=prod`, `make policy-abandon ENV=prod` | `policy-abandon` refuses once a column was retagged or a principal moved, unless the switch was rolled back and a live check confirms it ; `make policy-rebind` (after deleted principals were recreated) runs on dev only and refuses prod |
 

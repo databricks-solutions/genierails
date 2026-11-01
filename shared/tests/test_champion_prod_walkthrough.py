@@ -430,14 +430,13 @@ def test_the_ci_section_names_the_low_level_commands_and_what_they_do_off_a_term
 
 
 def test_the_walkthrough_says_setup_without_repo_keeps_the_genierails_remote():
-    """Local-only provenance needs no remotes at all; setup without REPO= keeps the genierails one."""
+    """Setup without REPO= keeps the canonical genierails remote, and that still deploys local main."""
     before = _section("Before you start")
     assert "setup renames `origin` to `genierails` and adds no `origin`" in before
-    assert "the `genierails` remote counts" in before
-    assert "`git remote remove genierails`" in before and "a repo with no remotes at all deploys from its committed " \
-        "local `main`" in before
+    assert "only that canonical `genierails` upgrade remote, deploys from its committed local `main`" in before
+    assert "`git remote remove genierails`" not in before
     assert "(no remote, no GitHub account)" not in before
-    # ...because provenance takes the local-only path only with no remote names at all.
+    # ...because provenance takes the local-only path for no remotes or exactly the canonical upgrade remote.
     gate = (SHARED / "scripts" / "release_gate.py").read_text()
-    assert "    if not remotes and not _ci_detected_strict():\n" in gate
+    assert "def local_main_mode(" in gate and 'remotes != (UPSTREAM_REMOTE,)' in gate
     assert 'UPSTREAM_REMOTE = "genierails"' in (SHARED / "scripts" / "setup_repo.py").read_text()

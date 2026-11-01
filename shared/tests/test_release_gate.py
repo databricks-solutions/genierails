@@ -642,6 +642,56 @@ def test_provenance_accepts_committed_head_in_a_repo_with_no_remotes(repo):
     assert prov["local_only"] is True
 
 
+def test_provenance_accepts_setup_genierails_remote_as_local_only(repo):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    local = repo.commit({"aws/envs/prod/ack.txt": "# local only\n"}, push=False)
+    rehearse(repo)
+    prov = rg.provenance(repo.prod, "prod")
+    assert prov["commit"] == local
+    assert prov["remote"] == "local main"
+    assert prov["remote_ref"] == "refs/heads/main"
+    assert prov["remote_commit"] == local
+    assert prov["local_only"] is True
+
+
+def test_provenance_normal_origin_ignores_global_url_rewrites(repo):
+    Path(repo.env["GIT_CONFIG_GLOBAL"]).write_text(
+        Path(repo.env["GIT_CONFIG_GLOBAL"]).read_text()
+        + '[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n')
+    rehearse(repo)
+    prov = rg.provenance(repo.prod, "prod")
+    account = rg.account_provenance(repo.cloud / "envs" / "account")
+    assert prov["commit"] == repo.head() and prov["remote"] == "origin/main"
+    assert account["commit"] == repo.head() and account["remote"] == "origin/main"
+
+
+def test_provenance_no_remote_ignores_global_url_rewrites(repo):
+    Path(repo.env["GIT_CONFIG_GLOBAL"]).write_text(
+        Path(repo.env["GIT_CONFIG_GLOBAL"]).read_text()
+        + '[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n')
+    repo.git("remote", "remove", "origin")
+    local = repo.commit({
+        "aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n",
+        "aws/envs/prod/ack.txt": "# local only\n",
+    }, push=False)
+    rehearse(repo)
+    prov = rg.provenance(repo.prod, "prod")
+    account = rg.account_provenance(repo.cloud / "envs" / "account")
+    assert prov["commit"] == local and prov["remote"] == "local main"
+    assert account["commit"] == local and account["remote"] == "local main"
+
+
+def test_provenance_refuses_genierails_only_when_url_rewrite_is_configured(repo):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    repo.git("config", "url.git@github.com:.pushInsteadOf", "https://github.com/")
+    repo.commit({"aws/envs/prod/ack.txt": "# local only\n"}, push=False)
+    rehearse(repo)
+    with pytest.raises(rg.Refused, match=r"git url rewrite config is present .*pushinsteadof"):
+        rg.provenance(repo.prod, "prod")
+
+
 def test_provenance_refuses_local_only_head_not_on_local_main(repo):
     repo.git("remote", "remove", "origin")
     base = repo.head()
@@ -851,6 +901,23 @@ def test_account_provenance_accepts_committed_head_in_a_repo_with_no_remotes(rep
     assert prov["local_only"] is True
 
 
+@pytest.mark.parametrize("url", [
+    "https://github.com/databricks-solutions/genierails.git",
+    "git@github.com:databricks-solutions/genierails.git",
+    "ssh://git@github.com/databricks-solutions/genierails",
+])
+def test_account_provenance_accepts_setup_genierails_remote_as_local_only(repo, url):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", url)
+    local = repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+    prov = rg.account_provenance(repo.cloud / "envs" / "account")
+    assert prov["commit"] == local
+    assert prov["remote"] == "local main"
+    assert prov["remote_ref"] == "refs/heads/main"
+    assert prov["remote_commit"] == local
+    assert prov["local_only"] is True
+
+
 def test_account_provenance_refuses_local_only_head_not_exactly_local_main(repo):
     repo.git("remote", "remove", "origin")
     older = repo.head()
@@ -865,16 +932,192 @@ def test_account_provenance_refuses_local_only_in_ci(repo, monkeypatch):
     repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
     monkeypatch.setenv("CI", "true")
     monkeypatch.setenv("GENIERAILS_ALLOW_CI_APPLY", "1")
-    with pytest.raises(rg.Refused, match="git fetch .* origin main failed"):
+    with pytest.raises(rg.Refused, match="local-only provenance is refused in CI"):
         rg.account_provenance(repo.cloud / "envs" / "account")
 
 
-def test_account_provenance_refuses_local_head_when_any_remote_exists(repo):
-    repo.git("remote", "remove", "origin")
-    repo.git("remote", "add", "genierails", str(repo.origin))
+def test_account_provenance_refuses_local_head_when_extra_remote_exists(repo):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    repo.git("remote", "add", "fork", str(repo.origin))
     repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
     with pytest.raises(rg.Refused, match="git fetch .* origin main failed"):
         rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+def test_account_provenance_refuses_genierails_remote_at_any_other_repo(repo):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", "https://github.com/example/not-genierails.git")
+    repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+    with pytest.raises(rg.Refused, match="genierails points at .* not the GenieRails upstream"):
+        rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+def test_account_provenance_ignores_fake_git_config_for_genierails_url(repo, monkeypatch, tmp_path):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", "https://github.com/example/customer-repo.git")
+    repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+    fake = tmp_path / "fake-git-config"
+    fake.write_text(f'[remote "genierails"]\n\turl = {rg.UPSTREAM_URL}\n')
+    monkeypatch.setenv("GIT_CONFIG", str(fake))
+    with pytest.raises(rg.Refused, match="genierails points at .*customer-repo.* not the GenieRails upstream"):
+        rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+def _genierails_only_account_change(repo: Repo) -> None:
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+
+
+def _included_config(repo: Repo, tmp_path: Path, text: str) -> Path:
+    included = tmp_path / "included git config"
+    included.write_text(text)
+    repo.git("config", "include.path", str(included))
+    return included
+
+
+def _worktree_config(repo: Repo, text: str) -> None:
+    repo.git("config", "extensions.worktreeConfig", "true")
+    git_dir = Path(repo.git("rev-parse", "--git-dir"))
+    git_dir = git_dir if git_dir.is_absolute() else repo.root / git_dir
+    (git_dir / "config.worktree").write_text(text)
+
+
+def _assert_genierails_pushurl_refused(repo: Repo, match: str = "genierails pushurl points at") -> None:
+    with pytest.raises(rg.Refused, match=match):
+        rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+def _assert_genierails_url_refused(repo: Repo, match: str = "genierails has no fetch URL") -> None:
+    with pytest.raises(rg.Refused, match=match):
+        rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+def test_account_provenance_refuses_included_genierails_pushurl(repo, tmp_path):
+    _genierails_only_account_change(repo)
+    _included_config(repo, tmp_path, '[remote "genierails"]\n\tpushurl = https://github.com/example/customer.git\n')
+    _assert_genierails_pushurl_refused(repo)
+
+
+def test_account_provenance_refuses_included_second_genierails_url(repo, tmp_path):
+    _genierails_only_account_change(repo)
+    _included_config(repo, tmp_path, '[remote "genierails"]\n\turl = https://github.com/example/customer.git\n')
+    _assert_genierails_url_refused(repo)
+
+
+def test_account_provenance_refuses_includeif_gitdir_genierails_pushurl(repo, tmp_path):
+    _genierails_only_account_change(repo)
+    included = tmp_path / "conditional config"
+    included.write_text('[remote "genierails"]\n\tpushurl = https://github.com/example/customer.git\n')
+    repo.git("config", f"includeIf.gitdir:{repo.root}/.path", str(included))
+    _assert_genierails_pushurl_refused(repo)
+
+
+def test_account_provenance_refuses_global_genierails_pushurl(repo):
+    _genierails_only_account_change(repo)
+    Path(repo.env["GIT_CONFIG_GLOBAL"]).write_text(
+        Path(repo.env["GIT_CONFIG_GLOBAL"]).read_text()
+        + '[remote "genierails"]\n\tpushurl = https://github.com/example/customer.git\n')
+    _assert_genierails_pushurl_refused(repo)
+
+
+def test_account_provenance_refuses_worktree_config_genierails_pushurl(repo):
+    _genierails_only_account_change(repo)
+    _worktree_config(repo, '[remote "genierails"]\n\tpushurl = https://github.com/example/customer.git\n')
+    _assert_genierails_pushurl_refused(repo)
+
+
+def test_account_provenance_refuses_worktree_config_extra_genierails_url(repo):
+    _genierails_only_account_change(repo)
+    _worktree_config(repo, '[remote "genierails"]\n\turl = https://github.com/example/customer.git\n')
+    _assert_genierails_url_refused(repo)
+
+
+def test_account_provenance_refuses_git_config_count_genierails_pushurl(repo, monkeypatch):
+    _genierails_only_account_change(repo)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "remote.genierails.pushurl")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/example/customer.git")
+    _assert_genierails_pushurl_refused(repo)
+
+
+def test_account_provenance_refuses_git_config_count_genierails_url(repo, monkeypatch):
+    _genierails_only_account_change(repo)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "remote.genierails.url")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/example/customer.git")
+    _assert_genierails_url_refused(repo)
+
+
+@pytest.mark.parametrize("key", ["insteadOf", "pushInsteadOf"])
+def test_account_provenance_refuses_url_rewrite_config(repo, key):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    repo.git("config", f"url.ssh://git@github.com/.{key}", "https://github.com/")
+    repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+    with pytest.raises(rg.Refused, match="git url rewrite config is present"):
+        rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+def test_account_provenance_refuses_noncanonical_genierails_pushurl(repo):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    repo.git("remote", "set-url", "--push", "genierails", "https://github.com/example/not-genierails.git")
+    repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+    with pytest.raises(rg.Refused, match="genierails pushurl points at"):
+        rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+def test_account_provenance_refuses_push_only_genierails_remote(repo):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("config", "--unset-all", "remote.genierails.url")
+    repo.git("config", "remote.genierails.pushurl", rg.UPSTREAM_URL)
+    repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+    with pytest.raises(rg.Refused, match="genierails has no fetch URL"):
+        rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+@pytest.mark.parametrize(("directory", "name"), [("remotes", "fork"), ("branches", "fork")])
+def test_account_provenance_refuses_legacy_git_remote_files(repo, directory, name):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    git_dir = Path(repo.git("rev-parse", "--git-common-dir"))
+    legacy = repo.root / git_dir / directory
+    legacy.mkdir(parents=True, exist_ok=True)
+    (legacy / name).write_text(str(repo.origin) + "\n")
+    repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+    with pytest.raises(rg.Refused, match="git fetch .* origin main failed"):
+        rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+def test_account_provenance_refuses_other_remote_tracking_refs(repo):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    repo.git("update-ref", "refs/remotes/origin/main", repo.head())
+    repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+    with pytest.raises(rg.Refused, match="not exactly origin/main"):
+        rg.account_provenance(repo.cloud / "envs" / "account", fetch=False)
+
+
+def test_account_provenance_refuses_linked_worktree_when_common_dir_has_other_remotes(repo, tmp_path):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    repo.git("remote", "add", "fork", str(repo.origin))
+    wt = tmp_path / "linked"
+    repo.git("worktree", "add", "-q", "--detach", str(wt), "HEAD")
+    with pytest.raises(rg.Refused, match="git fetch .* origin main failed"):
+        rg.account_provenance(wt / "aws" / "envs" / "account")
+
+
+def test_account_provenance_scrubs_git_dir_override(repo, monkeypatch, tmp_path):
+    expected = repo.head()
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "-C", str(other), "init", "-q", "-b", "main"], check=True, env=os.environ | repo.env)
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    prov = rg.account_provenance(repo.cloud / "envs" / "account")
+    assert prov["commit"] == expected and prov["remote"] == "origin/main"
 
 
 def test_provenance_refuses_local_only_after_remote_backed_release_manifest(repo):

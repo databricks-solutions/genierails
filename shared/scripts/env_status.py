@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import socket
 import sys
 from pathlib import Path
@@ -184,12 +185,13 @@ def _git(env_dir: Path, cloud_dir: Path, remote: str, branch: str) -> dict:
     env_rel = rg._rel(repo, env_dir)
     upstream = f"{remote}/{branch}"
     remotes = rg.remote_names(repo)
+    prov = rg.provenance_ref(repo, remote=remote, branch=branch, fetch=False, cloud_dir=cloud_dir, env=env_dir.name)
+    local_mode = rg.local_main_mode(repo, remote=remote, branch=branch)
     known = bool(commit) and rg.commit_known(repo, upstream)
     remote_url = rg.git(repo, "remote", "get-url", remote, check=False)
     local_ref = f"refs/heads/{branch}"
-    local_known = bool(commit) and not remotes and not rg._ci_detected_strict() and rg.commit_known(repo, local_ref)
-    local_commit = rg.git(repo, "rev-parse", local_ref).stdout.strip() if local_known else ""
-    local_only = bool(commit) and local_known
+    local_only = bool(commit) and prov.local_only
+    local_commit = prov.commit if local_only else ""
     remote_backed = rg.remote_backed_provenance_recorded(cloud_dir, env_dir.name) if local_only else ""
     return {
         "checkout": True, "repo": repo, "head": commit, "cloud_rel": rg._rel(repo, cloud_dir),
@@ -199,6 +201,7 @@ def _git(env_dir: Path, cloud_dir: Path, remote: str, branch: str) -> dict:
         "remote": "local " + branch if local_only else upstream, "remote_ref": local_ref if local_only else upstream,
         "remote_commit": local_commit if local_only else rg.git(repo, "rev-parse", upstream).stdout.strip() if known else "",
         "remotes": remotes, "local_only": local_only, "remote_backed_marker": remote_backed,
+        "provenance_problems": list(local_mode.problems),
         "remote_configured": remote_url.returncode == 0, "remote_known": known,
         "head_on_remote": rg.is_ancestor(repo, commit, local_ref) if local_only
         else rg.is_ancestor(repo, commit, upstream) if known else None,
@@ -446,7 +449,29 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
                 f"local-only provenance is refused because {marker}; restore the {remote} remote and release from "
                 f"freshly fetched {remote}/{branch}")
 
+    def provenance_problem_step() -> tuple[str, str] | None:
+        problems = git.get("provenance_problems") or []
+        if not problems:
+            return None
+        problem = problems[0]
+        if "genierails points at" in problem:
+            command = f"git remote set-url genierails {rg.UPSTREAM_URL}"
+        elif "url rewrite config" in problem:
+            match = re.search(r"\((.*?)\)", problem)
+            fields = (match.group(1).split(None, 3) if match else [])
+            scope, origin, key = (fields + ["", "", ""])[:3]
+            scope_opt = {"local": "", "global": " --global", "system": " --system",
+                         "worktree": " --worktree"}.get(scope)
+            command = (f"git config{scope_opt} --unset-all {shlex.quote(key)}" if scope_opt is not None and key
+                       else f"edit {origin or 'the git config shown above'} and remove {key or 'the url rewrite'}")
+        else:
+            command = f"git remote add {remote} <your repo URL> && git fetch {remote} {branch}"
+        return command, f"local-only provenance is refused because {problem}"
+
     def push_first(why: str, *, exact: bool = False) -> tuple[str, str] | None:
+        problem = provenance_problem_step()
+        if problem:
+            return problem
         if git.get("local_only"):
             if git.get("remote_backed_marker"):
                 return local_only_marker(git["remote_backed_marker"])
@@ -532,6 +557,9 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
                                   if git.get("local_only") else "")
                 if account_marker:
                     return local_only_marker(account_marker)
+                problem = provenance_problem_step()
+                if problem:
+                    return problem
                 if not git["head_is_remote"]:
                     return push_first(f"{command} runs only from exactly {git['remote']}", exact=True) or (
                         f"git pull --ff-only {remote} {branch}",
@@ -666,7 +694,9 @@ def _text(report: dict) -> list[str]:
     elif not git.get("head"):
         lines.append("  Git:         no commit yet")
     else:
-        where = (f"local-only repo ({git['remote']}; no remotes)" if git.get("local_only")
+        local_detail = ("only genierails upgrade remote" if git.get("local_only")
+                        and git.get("remotes") == ["genierails"] else "no remotes")
+        where = (f"local-only repo ({git['remote']}; {local_detail})" if git.get("local_only")
                  else "no remote " + git["remote"].split("/")[0] + " (other remote(s): "
                  + ", ".join(git.get("remotes") or []) + ")" if not git["remote_configured"] and git.get("remotes")
                  else "no remote " + git["remote"].split("/")[0] + " (local-only repo)" if not git["remote_configured"]
