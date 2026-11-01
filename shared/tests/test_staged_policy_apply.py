@@ -1405,6 +1405,74 @@ def test_state_changed_outside_the_controller_is_refused(harness):
     assert harness.calls == []
 
 
+def _drift_policy_principals(env_dir: Path) -> tuple[str, str]:
+    state = live_state(env_dir)
+    drifted = ""
+    for name, policy in _instances(state, "databricks_policy_info", "policies").items():
+        if policy["to_principals"] == ["regional"]:
+            policy["except_principals"] = sorted(set(policy["except_principals"]) | {"unknown"})
+            drifted = name
+            break
+    assert drifted
+    (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+    return drifted, "unknown"
+
+
+def _adoption_history_entry(journal: dict) -> dict:
+    return next(entry for entry in reversed(journal["history"])
+                if entry.get("reason") == "principal-only drift adopted from state")
+
+
+@pytest.mark.parametrize("with_existing_journal", [False, True])
+def test_principal_only_state_drift_is_adopted_then_rehearsed_through_staged_phases(harness,
+                                                                                   with_existing_journal):
+    desired = released(harness)
+    drifted, principal = _drift_policy_principals(harness.env_dir)
+    original = harness.journal()["active"]
+    if not with_existing_journal:
+        spa.journal_path(harness.env_dir).unlink()
+    harness.calls.clear()
+
+    assert harness.apply() == 0
+
+    journal = harness.journal()
+    adoption = _adoption_history_entry(journal)
+    assert adoption["to"] == desired["fingerprint"]
+    if with_existing_journal:
+        assert adoption["from"] == original
+    adopted = pg.load_snapshot(harness.env_dir, adoption["adopted"])
+    assert adopted and adopted["fingerprint"] != desired["fingerprint"]
+    adopted_policy = next(p for p in adopted["fgac_policies"] if p["name"] == drifted)
+    assert principal in adopted_policy["except_principals"]
+    assert journal["active"] == desired["fingerprint"]
+    assert journal["pending"] and journal["pending"][0]["fingerprint"] == adoption["adopted"]
+    assert "create" in harness.calls and "switch" in harness.calls and "verify-access:switch" in harness.calls
+    live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
+    assert {name: live[name]["except_principals"] for name in live} == {
+        p["name"]: p["except_principals"] for p in desired["fgac_policies"]}
+
+
+@pytest.mark.parametrize(("edit", "message"), [
+    (lambda policy: policy["column_mask"].update({"function_name": "cat.sch.other_mask"}),
+     "changes its column_mask"),
+    (lambda policy: policy["match_columns"].__setitem__(0, {"condition": "hasTagValue('gr_treatment', 'other')"}),
+     "changes its match_condition"),
+])
+def test_principal_only_adoption_refuses_function_or_condition_drift(harness, edit, message):
+    released(harness)
+    state = live_state(harness.env_dir)
+    policy = next(p for p in _instances(state, "databricks_policy_info", "policies").values()
+                  if p["to_principals"] == ["regional"])
+    policy["except_principals"] = sorted(set(policy["except_principals"]) | {"unknown"})
+    edit(policy)
+    (harness.env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+    harness.calls.clear()
+
+    with pytest.raises(spa.Refused, match=message):
+        harness.apply()
+    assert harness.calls == []
+
+
 def test_lost_journal_adopts_only_a_state_that_matches_the_config(harness):
     gen = released(harness)
     spa.journal_path(harness.env_dir).unlink()

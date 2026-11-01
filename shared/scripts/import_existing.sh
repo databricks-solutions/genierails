@@ -198,7 +198,9 @@ run_import() {
     if grep -qiE "Invalid (for_each|count) argument|precondition failed" <<<"$import_out"; then
       echo "  ✗ Failed to import $address: Terraform couldn't evaluate the configuration (see the error above); nothing was imported and the object may well exist in Databricks"
       HARD_IMPORT_FAILURES=$((HARD_IMPORT_FAILURES + 1))
-    elif grep -qiE "Cannot import non-existent remote object|Cannot import a non-existent remote object|non-existent remote object|Cannot find|not found|does not exist|404" <<<"$import_out"; then
+    elif grep -qiE '^Error:.*(Cannot import (a )?non-existent remote object|RESOURCE_DOES_NOT_EXIST)' <<<"$import_out" \
+        || { grep -qiE '^Error:.*does not exist' <<<"$import_out" \
+             && ! grep -qiE '^Error:.*Configuration for import target does not exist' <<<"$import_out"; }; then
       echo "  ✗ Failed to import $address (may not exist in Databricks)"
     else
       echo "  ✗ Failed to import $address: Terraform import failed (see the error above); not treating this as a missing Databricks object"

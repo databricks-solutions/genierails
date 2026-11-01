@@ -2248,7 +2248,7 @@ _apply-layer: _guard-not-ci-apply
 	if [ "$$layer" = "data_access" ]; then \
 		echo "=== Auto-importing existing data_access resources (idempotent apply) ==="; \
 		import_rc=0; (cd "$$env_dir" && LAYER_ENV_DIR="$$env_dir" TERRAFORM_RUNNER="$(ROOT_RUNNER)" "$(IMPORT_EXISTING_SCRIPT)" $$([ "$$staged" = 1 ] && echo --skip-treatment-tags) 2>&1) || import_rc=$$?; \
-		if [ $$import_rc -eq 3 ]; then echo "ERROR: the data_access import refused (above); nothing was applied." >&2; exit 1; fi; \
+		if [ $$import_rc -ne 0 ]; then echo "ERROR: the data_access import failed (above); nothing was applied." >&2; exit 1; fi; \
 	fi; \
 	if [ "$$layer" = "workspace" ]; then \
 		$(_COVERAGE_GATE) can-run-check --env-dir "$$env_dir" --env-name "$$target_env" --runner "$(ROOT_RUNNER)" --apply-flags="$$apply_flags"; \
@@ -2472,8 +2472,11 @@ import: _guard-not-ci-apply _guarded-bootstrap ## Import existing resources into
 	@if [ "$(ENV)" = "$(ACCOUNT_ENV)" ]; then \
 		cd "$(ACCOUNT_ENV_DIR)" && "$(SHARED_ROOT)/scripts/import_existing.sh"; \
 	else \
-		cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && "$(SHARED_ROOT)/scripts/import_existing.sh"; \
-		cd "$(ENV_DIR)" && "$(SHARED_ROOT)/scripts/import_existing.sh"; \
+		import_rc=0; workspace_rc=0; \
+		(cd "$(ENV_DIR)/$(DATA_ACCESS_SUBDIR)" && "$(SHARED_ROOT)/scripts/import_existing.sh") || import_rc=$$?; \
+		(cd "$(ENV_DIR)" && "$(SHARED_ROOT)/scripts/import_existing.sh") || workspace_rc=$$?; \
+		if [ $$import_rc -ne 0 ]; then exit $$import_rc; fi; \
+		if [ $$workspace_rc -ne 0 ]; then exit $$workspace_rc; fi; \
 	fi
 
 migrate-state: _guard-not-ci-apply _bootstrap ## Migrate legacy state into account/data_access/workspace ownership

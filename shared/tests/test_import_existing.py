@@ -543,6 +543,74 @@ def test_a_configuration_error_is_not_blamed_on_the_object(tmp_path, hard_error)
     assert "import(s) failed because Terraform could not run the import walk" in result.stderr
 
 
+@pytest.mark.parametrize(("terraform_output", "expected"), [
+    ("+ terraform import module.data_access.databricks_policy_info.policies[dev404]\n"
+     "Error: failed to configure provider: authentication failed\n",
+     "authentication failed"),
+    ("Error: PERMISSION_DENIED: cannot read policy t_a404f\n", "PERMISSION_DENIED"),
+    ("Error: Configuration for import target does not exist\n", "Configuration for import target does not exist"),
+])
+def test_only_provider_missing_object_errors_are_soft_import_misses(tmp_path, terraform_output, expected):
+    data_access = tmp_path / "env" / "data_access"
+    data_access.mkdir(parents=True)
+    (tmp_path / "env" / "env.auto.tfvars").write_text('governance_mode = "legacy"\n')
+    (data_access / "abac.auto.tfvars").write_text(
+        'tag_assignments = [{ entity_type = "tables", entity_name = "cat.sch.probe", '
+        'tag_key = "k", tag_value = "v" }]\n'
+    )
+    runner = tmp_path / "terraform-runner"
+    runner.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$3\" = state ]; then exit 0; fi\n"
+        f"printf '%b' {terraform_output!r}; exit 1\n"
+    )
+    runner.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "python3").symlink_to(sys.executable)
+    env = os.environ | {"TERRAFORM_RUNNER": str(runner), "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+    result = subprocess.run(["bash", SCRIPT, "--tag-assignments-only"], cwd=data_access, env=env,
+                            text=True, capture_output=True)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert expected in result.stderr
+    assert "may not exist in Databricks" not in result.stdout
+    assert "not treating this as a missing Databricks object" in result.stdout
+
+
+@pytest.mark.parametrize("terraform_output", [
+    "Error: Cannot import non-existent remote object\n",
+    "Error: RESOURCE_DOES_NOT_EXIST: policy missing\n",
+    "Error: remote object does not exist\n",
+])
+def test_provider_missing_object_errors_remain_soft_import_misses(tmp_path, terraform_output):
+    data_access = tmp_path / "env" / "data_access"
+    data_access.mkdir(parents=True)
+    (tmp_path / "env" / "env.auto.tfvars").write_text('governance_mode = "legacy"\n')
+    (data_access / "abac.auto.tfvars").write_text(
+        'tag_assignments = [{ entity_type = "tables", entity_name = "cat.sch.missing", '
+        'tag_key = "k", tag_value = "v" }]\n'
+    )
+    runner = tmp_path / "terraform-runner"
+    runner.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [ \"$3\" = state ]; then exit 0; fi\n"
+        f"printf '%b' {terraform_output!r}; exit 1\n"
+    )
+    runner.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "python3").symlink_to(sys.executable)
+    env = os.environ | {"TERRAFORM_RUNNER": str(runner), "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+    result = subprocess.run(["bash", SCRIPT, "--tag-assignments-only"], cwd=data_access, env=env,
+                            text=True, capture_output=True)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "may not exist in Databricks" in result.stdout
+
+
 def test_a_missing_optional_import_still_does_not_fail_make_import(tmp_path):
     data_access = tmp_path / "env" / "data_access"
     data_access.mkdir(parents=True)
