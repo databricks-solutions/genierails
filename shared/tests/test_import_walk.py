@@ -147,8 +147,19 @@ def test_workspace_import_works_while_the_agent_coverage_check_passes(tmp_path):
 
 
 @pytest.mark.parametrize("command", ["plan", "apply", "import"])
-def test_a_caller_cannot_set_import_walk(data_access, command):
-    args = [command, "-var=import_walk=true"] + ([WAIT, "30s,"] if command == "import" else [])
+@pytest.mark.parametrize("source", ["arg", "tf_var", "tf_cli_args", "tfvars"])
+def test_a_caller_cannot_set_import_walk(data_access, command, source):
+    args = [command] + ([WAIT, "30s,"] if command == "import" else [])
+    if source == "arg":
+        args.insert(1, "-var=import_walk=true")
+    elif source == "tf_var":
+        data_access.environ["TF_VAR_import_walk"] = "true"
+    elif source == "tf_cli_args":
+        data_access.environ["TF_CLI_ARGS"] = "-var=import_walk=true"
+    else:
+        (data_access.layer_dir / "abac.auto.tfvars").write_text(
+            (data_access.layer_dir / "abac.auto.tfvars").read_text() + "import_walk = true\n")
+
     result = data_access.run(*args)
     assert result.returncode == 2, result.stdout + result.stderr
     assert "sets import_walk" in result.stderr and "+ terraform" not in result.stderr
