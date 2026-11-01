@@ -210,3 +210,34 @@ def test_split_refuses_a_deterministic_shaped_value_on_another_registry_key():
 
     with pytest.raises(ValueError, match="unknown canonical value"):
         build_account_config(bad, None)
+
+
+def test_account_only_writes_exactly_the_full_splits_account_file_and_nothing_else(tmp_path):
+    """rehearse's and release's account step plans from it before the env's own split runs."""
+    import subprocess
+
+    script = Path(__file__).resolve().parent.parent / "scripts" / "split_abac_config.py"
+    draft = tmp_path / "abac.auto.tfvars"
+    draft.write_text('groups = {\n  analysts = { description = "A" }\n}\n'
+                     'tag_policies = [\n  { key = "gr_treatment", description = "", values = ["card_last4__string__951e00ac"] },\n]\n'
+                     'tag_assignments = [\n]\nfgac_policies = [\n]\n')
+    existing = '# kept\ngroups = {\n  viewers = { description = "" }\n}\n'
+    for name in ("only", "full"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "account.tfvars").write_text(existing)
+    only = subprocess.run([sys.executable, str(script), "--account-only", str(draft),
+                           str(tmp_path / "only" / "account.tfvars")], text=True, capture_output=True)
+    assert only.returncode == 0, only.stdout + only.stderr
+    assert only.stdout == f"  Wrote shared account config: {tmp_path / 'only' / 'account.tfvars'}\n"
+    full = subprocess.run([sys.executable, str(script), str(draft), str(tmp_path / "full" / "account.tfvars"),
+                           str(tmp_path / "full" / "da.tfvars"), str(tmp_path / "full" / "ws.tfvars")],
+                          text=True, capture_output=True)
+    assert full.returncode == 0, full.stdout + full.stderr
+    assert (tmp_path / "only" / "account.tfvars").read_bytes() == (tmp_path / "full" / "account.tfvars").read_bytes()
+    assert sorted(p.name for p in (tmp_path / "only").iterdir()) == ["account.tfvars"]
+    # Re-running it (the env's split under its lock, after the step) changes no byte.
+    before = (tmp_path / "only" / "account.tfvars").read_bytes()
+    subprocess.run([sys.executable, str(script), str(draft), str(tmp_path / "only" / "account.tfvars"),
+                    str(tmp_path / "only" / "da.tfvars"), str(tmp_path / "only" / "ws.tfvars")], check=True,
+                   capture_output=True)
+    assert (tmp_path / "only" / "account.tfvars").read_bytes() == before

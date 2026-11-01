@@ -436,20 +436,25 @@ def write_tfvars(
 
 
 def main():
-    if len(sys.argv) != 5:
+    # --account-only <draft> <account file>: write only the shared account file,
+    # exactly as the full split would. rehearse's and release's account step
+    # plans the account layer from it before the env's own split runs.
+    account_only = sys.argv[1:2] == ["--account-only"]
+    if len(sys.argv) != (4 if account_only else 5):
         print(
             "Usage: python scripts/split_abac_config.py "
             "generated/abac.auto.tfvars "
             "envs/account/abac.auto.tfvars "
             "envs/<env>/data_access/abac.auto.tfvars "
-            "envs/dev/abac.auto.tfvars"
+            "envs/dev/abac.auto.tfvars\n"
+            "       python scripts/split_abac_config.py --account-only "
+            "generated/abac.auto.tfvars envs/account/abac.auto.tfvars"
         )
         sys.exit(1)
 
-    source_path = Path(sys.argv[1])
-    account_path = Path(sys.argv[2])
-    data_access_path = Path(sys.argv[3])
-    workspace_path = Path(sys.argv[4])
+    args = sys.argv[2:] if account_only else sys.argv[1:]
+    source_path = Path(args[0])
+    account_path = Path(args[1])
 
     if not source_path.exists():
         print(f"ERROR: source file not found: {source_path}")
@@ -461,8 +466,11 @@ def main():
     )
 
     account_cfg = build_account_config(full_cfg, existing_account_cfg)
-    data_access_cfg = build_data_access_config(full_cfg)
-    workspace_cfg = build_workspace_config(full_cfg)
+    if not account_only:
+        data_access_path = Path(args[2])
+        workspace_path = Path(args[3])
+        data_access_cfg = build_data_access_config(full_cfg)
+        workspace_cfg = build_workspace_config(full_cfg)
 
     account_header = """
 # ============================================================================
@@ -499,6 +507,9 @@ def main():
         account_header,
         ACCOUNT_KEYS,
     )
+    if account_only:
+        print(f"  Wrote shared account config: {account_path}")
+        return
     write_tfvars(
         data_access_path,
         data_access_cfg,

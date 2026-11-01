@@ -433,6 +433,32 @@ def test_an_empty_account_plan_asks_nothing_about_the_account_and_releases(accou
     assert COMPLETE.format(n=1) in shown
 
 
+def test_the_account_step_plans_from_prods_split_so_release_plan_finds_the_account_plan_empty(tmp_path, repo):
+    """BUG A in make release: the account step planned before release-plan's same-env promote wrote prod's
+    part of envs/account/abac.auto.tfvars, so it found nothing to ask, and release-plan then refused
+    'the account plan is not empty'."""
+    from tests.test_rehearse_account_approval import account_resources, draft, fresh_account
+
+    make = Make(tmp_path, repo, passthrough=("release-plan", "_release-manifest", "_apply-account-locked"))
+    runner = fresh_account(make, repo, prod_draft=draft("analysts", "prod_auditors"))
+    (make.tmp / "account-state.json").write_text(json.dumps({"outputs": True, "resources": ["group:analysts"]}))
+    result = make("rehearse", "dev", root_runner=runner)  # dev's part is already applied
+    assert result.returncode == 0, result.stdout + result.stderr
+    make.reset()
+    rc, shown = _on_a_pty(make, ["y", "y"], root_runner=runner)
+    assert rc == 0, shown
+    assert "the account plan is not empty" not in shown
+    assert shown.count(PROMPT) == 2 and shown.count(ACCOUNT_QUESTION) == 1
+    assert "  Account plan: 1 create\n" in shown.split(ACCOUNT_QUESTION)[0].replace("\r", "")
+    assert shown.index(ACCOUNT_APPLIED) < shown.index("=== Release round 1 (prod)")
+    assert account_resources(make) == ["group:analysts", "group:prod_auditors"]
+    [account_receipt] = rg.account_receipts(repo.cloud, "account")
+    assert account_receipt["approval"]["via"] == "terminal"
+    assert rg.last_release(repo.cloud, "prod")["approval"]["via"] == "terminal"
+    assert COMPLETE.format(n=1) in shown
+    assert _unlocked(repo.prod, _account_dir(repo))
+
+
 def test_a_failing_account_plan_stops_before_round_1(account_loop, repo, tmp_path):
     from tests.test_rehearse_account_approval import _runner
 

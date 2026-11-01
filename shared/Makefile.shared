@@ -1280,7 +1280,16 @@ _apply-account-locked: _guard-not-databricks-compute
 # rehearse locks dev. Off a terminal, in CI, or with GENIERAILS_INTERACTIVE=0
 # it does nothing, so rehearse behaves exactly as before (apply's
 # _guard-account-plan-empty refuses a non-empty account plan); no flag or
-# variable approves. A macro, not a target: approval.py asks only in the
+# variable approves. It plans from the account file the env's own split will
+# write: first it merges the env's account part (groups, members, tag
+# policies) into envs/account/abac.auto.tfvars (split_abac_config.py
+# --account-only: the bytes the split under the env lock writes again), so on
+# a fresh repo the manifest shown is the one apply's guard (release-plan's
+# account plan) then finds applied. Only when that file is git-ignored (a
+# runtime output: no legacy env commits it); otherwise the plan reads the
+# file as it is, as before. An outputs-only plan (no resource changes) still
+# asks: the guard refuses any non-empty plan, and applying it is what empties
+# it. A macro, not a target: approval.py asks only in the
 # top-level make's own recipe. The subshell keeps its per-run approval nonce
 # (approval.py RUN_ENV) out of the rest of rehearse. Only the y/N answers
 # below are accepted, as exact (exit code, line) pairs. The manifest is pinned
@@ -1303,6 +1312,11 @@ override _ACCOUNT_APPROVE_APPLY = ( \
 		"0:genierails-approval:v1:interactive") ;; \
 		*) echo "ERROR: the terminal check ($(SHARED_ROOT)/scripts/approval.py interactive) gave no valid answer (exit $$ap_rc); nothing was locked, approved or applied." >&2; exit 1 ;; \
 	esac; \
+	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ] && git -C "$(ACCOUNT_ENV_DIR)" check-ignore -q abac.auto.tfvars 2>/dev/null; then \
+		gen_abac="$$($(_OVERLAY) path --env-dir "$(ENV_DIR)" abac.auto.tfvars)" && \
+		python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" --account-only "$$gen_abac" "$(ACCOUNT_ENV_DIR)/abac.auto.tfvars" || { \
+			echo "$(1): $(ENV)'s account config could not be written to $(ACCOUNT_ENV_DIR)/abac.auto.tfvars (above); nothing was locked, approved or applied." >&2; exit 1; }; \
+	fi; \
 	plan_rc=0; LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)" "$(ROOT_RUNNER)" account $(ACCOUNT_ENV) plan -input=false -detailed-exitcode >/dev/null || plan_rc=$$?; \
 	if [ $$plan_rc -ne 0 ] && [ $$plan_rc -ne 2 ]; then echo "$(1): the account plan failed (above); nothing was locked, approved or applied." >&2; exit 1; fi; \
 	if [ $$plan_rc -eq 2 ]; then \
