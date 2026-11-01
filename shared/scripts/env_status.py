@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import socket
 import sys
 from pathlib import Path
@@ -453,9 +454,18 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
         if not problems:
             return None
         problem = problems[0]
-        command = (f"git remote set-url genierails {rg.UPSTREAM_URL}" if "genierails points at" in problem
-                   else "git config --unset-all url.<base>.insteadOf" if "url rewrite config" in problem
-                   else f"git remote add {remote} <your repo URL> && git fetch {remote} {branch}")
+        if "genierails points at" in problem:
+            command = f"git remote set-url genierails {rg.UPSTREAM_URL}"
+        elif "url rewrite config" in problem:
+            match = re.search(r"\((.*?)\)", problem)
+            fields = (match.group(1).split(None, 3) if match else [])
+            scope, origin, key = (fields + ["", "", ""])[:3]
+            scope_opt = {"local": "", "global": " --global", "system": " --system",
+                         "worktree": " --worktree"}.get(scope)
+            command = (f"git config{scope_opt} --unset-all {shlex.quote(key)}" if scope_opt is not None and key
+                       else f"edit {origin or 'the git config shown above'} and remove {key or 'the url rewrite'}")
+        else:
+            command = f"git remote add {remote} <your repo URL> && git fetch {remote} {branch}"
         return command, f"local-only provenance is refused because {problem}"
 
     def push_first(why: str, *, exact: bool = False) -> tuple[str, str] | None:

@@ -287,6 +287,20 @@ def test_next_refuses_bad_genierails_remote_before_account_plan(world, repo):
     assert "make account-plan" not in command
 
 
+def test_next_names_the_scoped_url_rewrite_to_remove_before_account_plan(world, repo):
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    Path(repo.env["GIT_CONFIG_GLOBAL"]).write_text(
+        Path(repo.env["GIT_CONFIG_GLOBAL"]).read_text()
+        + '[url "git@github.com:"]\n\tpushInsteadOf = https://github.com/\n')
+    repo.commit({"aws/envs/dev/ack.txt": "\n"}, push=False)
+    command, why = world.next("dev")
+    assert command == "git config --global --unset-all url.git@github.com:.pushinsteadof"
+    assert "git url rewrite config is present (global file:" in why
+    assert "url.git@github.com:.pushinsteadof https://github.com/" in why
+    assert "make account-plan" not in command
+
+
 def test_account_plan_local_only_feature_branch_merges_to_local_main(world, repo):
     repo.git("remote", "remove", "origin")
     repo.git("checkout", "-q", "-b", "feature")

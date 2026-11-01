@@ -308,7 +308,7 @@ def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
     scrub = {
         "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
         "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
-        "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_PREFIX",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_PREFIX", "GIT_CONFIG",
     }
     env = {k: v for k, v in os.environ.items() if k not in scrub}
     result = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=False, env=env)
@@ -915,23 +915,25 @@ def remote_names(repo: Path) -> list[str]:
     return sorted(names)
 
 
-def _config_values(repo: Path, key: str) -> list[str]:
-    out = git(repo, "config", "--get-all", key, check=False)
+def _config_values(repo: Path, key: str, *, local: bool = False) -> list[str]:
+    args = ("config", "--local", "--get-all", key) if local else ("config", "--get-all", key)
+    out = git(repo, *args, check=False)
     return out.stdout.splitlines() if out.returncode == 0 else []
 
 
 def _url_rewrites(repo: Path) -> list[str]:
-    out = git(repo, "config", "--get-regexp", r"^url\..*\.(insteadOf|pushInsteadOf)$", check=False)
-    return [line for line in out.stdout.splitlines() if line.strip()] if out.returncode == 0 else []
+    out = git(repo, "config", "--show-scope", "--show-origin", "--get-regexp",
+              r"^url\..*\.(insteadOf|pushInsteadOf)$", check=False)
+    return [line.replace("\t", " ") for line in out.stdout.splitlines() if line.strip()] if out.returncode == 0 else []
 
 
 def _remote_url(repo: Path, remote: str) -> str:
-    urls = _config_values(repo, f"remote.{remote}.url")
+    urls = _config_values(repo, f"remote.{remote}.url", local=True)
     return urls[0] if len(urls) == 1 else ""
 
 
 def _remote_pushurls(repo: Path, remote: str) -> list[str]:
-    return _config_values(repo, f"remote.{remote}.pushurl")
+    return _config_values(repo, f"remote.{remote}.pushurl", local=True)
 
 
 def _canonical_upstream_url(url: str) -> bool:
@@ -947,14 +949,15 @@ def local_main_mode(repo: Path, *, remote: str = "origin", branch: str = "main")
     layouts keep the normal remote-backed gate.
     """
     remotes = tuple(remote_names(repo))
-    rewrites = _url_rewrites(repo)
-    if rewrites:
-        return LocalMainMode(False, "", remotes, (f"git url rewrite config is present ({rewrites[0]}); "
-                                                  f"remove it before using local-only provenance",))
     if not remotes:
         return LocalMainMode(True, f"no {remote} remote", remotes)
     if remotes != (UPSTREAM_REMOTE,):
         return LocalMainMode(False, "", remotes)
+    rewrites = _url_rewrites(repo)
+    if rewrites:
+        return LocalMainMode(False, "", remotes, (f"git url rewrite config is present ({rewrites[0]}); "
+                                                  f"remove it before using local-only provenance with only "
+                                                  f"the {UPSTREAM_REMOTE} remote",))
     url = _remote_url(repo, UPSTREAM_REMOTE)
     if not url:
         return LocalMainMode(False, "", remotes, (f"{UPSTREAM_REMOTE} has no fetch URL; local-only provenance "
