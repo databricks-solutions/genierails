@@ -212,9 +212,11 @@ def test_split_refuses_a_deterministic_shaped_value_on_another_registry_key():
         build_account_config(bad, None)
 
 
-def test_account_only_writes_exactly_the_full_splits_account_file_and_nothing_else(tmp_path):
+def test_account_only_writes_exactly_the_full_splits_account_file_and_nothing_else(tmp_path, monkeypatch):
     """rehearse's and release's account step plans from it before the env's own split runs."""
     import subprocess
+
+    monkeypatch.delenv("GENIERAILS_STATE_DIR", raising=False)
 
     script = Path(__file__).resolve().parent.parent / "scripts" / "split_abac_config.py"
     draft = tmp_path / "abac.auto.tfvars"
@@ -234,10 +236,130 @@ def test_account_only_writes_exactly_the_full_splits_account_file_and_nothing_el
                           text=True, capture_output=True)
     assert full.returncode == 0, full.stdout + full.stderr
     assert (tmp_path / "only" / "account.tfvars").read_bytes() == (tmp_path / "full" / "account.tfvars").read_bytes()
-    assert sorted(p.name for p in (tmp_path / "only").iterdir()) == ["account.tfvars"]
+    # Only the account file (and the account lock's mutex file, generated/.governance.guard, ignored).
+    assert sorted(p.name for p in (tmp_path / "only").iterdir()) == ["account.tfvars", "generated"]
+    assert [p.name for p in (tmp_path / "only" / "generated").iterdir()] == [".governance.guard"]
     # Re-running it (the env's split under its lock, after the step) changes no byte.
     before = (tmp_path / "only" / "account.tfvars").read_bytes()
     subprocess.run([sys.executable, str(script), str(draft), str(tmp_path / "only" / "account.tfvars"),
                     str(tmp_path / "only" / "da.tfvars"), str(tmp_path / "only" / "ws.tfvars")], check=True,
                    capture_output=True)
     assert (tmp_path / "only" / "account.tfvars").read_bytes() == before
+
+
+# ── the shared account file: one locked, atomic merge per env (PR #297 r2) ────
+
+SPLIT = Path(__file__).resolve().parent.parent / "scripts" / "split_abac_config.py"
+
+
+def _account_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("GENIERAILS_STATE_DIR", raising=False)
+    account = tmp_path / "aws" / "envs" / "account"
+    account.mkdir(parents=True)
+    return account / "abac.auto.tfvars"
+
+
+def _draft(tmp_path, env, group):
+    path = tmp_path / "aws" / "envs" / env / "generated" / "abac.auto.tfvars"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f'groups = {{\n  {group} = {{ description = "" }}\n}}\n')
+    return path
+
+
+def _groups(path):
+    import hcl2
+
+    return sorted(hcl2.loads(path.read_text()).get("groups") or {})
+
+
+def test_concurrent_merges_for_different_envs_lose_no_part(tmp_path, monkeypatch):
+    """Codex r1 B1: two unlocked read-merge-writes; the second one's read missed the first one's part."""
+    import threading
+    import time
+
+    import split_abac_config as split
+
+    account = _account_env(tmp_path, monkeypatch)
+    real = split.build_account_config
+
+    def slow(full_cfg, existing):  # read, then take a while before writing
+        merged = real(full_cfg, existing)
+        time.sleep(0.4)
+        return merged
+
+    monkeypatch.setattr(split, "build_account_config", slow)
+    threads = [threading.Thread(target=split.merge_account_file, args=({"groups": {g: {}}}, account))
+               for g in ("dev_analysts", "prod_auditors")]
+    threads[0].start()
+    time.sleep(0.1)
+    threads[1].start()
+    for thread in threads:
+        thread.join()
+    assert _groups(account) == ["dev_analysts", "prod_auditors"]
+
+
+def test_account_only_pre_writes_of_two_envs_wait_for_the_mutex_and_both_land(tmp_path, monkeypatch):
+    import subprocess
+    import time
+
+    from scripts import environment_lock
+
+    account = _account_env(tmp_path, monkeypatch)
+    drafts = [_draft(tmp_path, "dev", "dev_analysts"), _draft(tmp_path, "prod", "prod_auditors")]
+    with environment_lock.mutex(account.parent):
+        runs = [subprocess.Popen([sys.executable, str(SPLIT), "--account-only", str(d), str(account)],
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for d in drafts]
+        time.sleep(1.0)
+        assert all(run.poll() is None for run in runs)  # both wait for the mutex
+        assert not account.exists()
+    for run in runs:
+        out, _ = run.communicate(timeout=60)
+        assert run.returncode == 0, out
+    assert _groups(account) == ["dev_analysts", "prod_auditors"]
+    assert sorted(p.name for p in account.parent.iterdir()) == ["abac.auto.tfvars", "generated"]  # no temp file
+
+
+@pytest.mark.parametrize("mode", ["account-only", "full"])
+@pytest.mark.parametrize("shape", ["file-symlink", "dangling-symlink", "dir-symlink", "not-a-file"])
+def test_the_account_file_is_never_written_through_a_link_or_into_a_non_file(tmp_path, monkeypatch, mode, shape):
+    """Codex r1 B2: a git-ignored symlinked envs/account/abac.auto.tfvars; write_text followed it."""
+    import subprocess
+
+    account = _account_env(tmp_path, monkeypatch)
+    target = tmp_path / "elsewhere" / "abac.auto.tfvars"
+    target.parent.mkdir()
+    target.write_text("# not GenieRails'\n")
+    if shape == "file-symlink":
+        account.symlink_to(target)
+    elif shape == "dangling-symlink":
+        account.symlink_to(tmp_path / "elsewhere" / "missing.tfvars")
+    elif shape == "dir-symlink":
+        account.parent.rmdir()
+        account.parent.symlink_to(target.parent, target_is_directory=True)
+    else:
+        account.mkdir()
+    dev = _draft(tmp_path, "dev", "dev_analysts")
+    args = (["--account-only", str(dev), str(account)] if mode == "account-only"
+            else [str(dev), str(account), str(dev.parent.parent / "da.tfvars"), str(dev.parent.parent / "ws.tfvars")])
+    result = subprocess.run([sys.executable, str(SPLIT), *args], capture_output=True, text=True)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "Nothing was written." in result.stdout
+    assert target.read_text() == "# not GenieRails'\n"
+    assert sorted(p.name for p in target.parent.iterdir()) == ["abac.auto.tfvars"]
+    assert not (tmp_path / "elsewhere" / "missing.tfvars").exists()
+    assert not (dev.parent.parent / "da.tfvars").exists() and not (dev.parent.parent / "ws.tfvars").exists()
+
+
+def test_the_account_file_is_replaced_atomically_keeping_its_mode(tmp_path, monkeypatch):
+    import os
+    import split_abac_config as split
+
+    account = _account_env(tmp_path, monkeypatch)
+    account.write_text('groups = {\n  viewers = { description = "" }\n}\n')
+    account.chmod(0o640)
+    inode = account.stat().st_ino
+    split.merge_account_file({"groups": {"analysts": {}}}, account)
+    assert _groups(account) == ["analysts", "viewers"]
+    assert account.stat().st_ino != inode and oct(account.stat().st_mode & 0o777) == oct(0o640)  # renamed into place
+    assert not [p for p in account.parent.iterdir() if p.name.endswith(".tmp")]
+    assert os.path.isfile(account) and not account.is_symlink()

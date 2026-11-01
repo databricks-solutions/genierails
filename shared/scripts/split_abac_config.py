@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import secrets
+import stat
 import sys
 from pathlib import Path
 
@@ -416,6 +419,10 @@ def write_tfvars(
     ordered_keys: tuple[str, ...],
 ):
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_tfvars(config, header, ordered_keys))
+
+
+def render_tfvars(config: dict, header: str, ordered_keys: tuple[str, ...]) -> str:
     pieces = [header.strip(), ""]
     handled = set()
 
@@ -432,7 +439,70 @@ def write_tfvars(
         pieces.append(f"{key} = {render_value(config[key])}")
         pieces.append("")
 
-    path.write_text("\n".join(pieces).rstrip() + "\n")
+    return "\n".join(pieces).rstrip() + "\n"
+
+
+ACCOUNT_HEADER = """
+# ============================================================================
+# ACCOUNT-OWNED ABAC CONFIG
+# ============================================================================
+# Generated from the workspace draft and merged into shared account state.
+# Owns groups, optional group membership, and tag policy definitions.
+# Tag policies are account-scoped and shared across all workspace environments.
+# ============================================================================
+"""
+
+
+class AccountFileError(RuntimeError):
+    """The shared account file can't be merged safely; nothing was written."""
+
+
+def _check_account_path(path: Path) -> None:
+    parent = path.parent
+    if parent.is_symlink() or not parent.is_dir():
+        raise AccountFileError(f"{parent} is a symlink or not a directory; the shared account file is only "
+                               "written in a real envs/account directory. Nothing was written.")
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise AccountFileError(f"{path} is a symlink or not a regular file; GenieRails never writes the shared "
+                               "account file through a link. Replace it with a regular file (or remove it). "
+                               "Nothing was written.")
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` by temp file + rename in its directory, never following a link."""
+    mode = stat.S_IMODE(path.stat().st_mode) if path.is_file() else 0o644
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.fchmod(handle.fileno(), mode)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def merge_account_file(full_cfg: dict, account_path: Path) -> None:
+    """Merge a draft's account part into the shared account file, losing no other env's part.
+
+    Every env's split (and rehearse's and release's account step) merges into
+    this one file, so the read-merge-write runs under the account env's lock
+    mutex (scripts/environment_lock.py mutex: the short flock that taking and
+    releasing the account lock use; held only for this read-modify-write, and
+    nothing is locked inside it). The write is atomic and never through a link.
+    """
+    from scripts import environment_lock
+
+    account_path.parent.mkdir(parents=True, exist_ok=True)
+    _check_account_path(account_path)
+    with environment_lock.mutex(account_path.parent):
+        _check_account_path(account_path)
+        existing_account_cfg = load_hcl(account_path) if account_path.exists() else None
+        account_cfg = build_account_config(full_cfg, existing_account_cfg)
+        _atomic_write(account_path, render_tfvars(account_cfg, ACCOUNT_HEADER, ACCOUNT_KEYS))
 
 
 def main():
@@ -461,26 +531,11 @@ def main():
         sys.exit(1)
 
     full_cfg = load_generated_config(source_path)
-    existing_account_cfg = (
-        load_hcl(account_path) if account_path.exists() else None
-    )
-
-    account_cfg = build_account_config(full_cfg, existing_account_cfg)
     if not account_only:
         data_access_path = Path(args[2])
         workspace_path = Path(args[3])
         data_access_cfg = build_data_access_config(full_cfg)
         workspace_cfg = build_workspace_config(full_cfg)
-
-    account_header = """
-# ============================================================================
-# ACCOUNT-OWNED ABAC CONFIG
-# ============================================================================
-# Generated from the workspace draft and merged into shared account state.
-# Owns groups, optional group membership, and tag policy definitions.
-# Tag policies are account-scoped and shared across all workspace environments.
-# ============================================================================
-"""
 
     data_access_header = """
 # ============================================================================
@@ -501,12 +556,11 @@ def main():
 # ============================================================================
 """
 
-    write_tfvars(
-        account_path,
-        account_cfg,
-        account_header,
-        ACCOUNT_KEYS,
-    )
+    try:
+        merge_account_file(full_cfg, account_path)
+    except AccountFileError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
     if account_only:
         print(f"  Wrote shared account config: {account_path}")
         return

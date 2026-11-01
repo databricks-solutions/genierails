@@ -1287,7 +1287,15 @@ _apply-account-locked: _guard-not-databricks-compute
 # a fresh repo the manifest shown is the one apply's guard (release-plan's
 # account plan) then finds applied. Only when that file is git-ignored (a
 # runtime output: no legacy env commits it); otherwise the plan reads the
-# file as it is, as before. An outputs-only plan (no resource changes) still
+# file as it is, as before. The merge and that first plan run under the
+# account lock (the one account-plan and apply-account take; a held lock
+# refuses before anything is written), released before account-plan takes it
+# again. Lock order: the account lock is a leaf. This step takes it holding
+# no env lock; under an env lock only the account sync takes it; nothing
+# holding it takes an env lock. Every merge into the file, this one and each
+# env's split, is also atomic under the account lock's mutex
+# (environment_lock.py mutex), so no env's part is lost; the file is never
+# written through a symlink. An outputs-only plan (no resource changes) still
 # asks: the guard refuses any non-empty plan, and applying it is what empties
 # it. A macro, not a target: approval.py asks only in the
 # top-level make's own recipe. The subshell keeps its per-run approval nonce
@@ -1304,7 +1312,7 @@ override _ACCOUNT_MANIFEST_OUT = $(if $(filter-out 0,$(MAKELEVEL)),$(GENIERAILS_
 override _ACCOUNT_APPROVE_QUESTION = Approve and apply this account manifest?
 override _ACCOUNT_APPROVE_APPLY = ( \
 	ap_tmp="$$(mktemp -d "$${TMPDIR:-/tmp}/genierails-approval.XXXXXX")" || exit 1; \
-	trap 'rm -rf "$$ap_tmp"' EXIT; \
+	acct_lock=; trap 'rm -rf "$$ap_tmp"; if [ -n "$$acct_lock" ]; then $(_NO_SIGNALS); $(_ENV_LOCK_HELPER) unlock "$(ACCOUNT_ENV_DIR)" --pid $$$$; fi' EXIT; \
 	: > "$$ap_tmp/interactive"; \
 	python3 "$(SHARED_ROOT)/scripts/approval.py" interactive --answer-file "$$ap_tmp/interactive"; ap_rc=$$?; \
 	case "$$ap_rc:$$(cat "$$ap_tmp/interactive")" in \
@@ -1313,11 +1321,16 @@ override _ACCOUNT_APPROVE_APPLY = ( \
 		*) echo "ERROR: the terminal check ($(SHARED_ROOT)/scripts/approval.py interactive) gave no valid answer (exit $$ap_rc); nothing was locked, approved or applied." >&2; exit 1 ;; \
 	esac; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ] && git -C "$(ACCOUNT_ENV_DIR)" check-ignore -q abac.auto.tfvars 2>/dev/null; then \
+		trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; \
+		$(_ENV_LOCK_HELPER) lock "$(ACCOUNT_ENV_DIR)" --pid $$$$ --owner $(1) --env "$(ACCOUNT_ENV)" >/dev/null || { \
+			echo "$(1): the shared account layer is locked by another run (above); nothing was written, approved or applied, and $(ENV) was not locked. Re-run make $(1) ENV=$(ENV) when it finishes." >&2; exit 1; }; \
+		acct_lock=1; \
 		gen_abac="$$($(_OVERLAY) path --env-dir "$(ENV_DIR)" abac.auto.tfvars)" && \
 		python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" --account-only "$$gen_abac" "$(ACCOUNT_ENV_DIR)/abac.auto.tfvars" || { \
-			echo "$(1): $(ENV)'s account config could not be written to $(ACCOUNT_ENV_DIR)/abac.auto.tfvars (above); nothing was locked, approved or applied." >&2; exit 1; }; \
+			echo "$(1): $(ENV)'s account config could not be written to $(ACCOUNT_ENV_DIR)/abac.auto.tfvars (above); nothing was approved or applied, and $(ENV) was not locked." >&2; exit 1; }; \
 	fi; \
 	plan_rc=0; LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)" "$(ROOT_RUNNER)" account $(ACCOUNT_ENV) plan -input=false -detailed-exitcode >/dev/null || plan_rc=$$?; \
+	if [ -n "$$acct_lock" ]; then $(_ENV_LOCK_HELPER) unlock "$(ACCOUNT_ENV_DIR)" --pid $$$$; acct_lock=; trap - HUP INT TERM; fi; \
 	if [ $$plan_rc -ne 0 ] && [ $$plan_rc -ne 2 ]; then echo "$(1): the account plan failed (above); nothing was locked, approved or applied." >&2; exit 1; fi; \
 	if [ $$plan_rc -eq 2 ]; then \
 		echo ""; echo "=== make $(1): the account plan has changes; they need an approved account manifest first ==="; \

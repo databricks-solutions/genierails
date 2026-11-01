@@ -295,6 +295,12 @@ if args[:1] != ["account"]:
 state = Path({state!r})
 applied = json.loads(state.read_text()) if state.exists() else {{"outputs": False, "resources": []}}
 if args[2] == "plan":
+    if not any(a.startswith("-out=") for a in args):  # the account step's probe: who holds the account lock
+        sys.path.insert(0, {shared!r})
+        from scripts import environment_lock
+        lock = environment_lock.lock_path(Path(os.environ["LAYER_ENV_DIR"]))
+        with open({probe_locks!r}, "a") as out:
+            out.write(json.dumps(json.loads(lock.read_text())["owner"] if lock.exists() else None) + "\n")
     path = Path(os.environ["LAYER_ENV_DIR"], "abac.auto.tfvars")
     config = hcl2.loads(path.read_text()) if path.exists() else {{}}
     desired = [f"tag_policy:{{p['key']}}" for p in config.get("tag_policies") or []] \
@@ -356,7 +362,8 @@ def fresh_account(make: Make, repo, prod_draft: str = "") -> Path:
     assert not (_account_dir(repo) / "abac.auto.tfvars").exists()
     runner = make._write("account-terraform", ACCOUNT_TERRAFORM.format(
         python=sys.executable, log=str(make.log), runner=str(make.stubs["runner"]),
-        state=str(make.tmp / "account-state.json")))
+        state=str(make.tmp / "account-state.json"), shared=str(SPLIT.parents[1]),
+        probe_locks=str(make.tmp / "probe-locks.jsonl")))
     make.make = make._write("split-make", SPLIT_MAKE.format(
         python=sys.executable, stub=str(make.make), cloud=str(repo.cloud), runner=str(runner), split=str(SPLIT)))
     return runner
@@ -381,6 +388,56 @@ def test_a_fresh_repos_first_rehearse_asks_once_for_the_account_plan_the_split_m
     assert account_resources(amake) == ["group:analysts"]
     assert [r["result"] for r in rg.rehearse_receipts(repo.cloud, "dev")] == ["passed"]
     assert _unlocked(repo.dev) and _unlocked(_account_dir(repo))
+    # The merge and the probe ran under the account lock (released before account-plan took it).
+    assert probe_lock_owners(amake)[0] == "rehearse"
+
+
+def probe_lock_owners(make: Make) -> list:
+    return [json.loads(line) for line in (make.tmp / "probe-locks.jsonl").read_text().splitlines()]
+
+
+def test_a_held_account_lock_refuses_the_account_step_before_anything_is_written(amake, repo):
+    """Codex r1 B1: the pre-write is serialized with the account lock; a held lock refuses, nothing written."""
+    runner = fresh_account(amake, repo)
+    holder = subprocess.Popen(["sleep", "300"])
+    try:
+        ok, message, _nonce = environment_lock.acquire(_account_dir(repo), holder.pid, "apply-account")
+        assert ok, message
+        rc, shown = pty_make(amake, "rehearse", "dev", answer="y", root_runner=runner)
+        assert rc != 0, shown
+        assert "is held by make apply-account" in shown
+        assert ("rehearse: the shared account layer is locked by another run (above); nothing was written, "
+                "approved or applied, and dev was not locked.") in shown
+        assert "[y/N]" not in shown and not (_account_dir(repo) / "abac.auto.tfvars").exists()
+        assert not (amake.tmp / "probe-locks.jsonl").exists()  # never planned
+        assert not list(rg.manifests_dir(repo.cloud, "account").glob("*/manifest.json"))
+        assert environment_lock.owns_lock(_account_dir(repo), holder.pid)  # the holder's lock is untouched
+        _nothing_in_dev_but_the_account_lock(amake, repo)
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def _nothing_in_dev_but_the_account_lock(make: Make, repo) -> None:
+    names = make.names()
+    assert "_derive-before-exposure" not in names and "apply" not in names, names
+    assert not rg.rehearse_receipts(repo.cloud, "dev") and _unlocked(repo.dev)
+
+
+def test_a_symlinked_account_file_is_refused_and_its_target_never_written(amake, repo, tmp_path):
+    """Codex r1 B2: git-ignored but a symlink; check-ignore passed and write_text followed it."""
+    runner = fresh_account(amake, repo)
+    target = tmp_path / "outside" / "abac.auto.tfvars"
+    target.parent.mkdir()
+    target.write_text("# someone else's file\n")
+    (_account_dir(repo) / "abac.auto.tfvars").symlink_to(target)
+    rc, shown = pty_make(amake, "rehearse", "dev", answer="y", root_runner=runner)
+    assert rc != 0, shown
+    assert "is a symlink or not a regular file; GenieRails never writes the shared account file through a link" in shown
+    assert "rehearse: dev's account config could not be written to " in shown
+    assert target.read_text() == "# someone else's file\n" and (_account_dir(repo) / "abac.auto.tfvars").is_symlink()
+    assert "[y/N]" not in shown and not (amake.tmp / "probe-locks.jsonl").exists()
+    _nothing_in_dev(amake, repo)  # and the account lock was released
 
 
 def test_a_manifest_planned_before_the_split_wrote_the_account_file_is_not_offered(amake, repo):

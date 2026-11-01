@@ -69,6 +69,18 @@ def _guard(env_dir: Path, state_dir: str | None = None):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+def mutex(env_dir: Path):
+    """The env's short lock mutex (the flock ``lock`` and ``unlock`` take), for a read-modify-write.
+
+    split_abac_config.py merges every env's account part into the shared
+    envs/account/abac.auto.tfvars under the account env's mutex, so two
+    merges never lose each other's part. Hold it only for that write and take
+    nothing inside it: the governance lock is taken outside it, so it can
+    never wait on one.
+    """
+    return _guard(env_dir)
+
+
 def _read_lock(path: Path):
     try:
         data = json.loads(path.read_text())
