@@ -208,7 +208,7 @@ def test_a_stale_layer_local_env_file_does_not_hide_a_deterministic_env(tmp_path
     assert result.returncode == 0, result.stdout + result.stderr
     assert fake_uc.sql_writes(fake) == ["ALTER TABLE cat.sch.tbl UNSET TAGS ('sensitivity')"]
     imports = fake_uc.runner_imports(fake)
-    assert imports and not [argv for argv in imports if "gr_treatment" in argv[3]]
+    assert imports and not [argv for argv in imports if "gr_treatment" in argv[-2]]
 
 
 def test_a_missing_governance_mode_is_legacy_as_everywhere_else(tmp_path):
@@ -322,7 +322,7 @@ def test_an_import_already_in_state_is_skipped(tmp_path, mode):
     args = [f"--record={record}"] if mode == "record" else []
     result = _run(data_access, fake | {"LAYER_ENV_DIR": str(data_access)}, "--skip-treatment-tags", *args)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert TAG_IMPORT not in [argv[3] for argv in fake_uc.runner_imports(fake)]
+    assert TAG_IMPORT not in [argv[-2] for argv in fake_uc.runner_imports(fake)]
     assert {e["argv"][2] for e in fake_uc.events(fake) if e["src"] == "runner"} <= {"state-list", "import"}
     if mode == "record":
         assert [json.loads(line)["kind"] for line in record.read_text().splitlines()] == ["cleanup"]
@@ -367,7 +367,7 @@ def test_apply_recorded_runs_exactly_the_layers_recorded_entries(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert fake_uc.sql_writes(fake) == ["ALTER TABLE `cat`.`sch`.`tbl` UNSET TAGS ('sensitivity')"]
     assert [e["warehouse_id"] for e in fake_uc.events(fake) if e["src"] == "sql"] == ["wh"]
-    assert [argv[3:] for argv in fake_uc.runner_imports(fake)] == [[TAG_IMPORT, "tables,cat.sch.tbl,owner"]]
+    assert [argv[-2:] for argv in fake_uc.runner_imports(fake)] == [[TAG_IMPORT, "tables,cat.sch.tbl,owner"]]
     # A recorded import that fails fails the release (it was verified to exist).
     failing = _run(data_access, fake | {"FAKE_UC_FAIL_IMPORT": "1"}, "--skip-treatment-tags",
                    f"--apply-recorded={record}")
@@ -386,7 +386,7 @@ def test_what_release_plan_records_release_runs(tmp_path):
     result = _run(data_access, fake, "--skip-treatment-tags", f"--apply-recorded={record}")
     assert result.returncode == 0, result.stdout + result.stderr
     assert fake_uc.sql_writes(fake) == [CLEANUP["statement"]]
-    assert [argv[3] for argv in fake_uc.runner_imports(fake)] == [TAG_IMPORT]
+    assert [argv[-2] for argv in fake_uc.runner_imports(fake)] == [TAG_IMPORT]
 
 
 def test_record_mode_needs_the_envs_own_warehouse_for_a_cleanup(tmp_path):
@@ -548,7 +548,12 @@ def test_a_configuration_error_is_not_blamed_on_the_object(tmp_path, hard_error)
      "Error: failed to configure provider: authentication failed\n",
      "authentication failed"),
     ("Error: PERMISSION_DENIED: cannot read policy t_a404f\n", "PERMISSION_DENIED"),
+    ("\x1b[31m│\x1b[0m \x1b[0m\x1b[1m\x1b[31mError: PERMISSION_DENIED: cannot read policy t_a404f\x1b[0m\n",
+     "PERMISSION_DENIED"),
+    ("Error: PERMISSION_DENIED: cannot read policy t_a404f (or it does not exist)\n", "PERMISSION_DENIED"),
     ("Error: Configuration for import target does not exist\n", "Configuration for import target does not exist"),
+    ("\x1b[31m│\x1b[0m \x1b[0m\x1b[1m\x1b[31mError: Configuration for import target does not exist\x1b[0m\n",
+     "Configuration for import target does not exist"),
 ])
 def test_only_provider_missing_object_errors_are_soft_import_misses(tmp_path, terraform_output, expected):
     data_access = tmp_path / "env" / "data_access"
@@ -581,6 +586,7 @@ def test_only_provider_missing_object_errors_are_soft_import_misses(tmp_path, te
 
 @pytest.mark.parametrize("terraform_output", [
     "Error: Cannot import non-existent remote object\n",
+    "\x1b[31m│\x1b[0m \x1b[0m\x1b[1m\x1b[31mError: Cannot import non-existent remote object\n",
     "Error: RESOURCE_DOES_NOT_EXIST: policy missing\n",
     "Error: remote object does not exist\n",
 ])
