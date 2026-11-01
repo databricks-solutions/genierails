@@ -427,6 +427,7 @@ def test_the_lock_holder_writes_with_its_nonce_and_nothing_else_stands_in_for_it
     try:
         wrong = tmp_path / "wrong-nonce"
         wrong.write_text("0" * 64 + "\n")
+        wrong.chmod(0o600)
         assert _full_split(dev, account, "--account-lock-nonce-file", str(wrong)).returncode == 1
         # Not inferable from the environment: the inherited nonce variable alone is no pass.
         monkeypatch.setenv(environment_lock.nonce_var(account.parent), nonce)
@@ -435,6 +436,7 @@ def test_the_lock_holder_writes_with_its_nonce_and_nothing_else_stands_in_for_it
         assert not account.exists()
         right = tmp_path / "nonce"
         right.write_text(nonce + "\n")
+        right.chmod(0o600)
         written = _full_split(dev, account, "--account-lock-nonce-file", str(right))
         assert written.returncode == 0, written.stdout + written.stderr
         assert "Wrote shared account config" in written.stdout and _groups(account) == ["dev_analysts"]
@@ -482,3 +484,65 @@ def test_a_stale_account_lock_after_kill_9_does_not_block_the_split(tmp_path, mo
     ok, message, _ = environment_lock.acquire(account.parent, os.getpid(), "account-plan")
     assert ok and "removed stale lock from dead pid" in message
     environment_lock.release_lock(account.parent, os.getpid())
+
+
+# ── the holder's nonce file must be a private regular file (PR #297 r4) ──────
+
+@pytest.mark.parametrize("shape, message", [
+    ("mode-0644", "has mode 0644; it must be exactly 0600"),
+    ("mode-0640", "has mode 0640; it must be exactly 0600"),
+    ("symlink", "is a symlink"),
+    ("directory", "is not a regular file"),
+    ("fifo", "is not a regular file"),
+])
+def test_the_holders_nonce_only_counts_from_a_private_regular_file(tmp_path, monkeypatch, shape, message):
+    """Codex r3: the right nonce in a 0644 file, or behind a symlink, still let a non-holder write."""
+    import subprocess
+
+    from scripts import environment_lock
+
+    account = _account_env(tmp_path, monkeypatch)
+    dev = _draft(tmp_path, "dev", "dev_analysts")
+    ok, held, nonce = environment_lock.acquire(account.parent, os.getpid(), "rehearse")  # this process: an ancestor
+    assert ok, held
+    try:
+        private = tmp_path / "private-nonce"
+        private.write_text(nonce + "\n")
+        private.chmod(0o600)
+        given = tmp_path / "given-nonce"
+        if shape.startswith("mode-"):
+            given.write_text(nonce + "\n")
+            given.chmod(int(shape[5:], 8))
+        elif shape == "symlink":
+            given.symlink_to(private)  # the right nonce, in a private file, but through a link
+        elif shape == "directory":
+            given.mkdir()
+            given.chmod(0o700)
+        else:
+            os.mkfifo(given, 0o600)
+        result = subprocess.run([sys.executable, str(SPLIT), "--account-lock-nonce-file", str(given),
+                                 "--account-only", str(dev), str(account)], capture_output=True, text=True, timeout=60)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert f"the account lock nonce file {given} {message}; nothing was written." in result.stdout
+        assert not account.exists()
+        # The same nonce in a private regular file is the holder's pass.
+        passed = subprocess.run([sys.executable, str(SPLIT), "--account-lock-nonce-file", str(private),
+                                 "--account-only", str(dev), str(account)], capture_output=True, text=True, timeout=60)
+        assert passed.returncode == 0, passed.stdout + passed.stderr
+        assert _groups(account) == ["dev_analysts"]
+    finally:
+        environment_lock.release_lock(account.parent, os.getpid())
+
+
+def test_a_nonce_file_of_another_owner_is_refused(tmp_path, monkeypatch):
+    """chown needs root, so the owner check is shown by running the check as another uid."""
+    import split_abac_config as split
+
+    nonce = tmp_path / "nonce"
+    nonce.write_text("ab" * 32 + "\n")
+    nonce.chmod(0o600)
+    assert split.read_lock_nonce(nonce) == "ab" * 32
+    other = os.getuid() + 1
+    monkeypatch.setattr(split.os, "getuid", lambda: other)
+    with pytest.raises(split.AccountFileError, match=rf"is owned by uid {os.stat(nonce).st_uid}, not this user \({other}\)"):
+        split.read_lock_nonce(nonce)

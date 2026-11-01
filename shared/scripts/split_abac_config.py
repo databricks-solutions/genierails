@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -526,6 +527,43 @@ def merge_account_file(full_cfg: dict, account_path: Path, lock_nonce: str = "")
         raise AccountFileError(f"{exc}. Nothing was written.") from exc
 
 
+def read_lock_nonce(path: Path) -> str:
+    """The account lock's nonce from the file the lock holder wrote; refuses anything but a private file.
+
+    One open, never through a link (O_NOFOLLOW; O_NONBLOCK so a FIFO can't
+    hang it), then fstat of that same descriptor: a regular file of this
+    user, mode exactly 0600. The nonce is read from that descriptor, so the
+    file checked is the file read.
+    """
+    refused = f"the account lock nonce file {path} "
+    tail = "; nothing was written."
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP or path.is_symlink():
+            raise AccountFileError(refused + "is a symlink" + tail) from exc
+        raise AccountFileError(refused + f"can't be opened ({exc.strerror})" + tail) from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise AccountFileError(refused + "is not a regular file" + tail)
+        if info.st_uid != os.getuid():
+            raise AccountFileError(refused + f"is owned by uid {info.st_uid}, not this user ({os.getuid()})" + tail)
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise AccountFileError(refused + f"has mode {stat.S_IMODE(info.st_mode):04o}; it must be exactly 0600" + tail)
+        data = b""
+        while len(data) <= 4096:
+            chunk = os.read(fd, 4097 - len(data))
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > 4096:
+            raise AccountFileError(refused + "is too large to be a lock nonce" + tail)
+    finally:
+        os.close(fd)
+    return data.decode("ascii", "replace").strip()
+
+
 def main():
     # --account-only <draft> <account file>: write only the shared account file,
     # exactly as the full split would. rehearse's and release's account step
@@ -539,9 +577,9 @@ def main():
             print("ERROR: --account-lock-nonce-file needs a file")
             sys.exit(1)
         try:
-            lock_nonce = Path(argv[at + 1]).read_text().strip()
-        except OSError as exc:
-            print(f"ERROR: cannot read the account lock nonce file: {exc}")
+            lock_nonce = read_lock_nonce(Path(argv[at + 1]))
+        except AccountFileError as exc:
+            print(f"ERROR: {exc}")
             sys.exit(1)
         del argv[at:at + 2]
     account_only = argv[1:2] == ["--account-only"]

@@ -1303,7 +1303,9 @@ _apply-account-locked: _guard-not-databricks-compute
 # lock's mutex (environment_lock.py mutex) and, when their part changes the
 # file, refuse with nothing written while another live run holds the lock;
 # this step, the holder, passes its lock's nonce in a file only it wrote
-# (--account-lock-nonce-file). An unchanged part needs no lock; a stale lock
+# (--account-lock-nonce-file: created 0600 and exclusively in its private
+# temp dir; the split refuses a link, a non-regular file, another owner's or
+# any mode but 0600). An unchanged part needs no lock; a stale lock
 # (dead pid) doesn't block. The write is atomic, never through a symlink.
 # Lock order: env lock, then account lock, then its mutex; the account lock
 # is never held while waiting for an env lock, and neither lock is waited
@@ -1338,7 +1340,7 @@ override _ACCOUNT_APPROVE_APPLY = ( \
 	esac; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ] && git -C "$(ACCOUNT_ENV_DIR)" check-ignore -q abac.auto.tfvars 2>/dev/null; then \
 		trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; \
-		(umask 077; $(_ENV_LOCK_HELPER) lock "$(ACCOUNT_ENV_DIR)" --pid $$$$ --owner $(1) --env "$(ACCOUNT_ENV)" > "$$ap_tmp/account-lock") || { \
+		(umask 077; set -C; $(_ENV_LOCK_HELPER) lock "$(ACCOUNT_ENV_DIR)" --pid $$$$ --owner $(1) --env "$(ACCOUNT_ENV)" > "$$ap_tmp/account-lock") || { \
 			echo "$(1): the shared account layer is locked by another run (above); nothing was written, approved or applied, and $(ENV) was not locked. Re-run make $(1) ENV=$(ENV) when it finishes." >&2; exit 1; }; \
 		acct_lock=1; \
 		gen_abac="$$($(_OVERLAY) path --env-dir "$(ENV_DIR)" abac.auto.tfvars)" && \
