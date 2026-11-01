@@ -523,13 +523,17 @@ def test_promote_release_steps_name_the_offer_instead_of_git(tmp_path):
     assert "make release-plan ENV=prod" in offered
 
 
-def test_will_offer_follows_the_same_rules(checkout):
+@pytest.mark.parametrize("step", ["generate", "promote-to"])
+def test_will_offer_follows_the_same_rules(checkout, step):
     cloud = _cloud(checkout)
-    args = (cloud, "dev", cloud / "envs" / "dev", "generate")
+    args = (cloud, "dev", cloud / "envs" / "dev", step)
     assert commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "ask"}, tty=True)
     assert not commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "ask"}, tty=False)
     assert not commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "0"}, tty=True)
     assert not commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "ask", "CI": "true"}, tty=True)
+    assert not commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "ask", "GENIERAILS_INTERACTIVE": "0"}, tty=True)
+    # The shared switch can only turn the implicit question off; explicit COMMIT=1 remains automatic.
+    assert commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "1", "GENIERAILS_INTERACTIVE": "0"}, tty=False)
     assert commit_envs.will_offer(*args, environ={"GENIERAILS_COMMIT": "1"}, tty=False)
     assert not commit_envs.will_offer(*args, environ={}, tty=True)  # outside make: never
 
@@ -771,6 +775,24 @@ def test_make_setup_ci_no_tty_and_opt_out_keep_git_unchanged(tmp_path, mode):
     assert not _git(checkout, "diff", "--cached", "--name-only")
 
 
+def test_genierails_interactive_zero_disables_setup_offer_but_explicit_commit_one_wins(tmp_path):
+    quiet = _fresh_setup_clone(tmp_path / "quiet")
+    quiet_head = _git(quiet, "rev-parse", "HEAD")
+    code, out = _pty_run(_setup_cmd(quiet), None,
+                         _make_env(tmp_path, GENIERAILS_INTERACTIVE="0"))
+    assert code == 0, out
+    assert PROMPT not in out and "=== Commit" not in out
+    assert _git(quiet, "rev-parse", "HEAD") == quiet_head
+
+    forced = _fresh_setup_clone(tmp_path / "forced")
+    forced_head = _git(forced, "rev-parse", "HEAD")
+    code, out = _pty_run(_setup_cmd(forced, "COMMIT=1"), None,
+                         _make_env(tmp_path, GENIERAILS_INTERACTIVE="0"))
+    assert code == 0, out
+    assert PROMPT not in out and "=== Commit dev's changes (.gitignore, envs/dev/ and envs/account/) ===" in out
+    assert _git(forced, "rev-parse", "HEAD~1") == forced_head
+
+
 def test_direct_internal_setup_target_never_enables_the_commit_offer(tmp_path):
     checkout = _fresh_setup_clone(tmp_path)
     head = _git(checkout, "rev-parse", "HEAD")
@@ -807,12 +829,15 @@ def test_make_promote_to_answer_n_leaves_git_unchanged(repo, tmp_path):
     assert not _git(repo, "diff", "--cached", "--name-only")
 
 
-@pytest.mark.parametrize("how", ["no-tty", "shell-commit-1", "shell-genierails-commit-1", "commit-0-tty"])
+@pytest.mark.parametrize("how", ["no-tty", "shell-commit-1", "shell-genierails-commit-1", "commit-0-tty",
+                                 "interactive-0-tty"])
 def test_make_promote_to_without_a_prompt_is_unchanged(repo, tmp_path, how):
     repo = _customer_promote_repo(repo)
     head = _git(repo, "rev-parse", "HEAD")
-    if how == "commit-0-tty":
-        code, out = _pty_run(_make_cmd(repo, "COMMIT=0"), None, _make_env(tmp_path))
+    if how in ("commit-0-tty", "interactive-0-tty"):
+        args = _make_cmd(repo, "COMMIT=0") if how == "commit-0-tty" else _make_cmd(repo)
+        extra = {"GENIERAILS_INTERACTIVE": "0"} if how == "interactive-0-tty" else {}
+        code, out = _pty_run(args, None, _make_env(tmp_path, **extra))
     else:
         extra = {"shell-commit-1": {"COMMIT": "1"}, "shell-genierails-commit-1": {"GENIERAILS_COMMIT": "1"}}.get(how, {})
         result = subprocess.run(_make_cmd(repo), text=True, capture_output=True, stdin=subprocess.DEVNULL,

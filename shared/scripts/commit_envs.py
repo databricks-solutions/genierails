@@ -150,6 +150,8 @@ def mode(environ: Mapping[str, str], interactive: bool) -> str:
         return ""
     if commit == "1":
         return "auto"
+    if environ.get("GENIERAILS_INTERACTIVE") == "0":
+        return ""
     return "ask" if interactive else ""
 
 
