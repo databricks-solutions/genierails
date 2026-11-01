@@ -915,9 +915,8 @@ def remote_names(repo: Path) -> list[str]:
     return sorted(names)
 
 
-def _config_values(repo: Path, key: str, *, local: bool = False) -> list[str]:
-    args = ("config", "--local", "--get-all", key) if local else ("config", "--get-all", key)
-    out = git(repo, *args, check=False)
+def _config_values(repo: Path, key: str) -> list[str]:
+    out = git(repo, "config", "--get-all", key, check=False)
     return out.stdout.splitlines() if out.returncode == 0 else []
 
 
@@ -928,12 +927,12 @@ def _url_rewrites(repo: Path) -> list[str]:
 
 
 def _remote_url(repo: Path, remote: str) -> str:
-    urls = _config_values(repo, f"remote.{remote}.url", local=True)
+    urls = _config_values(repo, f"remote.{remote}.url")
     return urls[0] if len(urls) == 1 else ""
 
 
 def _remote_pushurls(repo: Path, remote: str) -> list[str]:
-    return _config_values(repo, f"remote.{remote}.pushurl", local=True)
+    return _config_values(repo, f"remote.{remote}.pushurl")
 
 
 def _canonical_upstream_url(url: str) -> bool:

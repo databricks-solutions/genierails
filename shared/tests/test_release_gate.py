@@ -964,6 +964,92 @@ def test_account_provenance_ignores_fake_git_config_for_genierails_url(repo, mon
         rg.account_provenance(repo.cloud / "envs" / "account")
 
 
+def _genierails_only_account_change(repo: Repo) -> None:
+    repo.git("remote", "rename", "origin", "genierails")
+    repo.git("remote", "set-url", "genierails", rg.UPSTREAM_URL)
+    repo.commit({"aws/envs/account/env.auto.tfvars": "manage_groups = false\n# local\n"}, push=False)
+
+
+def _included_config(repo: Repo, tmp_path: Path, text: str) -> Path:
+    included = tmp_path / "included git config"
+    included.write_text(text)
+    repo.git("config", "include.path", str(included))
+    return included
+
+
+def _worktree_config(repo: Repo, text: str) -> None:
+    repo.git("config", "extensions.worktreeConfig", "true")
+    git_dir = Path(repo.git("rev-parse", "--git-dir"))
+    git_dir = git_dir if git_dir.is_absolute() else repo.root / git_dir
+    (git_dir / "config.worktree").write_text(text)
+
+
+def _assert_genierails_pushurl_refused(repo: Repo, match: str = "genierails pushurl points at") -> None:
+    with pytest.raises(rg.Refused, match=match):
+        rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+def _assert_genierails_url_refused(repo: Repo, match: str = "genierails has no fetch URL") -> None:
+    with pytest.raises(rg.Refused, match=match):
+        rg.account_provenance(repo.cloud / "envs" / "account")
+
+
+def test_account_provenance_refuses_included_genierails_pushurl(repo, tmp_path):
+    _genierails_only_account_change(repo)
+    _included_config(repo, tmp_path, '[remote "genierails"]\n\tpushurl = https://github.com/example/customer.git\n')
+    _assert_genierails_pushurl_refused(repo)
+
+
+def test_account_provenance_refuses_included_second_genierails_url(repo, tmp_path):
+    _genierails_only_account_change(repo)
+    _included_config(repo, tmp_path, '[remote "genierails"]\n\turl = https://github.com/example/customer.git\n')
+    _assert_genierails_url_refused(repo)
+
+
+def test_account_provenance_refuses_includeif_gitdir_genierails_pushurl(repo, tmp_path):
+    _genierails_only_account_change(repo)
+    included = tmp_path / "conditional config"
+    included.write_text('[remote "genierails"]\n\tpushurl = https://github.com/example/customer.git\n')
+    repo.git("config", f"includeIf.gitdir:{repo.root}/.path", str(included))
+    _assert_genierails_pushurl_refused(repo)
+
+
+def test_account_provenance_refuses_global_genierails_pushurl(repo):
+    _genierails_only_account_change(repo)
+    Path(repo.env["GIT_CONFIG_GLOBAL"]).write_text(
+        Path(repo.env["GIT_CONFIG_GLOBAL"]).read_text()
+        + '[remote "genierails"]\n\tpushurl = https://github.com/example/customer.git\n')
+    _assert_genierails_pushurl_refused(repo)
+
+
+def test_account_provenance_refuses_worktree_config_genierails_pushurl(repo):
+    _genierails_only_account_change(repo)
+    _worktree_config(repo, '[remote "genierails"]\n\tpushurl = https://github.com/example/customer.git\n')
+    _assert_genierails_pushurl_refused(repo)
+
+
+def test_account_provenance_refuses_worktree_config_extra_genierails_url(repo):
+    _genierails_only_account_change(repo)
+    _worktree_config(repo, '[remote "genierails"]\n\turl = https://github.com/example/customer.git\n')
+    _assert_genierails_url_refused(repo)
+
+
+def test_account_provenance_refuses_git_config_count_genierails_pushurl(repo, monkeypatch):
+    _genierails_only_account_change(repo)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "remote.genierails.pushurl")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/example/customer.git")
+    _assert_genierails_pushurl_refused(repo)
+
+
+def test_account_provenance_refuses_git_config_count_genierails_url(repo, monkeypatch):
+    _genierails_only_account_change(repo)
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "remote.genierails.url")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "https://github.com/example/customer.git")
+    _assert_genierails_url_refused(repo)
+
+
 @pytest.mark.parametrize("key", ["insteadOf", "pushInsteadOf"])
 def test_account_provenance_refuses_url_rewrite_config(repo, key):
     repo.git("remote", "rename", "origin", "genierails")
