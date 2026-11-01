@@ -1,5 +1,6 @@
 """Tests for splitting generated ABAC configuration into ownership layers."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -363,3 +364,121 @@ def test_the_account_file_is_replaced_atomically_keeping_its_mode(tmp_path, monk
     assert account.stat().st_ino != inode and oct(account.stat().st_mode & 0o777) == oct(0o640)  # renamed into place
     assert not [p for p in account.parent.iterdir() if p.name.endswith(".tmp")]
     assert os.path.isfile(account) and not account.is_symlink()
+
+
+# ── every writer of the account file respects the account lock (PR #297 r3) ──
+
+def _full_split(dev, account, *extra):
+    import subprocess
+
+    layer = dev.parent.parent
+    return subprocess.run([sys.executable, str(SPLIT), *extra, str(dev), str(account), str(layer / "da.tfvars"),
+                           str(layer / "ws.tfvars")], capture_output=True, text=True)
+
+
+def _holder(tmp_path):
+    """A live process that holds the account lock, as another run's make recipe would."""
+    import subprocess
+
+    return subprocess.Popen(["sleep", "300"])
+
+
+LOCKED = "the shared account layer is locked by another run (make rehearse, pid "
+
+
+@pytest.mark.parametrize("mode", ["full", "account-only"])
+def test_a_split_that_changes_the_account_file_is_refused_while_another_run_holds_the_account_lock(
+        tmp_path, monkeypatch, mode):
+    """Codex r2 (repro): acquire(account, holder_pid, 'rehearse'); a full split still wrote the account file."""
+    import subprocess
+
+    from scripts import environment_lock
+
+    account = _account_env(tmp_path, monkeypatch)
+    account.write_text('groups = {\n  viewers = { description = "" }\n}\n')
+    before = account.read_bytes()
+    dev = _draft(tmp_path, "dev", "dev_analysts")
+    holder = _holder(tmp_path)
+    try:
+        ok, message, _ = environment_lock.acquire(account.parent, holder.pid, "rehearse")
+        assert ok, message
+        result = (_full_split(dev, account) if mode == "full" else subprocess.run(
+            [sys.executable, str(SPLIT), "--account-only", str(dev), str(account)], capture_output=True, text=True))
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert LOCKED + str(holder.pid) in result.stdout and "nothing was written" in result.stdout
+        assert account.read_bytes() == before
+        layer = dev.parent.parent
+        assert not (layer / "da.tfvars").exists() and not (layer / "ws.tfvars").exists()
+        assert environment_lock.owns_lock(account.parent, holder.pid)
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_the_lock_holder_writes_with_its_nonce_and_nothing_else_stands_in_for_it(tmp_path, monkeypatch):
+    import os
+
+    from scripts import environment_lock
+
+    account = _account_env(tmp_path, monkeypatch)
+    dev = _draft(tmp_path, "dev", "dev_analysts")
+    ok, message, nonce = environment_lock.acquire(account.parent, os.getpid(), "rehearse")  # this process: an ancestor
+    assert ok, message
+    try:
+        wrong = tmp_path / "wrong-nonce"
+        wrong.write_text("0" * 64 + "\n")
+        assert _full_split(dev, account, "--account-lock-nonce-file", str(wrong)).returncode == 1
+        # Not inferable from the environment: the inherited nonce variable alone is no pass.
+        monkeypatch.setenv(environment_lock.nonce_var(account.parent), nonce)
+        refused = _full_split(dev, account)
+        assert refused.returncode == 1 and "is locked by another run" in refused.stdout
+        assert not account.exists()
+        right = tmp_path / "nonce"
+        right.write_text(nonce + "\n")
+        written = _full_split(dev, account, "--account-lock-nonce-file", str(right))
+        assert written.returncode == 0, written.stdout + written.stderr
+        assert "Wrote shared account config" in written.stdout and _groups(account) == ["dev_analysts"]
+    finally:
+        environment_lock.release_lock(account.parent, os.getpid())
+
+
+def test_an_unchanged_account_part_writes_nothing_and_needs_no_lock(tmp_path, monkeypatch):
+    import split_abac_config as split
+    from scripts import environment_lock
+
+    account = _account_env(tmp_path, monkeypatch)
+    dev = _draft(tmp_path, "dev", "dev_analysts")
+    assert split.merge_account_file({"groups": {"dev_analysts": {"description": ""}}}, account) is True
+    before, inode = account.read_bytes(), account.stat().st_ino
+    holder = _holder(tmp_path)
+    try:
+        assert environment_lock.acquire(account.parent, holder.pid, "rehearse")[0]
+        result = _full_split(dev, account)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"  Shared account config unchanged: {account}" in result.stdout
+        assert account.read_bytes() == before and account.stat().st_ino == inode  # not even rewritten
+        assert (dev.parent.parent / "da.tfvars").exists() and (dev.parent.parent / "ws.tfvars").exists()
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def test_a_stale_account_lock_after_kill_9_does_not_block_the_split(tmp_path, monkeypatch):
+    import signal
+    import subprocess
+
+    from scripts import environment_lock
+
+    account = _account_env(tmp_path, monkeypatch)
+    dev = _draft(tmp_path, "dev", "dev_analysts")
+    holder = subprocess.Popen(["sleep", "300"])
+    assert environment_lock.acquire(account.parent, holder.pid, "rehearse")[0]
+    holder.send_signal(signal.SIGKILL)
+    holder.wait()
+    result = _full_split(dev, account)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _groups(account) == ["dev_analysts"]
+    # And the next lock taker still recovers it as before.
+    ok, message, _ = environment_lock.acquire(account.parent, os.getpid(), "account-plan")
+    assert ok and "removed stale lock from dead pid" in message
+    environment_lock.release_lock(account.parent, os.getpid())

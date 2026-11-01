@@ -34,6 +34,9 @@ import sys
 from pathlib import Path
 
 SKIP = frozenset({".terraform"})
+# The env lock and its mutex (scripts/environment_lock.py): live coordination
+# between runs, never part of a promotion, so never snapshotted, restored or removed.
+SKIP_FILES = frozenset({".governance.lock", ".governance.guard"})
 MANIFEST = "manifest.json"
 
 
@@ -45,7 +48,8 @@ def _walk(root: Path):
         for name in dirs:
             yield base / name
         for name in sorted(files):
-            yield base / name
+            if name not in SKIP_FILES:
+                yield base / name
 
 
 def snapshot(dirs: list[Path], to: Path) -> None:

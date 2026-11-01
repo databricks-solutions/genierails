@@ -160,6 +160,8 @@ _is_own_env_dir = { [ -n "$(GENIERAILS_CLOUD_DIR)" ] && _own=$$(CDPATH= cd -P "$
 override _WALKTHROUGH_DIR = $(SHARED_ROOT)/examples/dev_to_prod
 override _SETUP_AGENT_NAME = Finance Analytics
 override _SETUP_AGENT_FILE = $(_SETUP_AGENT_NAME).auto.tfvars
+# The account env's old-layout generated/ is removed, except the account lock
+# (generated/.governance.lock) and its mutex file: a live run's lock, never a leftover.
 _prepare-env:
 	@envs="$(ENV)"; \
 	if [ "$(ENV)" != "$(ACCOUNT_ENV)" ] && [ "$(ENV)" != "$(DATA_ACCESS_SUBDIR)" ]; then \
@@ -189,7 +191,13 @@ _prepare-env:
 			done; \
 		fi; \
 		if [ "$$env_name" = "$(ACCOUNT_ENV)" ]; then \
-			if [ -n "$$owned" ]; then rm -rf "$$env_dir/ddl" "$$env_dir/generated" "$$env_dir/$(DATA_ACCESS_SUBDIR)" || exit 1; fi; \
+			if [ -n "$$owned" ]; then \
+				rm -rf "$$env_dir/ddl" "$$env_dir/$(DATA_ACCESS_SUBDIR)" || exit 1; \
+				if [ -d "$$env_dir/generated" ] && [ ! -L "$$env_dir/generated" ]; then \
+					find "$$env_dir/generated" -mindepth 1 -maxdepth 1 ! -name .governance.lock ! -name .governance.guard -exec rm -rf {} + || exit 1; \
+					rmdir "$$env_dir/generated" 2>/dev/null || true; \
+				else rm -rf "$$env_dir/generated" || exit 1; fi; \
+			fi; \
 		else \
 			mkdir -p "$$env_dir/ddl" "$$env_dir/generated" || exit 1; \
 			gov_dir="$$env_dir/$(DATA_ACCESS_SUBDIR)"; \
@@ -1290,12 +1298,20 @@ _apply-account-locked: _guard-not-databricks-compute
 # file as it is, as before. The merge and that first plan run under the
 # account lock (the one account-plan and apply-account take; a held lock
 # refuses before anything is written), released before account-plan takes it
-# again. Lock order: the account lock is a leaf. This step takes it holding
-# no env lock; under an env lock only the account sync takes it; nothing
-# holding it takes an env lock. Every merge into the file, this one and each
-# env's split, is also atomic under the account lock's mutex
-# (environment_lock.py mutex), so no env's part is lost; the file is never
-# written through a symlink. An outputs-only plan (no resource changes) still
+# again. Every writer of the file respects that lock: each env's split
+# (promote, promote-to, apply's promote) and this merge run under the account
+# lock's mutex (environment_lock.py mutex) and, when their part changes the
+# file, refuse with nothing written while another live run holds the lock;
+# this step, the holder, passes its lock's nonce in a file only it wrote
+# (--account-lock-nonce-file). An unchanged part needs no lock; a stale lock
+# (dead pid) doesn't block. The write is atomic, never through a symlink.
+# Lock order: env lock, then account lock, then its mutex; the account lock
+# is never held while waiting for an env lock, and neither lock is waited
+# on: a held one refuses. The window between releasing the lock here and
+# account-plan taking it is not closed (account-plan and apply-account own
+# their lock, its owner and nonce): another env's split may add its part
+# there; account-plan then plans the file as it is, and apply-account
+# refuses under its lock if the account inputs changed after account-plan. An outputs-only plan (no resource changes) still
 # asks: the guard refuses any non-empty plan, and applying it is what empties
 # it. A macro, not a target: approval.py asks only in the
 # top-level make's own recipe. The subshell keeps its per-run approval nonce
@@ -1322,11 +1338,11 @@ override _ACCOUNT_APPROVE_APPLY = ( \
 	esac; \
 	if [ -f "$(ENV_DIR)/generated/abac.auto.tfvars" ] && git -C "$(ACCOUNT_ENV_DIR)" check-ignore -q abac.auto.tfvars 2>/dev/null; then \
 		trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; \
-		$(_ENV_LOCK_HELPER) lock "$(ACCOUNT_ENV_DIR)" --pid $$$$ --owner $(1) --env "$(ACCOUNT_ENV)" >/dev/null || { \
+		(umask 077; $(_ENV_LOCK_HELPER) lock "$(ACCOUNT_ENV_DIR)" --pid $$$$ --owner $(1) --env "$(ACCOUNT_ENV)" > "$$ap_tmp/account-lock") || { \
 			echo "$(1): the shared account layer is locked by another run (above); nothing was written, approved or applied, and $(ENV) was not locked. Re-run make $(1) ENV=$(ENV) when it finishes." >&2; exit 1; }; \
 		acct_lock=1; \
 		gen_abac="$$($(_OVERLAY) path --env-dir "$(ENV_DIR)" abac.auto.tfvars)" && \
-		python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" --account-only "$$gen_abac" "$(ACCOUNT_ENV_DIR)/abac.auto.tfvars" || { \
+		python3 "$(SHARED_ROOT)/scripts/split_abac_config.py" --account-lock-nonce-file "$$ap_tmp/account-lock" --account-only "$$gen_abac" "$(ACCOUNT_ENV_DIR)/abac.auto.tfvars" || { \
 			echo "$(1): $(ENV)'s account config could not be written to $(ACCOUNT_ENV_DIR)/abac.auto.tfvars (above); nothing was approved or applied, and $(ENV) was not locked." >&2; exit 1; }; \
 	fi; \
 	plan_rc=0; LAYER_ENV_DIR="$(ACCOUNT_ENV_DIR)" "$(ROOT_RUNNER)" account $(ACCOUNT_ENV) plan -input=false -detailed-exitcode >/dev/null || plan_rc=$$?; \

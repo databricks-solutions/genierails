@@ -74,11 +74,45 @@ def mutex(env_dir: Path):
 
     split_abac_config.py merges every env's account part into the shared
     envs/account/abac.auto.tfvars under the account env's mutex, so two
-    merges never lose each other's part. Hold it only for that write and take
-    nothing inside it: the governance lock is taken outside it, so it can
-    never wait on one.
+    merges never lose each other's part, and the lock can't be taken or
+    released while it decides (``live_holder``, ``holds``). Hold it only for
+    that write and wait on nothing inside it: a held lock refuses, never waits.
     """
     return _guard(env_dir)
+
+
+def live_holder(env_dir: Path) -> dict | None:
+    """Under ``mutex``: the lock's record while a live run holds it; None when free or stale.
+
+    Stale is what ``acquire`` removes: a lock of this host whose pid is dead
+    (kill -9). An unreadable lock, or one of another host, counts as held.
+    Reads no process table, so it works without ps.
+    """
+    path = lock_path(env_dir)
+    if not (path.exists() or path.is_symlink()):
+        return None
+    held = _read_lock(path)
+    if held is None:
+        return {"owner": "?", "pid": "?", "host": "?", "started_at": f"unreadable {path}"}
+    if held["host"] == socket.gethostname() and not _pid_alive(held["pid"]):
+        return None
+    return held
+
+
+def holds(env_dir: Path, nonce: str) -> bool:
+    """Under ``mutex``: True when ``nonce`` is the lock's and its holder is a live ancestor of this process.
+
+    The nonce is the one ``lock`` printed to the run that took the lock; the
+    caller passes it explicitly (a file the run wrote), never from the environment.
+    """
+    held = _read_lock(lock_path(env_dir))
+    if not held or not nonce or not isinstance(held.get("nonce"), str) or not isinstance(held.get("pid_start"), str):
+        return False
+    if not hmac.compare_digest(held["nonce"], nonce):
+        return False
+    if held["host"] != socket.gethostname() or held["pid"] not in _ancestors():
+        return False
+    return bool(held["pid_start"]) and process_start(held["pid"]) == held["pid_start"]
 
 
 def _read_lock(path: Path):
