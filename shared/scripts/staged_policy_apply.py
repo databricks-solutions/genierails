@@ -248,6 +248,35 @@ def _with_state_principals(policy: dict, principals: dict) -> dict:
     }
 
 
+def _sql_function_names(sql: str) -> set[str]:
+    return {pg.function_name(stmt) for _, _, stmt in pg._statements(sql) if pg.function_name(stmt)}
+
+
+def _content_versioned_policy_functions(functions_sql: str, desired_by_name: dict[str, dict],
+                                        names: set[str]) -> list[str]:
+    """Reasons generated SQL cannot stand in for a missing masking_functions sql_hash."""
+    from governance_policies import parse_treatment_value
+
+    sql_functions = _sql_function_names(functions_sql)
+    problems = []
+    for name in sorted(names):
+        policy = desired_by_name[name]
+        function = ".".join(str(policy.get(k) or "").lower()
+                            for k in ("function_catalog", "function_schema", "function_name"))
+        function_short = str(policy.get("function_name") or "").lower()
+        if function_short not in sql_functions and function not in sql_functions:
+            problems.append(f"policy {name}'s function {function or 'none'} is not in generated SQL")
+            continue
+        value = pg.policy_value(policy)
+        parsed = parse_treatment_value(value)
+        expected_suffix = ""
+        if parsed:
+            expected_suffix = f"gr_mask_{value}_{'partial' if name.endswith('_partial') else 'full'}"
+        if not parsed or function_short != expected_suffix:
+            problems.append(f"policy {name}'s function name is not content-versioned")
+    return problems
+
+
 def _principal_only_adoption(env_dir: Path, live: dict, desired: dict, *,
                              allow_named_principal_drift: bool) -> tuple[dict | None, list[str]]:
     """A synthetic current generation when state differs from desired only by principals."""
@@ -265,7 +294,11 @@ def _principal_only_adoption(env_dir: Path, live: dict, desired: dict, *,
             problems.append(f"{column}: state has treatment {have or 'none'}, generated config has {want or 'none'}")
     desired_hash = pg.masking_sql_hash(desired.get("functions_sql") or "")
     if not live.get("sql_hash"):
-        problems.append("masking function SQL digest missing from state")
+        sql_problems = _content_versioned_policy_functions(
+            desired.get("functions_sql") or "", desired_by_name, live_names & desired_names)
+        if sql_problems:
+            problems.append("masking function SQL digest missing from state")
+            problems += sql_problems
     elif live["sql_hash"] != desired_hash:
         problems.append(f"masking function SQL digest differs (state {live['sql_hash']}, generated {desired_hash})")
     changed_principals = False
@@ -288,6 +321,8 @@ def _principal_only_adoption(env_dir: Path, live: dict, desired: dict, *,
                 for principal in sorted(set(live_policy[field]) - set(want[field])):
                     if principal != pg.UNKNOWN:
                         named_drift.append(f"policy {name} has unexpected live principal {principal!r} in {field}")
+            for principal in sorted(set(want["to"]) - set(live_policy["to"])):
+                named_drift.append(f"policy {name} removed expected live principal {principal!r} from to")
         adopted_policies.append(_with_state_principals(desired_policy, live_policy))
     if named_drift:
         problems += named_drift
