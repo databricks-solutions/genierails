@@ -762,6 +762,9 @@ genie_space_configs = {
 genie_space_id_to_name = { s1 = "Payments", s2 = "HR" }
 ''')
     (generated / "masking_functions.sql").write_text("-- none\n")
+    # Cross-env make promote is legacy-only; it refuses a destination whose mode it can't read.
+    (cloud / "envs" / "prod").mkdir()
+    (cloud / "envs" / "prod" / "env.auto.tfvars").write_text('governance_mode = "legacy"\n')
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     python = bin_dir / "python3"

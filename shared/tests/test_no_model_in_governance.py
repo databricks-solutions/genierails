@@ -321,13 +321,18 @@ def _clean_env(**extra):
 
 
 def test_the_stub_env_clears_every_ci_marker_a_guard_reads():
+    from scripts import ci_guard
     from tests.script_stubs import CI_ENV_MARKERS, without_ci
 
+    # The Makefile's guards ask scripts/ci_guard.py; no recipe reads a marker itself.
     makefile = MAKEFILE.read_text()
-    read = set(re.findall(r"\$\$([A-Z][A-Z0-9_]*)", "".join(
-        line for line in makefile.splitlines() if "ci_value" in line or "$$TF_BUILD" in line)))
+    markers = {"CI", *ci_guard.CI_MARKERS, *ai_helpers.CI_MARKERS}
+    assert not [m for m in markers if re.search(rf"\$\$\{{?{m}\b", makefile)]
+    source = (SHARED / "scripts" / "ci_guard.py").read_text()
+    assert set(re.findall(r"environ(?:\.get\(|\[)[\"']([A-Za-z0-9_]+)", source)) == {"CI"}
+    read = {"CI", *ci_guard.CI_MARKERS, ci_guard.ALLOW_CI_APPLY}
     assert {"CI", "TF_BUILD", "JENKINS_URL", "GITLAB_CI", "BUILDKITE", "CIRCLECI"} <= read
-    assert read - {"ci_value", "is_ci"} <= set(CI_ENV_MARKERS), read - set(CI_ENV_MARKERS)
+    assert read <= set(CI_ENV_MARKERS), read - set(CI_ENV_MARKERS)
     assert set(ai_helpers.CI_MARKERS) <= set(CI_ENV_MARKERS)
     assert without_ci({"TF_BUILD": "True", "BUILD_BUILDID": "1", "CI": "true", "PATH": "/bin"}) == {"PATH": "/bin"}
 
