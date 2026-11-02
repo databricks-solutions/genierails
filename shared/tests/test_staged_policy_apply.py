@@ -384,6 +384,8 @@ class Harness:
         self.live_check = "strict"
         self.simulate_access = True
         self.agent_coverage_rc = 0
+        self.live_treatment_tags: dict[str, str] | None = None
+        self.live_read_error = ""
         monkeypatch.delenv("FAKE_TF_FAIL_APPLY", raising=False)
         monkeypatch.delenv("FAKE_TF_FAIL_PLAN", raising=False)
         monkeypatch.delenv("FAKE_TF_NO_WITHHOLD_USE", raising=False)
@@ -391,7 +393,16 @@ class Harness:
     def controller(self) -> spa.Controller:
         return spa.Controller(self.env_dir, "dev", hook_dir=Path("/hooks"), verify_access_cmd="simulated",
                               inventory_cmd=["inventory"], agent_coverage_cmd=["agent-coverage"],
-                              commit="abc123", run=self.run)
+                              commit="abc123", run=self.run, live_reader=self.read_live)
+
+    def read_live(self, env_dir, rendered, columns):
+        if self.live_read_error:
+            raise RuntimeError(self.live_read_error)
+        catalog_policies, table_policies, functions, tags = fake_reader(env_dir, rendered, columns)
+        if self.live_treatment_tags is not None:
+            wanted = {c.lower() for c in columns}
+            tags = {str(c).lower(): v for c, v in self.live_treatment_tags.items() if str(c).lower() in wanted}
+        return catalog_policies, table_policies, functions, tags
 
     def run(self, argv, env=None, check=False):
         env = dict(env or {})
@@ -427,7 +438,7 @@ class Harness:
             stages = set(argv[argv.index("--stage") + 1].split(","))
             self.calls.append("inventory:" + "/".join(sorted(stages)))
             # The real live check, reading "Unity Catalog" from the fake state.
-            problems = spv.verify(self.env_dir, stages, reader=fake_reader)
+            problems = spv.verify(self.env_dir, stages, reader=self.read_live)
             self.inventory_problems.append(problems)
             if self.live_check == "strict":
                 assert not problems, problems
@@ -1475,6 +1486,25 @@ def _remove_sql_hash(env_dir: Path) -> None:
     (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
 
 
+def _remove_treatment_tag_state(env_dir: Path) -> None:
+    state = live_state(env_dir)
+    state["resources"] = [r for r in state["resources"]
+                          if (r["type"], r["name"]) != ("databricks_entity_tag_assignment", "treatment")]
+    (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+
+
+def _aws_takeover_principal_drift(harness, *, with_existing_journal: bool) -> dict:
+    desired = released(harness, columns=tuple(f"field_{i}" for i in range(9)))
+    _replace_deleted_principals_with_unknown(harness.env_dir)
+    _remove_sql_hash(harness.env_dir)
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_treatment_tags = dict(desired["tags"])
+    if not with_existing_journal:
+        spa.journal_path(harness.env_dir).unlink()
+    harness.calls.clear()
+    return desired
+
+
 def _drop_first_policy(state: dict) -> None:
     for resource in state["resources"]:
         if (resource["type"], resource["name"]) == ("databricks_policy_info", "policies"):
@@ -1685,6 +1715,118 @@ def test_principal_only_adoption_accepts_post_import_state_with_deleted_tier_gro
         p["name"]: (p["to_principals"], p["except_principals"]) for p in desired["fgac_policies"]}
     state = live_state(harness.env_dir)
     assert _instances(state, "terraform_data", "masking_functions")
+
+
+@pytest.mark.parametrize("with_existing_journal", [False, True])
+def test_principal_only_adoption_accepts_post_import_state_with_live_treatment_tags(harness,
+                                                                                   with_existing_journal):
+    desired = released(harness)
+    _drift_policy_principals(harness.env_dir)
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_treatment_tags = dict(desired["tags"])
+    if not with_existing_journal:
+        spa.journal_path(harness.env_dir).unlink()
+    harness.calls.clear()
+
+    assert harness.apply() == 0
+
+    journal = harness.journal()
+    adoption = _adoption_history_entry(journal)
+    assert adoption["to"] == desired["fingerprint"]
+    assert journal["active"] == desired["fingerprint"]
+    assert harness.calls[:3] == ["create", "inventory:create/restore", "verify-access:create"]
+    assert "switch" in harness.calls and "verify-access:switch" in harness.calls
+    assert live_tags(live_state(harness.env_dir)) == desired["tags"]
+
+
+def test_principal_only_adoption_refuses_when_live_treatment_tag_differs_from_config(harness):
+    desired = released(harness)
+    _drift_policy_principals(harness.env_dir)
+    _remove_treatment_tag_state(harness.env_dir)
+    column = next(iter(desired["tags"]))
+    harness.live_treatment_tags = dict(desired["tags"]) | {column: "other__string__deadbeef"}
+    harness.calls.clear()
+
+    with pytest.raises(spa.Refused, match="live has treatment other__string__deadbeef"):
+        harness.apply()
+    assert harness.calls == []
+
+
+def test_principal_only_adoption_refuses_when_live_treatment_read_fails(harness):
+    released(harness)
+    _drift_policy_principals(harness.env_dir)
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_read_error = "warehouse unavailable"
+    harness.calls.clear()
+
+    with pytest.raises(spa.Refused, match="re-reading live gr_treatment tags.*warehouse unavailable"):
+        harness.apply()
+    assert harness.calls == []
+
+
+def test_principal_only_adoption_refuses_when_live_treatment_read_is_missing_a_column(harness):
+    desired = released(harness, columns=("email", "phone"))
+    _drift_policy_principals(harness.env_dir)
+    _remove_treatment_tag_state(harness.env_dir)
+    column = next(iter(desired["tags"]))
+    harness.live_treatment_tags = {c: v for c, v in desired["tags"].items() if c != column}
+    harness.calls.clear()
+
+    with pytest.raises(spa.Refused, match="live has treatment none"):
+        harness.apply()
+    assert harness.calls == []
+
+
+def test_principal_only_adoption_refuses_when_state_treatment_is_present_and_differs(harness):
+    desired = released(harness)
+    _drift_policy_principals(harness.env_dir)
+    state = live_state(harness.env_dir)
+    first = next(r for r in state["resources"] if r["name"] == "treatment")["instances"][0]["attributes"]
+    first["tag_value"] = "other__string__deadbeef"
+    (harness.env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+    harness.live_treatment_tags = dict(desired["tags"])
+    harness.calls.clear()
+
+    with pytest.raises(spa.Refused, match="state has treatment other__string__deadbeef"):
+        harness.apply()
+    assert harness.calls == []
+
+
+def test_no_journal_post_import_adoption_keeps_generated_restore_target_for_unknown_to_and_except(harness):
+    desired = _aws_takeover_principal_drift(harness, with_existing_journal=False)
+    harness.fail_verify = {"switch"}
+
+    assert harness.apply() == 1
+
+    assert "verify-access:create" in harness.calls
+    assert "tighten" not in harness.calls
+    t = harness.journal()["transition"]
+    assert t["restore_from"] == desired["fingerprint"]
+    assert t["render_from"] == desired["fingerprint"]
+    assert t["restored"]["generation"] == desired["fingerprint"]
+
+
+@pytest.mark.parametrize("with_existing_journal", [False, True])
+def test_preview_plan_and_run_agree_for_post_import_live_treatment_adoption(harness, tmp_path, capsys,
+                                                                           with_existing_journal):
+    _aws_takeover_principal_drift(harness, with_existing_journal=with_existing_journal)
+
+    assert harness.controller().describe() == 0
+    described = capsys.readouterr().out
+    assert "would refuse" not in described
+    assert "live has treatment none" not in described
+    assert "would run: create -> verify-created -> switch -> verify-switched -> grant" in described
+
+    out = tmp_path / "plan"
+    assert harness.controller().plan(out) == 0
+    planned = json.loads((out / spa.PHASES_FILE).read_text())
+    assert planned["transition"]["phases"] == ["create", "verify-created", "switch", "verify-switched", "grant"]
+    assert not planned["transition"]["tier_move"]
+
+    harness.calls.clear()
+    assert harness.apply() == 0
+    assert "verify-access:create" in harness.calls
+    assert "tighten" not in harness.calls
 
 
 def test_lost_journal_named_principal_adoption_restores_generated_principals_after_failed_switch(harness):

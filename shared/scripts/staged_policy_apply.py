@@ -293,7 +293,8 @@ def _missing_to_principals_not_deleted(live_to: list[str], want_to: list[str]) -
 
 
 def _principal_only_adoption(env_dir: Path, live: dict, desired: dict, *,
-                             allow_named_principal_drift: bool) -> tuple[dict | None, list[str]]:
+                             allow_named_principal_drift: bool,
+                             live_treatments: dict[str, str] | None = None) -> tuple[dict | None, list[str]]:
     """A synthetic current generation when state differs from desired only by principals."""
     problems: list[str] = []
     desired_by_name = {p["name"]: p for p in desired.get("fgac_policies") or []}
@@ -303,9 +304,18 @@ def _principal_only_adoption(env_dir: Path, live: dict, desired: dict, *,
         problems.append(f"policy {name} is in the state but not in the generated config")
     for name in sorted(desired_names - live_names):
         problems.append(f"policy {name} is in the generated config but missing from the state")
+    live_treatments = {str(k).lower(): str(v) for k, v in (live_treatments or {}).items()}
     for column in sorted(set(live["tags"]) | set(desired.get("tags") or {})):
         have, want = live["tags"].get(column), desired.get("tags", {}).get(column)
         if have != want:
+            live_value = live_treatments.get(column.lower())
+            if have is None and want is not None and live_value == want:
+                continue
+            if have is None and want is not None:
+                problems.append(
+                    f"{column}: state has treatment none, live has treatment {live_value or 'none'}, "
+                    f"generated config has {want}")
+                continue
             problems.append(f"{column}: state has treatment {have or 'none'}, generated config has {want or 'none'}")
     desired_hash = pg.masking_sql_hash(desired.get("functions_sql") or "")
     if not live.get("sql_hash"):
@@ -393,13 +403,17 @@ def _adopted_unverified(journal: dict, fingerprint: str) -> dict | None:
     return adopted if adopted.get("fingerprint") == fingerprint else None
 
 
-def state_problems(live: dict, active: dict | None, pending: list[dict]) -> list[str]:
+def state_problems(live: dict, active: dict | None, pending: list[dict],
+                   *, live_treatments: dict[str, str] | None = None) -> list[str]:
     """How the data_access state differs from what the journal says is live."""
     problems = []
     expected_tags = dict((active or {}).get("tags") or {})
+    live_treatments = {str(k).lower(): str(v) for k, v in (live_treatments or {}).items()}
     for column in sorted(live["tags"].keys() | expected_tags.keys()):
         have, want = live["tags"].get(column), expected_tags.get(column)
         if have != want:
+            if have is None and want is not None and live_treatments.get(column.lower()) == want:
+                continue
             problems.append(f"{column}: state has treatment {have or 'none'}, the journal expects {want or 'none'}")
     expected = _expected_live([g for g in [active] + pending if g])
     for name in sorted(live["policies"].keys() - expected.keys()):
@@ -463,7 +477,8 @@ class Controller:
                  verify_access_cmd: str = "", inventory_cmd: list[str] | None = None,
                  agent_coverage_cmd: list[str] | None = None,
                  commit: str = "", environ: dict | None = None, run=subprocess.run,
-                 verify_spec: str = "", verify_key: str = "", account_tfvars: Path | None = None):
+                 verify_spec: str = "", verify_key: str = "", account_tfvars: Path | None = None,
+                 live_reader=None):
         self.env_dir = env_dir.resolve()
         self.env_name = env_name or self.env_dir.name
         self.hook_dir = hook_dir
@@ -477,6 +492,7 @@ class Controller:
         self.verify_spec = verify_spec
         self.verify_key = verify_key
         self.account_tfvars = account_tfvars
+        self.live_reader = live_reader
 
     # -- journal -------------------------------------------------------------
     def _save(self, journal: dict) -> None:
@@ -487,6 +503,28 @@ class Controller:
     def _snapshot(self, fingerprint: str) -> dict | None:
         preview = getattr(self, "_preview_snapshots", {})
         return preview[fingerprint] if fingerprint in preview else pg.load_snapshot(self.env_dir, fingerprint)
+
+    def _principal_adoption_live_treatments(self, live: dict, desired: dict) -> dict[str, str] | None:
+        missing = sorted(
+            column for column, value in (desired.get("tags") or {}).items()
+            if value is not None and live.get("tags", {}).get(column) is None
+        )
+        if not missing:
+            return None
+        try:
+            if self.live_reader is None:
+                from scripts.staged_policy_verify import read_live
+                reader = read_live
+            else:
+                reader = self.live_reader
+            rendered = {"fgac_policies": desired.get("fgac_policies") or [], "tags": desired.get("tags") or {}}
+            _, _, _, tags = reader(self.env_dir, rendered, set(missing))
+            return {str(k).lower(): str(v) for k, v in (tags or {}).items()}
+        except Exception as exc:
+            raise Refused(
+                "re-reading live gr_treatment tags for principal-only adoption failed; "
+                f"state is missing {len(missing)} treatment tag(s), so nothing was applied ({exc})"
+            ) from exc
 
     def _adopt(self, desired: dict) -> dict:
         """A journal for an env that has none: fresh, the legacy deployment, or exactly the desired generation live."""
@@ -504,8 +542,10 @@ class Controller:
             return journal
         problems = state_problems(live, desired, [])
         if problems:
+            live_treatments = self._principal_adoption_live_treatments(live, desired)
             adopted, adoption_problems = _principal_only_adoption(self.env_dir, live, desired,
-                                                                  allow_named_principal_drift=True)
+                                                                  allow_named_principal_drift=True,
+                                                                  live_treatments=live_treatments)
             if adopted:
                 pg.save_snapshot(self.env_dir, desired)
                 pg.save_snapshot(self.env_dir, adopted)
@@ -545,11 +585,16 @@ class Controller:
         if active and old is None:
             return journal
         live = live_from_state(_read_state(self.env_dir))
-        problems = state_problems(live, old, [])
+        live_treatments = None
+        if _adopted_unverified(journal, active):
+            live_treatments = self._principal_adoption_live_treatments(live, old or desired)
+        problems = state_problems(live, old, [], live_treatments=live_treatments)
         if not problems:
             return journal
+        live_treatments = self._principal_adoption_live_treatments(live, desired)
         adopted, adoption_problems = _principal_only_adoption(self.env_dir, live, desired,
-                                                              allow_named_principal_drift=False)
+                                                              allow_named_principal_drift=False,
+                                                              live_treatments=live_treatments)
         if not adopted:
             if adoption_problems:
                 raise Refused(
@@ -586,8 +631,12 @@ class Controller:
         retain = self._snapshot(held["fingerprint"]) if held else None
         # A migration preview (make plan) runs before the legacy tags are moved; the adoption checks the state.
         previewed = bool(old) and old["fingerprint"] in getattr(self, "_preview_snapshots", {})
-        problems = [] if previewed else state_problems(live_from_state(_read_state(self.env_dir)), old,
-                                                       [retain] if retain else [])
+        live = live_from_state(_read_state(self.env_dir))
+        problems = [] if previewed else state_problems(live, old, [retain] if retain else [])
+        adopted = _adopted_unverified(journal, active)
+        if problems and adopted:
+            live_treatments = self._principal_adoption_live_treatments(live, old or desired)
+            problems = state_problems(live, old, [retain] if retain else [], live_treatments=live_treatments)
         if problems:
             raise Refused(
                 "the data_access state doesn't match the policy journal (applied outside the staged "
@@ -601,7 +650,6 @@ class Controller:
                 "completion first; a new policy change would need a fourth live generation.")
         eligible = held if held and held["confirmed"] and held["fingerprint"] not in {active, desired["fingerprint"]} \
             else None
-        adopted = _adopted_unverified(journal, active)
         render_from = str((adopted or {}).get("restore_from") or "")
         render_old = self._snapshot(render_from) if render_from else old
         tier_move = change and pg.has_tier_move(desired, render_old, retain)
@@ -1583,8 +1631,10 @@ class Controller:
             return journal
         live = live_from_state(_read_state(self.env_dir))
         if live["policies"] or live["tags"]:
+            live_treatments = self._principal_adoption_live_treatments(live, desired)
             adopted, problems = _principal_only_adoption(self.env_dir, live, desired,
-                                                         allow_named_principal_drift=True)
+                                                         allow_named_principal_drift=True,
+                                                         live_treatments=live_treatments)
             if adopted:
                 self._preview_snapshots = getattr(self, "_preview_snapshots", {}) | {
                     adopted["fingerprint"]: adopted,
@@ -1612,10 +1662,13 @@ class Controller:
         if active and old is None:
             return journal
         live = live_from_state(_read_state(self.env_dir))
-        if not state_problems(live, old, []):
+        live_treatments = self._principal_adoption_live_treatments(live, old or desired)
+        if not state_problems(live, old, [], live_treatments=live_treatments):
             return journal
+        live_treatments = self._principal_adoption_live_treatments(live, desired)
         adopted, problems = _principal_only_adoption(self.env_dir, live, desired,
-                                                     allow_named_principal_drift=False)
+                                                     allow_named_principal_drift=False,
+                                                     live_treatments=live_treatments)
         if not adopted:
             if problems:
                 raise Refused(
