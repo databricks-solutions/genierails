@@ -2115,10 +2115,15 @@ def account_manifest_summary(manifest_path: Path, manifest: Mapping) -> list[str
     plan = manifest.get("plan") or {}
     counts = (plan.get("summary") or {}).get("resource_changes") or {}
     diff = manifest.get("tag_sync") or []
+    if not plan.get("changes"):
+        planned = "no changes"
+    elif set(counts) - {"no-op", "read"}:
+        planned = ", ".join(f"{n} {a}" for a, n in sorted(counts.items()))
+    else:  # Terraform outputs only; applying records them in the account state
+        planned = "no resource changes (only Terraform outputs change)"
     lines = [f"  Manifest: {manifest_path}",
              f"  Commit:   {manifest.get('commit')} (planned {manifest.get('created_at')} on {manifest.get('host')})",
-             "  Account plan: " + (", ".join(f"{n} {a}" for a, n in sorted(counts.items()))
-                                   if plan.get("changes") else "no changes")]
+             "  Account plan: " + planned]
     removed = [(e.get("key"), e.get("removed")) for e in diff if e.get("removed")]
     if removed:
         lines.append("  !! TAG VALUES THIS MANIFEST REMOVES (from every workspace on the metastore):")

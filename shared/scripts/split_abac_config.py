@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import re
+import secrets
+import stat
 import sys
 from pathlib import Path
 
@@ -416,6 +420,10 @@ def write_tfvars(
     ordered_keys: tuple[str, ...],
 ):
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_tfvars(config, header, ordered_keys))
+
+
+def render_tfvars(config: dict, header: str, ordered_keys: tuple[str, ...]) -> str:
     pieces = [header.strip(), ""]
     handled = set()
 
@@ -432,39 +440,10 @@ def write_tfvars(
         pieces.append(f"{key} = {render_value(config[key])}")
         pieces.append("")
 
-    path.write_text("\n".join(pieces).rstrip() + "\n")
+    return "\n".join(pieces).rstrip() + "\n"
 
 
-def main():
-    if len(sys.argv) != 5:
-        print(
-            "Usage: python scripts/split_abac_config.py "
-            "generated/abac.auto.tfvars "
-            "envs/account/abac.auto.tfvars "
-            "envs/<env>/data_access/abac.auto.tfvars "
-            "envs/dev/abac.auto.tfvars"
-        )
-        sys.exit(1)
-
-    source_path = Path(sys.argv[1])
-    account_path = Path(sys.argv[2])
-    data_access_path = Path(sys.argv[3])
-    workspace_path = Path(sys.argv[4])
-
-    if not source_path.exists():
-        print(f"ERROR: source file not found: {source_path}")
-        sys.exit(1)
-
-    full_cfg = load_generated_config(source_path)
-    existing_account_cfg = (
-        load_hcl(account_path) if account_path.exists() else None
-    )
-
-    account_cfg = build_account_config(full_cfg, existing_account_cfg)
-    data_access_cfg = build_data_access_config(full_cfg)
-    workspace_cfg = build_workspace_config(full_cfg)
-
-    account_header = """
+ACCOUNT_HEADER = """
 # ============================================================================
 # ACCOUNT-OWNED ABAC CONFIG
 # ============================================================================
@@ -473,6 +452,164 @@ def main():
 # Tag policies are account-scoped and shared across all workspace environments.
 # ============================================================================
 """
+
+
+class AccountFileError(RuntimeError):
+    """The shared account file can't be merged safely; nothing was written."""
+
+
+def _check_account_path(path: Path) -> None:
+    parent = path.parent
+    if parent.is_symlink() or not parent.is_dir():
+        raise AccountFileError(f"{parent} is a symlink or not a directory; the shared account file is only "
+                               "written in a real envs/account directory. Nothing was written.")
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise AccountFileError(f"{path} is a symlink or not a regular file; GenieRails never writes the shared "
+                               "account file through a link. Replace it with a regular file (or remove it). "
+                               "Nothing was written.")
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` by temp file + rename in its directory, never following a link."""
+    mode = stat.S_IMODE(path.stat().st_mode) if path.is_file() else 0o644
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.fchmod(handle.fileno(), mode)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def merge_account_file(full_cfg: dict, account_path: Path, lock_nonce: str = "") -> bool:
+    """Merge a draft's account part into the shared account file; False when it was already there.
+
+    Every env's split (and rehearse's and release's account step) merges into
+    this one file, so the read-merge-write runs under the account env's lock
+    mutex (scripts/environment_lock.py mutex), losing no other env's part,
+    and the write is atomic and never through a link. A change also respects
+    the account lock (the one account-plan and apply-account hold): while a
+    live run holds it, only that run may write, by passing the nonce its lock
+    printed (``lock_nonce``); anyone else is refused with nothing written. An
+    unchanged part writes nothing and needs no lock. A free or stale lock
+    (its pid dead, e.g. kill -9) lets the write through: no lock can be taken
+    while the mutex is held, so the write is still exclusive.
+    """
+    from scripts import environment_lock
+
+    account_path.parent.mkdir(parents=True, exist_ok=True)
+    _check_account_path(account_path)
+    try:
+        with environment_lock.mutex(account_path.parent):
+            _check_account_path(account_path)
+            existing_text = account_path.read_text() if account_path.exists() else None
+            existing_account_cfg = load_hcl(account_path) if existing_text is not None else None
+            text = render_tfvars(build_account_config(full_cfg, existing_account_cfg), ACCOUNT_HEADER, ACCOUNT_KEYS)
+            if text == existing_text:
+                return False
+            if not (lock_nonce and environment_lock.holds(account_path.parent, lock_nonce)):
+                held = environment_lock.live_holder(account_path.parent)
+                if held is not None:
+                    raise AccountFileError(
+                        f"the shared account layer is locked by another run (make {held.get('owner', '?')}, pid "
+                        f"{held.get('pid', '?')} on {held.get('host', '?')}, since {held.get('started_at', '?')}), "
+                        f"so {account_path} can't change now; nothing was written. Re-run when that run finishes.")
+            _atomic_write(account_path, text)
+            return True
+    except RuntimeError as exc:  # environment_lock.lock_path: an unusable GENIERAILS_STATE_DIR
+        if isinstance(exc, AccountFileError):
+            raise
+        raise AccountFileError(f"{exc}. Nothing was written.") from exc
+
+
+def read_lock_nonce(path: Path) -> str:
+    """The account lock's nonce from the file the lock holder wrote; refuses anything but a private file.
+
+    One open, never through a link (O_NOFOLLOW; O_NONBLOCK so a FIFO can't
+    hang it), then fstat of that same descriptor: a regular file of this
+    user, mode exactly 0600. The nonce is read from that descriptor, so the
+    file checked is the file read.
+    """
+    refused = f"the account lock nonce file {path} "
+    tail = "; nothing was written."
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP or path.is_symlink():
+            raise AccountFileError(refused + "is a symlink" + tail) from exc
+        raise AccountFileError(refused + f"can't be opened ({exc.strerror})" + tail) from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise AccountFileError(refused + "is not a regular file" + tail)
+        if info.st_uid != os.getuid():
+            raise AccountFileError(refused + f"is owned by uid {info.st_uid}, not this user ({os.getuid()})" + tail)
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise AccountFileError(refused + f"has mode {stat.S_IMODE(info.st_mode):04o}; it must be exactly 0600" + tail)
+        data = b""
+        while len(data) <= 4096:
+            chunk = os.read(fd, 4097 - len(data))
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > 4096:
+            raise AccountFileError(refused + "is too large to be a lock nonce" + tail)
+    finally:
+        os.close(fd)
+    return data.decode("ascii", "replace").strip()
+
+
+def main():
+    # --account-only <draft> <account file>: write only the shared account file,
+    # exactly as the full split would. rehearse's and release's account step
+    # plans the account layer from it before the env's own split runs.
+    argv = list(sys.argv)
+    lock_nonce = ""
+    if "--account-lock-nonce-file" in argv:
+        # The account step holds the account lock: the nonce its lock printed, in a file it wrote.
+        at = argv.index("--account-lock-nonce-file")
+        if at + 1 >= len(argv):
+            print("ERROR: --account-lock-nonce-file needs a file")
+            sys.exit(1)
+        try:
+            lock_nonce = read_lock_nonce(Path(argv[at + 1]))
+        except AccountFileError as exc:
+            print(f"ERROR: {exc}")
+            sys.exit(1)
+        del argv[at:at + 2]
+    account_only = argv[1:2] == ["--account-only"]
+    if len(argv) != (4 if account_only else 5):
+        print(
+            "Usage: python scripts/split_abac_config.py "
+            "generated/abac.auto.tfvars "
+            "envs/account/abac.auto.tfvars "
+            "envs/<env>/data_access/abac.auto.tfvars "
+            "envs/dev/abac.auto.tfvars\n"
+            "       python scripts/split_abac_config.py --account-only "
+            "generated/abac.auto.tfvars envs/account/abac.auto.tfvars\n"
+            "       (either form: --account-lock-nonce-file <file> when the caller holds the account lock)"
+        )
+        sys.exit(1)
+
+    args = argv[2:] if account_only else argv[1:]
+    source_path = Path(args[0])
+    account_path = Path(args[1])
+
+    if not source_path.exists():
+        print(f"ERROR: source file not found: {source_path}")
+        sys.exit(1)
+
+    full_cfg = load_generated_config(source_path)
+    if not account_only:
+        data_access_path = Path(args[2])
+        workspace_path = Path(args[3])
+        data_access_cfg = build_data_access_config(full_cfg)
+        workspace_cfg = build_workspace_config(full_cfg)
 
     data_access_header = """
 # ============================================================================
@@ -493,12 +630,16 @@ def main():
 # ============================================================================
 """
 
-    write_tfvars(
-        account_path,
-        account_cfg,
-        account_header,
-        ACCOUNT_KEYS,
-    )
+    try:
+        changed = merge_account_file(full_cfg, account_path, lock_nonce)
+    except AccountFileError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
+    account_line = (f"  Wrote shared account config: {account_path}" if changed
+                    else f"  Shared account config unchanged: {account_path}")
+    if account_only:
+        print(account_line)
+        return
     write_tfvars(
         data_access_path,
         data_access_cfg,
@@ -512,7 +653,7 @@ def main():
         WORKSPACE_KEYS,
     )
 
-    print(f"  Wrote shared account config: {account_path}")
+    print(account_line)
     print(f"  Wrote env-scoped data-access config: {data_access_path}")
     print(f"  Wrote workspace config:      {workspace_path}")
 

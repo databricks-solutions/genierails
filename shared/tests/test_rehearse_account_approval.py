@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import time
 from pathlib import Path
 from unittest import mock
@@ -25,11 +26,13 @@ from scripts import approval
 from scripts import environment_lock
 from scripts import release_gate as rg
 from tests.pty_harness import CTRL_C, CTRL_D, pty_run
+from tests.test_release_gate import EMPTY_ABAC
 from tests.test_release_gate_make import Make, _account_planned, repo  # noqa: F401 (fixtures)
 
 QUESTION = "Approve and apply this account manifest? [y/N] "
 PROBE = ["runner", "account", "account", "plan", "-input=false", "-detailed-exitcode"]
 NOT_APPLIED = "rehearse: not applied. The account manifest "
+SPLIT = Path(rg.__file__).with_name("split_abac_config.py")
 PLAN_RUNNER = """#!/bin/sh
 printf '%s\\n' "[\\"runner\\", \\"$1\\", \\"$2\\", \\"$3\\"]" >> {log}
 exit {rc}
@@ -111,6 +114,9 @@ def test_y_applies_exactly_the_manifest_shown_then_rehearses_dev(amake, repo):
 
 
 def test_an_unapplied_manifest_already_planned_for_head_is_offered_without_planning_again(amake, repo):
+    # Planned from the account file dev's split writes (the step writes the same bytes again first).
+    subprocess.run([sys.executable, str(SPLIT), "--account-only", str(repo.dev / "generated" / "abac.auto.tfvars"),
+                    str(_account_dir(repo) / "abac.auto.tfvars")], check=True, capture_output=True)
     manifest = _account_planned(amake)
     rc, shown = pty_make(amake, "rehearse", "dev", answer="y")
     assert rc == 0, shown
@@ -271,6 +277,191 @@ def test_an_empty_account_plan_asks_nothing_and_rehearses(amake, repo, tmp_path)
     assert amake.calls()[0] == ["runner", "account", "account", "plan"]  # the probe ran
     assert "_account-plan-locked" not in amake.names() and "_apply-account-locked" not in amake.names()
     assert [r["result"] for r in rg.rehearse_receipts(repo.cloud, "dev")] == ["passed"]
+
+
+# -- a fresh repo: the account plan shown is the one the env's split makes ---------------------
+
+# The account root as Terraform sees it: the resources are envs/account/abac.auto.tfvars'
+# tag policies and groups; apply-plan records what the saved plan created (and the outputs).
+ACCOUNT_TERRAFORM = r'''#!{python}
+import json, os, sys
+from pathlib import Path
+import hcl2
+args = sys.argv[1:]
+with open({log!r}, "a") as log:
+    log.write(json.dumps(["runner"] + args) + "\n")
+if args[:1] != ["account"]:
+    os.execv({runner!r}, [{runner!r}, *args])
+state = Path({state!r})
+applied = json.loads(state.read_text()) if state.exists() else {{"outputs": False, "resources": []}}
+if args[2] == "plan":
+    if not any(a.startswith("-out=") for a in args):  # the account step's probe: who holds the account lock
+        sys.path.insert(0, {shared!r})
+        from scripts import environment_lock
+        lock = environment_lock.lock_path(Path(os.environ["LAYER_ENV_DIR"]))
+        with open({probe_locks!r}, "a") as out:
+            out.write(json.dumps(json.loads(lock.read_text())["owner"] if lock.exists() else None) + "\n")
+    path = Path(os.environ["LAYER_ENV_DIR"], "abac.auto.tfvars")
+    config = hcl2.loads(path.read_text()) if path.exists() else {{}}
+    desired = [f"tag_policy:{{p['key']}}" for p in config.get("tag_policies") or []] \
+        + [f"group:{{g}}" for g in config.get("groups") or {{}}]
+    creates = [r for r in desired if r not in applied["resources"]]
+    for arg in args:
+        if arg.startswith("-out="):
+            Path(arg[5:]).write_text(json.dumps({{"creates": creates}}))
+    sys.exit(2 if creates or not applied["outputs"] else 0)
+if args[2] == "show":
+    creates = json.loads(Path(args[-1]).read_text())["creates"]
+    print(json.dumps({{"resource_changes": [{{"address": r, "change": {{"actions": ["create"]}}}} for r in creates]}}))
+elif args[2] == "apply-plan":
+    creates = json.loads(Path(args[-1]).read_text())["creates"]
+    state.write_text(json.dumps({{"outputs": True, "resources": applied["resources"] + creates}}))
+'''
+
+# The harness's recursive make, plus the account part of what it stubs: the same-env promote's
+# split (promote, and apply's own promote), apply's _apply-account-for-workspace guard (the real
+# _guard-account-plan-empty) and _release-plan-roots' saved account plan.
+SPLIT_MAKE = r'''#!{python}
+import json, os, subprocess, sys
+from pathlib import Path
+args = sys.argv[1:]
+rc = subprocess.run([{stub!r}, *args]).returncode
+if rc:
+    sys.exit(rc)
+env = next((a[4:] for a in args if a.startswith("ENV=")), "")
+account = Path({cloud!r}, "envs", "account")
+def split():
+    env_dir = Path({cloud!r}, "envs", env)
+    (env_dir / "data_access").mkdir(exist_ok=True)
+    subprocess.run([sys.executable, {split!r}, str(env_dir / "generated" / "abac.auto.tfvars"),
+                    str(account / "abac.auto.tfvars"), str(env_dir / "data_access" / "abac.auto.tfvars"),
+                    str(env_dir / "abac.auto.tfvars")], check=True)
+if "apply" in args:
+    split()
+    os.execvp("make", ["make", "--no-print-directory", "_guard-account-plan-empty", f"ENV={{env}}"])
+if "promote" in args:
+    split()
+if "_release-plan-roots" in args:
+    plan_dir = Path(next(a.split("=", 1)[1] for a in args if a.startswith("PLAN_DIR=")))
+    rc = subprocess.run([{runner!r}, "account", "account", "plan", "-input=false", "-detailed-exitcode",
+                         f"-out={{plan_dir / 'account.tfplan'}}"], env=os.environ | {{"LAYER_ENV_DIR": str(account)}}).returncode
+    (plan_dir / "account.json").write_text(json.dumps({{"file": "account.tfplan", "changes": rc == 2}}))
+'''
+
+def draft(*groups: str) -> str:
+    """A generated draft whose account part is its groups. (gr_treatment takes the same path into
+    envs/account/abac.auto.tfvars, but planning its values reads live tag policies.)"""
+    return EMPTY_ABAC + "groups = {\n" + "".join(f'  {g} = {{ description = "" }}\n' for g in groups) + "}\n"
+
+
+def fresh_account(make: Make, repo, prod_draft: str = "") -> Path:
+    """A fresh repo after setup + generate: dev's draft names an account group, there is no
+    envs/account/abac.auto.tfvars and the account state is empty. Returns the account ROOT_RUNNER."""
+    repo.commit({"aws/envs/dev/generated/abac.auto.tfvars": draft("analysts"),
+                 "aws/envs/prod/generated/abac.auto.tfvars": prod_draft or draft("analysts")})
+    assert not (_account_dir(repo) / "abac.auto.tfvars").exists()
+    runner = make._write("account-terraform", ACCOUNT_TERRAFORM.format(
+        python=sys.executable, log=str(make.log), runner=str(make.stubs["runner"]),
+        state=str(make.tmp / "account-state.json"), shared=str(SPLIT.parents[1]),
+        probe_locks=str(make.tmp / "probe-locks.jsonl")))
+    make.make = make._write("split-make", SPLIT_MAKE.format(
+        python=sys.executable, stub=str(make.make), cloud=str(repo.cloud), runner=str(runner), split=str(SPLIT)))
+    return runner
+
+
+def account_resources(make: Make) -> list[str]:
+    state = make.tmp / "account-state.json"
+    return json.loads(state.read_text())["resources"] if state.exists() else []
+
+
+def test_a_fresh_repos_first_rehearse_asks_once_for_the_account_plan_the_split_makes(amake, repo):
+    """Live AWS run 08 (BUG A): the outputs-only account plan was approved, then dev's split added
+    gr_treatment and apply's guard refused 'account plan is non-empty'; nothing in dev was applied."""
+    runner = fresh_account(amake, repo)
+    rc, shown = pty_make(amake, "rehearse", "dev", answer="y", root_runner=runner)
+    assert rc == 0, shown
+    assert shown.count("[y/N]") == 1 and "account plan is non-empty" not in shown
+    assert "  Account plan: 1 create\n" in shown.split(QUESTION)[0].replace("\r", "")
+    assert "analysts" in (_account_dir(repo) / "abac.auto.tfvars").read_text()
+    [receipt] = rg.account_receipts(repo.cloud, "account")
+    assert receipt["approval"]["via"] == "terminal"
+    assert account_resources(amake) == ["group:analysts"]
+    assert [r["result"] for r in rg.rehearse_receipts(repo.cloud, "dev")] == ["passed"]
+    assert _unlocked(repo.dev) and _unlocked(_account_dir(repo))
+    # The merge and the probe ran under the account lock (released before account-plan took it).
+    assert probe_lock_owners(amake)[0] == "rehearse"
+
+
+def probe_lock_owners(make: Make) -> list:
+    return [json.loads(line) for line in (make.tmp / "probe-locks.jsonl").read_text().splitlines()]
+
+
+def test_a_held_account_lock_refuses_the_account_step_before_anything_is_written(amake, repo):
+    """Codex r1 B1: the pre-write is serialized with the account lock; a held lock refuses, nothing written."""
+    runner = fresh_account(amake, repo)
+    holder = subprocess.Popen(["sleep", "300"])
+    try:
+        ok, message, _nonce = environment_lock.acquire(_account_dir(repo), holder.pid, "apply-account")
+        assert ok, message
+        rc, shown = pty_make(amake, "rehearse", "dev", answer="y", root_runner=runner)
+        assert rc != 0, shown
+        assert "is held by make apply-account" in shown
+        assert ("rehearse: the shared account layer is locked by another run (above); nothing was written, "
+                "approved or applied, and dev was not locked.") in shown
+        assert "[y/N]" not in shown and not (_account_dir(repo) / "abac.auto.tfvars").exists()
+        assert not (amake.tmp / "probe-locks.jsonl").exists()  # never planned
+        assert not list(rg.manifests_dir(repo.cloud, "account").glob("*/manifest.json"))
+        assert environment_lock.owns_lock(_account_dir(repo), holder.pid)  # the holder's lock is untouched
+        _nothing_in_dev_but_the_account_lock(amake, repo)
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def _nothing_in_dev_but_the_account_lock(make: Make, repo) -> None:
+    names = make.names()
+    assert "_derive-before-exposure" not in names and "apply" not in names, names
+    assert not rg.rehearse_receipts(repo.cloud, "dev") and _unlocked(repo.dev)
+
+
+def test_a_symlinked_account_file_is_refused_and_its_target_never_written(amake, repo, tmp_path):
+    """Codex r1 B2: git-ignored but a symlink; check-ignore passed and write_text followed it."""
+    runner = fresh_account(amake, repo)
+    target = tmp_path / "outside" / "abac.auto.tfvars"
+    target.parent.mkdir()
+    target.write_text("# someone else's file\n")
+    (_account_dir(repo) / "abac.auto.tfvars").symlink_to(target)
+    rc, shown = pty_make(amake, "rehearse", "dev", answer="y", root_runner=runner)
+    assert rc != 0, shown
+    assert "is a symlink or not a regular file; GenieRails never writes the shared account file through a link" in shown
+    assert "rehearse: dev's account config could not be written to " in shown
+    assert target.read_text() == "# someone else's file\n" and (_account_dir(repo) / "abac.auto.tfvars").is_symlink()
+    assert "[y/N]" not in shown and not (amake.tmp / "probe-locks.jsonl").exists()
+    _nothing_in_dev(amake, repo)  # and the account lock was released
+
+
+def test_a_manifest_planned_before_the_split_wrote_the_account_file_is_not_offered(amake, repo):
+    """The outputs-only manifest a fresh repo's account-plan (or a declined first rehearse) left for HEAD."""
+    runner = fresh_account(amake, repo)
+    stale = _account_planned(amake)
+    rc, shown = pty_make(amake, "rehearse", "dev", answer="y", root_runner=runner)
+    assert rc == 0, shown
+    assert _manifest(shown) != stale and "already planned for HEAD" not in shown
+    assert rg.account_receipts(repo.cloud, "account")[0]["manifest"]["path"] == str(_manifest(shown))
+    assert [r["result"] for r in rg.rehearse_receipts(repo.cloud, "dev")] == ["passed"]
+
+
+def test_a_committed_account_file_is_never_rewritten_before_the_plan(amake, repo):
+    """When a legacy env commits envs/account/abac.auto.tfvars, the step plans from it as it is."""
+    runner = fresh_account(amake, repo)
+    committed = "# committed account layer\n"
+    gitignore = (repo.cloud / ".gitignore").read_text() + "!envs/account/abac.auto.tfvars\n"
+    repo.commit({"aws/.gitignore": gitignore, "aws/envs/account/abac.auto.tfvars": committed})
+    rc, shown = pty_make(amake, "rehearse", "dev", answer="n", root_runner=runner)
+    assert rc != 0 and QUESTION in shown, shown
+    assert (_account_dir(repo) / "abac.auto.tfvars").read_text() == committed
+    assert "  Account plan: no resource changes (only Terraform outputs change)" in shown.replace("\r", "")
+    _nothing_in_dev(amake, repo)
 
 
 def test_a_failing_account_plan_stops_before_any_lock(amake, repo, tmp_path):

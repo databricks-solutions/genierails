@@ -1310,3 +1310,35 @@ def test_check_runs_promote_check_exactly_when_env_role_says_promoted(repo, tmp_
 
     assert roles == ["dev"]
     assert code == 1
+
+
+def test_promote_to_under_a_held_account_lock_refuses_and_writes_nothing(repo, tmp_path):
+    """PR #297 r3: every writer of envs/account/abac.auto.tfvars respects the account lock. promote-to's
+    split would add dev's part back to the account file; another run holds the account lock."""
+    from scripts import environment_lock
+
+    account = _envs(repo) / "account"
+    (account / "abac.auto.tfvars").write_text(LEGACY_ACCOUNT)  # dev's part not merged in yet
+    prod = _envs(repo) / "prod"
+    prod.mkdir()
+    (prod / "env.auto.tfvars").write_text(PROD_ENV)
+    (prod / "auth.auto.tfvars").write_text(_auth(DEPLOYER, host=""))
+    holder = subprocess.Popen(["sleep", "300"])
+    try:
+        ok, message, _ = environment_lock.acquire(account, holder.pid, "apply-account")
+        assert ok, message
+
+        def files():
+            return {k: v for k, v in _snapshot(_envs(repo)).items() if not k.endswith(".governance.guard")}
+
+        before = files()
+        result = _make(repo, tmp_path, "promote-to", "ENV=prod")
+        out = result.stdout + result.stderr
+        assert result.returncode != 0, out
+        assert f"the shared account layer is locked by another run (make apply-account, pid {holder.pid}" in out
+        assert "nothing was written" in out
+        assert files() == before  # the account file, prod and dev, byte for byte (the lock file too)
+        assert environment_lock.owns_lock(account, holder.pid)
+    finally:
+        holder.kill()
+        holder.wait()

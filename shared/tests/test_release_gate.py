@@ -1358,6 +1358,19 @@ def test_account_manifest_summary_puts_removals_first_and_loud(repo, account_man
     assert text.index("REMOVES") < text.index("Tag values added")
 
 
+@pytest.mark.parametrize("plan, line", [
+    ({"changes": False, "summary": {"resource_changes": {}}}, "no changes"),
+    ({"changes": True, "summary": {"resource_changes": {"create": 2, "no-op": 3}}}, "2 create, 3 no-op"),
+    # Live AWS run 08: a fresh account state, outputs only, printed an empty 'Account plan:' line.
+    ({"changes": True, "summary": {"resource_changes": {}}}, "no resource changes (only Terraform outputs change)"),
+    ({"changes": True, "summary": {"resource_changes": {"no-op": 3, "read": 1}}},
+     "no resource changes (only Terraform outputs change)"),
+])
+def test_account_manifest_summary_says_plainly_what_the_plan_changes(plan, line):
+    lines = rg.account_manifest_summary(Path("/m/manifest.json"), {"plan": plan, "tag_sync": []})
+    assert f"  Account plan: {line}" in lines
+
+
 @pytest.mark.parametrize("text, expected", [
     ("", []), ("k:b,k:a, k:a ", ["k:a", "k:b"]), ("k:a:b", ["k:a:b"]),
 ])
