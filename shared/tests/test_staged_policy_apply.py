@@ -1493,6 +1493,18 @@ def _remove_treatment_tag_state(env_dir: Path) -> None:
     (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
 
 
+def _aws_takeover_principal_drift(harness, *, with_existing_journal: bool) -> dict:
+    desired = released(harness, columns=tuple(f"field_{i}" for i in range(9)))
+    _replace_deleted_principals_with_unknown(harness.env_dir)
+    _remove_sql_hash(harness.env_dir)
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_treatment_tags = dict(desired["tags"])
+    if not with_existing_journal:
+        spa.journal_path(harness.env_dir).unlink()
+    harness.calls.clear()
+    return desired
+
+
 def _drop_first_policy(state: dict) -> None:
     for resource in state["resources"]:
         if (resource["type"], resource["name"]) == ("databricks_policy_info", "policies"):
@@ -1778,6 +1790,43 @@ def test_principal_only_adoption_refuses_when_state_treatment_is_present_and_dif
     with pytest.raises(spa.Refused, match="state has treatment other__string__deadbeef"):
         harness.apply()
     assert harness.calls == []
+
+
+def test_no_journal_post_import_adoption_keeps_generated_restore_target_for_unknown_to_and_except(harness):
+    desired = _aws_takeover_principal_drift(harness, with_existing_journal=False)
+    harness.fail_verify = {"switch"}
+
+    assert harness.apply() == 1
+
+    assert "verify-access:create" in harness.calls
+    assert "tighten" not in harness.calls
+    t = harness.journal()["transition"]
+    assert t["restore_from"] == desired["fingerprint"]
+    assert t["render_from"] == desired["fingerprint"]
+    assert t["restored"]["generation"] == desired["fingerprint"]
+
+
+@pytest.mark.parametrize("with_existing_journal", [False, True])
+def test_preview_plan_and_run_agree_for_post_import_live_treatment_adoption(harness, tmp_path, capsys,
+                                                                           with_existing_journal):
+    _aws_takeover_principal_drift(harness, with_existing_journal=with_existing_journal)
+
+    assert harness.controller().describe() == 0
+    described = capsys.readouterr().out
+    assert "would refuse" not in described
+    assert "live has treatment none" not in described
+    assert "would run: create -> verify-created -> switch -> verify-switched -> grant" in described
+
+    out = tmp_path / "plan"
+    assert harness.controller().plan(out) == 0
+    planned = json.loads((out / spa.PHASES_FILE).read_text())
+    assert planned["transition"]["phases"] == ["create", "verify-created", "switch", "verify-switched", "grant"]
+    assert not planned["transition"]["tier_move"]
+
+    harness.calls.clear()
+    assert harness.apply() == 0
+    assert "verify-access:create" in harness.calls
+    assert "tighten" not in harness.calls
 
 
 def test_lost_journal_named_principal_adoption_restores_generated_principals_after_failed_switch(harness):

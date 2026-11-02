@@ -585,7 +585,10 @@ class Controller:
         if active and old is None:
             return journal
         live = live_from_state(_read_state(self.env_dir))
-        problems = state_problems(live, old, [])
+        live_treatments = None
+        if _adopted_unverified(journal, active):
+            live_treatments = self._principal_adoption_live_treatments(live, old or desired)
+        problems = state_problems(live, old, [], live_treatments=live_treatments)
         if not problems:
             return journal
         live_treatments = self._principal_adoption_live_treatments(live, desired)
@@ -1628,8 +1631,10 @@ class Controller:
             return journal
         live = live_from_state(_read_state(self.env_dir))
         if live["policies"] or live["tags"]:
+            live_treatments = self._principal_adoption_live_treatments(live, desired)
             adopted, problems = _principal_only_adoption(self.env_dir, live, desired,
-                                                         allow_named_principal_drift=True)
+                                                         allow_named_principal_drift=True,
+                                                         live_treatments=live_treatments)
             if adopted:
                 self._preview_snapshots = getattr(self, "_preview_snapshots", {}) | {
                     adopted["fingerprint"]: adopted,
@@ -1657,10 +1662,13 @@ class Controller:
         if active and old is None:
             return journal
         live = live_from_state(_read_state(self.env_dir))
-        if not state_problems(live, old, []):
+        live_treatments = self._principal_adoption_live_treatments(live, old or desired)
+        if not state_problems(live, old, [], live_treatments=live_treatments):
             return journal
+        live_treatments = self._principal_adoption_live_treatments(live, desired)
         adopted, problems = _principal_only_adoption(self.env_dir, live, desired,
-                                                     allow_named_principal_drift=False)
+                                                     allow_named_principal_drift=False,
+                                                     live_treatments=live_treatments)
         if not adopted:
             if problems:
                 raise Refused(
