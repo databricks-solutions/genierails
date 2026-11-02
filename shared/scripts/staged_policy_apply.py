@@ -655,7 +655,7 @@ class Controller:
         # Principal-only adoption records the generated/last-verified generation as the restore target,
         # but create must render the live adopted principals. Otherwise create would move unknown deleted
         # principals back to real groups before verify-created proves the masks.
-        render_old = self._snapshot(restore_from) if restore_from else old
+        render_old = old
         tier_move = change and pg.has_tier_move(desired, render_old, retain)
         phases = ["create"]
         if change or eligible:
@@ -690,8 +690,21 @@ class Controller:
             return
         if t.get("render_from") == adopted:
             return
-        if self._snapshot(adopted) is None:
+        restore_from = _restore_fingerprint(t)
+        if not t.get("render_from") and not t.get("restore_from"):
             return
+        if t.get("render_from") != restore_from or adopted != t.get("from"):
+            raise Refused("the adopted principal-only drift journal has an unexpected create render target; "
+                          "nothing was applied. Re-run the original 499e19a failed-create journal shape or "
+                          "restore the policy journal from records.")
+        try:
+            snapshot = self._snapshot(adopted)
+        except (pg.StageError, OSError, ValueError) as exc:
+            raise Refused(f"the adopted principal-only drift snapshot {adopted} can't be read ({exc}); "
+                          "nothing was applied.") from exc
+        if not pg.snapshot_intact(snapshot, adopted):
+            raise Refused(f"the adopted principal-only drift snapshot {adopted} doesn't match its fingerprint; "
+                          "nothing was applied.")
         t["render_from"] = adopted
         t["updated_at"] = _now()
         self._save(journal)
@@ -720,7 +733,8 @@ class Controller:
             else _render_fingerprint(t)
         return self.run_cmd(cmd, env=self._hook_env(t, old_fp=old_fp), check=False).returncode
 
-    def verification_inputs(self, t: dict, stages: tuple[str, ...]) -> tuple[Path, Path] | None:
+    def verification_inputs(self, t: dict, stages: tuple[str, ...],
+                            *, skip_values: set[str] | None = None) -> tuple[Path, Path] | None:
         """The tfvars and env file verify-access checks the applied stage against.
 
         After create (or restore) only columns that already had a value are
@@ -737,10 +751,11 @@ class Controller:
         layer_tfvars = pg.stage_config_dir(self.env_dir) / "abac.auto.tfvars"
         if not layer_tfvars.is_file():
             layer_tfvars = self.env_dir / "data_access" / "abac.auto.tfvars"
-        return self._verification_files(t, record["stage"], record["rendered"], layer_tfvars, verify_dir)
+        return self._verification_files(t, record["stage"], record["rendered"], layer_tfvars, verify_dir,
+                                        skip_values=skip_values)
 
     def _verification_files(self, t: dict, stage: str, rendered: dict, layer_tfvars: Path,
-                            verify_dir: Path) -> tuple[Path, Path] | None:
+                            verify_dir: Path, *, skip_values: set[str] | None = None) -> tuple[Path, Path] | None:
         before_switch = stage in ("create", "restore", "rebind")
         basis_fp = _restore_fingerprint(t) if stage in ("restore", "rebind", "abandon") \
             else _render_fingerprint(t)
@@ -748,6 +763,8 @@ class Controller:
         tags = dict(rendered["tags"])
         if before_switch:
             tags = {c: v for c, v in tags.items() if c in (basis or {}).get("tags", {})}
+        if skip_values:
+            tags = {c: v for c, v in tags.items() if v not in skip_values}
         if not tags:
             return None
         verify_dir.mkdir(parents=True, exist_ok=True)
@@ -787,9 +804,11 @@ class Controller:
         old = self._snapshot(old_fp) if old_fp else None
         retire = self._snapshot(t["retain"]) if t["retain"] not in {"", t["to"], t["from"]} else None
         rendered = pg.render_stage("create", desired, old, retire)
+        skip_values = self._trusted_adopted_unknown_values(t) if t.get("adopted_from_state") else set()
         with tempfile.TemporaryDirectory() as tmp:
             layer = pg.write_stage(self.env_dir / "data_access", rendered, out_dir=Path(tmp) / "create")
-            inputs = self._verification_files(t, "create", rendered, layer / "abac.auto.tfvars", Path(tmp))
+            inputs = self._verification_files(t, "create", rendered, layer / "abac.auto.tfvars", Path(tmp),
+                                              skip_values=skip_values)
             if inputs is None:
                 return
             if require_mask_proof(self.env_dir, self.env_name, resolve_verify_key(self.env_dir, self.verify_key),
@@ -802,13 +821,13 @@ class Controller:
         rc = self._inventory(t, stages)
         if rc or not with_access:
             return rc
-        if phase == "verify-created" and t.get("adopted_from_state") and _render_fingerprint(t) == t["from"]:
-            print("  verify-created: retained policies still name adopted live principals; "
-                  "generated-principal access is proved after switch")
-            return 0
-        inputs = self.verification_inputs(t, stages)
+        skip_values = set()
+        if phase == "verify-created" and t.get("adopted_from_state"):
+            skip_values = self._trusted_adopted_unknown_values(t)
+        inputs = self.verification_inputs(t, stages, skip_values=skip_values)
         if inputs is None:
-            print(f"  {phase}: no column carries a value yet; the live policy check above is the verification")
+            detail = "no column carries a verifiable value yet" if skip_values else "no column carries a value yet"
+            print(f"  {phase}: {detail}; the live policy check above is the verification")
             return 0
         if not self.verify_access_cmd:
             print(f"ERROR: {phase} needs a verify-access command (--verify-access-cmd)", file=sys.stderr)
@@ -820,6 +839,28 @@ class Controller:
             "GENIERAILS_VERIFY_PRE_GRANT": "1" if phase in PRE_GRANT_VERIFY else "",
         }
         return self.run_cmd(["/bin/sh", "-c", self.verify_access_cmd], env=env, check=False).returncode
+
+    def _trusted_adopted_unknown_values(self, t: dict) -> set[str]:
+        """Treatment values whose create render still names deleted principals as ``unknown``."""
+        adopted = t.get("adopted_from_state") or ""
+        if not adopted or adopted != t.get("from") or _render_fingerprint(t) != adopted:
+            return set()
+        journal = load_journal(self.env_dir) or {}
+        marker = journal.get("adopted_unverified") or {}
+        if marker.get("fingerprint") != adopted or marker.get("restore_from") != _restore_fingerprint(t):
+            return set()
+        if not any(entry.get("reason") == "principal-only drift adopted from state"
+                   and entry.get("adopted") == adopted and entry.get("to") == t.get("to")
+                   for entry in journal.get("history") or []):
+            return set()
+        try:
+            snapshot = self._snapshot(adopted)
+        except (pg.StageError, OSError, ValueError):
+            return set()
+        if not pg.snapshot_intact(snapshot, adopted):
+            return set()
+        return {pg.policy_value(policy) for policy in snapshot.get("fgac_policies") or []
+                if pg.UNKNOWN in ((policy.get("to_principals") or []) + (policy.get("except_principals") or []))}
 
     def _phase(self, t: dict, phase: str) -> int:
         if phase in APPLY_PHASES:

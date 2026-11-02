@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import itertools
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -418,7 +419,7 @@ def _value_of(policy):
 
 
 def _covers(policy, who):
-    to, excepted = policy["to_principals"], policy["except_principals"]
+    to, excepted = policy["to_principals"], policy.get("except_principals") or []
     if who == pg.OUTSIDER:
         return "account users" in to
     return ("account users" in to or who in to) and who not in excepted
@@ -605,12 +606,20 @@ class Harness:
                 applied = [p for p in masks if _covers(p, who)]
                 gens = [g for g in targets if g] or [desired]
                 if not applied and any(access(g, who, value) != "raw" for g in gens):
-                    if stage == "create" and any(pg.UNKNOWN in (p.get("to_principals") or [])
-                                                 or pg.UNKNOWN in (p.get("except_principals") or [])
-                                                 for p in masks):
+                    before_masks = [p for p in live_policies(before) if _value_of(p) == value]
+                    already_unmasked = not any(_covers(p, who) for p in before_masks)
+                    if stage == "create" and already_unmasked and any(
+                            pg.UNKNOWN in (p.get("to_principals") or [])
+                            or pg.UNKNOWN in (p.get("except_principals") or []) for p in masks):
                         continue
                     self.invariant_problems.append(f"after {stage}: {who} sees {column} raw")
-                moving = bool(old and desired) and access(old, who, value) != access(desired, who, value)
+                desired_masks = [p for p in (desired or {}).get("fgac_policies", []) if pg.policy_value(p) == value
+                                 and p.get("catalog", column.split(".")[0]) == column.split(".")[0]]
+                old_masks = [p for p in (old or {}).get("fgac_policies", []) if pg.policy_value(p) == value
+                             and p.get("catalog", column.split(".")[0]) == column.split(".")[0]]
+                moving = bool(old and desired) and (
+                    sorted(p["name"] for p in old_masks if _covers(p, who))
+                    != sorted(p["name"] for p in desired_masks if _covers(p, who)))
                 if len(applied) > 1 and not (stage == "tighten" and moving):
                     self.invariant_problems.append(f"after {stage}: {who} has {len(applied)} masks on {column}")
 
@@ -1642,6 +1651,15 @@ def _adoption_history_entry(journal: dict) -> dict:
                 if entry.get("reason") == "principal-only drift adopted from state")
 
 
+def _assert_live_generated_principals(env_dir: Path, desired: dict) -> None:
+    live = {p["name"]: p for p in live_policies(live_state(env_dir))}
+    assert {name: (sorted(live[name]["to_principals"]), sorted(live[name]["except_principals"]))
+            for name in live} == {
+        p["name"]: (sorted(p["to_principals"]), sorted(p.get("except_principals") or []))
+        for p in desired["fgac_policies"]}
+    assert not any(pg.UNKNOWN in p["to_principals"] + p["except_principals"] for p in live.values())
+
+
 @pytest.mark.parametrize("with_existing_journal", [False, True])
 def test_principal_only_state_drift_is_adopted_then_rehearsed_through_staged_phases(harness,
                                                                                    with_existing_journal):
@@ -1723,7 +1741,7 @@ def test_existing_journal_accepts_deleted_to_principal_as_unknown(harness):
     adoption = _adoption_history_entry(journal)
     assert adoption["to"] == desired["fingerprint"]
     assert journal["active"] == desired["fingerprint"]
-    assert harness.calls[:3] == ["create", "inventory:create/restore", "switch"]
+    assert harness.calls[:4] == ["create", "inventory:create/restore", "tighten", "inventory:tighten"]
     assert "switch" in harness.calls and "verify-access:switch" in harness.calls
     live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
     assert {name: live[name]["to_principals"] for name in live} == {
@@ -1832,7 +1850,7 @@ def test_principal_only_adoption_accepts_post_import_state_with_deleted_tier_gro
     adoption = _adoption_history_entry(journal)
     assert adoption["to"] == desired["fingerprint"]
     assert journal["active"] == desired["fingerprint"]
-    assert harness.calls[:3] == ["create", "inventory:create/restore", "switch"]
+    assert harness.calls[:4] == ["create", "inventory:create/restore", "tighten", "inventory:tighten"]
     assert "switch" in harness.calls and "verify-access:switch" in harness.calls
     live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
     assert {name: (live[name]["to_principals"], live[name]["except_principals"]) for name in live} == {
@@ -1858,7 +1876,7 @@ def test_principal_only_adoption_accepts_post_import_state_with_live_treatment_t
     adoption = _adoption_history_entry(journal)
     assert adoption["to"] == desired["fingerprint"]
     assert journal["active"] == desired["fingerprint"]
-    assert harness.calls[:3] == ["create", "inventory:create/restore", "switch"]
+    assert harness.calls[:4] == ["create", "inventory:create/restore", "tighten", "inventory:tighten"]
     assert "switch" in harness.calls and "verify-access:switch" in harness.calls
     assert live_tags(live_state(harness.env_dir)) == desired["tags"]
 
@@ -1923,7 +1941,6 @@ def test_no_journal_post_import_adoption_keeps_create_on_live_principals_and_res
     assert harness.apply() == 1
 
     assert "verify-access:create" not in harness.calls
-    assert "tighten" not in harness.calls
     t = harness.journal()["transition"]
     assert t["restore_from"] == desired["fingerprint"]
     assert t["render_from"] == t["adopted_from_state"]
@@ -1950,13 +1967,15 @@ def test_live_bug_d_adopted_unknown_principals_resume_create_then_switch_to_gene
     out = tmp_path / "plan"
     assert harness.controller().plan(out) == 0
     planned = json.loads((out / spa.PHASES_FILE).read_text())
-    assert planned["transition"]["phases"] == ["create", "verify-created", "switch", "verify-switched", "grant"]
-    assert not planned["transition"]["tier_move"]
+    assert planned["transition"]["phases"] == [
+        "create", "verify-created", "tighten", "verify-tightened", "switch", "verify-switched", "grant"]
+    assert planned["transition"]["tier_move"]
 
     harness.calls.clear()
     assert harness.apply() == 0
 
     assert harness.calls == ["create", "inventory:create/restore",
+                             "tighten", "inventory:tighten",
                              "switch", "inventory:switch", "verify-access:switch", "grant"]
     journal = harness.journal()
     adoption = _adoption_history_entry(journal)
@@ -1968,9 +1987,133 @@ def test_live_bug_d_adopted_unknown_principals_resume_create_then_switch_to_gene
     assert len(retained) == 14
     assert any(pg.UNKNOWN in p["to_principals"] or pg.UNKNOWN in p["except_principals"]
                for p in retained.values())
-    live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
-    assert {name: (live[name]["to_principals"], live[name]["except_principals"]) for name in live} == {
-        p["name"]: (p["to_principals"], p.get("except_principals") or []) for p in desired["fgac_policies"]}
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def test_tier_move_is_measured_against_adopted_principals(harness):
+    desired = released_fifteen_policy_env(harness)
+    _replace_first_n_policy_principals_with_unknown(harness.env_dir, 14)
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_treatment_tags = dict(desired["tags"])
+    spa.journal_path(harness.env_dir).unlink()
+
+    assert harness.apply(FAKE_TF_FAIL_APPLY="create") == 1
+
+    t = harness.journal()["transition"]
+    adopted = pg.load_snapshot(harness.env_dir, t["adopted_from_state"])
+    assert pg.has_tier_move(desired, adopted)
+    assert not pg.has_tier_move(desired, desired)
+    assert t["tier_move"]
+    assert "tighten" in t["phases"]
+
+    live = {p["name"]: p for p in adopted["fgac_policies"]}
+    want = {p["name"]: p for p in desired["fgac_policies"]}
+    leaks = set()
+    by_value: dict[str, list[str]] = {}
+    for policy in want.values():
+        by_value.setdefault(pg.policy_value(policy), []).append(policy["name"])
+    universe = pg._universe(desired) - {pg.OUTSIDER}
+    for value, names in by_value.items():
+        for count in range(len(names) + 1):
+            for done in itertools.combinations(names, count):
+                current = [want[name] if name in done else live[name] for name in names]
+                for principal in universe:
+                    final = [want[name] for name in names if pg._covers(want[name], principal)]
+                    now = [policy for policy in current if pg._covers(policy, principal)]
+                    if final and not now:
+                        leaks.add((value, principal, done))
+    assert leaks
+
+
+def test_tampered_adopted_from_state_does_not_skip_verify_created(harness):
+    released(harness)
+    write_env(harness.env_dir, versions={"email_partial": {"partial": "redacted"}})
+    assert harness.apply(FAKE_TF_FAIL_APPLY="create") == 1
+    journal = harness.journal()
+    transition = journal["transition"]
+    assert "adopted_from_state" not in transition
+    transition["adopted_from_state"] = transition["from"]
+    spa.save_journal(harness.env_dir, journal)
+    harness.calls.clear()
+
+    assert harness.apply() == 0
+
+    assert "verify-access:create" in harness.calls
+
+
+def test_adopted_create_verifies_values_without_unknown_principals(harness):
+    desired = released_fifteen_policy_env(harness)
+    _replace_first_n_policy_principals_with_unknown(harness.env_dir, 2)
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_treatment_tags = dict(desired["tags"])
+    harness.validate_real_specs = True
+    spa.journal_path(harness.env_dir).unlink()
+    harness.calls.clear()
+
+    assert harness.apply() == 0
+
+    assert "verify-access:create" in harness.calls
+    checked = list(harness.verify_specs[0].column_masks)
+    assert checked
+    skipped_values = {
+        pg.policy_value(policy)
+        for policy in pg.load_snapshot(harness.env_dir, _adoption_history_entry(harness.journal())["adopted"])[
+            "fgac_policies"]
+        if pg.UNKNOWN in ((policy.get("to_principals") or []) + (policy.get("except_principals") or []))
+    }
+    checked_values = {desired["tags"][f"{item.table}.{item.column}"] for item in checked}
+    assert not checked_values & skipped_values
+
+
+@pytest.mark.parametrize(("edit", "message"), [
+    (lambda t: t.__setitem__("render_from", "not-the-restore"), "unexpected create render target"),
+    (lambda t: (t.__setitem__("from", "deadbeef"), t.__setitem__("adopted_from_state", "deadbeef")),
+     "can't be read"),
+])
+def test_repair_adopted_create_render_refuses_bad_journal_shapes(harness, edit, message):
+    desired = released_fifteen_policy_env(harness)
+    _replace_first_n_policy_principals_with_unknown(harness.env_dir, 14)
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_treatment_tags = dict(desired["tags"])
+    spa.journal_path(harness.env_dir).unlink()
+    assert harness.apply(FAKE_TF_FAIL_APPLY="create") == 1
+    journal = harness.journal()
+    transition = journal["transition"]
+    transition["render_from"] = transition["restore_from"]
+    edit(transition)
+    before = json.loads(json.dumps(journal))
+    spa.save_journal(harness.env_dir, journal)
+    harness.calls.clear()
+
+    with pytest.raises(spa.Refused, match=message):
+        harness.apply()
+
+    assert harness.calls == []
+    assert harness.journal() == before
+
+
+def test_repair_adopted_create_render_refuses_non_matching_adopted_snapshot(harness):
+    desired = released_fifteen_policy_env(harness)
+    _replace_first_n_policy_principals_with_unknown(harness.env_dir, 14)
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_treatment_tags = dict(desired["tags"])
+    spa.journal_path(harness.env_dir).unlink()
+    assert harness.apply(FAKE_TF_FAIL_APPLY="create") == 1
+    journal = harness.journal()
+    transition = journal["transition"]
+    transition["render_from"] = transition["restore_from"]
+    adopted = pg.load_snapshot(harness.env_dir, transition["adopted_from_state"])
+    adopted["fgac_policies"][0]["to_principals"] = ["attacker"]
+    pg.save_snapshot(harness.env_dir, adopted)
+    before = json.loads(json.dumps(journal))
+    spa.save_journal(harness.env_dir, journal)
+    harness.calls.clear()
+
+    with pytest.raises(spa.Refused, match="doesn't match its fingerprint"):
+        harness.apply()
+
+    assert harness.calls == []
+    assert harness.journal() == before
 
 
 @pytest.mark.parametrize("with_existing_journal", [False, True])
@@ -1982,18 +2125,19 @@ def test_preview_plan_and_run_agree_for_post_import_live_treatment_adoption(harn
     described = capsys.readouterr().out
     assert "would refuse" not in described
     assert "live has treatment none" not in described
-    assert "would run: create -> verify-created -> switch -> verify-switched -> grant" in described
+    assert "would run: create -> verify-created -> tighten -> verify-tightened -> switch -> verify-switched -> grant" in described
 
     out = tmp_path / "plan"
     assert harness.controller().plan(out) == 0
     planned = json.loads((out / spa.PHASES_FILE).read_text())
-    assert planned["transition"]["phases"] == ["create", "verify-created", "switch", "verify-switched", "grant"]
-    assert not planned["transition"]["tier_move"]
+    assert planned["transition"]["phases"] == [
+        "create", "verify-created", "tighten", "verify-tightened", "switch", "verify-switched", "grant"]
+    assert planned["transition"]["tier_move"]
 
     harness.calls.clear()
     assert harness.apply() == 0
     assert "verify-access:create" not in harness.calls
-    assert "tighten" not in harness.calls
+    assert "tighten" in harness.calls
 
 
 def test_lost_journal_named_principal_adoption_restores_generated_principals_after_failed_switch(harness):
