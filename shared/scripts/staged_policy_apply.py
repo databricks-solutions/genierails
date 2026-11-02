@@ -650,8 +650,12 @@ class Controller:
                 "completion first; a new policy change would need a fourth live generation.")
         eligible = held if held and held["confirmed"] and held["fingerprint"] not in {active, desired["fingerprint"]} \
             else None
-        render_from = str((adopted or {}).get("restore_from") or "")
-        render_old = self._snapshot(render_from) if render_from else old
+        restore_from = str((adopted or {}).get("restore_from") or "")
+        render_from = active if adopted else ""
+        # Principal-only adoption records the generated/last-verified generation as the restore target,
+        # but create must render the live adopted principals. Otherwise create would move unknown deleted
+        # principals back to real groups before verify-created proves the masks.
+        render_old = self._snapshot(restore_from) if restore_from else old
         tier_move = change and pg.has_tier_move(desired, render_old, retain)
         phases = ["create"]
         if change or eligible:
@@ -673,11 +677,24 @@ class Controller:
             "failed_phase": "", "error": "", "switch_attempted": False, "restoring": False,
             "restore_failed": False, "restored": None, "started_at": _now(), "updated_at": _now(),
         }
-        if render_from and render_from != active:
-            transition["restore_from"] = adopted["restore_from"]
+        if adopted:
+            transition["restore_from"] = restore_from
             transition["adopted_from_state"] = active
             transition["render_from"] = render_from
         return transition
+
+    def _repair_adopted_create_render(self, journal: dict, t: dict) -> None:
+        """Old failed-create journals rendered create from restore_from; resume from adopted live instead."""
+        adopted = t.get("adopted_from_state") or ""
+        if not adopted or "create" in (t.get("completed") or []) or t.get("switch_attempted"):
+            return
+        if t.get("render_from") == adopted:
+            return
+        if self._snapshot(adopted) is None:
+            return
+        t["render_from"] = adopted
+        t["updated_at"] = _now()
+        self._save(journal)
 
     # -- running hooks ---------------------------------------------------------
     def _hook_env(self, t: dict, *, old_fp: str | None = None) -> dict:
@@ -785,6 +802,10 @@ class Controller:
         rc = self._inventory(t, stages)
         if rc or not with_access:
             return rc
+        if phase == "verify-created" and t.get("adopted_from_state") and _render_fingerprint(t) == t["from"]:
+            print("  verify-created: retained policies still name adopted live principals; "
+                  "generated-principal access is proved after switch")
+            return 0
         inputs = self.verification_inputs(t, stages)
         if inputs is None:
             print(f"  {phase}: no column carries a value yet; the live policy check above is the verification")
@@ -893,6 +914,7 @@ class Controller:
             if t:
                 if t["to"] != desired["fingerprint"]:
                     raise Refused(self._unfinished_message(t, desired))
+                self._repair_adopted_create_render(journal, t)
                 print(f"=== Policy staged apply: resuming run {t['run_id']} "
                       f"({t['status']} at {t['failed_phase'] or t['current'] or 'start'}) ===")
                 if t["restoring"] or t["restore_failed"]:
@@ -948,6 +970,7 @@ class Controller:
             journal = journal or self._adopt(desired)
             journal = self._adopt_principal_drift(journal, desired)
             t = self._transition_for(journal, desired)
+            self._repair_adopted_create_render(journal, t)
             self.refuse_weaker_spec(t)
             remaining = [p for p in t["phases"] if p not in t["completed"]]
             steps: list[dict] = []
@@ -1019,6 +1042,7 @@ class Controller:
             journal = load_journal(self.env_dir) or self._adopt(desired)
             journal = self._adopt_principal_drift(journal, desired)
             t = self._transition_for(journal, desired)
+            self._repair_adopted_create_render(journal, t)
             for key in ("from", "to", "retain", "retire", "tier_move", "phases"):
                 if t[key] != planned[key]:
                     raise Refused(f"the policy journal moved since release-plan ({key}: planned {planned[key]!r}, "
@@ -1598,6 +1622,9 @@ class Controller:
         journal = load_journal(self.env_dir)
         t = (journal or {}).get("transition")
         if t:
+            if t.get("adopted_from_state") and "create" not in (t.get("completed") or []) \
+                    and not t.get("switch_attempted"):
+                t = dict(t) | {"render_from": t.get("adopted_from_state") or t.get("from") or ""}
             print(self.describe_transition(t))
             if t["to"] != desired["fingerprint"]:
                 print("  The generated config has moved on: the next apply refuses until this is resumed or "

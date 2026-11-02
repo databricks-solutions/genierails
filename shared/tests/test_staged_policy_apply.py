@@ -23,7 +23,7 @@ import hcl2
 import pytest
 
 import generate_abac
-from governance_policies import build_model, is_never_raw
+from governance_policies import SQL_MARKER, build_model, is_never_raw
 from scripts import environment_lock
 from scripts import policy_generations as pg
 from scripts import staged_policy_apply as spa
@@ -149,6 +149,35 @@ def refreshed(state):
     return state
 
 
+def staged_policy_guard(stage, state, wanted):
+    if stage not in ("", "create", "tighten", "grant"):
+        return []
+    live = instances(state, MASK)
+    problems = []
+    for name, policy in sorted(live.items()):
+        if not name.startswith("gr_mask_"):
+            continue
+        want = wanted.get(name)
+        if want is None:
+            problems.append(f"{name} removed")
+            continue
+        have_function = (policy.get("column_mask") or {}).get("function_name", "").lower()
+        want_function = (want.get("column_mask") or {}).get("function_name", "").lower()
+        if have_function != want_function:
+            problems.append(f"{name} changes its function")
+        if stage != "tighten" and (
+            sorted(policy.get("to_principals") or []) != sorted(want.get("to_principals") or [])
+            or sorted(policy.get("except_principals") or []) != sorted(want.get("except_principals") or [])
+        ):
+            problems.append(f"{name} changes its principals")
+        if stage == "tighten":
+            if set(policy.get("to_principals") or []) - set(want.get("to_principals") or []):
+                problems.append(f"{name} loses coverage while tightening")
+            if set(want.get("except_principals") or []) - set(policy.get("except_principals") or []):
+                problems.append(f"{name} loses coverage while tightening")
+    return problems
+
+
 def access_wanted(state, stage, masks):
     """What the config plans for grants, the functions and the wait (with fake_access.json)."""
     if not os.path.exists(ACCESS):
@@ -182,6 +211,11 @@ if command == "plan":
     want, functions = desired()
     want |= access_wanted(prior, stage, want[MASK])
     state = refreshed(prior)
+    guarded = staged_policy_guard(stage, state, want[MASK])
+    if guarded:
+        sys.stderr.write("Module output value precondition failed\\n")
+        sys.stderr.write("This " + (stage or "plan") + " plan would: " + "; ".join(guarded) + "\\n")
+        sys.exit(1)
     changes = []
     for kind, wanted in want.items():
         have = instances(state, kind)
@@ -267,6 +301,77 @@ def write_env(env_dir: Path, *, tiers=TIERS, versions=None, columns=("email",), 
     (layer / "abac.auto.tfvars").write_text((generated / "abac.auto.tfvars").read_text())
     (layer / "masking_functions.sql").write_text((generated / "masking_functions.sql").read_text())
     return pg.desired_generation(env_dir) if mode == "deterministic" else None
+
+
+def _write_fifteen_policy_config(env_dir: Path) -> dict:
+    """Nine columns and fifteen Terraform-shaped mask policies, matching the AWS Bug D scale."""
+    values = [f"live_{i:02d}__string__{i:08x}" for i in range(8)]
+    assignments = [
+        {"entity_type": "columns", "entity_name": f"cat.sch.t.field_{i}", "tag_key": pg.TAG_KEY,
+         "tag_value": values[i % 7]}
+        for i in range(9)
+    ]
+    policies = []
+    for i, value in enumerate(values[:7]):
+        alias = f"gr_treatment_{i}"
+        for suffix, to_principals, except_principals in (
+            ("partial", ["regional"], []),
+            ("full", ["account users"], ["raw", "regional"]),
+        ):
+            policies.append({
+                "name": f"gr_mask_live_{i:02d}_{suffix}",
+                "policy_type": "POLICY_TYPE_COLUMN_MASK",
+                "catalog": "cat",
+                "to_principals": to_principals,
+                "except_principals": except_principals,
+                "match_condition": f"hasTagValue('{pg.TAG_KEY}', '{value}')",
+                "match_alias": alias,
+                "function_name": f"gr_mask_live_{i:02d}_{suffix}",
+                "function_catalog": "cat",
+                "function_schema": "sch",
+            })
+    policies.append({
+        "name": "gr_mask_live_07_full",
+        "policy_type": "POLICY_TYPE_COLUMN_MASK",
+        "catalog": "cat",
+        "to_principals": ["account users"],
+        "except_principals": ["raw", "regional"],
+        "match_condition": f"hasTagValue('{pg.TAG_KEY}', '{values[7]}')",
+        "match_alias": "gr_treatment_7",
+        "function_name": "gr_mask_live_07_full",
+        "function_catalog": "cat",
+        "function_schema": "sch",
+    })
+    sql = SQL_MARKER + "\nUSE CATALOG cat;\nUSE SCHEMA sch;\n" + "\n".join(
+        f"CREATE OR REPLACE FUNCTION {policy['function_name']}(x STRING) RETURNS STRING RETURN x;"
+        for policy in policies
+    ) + "\n"
+
+    def write(path: Path) -> None:
+        text = path.read_text()
+        text = generate_abac._replace_bracket_section(
+            text, "tag_assignments", [generate_abac._render_tag_assignment_block(item) for item in assignments])
+        text = generate_abac._replace_bracket_section(
+            text, "fgac_policies", [generate_abac._render_fgac_policy_block(policy) for policy in policies])
+        path.write_text(text)
+        (path.parent / "masking_functions.sql").write_text(sql)
+
+    for base in (env_dir / "generated", env_dir / "data_access"):
+        write(base / "abac.auto.tfvars")
+    generation = pg.desired_generation(env_dir)
+    assert len(generation["tags"]) == 9
+    assert len(generation["fgac_policies"]) == 15
+    return generation
+
+
+def released_fifteen_policy_env(h) -> dict:
+    write_env(h.env_dir, columns=tuple(f"field_{i}" for i in range(9)))
+    gen = _write_fifteen_policy_config(h.env_dir)
+    assert h.apply() == 0
+    assert h.controller().confirm() == 0
+    h.calls.clear()
+    h.verify_envs.clear()
+    return gen
 
 
 def live_state(env_dir: Path) -> dict:
@@ -500,6 +605,10 @@ class Harness:
                 applied = [p for p in masks if _covers(p, who)]
                 gens = [g for g in targets if g] or [desired]
                 if not applied and any(access(g, who, value) != "raw" for g in gens):
+                    if stage == "create" and any(pg.UNKNOWN in (p.get("to_principals") or [])
+                                                 or pg.UNKNOWN in (p.get("except_principals") or [])
+                                                 for p in masks):
+                        continue
                     self.invariant_problems.append(f"after {stage}: {who} sees {column} raw")
                 moving = bool(old and desired) and access(old, who, value) != access(desired, who, value)
                 if len(applied) > 1 and not (stage == "tighten" and moving):
@@ -1456,6 +1565,21 @@ def _replace_deleted_principals_with_unknown(env_dir: Path) -> None:
     (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
 
 
+def _replace_first_n_policy_principals_with_unknown(env_dir: Path, count: int) -> list[str]:
+    state = live_state(env_dir)
+    changed = []
+    for name, policy in sorted(_instances(state, "databricks_policy_info", "policies").items()):
+        if len(changed) == count:
+            break
+        for field in ("to_principals", "except_principals"):
+            policy[field] = sorted({"account users" if p == "account users" else pg.UNKNOWN
+                                    for p in policy[field]})
+        changed.append(name)
+    assert len(changed) == count
+    (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+    return changed
+
+
 def _replace_first_regional_to(env_dir: Path, replacement: str) -> None:
     state = live_state(env_dir)
     for policy in _instances(state, "databricks_policy_info", "policies").values():
@@ -1599,7 +1723,7 @@ def test_existing_journal_accepts_deleted_to_principal_as_unknown(harness):
     adoption = _adoption_history_entry(journal)
     assert adoption["to"] == desired["fingerprint"]
     assert journal["active"] == desired["fingerprint"]
-    assert harness.calls[:3] == ["create", "inventory:create/restore", "verify-access:create"]
+    assert harness.calls[:3] == ["create", "inventory:create/restore", "switch"]
     assert "switch" in harness.calls and "verify-access:switch" in harness.calls
     live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
     assert {name: live[name]["to_principals"] for name in live} == {
@@ -1708,11 +1832,11 @@ def test_principal_only_adoption_accepts_post_import_state_with_deleted_tier_gro
     adoption = _adoption_history_entry(journal)
     assert adoption["to"] == desired["fingerprint"]
     assert journal["active"] == desired["fingerprint"]
-    assert harness.calls[:3] == ["create", "inventory:create/restore", "verify-access:create"]
+    assert harness.calls[:3] == ["create", "inventory:create/restore", "switch"]
     assert "switch" in harness.calls and "verify-access:switch" in harness.calls
     live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
     assert {name: (live[name]["to_principals"], live[name]["except_principals"]) for name in live} == {
-        p["name"]: (p["to_principals"], p["except_principals"]) for p in desired["fgac_policies"]}
+        p["name"]: (p["to_principals"], p.get("except_principals") or []) for p in desired["fgac_policies"]}
     state = live_state(harness.env_dir)
     assert _instances(state, "terraform_data", "masking_functions")
 
@@ -1734,7 +1858,7 @@ def test_principal_only_adoption_accepts_post_import_state_with_live_treatment_t
     adoption = _adoption_history_entry(journal)
     assert adoption["to"] == desired["fingerprint"]
     assert journal["active"] == desired["fingerprint"]
-    assert harness.calls[:3] == ["create", "inventory:create/restore", "verify-access:create"]
+    assert harness.calls[:3] == ["create", "inventory:create/restore", "switch"]
     assert "switch" in harness.calls and "verify-access:switch" in harness.calls
     assert live_tags(live_state(harness.env_dir)) == desired["tags"]
 
@@ -1792,18 +1916,61 @@ def test_principal_only_adoption_refuses_when_state_treatment_is_present_and_dif
     assert harness.calls == []
 
 
-def test_no_journal_post_import_adoption_keeps_generated_restore_target_for_unknown_to_and_except(harness):
+def test_no_journal_post_import_adoption_keeps_create_on_live_principals_and_restore_on_generated(harness):
     desired = _aws_takeover_principal_drift(harness, with_existing_journal=False)
     harness.fail_verify = {"switch"}
 
     assert harness.apply() == 1
 
-    assert "verify-access:create" in harness.calls
+    assert "verify-access:create" not in harness.calls
     assert "tighten" not in harness.calls
     t = harness.journal()["transition"]
     assert t["restore_from"] == desired["fingerprint"]
-    assert t["render_from"] == desired["fingerprint"]
+    assert t["render_from"] == t["adopted_from_state"]
     assert t["restored"]["generation"] == desired["fingerprint"]
+
+
+def test_live_bug_d_adopted_unknown_principals_resume_create_then_switch_to_generated(harness, tmp_path):
+    desired = released_fifteen_policy_env(harness)
+    changed = _replace_first_n_policy_principals_with_unknown(harness.env_dir, 14)
+    harness.live_treatment_tags = dict(desired["tags"])
+    spa.journal_path(harness.env_dir).unlink()
+
+    # Reproduce the journal left by 499e19a: principal-only drift was adopted, but the failed create
+    # transition rendered retained policies from the generated restore target.
+    assert harness.apply(FAKE_TF_FAIL_APPLY="create") == 1
+    journal = harness.journal()
+    t = journal["transition"]
+    adopted_fp = t["adopted_from_state"]
+    assert t["failed_phase"] == "create"
+    assert t["render_from"] == adopted_fp
+    t["render_from"] = t["restore_from"]
+    spa.save_journal(harness.env_dir, journal)
+
+    out = tmp_path / "plan"
+    assert harness.controller().plan(out) == 0
+    planned = json.loads((out / spa.PHASES_FILE).read_text())
+    assert planned["transition"]["phases"] == ["create", "verify-created", "switch", "verify-switched", "grant"]
+    assert not planned["transition"]["tier_move"]
+
+    harness.calls.clear()
+    assert harness.apply() == 0
+
+    assert harness.calls == ["create", "inventory:create/restore",
+                             "switch", "inventory:switch", "verify-access:switch", "grant"]
+    journal = harness.journal()
+    adoption = _adoption_history_entry(journal)
+    assert adoption["adopted"] == adopted_fp
+    adopted = pg.load_snapshot(harness.env_dir, adopted_fp)
+    assert len(adopted["tags"]) == 9
+    assert len(adopted["fgac_policies"]) == 15
+    retained = {p["name"]: p for p in adopted["fgac_policies"] if p["name"] in changed}
+    assert len(retained) == 14
+    assert any(pg.UNKNOWN in p["to_principals"] or pg.UNKNOWN in p["except_principals"]
+               for p in retained.values())
+    live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
+    assert {name: (live[name]["to_principals"], live[name]["except_principals"]) for name in live} == {
+        p["name"]: (p["to_principals"], p.get("except_principals") or []) for p in desired["fgac_policies"]}
 
 
 @pytest.mark.parametrize("with_existing_journal", [False, True])
@@ -1825,7 +1992,7 @@ def test_preview_plan_and_run_agree_for_post_import_live_treatment_adoption(harn
 
     harness.calls.clear()
     assert harness.apply() == 0
-    assert "verify-access:create" in harness.calls
+    assert "verify-access:create" not in harness.calls
     assert "tighten" not in harness.calls
 
 
