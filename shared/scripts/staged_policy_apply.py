@@ -688,12 +688,10 @@ class Controller:
         adopted = t.get("adopted_from_state") or ""
         if not adopted or "create" in (t.get("completed") or []) or t.get("switch_attempted"):
             return
-        if t.get("render_from") == adopted:
-            return
         restore_from = _restore_fingerprint(t)
         if not t.get("render_from") and not t.get("restore_from"):
             return
-        if t.get("render_from") != restore_from or adopted != t.get("from"):
+        if t.get("render_from") not in {restore_from, adopted} or adopted != t.get("from"):
             raise Refused("the adopted principal-only drift journal has an unexpected create render target; "
                           "nothing was applied. Re-run the original 499e19a failed-create journal shape or "
                           "restore the policy journal from records.")
@@ -705,7 +703,31 @@ class Controller:
         if not pg.snapshot_intact(snapshot, adopted):
             raise Refused(f"the adopted principal-only drift snapshot {adopted} doesn't match its fingerprint; "
                           "nothing was applied.")
+        try:
+            desired = self._snapshot(t["to"])
+            retain = self._snapshot(t["retain"]) if t.get("retain") else None
+            if not desired or not pg.snapshot_intact(desired, t["to"]):
+                raise pg.StageError(f"generation {t['to']} has no intact snapshot")
+            if retain and not pg.snapshot_intact(retain, t["retain"]):
+                raise pg.StageError(f"generation {t['retain']} has no intact snapshot")
+            change = t["to"] != adopted
+            tier_move = change and pg.has_tier_move(desired, snapshot, retain)
+        except (pg.StageError, OSError, ValueError) as exc:
+            raise Refused(f"the adopted principal-only drift journal can't be safely repaired ({exc}); "
+                          f"nothing was applied. Run make policy-abandon ENV={self.env_name}, then re-plan.") from exc
+        phases = ["create"]
+        if change or t.get("retire"):
+            phases.append("verify-created")
+        if tier_move:
+            phases += ["tighten", "verify-tightened"]
+        if change:
+            phases += ["switch", "verify-switched"]
+        if t.get("retire"):
+            phases += ["retire", "verify-retired", "drop-functions"]
+        phases.append("grant")
         t["render_from"] = adopted
+        t["tier_move"] = tier_move
+        t["phases"] = phases
         t["updated_at"] = _now()
         self._save(journal)
 

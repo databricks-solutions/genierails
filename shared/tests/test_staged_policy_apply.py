@@ -1990,6 +1990,60 @@ def test_live_bug_d_adopted_unknown_principals_resume_create_then_switch_to_gene
     _assert_live_generated_principals(harness.env_dir, desired)
 
 
+def _true_499e19a_adopted_journal_shape(t: dict) -> None:
+    t["render_from"] = t["restore_from"]
+    t["tier_move"] = False
+    t["phases"] = [phase for phase in t["phases"] if phase not in {"tighten", "verify-tightened"}]
+
+
+@pytest.mark.parametrize("with_existing_journal", [False, True])
+def test_true_499e19a_journal_resume_tightens_before_switch(harness, with_existing_journal):
+    desired = released_fifteen_policy_env(harness)
+    _replace_first_n_policy_principals_with_unknown(harness.env_dir, 14)
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_treatment_tags = dict(desired["tags"])
+    if not with_existing_journal:
+        spa.journal_path(harness.env_dir).unlink()
+
+    assert harness.apply(FAKE_TF_FAIL_APPLY="create") == 1
+    journal = harness.journal()
+    _true_499e19a_adopted_journal_shape(journal["transition"])
+    spa.save_journal(harness.env_dir, journal)
+    harness.calls.clear()
+
+    assert harness.apply() == 0
+
+    assert "tighten" in harness.calls
+    assert harness.calls.index("tighten") < harness.calls.index("switch")
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+@pytest.mark.parametrize("with_existing_journal", [False, True])
+def test_true_499e19a_journal_failed_switch_restore_tightens(harness, with_existing_journal):
+    desired = released_fifteen_policy_env(harness)
+    _replace_first_n_policy_principals_with_unknown(harness.env_dir, 14)
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_treatment_tags = dict(desired["tags"])
+    if not with_existing_journal:
+        spa.journal_path(harness.env_dir).unlink()
+
+    assert harness.apply(FAKE_TF_FAIL_APPLY="create") == 1
+    journal = harness.journal()
+    _true_499e19a_adopted_journal_shape(journal["transition"])
+    spa.save_journal(harness.env_dir, journal)
+    harness.calls.clear()
+    harness.fail_verify = {"switch"}
+
+    assert harness.apply() == 1
+
+    after_switch_verify = harness.calls[harness.calls.index("verify-access:switch"):]
+    assert "tighten" in after_switch_verify
+    assert after_switch_verify.index("tighten") < after_switch_verify.index("restore")
+    t = harness.journal()["transition"]
+    assert t["restored"]["generation"] == desired["fingerprint"]
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
 def test_tier_move_is_measured_against_adopted_principals(harness):
     desired = released_fifteen_policy_env(harness)
     _replace_first_n_policy_principals_with_unknown(harness.env_dir, 14)
