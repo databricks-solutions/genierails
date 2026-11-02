@@ -73,6 +73,7 @@ import shlex
 import subprocess
 import sys
 import uuid
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -277,6 +278,20 @@ def _content_versioned_policy_functions(functions_sql: str, desired_by_name: dic
     return problems
 
 
+def _missing_to_principals_not_deleted(live_to: list[str], want_to: list[str]) -> list[str]:
+    """Expected TO principals missing from live without an ``unknown`` deleted-principal marker."""
+    live = Counter(live_to)
+    missing = list((Counter(want_to) - live).elements())
+    unknowns = live.get(pg.UNKNOWN, 0)
+    unaccounted = []
+    for principal in sorted(missing):
+        if unknowns:
+            unknowns -= 1
+        else:
+            unaccounted.append(principal)
+    return unaccounted
+
+
 def _principal_only_adoption(env_dir: Path, live: dict, desired: dict, *,
                              allow_named_principal_drift: bool) -> tuple[dict | None, list[str]]:
     """A synthetic current generation when state differs from desired only by principals."""
@@ -304,6 +319,12 @@ def _principal_only_adoption(env_dir: Path, live: dict, desired: dict, *,
     changed_principals = False
     adopted_policies = []
     named_drift: list[str] = []
+    live_named_to = {
+        principal
+        for policy in live["policies"].values()
+        for principal in policy["to"]
+        if principal not in {pg.UNKNOWN, pg.ALL_USERS}
+    }
     for name in sorted(live_names & desired_names):
         live_policy = live["policies"][name]
         desired_policy = desired_by_name[name]
@@ -321,8 +342,14 @@ def _principal_only_adoption(env_dir: Path, live: dict, desired: dict, *,
                 for principal in sorted(set(live_policy[field]) - set(want[field])):
                     if principal != pg.UNKNOWN:
                         named_drift.append(f"policy {name} has unexpected live principal {principal!r} in {field}")
-            for principal in sorted(set(want["to"]) - set(live_policy["to"])):
+            for principal in _missing_to_principals_not_deleted(live_policy["to"], want["to"]):
                 named_drift.append(f"policy {name} removed expected live principal {principal!r} from to")
+            missing_except = list((Counter(want["except"]) - Counter(live_policy["except"])).elements())
+            for principal in sorted(missing_except):
+                if principal in live_named_to:
+                    named_drift.append(
+                        f"policy {name} removed expected except principal {principal!r}, "
+                        f"but {principal!r} is still named in a live to_principals list")
         adopted_policies.append(_with_state_principals(desired_policy, live_policy))
     if named_drift:
         problems += named_drift
@@ -354,6 +381,11 @@ def _expected_live(generations: list[dict]) -> dict[str, dict]:
 def _restore_fingerprint(t: dict) -> str:
     """The verified generation a failed switch may restore to."""
     return str(t.get("restore_from") or t.get("from") or "")
+
+
+def _render_fingerprint(t: dict) -> str:
+    """The generation forward phases render and verify as the old protection."""
+    return str(t.get("render_from") or t.get("from") or "")
 
 
 def _adopted_unverified(journal: dict, fingerprint: str) -> dict | None:
@@ -569,7 +601,10 @@ class Controller:
                 "completion first; a new policy change would need a fourth live generation.")
         eligible = held if held and held["confirmed"] and held["fingerprint"] not in {active, desired["fingerprint"]} \
             else None
-        tier_move = change and pg.has_tier_move(desired, old, retain)
+        adopted = _adopted_unverified(journal, active)
+        render_from = str((adopted or {}).get("restore_from") or "")
+        render_old = self._snapshot(render_from) if render_from else old
+        tier_move = change and pg.has_tier_move(desired, render_old, retain)
         phases = ["create"]
         if change or eligible:
             phases.append("verify-created")
@@ -590,9 +625,10 @@ class Controller:
             "failed_phase": "", "error": "", "switch_attempted": False, "restoring": False,
             "restore_failed": False, "restored": None, "started_at": _now(), "updated_at": _now(),
         }
-        if adopted and adopted.get("restore_from") and adopted.get("restore_from") != active:
+        if render_from and render_from != active:
             transition["restore_from"] = adopted["restore_from"]
             transition["adopted_from_state"] = active
+            transition["render_from"] = render_from
         return transition
 
     # -- running hooks ---------------------------------------------------------
@@ -610,12 +646,13 @@ class Controller:
         }
 
     def _hook(self, t: dict, stage: str) -> int:
-        old_fp = _restore_fingerprint(t) if stage in {"restore", "abandon"} else t["from"]
+        old_fp = _restore_fingerprint(t) if stage in {"restore", "abandon"} else _render_fingerprint(t)
         return self.run_cmd([str(self.hook_dir / stage)], env=self._hook_env(t, old_fp=old_fp), check=False).returncode
 
     def _inventory(self, t: dict, stages: tuple[str, ...]) -> int:
         cmd = self.inventory_cmd + ["--env-dir", str(self.env_dir), "--stage", ",".join(stages)]
-        old_fp = _restore_fingerprint(t) if set(stages) & {"restore", "rebind", "abandon"} else t["from"]
+        old_fp = _restore_fingerprint(t) if set(stages) & {"restore", "rebind", "abandon"} \
+            else _render_fingerprint(t)
         return self.run_cmd(cmd, env=self._hook_env(t, old_fp=old_fp), check=False).returncode
 
     def verification_inputs(self, t: dict, stages: tuple[str, ...]) -> tuple[Path, Path] | None:
@@ -640,7 +677,8 @@ class Controller:
     def _verification_files(self, t: dict, stage: str, rendered: dict, layer_tfvars: Path,
                             verify_dir: Path) -> tuple[Path, Path] | None:
         before_switch = stage in ("create", "restore", "rebind")
-        basis_fp = _restore_fingerprint(t) if stage in ("restore", "rebind", "abandon") else t["from"]
+        basis_fp = _restore_fingerprint(t) if stage in ("restore", "rebind", "abandon") \
+            else _render_fingerprint(t)
         basis = self._snapshot(basis_fp) if before_switch and basis_fp else self._snapshot(t["to"])
         tags = dict(rendered["tags"])
         if before_switch:
@@ -680,7 +718,8 @@ class Controller:
         from scripts.resolve_env_config import resolve_verify_key
 
         desired = pg.desired_generation(self.env_dir)
-        old = self._snapshot(t["from"]) if t["from"] else None
+        old_fp = _render_fingerprint(t)
+        old = self._snapshot(old_fp) if old_fp else None
         retire = self._snapshot(t["retain"]) if t["retain"] not in {"", t["to"], t["from"]} else None
         rendered = pg.render_stage("create", desired, old, retire)
         with tempfile.TemporaryDirectory() as tmp:
@@ -690,7 +729,7 @@ class Controller:
                 return
             if require_mask_proof(self.env_dir, self.env_name, resolve_verify_key(self.env_dir, self.verify_key),
                                   self.verify_spec, self.account_tfvars, tfvars=inputs[0], env_file=inputs[1]):
-                raise Refused(f"verify-created would refuse VERIFY_SPEC against generation {t['from']}, which "
+                raise Refused(f"verify-created would refuse VERIFY_SPEC against generation {old_fp}, which "
                               "the columns carry until switch (above); omit VERIFY_SPEC for this change")
 
     def _verify(self, t: dict, phase: str) -> int:
@@ -705,7 +744,8 @@ class Controller:
         if not self.verify_access_cmd:
             print(f"ERROR: {phase} needs a verify-access command (--verify-access-cmd)", file=sys.stderr)
             return 2
-        env = self._hook_env(t, old_fp=_restore_fingerprint(t) if "restore" in stages else t["from"]) | {
+        env = self._hook_env(t, old_fp=_restore_fingerprint(t) if "restore" in stages
+                             else _render_fingerprint(t)) | {
             "GENIERAILS_VERIFY_TFVARS": str(inputs[0]),
             "GENIERAILS_VERIFY_ENV_FILE": str(inputs[1]),
             "GENIERAILS_VERIFY_PRE_GRANT": "1" if phase in PRE_GRANT_VERIFY else "",
@@ -875,7 +915,7 @@ class Controller:
                     steps.append({"phase": phase, "kind": "verify"})
                     continue
                 plan_file = out_dir / f"{len(steps):02d}-{phase}.tfplan"
-                old_fp = _restore_fingerprint(t) if phase in {"restore", "abandon"} else t["from"]
+                old_fp = _restore_fingerprint(t) if phase in {"restore", "abandon"} else _render_fingerprint(t)
                 env = self._hook_env(t, old_fp=old_fp) | {PLAN_OUT_ENV: str(plan_file)} \
                     | ({PLAN_BASIS_ENV: basis} if basis else {})
                 print(f"=== Policy phase {phase} ({self.env_name}): saving its plan ===", flush=True)
@@ -951,7 +991,7 @@ class Controller:
                 self._save(journal)
                 print(f"=== Policy phase {phase} ({self.env_name}) ===", flush=True)
                 if step["kind"] == "apply":
-                    old_fp = _restore_fingerprint(t) if phase in {"restore", "abandon"} else t["from"]
+                    old_fp = _restore_fingerprint(t) if phase in {"restore", "abandon"} else _render_fingerprint(t)
                     env = self._hook_env(t, old_fp=old_fp) | {SAVED_PLAN_ENV: str(plan_dir / step["file"])}
                     rc = self.run_cmd([str(self.hook_dir / APPLY_PHASES[phase])], env=env, check=False).returncode
                 else:
