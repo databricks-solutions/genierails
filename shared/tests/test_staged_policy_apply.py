@@ -37,6 +37,8 @@ FAKE_RUNNER = r'''#!/usr/bin/env python3
 """A data_access terraform_layer.sh: plan/show/apply-plan against a JSON state."""
 import hashlib, json, os, re, sys
 import hcl2
+sys.path.insert(0, "@SHARED@")
+from modules.data_access.normalize_masking_sql import normalized_definitions
 
 layer, env_name, command, *args = sys.argv[1:]
 layer_dir = os.environ["LAYER_ENV_DIR"]
@@ -93,10 +95,14 @@ def desired():
     for p in cfg.get("fgac_policies") or []:
         if p.get("policy_type") == "POLICY_TYPE_COLUMN_MASK":
             masks[p["name"]] = {
-                "catalog": p["catalog"], "to_principals": p["to_principals"],
+                "catalog": p["catalog"], "on_securable_type": "CATALOG", "on_securable_fullname": p["catalog"],
+                "policy_type": p["policy_type"], "for_securable_type": "TABLE",
+                "to_principals": p["to_principals"],
                 "except_principals": p.get("except_principals") or [],
-                "column_mask": {"function_name": f"{p['function_catalog']}.{p['function_schema']}.{p['function_name']}"},
-                "match_columns": [{"condition": p["match_condition"]}],
+                "column_mask": {"function_name": f"{p['function_catalog']}.{p['function_schema']}.{p['function_name']}",
+                                "on_column": p.get("match_alias"), "using": []},
+                "match_columns": [{"condition": p["match_condition"], "alias": p.get("match_alias")}],
+                "when_condition": p.get("when_condition"),
             }
     tags = {f"columns|{t['entity_name']}|gr_treatment": {"entity_name": t["entity_name"], "tag_value": t["tag_value"]}
             for t in cfg.get("tag_assignments") or []
@@ -111,7 +117,8 @@ def desired():
         match = re.match(r"CREATE OR REPLACE FUNCTION (\w+)", line)
         if match:
             functions.append(f"{catalog}.{schema}.{match.group(1)}".lower())
-    return {MASK: masks, TAG: tags}, functions
+    want = {MASK: masks, TAG: tags, FUNCTIONS: {"": {"triggers_replace": {"sql_hash": sql_hash(sql)}}}}
+    return want, functions
 
 
 def flag(name):
@@ -124,6 +131,10 @@ def var(name):
 
 def sha(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def sql_hash(sql):
+    return hashlib.sha256(normalized_definitions(sql).encode()).hexdigest()
 
 
 def refreshed(state):
@@ -156,7 +167,7 @@ def access_wanted(state, stage, masks):
             continue
         want.setdefault(("databricks_grant", name), {})[key] = {"principal": key.rsplit("|", 1)[-1]}
     sql = open(os.path.join(config_dir, "masking_functions.sql")).read()
-    functions = {"triggers_replace": {"sql_hash": sha(sql), "client_id": access["client_id"]}}
+    functions = {"triggers_replace": {"sql_hash": sql_hash(sql), "client_id": access["client_id"]}}
     want[FUNCTIONS] = {"": functions}
     want[DROP] = {"": {"input": {"client_id": access["client_id"]}}}
     want[WAIT] = {"": {"triggers": {"policy_hash": sha(masks), "masking_functions_id": sha(functions)}}}
@@ -226,7 +237,7 @@ elif command == "apply-plan":
     sys.exit(1 if fail else 0)
 else:
     sys.exit(f"unsupported {command}")
-'''.replace("@ROOT_MAIN@", str(SHARED / "roots" / "data_access" / "main.tf"))
+'''.replace("@ROOT_MAIN@", str(SHARED / "roots" / "data_access" / "main.tf")).replace("@SHARED@", str(SHARED))
 
 
 # -- the env -------------------------------------------------------------------
@@ -469,7 +480,7 @@ class Harness:
         targets = {"create": [old], "restore": [old], "abandon": [old], "tighten": [old, desired],
                    "switch": [desired], "retire": [desired], "rebind-protect": [old],
                    "rebind-access": [old]}.get(stage, [])
-        universe = pg._universe(old, desired) | {pg.OUTSIDER}
+        universe = (pg._universe(old, desired) - {pg.UNKNOWN}) | {pg.OUTSIDER}
         for column, value in live_tags(state).items():
             masks = [p for p in live_policies(state) if _value_of(p) == value]
             if not masks:
@@ -1403,6 +1414,310 @@ def test_state_changed_outside_the_controller_is_refused(harness):
     with pytest.raises(spa.Refused, match="doesn't match the policy journal"):
         harness.apply()
     assert harness.calls == []
+
+
+def _drift_policy_principals(env_dir: Path, principal: str = "unknown") -> tuple[str, str]:
+    state = live_state(env_dir)
+    drifted = ""
+    for name, policy in _instances(state, "databricks_policy_info", "policies").items():
+        if policy["to_principals"] == ["regional"]:
+            policy["except_principals"] = sorted(set(policy["except_principals"]) | {principal})
+            drifted = name
+            break
+    assert drifted
+    (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+    return drifted, principal
+
+
+def _drift_all_policy_excepts(env_dir: Path, principal: str = "unknown") -> None:
+    state = live_state(env_dir)
+    for policy in _instances(state, "databricks_policy_info", "policies").values():
+        policy["except_principals"] = sorted(set(policy["except_principals"]) | {principal})
+    (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+
+
+def _replace_deleted_principals_with_unknown(env_dir: Path) -> None:
+    state = live_state(env_dir)
+    for policy in _instances(state, "databricks_policy_info", "policies").values():
+        for field in ("to_principals", "except_principals"):
+            policy[field] = sorted({"account users" if p == "account users" else pg.UNKNOWN
+                                    for p in policy[field]})
+    (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+
+
+def _replace_first_regional_to(env_dir: Path, replacement: str) -> None:
+    state = live_state(env_dir)
+    for policy in _instances(state, "databricks_policy_info", "policies").values():
+        if policy["to_principals"] == ["regional"]:
+            policy["to_principals"] = [replacement]
+            break
+    else:
+        raise AssertionError("no regional policy")
+    (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+
+
+def _replace_first_regional_except(env_dir: Path, replacement: str) -> None:
+    state = live_state(env_dir)
+    for policy in _instances(state, "databricks_policy_info", "policies").values():
+        if "regional" in policy["except_principals"]:
+            policy["except_principals"] = sorted(replacement if p == "regional" else p
+                                                 for p in policy["except_principals"])
+            break
+    else:
+        raise AssertionError("no regional exception")
+    (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+
+
+def _remove_sql_hash(env_dir: Path) -> None:
+    state = live_state(env_dir)
+    state["resources"] = [r for r in state["resources"]
+                          if (r["type"], r["name"]) != ("terraform_data", "masking_functions")]
+    (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+
+
+def _drop_first_policy(state: dict) -> None:
+    for resource in state["resources"]:
+        if (resource["type"], resource["name"]) == ("databricks_policy_info", "policies"):
+            resource["instances"] = resource["instances"][1:]
+            return
+    raise AssertionError("no policy resource")
+
+
+def _adoption_history_entry(journal: dict) -> dict:
+    return next(entry for entry in reversed(journal["history"])
+                if entry.get("reason") == "principal-only drift adopted from state")
+
+
+@pytest.mark.parametrize("with_existing_journal", [False, True])
+def test_principal_only_state_drift_is_adopted_then_rehearsed_through_staged_phases(harness,
+                                                                                   with_existing_journal):
+    desired = released(harness)
+    drifted, principal = _drift_policy_principals(harness.env_dir)
+    original = harness.journal()["active"]
+    if not with_existing_journal:
+        spa.journal_path(harness.env_dir).unlink()
+    harness.calls.clear()
+
+    assert harness.apply() == 0
+
+    journal = harness.journal()
+    adoption = _adoption_history_entry(journal)
+    assert adoption["to"] == desired["fingerprint"]
+    if with_existing_journal:
+        assert adoption["from"] == original
+    adopted = pg.load_snapshot(harness.env_dir, adoption["adopted"])
+    assert adopted and adopted["fingerprint"] != desired["fingerprint"]
+    adopted_policy = next(p for p in adopted["fgac_policies"] if p["name"] == drifted)
+    assert principal in adopted_policy["except_principals"]
+    assert journal["active"] == desired["fingerprint"]
+    assert journal["pending"] and journal["pending"][0]["fingerprint"] == adoption["adopted"]
+    assert "create" in harness.calls and "switch" in harness.calls and "verify-access:switch" in harness.calls
+    live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
+    assert {name: live[name]["except_principals"] for name in live} == {
+        p["name"]: p["except_principals"] for p in desired["fgac_policies"]}
+
+
+def test_existing_journal_refuses_named_principal_drift(harness):
+    released(harness)
+    _drift_policy_principals(harness.env_dir, "attacker")
+
+    with pytest.raises(spa.Refused, match="unexpected live principal 'attacker'"):
+        harness.apply()
+    assert harness.journal()["active"] != ""
+    assert "adopted_unverified" not in harness.journal()
+
+
+def test_describe_uses_the_same_principal_drift_adoption_decision(harness, capsys):
+    released(harness)
+    _drift_policy_principals(harness.env_dir, "attacker")
+
+    assert harness.controller().describe() == 0
+
+    out = capsys.readouterr().out
+    assert "would refuse" in out
+    assert "unexpected live principal 'attacker'" in out
+
+
+def test_existing_journal_refuses_removed_to_principal(harness):
+    released(harness)
+    state = live_state(harness.env_dir)
+    policy = next(p for p in _instances(state, "databricks_policy_info", "policies").values()
+                  if p["to_principals"] == ["regional"])
+    policy["to_principals"] = []
+    (harness.env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+
+    with pytest.raises(spa.Refused, match="removed expected live principal 'regional' from to"):
+        harness.apply()
+
+
+def test_existing_journal_refuses_named_to_principal_replacement(harness):
+    released(harness)
+    _replace_first_regional_to(harness.env_dir, "attacker")
+
+    with pytest.raises(spa.Refused, match="unexpected live principal 'attacker' in to"):
+        harness.apply()
+
+
+def test_existing_journal_accepts_deleted_to_principal_as_unknown(harness):
+    desired = released(harness)
+    _replace_first_regional_to(harness.env_dir, pg.UNKNOWN)
+    harness.calls.clear()
+
+    assert harness.apply() == 0
+
+    journal = harness.journal()
+    adoption = _adoption_history_entry(journal)
+    assert adoption["to"] == desired["fingerprint"]
+    assert journal["active"] == desired["fingerprint"]
+    assert harness.calls[:3] == ["create", "inventory:create/restore", "verify-access:create"]
+    assert "switch" in harness.calls and "verify-access:switch" in harness.calls
+    live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
+    assert {name: live[name]["to_principals"] for name in live} == {
+        p["name"]: p["to_principals"] for p in desired["fgac_policies"]}
+
+
+def test_existing_journal_refuses_except_unknown_when_principal_still_named_in_to(harness):
+    released(harness)
+    _replace_first_regional_except(harness.env_dir, pg.UNKNOWN)
+
+    with pytest.raises(spa.Refused, match="still named in a live to_principals list"):
+        harness.apply()
+
+
+@pytest.mark.parametrize(("edit", "message"), [
+    (lambda policy: policy["column_mask"].update({"function_name": "cat.sch.other_mask"}),
+     "changes its column_mask"),
+    (lambda policy: policy["column_mask"].update({"using": [{"alias": "other"}]}),
+     "changes its column_mask"),
+    (lambda policy: policy["match_columns"].__setitem__(0, {"condition": "hasTagValue('gr_treatment', 'other')"}),
+     "changes its match_condition"),
+    (lambda policy: policy.__setitem__("when_condition", "current_user() = 'nobody'"),
+     "changes its when_condition"),
+])
+def test_principal_only_adoption_refuses_function_or_condition_drift(harness, edit, message):
+    released(harness)
+    state = live_state(harness.env_dir)
+    policy = next(p for p in _instances(state, "databricks_policy_info", "policies").values()
+                  if p["to_principals"] == ["regional"])
+    policy["except_principals"] = sorted(set(policy["except_principals"]) | {"unknown"})
+    edit(policy)
+    (harness.env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+    harness.calls.clear()
+
+    with pytest.raises(spa.Refused, match=message):
+        harness.apply()
+    assert harness.calls == []
+
+
+@pytest.mark.parametrize(("edit", "message"), [
+    (lambda state: next(r for r in state["resources"] if r["name"] == "treatment")["instances"][0]["attributes"]
+     .__setitem__("tag_value", "other__string__deadbeef"), "state has treatment"),
+    (_drop_first_policy, "missing from the state"),
+    (lambda state: state["resources"].append({
+        "module": "module.data_access", "mode": "managed", "type": "databricks_policy_info", "name": "policies",
+        "instances": [{"index_key": "gr_mask_extra", "attributes": {
+            "catalog": "cat", "on_securable_type": "CATALOG", "on_securable_fullname": "cat",
+            "policy_type": "POLICY_TYPE_COLUMN_MASK", "for_securable_type": "TABLE",
+            "to_principals": ["account users"], "except_principals": [],
+            "column_mask": {"function_name": "cat.sch.gr_mask_extra", "on_column": "gr_treatment_x", "using": []},
+            "match_columns": [{"condition": "hasTagValue('gr_treatment', 'x')", "alias": "gr_treatment_x"},
+                              ]}}]}), "in the state but not in the generated config"),
+    (lambda state: _instances(state, "terraform_data", "masking_functions")[""]["triggers_replace"]
+     .__setitem__("sql_hash", "bad"), "SQL digest differs"),
+])
+def test_principal_only_adoption_refuses_other_drift_kinds(harness, edit, message):
+    released(harness)
+    spa.journal_path(harness.env_dir).unlink()
+    state = live_state(harness.env_dir)
+    policy = next(p for p in _instances(state, "databricks_policy_info", "policies").values()
+                  if p["to_principals"] == ["regional"])
+    policy["except_principals"] = sorted(set(policy["except_principals"]) | {"unknown"})
+    edit(state)
+    (harness.env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+
+    with pytest.raises(spa.Refused, match=message):
+        harness.apply()
+
+
+@pytest.mark.parametrize("with_existing_journal", [False, True])
+def test_principal_only_adoption_accepts_post_import_state_without_sql_digest(harness, with_existing_journal):
+    desired = released(harness)
+    _drift_all_policy_excepts(harness.env_dir)
+    _remove_sql_hash(harness.env_dir)
+    if not with_existing_journal:
+        spa.journal_path(harness.env_dir).unlink()
+    harness.calls.clear()
+
+    assert harness.apply() == 0
+
+    journal = harness.journal()
+    adoption = _adoption_history_entry(journal)
+    assert adoption["to"] == desired["fingerprint"]
+    assert journal["active"] == desired["fingerprint"]
+    assert "create" in harness.calls and "switch" in harness.calls and "verify-access:switch" in harness.calls
+    live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
+    assert {name: live[name]["except_principals"] for name in live} == {
+        p["name"]: p["except_principals"] for p in desired["fgac_policies"]}
+    state = live_state(harness.env_dir)
+    assert _instances(state, "terraform_data", "masking_functions")
+
+
+@pytest.mark.parametrize("with_existing_journal", [False, True])
+def test_principal_only_adoption_accepts_post_import_state_with_deleted_tier_groups(harness,
+                                                                                   with_existing_journal):
+    desired = released(harness)
+    _replace_deleted_principals_with_unknown(harness.env_dir)
+    _remove_sql_hash(harness.env_dir)
+    if not with_existing_journal:
+        spa.journal_path(harness.env_dir).unlink()
+    harness.calls.clear()
+
+    assert harness.apply() == 0
+
+    journal = harness.journal()
+    adoption = _adoption_history_entry(journal)
+    assert adoption["to"] == desired["fingerprint"]
+    assert journal["active"] == desired["fingerprint"]
+    assert harness.calls[:3] == ["create", "inventory:create/restore", "verify-access:create"]
+    assert "switch" in harness.calls and "verify-access:switch" in harness.calls
+    live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
+    assert {name: (live[name]["to_principals"], live[name]["except_principals"]) for name in live} == {
+        p["name"]: (p["to_principals"], p["except_principals"]) for p in desired["fgac_policies"]}
+    state = live_state(harness.env_dir)
+    assert _instances(state, "terraform_data", "masking_functions")
+
+
+def test_lost_journal_named_principal_adoption_restores_generated_principals_after_failed_switch(harness):
+    desired = released(harness)
+    drifted, principal = _drift_policy_principals(harness.env_dir, "attacker")
+    spa.journal_path(harness.env_dir).unlink()
+    harness.fail_verify = {"switch"}
+
+    assert harness.apply() == 1
+
+    live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
+    assert principal not in live[drifted]["except_principals"]
+    assert live[drifted]["except_principals"] == next(
+        p for p in desired["fgac_policies"] if p["name"] == drifted)["except_principals"]
+    t = harness.journal()["transition"]
+    assert t["restore_from"] == desired["fingerprint"]
+    assert t["restored"]["generation"] == desired["fingerprint"]
+
+
+def test_abandon_after_adopted_drift_restore_keeps_generated_principals_active(harness):
+    desired = released(harness)
+    drifted, principal = _drift_policy_principals(harness.env_dir, "attacker")
+    spa.journal_path(harness.env_dir).unlink()
+    harness.fail_verify = {"switch"}
+    assert harness.apply() == 1
+
+    assert harness.controller().abandon() == 0
+
+    journal = harness.journal()
+    assert journal["active"] == desired["fingerprint"]
+    assert "adopted_unverified" not in journal
+    live = {p["name"]: p for p in live_policies(live_state(harness.env_dir))}
+    assert principal not in live[drifted]["except_principals"]
 
 
 def test_lost_journal_adopts_only_a_state_that_matches_the_config(harness):

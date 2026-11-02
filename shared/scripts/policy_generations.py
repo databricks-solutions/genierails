@@ -367,6 +367,7 @@ def _universe(*generations) -> set[str]:
             to, excepted = _principals(policy)
             names.update(to + excepted)
     names.discard(ALL_USERS)
+    names.discard(UNKNOWN)
     return names
 
 

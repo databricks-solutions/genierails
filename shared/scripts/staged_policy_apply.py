@@ -73,6 +73,7 @@ import shlex
 import subprocess
 import sys
 import uuid
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -162,6 +163,7 @@ def live_from_state(state: dict | None) -> dict:
     """The deterministic mask policies and treatment tags a data_access state holds."""
     policies: dict[str, dict] = {}
     tags: dict[str, str] = {}
+    sql_hash = ""
     for resource in (state or {}).get("resources") or []:
         if resource.get("module") != "module.data_access" or resource.get("mode", "managed") != "managed":
             continue
@@ -173,10 +175,197 @@ def live_from_state(state: dict | None) -> dict:
             if resource.get("type") == "databricks_policy_info" and resource.get("name") == "policies" \
                     and key.startswith("gr_mask_"):
                 policies[key] = {"to": sorted(attrs.get("to_principals") or []),
-                                 "except": sorted(attrs.get("except_principals") or [])}
+                                 "except": sorted(attrs.get("except_principals") or []),
+                                 "binding": _state_policy_binding(attrs)}
             elif resource.get("type") == "databricks_entity_tag_assignment" and resource.get("name") == "treatment":
                 tags[str(attrs.get("entity_name") or key.split("|")[1])] = str(attrs.get("tag_value") or "")
-    return {"policies": policies, "tags": tags}
+            elif resource.get("type") == "terraform_data" and resource.get("name") == "masking_functions":
+                sql_hash = _trigger_value(attrs, "sql_hash") or sql_hash
+    return {"policies": policies, "tags": tags, "sql_hash": sql_hash}
+
+
+def _trigger_value(attrs: dict, key: str) -> str:
+    for field in ("triggers_replace", "triggers", "input"):
+        value = attrs.get(field)
+        if isinstance(value, dict) and value.get(key):
+            return str(value[key])
+    return ""
+
+
+def _state_policy_binding(attrs: dict) -> dict:
+    conditions = [m.get("condition") for m in attrs.get("match_columns") or [] if isinstance(m, dict)]
+    mask = attrs.get("column_mask") or {}
+    row_filter = attrs.get("row_filter") or None
+    return {
+        "column_mask": _normal_mask(mask),
+        "match_condition": str(attrs.get("match_condition") or next((c for c in conditions if c), "")),
+        "row_filter": _normal_mask(row_filter) if isinstance(row_filter, dict) else row_filter,
+        "when_condition": str(attrs.get("when_condition") or ""),
+        "on_securable_fullname": str(attrs.get("on_securable_fullname") or attrs.get("catalog") or ""),
+        "on_securable_type": str(attrs.get("on_securable_type") or attrs.get("securable_type") or ""),
+        "policy_type": str(attrs.get("policy_type") or ""),
+        "for_securable_type": str(attrs.get("for_securable_type") or ""),
+    }
+
+
+def _desired_policy_binding(policy: dict) -> dict:
+    policy_type = str(policy.get("policy_type") or "")
+    function = ".".join(str(policy.get(k) or "") for k in ("function_catalog", "function_schema", "function_name"))
+    match_alias = policy.get("match_alias")
+    return {
+        "column_mask": {"function_name": function, "on_column": match_alias, "using": []}
+        if policy_type == "POLICY_TYPE_COLUMN_MASK" else None,
+        "match_condition": str(policy.get("match_condition") or ""),
+        "row_filter": {"function_name": function, "using": [{"alias": match_alias}] if match_alias is not None else []}
+        if policy_type == "POLICY_TYPE_ROW_FILTER" else None,
+        "when_condition": str(policy.get("when_condition") or ""),
+        "on_securable_fullname": str(policy.get("on_securable_fullname") or policy.get("catalog") or ""),
+        "on_securable_type": str(policy.get("on_securable_type") or "CATALOG"),
+        "policy_type": policy_type,
+        "for_securable_type": str(policy.get("for_securable_type") or "TABLE"),
+    }
+
+
+def _normal_mask(mask: dict) -> dict:
+    out = {k: v for k, v in (mask or {}).items() if v not in ("", None, [], {})}
+    if out.get("function_name"):
+        out["function_name"] = str(out["function_name"]).lower()
+    return out
+
+
+def _normal_binding(binding: dict) -> dict:
+    out = {k: v for k, v in binding.items() if v not in ("", None, [], {})}
+    if isinstance(out.get("column_mask"), dict):
+        out["column_mask"] = _normal_mask(out["column_mask"])
+    if isinstance(out.get("row_filter"), dict):
+        out["row_filter"] = _normal_mask(out["row_filter"])
+    return out
+
+
+def _with_state_principals(policy: dict, principals: dict) -> dict:
+    return dict(policy) | {
+        "to_principals": list(principals.get("to") or []),
+        "except_principals": list(principals.get("except") or []),
+    }
+
+
+def _sql_function_names(sql: str) -> set[str]:
+    return {pg.function_name(stmt) for _, _, stmt in pg._statements(sql) if pg.function_name(stmt)}
+
+
+def _content_versioned_policy_functions(functions_sql: str, desired_by_name: dict[str, dict],
+                                        names: set[str]) -> list[str]:
+    """Reasons generated SQL cannot stand in for a missing masking_functions sql_hash."""
+    from governance_policies import parse_treatment_value
+
+    sql_functions = _sql_function_names(functions_sql)
+    problems = []
+    for name in sorted(names):
+        policy = desired_by_name[name]
+        function = ".".join(str(policy.get(k) or "").lower()
+                            for k in ("function_catalog", "function_schema", "function_name"))
+        function_short = str(policy.get("function_name") or "").lower()
+        if function_short not in sql_functions and function not in sql_functions:
+            problems.append(f"policy {name}'s function {function or 'none'} is not in generated SQL")
+            continue
+        value = pg.policy_value(policy)
+        parsed = parse_treatment_value(value)
+        expected_suffix = ""
+        if parsed:
+            expected_suffix = f"gr_mask_{value}_{'partial' if name.endswith('_partial') else 'full'}"
+        if not parsed or function_short != expected_suffix:
+            problems.append(f"policy {name}'s function name is not content-versioned")
+    return problems
+
+
+def _missing_to_principals_not_deleted(live_to: list[str], want_to: list[str]) -> list[str]:
+    """Expected TO principals missing from live without an ``unknown`` deleted-principal marker."""
+    live = Counter(live_to)
+    missing = list((Counter(want_to) - live).elements())
+    unknowns = live.get(pg.UNKNOWN, 0)
+    unaccounted = []
+    for principal in sorted(missing):
+        if unknowns:
+            unknowns -= 1
+        else:
+            unaccounted.append(principal)
+    return unaccounted
+
+
+def _principal_only_adoption(env_dir: Path, live: dict, desired: dict, *,
+                             allow_named_principal_drift: bool) -> tuple[dict | None, list[str]]:
+    """A synthetic current generation when state differs from desired only by principals."""
+    problems: list[str] = []
+    desired_by_name = {p["name"]: p for p in desired.get("fgac_policies") or []}
+    live_names = set(live["policies"])
+    desired_names = set(desired_by_name)
+    for name in sorted(live_names - desired_names):
+        problems.append(f"policy {name} is in the state but not in the generated config")
+    for name in sorted(desired_names - live_names):
+        problems.append(f"policy {name} is in the generated config but missing from the state")
+    for column in sorted(set(live["tags"]) | set(desired.get("tags") or {})):
+        have, want = live["tags"].get(column), desired.get("tags", {}).get(column)
+        if have != want:
+            problems.append(f"{column}: state has treatment {have or 'none'}, generated config has {want or 'none'}")
+    desired_hash = pg.masking_sql_hash(desired.get("functions_sql") or "")
+    if not live.get("sql_hash"):
+        sql_problems = _content_versioned_policy_functions(
+            desired.get("functions_sql") or "", desired_by_name, live_names & desired_names)
+        if sql_problems:
+            problems.append("masking function SQL digest missing from state")
+            problems += sql_problems
+    elif live["sql_hash"] != desired_hash:
+        problems.append(f"masking function SQL digest differs (state {live['sql_hash']}, generated {desired_hash})")
+    changed_principals = False
+    adopted_policies = []
+    named_drift: list[str] = []
+    live_named_to = {
+        principal
+        for policy in live["policies"].values()
+        for principal in policy["to"]
+        if principal not in {pg.UNKNOWN, pg.ALL_USERS}
+    }
+    for name in sorted(live_names & desired_names):
+        live_policy = live["policies"][name]
+        desired_policy = desired_by_name[name]
+        live_binding = _normal_binding(live_policy.get("binding") or {})
+        desired_binding = _normal_binding(_desired_policy_binding(desired_policy))
+        for key in sorted(set(live_binding) | set(desired_binding)):
+            if live_binding.get(key) != desired_binding.get(key):
+                problems.append(f"policy {name} changes its {key}")
+        want = {"to": sorted(desired_policy.get("to_principals") or []),
+                "except": sorted(desired_policy.get("except_principals") or [])}
+        changed_principals = changed_principals or live_policy["to"] != want["to"] \
+            or live_policy["except"] != want["except"]
+        if not allow_named_principal_drift:
+            for field in ("to", "except"):
+                for principal in sorted(set(live_policy[field]) - set(want[field])):
+                    if principal != pg.UNKNOWN:
+                        named_drift.append(f"policy {name} has unexpected live principal {principal!r} in {field}")
+            for principal in _missing_to_principals_not_deleted(live_policy["to"], want["to"]):
+                named_drift.append(f"policy {name} removed expected live principal {principal!r} from to")
+            missing_except = list((Counter(want["except"]) - Counter(live_policy["except"])).elements())
+            for principal in sorted(missing_except):
+                if principal in live_named_to:
+                    named_drift.append(
+                        f"policy {name} removed expected except principal {principal!r}, "
+                        f"but {principal!r} is still named in a live to_principals list")
+        adopted_policies.append(_with_state_principals(desired_policy, live_policy))
+    if named_drift:
+        problems += named_drift
+    if problems:
+        return None, problems
+    if not changed_principals:
+        return None, []
+    adopted = dict(desired) | {"fgac_policies": adopted_policies}
+    # Recompute so the journal's active generation really names the live principals.
+    cfg = {"fgac_policies": adopted_policies, "tag_assignments": [
+        {"entity_type": "columns", "entity_name": column, "tag_key": pg.TAG_KEY, "tag_value": value}
+        for column, value in sorted((desired.get("tags") or {}).items())
+    ]}
+    from governance_policies import model_fingerprint
+    adopted["fingerprint"] = model_fingerprint(cfg, adopted.get("functions_sql") or "")
+    return adopted, []
 
 
 def _expected_live(generations: list[dict]) -> dict[str, dict]:
@@ -187,6 +376,21 @@ def _expected_live(generations: list[dict]) -> dict[str, dict]:
             out[policy["name"]] = {"to": sorted(policy.get("to_principals") or []),
                                    "except": sorted(policy.get("except_principals") or [])}
     return out
+
+
+def _restore_fingerprint(t: dict) -> str:
+    """The verified generation a failed switch may restore to."""
+    return str(t.get("restore_from") or t.get("from") or "")
+
+
+def _render_fingerprint(t: dict) -> str:
+    """The generation forward phases render and verify as the old protection."""
+    return str(t.get("render_from") or t.get("from") or "")
+
+
+def _adopted_unverified(journal: dict, fingerprint: str) -> dict | None:
+    adopted = journal.get("adopted_unverified") or {}
+    return adopted if adopted.get("fingerprint") == fingerprint else None
 
 
 def state_problems(live: dict, active: dict | None, pending: list[dict]) -> list[str]:
@@ -203,8 +407,9 @@ def state_problems(live: dict, active: dict | None, pending: list[dict]) -> list
     for name in sorted({p["name"] for p in (active or {}).get("fgac_policies") or []} - live["policies"].keys()):
         problems.append(f"policy {name} of the active generation is missing from the state")
     for name in sorted(live["policies"].keys() & expected.keys()):
-        if live["policies"][name] != expected[name]:
-            problems.append(f"policy {name} has principals {live['policies'][name]}, "
+        live_principals = {k: live["policies"][name][k] for k in ("to", "except")}
+        if live_principals != expected[name]:
+            problems.append(f"policy {name} has principals {live_principals}, "
                             f"the journal expects {expected[name]}")
     return problems
 
@@ -299,14 +504,76 @@ class Controller:
             return journal
         problems = state_problems(live, desired, [])
         if problems:
+            adopted, adoption_problems = _principal_only_adoption(self.env_dir, live, desired,
+                                                                  allow_named_principal_drift=True)
+            if adopted:
+                pg.save_snapshot(self.env_dir, desired)
+                pg.save_snapshot(self.env_dir, adopted)
+                journal["active"] = adopted["fingerprint"]
+                journal["adopted_unverified"] = {
+                    "fingerprint": adopted["fingerprint"], "restore_from": desired["fingerprint"],
+                    "reason": "principal-only drift adopted from state",
+                }
+                journal["history"].append({
+                    "adopted": adopted["fingerprint"], "at": _now(),
+                    "reason": "principal-only drift adopted from state",
+                    "to": desired["fingerprint"],
+                })
+                print(f"Policy journal: adopted live principal-only drift {adopted['fingerprint']} "
+                      f"from state; generated config remains {desired['fingerprint']}.")
+                return journal
             raise Refused(
                 "the data_access state holds deterministic policies or treatment tags that no policy "
                 "journal records, and they differ from the generated config:\n  - " + "\n  - ".join(problems[:20])
-                + f"\nRestore {journal_path(self.env_dir)} from a backup; GenieRails won't guess what is live.")
+                + ("\nThis is not principal-only drift: " + "; ".join(adoption_problems[:5])
+                   if adoption_problems else "\nGenieRails won't guess what is live."))
         pg.save_snapshot(self.env_dir, desired)
         journal["active"] = desired["fingerprint"]
         journal["history"].append({"adopted": desired["fingerprint"], "at": _now()})
         print(f"Policy journal: adopted the live generation {desired['fingerprint']} (matches the state).")
+        return journal
+
+    def _adopt_principal_drift(self, journal: dict, desired: dict) -> dict:
+        """If state drifted only in principals, record that live state as the current generation."""
+        if journal.get("transition"):
+            return journal
+        active = journal.get("active") or ""
+        pending = list(journal.get("pending") or [])
+        if pending:
+            return journal
+        old = self._snapshot(active)
+        if active and old is None:
+            return journal
+        live = live_from_state(_read_state(self.env_dir))
+        problems = state_problems(live, old, [])
+        if not problems:
+            return journal
+        adopted, adoption_problems = _principal_only_adoption(self.env_dir, live, desired,
+                                                              allow_named_principal_drift=False)
+        if not adopted:
+            if adoption_problems:
+                raise Refused(
+                    "the data_access state doesn't match the policy journal, and it is not principal-only "
+                    "drift that GenieRails can adopt:\n  - " + "\n  - ".join(adoption_problems[:20])
+                    + "\nNothing was applied. Next: revert the out-of-band principal change in the Databricks UI, "
+                    "or re-run after confirming the live principals are only deleted principals shown as unknown.")
+            return journal
+        pg.save_snapshot(self.env_dir, desired)
+        pg.save_snapshot(self.env_dir, adopted)
+        journal["active"] = adopted["fingerprint"]
+        journal["pending"] = []
+        journal["adopted_unverified"] = {
+            "fingerprint": adopted["fingerprint"], "restore_from": active or desired["fingerprint"],
+            "reason": "principal-only drift adopted from state",
+        }
+        journal["history"] = (journal.get("history") or [])[-(HISTORY_LIMIT - 1):] + [{
+            "adopted": adopted["fingerprint"], "at": _now(),
+            "reason": "principal-only drift adopted from state",
+            "from": active, "to": desired["fingerprint"],
+        }]
+        self._save(journal)
+        print(f"Policy journal: adopted live principal-only drift {adopted['fingerprint']} "
+              f"from state; generated config remains {desired['fingerprint']}.")
         return journal
 
     def _new_transition(self, journal: dict, desired: dict) -> dict:
@@ -334,7 +601,10 @@ class Controller:
                 "completion first; a new policy change would need a fourth live generation.")
         eligible = held if held and held["confirmed"] and held["fingerprint"] not in {active, desired["fingerprint"]} \
             else None
-        tier_move = change and pg.has_tier_move(desired, old, retain)
+        adopted = _adopted_unverified(journal, active)
+        render_from = str((adopted or {}).get("restore_from") or "")
+        render_old = self._snapshot(render_from) if render_from else old
+        tier_move = change and pg.has_tier_move(desired, render_old, retain)
         phases = ["create"]
         if change or eligible:
             phases.append("verify-created")
@@ -346,7 +616,8 @@ class Controller:
             phases += ["retire", "verify-retired", "drop-functions"]
         # New SELECT opens last, after everything above is applied and verified.
         phases.append("grant")
-        return {
+        adopted = _adopted_unverified(journal, active)
+        transition = {
             "run_id": uuid.uuid4().hex[:12], "commit": self.commit, "from": active,
             "to": desired["fingerprint"], "retain": held["fingerprint"] if held else "",
             "retire": eligible["fingerprint"] if eligible else "", "tier_move": tier_move,
@@ -354,26 +625,35 @@ class Controller:
             "failed_phase": "", "error": "", "switch_attempted": False, "restoring": False,
             "restore_failed": False, "restored": None, "started_at": _now(), "updated_at": _now(),
         }
+        if render_from and render_from != active:
+            transition["restore_from"] = adopted["restore_from"]
+            transition["adopted_from_state"] = active
+            transition["render_from"] = render_from
+        return transition
 
     # -- running hooks ---------------------------------------------------------
-    def _hook_env(self, t: dict) -> dict:
+    def _hook_env(self, t: dict, *, old_fp: str | None = None) -> dict:
         # The env lock's nonce (env_lock exports it once taken): the hooks' Terraform calls derive
         # the token terraform_layer.sh needs for policy_stage from it (environment_lock.stage_token).
         var = environment_lock.nonce_var(self.env_dir)
         return self.environ | ({var: os.environ[var]} if os.environ.get(var) else {}) | {
             "GENIERAILS_ENV_DIR": str(self.env_dir), "GENIERAILS_ENV_NAME": self.env_name,
-            "GENIERAILS_POLICY_FINGERPRINT": t["to"], "GENIERAILS_OLD_POLICY_FINGERPRINT": t["from"],
+            "GENIERAILS_POLICY_FINGERPRINT": t["to"],
+            "GENIERAILS_OLD_POLICY_FINGERPRINT": t["from"] if old_fp is None else old_fp,
             "GENIERAILS_RETIRE_FINGERPRINT": t["retain"],
             "GENIERAILS_POLICY_KEEP_NEW_TAGS": "1" if t["switch_attempted"] else "",
             "GENIERAILS_POLICY_RUN_ID": t["run_id"],
         }
 
     def _hook(self, t: dict, stage: str) -> int:
-        return self.run_cmd([str(self.hook_dir / stage)], env=self._hook_env(t), check=False).returncode
+        old_fp = _restore_fingerprint(t) if stage in {"restore", "abandon"} else _render_fingerprint(t)
+        return self.run_cmd([str(self.hook_dir / stage)], env=self._hook_env(t, old_fp=old_fp), check=False).returncode
 
     def _inventory(self, t: dict, stages: tuple[str, ...]) -> int:
         cmd = self.inventory_cmd + ["--env-dir", str(self.env_dir), "--stage", ",".join(stages)]
-        return self.run_cmd(cmd, env=self._hook_env(t), check=False).returncode
+        old_fp = _restore_fingerprint(t) if set(stages) & {"restore", "rebind", "abandon"} \
+            else _render_fingerprint(t)
+        return self.run_cmd(cmd, env=self._hook_env(t, old_fp=old_fp), check=False).returncode
 
     def verification_inputs(self, t: dict, stages: tuple[str, ...]) -> tuple[Path, Path] | None:
         """The tfvars and env file verify-access checks the applied stage against.
@@ -397,7 +677,9 @@ class Controller:
     def _verification_files(self, t: dict, stage: str, rendered: dict, layer_tfvars: Path,
                             verify_dir: Path) -> tuple[Path, Path] | None:
         before_switch = stage in ("create", "restore", "rebind")
-        basis = self._snapshot(t["from"]) if before_switch and t["from"] else self._snapshot(t["to"])
+        basis_fp = _restore_fingerprint(t) if stage in ("restore", "rebind", "abandon") \
+            else _render_fingerprint(t)
+        basis = self._snapshot(basis_fp) if before_switch and basis_fp else self._snapshot(t["to"])
         tags = dict(rendered["tags"])
         if before_switch:
             tags = {c: v for c, v in tags.items() if c in (basis or {}).get("tags", {})}
@@ -436,7 +718,8 @@ class Controller:
         from scripts.resolve_env_config import resolve_verify_key
 
         desired = pg.desired_generation(self.env_dir)
-        old = self._snapshot(t["from"]) if t["from"] else None
+        old_fp = _render_fingerprint(t)
+        old = self._snapshot(old_fp) if old_fp else None
         retire = self._snapshot(t["retain"]) if t["retain"] not in {"", t["to"], t["from"]} else None
         rendered = pg.render_stage("create", desired, old, retire)
         with tempfile.TemporaryDirectory() as tmp:
@@ -446,7 +729,7 @@ class Controller:
                 return
             if require_mask_proof(self.env_dir, self.env_name, resolve_verify_key(self.env_dir, self.verify_key),
                                   self.verify_spec, self.account_tfvars, tfvars=inputs[0], env_file=inputs[1]):
-                raise Refused(f"verify-created would refuse VERIFY_SPEC against generation {t['from']}, which "
+                raise Refused(f"verify-created would refuse VERIFY_SPEC against generation {old_fp}, which "
                               "the columns carry until switch (above); omit VERIFY_SPEC for this change")
 
     def _verify(self, t: dict, phase: str) -> int:
@@ -461,9 +744,12 @@ class Controller:
         if not self.verify_access_cmd:
             print(f"ERROR: {phase} needs a verify-access command (--verify-access-cmd)", file=sys.stderr)
             return 2
-        env = self._hook_env(t) | {"GENIERAILS_VERIFY_TFVARS": str(inputs[0]),
-                                   "GENIERAILS_VERIFY_ENV_FILE": str(inputs[1]),
-                                   "GENIERAILS_VERIFY_PRE_GRANT": "1" if phase in PRE_GRANT_VERIFY else ""}
+        env = self._hook_env(t, old_fp=_restore_fingerprint(t) if "restore" in stages
+                             else _render_fingerprint(t)) | {
+            "GENIERAILS_VERIFY_TFVARS": str(inputs[0]),
+            "GENIERAILS_VERIFY_ENV_FILE": str(inputs[1]),
+            "GENIERAILS_VERIFY_PRE_GRANT": "1" if phase in PRE_GRANT_VERIFY else "",
+        }
         return self.run_cmd(["/bin/sh", "-c", self.verify_access_cmd], env=env, check=False).returncode
 
     def _phase(self, t: dict, phase: str) -> int:
@@ -486,13 +772,14 @@ class Controller:
                 record = pg.load_stage_record(self.env_dir) or {}
                 rendered = record.get("rendered") or {}
                 # What the live check proved, so abandon can tell a rolled-back switch from one in flight.
-                restored = {"at": _now(), "after": t["failed_phase"], "generation": t["from"],
+                restored_fp = _restore_fingerprint(t)
+                restored = {"at": _now(), "after": t["failed_phase"], "generation": restored_fp,
                             "tags": dict(rendered.get("tags") or {}),
                             "policies": sorted(p["name"] for p in rendered.get("fgac_policies") or [])}
                 t.update(restoring=False, restore_failed=False, completed=["create"], restored=restored)
                 self._save(journal)
                 kept = self._kept_new_columns(t)
-                if not t["from"]:
+                if not restored_fp:
                     print(f"  A first deploy has no previous protection to go back to: the restore keeps "
                           f"generation {t['to']}'s masks and treatment tags on {len(kept)} column(s), verified "
                           "live (fail-closed). No business USE or SELECT was granted.")
@@ -539,6 +826,8 @@ class Controller:
         if t["from"] and t["from"] != t["to"]:
             pending.append({"fingerprint": t["from"], "superseded_by": t["run_id"], "confirmed": False})
         journal.update(active=t["to"], pending=pending, transition=None)
+        if (journal.get("adopted_unverified") or {}).get("fingerprint") == t["from"]:
+            journal.pop("adopted_unverified", None)
         journal["history"] = (journal.get("history") or [])[-(HISTORY_LIMIT - 1):] + [{
             "run_id": t["run_id"], "commit": t["commit"], "from": t["from"], "to": t["to"],
             "retired": t["retire"], "phases": t["phases"], "finished_at": _now()}]
@@ -551,6 +840,7 @@ class Controller:
         with env_lock(self.env_dir, "staged-policy-apply"):
             desired = pg.desired_generation(self.env_dir)
             journal = load_journal(self.env_dir) or self._adopt(desired)
+            journal = self._adopt_principal_drift(journal, desired)
             t = journal.get("transition")
             if t:
                 if t["to"] != desired["fingerprint"]:
@@ -608,6 +898,7 @@ class Controller:
             if journal is None and self._legacy_pending():
                 return self._plan_adoption(out_dir, desired)
             journal = journal or self._adopt(desired)
+            journal = self._adopt_principal_drift(journal, desired)
             t = self._transition_for(journal, desired)
             self.refuse_weaker_spec(t)
             remaining = [p for p in t["phases"] if p not in t["completed"]]
@@ -624,7 +915,9 @@ class Controller:
                     steps.append({"phase": phase, "kind": "verify"})
                     continue
                 plan_file = out_dir / f"{len(steps):02d}-{phase}.tfplan"
-                env = self._hook_env(t) | {PLAN_OUT_ENV: str(plan_file)} | ({PLAN_BASIS_ENV: basis} if basis else {})
+                old_fp = _restore_fingerprint(t) if phase in {"restore", "abandon"} else _render_fingerprint(t)
+                env = self._hook_env(t, old_fp=old_fp) | {PLAN_OUT_ENV: str(plan_file)} \
+                    | ({PLAN_BASIS_ENV: basis} if basis else {})
                 print(f"=== Policy phase {phase} ({self.env_name}): saving its plan ===", flush=True)
                 with _owner_only(plan_file):
                     rc = self.run_cmd([str(self.hook_dir / APPLY_PHASES[phase])], env=env, check=False).returncode
@@ -676,6 +969,7 @@ class Controller:
             if [s["kind"] for s in saved["steps"]] == ["adopt"]:
                 return self._apply_adoption(saved["steps"][0])
             journal = load_journal(self.env_dir) or self._adopt(desired)
+            journal = self._adopt_principal_drift(journal, desired)
             t = self._transition_for(journal, desired)
             for key in ("from", "to", "retain", "retire", "tier_move", "phases"):
                 if t[key] != planned[key]:
@@ -697,7 +991,8 @@ class Controller:
                 self._save(journal)
                 print(f"=== Policy phase {phase} ({self.env_name}) ===", flush=True)
                 if step["kind"] == "apply":
-                    env = self._hook_env(t) | {SAVED_PLAN_ENV: str(plan_dir / step["file"])}
+                    old_fp = _restore_fingerprint(t) if phase in {"restore", "abandon"} else _render_fingerprint(t)
+                    env = self._hook_env(t, old_fp=old_fp) | {SAVED_PLAN_ENV: str(plan_dir / step["file"])}
                     rc = self.run_cmd([str(self.hook_dir / APPLY_PHASES[phase])], env=env, check=False).returncode
                 else:
                     rc = self._verify(t, phase)
@@ -801,13 +1096,14 @@ class Controller:
             if not _pre_marker_restored(t):
                 return "no verified restore of the previous protection is recorded"
         record = pg.load_stage_record(self.env_dir)
+        restore_fp = _restore_fingerprint(t)
         if not record or record.get("stage") not in stages \
-                or record.get("desired") != t["to"] or record.get("old") != t["from"]:
+                or record.get("desired") != t["to"] or record.get("old") != restore_fp:
             return (f"the last applied stage is {(record or {}).get('stage') or 'none'}, not the restore "
                     "of this change")
-        old = self._snapshot(t["from"]) if t["from"] else None
+        old = self._snapshot(restore_fp) if restore_fp else None
         retain = self._snapshot(t["retain"]) if t["retain"] else None
-        if (t["from"] and old is None) or (t["retain"] and retain is None):
+        if (restore_fp and old is None) or (t["retain"] and retain is None):
             return "the previous generation's snapshot is missing, so what it protects can't be checked"
         rendered = record["rendered"]
         old_tags = dict((old or {}).get("tags") or {})
@@ -867,6 +1163,9 @@ class Controller:
                 return self._kept_columns_message(t, "abandoned", reason)
             if reason:
                 return _unabandonable(reason)
+        elif t.get("adopted_from_state"):
+            return ("this principal-only drift adoption has not been restored to the last verified generation; "
+                    "resume the staged change instead. Nothing was applied.")
         try:
             self._created_policies(t)
         except Refused as exc:
@@ -935,7 +1234,8 @@ class Controller:
             plan_file = plan_dir / f"{t['run_id']}.tfplan"
             for stale in (plan_file, pg.sidecar_path(plan_file)):
                 stale.unlink(missing_ok=True)
-            env = self._hook_env(t) | {pg.PLAN_OUT_ENV: str(plan_file)}
+            restore_fp = _restore_fingerprint(t)
+            env = self._hook_env(t, old_fp=restore_fp) | {pg.PLAN_OUT_ENV: str(plan_file)}
             with _owner_only(plan_file):
                 rc = self.run_cmd([str(self.hook_dir / "abandon")], env=env, check=False).returncode
             if rc:
@@ -943,7 +1243,7 @@ class Controller:
                 raise Refused("the abandon plan was refused or couldn't be made (see above); nothing was applied")
             planned = _sha256(plan_file)
             side = pg.load_sidecar(plan_file)
-            if (side.get("stage"), side.get("desired"), side.get("old")) != ("abandon", t["to"], t["from"]):
+            if (side.get("stage"), side.get("desired"), side.get("old")) != ("abandon", t["to"], restore_fp):
                 raise Refused(f"the saved abandon plan {plan_file} isn't of this change; nothing was applied")
             foreign = sorted(set(side.get("policy_deletes") or []) - created)
             if foreign:
@@ -957,11 +1257,11 @@ class Controller:
                         "the live check found Unity Catalog differs from the restored protection" if rc == 1
                         else f"the live check couldn't run (exit {rc}), so the restore can't be confirmed"))
                 print(f"  The switch of run {t['run_id']} was rolled back after {t['failed_phase']} and "
-                      f"the live check confirms the previous protection ({t['from'] or 'none'}).")
+                      f"the live check confirms the previous protection ({restore_fp or 'none'}).")
             # 3. Exactly the saved plan (release's saved-plan pattern: the hash recorded when it was made).
             if _sha256(plan_file) != planned:
                 raise Refused(f"the saved abandon plan {plan_file} changed after it was made; nothing was applied")
-            env = self._hook_env(t) | {pg.SAVED_PLAN_ENV: str(plan_file)}
+            env = self._hook_env(t, old_fp=restore_fp) | {pg.SAVED_PLAN_ENV: str(plan_file)}
             if self.run_cmd([str(self.hook_dir / "abandon")], env=env, check=False).returncode:
                 t.update(status="failed", error="abandon apply failed")
                 self._save(journal)
@@ -974,18 +1274,24 @@ class Controller:
                          abandon_incomplete=True)
                 self._save(journal)
                 print(f"ERROR: ABANDON INCOMPLETE. The abandon plan was applied, but live governance doesn't match "
-                      f"the previous protection ({t['from'] or 'none'}): see the live check above. Run "
+                      f"the previous protection ({restore_fp or 'none'}): see the live check above. Run "
                       f"{t['run_id']} is still recorded as unfinished, not abandoned. Next: put back what the "
                       "check lists (a column retagged outside GenieRails goes back to its previous gr_treatment "
                       f"value), then re-run make policy-abandon ENV={self.env_name}.", file=sys.stderr)
                 return 1
             journal["transition"] = None
+            if t.get("adopted_from_state"):
+                journal["active"] = restore_fp
+                journal["pending"] = [p for p in journal.get("pending") or []
+                                      if p.get("fingerprint") not in {t["from"], restore_fp}]
+                if (journal.get("adopted_unverified") or {}).get("fingerprint") == t["from"]:
+                    journal.pop("adopted_unverified", None)
             journal["history"] = (journal.get("history") or [])[-(HISTORY_LIMIT - 1):] + [
                 {"run_id": t["run_id"], "abandoned": t["to"], "at": _now()}]
             self._save(journal)
             # The journal records the abandon first; a failed abandon keeps its plan.
             _drop_plans(plan_file, *(pg.ledger_dir(self.env_dir) / "rebind").glob(f"{t['run_id']}-*.tfplan"))
-            print(f"Abandoned generation {t['to']}; {t['from'] or 'nothing'} stays live.")
+            print(f"Abandoned generation {t['to']}; {restore_fp or 'nothing'} stays live.")
             if moved:
                 print(f"  {len(moved)} column(s) have another treatment in the generated config than the abandoned "
                       f"change ({', '.join(moved[:10])}); the next apply stages that as a new change.")
@@ -1066,8 +1372,10 @@ class Controller:
             plan_dir = pg.ledger_dir(self.env_dir) / "rebind"
             # Grants earlier protect phases of this rebind held back, each proven by its saved plan.
             held = self._validated_held(t, plan_dir)
-            env = self._hook_env(t) | {"GENIERAILS_REBIND_FINGERPRINT": desired["fingerprint"],
-                                       "GENIERAILS_REBIND_TABLE_GRANTS": json.dumps(_table_keys(held))}
+            env = self._hook_env(t, old_fp=_restore_fingerprint(t)) | {
+                "GENIERAILS_REBIND_FINGERPRINT": desired["fingerprint"],
+                "GENIERAILS_REBIND_TABLE_GRANTS": json.dumps(_table_keys(held)),
+            }
             print(f"=== Policy rebind ({self.env_name}): run {t['run_id']} (generation {t['to']}) with the "
                   f"principals of {desired['fingerprint']} ===", flush=True)
             plan_dir.mkdir(parents=True, exist_ok=True)
@@ -1182,7 +1490,7 @@ class Controller:
         planned = _sha256(plan_file)
         side = pg.load_sidecar(plan_file)
         if (side.get("stage"), side.get("desired"), side.get("old"), side.get("rebind")) != (
-                stage, t["to"], t["from"], env["GENIERAILS_REBIND_FINGERPRINT"]):
+                stage, t["to"], _restore_fingerprint(t), env["GENIERAILS_REBIND_FINGERPRINT"]):
             raise Refused(f"the saved {stage} plan {plan_file} isn't of this rebind")
         return plan_file, planned
 
@@ -1250,6 +1558,8 @@ class Controller:
                       f"the same command at commit {t['commit'] or '?'}).")
             return 0
         try:
+            if journal is not None:
+                journal = self._adopt_principal_drift_preview(journal, desired)
             plan = self._new_transition(journal or self._adopt_preview(desired), desired)
         except Refused as exc:
             print(f"Staged policy apply would refuse: {exc}")
@@ -1273,8 +1583,60 @@ class Controller:
             return journal
         live = live_from_state(_read_state(self.env_dir))
         if live["policies"] or live["tags"]:
-            journal["active"] = desired["fingerprint"]
+            adopted, problems = _principal_only_adoption(self.env_dir, live, desired,
+                                                         allow_named_principal_drift=True)
+            if adopted:
+                self._preview_snapshots = getattr(self, "_preview_snapshots", {}) | {
+                    adopted["fingerprint"]: adopted,
+                    desired["fingerprint"]: desired,
+                }
+                journal["active"] = adopted["fingerprint"]
+                journal["adopted_unverified"] = {
+                    "fingerprint": adopted["fingerprint"], "restore_from": desired["fingerprint"],
+                    "reason": "principal-only drift adopted from state",
+                }
+            elif problems:
+                raise Refused("the data_access state holds deterministic policies or treatment tags that no policy "
+                              "journal records, and they differ from the generated config:\n  - "
+                              + "\n  - ".join(problems[:20]))
+            else:
+                journal["active"] = desired["fingerprint"]
         return journal
+
+    def _adopt_principal_drift_preview(self, journal: dict, desired: dict) -> dict:
+        """Read-only equivalent of _adopt_principal_drift for status/plan preview."""
+        if journal.get("transition") or journal.get("pending"):
+            return journal
+        active = journal.get("active") or ""
+        old = self._snapshot(active)
+        if active and old is None:
+            return journal
+        live = live_from_state(_read_state(self.env_dir))
+        if not state_problems(live, old, []):
+            return journal
+        adopted, problems = _principal_only_adoption(self.env_dir, live, desired,
+                                                     allow_named_principal_drift=False)
+        if not adopted:
+            if problems:
+                raise Refused(
+                    "the data_access state doesn't match the policy journal, and it is not principal-only "
+                    "drift that GenieRails can adopt:\n  - " + "\n  - ".join(problems[:20])
+                    + "\nNothing would be applied. Next: revert the out-of-band principal change in the "
+                    "Databricks UI, or re-run after confirming the live principals are only deleted principals "
+                    "shown as unknown.")
+            return journal
+        self._preview_snapshots = getattr(self, "_preview_snapshots", {}) | {
+            adopted["fingerprint"]: adopted,
+            desired["fingerprint"]: desired,
+        }
+        preview = dict(journal)
+        preview["active"] = adopted["fingerprint"]
+        preview["pending"] = []
+        preview["adopted_unverified"] = {
+            "fingerprint": adopted["fingerprint"], "restore_from": active or desired["fingerprint"],
+            "reason": "principal-only drift adopted from state",
+        }
+        return preview
 
     def describe_transition(self, t: dict) -> str:
         lines = [f"Unfinished policy change (run {t['run_id']}, commit {t['commit'] or '?'}): "
@@ -1300,15 +1662,16 @@ class Controller:
         else:
             kept = self._kept_new_columns(t)
             after = (t.get("restored") or {}).get("after") or t["failed_phase"]
-            if not t["from"]:
+            restore_fp = _restore_fingerprint(t)
+            if not restore_fp:
                 lines.append(f"  live:      generation {t['to']}'s masks and treatment tags on {len(kept)} column(s), "
                              f"kept by the restore after {after}: a first deploy has no previous protection "
                              "(fail-closed; no business USE or SELECT is granted until the grant phase)")
             elif kept:
-                lines.append(f"  live:      the previous protection ({t['from']}), restored after {after}; "
+                lines.append(f"  live:      the previous protection ({restore_fp}), restored after {after}; "
                              f"{len(kept)} newly governed column(s) keep generation {t['to']}'s masks (fail-closed)")
             else:
-                lines.append(f"  live:      the previous protection ({t['from']}), restored after {after}")
+                lines.append(f"  live:      the previous protection ({restore_fp}), restored after {after}")
             if kept:
                 lines.append(f"  next:      re-run the same command to resume ({_remaining(t)}); it can't be "
                              "abandoned while columns keep its masks")
@@ -1320,7 +1683,8 @@ class Controller:
         if not restored:
             return []
         try:
-            old = self._snapshot(t["from"]) if t["from"] else None
+            restore_fp = _restore_fingerprint(t)
+            old = self._snapshot(restore_fp) if restore_fp else None
         except (pg.StageError, OSError, ValueError):
             old = None
         old_tags = dict((old or {}).get("tags") or {})
@@ -1354,14 +1718,15 @@ class Controller:
 
     def _previous_snapshot_problem(self, t: dict) -> str:
         """Why the snapshot of the generation the change started from can't be trusted, or ""."""
-        if not t["from"]:
+        restore_fp = _restore_fingerprint(t)
+        if not restore_fp:
             return ""
         try:
-            snapshot = self._snapshot(t["from"])
+            snapshot = self._snapshot(restore_fp)
         except (pg.StageError, OSError, ValueError) as exc:
-            return f"the snapshot of generation {t['from']} can't be read ({exc})"
-        if not pg.snapshot_intact(snapshot, t["from"]):
-            return (f"the snapshot of generation {t['from']} ({pg.ledger_dir(self.env_dir) / (t['from'] + '.json')}) "
+            return f"the snapshot of generation {restore_fp} can't be read ({exc})"
+        if not pg.snapshot_intact(snapshot, restore_fp):
+            return (f"the snapshot of generation {restore_fp} ({pg.ledger_dir(self.env_dir) / (restore_fp + '.json')}) "
                     "doesn't match its fingerprint (edited since it was recorded)")
         return ""
 

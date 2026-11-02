@@ -174,7 +174,7 @@ locals {
     for ta in var.tag_assignments : "${ta.entity_type}|${ta.entity_name}|${ta.tag_key}" => ta.tag_value
     if ta.entity_type == "columns" && ta.tag_key == "gr_treatment"
   }
-  _policy_stage_guarded = var.governance_mode == "deterministic" && contains(["", "create", "tighten", "grant"], var.policy_stage)
+  _policy_stage_guarded = var.governance_mode == "deterministic" && !var.import_walk && contains(["", "create", "tighten", "grant"], var.policy_stage)
   # New SELECT opens only in the grant phase, after every staged phase is
   # applied and verified (scripts/staged_policy_apply.py).
   withhold_new_table_grants = var.governance_mode == "deterministic" && contains(["create", "tighten", "switch", "restore", "retire", "abandon", "rebind"], var.policy_stage)

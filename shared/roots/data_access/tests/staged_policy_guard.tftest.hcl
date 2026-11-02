@@ -172,6 +172,25 @@ run "one_shot_tier_move_is_refused" {
   }
 }
 
+# terraform import walks the whole configuration but applies nothing. The
+# runner's private import_walk variable suppresses this backstop only there, so
+# brownfield adoption can import a live policy whose principals drifted; the
+# staged phases then apply the principal change through the guarded path.
+run "import_walk_allows_drifted_principals" {
+  command = plan
+  variables {
+    import_walk  = true
+    policy_stage = ""
+    fgac_policies = [
+      { name = "gr_mask_cat_email_partial__string__0a1b2c3d_partial", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "cat", to_principals = ["analysts"], except_principals = ["raw"], match_condition = "hasTagValue('gr_treatment', 'email_partial__string__0a1b2c3d')", match_alias = "masked_col", function_name = "gr_mask_email_partial__string__0a1b2c3d_partial", function_catalog = "cat", function_schema = "sch" },
+      { name = "gr_mask_cat_email_partial__string__0a1b2c3d_full", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "cat", to_principals = ["account users"], except_principals = ["raw", "analysts"], match_condition = "hasTagValue('gr_treatment', 'email_partial__string__0a1b2c3d')", match_alias = "masked_col", function_name = "gr_mask_email_partial__string__0a1b2c3d_full", function_catalog = "cat", function_schema = "sch" },
+    ]
+    tag_assignments = [
+      { entity_type = "columns", entity_name = "cat.sch.orders.email", tag_key = "gr_treatment", tag_value = "email_partial__string__0a1b2c3d" },
+    ]
+  }
+}
+
 # tighten: TO grows and EXCEPT shrinks, so nobody is unmasked.
 run "tighten_may_add_coverage" {
   command = plan

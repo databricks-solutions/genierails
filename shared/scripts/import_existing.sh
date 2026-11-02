@@ -179,7 +179,7 @@ run_import() {
   echo "  Importing: $address -> $id"
   local import_out
   local import_rc
-  if import_out=$("$TF_RUNNER" "$LAYER" "$ENV_NAME" import "$address" "$id" 2>&1); then
+  if import_out=$("$TF_RUNNER" "$LAYER" "$ENV_NAME" import -no-color "$address" "$id" 2>&1); then
     import_rc=0
   else
     import_rc=$?
@@ -193,17 +193,27 @@ run_import() {
     echo "  ↩ Already managed: $address (skipping)"
   else
     echo "$import_out" >&2
+    local classified_out
+    classified_out=$(printf '%s\n' "$import_out" | sed -E $'s/\x1B\\[[0-9;?]*[ -/]*[@-~]//g; s/^[[:space:]]*│[[:space:]]*//')
     # Terraform evaluates the whole configuration before it imports anything:
     # an error there says nothing about whether the object exists.
-    if grep -qE "Invalid (for_each|count) argument" <<<"$import_out"; then
+    if grep -qiE "Invalid (for_each|count) argument|precondition failed" <<<"$classified_out"; then
       echo "  ✗ Failed to import $address: Terraform couldn't evaluate the configuration (see the error above); nothing was imported and the object may well exist in Databricks"
-    else
+      HARD_IMPORT_FAILURES=$((HARD_IMPORT_FAILURES + 1))
+    elif grep -qiE '^Error:.*Cannot import (a )?non-existent remote object' <<<"$classified_out" \
+        || grep -qiE '^Error:.*RESOURCE_DOES_NOT_EXIST' <<<"$classified_out" \
+        || { grep -qiE '^Error:.*does not exist' <<<"$classified_out" \
+             && ! grep -qiE '^Error:.*(Configuration for import target does not exist|PERMISSION_DENIED)' <<<"$classified_out"; }; then
       echo "  ✗ Failed to import $address (may not exist in Databricks)"
+    else
+      echo "  ✗ Failed to import $address: Terraform import failed (see the error above); not treating this as a missing Databricks object"
+      HARD_IMPORT_FAILURES=$((HARD_IMPORT_FAILURES + 1))
     fi
     IMPORT_FAILURES=$((IMPORT_FAILURES + 1))
   fi
 }
 IMPORT_FAILURES=0
+HARD_IMPORT_FAILURES=0
 
 # Look up group display-names from abac.auto.tfvars and resolve their numeric
 # account-level SCIM IDs via the Databricks SDK (required for terraform import).
@@ -1078,3 +1088,7 @@ else
 fi
 echo "  Next: terraform plan (to verify state is consistent)"
 echo "============================================"
+if [ "$HARD_IMPORT_FAILURES" -ne 0 ]; then
+  echo "ERROR: $HARD_IMPORT_FAILURES import(s) failed because Terraform could not run the import walk (see above)." >&2
+  exit 1
+fi

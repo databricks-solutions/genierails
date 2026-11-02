@@ -117,6 +117,8 @@ if command == "state-list":
 elif command == "import":
     if os.environ.get("FAKE_UC_FAIL_IMPORT"):
         sys.exit("fake import failure")
+    if args and args[0] == "-no-color":
+        args = args[1:]
     module, rtype, name, key = re.match(r'(module\.\w+)\.(\w+)\.(\w+)\["(.*)"\]$', args[0]).groups()
     for resource in state["resources"]:
         if (resource.get("module"), resource["type"], resource["name"]) == (module, rtype, name):

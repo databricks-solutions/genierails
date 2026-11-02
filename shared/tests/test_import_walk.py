@@ -128,6 +128,77 @@ def test_an_import_keeps_the_last_applies_coverage_record(data_access):
     assert data_access.state()["outputs"]["coverage_gate"]["value"] == before
 
 
+def test_data_access_import_walk_does_not_trip_the_staged_policy_guard_on_principal_drift(data_access):
+    name = "gr_mask_cat_email_partial__string__abc12345_partial"
+    value = "email_partial__string__abc12345"
+    function = "gr_mask_email_partial__string__abc12345_partial"
+    (data_access.layer_dir / "env.auto.tfvars").write_text(
+        'governance_mode = "deterministic"\naccess_tier_groups = ["raw", "regional", "masked"]\n')
+    (data_access.layer_dir / "abac.auto.tfvars").write_text(f"""
+tag_assignments = [
+  {{ entity_type = "columns", entity_name = "cat.sch.t.email", tag_key = "gr_treatment", tag_value = "{value}" }},
+]
+fgac_policies = [
+  {{
+    name = "{name}"
+    policy_type = "POLICY_TYPE_COLUMN_MASK"
+    catalog = "cat"
+    to_principals = ["regional"]
+    except_principals = ["raw"]
+    match_condition = "hasTagValue('gr_treatment', '{value}')"
+    match_alias = "masked_col"
+    function_catalog = "cat"
+    function_schema = "sch"
+    function_name = "{function}"
+  }},
+]
+""")
+    (data_access.layer_dir / "masking_functions.sql").write_text(
+        f"USE CATALOG cat;\nUSE SCHEMA sch;\nCREATE OR REPLACE FUNCTION {function}(masked_col STRING) "
+        "RETURN 'MASKED';\n")
+    (data_access.layer_dir / "terraform.tfstate").write_text(json.dumps({
+        "version": 4,
+        "terraform_version": "1.7.0",
+        "serial": 1,
+        "lineage": "import-walk-staged-policy-guard",
+        "outputs": {},
+        "resources": [{
+            "module": "module.data_access",
+            "mode": "managed",
+            "type": "databricks_policy_info",
+            "name": "policies",
+            "provider": 'provider["registry.terraform.io/databricks/databricks"].workspace',
+            "instances": [{
+                "index_key": name,
+                "schema_version": 0,
+                "attributes": {
+                    "id": name,
+                    "catalog": "cat",
+                    "on_securable_type": "CATALOG",
+                    "on_securable_fullname": "cat",
+                    "policy_type": "POLICY_TYPE_COLUMN_MASK",
+                    "for_securable_type": "TABLE",
+                    "to_principals": ["regional"],
+                    "except_principals": ["unknown"],
+                    "column_mask": {"function_name": f"cat.sch.{function}", "on_column": "masked_col", "using": []},
+                    "match_columns": [{"condition": f"hasTagValue('gr_treatment', '{value}')",
+                                       "alias": "masked_col"}],
+                },
+                "sensitive_attributes": [],
+            }],
+        }],
+        "check_results": [],
+    }))
+
+    result = data_access.run("import", "-no-color", MASKS, "imported")
+
+    _imported(result)
+    output = result.stdout + result.stderr
+    assert "-var=import_walk=true" in output
+    assert "staged phases" not in output
+    assert MASKS in data_access.addresses()
+
+
 def test_workspace_import_works_while_the_agent_coverage_check_passes(tmp_path):
     env = Env(tmp_path, "workspace")
     # Sales's CAN_RUN ACL is filtered on the check's status; New is created, so it has a terraform_data.
@@ -147,8 +218,19 @@ def test_workspace_import_works_while_the_agent_coverage_check_passes(tmp_path):
 
 
 @pytest.mark.parametrize("command", ["plan", "apply", "import"])
-def test_a_caller_cannot_set_import_walk(data_access, command):
-    args = [command, "-var=import_walk=true"] + ([WAIT, "30s,"] if command == "import" else [])
+@pytest.mark.parametrize("source", ["arg", "tf_var", "tf_cli_args", "tfvars"])
+def test_a_caller_cannot_set_import_walk(data_access, command, source):
+    args = [command] + ([WAIT, "30s,"] if command == "import" else [])
+    if source == "arg":
+        args.insert(1, "-var=import_walk=true")
+    elif source == "tf_var":
+        data_access.environ["TF_VAR_import_walk"] = "true"
+    elif source == "tf_cli_args":
+        data_access.environ["TF_CLI_ARGS"] = "-var=import_walk=true"
+    else:
+        (data_access.layer_dir / "abac.auto.tfvars").write_text(
+            (data_access.layer_dir / "abac.auto.tfvars").read_text() + "import_walk = true\n")
+
     result = data_access.run(*args)
     assert result.returncode == 2, result.stdout + result.stderr
     assert "sets import_walk" in result.stderr and "+ terraform" not in result.stderr

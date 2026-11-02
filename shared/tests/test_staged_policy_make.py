@@ -74,6 +74,47 @@ def _run_apply_layer(env_dir, stubs, extra, cloud):
         cwd=ROOT / cloud, text=True, capture_output=True, env=_env(stubs["staged"], stubs["gate"], stubs["sticky"]))
 
 
+def _ci_allowed_stubs(tmp_path: Path) -> dict[str, str]:
+    apply = tmp_path / "ci-apply"
+    apply.write_text("#!/bin/sh\necho genierails-ci-guard:v1:allowed\n")
+    apply.chmod(0o755)
+    status = tmp_path / "ci-status"
+    status.write_text("#!/bin/sh\necho genierails-ci-status:v1:not-ci\n")
+    status.chmod(0o755)
+    return {"ci_guard.py apply": str(apply), "ci_guard.py ci-status": str(status),
+            "genie_space_placeholder.py": "true", "scheduled_governance_scope.py": "true",
+            "auth_tfvars.py": "true"}
+
+
+def test_make_import_returns_the_data_access_failure_after_workspace_import_runs(tmp_path):
+    shared = tmp_path / "shared"
+    (shared / "scripts").mkdir(parents=True)
+    (shared / "Makefile.shared").write_text((ROOT / "shared" / "Makefile.shared").read_text())
+    (shared / "env.auto.tfvars.example").write_text((ROOT / "shared" / "env.auto.tfvars.example").read_text())
+    (shared / "auth.auto.tfvars.example").write_text((ROOT / "shared" / "auth.auto.tfvars.example").read_text())
+    log = tmp_path / "imports.jsonl"
+    importer = shared / "scripts" / "import_existing.sh"
+    importer.write_text(f"#!/bin/sh\n"
+                        f"printf '%s\\n' \"$PWD\" >> {str(log)!r}\n"
+                        "case \"$PWD\" in */data_access) exit 1 ;; *) exit 0 ;; esac\n")
+    importer.chmod(0o755)
+    env_dir = tmp_path / "envs" / "dev"
+    (env_dir / "data_access").mkdir(parents=True)
+    (env_dir / "env.auto.tfvars").write_text('governance_mode = "legacy"\n')
+    (tmp_path / "envs" / "account").mkdir(parents=True)
+    bin_dir = script_stubs.install(tmp_path / "stub-bin", _ci_allowed_stubs(tmp_path))
+    env = script_stubs.without_ci(os.environ) | {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    result = subprocess.run(
+        ["make", "--no-print-directory", "import", "ENV=dev", f"ENV_DIR={env_dir}",
+         f"ACCOUNT_ENV_DIR={tmp_path / 'envs' / 'account'}", f"SHARED_ROOT={shared}"],
+        cwd=ROOT / "aws", text=True, capture_output=True, env=env)
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    calls = log.read_text().splitlines()
+    assert calls == [str(env_dir / "data_access"), str(env_dir)]
+
+
 @pytest.mark.parametrize("cloud", ["aws", "azure"])
 def test_deterministic_data_access_apply_runs_only_through_the_staged_controller(tmp_path, cloud):
     result, calls, env_dir = _apply_layer(tmp_path, "deterministic", cloud=cloud)
@@ -134,6 +175,25 @@ def test_a_failed_staged_apply_fails_the_layer(tmp_path):
     assert not (env_dir / "data_access" / ".data_access.apply.sha").exists()
 
 
+def test_data_access_apply_stops_on_any_import_failure(tmp_path):
+    env_dir = _env_dir(tmp_path, "deterministic")
+    log = tmp_path / "calls"
+    stubs = {name: _stub(tmp_path / name, log) for name in ("runner", "staged", "gate", "sticky", "make")}
+    importer = _stub(tmp_path / "import-existing", log, rc=1)
+    with _held_as_rehearse(env_dir):
+        result = subprocess.run(
+            ["make", "--no-print-directory", "_apply-layer", "LAYER=data_access", "TARGET_ENV=dev", "ENV=dev",
+             f"LAYER_ENV_DIR={env_dir / 'data_access'}", f"ENV_DIR={env_dir}", f"ROOT_RUNNER={stubs['runner']}",
+             f"MAKE={stubs['make']}", f"IMPORT_EXISTING_SCRIPT={importer}", "FORCE_APPLY=1"],
+            cwd=ROOT / "aws", text=True, capture_output=True, env=_env(stubs["staged"], stubs["gate"], stubs["sticky"]))
+
+    assert result.returncode != 0
+    assert "data_access import failed" in result.stderr
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [c[0] for c in calls].count("import-existing") == 1
+    assert not [c for c in calls if c[0] == "staged"]
+
+
 @pytest.mark.parametrize("cloud", ["aws", "azure"])
 @pytest.mark.parametrize("target, env", [("rehearse", "dev"), ("release", "prod")])
 def test_rehearse_and_release_confirm_only_after_their_own_verification(cloud, target, env):
@@ -184,7 +244,7 @@ def test_terraform_refuses_a_one_shot_policy_change_outside_the_staged_phases(tm
     result = tf(root, "test", "-no-color", "-filter=tests/staged_policy_guard.tftest.hcl", env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     for run in ("one_shot_retag_is_refused", "one_shot_tier_move_is_refused", "create_may_not_remove_a_live_policy",
-                "tighten_may_not_remove_coverage", "legacy_mode_is_never_guarded", "switch_retags_under_the_controller",
+                "import_walk_allows_drifted_principals", "tighten_may_not_remove_coverage",
+                "legacy_mode_is_never_guarded", "switch_retags_under_the_controller",
                 "rebind_variables_outside_rebind_are_ignored", "rebind_variables_in_rebind"):
         assert f'run "{run}"... pass' in result.stdout, result.stdout
-
