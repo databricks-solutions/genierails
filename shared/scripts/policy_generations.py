@@ -341,10 +341,11 @@ def tightened(live: dict, wanted: dict) -> dict:
     live_to, live_except = _principals(live)
     wanted_to, wanted_except = _principals(wanted)
     keep = set(wanted_except)
-    return dict(live) | {
-        "to_principals": list(dict.fromkeys(live_to + wanted_to)),
-        "except_principals": [p for p in live_except if p in keep],
-    }
+    policy = dict(live) | {"to_principals": list(dict.fromkeys(live_to + wanted_to))}
+    except_principals = [p for p in live_except if p in keep]
+    if except_principals or "except_principals" in live or "except_principals" in wanted:
+        policy["except_principals"] = except_principals
+    return policy
 
 
 def _covers(policy: dict, principal: str) -> bool:
