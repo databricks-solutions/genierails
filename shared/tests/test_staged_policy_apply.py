@@ -172,7 +172,7 @@ def staged_policy_guard(stage, state, wanted):
         ):
             problems.append(f"{name} changes its principals")
         if stage == "tighten":
-            if set(policy.get("to_principals") or []) - set(want.get("to_principals") or []):
+            if (set(policy.get("to_principals") or []) - {"unknown"}) - set(want.get("to_principals") or []):
                 problems.append(f"{name} loses coverage while tightening")
             if set(want.get("except_principals") or []) - set(policy.get("except_principals") or []):
                 problems.append(f"{name} loses coverage while tightening")
@@ -204,6 +204,13 @@ def access_wanted(state, stage, masks):
     return want
 
 
+def normalized_for_diff(kind, value):
+    value = json.loads(json.dumps(value or {}))
+    if kind == MASK and isinstance(value.get("column_mask"), dict):
+        value["column_mask"].pop("using", None)
+    return value
+
+
 if command == "plan":
     stage = var("policy_stage")
     if os.environ.get("FAKE_TF_FAIL_PLAN") == stage:
@@ -225,7 +232,7 @@ if command == "plan":
                 actions = ["delete"]
             elif key not in have:
                 actions = ["create"]
-            elif have[key] != wanted[key]:
+            elif normalized_for_diff(kind, have[key]) != normalized_for_diff(kind, wanted[key]):
                 actions = ["delete", "create"] if kind in REPLACED else ["update"]
             else:
                 continue
@@ -253,6 +260,14 @@ elif command == "apply-plan":
         access = json.load(open(ACCESS))
         json.dump(access | {"gone": []}, open(ACCESS, "w"))
     changes = plan["resource_changes"]
+    for change in changes:
+        if change["type"] != "databricks_policy_info" or not set(change["change"]["actions"]) & {"create", "update"}:
+            continue
+        after = change["change"].get("after") or {}
+        principals = list(after.get("to_principals") or []) + list(after.get("except_principals") or [])
+        if "unknown" in principals:
+            sys.stderr.write("failed to update policy_info: Could not find principal with name unknown\n")
+            sys.exit(1)
     fail = os.environ.get("FAKE_TF_FAIL_APPLY") == plan["stage"]
     if fail:
         changes = changes[: len(changes) // 2]
@@ -1589,6 +1604,14 @@ def _replace_first_n_policy_principals_with_unknown(env_dir: Path, count: int) -
     return changed
 
 
+def _drop_column_mask_using(env_dir: Path, names: set[str]) -> None:
+    state = live_state(env_dir)
+    for name, policy in _instances(state, "databricks_policy_info", "policies").items():
+        if name in names:
+            (policy.get("column_mask") or {}).pop("using", None)
+    (env_dir / "data_access" / "terraform.tfstate").write_text(json.dumps(state))
+
+
 def _replace_first_regional_to(env_dir: Path, replacement: str) -> None:
     state = live_state(env_dir)
     for policy in _instances(state, "databricks_policy_info", "policies").values():
@@ -1987,6 +2010,63 @@ def test_live_bug_d_adopted_unknown_principals_resume_create_then_switch_to_gene
     assert len(retained) == 14
     assert any(pg.UNKNOWN in p["to_principals"] or pg.UNKNOWN in p["except_principals"]
                for p in retained.values())
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def test_bug_e_create_coverage_validates_generated_principals_not_unknown_placeholders(harness, tmp_path):
+    desired = released_fifteen_policy_env(harness)
+    changed = _replace_first_n_policy_principals_with_unknown(harness.env_dir, 14)
+    _drop_column_mask_using(harness.env_dir, set(changed))
+    harness.live_treatment_tags = dict(desired["tags"])
+    spa.journal_path(harness.env_dir).unlink()
+
+    assert harness.apply(FAKE_TF_FAIL_APPLY="create") == 1
+
+    t = harness.journal()["transition"]
+    old = pg.load_snapshot(harness.env_dir, t["render_from"])
+    staged = pg.plan_stage("create", pg.desired_generation(harness.env_dir), old, None)
+    assert "coverage_rendered" in staged
+    actual = pg.write_stage(harness.env_dir / "data_access", staged["rendered"], out_dir=tmp_path / "actual")
+    coverage = pg.write_stage(
+        harness.env_dir / "data_access", staged["coverage_rendered"], out_dir=tmp_path / "coverage")
+
+    actual_check = subprocess.run(
+        [sys.executable, str(SHARED / "validate_abac.py"), str(actual / "abac.auto.tfvars"),
+         str(actual / "masking_functions.sql")],
+        text=True, capture_output=True, check=False,
+    )
+    coverage_check = subprocess.run(
+        [sys.executable, str(SHARED / "validate_abac.py"), str(coverage / "abac.auto.tfvars"),
+         str(coverage / "masking_functions.sql")],
+        text=True, capture_output=True, check=False,
+    )
+
+    assert actual_check.returncode == 1
+    assert "unknown" in actual_check.stdout
+    assert "unknown" not in coverage_check.stdout
+
+
+@pytest.mark.parametrize("resume_partial_create", [False, True])
+def test_bug_e_aws_shape_adopted_unknown_create_never_writes_unknown_and_reaches_grant(harness,
+                                                                                      resume_partial_create):
+    desired = released_fifteen_policy_env(harness)
+    changed = _replace_first_n_policy_principals_with_unknown(harness.env_dir, 14)
+    _drop_column_mask_using(harness.env_dir, set(changed))
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_treatment_tags = dict(desired["tags"])
+    spa.journal_path(harness.env_dir).unlink()
+    harness.calls.clear()
+
+    if resume_partial_create:
+        assert harness.apply(FAKE_TF_FAIL_APPLY="create") == 1
+        assert harness.journal()["transition"]["failed_phase"] == "create"
+        harness.calls.clear()
+
+    assert harness.apply() == 0
+
+    assert harness.calls[-1] == "grant"
+    assert "tighten" in harness.calls
+    assert harness.calls.index("tighten") < harness.calls.index("switch")
     _assert_live_generated_principals(harness.env_dir, desired)
 
 

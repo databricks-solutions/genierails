@@ -37,6 +37,7 @@ except ImportError:
 VALID_ENTITY_TYPES = {"tables", "columns"}
 VALID_POLICY_TYPES = {"POLICY_TYPE_COLUMN_MASK", "POLICY_TYPE_ROW_FILTER"}
 BUILTIN_PRINCIPALS = {"account users"}
+RESERVED_UNKNOWN_PRINCIPAL = "unknown"
 
 COUNTRIES_DIR = Path(__file__).resolve().parent / "countries"
 INDUSTRIES_DIR = Path(__file__).resolve().parent / "industries"
@@ -932,6 +933,8 @@ def validate_groups(cfg: dict, result: ValidationResult):
         result.error("'groups' must be a map of group_name -> { description = \"...\" }")
         return set()
     for name, val in groups.items():
+        if str(name).casefold() == RESERVED_UNKNOWN_PRINCIPAL:
+            result.error("groups: 'unknown' is reserved for Unity Catalog deleted-principal placeholders")
         if not isinstance(val, dict):
             result.error(f"groups[\"{name}\"] must be an object with a 'description' key")
     result.ok(f"groups: {len(groups)} group(s) defined")
@@ -1108,11 +1111,17 @@ def validate_fgac_policies(
 
         # Validate principals reference existing groups
         for principal in p.get("to_principals", []):
+            if str(principal).casefold() == RESERVED_UNKNOWN_PRINCIPAL:
+                result.error(f"{prefix}: to_principals may not name reserved principal 'unknown'")
+                continue
             if principal.lower() not in BUILTIN_PRINCIPALS and principal not in group_names:
                 result.error(
                     f"{prefix}: to_principals group '{principal}' not defined in 'groups'"
                 )
         for principal in p.get("except_principals", []) or []:
+            if str(principal).casefold() == RESERVED_UNKNOWN_PRINCIPAL:
+                result.error(f"{prefix}: except_principals may not name reserved principal 'unknown'")
+                continue
             if (principal.lower() not in BUILTIN_PRINCIPALS and principal not in group_names
                     and principal not in deterministic_exempt_principals):
                 result.error(
@@ -1443,6 +1452,12 @@ def load_validation_context(cfg: dict, result: ValidationResult, tfvars_path: Pa
     ):
         if key not in merged and key in env_cfg:
             merged[key] = env_cfg[key]
+    for key in ("access_tier_groups", "raw_exempt_principals"):
+        for principal in merged.get(key) or []:
+            if str(principal).casefold() == RESERVED_UNKNOWN_PRINCIPAL:
+                result.error(f"{key}: 'unknown' is reserved for Unity Catalog deleted-principal placeholders")
+    if str(merged.get("deployer_principal_id") or "").casefold() == RESERVED_UNKNOWN_PRINCIPAL:
+        result.error("deployer_principal_id: 'unknown' is reserved for Unity Catalog deleted-principal placeholders")
     if env_path is not None and not env_parse_failed:
         from deployer_identity import validation_errors as deployer_errors
 

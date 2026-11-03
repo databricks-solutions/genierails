@@ -804,10 +804,13 @@ def can_run_check(env_dir: Path, env_name: str, runner: Path, apply_flags: str) 
 
 
 def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbose: bool,
-             config_dir: Path | None = None, staged: dict | None = None) -> int:
+             config_dir: Path | None = None, staged: dict | None = None,
+             validation_config_dir: Path | None = None) -> int:
     """Gate the data_access config: the split one, or a staged phase's render in ``config_dir``."""
     layer_dir = env_dir / data_access_subdir()
     tfvars = (config_dir or layer_dir) / "abac.auto.tfvars"
+    validation_tfvars = (validation_config_dir or config_dir or layer_dir) / "abac.auto.tfvars"
+    validation_sql = (validation_config_dir or config_dir or layer_dir) / "masking_functions.sql"
     gate_path = layer_dir / GATE_FILENAME
     if not tfvars.is_file():
         if config_dir:
@@ -855,8 +858,8 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
             pending_file = Path(handle.name)
     try:
         command = [
-            sys.executable, str(VALIDATOR), "--coverage-gate", str(tfvars),
-            str((config_dir or layer_dir) / "masking_functions.sql"),
+            sys.executable, str(VALIDATOR), "--coverage-gate", str(validation_tfvars),
+            str(validation_sql),
             "--ddl", str(env_dir / "ddl" / "_fetched.sql"),
             "--exposure-context", str(context),
             "--summary-label", f"coverage check (data_access:{env_name})",
@@ -1016,6 +1019,10 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--verbose", action="store_true")
     # Set by scripts/policy_generations.py for a staged phase's re-check.
     run.add_argument("--layer-config-dir", type=Path, help="gate a staged phase's render instead of the split config")
+    run.add_argument(
+        "--validation-config-dir", type=Path,
+        help="validate coverage against this config while gating the staged render's Terraform fingerprint",
+    )
     run.add_argument("--stage", default="", help="the staged phase that rendered --layer-config-dir")
     run.add_argument("--old-fingerprint", default="", help="the active generation the phase keeps live")
     run.add_argument("--keep-new-tags", action="store_true", help="a switch was attempted (the phase's KEEP_NEW_TAGS)")
@@ -1084,7 +1091,8 @@ def main(argv: list[str] | None = None) -> int:
                    "keep_new_tags": args.keep_new_tags, "rebind_fingerprint": args.rebind_fingerprint,
                    "opens_access": args.opens_access} if args.stage else None)
         return run_gate(args.env_dir.resolve(), args.env_name, args.runner, args.apply_flags, args.verbose,
-                        args.layer_config_dir.resolve() if args.layer_config_dir else None, staged)
+                        args.layer_config_dir.resolve() if args.layer_config_dir else None, staged,
+                        args.validation_config_dir.resolve() if args.validation_config_dir else None)
     except GateError as exc:
         print(f"coverage check: ERROR: {exc}", file=sys.stderr)
         return 2

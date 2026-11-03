@@ -212,6 +212,40 @@ def test_deterministic_validator_still_refuses_undefined_except_group(tmp_path):
     assert any("except_principals group 'undefined-group' not defined" in error for error in result.errors)
 
 
+@pytest.mark.parametrize(("field", "principal"), [
+    ("to_principals", "unknown"),
+    ("except_principals", "Unknown"),
+])
+def test_validator_refuses_config_principal_named_unknown(tmp_path, field, principal):
+    _, _, cfg = _real_deterministic_output(tmp_path)
+    cfg["groups"][principal] = {"description": "Reserved"}
+    cfg["fgac_policies"][0][field] = [principal]
+    result = _result()
+    tag_map = validate_tag_policies(cfg, result)
+    group_names = validate_groups(cfg, result)
+    validate_fgac_policies(cfg, group_names, tag_map, None, result)
+    assert any("reserved" in error and "unknown" in error for error in result.errors)
+
+
+@pytest.mark.parametrize("key", ["access_tier_groups", "raw_exempt_principals"])
+def test_validator_refuses_env_principal_named_unknown(tmp_path, key):
+    tfvars, sql, _ = _real_deterministic_output(tmp_path)
+    env_file = tfvars.parent.parent / "env.auto.tfvars"
+    lines = env_file.read_text().splitlines()
+    env_file.write_text("\n".join(
+        f'{key} = ["unknown"]' if line.startswith(f"{key} = ") else line
+        for line in lines
+    ) + "\n")
+
+    run = subprocess.run(
+        [sys.executable, str(Path(__file__).parent.parent / "validate_abac.py"), str(tfvars), str(sql)],
+        text=True, capture_output=True, check=False,
+    )
+
+    assert run.returncode == 1
+    assert f"{key}: 'unknown' is reserved" in run.stdout
+
+
 def test_never_raw_deterministic_policy_refuses_deployer_and_raw_exempt_exceptions():
     from governance_policies import build_model
 

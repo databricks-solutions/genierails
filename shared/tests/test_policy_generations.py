@@ -67,6 +67,32 @@ def test_create_keeps_old_principals_and_switch_moves_them_in_place(tmp_path):
     assert switch[partial]["to_principals"] == ["analysts"]
 
 
+def test_adopted_unknown_principals_are_unrenderable_until_tighten(tmp_path):
+    desired = _generation(tmp_path)
+    adopted = json.loads(json.dumps(desired))
+    for policy in adopted["fgac_policies"]:
+        policy["to_principals"] = ["account users" if p == "account users" else pg.UNKNOWN
+                                   for p in policy.get("to_principals") or []]
+        policy["except_principals"] = ["account users" if p == "account users" else pg.UNKNOWN
+                                       for p in policy.get("except_principals") or []]
+
+    create = pg.plan_stage("create", desired, adopted, None)
+    assert any(
+        pg.UNKNOWN in ((policy.get("to_principals") or []) + (policy.get("except_principals") or []))
+        for policy in create["rendered"]["fgac_policies"]
+    )
+    assert not any(
+        pg.UNKNOWN in ((policy.get("to_principals") or []) + (policy.get("except_principals") or []))
+        for policy in create["coverage_rendered"]["fgac_policies"]
+    )
+    for stage in ("tighten", "switch"):
+        rendered = pg.render_stage(stage, desired, adopted, None)
+        assert not any(
+            pg.UNKNOWN in ((policy.get("to_principals") or []) + (policy.get("except_principals") or []))
+            for policy in rendered["fgac_policies"]
+        )
+
+
 def test_switch_retags_and_keeps_retained_generations_until_retire(tmp_path):
     retired = _generation(tmp_path, versions={"ip_address": {"partial": "redacted"}})
     old = _generation(tmp_path)

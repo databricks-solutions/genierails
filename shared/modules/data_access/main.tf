@@ -664,6 +664,14 @@ resource "databricks_policy_info" "policies" {
     databricks_grant.terraform_sp_manage_catalog,
     terraform_data.masking_functions,
   ]
+
+  lifecycle {
+    # Provider/API refreshes can omit this empty list for column masks. Updating
+    # solely to write the normalization back is a no-op, and for retained
+    # adopted policies with deleted principals it would force UC to reject the
+    # whole policy update because the live principal is reported as "unknown".
+    ignore_changes = [column_mask[0].using]
+  }
 }
 
 # Unity Catalog policy creation and treatment retags can return before
