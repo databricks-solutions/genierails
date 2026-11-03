@@ -213,7 +213,7 @@ def _desired_policy_binding(policy: dict) -> dict:
     function = ".".join(str(policy.get(k) or "") for k in ("function_catalog", "function_schema", "function_name"))
     match_alias = policy.get("match_alias")
     return {
-        "column_mask": {"function_name": function, "on_column": match_alias, "using": []}
+        "column_mask": {"function_name": function, "on_column": match_alias, "using": None}
         if policy_type == "POLICY_TYPE_COLUMN_MASK" else None,
         "match_condition": str(policy.get("match_condition") or ""),
         "row_filter": {"function_name": function, "using": [{"alias": match_alias}] if match_alias is not None else []}

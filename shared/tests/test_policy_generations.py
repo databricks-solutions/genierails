@@ -67,6 +67,64 @@ def test_create_keeps_old_principals_and_switch_moves_them_in_place(tmp_path):
     assert switch[partial]["to_principals"] == ["analysts"]
 
 
+def test_adopted_unknown_principals_are_unrenderable_until_tighten(tmp_path):
+    desired = _generation(tmp_path)
+    adopted = json.loads(json.dumps(desired))
+    for policy in adopted["fgac_policies"]:
+        policy["to_principals"] = ["account users" if p == "account users" else pg.UNKNOWN
+                                   for p in policy.get("to_principals") or []]
+        policy["except_principals"] = ["account users" if p == "account users" else pg.UNKNOWN
+                                       for p in policy.get("except_principals") or []]
+
+    create = pg.plan_stage("create", desired, adopted, None)
+    assert any(
+        pg.UNKNOWN in ((policy.get("to_principals") or []) + (policy.get("except_principals") or []))
+        for policy in create["rendered"]["fgac_policies"]
+    )
+    assert not any(
+        pg.UNKNOWN in ((policy.get("to_principals") or []) + (policy.get("except_principals") or []))
+        for policy in create["coverage_rendered"]["fgac_policies"]
+    )
+    for stage in ("tighten", "switch"):
+        rendered = pg.render_stage(stage, desired, adopted, None)
+        assert not any(
+            pg.UNKNOWN in ((policy.get("to_principals") or []) + (policy.get("except_principals") or []))
+            for policy in rendered["fgac_policies"]
+        )
+
+
+def test_adopted_unknown_coverage_view_swaps_only_principals(tmp_path):
+    desired = _generation(tmp_path)
+    adopted = json.loads(json.dumps(desired))
+    retained = next(p for p in adopted["fgac_policies"] if p["name"].endswith("_partial"))
+    generated = next(p for p in desired["fgac_policies"] if p["name"] == retained["name"])
+    retained["to_principals"] = [pg.UNKNOWN]
+    retained["function_name"] = "live_mask_function"
+
+    create = pg.plan_stage("create", desired, adopted, None)
+    coverage = {p["name"]: p for p in create["coverage_rendered"]["fgac_policies"]}[retained["name"]]
+    rendered = {p["name"]: p for p in create["rendered"]["fgac_policies"]}[retained["name"]]
+
+    assert rendered["to_principals"] == [pg.UNKNOWN]
+    assert rendered["function_name"] == "live_mask_function"
+    assert coverage["to_principals"] == generated["to_principals"]
+    assert coverage["function_name"] == "live_mask_function"
+
+
+def test_tighten_refuses_empty_to_after_stripping_unknown(tmp_path):
+    desired = _generation(tmp_path)
+    old = json.loads(json.dumps(desired))
+    first = desired["fgac_policies"][0]["name"]
+    for generation, to_principals in ((desired, []), (old, [pg.UNKNOWN])):
+        for policy in generation["fgac_policies"]:
+            if policy["name"] == first:
+                policy["to_principals"] = to_principals
+                policy["except_principals"] = []
+
+    planned = pg.plan_stage("tighten", desired, old, None)
+    assert any(f"{first} would have no TO principals" == problem for problem in planned["problems"])
+
+
 def test_switch_retags_and_keeps_retained_generations_until_retire(tmp_path):
     retired = _generation(tmp_path, versions={"ip_address": {"partial": "redacted"}})
     old = _generation(tmp_path)

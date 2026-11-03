@@ -140,6 +140,7 @@ STAGE_CONFIG_ENV = "GENIERAILS_LAYER_CONFIG_DIR"
 # The stages whose render keeps the active generation's tag values.
 KEEP_TAG_STAGES = ("create", "tighten", "restore", "abandon")
 ALL_USERS = "account users"
+UNKNOWN = "unknown"  # how Unity Catalog shows a deleted principal in a policy
 OUTSIDER = "<anyone outside the tiers>"
 # Resources a staged apply may never destroy: a live policy, a treatment tag
 # (a column would lose its mask), or the resource whose destroy drops functions.
@@ -341,7 +342,12 @@ def tightened(live: dict, wanted: dict) -> dict:
     live_to, live_except = _principals(live)
     wanted_to, wanted_except = _principals(wanted)
     keep = set(wanted_except)
-    policy = dict(live) | {"to_principals": list(dict.fromkeys(live_to + wanted_to))}
+    # ``unknown`` is UC's placeholder for a deleted principal. It describes
+    # live state, but UC rejects it in policy writes, so a tighten that starts
+    # from deleted-principal drift must add the generated principals without
+    # writing the placeholder back.
+    to_principals = [p for p in dict.fromkeys(live_to + wanted_to) if p != UNKNOWN]
+    policy = dict(live) | {"to_principals": to_principals}
     except_principals = [p for p in live_except if p in keep]
     if except_principals or "except_principals" in live or "except_principals" in wanted:
         policy["except_principals"] = except_principals
@@ -433,11 +439,33 @@ def plan_stage(stage: str, desired: dict, old: dict | None, retire: dict | None,
             allowed_policies = {n for n in allowed_policies if policy_value(retained_defs[n]) in in_use}
         allowed_tags = {_tag_key(c) for c in (old_tags.keys() | create_tags.keys()) - desired_tags.keys()}
 
+    coverage_policies = policies
+    if stage in ("create", "restore"):
+        # Retained policies from an adopted generation may contain UC's
+        # deleted-principal placeholder ``unknown``. Create/restore render that
+        # placeholder only to keep Terraform from touching the retained policy.
+        # The coverage check must judge the generated config's real principals
+        # for those policies, because this phase is not writing the placeholder.
+        coverage_policies = dict(policies)
+        for name, policy in policies.items():
+            principals = (policy.get("to_principals") or []) + (policy.get("except_principals") or [])
+            if UNKNOWN in principals and name in desired_defs:
+                coverage_policies[name] = dict(policy) | {
+                    "to_principals": desired_defs[name].get("to_principals") or [],
+                    "except_principals": desired_defs[name].get("except_principals") or [],
+                }
+
     functions = _merge_functions(*(g["functions_sql"] for g in [desired, old, retire] if g))
     rendered = {"fgac_policies": [policies[name] for name in sorted(policies)], "tags": tags,
                 "functions_sql": functions}
+    coverage_rendered = {
+        "fgac_policies": [coverage_policies[name] for name in sorted(coverage_policies)],
+        "tags": tags,
+        "functions_sql": functions,
+    }
     return {
         "rendered": rendered,
+        "coverage_rendered": coverage_rendered,
         "allowed_policy_deletes": sorted(allowed_policies),
         "allowed_tag_deletes": sorted(allowed_tags),
         "problems": stage_problems(stage, rendered, desired, old),
@@ -472,6 +500,10 @@ def stage_problems(stage: str, rendered: dict, desired: dict, old: dict | None) 
     universe = _universe(rendered, desired, old)
     old_policies = (old or {}).get("fgac_policies") or []
 
+    for policy in policies:
+        if not policy.get("to_principals"):
+            problems.append(f"{policy['name']} would have no TO principals")
+
     # A policy applies only on its catalog, so the same value in two catalogs is two separate checks.
     def on(catalog: str, items: list[dict]) -> list[dict]:
         return [p for p in items if p.get("catalog", catalog) == catalog]
@@ -494,6 +526,10 @@ def stage_problems(stage: str, rendered: dict, desired: dict, old: dict | None) 
 
 def stage_config_dir(env_dir: Path) -> Path:
     return Path(env_dir) / STAGE_CONFIG
+
+
+def coverage_config_dir(env_dir: Path) -> Path:
+    return stage_config_dir(env_dir).with_name("data_access.coverage")
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -654,10 +690,12 @@ def _runner(env_name: str, layer_dir: Path, *args: str, capture: bool = False) -
 
 def _rerun_coverage_gate(env_dir: Path, env_name: str, runner: str, stage: str = "",
                          old_fp: str = "", keep_new_tags: bool = False, *, rebind_fp: str = "",
-                         opens_access: bool = False) -> None:
+                         opens_access: bool = False, validation_config_dir: Path | None = None) -> None:
     """Re-judge the coverage check on the render, so its result matches what is applied."""
     command = [sys.executable, str(COVERAGE_GATE), "run", "--env-dir", str(env_dir),
                "--env-name", env_name, "--runner", runner, "--layer-config-dir", str(stage_config_dir(env_dir))]
+    if validation_config_dir:
+        command += ["--validation-config-dir", str(validation_config_dir)]
     if stage:
         command += ["--stage", stage, "--old-fingerprint", old_fp] + (["--keep-new-tags"] if keep_new_tags else [])
         command += (["--rebind-fingerprint", rebind_fp] if rebind_fp else []) + (
@@ -792,8 +830,11 @@ def run_hook(stage: str, environ: dict | None = None) -> int:
         return 0
     write_stage(layer_dir, staged["rendered"])
     if environ.get("GENIERAILS_COVERAGE_GATE_RUNNER"):
+        validation_config_dir = None
+        if _normal(staged.get("coverage_rendered")) != _normal(staged["rendered"]):
+            validation_config_dir = write_stage(layer_dir, staged["coverage_rendered"], coverage_config_dir(env_dir))
         _rerun_coverage_gate(env_dir, env_name, environ["GENIERAILS_COVERAGE_GATE_RUNNER"], stage, old_fp,
-                             keep_new_tags)
+                             keep_new_tags, validation_config_dir=validation_config_dir)
     plan_out = environ.get(PLAN_OUT_ENV)
     with tempfile.TemporaryDirectory() as tmp:
         plan_file = Path(plan_out) if plan_out else Path(tmp) / f"{stage}.tfplan"
@@ -872,9 +913,6 @@ def grant(env_dir: Path, environ: dict) -> int:
 # -- rebind (make policy-rebind) ----------------------------------------------------
 def _binding(policy: dict) -> dict:
     return {k: v for k, v in policy.items() if k not in REBIND_POLICY_FIELDS}
-
-
-UNKNOWN = "unknown"  # how Unity Catalog shows a deleted principal in a policy
 
 
 def principal_replacements(desired: dict, changed: dict, approved: set[str]) -> tuple[list[str], dict[str, str]]:

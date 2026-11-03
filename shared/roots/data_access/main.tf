@@ -186,7 +186,7 @@ locals {
     [for name, live in local._applied_mask_policies : "${name} removed" if !contains(keys(local._config_mask_policies), name)],
     [for name, live in local._applied_mask_policies : "${name} changes its function" if contains(keys(local._config_mask_policies), name) && try(local._config_mask_policies[name].function, "") != live.function],
     [for name, live in local._applied_mask_policies : "${name} changes its principals" if contains(keys(local._config_mask_policies), name) && var.policy_stage != "tighten" && (try(local._config_mask_policies[name].to, []) != live.to || try(local._config_mask_policies[name].except, []) != live.except)],
-    [for name, live in local._applied_mask_policies : "${name} loses coverage while tightening" if contains(keys(local._config_mask_policies), name) && var.policy_stage == "tighten" && (length(setsubtract(live.to, try(local._config_mask_policies[name].to, []))) > 0 || length(setsubtract(try(local._config_mask_policies[name].except, []), live.except)) > 0)],
+    [for name, live in local._applied_mask_policies : "${name} loses coverage while tightening" if contains(keys(local._config_mask_policies), name) && var.policy_stage == "tighten" && (length(setsubtract(setsubtract(live.to, ["unknown"]), try(local._config_mask_policies[name].to, []))) > 0 || length(setsubtract(try(local._config_mask_policies[name].except, []), live.except)) > 0)],
     [for key, value in local._applied_treatment_tags : "${split("|", key)[1]} moves from ${value} to ${lookup(local._config_treatment_tags, key, "no treatment")}" if lookup(local._config_treatment_tags, key, "") != value],
   ) : []
 }
