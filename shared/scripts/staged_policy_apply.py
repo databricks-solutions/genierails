@@ -745,9 +745,60 @@ class Controller:
             "GENIERAILS_POLICY_RUN_ID": t["run_id"],
         }
 
+    def _verified_adopted_treatment_imports(self, t: dict) -> dict[str, str]:
+        """State-missing treatment tags proved live-equal during principal adoption.
+
+        This is deliberately transition-scoped.  The ordinary importer continues to
+        skip ``gr_treatment``; only an intact, recorded principal-only adoption may
+        ask the staged create hook to import an assignment.
+        """
+        adopted = str(t.get("adopted_from_state") or "")
+        if not adopted or adopted != t.get("from") or _render_fingerprint(t) != adopted \
+                or "create" in (t.get("completed") or []) or t.get("switch_attempted"):
+            return {}
+        journal = load_journal(self.env_dir) or {}
+        marker = journal.get("adopted_unverified") or {}
+        if marker.get("fingerprint") != adopted or marker.get("restore_from") != _restore_fingerprint(t):
+            return {}
+        if not any(entry.get("reason") == "principal-only drift adopted from state"
+                   and entry.get("adopted") == adopted and entry.get("to") == t.get("to")
+                   for entry in journal.get("history") or []):
+            return {}
+        snapshot = self._snapshot(adopted)
+        if not pg.snapshot_intact(snapshot, adopted):
+            raise Refused(f"the adopted principal-only drift snapshot {adopted} doesn't match its fingerprint; "
+                          "no treatment tag was imported")
+        live = live_from_state(_read_state(self.env_dir))
+        state_mismatches = [f"{column}: state treatment {live.get('tags', {}).get(column)}, adopted treatment {value}"
+                            for column, value in sorted((snapshot.get("tags") or {}).items())
+                            if live.get("tags", {}).get(column) not in {None, value}]
+        if state_mismatches:
+            raise Refused("the adopted treatment state changed before import; nothing was imported:\n  - "
+                          + "\n  - ".join(state_mismatches[:20]))
+        missing = {column: value for column, value in (snapshot.get("tags") or {}).items()
+                   if live.get("tags", {}).get(column) is None}
+        if not missing:
+            return {}
+        live_values = self._principal_adoption_live_treatments(live, snapshot)
+        problems = [f"{column}: live treatment {(live_values or {}).get(column.lower()) or 'none'}, "
+                    f"adopted treatment {value}"
+                    for column, value in sorted(missing.items())
+                    if (live_values or {}).get(column.lower()) != value]
+        if problems:
+            raise Refused("the treatment tags eligible for adopted-state import no longer exactly match live; "
+                          "nothing was imported:\n  - " + "\n  - ".join(problems[:20]))
+        return missing
+
+    def _create_hook_env(self, t: dict, env: dict) -> dict:
+        imports = self._verified_adopted_treatment_imports(t)
+        return env | ({pg.ADOPTED_TREATMENT_IMPORTS_ENV: json.dumps(imports, sort_keys=True)} if imports else {})
+
     def _hook(self, t: dict, stage: str) -> int:
         old_fp = _restore_fingerprint(t) if stage in {"restore", "abandon"} else _render_fingerprint(t)
-        return self.run_cmd([str(self.hook_dir / stage)], env=self._hook_env(t, old_fp=old_fp), check=False).returncode
+        env = self._hook_env(t, old_fp=old_fp)
+        if stage == "create":
+            env = self._create_hook_env(t, env)
+        return self.run_cmd([str(self.hook_dir / stage)], env=env, check=False).returncode
 
     def _inventory(self, t: dict, stages: tuple[str, ...]) -> int:
         cmd = self.inventory_cmd + ["--env-dir", str(self.env_dir), "--stage", ",".join(stages)]
@@ -1035,6 +1086,20 @@ class Controller:
             t = self._transition_for(journal, desired)
             self._repair_adopted_create_render(journal, t)
             self.refuse_weaker_spec(t)
+            treatment_imports = self._verified_adopted_treatment_imports(t)
+            if treatment_imports:
+                summary = {
+                    "transition": {key: t[key] for key in ("from", "to", "retain", "retire", "tier_move",
+                                                               "phases", "completed")}
+                                  | {"resumed": bool(journal.get("transition"))},
+                    "steps": [{"phase": "import-adopted-treatment-tags", "kind": "import-treatment-tags",
+                               "imports": treatment_imports}],
+                    "final": False, "planned_at": _now(),
+                }
+                pg.write_json(out_dir / PHASES_FILE, summary)
+                print(f"Staged policy plan ({self.env_name}): import {len(treatment_imports)} verified live "
+                      "gr_treatment assignment(s) into state; another release-plan then plans create")
+                return 0
             remaining = [p for p in t["phases"] if p not in t["completed"]]
             steps: list[dict] = []
             basis = ""
@@ -1052,6 +1117,8 @@ class Controller:
                 old_fp = _restore_fingerprint(t) if phase in {"restore", "abandon"} else _render_fingerprint(t)
                 env = self._hook_env(t, old_fp=old_fp) | {PLAN_OUT_ENV: str(plan_file)} \
                     | ({PLAN_BASIS_ENV: basis} if basis else {})
+                if phase == "create":
+                    env = self._create_hook_env(t, env)
                 print(f"=== Policy phase {phase} ({self.env_name}): saving its plan ===", flush=True)
                 with _owner_only(plan_file):
                     rc = self.run_cmd([str(self.hook_dir / APPLY_PHASES[phase])], env=env, check=False).returncode
@@ -1113,6 +1180,26 @@ class Controller:
             if sorted(t["completed"]) != sorted(planned["completed"]):
                 raise Refused("policy phases were applied since release-plan; run make release-plan again")
             self.refuse_weaker_spec(t)
+            if [s.get("kind") for s in saved["steps"]] == ["import-treatment-tags"]:
+                imports = self._verified_adopted_treatment_imports(t)
+                planned_imports = saved["steps"][0].get("imports") or {}
+                if any(planned_imports.get(column) != value for column, value in imports.items()):
+                    raise Refused("the verified live treatment assignments changed since release-plan; "
+                                  "nothing was imported. Run make release-plan again")
+                if not journal.get("transition"):
+                    journal["transition"] = t
+                    self._save(journal)
+                if imports:
+                    old = self._snapshot(_render_fingerprint(t))
+                    retain = self._snapshot(t["retain"]) if t.get("retain") else None
+                    rendered = pg.render_stage("create", desired, old, retain)
+                    pg.write_stage(self.env_dir / "data_access", rendered)
+                    env = self._create_hook_env(t, self._hook_env(t, old_fp=_render_fingerprint(t)))
+                    pg.import_verified_adopted_treatments(
+                        self.env_name, self.env_dir / "data_access", rendered, env)
+                print("Staged policy apply: verified live treatment tags imported; run release-plan again "
+                      "to plan create against the updated state.")
+                return MORE_PHASES
             if not journal.get("transition"):
                 journal["transition"] = t
                 self._save(journal)
