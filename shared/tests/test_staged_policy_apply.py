@@ -1990,6 +1990,25 @@ def test_principal_only_adoption_refuses_when_state_treatment_is_present_and_dif
     assert harness.calls == []
 
 
+@pytest.mark.parametrize("command", ["apply", "release-plan"])
+def test_inherited_adopted_treatment_imports_never_authorize_a_normal_transition(
+        harness, monkeypatch, tmp_path, command):
+    current = released(harness)
+    write_env(harness.env_dir, versions={"email_partial": {"partial": "redacted"}})
+    column, value = next(iter(current["tags"].items()))
+    monkeypatch.setenv(pg.ADOPTED_TREATMENT_IMPORTS_ENV, json.dumps({column: value}))
+    log = harness.env_dir / "runner.log"
+    before = log.read_text().splitlines()
+
+    if command == "apply":
+        assert harness.apply() == 0
+    else:
+        assert harness.controller().plan(tmp_path / "plan") == 0
+
+    after = log.read_text().splitlines()[len(before):]
+    assert not [line for line in after if line.startswith("import ") and "gr_treatment" in line]
+
+
 def test_no_journal_post_import_adoption_keeps_create_on_live_principals_and_restore_on_generated(harness):
     desired = _aws_takeover_principal_drift(harness, with_existing_journal=False)
     harness.fail_verify = {"switch"}
@@ -2122,12 +2141,16 @@ def test_true_499e19a_journal_resume_tightens_before_switch(harness, with_existi
     journal = harness.journal()
     _true_499e19a_adopted_journal_shape(journal["transition"])
     spa.save_journal(harness.env_dir, journal)
+    # 63ad011's failed create left every live assignment absent from Terraform state.
+    _remove_treatment_tag_state(harness.env_dir)
+    assert not live_tags(live_state(harness.env_dir))
     harness.calls.clear()
 
     assert harness.apply() == 0
 
     assert "tighten" in harness.calls
     assert harness.calls.index("tighten") < harness.calls.index("switch")
+    assert harness.calls[-1] == "grant"
     _assert_live_generated_principals(harness.env_dir, desired)
 
 
@@ -2314,6 +2337,22 @@ def test_preview_plan_and_run_agree_for_post_import_live_treatment_adoption(harn
     assert harness.apply() == 0
     assert "verify-access:create" not in harness.calls
     assert "tighten" in harness.calls
+
+
+def test_import_manifest_refuses_live_treatment_change_without_importing(harness, tmp_path):
+    desired = _aws_takeover_principal_drift(harness, with_existing_journal=True)
+    out = tmp_path / "plan"
+    assert harness.controller().plan(out) == 0
+    column = next(iter(desired["tags"]))
+    harness.live_treatment_tags[column] = "other__string__deadbeef"
+    log = harness.env_dir / "runner.log"
+    before = log.read_text().splitlines()
+
+    with pytest.raises(spa.Refused, match="live has treatment other__string__deadbeef"):
+        harness.controller().apply_saved(out)
+
+    after = log.read_text().splitlines()[len(before):]
+    assert not [line for line in after if line.startswith("import ") and "gr_treatment" in line]
 
 
 def test_lost_journal_named_principal_adoption_restores_generated_principals_after_failed_switch(harness):

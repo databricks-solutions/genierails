@@ -487,6 +487,7 @@ class Controller:
         self.agent_coverage_cmd = agent_coverage_cmd or [sys.executable, str(AGENT_COVERAGE), "check-masks"]
         self.commit = commit
         self.environ = dict(os.environ if environ is None else environ)
+        self.environ.pop(pg.ADOPTED_TREATMENT_IMPORTS_ENV, None)
         self.run_cmd = run
         # The VERIFY_SPEC every verify-access below runs, its key and account config.
         self.verify_spec = verify_spec
@@ -736,7 +737,9 @@ class Controller:
         # The env lock's nonce (env_lock exports it once taken): the hooks' Terraform calls derive
         # the token terraform_layer.sh needs for policy_stage from it (environment_lock.stage_token).
         var = environment_lock.nonce_var(self.env_dir)
-        return self.environ | ({var: os.environ[var]} if os.environ.get(var) else {}) | {
+        inherited = {key: value for key, value in self.environ.items()
+                     if key != pg.ADOPTED_TREATMENT_IMPORTS_ENV}
+        return inherited | ({var: os.environ[var]} if os.environ.get(var) else {}) | {
             "GENIERAILS_ENV_DIR": str(self.env_dir), "GENIERAILS_ENV_NAME": self.env_name,
             "GENIERAILS_POLICY_FINGERPRINT": t["to"],
             "GENIERAILS_OLD_POLICY_FINGERPRINT": t["from"] if old_fp is None else old_fp,
@@ -791,7 +794,7 @@ class Controller:
 
     def _create_hook_env(self, t: dict, env: dict) -> dict:
         imports = self._verified_adopted_treatment_imports(t)
-        return env | ({pg.ADOPTED_TREATMENT_IMPORTS_ENV: json.dumps(imports, sort_keys=True)} if imports else {})
+        return env | {pg.ADOPTED_TREATMENT_IMPORTS_ENV: json.dumps(imports, sort_keys=True)}
 
     def _hook(self, t: dict, stage: str) -> int:
         old_fp = _restore_fingerprint(t) if stage in {"restore", "abandon"} else _render_fingerprint(t)
