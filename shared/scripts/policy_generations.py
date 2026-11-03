@@ -346,7 +346,8 @@ def tightened(live: dict, wanted: dict) -> dict:
     # live state, but UC rejects it in policy writes, so a tighten that starts
     # from deleted-principal drift must add the generated principals without
     # writing the placeholder back.
-    policy = dict(live) | {"to_principals": [p for p in dict.fromkeys(live_to + wanted_to) if p != UNKNOWN]}
+    to_principals = [p for p in dict.fromkeys(live_to + wanted_to) if p != UNKNOWN]
+    policy = dict(live) | {"to_principals": to_principals}
     except_principals = [p for p in live_except if p in keep]
     if except_principals or "except_principals" in live or "except_principals" in wanted:
         policy["except_principals"] = except_principals
@@ -449,7 +450,10 @@ def plan_stage(stage: str, desired: dict, old: dict | None, retire: dict | None,
         for name, policy in policies.items():
             principals = (policy.get("to_principals") or []) + (policy.get("except_principals") or [])
             if UNKNOWN in principals and name in desired_defs:
-                coverage_policies[name] = desired_defs[name]
+                coverage_policies[name] = dict(policy) | {
+                    "to_principals": desired_defs[name].get("to_principals") or [],
+                    "except_principals": desired_defs[name].get("except_principals") or [],
+                }
 
     functions = _merge_functions(*(g["functions_sql"] for g in [desired, old, retire] if g))
     rendered = {"fgac_policies": [policies[name] for name in sorted(policies)], "tags": tags,
@@ -495,6 +499,10 @@ def stage_problems(stage: str, rendered: dict, desired: dict, old: dict | None) 
     policies = rendered["fgac_policies"]
     universe = _universe(rendered, desired, old)
     old_policies = (old or {}).get("fgac_policies") or []
+
+    for policy in policies:
+        if not policy.get("to_principals"):
+            problems.append(f"{policy['name']} would have no TO principals")
 
     # A policy applies only on its catalog, so the same value in two catalogs is two separate checks.
     def on(catalog: str, items: list[dict]) -> list[dict]:

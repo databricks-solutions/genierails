@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -544,3 +545,130 @@ def test_held_access_grants_leave_only_the_listed_grants_out(tmp_path):
     result = tf(root, "test", "-no-color", "-filter=tests/held_grants.tftest.hcl", env=env)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "3 passed, 0 failed" in result.stdout
+
+
+def _module_column_mask_using_expression() -> str:
+    body = _typed_resource_body(MAIN_TF.read_text(), "databricks_policy_info", "policies")
+    match = re.search(r"\n\s+using\s+=\s+([^\n]+)", body)
+    assert match, "column_mask.using must be rendered explicitly"
+    return match.group(1).strip()
+
+
+def _policy_state(using):
+    column_mask = {
+        "function_name": "cat.sch.mask_email",
+        "on_column": "email",
+    }
+    if using != "omitted":
+        column_mask["using"] = using
+    return {
+        "version": 4,
+        "terraform_version": "1.13.0",
+        "serial": 1,
+        "lineage": "column-mask-using-regression",
+        "resources": [{
+            "mode": "managed",
+            "type": "databricks_policy_info",
+            "name": "policies",
+            "provider": 'provider["registry.terraform.io/databricks/databricks"]',
+            "instances": [{
+                "index_key": "mask_email",
+                "schema_version": 0,
+                "attributes": {
+                    "id": "CATALOG,cat,mask_email",
+                    "name": "mask_email",
+                    "policy_type": "POLICY_TYPE_COLUMN_MASK",
+                    "comment": "",
+                    "on_securable_type": "CATALOG",
+                    "on_securable_fullname": "cat",
+                    "for_securable_type": "TABLE",
+                    "to_principals": ["analysts"],
+                    "except_principals": None,
+                    "match_columns": [{"condition": "hasTagValue('gr_treatment', 'mask_email')", "alias": "email"}],
+                    "column_mask": column_mask,
+                    "row_filter": None,
+                    "when_condition": None,
+                },
+            }],
+        }],
+    }
+
+
+def _write_policy_using_root(root: Path, using_expression: str, using):
+    root.mkdir()
+    (root / "main.tf").write_text(f"""
+terraform {{
+  required_providers {{
+    databricks = {{
+      source  = "databricks/databricks"
+      version = "~> 1.111.0"
+    }}
+  }}
+}}
+
+provider "databricks" {{
+  host  = "https://example.invalid"
+  token = "placeholder-token"
+}}
+
+resource "databricks_policy_info" "policies" {{
+  for_each              = {{ mask_email = true }}
+  name                  = each.key
+  policy_type           = "POLICY_TYPE_COLUMN_MASK"
+  comment               = ""
+  on_securable_type     = "CATALOG"
+  on_securable_fullname = "cat"
+  for_securable_type    = "TABLE"
+  to_principals         = ["analysts"]
+  except_principals     = null
+  match_columns         = [{{ condition = "hasTagValue('gr_treatment', 'mask_email')", alias = "email" }}]
+  column_mask = {{
+    function_name = "cat.sch.mask_email"
+    on_column     = "email"
+    using         = {using_expression}
+  }}
+  row_filter     = null
+  when_condition = null
+}}
+""")
+    (root / "terraform.tfstate").write_text(json.dumps(_policy_state(using), indent=2, sort_keys=True))
+
+
+def _plan_json(root: Path, env: dict, plan_name: str) -> tuple[subprocess.CompletedProcess, dict]:
+    plan = tf(root, "plan", "-refresh=false", "-input=false", "-no-color", "-detailed-exitcode",
+              f"-out={plan_name}", env=env)
+    if plan.returncode not in (0, 2):
+        return plan, {}
+    show = tf(root, "show", "-json", plan_name, env=env)
+    assert show.returncode == 0, show.stdout + show.stderr
+    return plan, json.loads(show.stdout)
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_column_mask_using_null_matches_live_null_and_reverts_non_empty_using(tmp_path):
+    """Provider 1.111 has column_mask as a single object: missing/null differs from []."""
+    using_expression = _module_column_mask_using_expression()
+
+    null_root = tmp_path / "null_using"
+    null_env = tf_env(tmp_path / "null_tf")
+    _write_policy_using_root(null_root, using_expression, "omitted")
+    tf_init(null_root, env=null_env)
+    null_plan, null_json = _plan_json(null_root, null_env, "null.tfplan")
+    assert null_plan.returncode == 0, null_plan.stdout + null_plan.stderr + json.dumps(null_json, indent=2)
+    assert all(
+        (change.get("change") or {}).get("actions") == ["no-op"]
+        for change in null_json.get("resource_changes", [])
+    )
+
+    non_empty_root = tmp_path / "non_empty_using"
+    non_empty_env = tf_env(tmp_path / "non_empty_tf")
+    _write_policy_using_root(non_empty_root, using_expression, [{"alias": "region"}])
+    tf_init(non_empty_root, env=non_empty_env)
+    non_empty_plan, non_empty_json = _plan_json(non_empty_root, non_empty_env, "non-empty.tfplan")
+    assert non_empty_plan.returncode == 2, non_empty_plan.stdout + non_empty_plan.stderr
+    changes = non_empty_json.get("resource_changes", [])
+    assert len(changes) == 1
+    change = changes[0]["change"]
+    assert change["actions"] == ["update"]
+    assert [item.get("alias") for item in change["before"]["column_mask"]["using"]] == ["region"]
+    assert change["after"]["column_mask"].get("using") is None

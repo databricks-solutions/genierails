@@ -617,3 +617,27 @@ run "prod_promoted_through_stg_names_no_refused_command" {
     error_message = "the warning must name no command make refuses here: ${local.business_select_withheld_message}"
   }
 }
+
+run "unknown_to_tighten_state" {
+  module {
+    source = "./tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/unknown_to/data_access/masking_functions.sql" = "SELECT 1;\n"
+      "tests/.tmp/unknown_to/data_access/terraform.tfstate"     = jsonencode({ version = 4, outputs = { coverage_gate = { value = { status = "pass", fingerprint = "applied", deployment_binding = run.gate_inputs.coverage_gate_inputs.deployment_binding } } }, resources = [{ module = "module.data_access", mode = "managed", type = "databricks_policy_info", name = "policies", provider = "provider[\"registry.terraform.io/databricks/databricks\"].workspace", instances = [{ index_key = "gr_mask_cat_email_partial__string__0a1b2c3d_partial", schema_version = 0, attributes = { to_principals = ["unknown"], except_principals = ["raw"], column_mask = { function_name = "cat.sch.gr_mask_email_partial__string__0a1b2c3d_partial" } } }] }] })
+    }
+  }
+}
+
+run "tighten_allows_replacing_deleted_unknown_to_principal" {
+  command = plan
+  variables {
+    env_dir      = "tests/.tmp/unknown_to/data_access"
+    policy_stage = "tighten"
+  }
+  assert {
+    condition     = output.staged_policy_guard == null
+    error_message = "tighten must ignore UC's deleted-principal placeholder when checking live TO coverage loss"
+  }
+}

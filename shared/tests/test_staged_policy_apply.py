@@ -101,7 +101,7 @@ def desired():
                 "to_principals": p["to_principals"],
                 "except_principals": p.get("except_principals") or [],
                 "column_mask": {"function_name": f"{p['function_catalog']}.{p['function_schema']}.{p['function_name']}",
-                                "on_column": p.get("match_alias"), "using": []},
+                                "on_column": p.get("match_alias"), "using": None},
                 "match_columns": [{"condition": p["match_condition"], "alias": p.get("match_alias")}],
                 "when_condition": p.get("when_condition"),
             }
@@ -206,7 +206,7 @@ def access_wanted(state, stage, masks):
 
 def normalized_for_diff(kind, value):
     value = json.loads(json.dumps(value or {}))
-    if kind == MASK and isinstance(value.get("column_mask"), dict):
+    if kind == MASK and isinstance(value.get("column_mask"), dict) and value["column_mask"].get("using") is None:
         value["column_mask"].pop("using", None)
     return value
 
@@ -1814,7 +1814,7 @@ def test_principal_only_adoption_refuses_function_or_condition_drift(harness, ed
             "catalog": "cat", "on_securable_type": "CATALOG", "on_securable_fullname": "cat",
             "policy_type": "POLICY_TYPE_COLUMN_MASK", "for_securable_type": "TABLE",
             "to_principals": ["account users"], "except_principals": [],
-            "column_mask": {"function_name": "cat.sch.gr_mask_extra", "on_column": "gr_treatment_x", "using": []},
+            "column_mask": {"function_name": "cat.sch.gr_mask_extra", "on_column": "gr_treatment_x", "using": None},
             "match_columns": [{"condition": "hasTagValue('gr_treatment', 'x')", "alias": "gr_treatment_x"},
                               ]}}]}), "in the state but not in the generated config"),
     (lambda state: _instances(state, "terraform_data", "masking_functions")[""]["triggers_replace"]

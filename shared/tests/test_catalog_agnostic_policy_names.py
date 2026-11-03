@@ -443,7 +443,7 @@ def _seed_state(path: Path, key: str) -> None:
         "when_condition": None,
         "match_columns": [{"condition": "hasTagValue('gr_treatment', 'redact')", "alias": "gr_treatment_redact"}],
         "column_mask": {"function_name": f"{PROD_1}.payments.mask_redact",
-                        "on_column": "gr_treatment_redact", "using": []},
+                        "on_column": "gr_treatment_redact", "using": None},
         "row_filter": None, "created_at": 1, "created_by": "seed",
         "updated_at": 1, "updated_by": "seed", "provider_config": None,
     }

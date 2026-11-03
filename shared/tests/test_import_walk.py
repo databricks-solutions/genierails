@@ -180,7 +180,7 @@ fgac_policies = [
                     "for_securable_type": "TABLE",
                     "to_principals": ["regional"],
                     "except_principals": ["unknown"],
-                    "column_mask": {"function_name": f"cat.sch.{function}", "on_column": "masked_col", "using": []},
+                    "column_mask": {"function_name": f"cat.sch.{function}", "on_column": "masked_col", "using": None},
                     "match_columns": [{"condition": f"hasTagValue('gr_treatment', '{value}')",
                                        "alias": "masked_col"}],
                 },

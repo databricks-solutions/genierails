@@ -505,7 +505,7 @@ resource "databricks_policy_info" "policies" {
   column_mask = each.value.policy_type == "POLICY_TYPE_COLUMN_MASK" ? {
     function_name = "${each.value.function_catalog}.${each.value.function_schema}.${each.value.function_name}"
     on_column     = each.value.match_alias
-    using         = []
+    using         = null
   } : null
 
   row_filter = each.value.policy_type == "POLICY_TYPE_ROW_FILTER" ? {
