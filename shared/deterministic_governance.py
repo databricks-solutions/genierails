@@ -268,7 +268,13 @@ def validate_config(
         elif not isinstance(rule["partial"], str):
             errors.append(f"{label}.partial must be a string")
         elif rule["partial"] == "raw":
-            errors.append(f"{label}.partial may not be raw; use a column or tier access override")
+            errors.append(
+                f'{label}.partial may not be raw; working routes are per-column '
+                'column_overrides["cat.sch.tbl.col"] = { partial = "raw" } for middle tiers, '
+                "putting the group in the first access tier, or raw_exempt_principals. Each is a "
+                "weakening that needs an ack.txt line. If the column is not sensitive, exclude it "
+                "in Data Classification"
+            )
         elif rule["partial"] == "hmac_sha256":
             errors.append(f"{label}.partial: {KEYED_HASH_UNAVAILABLE}")
         elif rule["partial"] not in partial_versions.get(treatment, frozenset()):
