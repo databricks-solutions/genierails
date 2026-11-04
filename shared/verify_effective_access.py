@@ -688,6 +688,10 @@ def most_privileged_tier(memberships: Iterable[str], access_tier_groups: Sequenc
     return "full"
 
 
+class UndeterminablePolicyError(ValueError):
+    """A live policy placeholder prevents a fail-closed access expectation."""
+
+
 def derive_spec_from_config(
     fgac_policies: Sequence[Mapping[str, Any]],
     tag_assignments: Sequence[Mapping[str, Any]],
@@ -709,9 +713,16 @@ def derive_spec_from_config(
     ``key_column`` (or per-table ``key_column_by_table``) names the primary-key
     column used to pair rows across principals.
     """
-    # The all-users pseudo-group is never a provisionable tier; drop it from the
-    # concrete group set (it is handled specially per-policy below).
-    all_groups = [g for g in dict.fromkeys(all_groups) if g != ALL_USERS_GROUP]
+    from scripts.policy_generations import UNKNOWN
+
+    def deleted_placeholder(value: Any) -> bool:
+        return isinstance(value, str) and value.casefold() == UNKNOWN.casefold()
+
+    # Neither pseudo-group is a provisionable tier. The deleted-principal
+    # placeholder can appear only in adopted live state and never identifies a
+    # group that verify-access can resolve.
+    all_groups = [g for g in dict.fromkeys(all_groups)
+                  if g != ALL_USERS_GROUP and not deleted_placeholder(g)]
     key_by_table = {t.lower(): k for t, k in (key_column_by_table or {}).items() if k}
     spec = VerificationSpec()
     seen_masks: set[tuple[str, str]] = set()
@@ -720,13 +731,21 @@ def derive_spec_from_config(
     for pol in fgac_policies:
         ptype = _as_str(pol.get("policy_type"))
         name = _as_str(pol.get("name"))
-        to_principals = tuple(_as_list(pol.get("to_principals")))
-        except_principals = tuple(_as_list(pol.get("except_principals")))
+        raw_to_principals = tuple(_as_list(pol.get("to_principals")))
+        to_principals = tuple(p for p in raw_to_principals if not deleted_placeholder(p))
+        except_principals = tuple(
+            p for p in _as_list(pol.get("except_principals")) if not deleted_placeholder(p))
 
         if ptype == "POLICY_TYPE_COLUMN_MASK":
             cols = resolve_columns_for_condition(
                 _as_str(pol.get("match_condition")), tag_assignments, entity_type="columns"
             )
+            if cols and any(deleted_placeholder(p) for p in raw_to_principals):
+                raise UndeterminablePolicyError(
+                    f"ERROR: policy {name!r} targets a verified column with the deleted-principal "
+                    f"placeholder {UNKNOWN!r} in to_principals; its access expectation is "
+                    "undeterminable. Repair or switch the policy principals before verification."
+                )
             if ALL_USERS_GROUP in to_principals:
                 # Mask applies to everyone except the exceptions. The admin
                 # baseline is also "everyone", so it is NOT a raw baseline here;
@@ -766,6 +785,12 @@ def derive_spec_from_config(
             tables = resolve_columns_for_condition(
                 _as_str(pol.get("when_condition")), tag_assignments, entity_type="tables"
             )
+            if tables and any(deleted_placeholder(p) for p in raw_to_principals):
+                raise UndeterminablePolicyError(
+                    f"ERROR: policy {name!r} targets a verified table with the deleted-principal "
+                    f"placeholder {UNKNOWN!r} in to_principals; its access expectation is "
+                    "undeterminable. Repair or switch the policy principals before verification."
+                )
             if ALL_USERS_GROUP in to_principals:
                 restricted = tuple(g for g in all_groups if g not in except_principals)
                 unrestricted = list(except_principals)
@@ -3400,6 +3425,11 @@ def load_spec_from_tfvars(
     fgac_policies = data.get("fgac_policies", []) or []
     tag_assignments = data.get("tag_assignments", []) or []
 
+    from scripts.policy_generations import UNKNOWN
+
+    def real_group(value: Any) -> bool:
+        return not (isinstance(value, str) and value.casefold() == UNKNOWN.casefold())
+
     groups: list[str] = []
     for src in (account_tfvars_file, tfvars_file):
         if not src:
@@ -3409,11 +3439,11 @@ def load_spec_from_tfvars(
         g = d.get("groups")
         if isinstance(g, list) and g and isinstance(g[0], dict):
             for gd in g:
-                groups.extend(gd.keys())
+                groups.extend(group for group in gd.keys() if real_group(group))
         elif isinstance(g, dict):
-            groups.extend(g.keys())
-    groups.extend(_as_list(env_data.get("access_tier_groups")))
-    groups.extend(_as_list(env_data.get("raw_exempt_principals")))
+            groups.extend(group for group in g.keys() if real_group(group))
+    groups.extend(g for g in _as_list(env_data.get("access_tier_groups")) if real_group(g))
+    groups.extend(g for g in _as_list(env_data.get("raw_exempt_principals")) if real_group(g))
     governance = {**data, **env_data}
     deterministic = _as_str(governance.get("governance_mode")) == "deterministic"
     # Deterministic generation exempts the deployer SP (an application ID, not
@@ -3441,7 +3471,8 @@ def load_spec_from_tfvars(
     # Also treat any principal referenced by a policy as a known group.
     for pol in fgac_policies:
         for key in ("to_principals", "except_principals"):
-            groups.extend(p for p in _as_list(pol.get(key)) if not deployer or p != deployer)
+            groups.extend(p for p in _as_list(pol.get(key))
+                          if real_group(p) and (not deployer or p != deployer))
 
     spec = derive_spec_from_config(
         derive_policies, tag_assignments, groups,
@@ -3790,6 +3821,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if weaker:
                 raise ValueError("ERROR: explicit verification spec is weaker than the policy-derived "
                                  "gate spec; missing or weakened check(s): " + "; ".join(weaker))
+    except UndeterminablePolicyError as exc:
+        print(exc, file=sys.stderr)
+        return 2
     except (OSError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
 

@@ -330,8 +330,13 @@ def function_name(stmt: str) -> str:
 
 def policy_value(policy: dict) -> str:
     """The treatment value a deterministic mask policy matches ("" if none)."""
-    match = _VALUE_IN_CONDITION.search(str(policy.get("match_condition") or ""))
-    return match.group(1) if match else ""
+    values = policy_values(policy)
+    return values[0] if values else ""
+
+
+def policy_values(policy: dict) -> tuple[str, ...]:
+    """Treatment values a deterministic mask policy matches, in condition order."""
+    return tuple(dict.fromkeys(_VALUE_IN_CONDITION.findall(str(policy.get("match_condition") or ""))))
 
 
 def _principals(policy: dict) -> tuple[list[str], list[str]]:

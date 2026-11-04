@@ -430,13 +430,15 @@ def logical_path(path: Path) -> Path:
     """Where a runtime-overlay file stands in for (scripts/runtime_overlay.py).
 
     ``generated/.runtime/<file>`` is read as ``generated/<file>``, and a staged
-    policy phase's render ``generated/.runtime/data_access/<file>``
-    (scripts/policy_generations.py) as ``data_access/<file>``, so the env dir,
-    its env.auto.tfvars, auth and ddl/ resolve as for the file it replaces.
+    policy phase's render ``generated/.runtime/data_access/<file>`` (including
+    derived siblings such as ``data_access.coverage``) as ``data_access/<file>``,
+    so the env dir, its env.auto.tfvars, auth and ddl/ resolve as for the file
+    it replaces.
     """
     if path.parent.name == ".runtime" and path.parent.parent.name == "generated":
         return path.parent.parent / path.name
-    if (path.parent.name == "data_access" and path.parent.parent.name == ".runtime"
+    if ((path.parent.name == "data_access" or path.parent.name.startswith("data_access."))
+            and path.parent.parent.name == ".runtime"
             and path.parent.parent.parent.name == "generated"):
         return path.parents[3] / "data_access" / path.name
     return path
