@@ -120,6 +120,15 @@ def test_treatment_versions_only_allows_partial_known_treatment_and_version():
         assert any("may not be raw" in error for error in result)
 
 
+def test_treatment_version_raw_error_names_only_working_reviewed_routes():
+    assert errors(treatment_versions={"email_partial": {"partial": "raw"}}) == [
+        'treatment_versions["email_partial"].partial may not be raw; working routes are per-column '
+        'column_overrides["cat.sch.tbl.col"] = { partial = "raw" } for middle tiers, putting the '
+        "group in the first access tier, or raw_exempt_principals. Each is a weakening that needs "
+        "an ack.txt line. If the column is not sensitive, exclude it in Data Classification"
+    ]
+
+
 def test_tier_override_validates_treatment_group_access_and_existing_tier():
     assert errors(tier_access_overrides={"email_partial": {"partial": "raw"}}) == []
     assert errors(tier_access_overrides={"missing": {"partial": "raw"}})

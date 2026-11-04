@@ -226,7 +226,7 @@ Credentials only. Never commit it.
 | `table_readers` | map(list(string)) | `null` | Deterministic envs: `"cat.sch.tbl"` or `"cat.sch.*"` to the tier groups or `raw_exempt_principals` granted `SELECT`; the only source of `SELECT`. See [access](shared/docs/access.md). |
 | `raw_exempt_principals` | list(string), group names (no `@`) | `[]` | Groups that see raw values except for never-raw treatments. |
 | `treatment_versions` | map(object({ partial = string })) | `{}` | The reviewed partial mask version per treatment. |
-| `tier_access_overrides` | map(map(string)), values `raw`, `partial` or `full` | `{}` | Per-treatment access for an intermediate tier group. |
+| `tier_access_overrides` | map(map(string)), values `raw`, `partial` or `full` | `{}` | Deferred and refused in deterministic generation. To expose raw, use a per-column `column_overrides["cat.sch.tbl.col"] = { partial = "raw" }` for middle tiers, put the group in the first access tier, or use `raw_exempt_principals`; each is a weakening that needs an `ack.txt` line. If a column is not sensitive, exclude it in Data Classification. |
 | `column_overrides` | any | `{}` | Per-column `{ partial = "<version>" }`, `{ treatment = "<stricter>" }` or `{ keep_current = true }`. |
 | `row_filters` | list(object({ table, column, values_by_group = map(list(string)) })) | `[]` | Declared row filters; rules on one table are ANDed. |
 | `require_acl_groups` | bool | `false` | Legacy envs: refuse an agent without `acl_groups`. |
