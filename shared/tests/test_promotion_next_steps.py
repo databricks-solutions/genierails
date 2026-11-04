@@ -84,12 +84,16 @@ DOC_REUSE = [
     ("shared/examples/dev_to_prod/README.md", "make promote-to ENV=prod # copies the reviewed rules",
      ["offers to commit + push (y)", "make release ENV=prod # each round: plans, shows the manifest, asks y/N"]),
     ("shared/examples/dev_to_prod/README.md", "| `make promote-to ENV=prod` | Copies dev's reviewed rules",
+     ["The same commit question", "| `make release ENV=prod` |", "Plans, applies and proves one manifest per round"]),
+    ("shared/examples/dev_to_prod/DETAILS.md", "| `make promote-to ENV=prod` | Copies dev's reviewed rules",
      ["The same commit question", "| `make release ENV=prod` |", "Per round: `make release-plan`",
       "reuses dev's rehearsal", "applies exactly it"]),
     ("shared/examples/dev_to_prod/README.md", "**3. Plan, release.**",
+     ["make release ENV=prod", "Each round shows a manifest", "It reuses dev's rehearsal; it never rehearses dev."]),
+    ("shared/examples/dev_to_prod/DETAILS.md", "## Prod step 3: Plan, release",
      ["make release ENV=prod", "Each round it plans (`make release-plan ENV=prod`)",
       "the next `make release ENV=prod` offers it first"]),
-    ("shared/examples/dev_to_prod/README.md", "**Reuse an existing mask** (the common case)",
+    ("shared/examples/dev_to_prod/DETAILS.md", "**Reuse an existing mask** (the common case)",
      ["`make generate ENV=dev`", "offers to commit the fix", "`make rehearse ENV=dev`",
       "`make promote-to ENV=prod`", "offers to commit the promotion", "`make release ENV=prod`",
       "runs its release-plan loop"]),
@@ -141,7 +145,7 @@ DOC_REUSE = [
     ("shared/examples/dev_to_prod/REFERENCE.md", "| `make release-plan ENV=prod` | 4 |",
      ["writes the receipt `make rehearse ENV=dev` would", "applying nothing", "`make rehearse ENV=dev` receipt",
       "dev is prod's `promote_from` here", "`make rehearse ENV=stg`"]),
-    ("shared/examples/dev_to_prod/README.md", "`make release-plan ENV=prod` plans only a commit on your `origin/main`",
+    ("shared/examples/dev_to_prod/DETAILS.md", "`make release-plan ENV=prod` plans only a commit on your `origin/main`",
      ["option-A local-only repo", "make rehearse ENV=dev", "dev is prod's `promote_from` in this walkthrough",
       "make rehearse ENV=stg", "release-plan reuses that rehearsal itself"]),
 ]
@@ -446,6 +450,10 @@ def test_prod_setup_says_set_group_map_not_replace_access_tier_groups():
     step = readme[readme.index("**1. Set up and promote.**"):readme.index("**2. Classify")]
     assert "group_map" in step and "Leave the `access_tier_groups` placeholders" in step, step
     assert "`access_tier_groups` placeholders, and set" not in step
+    details = (ROOT / "shared/examples/dev_to_prod/DETAILS.md").read_text()
+    details = details[details.index("## Prod step 1: Set up and promote"):details.index("## Prod step 3")]
+    assert "Leave the `access_tier_groups` placeholders" in details
+    assert "promotion refuses before writing and prints the missing `group_map` entry to add" in details
     makefile = (SHARED / "Makefile.shared").read_text()
     banner = makefile[makefile.index("Next steps ($(ENV) promotion"):makefile.index("  2. In $(_SETUP_ENV_REL)/env.auto.tfvars")]
     assert "set group_map there" in banner and "leave those placeholders" in banner, banner
@@ -478,13 +486,15 @@ def test_prod_setup_advice_does_not_ask_to_replace_tier_placeholders(tmp_path):
 # ── A coverage gap's recovery sequence: one builder, the README's list ──────
 
 README = SHARED / "examples" / "dev_to_prod" / "README.md"
+DETAILS = README.parent / "DETAILS.md"
 DETERMINISTIC_PROD = 'governance_mode = "deterministic"\npromote_from = "dev"\n'
 MAKE_STEP = r"make [a-z-]+ ENV=[a-z]+"
 
 
 def _readme_recovery() -> list[str]:
-    """The make commands the README lists after a reused mask's fix, in order."""
-    line = next(line for line in README.read_text().splitlines() if line.startswith("- **Reuse an existing mask**"))
+    """The make commands the walkthrough lists after a reused mask's fix, in order (README links to DETAILS.md)."""
+    assert "](DETAILS.md#if-prod-stops-on-coverage-or-drift)" in README.read_text()
+    line = next(line for line in DETAILS.read_text().splitlines() if line.startswith("- **Reuse an existing mask**"))
     tail = line[line.index("Review it in dev, then"):]
     assert "offers to commit the fix" in tail and "runs its release-plan loop" in tail
     return re.findall(rf"`({MAKE_STEP})`", tail)

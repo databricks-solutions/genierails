@@ -15,6 +15,8 @@ from pathlib import Path
 SHARED = Path(__file__).parents[1]
 README = SHARED / "examples/dev_to_prod/README.md"
 REFERENCE = SHARED / "examples/dev_to_prod/REFERENCE.md"
+# The walkthrough's details and edge cases, one section per README step.
+DETAILS = SHARED / "examples/dev_to_prod/DETAILS.md"
 EVIDENCE_DOC = SHARED / "docs/evidence-report.md"
 MAKEFILE = SHARED / "Makefile.shared"
 
@@ -43,13 +45,16 @@ def test_prod_step_4_records_evidence_after_the_release_and_its_stop_advice():
         < prod.index("**4. Record evidence.**")
     assert f"```bash\n{EVIDENCE}\n```" in step
     assert "writes a JSON record and Markdown summary to `.genierails-state/prod/evidence/` (git-ignored" in step
-    assert "`OFFLINE=1` writes a config-only report" in step
-    assert "The checkout stays clean, so `make maintain` and the next `release-plan` run as usual." in step
+    assert "](DETAILS.md#prod-step-4-record-evidence)" in step
+    details = _section(DETAILS.read_text(), "## Prod step 4: Record evidence", "## Keep it safe")
+    assert "writes a JSON record and Markdown summary to `.genierails-state/prod/evidence/` (git-ignored" in details
+    assert "`OFFLINE=1` writes a config-only report" in details
+    assert "The checkout stays clean, so `make maintain` and the next `release-plan` run as usual." in details
 
 
 def test_no_doc_asks_to_delete_the_evidence_folder_or_set_the_old_variable():
     reference = REFERENCE.read_text()
-    for path in (README, REFERENCE, EVIDENCE_DOC, SHARED.parent / "REFERENCE.md"):
+    for path in (README, DETAILS, REFERENCE, EVIDENCE_DOC, SHARED.parent / "REFERENCE.md"):
         text = path.read_text()
         assert "generated/evidence/` before" not in text and "delete that folder" not in text, path
         assert "remove the folder before" not in text and "then delete" not in text, path
@@ -68,7 +73,7 @@ def test_no_doc_asks_to_delete_the_evidence_folder_or_set_the_old_variable():
     custom = "custom `GENIERAILS_STATE_DIR` must be outside every git checkout or git-ignored in each one"
     assert custom in doc and custom in reference
     assert "`GENIERAILS_STATE_DIR`, which must be outside every git checkout or git-ignored in each one" in (SHARED.parent / "REFERENCE.md").read_text()
-    assert "`$GENIERAILS_STATE_DIR` when that is set, which must be outside every git checkout or git-ignored in each one" in README.read_text()
+    assert "`$GENIERAILS_STATE_DIR` when that is set, which must be outside every git checkout or git-ignored in each one" in DETAILS.read_text()
     assert "`GENIERAILS_EVIDENCE_INTEGRATION=1`, which older versions needed for live collection, is still accepted" in doc
     # ...because make evidence writes there, live unless OFFLINE=1.
     makefile = MAKEFILE.read_text()
@@ -79,7 +84,7 @@ def test_no_doc_asks_to_delete_the_evidence_folder_or_set_the_old_variable():
 
 
 def test_no_doc_requires_an_explicit_warehouse_for_evidence():
-    for path in (README, REFERENCE, EVIDENCE_DOC):
+    for path in (README, DETAILS, REFERENCE, EVIDENCE_DOC):
         text = path.read_text()
         assert not re.search(r"make evidence[^\n`]*WAREHOUSE_ID=", text), path
         assert "+ `WAREHOUSE_ID`" not in text, path
@@ -94,9 +99,11 @@ def test_make_evidence_resolves_the_warehouse_it_documents():
 
 
 def test_readme_no_longer_says_adopt_custom_mask_is_not_on_main():
-    readme = README.read_text()
-    assert "is not on `main` yet" not in readme
-    assert "make adopt-custom-mask ENV=dev TREATMENT=custom_<name>" in readme
+    readme, details = README.read_text(), DETAILS.read_text()
+    assert "is not on `main` yet" not in readme and "is not on `main` yet" not in details
+    # The README's coverage stop links to both fixes, adopt-custom-mask among them.
+    assert "](DETAILS.md#if-prod-stops-on-coverage-or-drift)" in readme
+    assert "make adopt-custom-mask ENV=dev TREATMENT=custom_<name>" in details
     # ...because the target is on main.
     assert re.search(r"^adopt-custom-mask:", MAKEFILE.read_text(), re.MULTILINE)
 
@@ -104,13 +111,16 @@ def test_readme_no_longer_says_adopt_custom_mask_is_not_on_main():
 def test_maintain_runs_on_the_deployment_machine_at_the_last_released_commit_not_ci():
     readme = README.read_text()
     flow = _section(readme, "## The whole flow", "## Before you start")
-    safe = _section(readme, "## Keep it safe", "## Commit it")
+    safe = _section(readme, "## Keep it safe", "## CI / scripted")
     line = "make maintain ENV=prod      # deployment machine, cron, at the last released commit"
     assert line in flow.splitlines() and line in safe.splitlines()
     assert "Run it from the [deployment machine](../../docs/deployment-machine.md)." in safe
     assert "In a deterministic env it runs only from the last released commit, on a clean checkout." in safe
     # No walkthrough line puts maintain in CI.
-    for path in (README, REFERENCE):
+    details = _section(DETAILS.read_text(), "## Keep it safe", "## CI / scripted")
+    assert "Run `make maintain ENV=prod` from the [deployment machine](../../docs/deployment-machine.md)." in details
+    assert "In a deterministic env it runs only from the last released commit, on a clean checkout." in details
+    for path in (README, DETAILS, REFERENCE):
         for text in path.read_text().splitlines():
             if "maintain" in text:
                 assert not re.search(r"\b(in|from|on) CI\b|CI (job|pipeline|schedule)|schedule[^.]*\bCI\b", text), (path, text)
@@ -128,8 +138,19 @@ def _generate_step(readme: str) -> str:
     return dev[dev.index("**4. Generate.**"):dev.index("**5. Rehearse.**")]
 
 
+def _generate_details() -> str:
+    return _section(DETAILS.read_text(), "## Dev step 4: Generate", "## Dev step 5: Rehearse")
+
+
 def test_dev_step_4_says_a_deterministic_generate_replaces_masks_and_points_at_the_settings():
-    step = _generate_step(README.read_text())
+    # The README step says the default mode replaces hand edits and links to what a re-run keeps.
+    readme_step = _generate_step(README.read_text())
+    assert "In the template's default mode a re-run replaces hand edits to the masks in `envs/dev/generated/`." \
+        in readme_step
+    assert "To change a mask, edit `envs/dev/env.auto.tfvars` and re-run `make generate ENV=dev`." in readme_step
+    assert "](DETAILS.md#dev-step-4-generate)" in readme_step
+    assert "including your edits" not in readme_step and "edit the rules if you need to" not in readme_step
+    step = _generate_details()
     assert "What a re-run keeps depends on the env's `governance_mode`:" in step
     det = next(line for line in step.splitlines() if line.startswith("- **Deterministic**"))
     for replaced in ("the column masks", "the `gr_treatment` column tags", "the `gr_treatment` tag policy",
