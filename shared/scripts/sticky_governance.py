@@ -108,7 +108,7 @@ def _rebuild_hint(env_dir: Path) -> str:
     return f"rebuild it with: make rebuild-governed-tables ENV={Path(env_dir).resolve().name}"
 
 
-def _parse_manifest(text: str, path: Path) -> list[str]:
+def _parse_record(text: str, path: Path) -> tuple[list[str], dict[str, list[str]] | None]:
     try:
         raw = json.loads(text)
     except ValueError as exc:
@@ -119,7 +119,25 @@ def _parse_manifest(text: str, path: Path) -> list[str]:
             f'invalid {path}: expected {{"tables": ["catalog.schema.table", ...]}}; '
             + _rebuild_hint(path.parent.parent)
         )
-    return tables
+    agents = raw.get("agent_tables") if isinstance(raw, dict) else None
+    if agents is not None and (
+        not isinstance(agents, dict)
+        or any(
+            not isinstance(name, str) or not name
+            or not isinstance(agent_tables, list)
+            or any(not isinstance(table, str) or not _is_table(table) for table in agent_tables)
+            for name, agent_tables in agents.items()
+        )
+    ):
+        raise GovernedTablesError(
+            f'invalid {path}: agent_tables must map agent names or IDs to '
+            '["catalog.schema.table", ...]; ' + _rebuild_hint(path.parent.parent)
+        )
+    return tables, agents
+
+
+def _parse_manifest(text: str, path: Path) -> list[str]:
+    return _parse_record(text, path)[0]
 
 
 def _committed_manifest(env_dir: Path) -> list[str] | None:
@@ -184,11 +202,69 @@ def _unique(tables: Iterable[str], drop: str = "") -> list[str]:
 
 
 def load_governed_tables(env_dir: Path, tag_key: str | None = None) -> list[str]:
-    """Recorded names plus deployed tables, minus a table being ungoverned."""
+    """Recorded footprint plus deployed tables, minus a table being ungoverned.
+
+    In a deterministic env, ``agent_tables`` is the committed source of truth
+    for an agent whose ID and table list intentionally do not survive
+    promotion.  Validate it against the env's agents before admitting it to
+    every downstream footprint consumer.
+    """
     if not deterministic(env_dir):
         return []
     tag_key = tag_key or _tag_key()
-    return _unique(_read_manifest(env_dir, tag_key) + _deployed_tables(env_dir, tag_key),
+    tables = _read_manifest(env_dir, tag_key)
+    path = Path(env_dir) / MANIFEST
+    if path.is_file():
+        try:
+            _recorded, recorded_agents = _parse_record(path.read_text(), path)
+        except OSError as exc:
+            raise GovernedTablesError(f"cannot read {path}: {exc}") from exc
+        from agent_files import AgentFileError, load_all
+        try:
+            file_agents = load_all(Path(env_dir))
+        except AgentFileError as exc:
+            raise GovernedTablesError(str(exc)) from exc
+        configured = {agent["name"]: _unique(agent["uc_tables"]) for agent in file_agents}
+        # A dev agent with a live ID can be discovered on this generate run;
+        # save_governed_tables records it afterwards.  A promoted file agent
+        # deliberately has no ID, so its committed entry is required before
+        # any footprint consumer may proceed.
+        required = {
+            agent["name"]: configured[agent["name"]]
+            for agent in file_agents if not agent["genie_space_id"]
+        }
+        cfg = _load_hcl(Path(env_dir) / "env.auto.tfvars")
+        for space in cfg.get("genie_spaces") or []:
+            if not isinstance(space, dict) or space.get("uc_tables"):
+                continue
+            space_id = str(space.get("genie_space_id") or "").strip()
+            if space_id:
+                configured.setdefault(space_id, [])
+        if required and recorded_agents is None:
+            raise GovernedTablesError(
+                f"invalid {path}: agent_tables is missing for configured agents; {_rebuild_hint(env_dir)}"
+            )
+        if recorded_agents is not None:
+            missing = sorted(set(required) - set(recorded_agents))
+            extra = sorted(set(recorded_agents) - set(configured))
+            mismatch = sorted(
+                name for name, agent_tables in configured.items()
+                if agent_tables and _unique(recorded_agents.get(name, [])) != agent_tables
+            )
+            if missing or extra or mismatch:
+                details = []
+                if missing:
+                    details.append("missing " + ", ".join(missing))
+                if extra:
+                    details.append("unknown " + ", ".join(extra))
+                if mismatch:
+                    details.append("tables differ for " + ", ".join(mismatch))
+                raise GovernedTablesError(
+                    f"invalid {path}: agent_tables does not match the configured agents "
+                    f"({'; '.join(details)}); {_rebuild_hint(env_dir)}"
+                )
+            tables += [table for agent in recorded_agents.values() for table in agent]
+    return _unique(tables + _deployed_tables(env_dir, tag_key),
                    os.environ.get(UNGOVERN_ENV, ""))
 
 

@@ -108,6 +108,49 @@ def _manifest(env):
     return json.loads((env / "generated/governed_tables.json").read_text())
 
 
+def _file_agent_env(tmp_path, record, *, mode="deterministic", tables=""):
+    env = _env(tmp_path, tables=(), mode=mode)
+    (env / "agents").mkdir()
+    (env / "agents/A.auto.tfvars").write_text(
+        'genie_space_id = ""\nacl_groups = ["g"]\n' +
+        (f'uc_tables = ["{tables}"]\n' if tables else "")
+    )
+    (env / "generated/governed_tables.json").write_text(json.dumps(record))
+    return env
+
+
+def test_agent_tables_are_part_of_every_deterministic_governed_footprint(tmp_path):
+    env = _file_agent_env(tmp_path, {"tables": [], "agent_tables": {"A": [ORDERS]}})
+
+    assert load_governed_tables(env) == [ORDERS]
+
+
+@pytest.mark.parametrize("record", [
+    {"tables": []},
+    {"tables": [], "agent_tables": []},
+    {"tables": [], "agent_tables": {"A": ["not-a-table"]}},
+    {"tables": [], "agent_tables": {"Other": [ORDERS]}},
+])
+def test_agent_table_footprint_refuses_missing_malformed_or_unrelated_records(tmp_path, record):
+    env = _file_agent_env(tmp_path, record)
+
+    with pytest.raises(GovernedTablesError, match="agent_tables"):
+        load_governed_tables(env)
+
+
+def test_agent_table_footprint_refuses_a_record_that_differs_from_agent_payload(tmp_path):
+    env = _file_agent_env(tmp_path, {"tables": [], "agent_tables": {"A": [CUSTOMERS]}}, tables=ORDERS)
+
+    with pytest.raises(GovernedTablesError, match="tables differ for A"):
+        load_governed_tables(env)
+
+
+def test_legacy_agent_tables_remain_outside_the_governed_footprint(tmp_path):
+    env = _file_agent_env(tmp_path, {"tables": [], "agent_tables": {"A": [ORDERS]}}, mode="legacy")
+
+    assert load_governed_tables(env) == []
+
+
 # -- Dropped tables stay governed, with treatments from current tags ----------
 
 def test_dropping_a_table_from_every_agent_keeps_its_tags(tmp_path, monkeypatch):
