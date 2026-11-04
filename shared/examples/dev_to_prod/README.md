@@ -54,7 +54,7 @@ make maintain ENV=prod      # deployment machine, cron, at the last released com
 <a id="what-each-command-asks"></a>
 ### What each command does and what it asks
 
-Commands run from `aws/` (or `azure/`). Questions appear only at a terminal; [off a terminal or in CI](#ci--scripted) nothing asks and nothing answers `y` for you. Every detail: [the full table](DETAILS.md#what-each-command-does-in-full).
+Questions appear only at a terminal ([CI / scripted](#ci--scripted)). Every detail: [the full table](DETAILS.md#what-each-command-does-in-full).
 
 | Command | What it does | What it asks | What your `y` approves |
 |---|---|---|---|
@@ -78,17 +78,17 @@ git clone https://github.com/databricks-solutions/genierails.git
 cd genierails/aws          # or: cd azure — every make command runs from the cloud folder
 ```
 
-- Have an empty repo you own ready: dev step 1's `make setup ENV=dev REPO=<your-repo-url>` points `origin` at it and renames GenieRails' remote to `genierails`.
+- Have an empty repo you own ready for dev step 1's `make setup ENV=dev REPO=<your-repo-url>`.
 - No repo of your own yet? Leave `REPO=` off. The commit offers then commit locally.
 - More: [your repo and remotes](DETAILS.md#your-repo-and-remotes).
 
 | You need | Notes |
 |---|---|
 | The [prerequisites](../../docs/prerequisites.md) | Tools, a deploying service principal (`make bootstrap-sp`), IdP-synced groups |
-| Your Genie **Agent ID** | Genie UI → open the agent → **Configure** → *About this agent*. *No agent yet?* Use the [sample environment](SAMPLE_ENV.md) |
-| Who may run the agent | The groups that get Genie `CAN_RUN` on it (its `acl_groups`), chosen from your access-tier groups. Required: `[]` means nobody |
-| Deploying SP application ID | The `databricks_client_id` from each env's `auth.auto.tfvars`; it is committed as `deployer_principal_id` (not secret) |
-| Access-tier groups | Your existing groups, most- to least-privileged, e.g. `payments_ops`, `regional_analysts`, `viewers`. Order matters: a tier listed above a masked tier also gets the agent and sees those columns unmasked |
+| Your Genie **Agent ID** | Genie UI → agent → **Configure** → *About this agent*. *No agent yet?* Use the [sample environment](SAMPLE_ENV.md) |
+| Who may run the agent | Its `acl_groups`: the groups that get Genie `CAN_RUN`, chosen from your access-tier groups |
+| Deploying SP application ID | Each env's `databricks_client_id` (`auth.auto.tfvars`), committed as `deployer_principal_id` (not secret) |
+| Access-tier groups | Your existing groups, most- to least-privileged. Order matters: a tier listed above a masked tier also gets the agent and sees those columns unmasked |
 | Dev and prod catalog names | e.g. `dev_finance` and `prod_finance` |
 
 <a id="phase-0--dev-set-up"></a>
@@ -108,7 +108,7 @@ make setup ENV=dev REPO=<your-repo-url>
   deployer_principal_id = "<the dev auth.auto.tfvars databricks_client_id>"
   access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
   ```
-- **Agents (preferred):** rename setup's `Finance Analytics.auto.tfvars` to your agent's name. In it, set the agent's ID and who may run it. Pick `acl_groups` from `access_tier_groups`:
+- **Agents (preferred):** rename setup's `Finance Analytics.auto.tfvars` to your agent's name. Set its ID and `acl_groups` (from `access_tier_groups`):
   ```hcl
   genie_space_id = "01ef0000000000000000000000000000"   # Genie UI > agent > Configure > About this agent
   acl_groups     = ["regional_analysts", "viewers"]      # who gets CAN_RUN on the agent; [] means nobody
@@ -158,7 +158,7 @@ make rehearse ENV=dev
 ```
 - It first runs `make check ENV=dev`. If a check fails, it stops before it takes the lock, writes anything or reads live dev.
 - A first deploy shows the shared account plan and asks `Approve and apply this account manifest? [y/N]`. That is the account-wide setup all envs share, e.g. the masks' tag policy. Answer `y`.
-- It applies dev. A first deploy goes in phases, masks before access. Then it runs `verify-access` as its last gate (`_verify-access-gate`). If it stops, fix what it reports and re-run it.
+- It applies dev, in phases on a first deploy: masks before access. Then it runs `verify-access` as its last gate (`_verify-access-gate`).
 
 **Pass looks like:** `ALL EFFECTIVE`: each test tier sees masked values, the authorized tier sees raw ones. To re-run only that proof later: `make verify-access ENV=dev`.
 
@@ -204,7 +204,7 @@ One command, at a terminal on the deployment machine:
 ```bash
 make release ENV=prod
 ```
-- Each round shows a manifest and asks `Approve and release manifest <id> ...? [y/N]`. `y` applies exactly that manifest and proves the masks. Anything else applies nothing and stops.
+- Each round shows a manifest and asks `Approve and release manifest <id> ...? [y/N]`: `y` applies exactly it. Anything else applies nothing and stops.
 - A first release takes several rounds, masks before access. Answer `y` each round until it prints `=== Release complete (prod) ===`.
 - It reuses dev's rehearsal; it never rehearses dev. If it says `no passing rehearsal of <commit>`, run `make rehearse ENV=dev` first.
 
@@ -215,11 +215,11 @@ prod:reader:prod_finance.payments.transactions:finance_admins
 ```
 Commit and push it yourself, then run `make release ENV=prod` again.
 
-**Pass looks like:** `ALL EFFECTIVE` (from its `verify-access` gate) and "Release complete". Business users now get answers from the agent, masked for their tier. To re-run only that proof later: `make verify-access ENV=prod`.
+**Pass looks like:** `ALL EFFECTIVE` (from its `verify-access` gate) and "Release complete". To re-run only that proof later: `make verify-access ENV=prod`.
 
 More: [each round, the account layer, rehearsal reuse, reader acks](DETAILS.md#prod-step-3-plan-release).
 
-**If it stops on coverage or drift**, prod found a sensitive tag your rules don't cover. Nothing new was granted. The message prints the fix with exact commands. More: [both fixes](DETAILS.md#if-prod-stops-on-coverage-or-drift).
+**If it stops on coverage or drift**, prod found a sensitive tag your rules don't cover. Nothing new was granted; the message prints the fix. More: [both fixes](DETAILS.md#if-prod-stops-on-coverage-or-drift).
 
 **4. Record evidence.** Write a compliance record of what is live.
 
@@ -256,4 +256,4 @@ Off a terminal (a pipeline, CI, piped output) nothing asks, and no flag or varia
 <a id="commit-it"></a>
 ## Commit it
 
-Answer `y` to each commit offer. Commit by hand only what no command offers: `envs/prod/ack.txt`, edits on a branch for a PR, and anything you answered `n` to. Later changes go through a PR into `main`, with `make check` as its check. More: [Commit it](DETAILS.md#commit-it), [Pipelines](../../docs/pipelines.md), and the [agents](../../docs/playbooks/agents.md), [governance](../../docs/playbooks/governance.md) and [one-team](../../docs/playbooks/one-team.md) playbooks.
+Commit by hand only what no command offers: `envs/prod/ack.txt`, edits on a branch for a PR, and anything you answered `n` to. Later changes go through a PR into `main`, with `make check` as its check. More: [Commit it](DETAILS.md#commit-it), [Pipelines](../../docs/pipelines.md), and the [agents](../../docs/playbooks/agents.md), [governance](../../docs/playbooks/governance.md) and [one-team](../../docs/playbooks/one-team.md) playbooks.

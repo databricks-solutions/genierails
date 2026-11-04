@@ -134,8 +134,8 @@ So there is deliberately no switch that makes a class raw for everyone. These ar
 | Way | Who sees raw | Scope | Where the decision is recorded |
 |---|---|---|---|
 | Mark the column not sensitive in Data Classification: exclude the detection, or turn off auto-tagging for that class | Everyone who can read the table | One column (exclusion), or one class in one catalog (auto-tagging) | In Catalog Explorer, not in git. On a table's first grant, a column whose name looks sensitive also needs a `coverage_acknowledged_columns` entry in `env.auto.tfvars` |
-| Put the group in the first access tier (`access_tier_groups[0]`) | That group | Every classified column it can read | `env.auto.tfvars`, plus an `ack.txt` line |
-| `raw_exempt_principals` | The named groups or service principals (the everyone group is refused) | Every masked column | Each env's own `env.auto.tfvars`, plus an `ack.txt` line |
+| Put the group in the first access tier (`access_tier_groups[0]`) | That group | Every classified column it can read, except never-raw ones (CVV, card PIN, card track data, secrets) | `env.auto.tfvars`, plus an `ack.txt` line |
+| `raw_exempt_principals` | The named groups or service principals (the everyone group is refused) | Every masked column, except never-raw ones (CVV, card PIN, card track data, secrets) | Each env's own `env.auto.tfvars`, plus an `ack.txt` line |
 | `column_overrides = { "cat.sch.tbl.col" = { partial = "raw" } }` | The middle tiers | One column | Dev's `env.auto.tfvars` (promoted), plus an `ack.txt` line |
 
 The last three weaken protection that is in place, so `make release-plan` refuses them until a reviewed `ack.txt` line accepts each one. Never-raw classes, such as a card's security code (CVV), stay masked for everyone in every case.

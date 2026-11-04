@@ -11,6 +11,7 @@ both files.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -259,6 +260,16 @@ def test_details_explains_why_no_class_is_raw_for_everyone():
         assert fact in section, fact
     rows = [line for line in section.splitlines() if line.startswith("| ") and not line.startswith("| Way")]
     assert len(rows) == 4, rows
+    # Tier 1 and raw_exempt_principals see raw on every classified/masked column EXCEPT never-raw ones: the
+    # cells themselves say so, naming every class the mask library never shows raw.
+    never_raw = "except never-raw ones (CVV, card PIN, card track data, secrets)"
+    cells = {row.split(" | ")[0]: [c.strip() for c in row.strip().strip("|").split(" | ")] for row in rows}
+    tier1 = next(c for k, c in cells.items() if "`access_tier_groups[0]`" in k)
+    exempt = next(c for k, c in cells.items() if k == "| `raw_exempt_principals`")
+    assert tier1[2] == f"Every classified column it can read, {never_raw}", tier1
+    assert exempt[2] == f"Every masked column, {never_raw}", exempt
+    library = json.loads((ROOT / "shared" / "mask_library.json").read_text())
+    assert library["never_raw_classes"] == ["card_security_code", "card_pin", "card_track_data", "secret"]
     # Only options that exist: tier_access_overrides is refused at generate, and no raw treatment exists.
     assert "tier_access_overrides" not in section and "treatment_versions" not in section
     # ...and the facts it cites hold in the code.
