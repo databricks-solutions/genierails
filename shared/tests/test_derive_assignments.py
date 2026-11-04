@@ -216,6 +216,30 @@ def test_deterministic_refresh_types_functions_and_never_raw_wins(tmp_path, monk
     assert config.read_text() == before
 
 
+def test_deterministic_refresh_ignores_existing_never_raw_raw_override_and_warns(
+    tmp_path, monkeypatch, capsys,
+):
+    config, auth, env = _deterministic(tmp_path, monkeypatch, [
+        ("prod", "sales", "customers", "cvv", "class.card_security_code", ""),
+    ])
+    env.write_text(env.read_text() + 'column_overrides = { "prod.sales.customers.cvv" = { partial = "raw" } }\n')
+
+    assert MODULE.derive_assignments(config, auth, env) == 1
+
+    parsed = hcl2.loads(config.read_text())
+    [value] = [
+        a["tag_value"] for a in parsed["tag_assignments"]
+        if a["tag_key"] == "gr_treatment" and a["entity_name"] == "prod.sales.customers.cvv"
+    ]
+    assert value.startswith("card_security_code__string__")
+    assert capsys.readouterr().err == (
+        'WARNING: column_overrides["prod.sales.customers.cvv"].partial = "raw" has no effect: '
+        "column prod.sales.customers.cvv is never shown raw to anyone and no override exists; "
+        "remove that column_overrides entry from the source env.auto.tfvars, run make generate there, "
+        "then make promote-to\n"
+    )
+
+
 def test_refresh_fails_closed_when_promoted_mask_does_not_cover_treatment(tmp_path, monkeypatch):
     config, auth, env = _files(tmp_path)
     original = config.read_text()

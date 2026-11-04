@@ -11,11 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Collection, Literal, Mapping, Sequence
 
+from never_raw import NEVER_RAW_OVERRIDE_UNAVAILABLE, NEVER_RAW_TREATMENTS
 
 ACCESS_LEVELS = {"raw", "partial", "full"}
-NEVER_RAW_TREATMENTS = frozenset({
-    "card_security_code", "card_pin", "card_track_data", "secret",
-})
 
 # Public treatment vocabulary. mask_library.json uses these names directly, so
 # every library treatment is configurable through treatment_versions.

@@ -272,8 +272,9 @@ def test_coverage_gate_warns_but_does_not_fail_for_existing_never_raw_raw_column
     assert result.warnings == [
         'COVERAGE ADVISORY (non-blocking) — never-raw raw column override ignored:\n'
         '    - column_overrides["cat.sch.t.cvv"].partial = "raw" has no effect: column '
-        "cat.sch.t.cvv is never shown raw to anyone and no override exists; remove the "
-        "override via make generate"
+        "cat.sch.t.cvv is never shown raw to anyone and no override exists; remove that "
+        "column_overrides entry from the source env.auto.tfvars, run make generate there, "
+        "then make promote-to"
     ]
 
 

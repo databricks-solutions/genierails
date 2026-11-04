@@ -324,9 +324,12 @@ def test_resolve_column_keeps_never_raw_when_raw_column_override_is_present():
 
 def test_generation_refuses_column_override_raw_on_never_raw_column_with_clear_error():
     with pytest.raises(DeterministicGovernanceError) as raised:
-        _model(
+        build_model(
             {"cat.sch.t.cvv": ["card_security_code"]},
-            column_overrides={"cat.sch.t.cvv": {"partial": "raw"}},
+            {"cat.sch.t.cvv": "STRING"},
+            {"access_tier_groups": TIERS, "column_overrides": {"cat.sch.t.cvv": {"partial": "raw"}}},
+            deployer_principal="deployer-sp",
+            refuse_ignored_raw_overrides=True,
         )
     assert str(raised.value) == (
         'column_overrides["cat.sch.t.cvv"].partial may not be raw; column cat.sch.t.cvv '

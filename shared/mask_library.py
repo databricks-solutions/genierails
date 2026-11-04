@@ -10,12 +10,11 @@ from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_UP, localcont
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from never_raw import NEVER_RAW_TREATMENTS
+
 LIBRARY_PATH = Path(__file__).with_name("mask_library.json")
 REDACTED = "[REDACTED]"
 NUMERIC_TYPES = frozenset({"BYTE", "TINYINT", "SHORT", "SMALLINT", "INT", "INTEGER", "LONG", "BIGINT", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC"})
-NEVER_RAW_TREATMENTS = frozenset({
-    "card_security_code", "card_pin", "card_track_data", "secret",
-})
 
 
 def load_library(path: Path = LIBRARY_PATH) -> dict:

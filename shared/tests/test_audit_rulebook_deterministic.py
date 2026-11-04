@@ -128,7 +128,8 @@ def test_rulebook_audit_warns_but_does_not_drift_for_existing_never_raw_raw_colu
     assert (
         'WARNING: column_overrides["dev_fin.payments.payments.cvv"].partial = "raw" has no effect: '
         "column dev_fin.payments.payments.cvv is never shown raw to anyone and no override exists; "
-        "remove the override via make generate"
+        "remove that column_overrides entry from the source env.auto.tfvars, run make generate there, "
+        "then make promote-to"
     ) in out
 
 
