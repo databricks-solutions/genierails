@@ -688,6 +688,10 @@ def most_privileged_tier(memberships: Iterable[str], access_tier_groups: Sequenc
     return "full"
 
 
+class UndeterminablePolicyError(ValueError):
+    """A live policy placeholder prevents a fail-closed access expectation."""
+
+
 def derive_spec_from_config(
     fgac_policies: Sequence[Mapping[str, Any]],
     tag_assignments: Sequence[Mapping[str, Any]],
@@ -737,7 +741,7 @@ def derive_spec_from_config(
                 _as_str(pol.get("match_condition")), tag_assignments, entity_type="columns"
             )
             if cols and any(deleted_placeholder(p) for p in raw_to_principals):
-                raise ValueError(
+                raise UndeterminablePolicyError(
                     f"ERROR: policy {name!r} targets a verified column with the deleted-principal "
                     f"placeholder {UNKNOWN!r} in to_principals; its access expectation is "
                     "undeterminable. Repair or switch the policy principals before verification."
@@ -781,6 +785,12 @@ def derive_spec_from_config(
             tables = resolve_columns_for_condition(
                 _as_str(pol.get("when_condition")), tag_assignments, entity_type="tables"
             )
+            if tables and any(deleted_placeholder(p) for p in raw_to_principals):
+                raise UndeterminablePolicyError(
+                    f"ERROR: policy {name!r} targets a verified table with the deleted-principal "
+                    f"placeholder {UNKNOWN!r} in to_principals; its access expectation is "
+                    "undeterminable. Repair or switch the policy principals before verification."
+                )
             if ALL_USERS_GROUP in to_principals:
                 restricted = tuple(g for g in all_groups if g not in except_principals)
                 unrestricted = list(except_principals)
@@ -3811,6 +3821,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if weaker:
                 raise ValueError("ERROR: explicit verification spec is weaker than the policy-derived "
                                  "gate spec; missing or weakened check(s): " + "; ".join(weaker))
+    except UndeterminablePolicyError as exc:
+        print(exc, file=sys.stderr)
+        return 2
     except (OSError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
 

@@ -3,6 +3,7 @@
 Tests exercise the individual validate_* functions with synthetic config dicts
 so no file I/O, Databricks, or LLM access is needed.
 """
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -85,6 +86,35 @@ def test_validator_accepts_real_deterministic_generator_output(tmp_path):
         text=True, capture_output=True, check=False,
     )
     assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_coverage_runtime_render_uses_env_context_and_still_refuses_real_gap(tmp_path):
+    from generate_abac import _replace_bracket_section
+
+    tfvars, sql, _ = _real_deterministic_output(tmp_path)
+    env_dir = tfvars.parents[1]
+    coverage = env_dir / "generated" / ".runtime" / "data_access.coverage"
+    coverage.mkdir(parents=True)
+    coverage_tfvars = coverage / tfvars.name
+    coverage_sql = coverage / sql.name
+    shutil.copyfile(tfvars, coverage_tfvars)
+    shutil.copyfile(sql, coverage_sql)
+    command = [sys.executable, str(Path(__file__).parent.parent / "validate_abac.py"),
+               "--coverage-gate", str(coverage_tfvars), str(coverage_sql)]
+
+    valid = subprocess.run(command, text=True, capture_output=True, check=False)
+
+    assert valid.returncode == 0, valid.stdout + valid.stderr
+    assert "not defined in groups" not in valid.stdout
+    assert "outside the registry" not in valid.stdout
+    assert "matches multiple column-mask policies" not in valid.stdout
+
+    coverage_tfvars.write_text(_replace_bracket_section(
+        coverage_tfvars.read_text(), "fgac_policies", []))
+    gap = subprocess.run(command, text=True, capture_output=True, check=False)
+
+    assert gap.returncode == 1
+    assert "no covering column-mask policy" in gap.stdout
 
 
 def test_generated_governance_mode_cannot_override_environment(tmp_path):

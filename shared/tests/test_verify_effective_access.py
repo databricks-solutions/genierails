@@ -998,6 +998,33 @@ class TestDeriveSpec:
         with pytest.raises(ValueError, match="mask_email.*verified column.*deleted-principal placeholder"):
             derive_spec_from_config(fgac, tags, ["raw", "viewer"])
 
+    @pytest.mark.parametrize("placeholder", ["unknown", "UNKNOWN"])
+    def test_verified_table_refuses_unknown_row_filter_to_principal(self, placeholder):
+        fgac = [{
+            "name": "filter_orders", "policy_type": "POLICY_TYPE_ROW_FILTER",
+            "to_principals": [placeholder],
+            "when_condition": "hasTagValue('scope', 'regional_orders')",
+        }]
+        tags = [{"entity_type": "tables", "entity_name": "fin.sales.orders",
+                 "tag_key": "scope", "tag_value": "regional_orders"}]
+
+        with pytest.raises(ValueError, match="filter_orders.*verified table.*deleted-principal placeholder"):
+            derive_spec_from_config(fgac, tags, ["raw", "viewer"])
+
+    def test_unknown_policy_refusal_cli_exits_two(self, tmp_path, capsys):
+        tfvars = tmp_path / "abac.auto.tfvars"
+        tfvars.write_text('''fgac_policies = [{
+          name = "mask_email", policy_type = "POLICY_TYPE_COLUMN_MASK",
+          to_principals = ["unknown"],
+          match_condition = "hasTagValue('pii_level', 'masked_email')"
+        }]
+        tag_assignments = [{ entity_type = "columns", entity_name = "fin.crm.people.email",
+          tag_key = "pii_level", tag_value = "masked_email" }]
+        ''')
+
+        assert main(["--from-tfvars", str(tfvars), "--print-spec"]) == 2
+        assert "access expectation is undeterminable" in capsys.readouterr().err
+
     def test_key_column_by_table_overrides_default(self):
         spec = derive_spec_from_config(
             self.FGAC, self.TAGS, self.GROUPS,
