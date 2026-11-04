@@ -494,8 +494,8 @@ def deterministic_class_coverage(
     keyed by lowercase column.
     """
     from governance_policies import (
-        TAG_KEY, build_policies, normalize_column_overrides, resolve_column,
-        value_sql_type, with_tag_treatments,
+        TAG_KEY, build_policies, never_raw_raw_override_warning, normalize_column_overrides,
+        resolve_column, value_sql_type, with_tag_treatments,
     )
     from scripts.custom_masks import effective_library
 
@@ -519,6 +519,7 @@ def deterministic_class_coverage(
 
     unmapped: set[tuple[str, str]] = set()
     columns: dict[str, str] = {}
+    warnings: list[str] = []
     for column in sorted(classes_by_column):
         key = column.lower()
         names = sorted({c.removeprefix("class.") for c in classes_by_column[column] if c})
@@ -531,11 +532,14 @@ def deterministic_class_coverage(
         if not sql_type:
             columns[key] = f"promoted {TAG_KEY}={value} is not a deterministic treatment value"
             continue
-        derived = resolve_column(
+        item = resolve_column(
             column, names, sql_type, library=library,
             treatment_versions=settings.get("treatment_versions") or {},
             column_overrides=overrides,
-        ).value
+        )
+        if item.never_raw and (overrides.get(key) or {}).get("partial") == "raw":
+            warnings.append(never_raw_raw_override_warning(column))
+        derived = item.value
         if derived != value:
             columns[key] = (f"the column's class.* tags derive {TAG_KEY}={derived}, "
                             f"but the promoted config assigns {value}")
@@ -549,7 +553,7 @@ def deterministic_class_coverage(
                    if (catalog, value, p["function_name"]) not in masks]
         columns[key] = (f"no promoted column mask in catalog {catalog} applies "
                         f"{', '.join(missing)} to {TAG_KEY}={value}") if missing else ""
-    return {"unmapped": unmapped, "columns": columns}
+    return {"unmapped": unmapped, "columns": columns, "warnings": warnings}
 
 
 def _deterministic_class_gap(tag: dict, coverage: dict) -> tuple[str, str] | None:
@@ -747,6 +751,8 @@ def main(argv: list[str] | None = None) -> int:
                 env_dir, _query_live_classes(w, warehouse_id, managed_tables),
                 fgac_policies, extract_promoted_tag_assignments(env_dir),
             )
+            for warning in rulebook["deterministic_classes"].get("warnings", []):
+                print(f"  WARNING: {warning}")
         uncovered = detect_rulebook_drift(w, warehouse_id, managed_tables, rulebook)
         if uncovered:
             drift_found = True

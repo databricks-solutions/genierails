@@ -250,6 +250,34 @@ def test_coverage_advisory_uses_the_effective_partial_tier(settings):
     assert result.passed and not result.warnings
 
 
+def test_coverage_gate_warns_but_does_not_fail_for_existing_never_raw_raw_column_override():
+    config = {
+        "access_tier_groups": ["raw", "regional", "masked"],
+        "column_overrides": {"cat.sch.t.cvv": {"partial": "raw"}},
+    }
+    # Existing generated configs can contain this override from before the
+    # generator refused it.  The generated never-raw value remains fully
+    # redacted; validate/check should warn, not crash or change the exit.
+    model = build_model(
+        {"cat.sch.t.cvv": ["card_security_code"]},
+        {"cat.sch.t.cvv": "STRING"},
+        {"access_tier_groups": ["raw", "regional", "masked"]},
+    )
+    result = ValidationResult()
+    functions = {line.split("(", 1)[0].rsplit(" ", 1)[1]
+                 for line in model.functions_sql.splitlines() if line.startswith("CREATE")}
+    validate_coverage_gate(apply_model({}, model) | config, functions, "", result)
+    assert result.passed
+    assert result.errors == []
+    assert result.warnings == [
+        'COVERAGE ADVISORY (non-blocking) — never-raw raw column override ignored:\n'
+        '    - column_overrides["cat.sch.t.cvv"].partial = "raw" has no effect: column '
+        "cat.sch.t.cvv is never shown raw to anyone and no override exists; remove that "
+        "column_overrides entry from the source env.auto.tfvars, run make generate there, "
+        "then make promote-to"
+    ]
+
+
 @pytest.mark.parametrize(("settings", "env_extra", "warned"), [
     ({}, "", True),
     (

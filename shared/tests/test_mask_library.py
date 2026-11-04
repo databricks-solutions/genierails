@@ -8,9 +8,19 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from mask_library import SQL_BODIES, apply_version, load_library, resolve_class, resolve_column_access, sql_body, type_family
+import deterministic_governance
+import governance_policies
+import mask_library
+import never_raw
+from deterministic_governance import (
+    NEVER_RAW_TREATMENTS,
+    PARTIAL_VERSIONS,
+    AccessResolution,
+    resolve_column_access,
+    validate_config,
+)
+from mask_library import SQL_BODIES, apply_version, load_library, resolve_class, sql_body, type_family
 from scripts.live_mask_library import BODY_CASES, RENDER_ZONE, TYPED_CASES, comparable
-from deterministic_governance import NEVER_RAW_TREATMENTS, PARTIAL_VERSIONS, AccessResolution, validate_config
 
 
 
@@ -72,6 +82,12 @@ def test_every_never_raw_class_lands_on_a_never_raw_treatment():
     # Only the never-raw classes may land there.
     for name in NEVER_RAW_TREATMENTS:
         assert set(library["treatments"][name]["classes"]) <= set(library["never_raw_classes"])
+
+
+def test_never_raw_treatments_have_one_dependency_free_source_of_truth():
+    assert deterministic_governance.NEVER_RAW_TREATMENTS is never_raw.NEVER_RAW_TREATMENTS
+    assert governance_policies.NEVER_RAW_TREATMENTS is never_raw.NEVER_RAW_TREATMENTS
+    assert mask_library.NEVER_RAW_TREATMENTS is never_raw.NEVER_RAW_TREATMENTS
 
 
 PRINCIPALS = {

@@ -181,6 +181,28 @@ def test_generate_calls_no_model_and_needs_no_endpoint(env_dir, monkeypatch, cap
     assert "kept reviewed rule" not in out
 
 
+def test_generate_refuses_never_raw_raw_column_override_before_writing(env_dir, monkeypatch, capfd):
+    generated = _reviewed_draft(env_dir)
+    (generated / "masking_functions.sql").write_text(REVIEWED_SQL)
+    before = {path.name: path.read_bytes() for path in sorted(generated.iterdir()) if path.is_file()}
+    env_file = env_dir / "env.auto.tfvars"
+    env_file.write_text(
+        env_file.read_text()
+        + 'column_overrides = { "dev_fin.payments.payments.cvv" = { partial = "raw" } }\n'
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        _generate(env_dir, monkeypatch)
+
+    assert raised.value.code == 1
+    assert (
+        'ERROR: column_overrides["dev_fin.payments.payments.cvv"].partial may not be raw; '
+        "column dev_fin.payments.payments.cvv is never shown raw to anyone and no override exists"
+    ) in capfd.readouterr().out
+    after = {path.name: path.read_bytes() for path in sorted(generated.iterdir()) if path.is_file()}
+    assert after == before
+
+
 def test_generate_warns_for_single_class_free_text_without_changing_generated_values(
     env_dir, monkeypatch, capfd,
 ):

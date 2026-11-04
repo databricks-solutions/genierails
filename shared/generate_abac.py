@@ -2805,6 +2805,7 @@ def write_deterministic_draft(
 def deterministic_model_for(
     env_cfg: dict, classification_source, ddl_text: str, *,
     columns: list[str] | None = None, env_dir: Path | None = None,
+    refuse_ignored_raw_overrides: bool = False,
 ):
     """The deterministic model for the classified columns of the governed set.
 
@@ -2826,6 +2827,7 @@ def deterministic_model_for(
         env_cfg,
         deployer_principal=str(env_cfg[SETTING]),
         library=effective_library(env_dir),
+        refuse_ignored_raw_overrides=refuse_ignored_raw_overrides,
     )
 
 
@@ -8016,7 +8018,13 @@ def main():
                   "were read; set enable_classification = true and wait for the tags")
             sys.exit(1)
         try:
-            deterministic_model = deterministic_model_for(auth_cfg, classification_source, ddl_text, env_dir=WORK_DIR)
+            deterministic_model = deterministic_model_for(
+                auth_cfg,
+                classification_source,
+                ddl_text,
+                env_dir=WORK_DIR,
+                refuse_ignored_raw_overrides=True,
+            )
         except DeterministicGovernanceError as exc:
             print(f"ERROR: {exc}")
             sys.exit(1)

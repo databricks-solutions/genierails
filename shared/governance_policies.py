@@ -32,8 +32,8 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from deterministic_governance import NEVER_RAW_TREATMENTS
 from mask_library import load_library, partial_treatments, resolve_class, sql_body, type_family, typed_body
+from never_raw import NEVER_RAW_TREATMENTS, raw_override_error, raw_override_warning
 
 TAG_KEY = "gr_treatment"
 FAILSAFE_TREATMENT = "unmapped_redact"
@@ -337,6 +337,10 @@ def treatment_value_column(
     return None
 
 
+def never_raw_raw_override_warning(column: str) -> str:
+    return raw_override_warning(column)
+
+
 def resolve_column(
     column: str, classes: Sequence[str], sql_type: str, *,
     library: dict | None = None,
@@ -609,6 +613,8 @@ class DeterministicModel:
     mixed_partial: list[tuple[str, list[str]]] = field(default_factory=list)
     # The mixed columns whose column_overrides entry asked for something else.
     overridden_mixed: list[str] = field(default_factory=list)
+    # Existing configs may carry a raw override that never-raw columns ignore.
+    ignored_never_raw_raw_overrides: list[str] = field(default_factory=list)
 
 
 def normalize_column_overrides(
@@ -639,6 +645,7 @@ def build_model(
     types_by_column: Mapping[str, str],
     settings: Mapping,
     *, deployer_principal: str = "", library: dict | None = None,
+    refuse_ignored_raw_overrides: bool = False,
 ) -> DeterministicModel:
     """The whole governance model for the classified columns of the governed set.
 
@@ -676,6 +683,7 @@ def build_model(
     unmapped: list[tuple[str, str]] = []
     mixed_partial: list[tuple[str, list[str]]] = []
     overridden_mixed: list[str] = []
+    ignored_never_raw_raw_overrides: list[str] = []
     missing_types = []
     for column in sorted(classes_by_column):
         classes = sorted({c.removeprefix("class.") for c in classes_by_column[column] if c})
@@ -689,10 +697,14 @@ def build_model(
             treatment_versions=settings.get("treatment_versions") or {},
             column_overrides=overrides,
         )
+        rule = overrides.get(column.lower()) or {}
+        if columns[column].never_raw and rule.get("partial") == "raw":
+            if refuse_ignored_raw_overrides:
+                raise DeterministicGovernanceError(raw_override_error(column))
+            ignored_never_raw_raw_overrides.append(column)
         mixed = partial_treatments(classes, sql_type, library)
         if len(mixed) > 1:
             mixed_partial.append((column, sorted(mixed)))
-            rule = overrides.get(column.lower()) or {}
             item = columns[column]
             if rule.get("treatment", item.treatment) != item.treatment or rule.get("partial", item.partial) != item.partial:
                 overridden_mixed.append(column)
@@ -722,6 +734,7 @@ def build_model(
         functions_sql=render_functions(columns),
         mixed_partial=mixed_partial,
         overridden_mixed=overridden_mixed,
+        ignored_never_raw_raw_overrides=ignored_never_raw_raw_overrides,
     )
 
 

@@ -110,11 +110,11 @@ unused until the rollout step shown, so adding them cannot change current behavi
 | `ACK_WEAKEN` | Environment variable formatted as comma-separated `cat.sch.tbl.col:principal` entries. Validation is format-only until refuse-weakening lands. | 7 |
 
 Resolution first fixes access: tier 1 is raw, the last tier and out-of-tier
-principals are full, and the most privileged group membership wins. A group
-access override can change only an intermediate tier. Only when the resulting
-access is partial does version precedence apply: `column_overrides`, then
-`treatment_versions`, then the shipped library default. A column override never
-changes what the full tier sees. Checking that a `treatment` column override is
+principals are full, and the most privileged group membership wins.
+Deterministic generation refuses `tier_access_overrides`; only when the
+resulting access is partial does version precedence apply: `column_overrides`,
+then `treatment_versions`, then the shipped library default. A column override
+never changes what the full tier sees. Checking that a `treatment` column override is
 strictly stronger needs class-derived protection data and lands in step 3;
 `keep_current` is interpreted by migration in step 6.
 

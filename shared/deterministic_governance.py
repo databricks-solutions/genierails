@@ -11,11 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Collection, Literal, Mapping, Sequence
 
+from never_raw import NEVER_RAW_OVERRIDE_UNAVAILABLE, NEVER_RAW_TREATMENTS
 
 ACCESS_LEVELS = {"raw", "partial", "full"}
-NEVER_RAW_TREATMENTS = frozenset({
-    "card_security_code", "card_pin", "card_track_data", "secret",
-})
 
 # Public treatment vocabulary. mask_library.json uses these names directly, so
 # every library treatment is configurable through treatment_versions.
@@ -152,6 +150,14 @@ def resolve_precedence(
     return AccessResolution("partial", version)
 
 
+def resolve_column_access(classes: list[str], sql_type: str, *, library: dict | None = None, **precedence) -> AccessResolution:
+    """Resolve a column's class tags, then access, carrying the never-raw flag."""
+    from mask_library import resolve_class
+
+    treatment, partial, _full, never_raw = resolve_class(classes, sql_type, library)
+    return resolve_precedence(treatment=treatment, library_default=partial, never_raw=never_raw, **precedence)
+
+
 _FQN4 = re.compile(r"^[^.\s]+\.[^.\s]+\.[^.\s]+\.[^.\s]+$")
 
 
@@ -268,13 +274,16 @@ def validate_config(
         elif not isinstance(rule["partial"], str):
             errors.append(f"{label}.partial must be a string")
         elif rule["partial"] == "raw":
-            errors.append(
-                f'{label}.partial may not be raw; working routes are per-column '
-                'column_overrides["cat.sch.tbl.col"] = { partial = "raw" } for middle tiers, '
-                "putting the group in the first access tier, or raw_exempt_principals. Each is a "
-                "weakening that needs an ack.txt line. If the column is not sensitive, exclude it "
-                "in Data Classification"
-            )
+            if treatment in NEVER_RAW_TREATMENTS:
+                errors.append(f"{label}.partial may not be raw; {treatment} {NEVER_RAW_OVERRIDE_UNAVAILABLE}")
+            else:
+                errors.append(
+                    f'{label}.partial may not be raw; working routes are per-column '
+                    'column_overrides["cat.sch.tbl.col"] = { partial = "raw" } for middle tiers, '
+                    "putting the group in the first access tier, or raw_exempt_principals. Each is a "
+                    "weakening that needs an ack.txt line. If the column is not sensitive, exclude it "
+                    "in Data Classification"
+                )
         elif rule["partial"] == "hmac_sha256":
             errors.append(f"{label}.partial: {KEYED_HASH_UNAVAILABLE}")
         elif rule["partial"] not in partial_versions.get(treatment, frozenset()):

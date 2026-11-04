@@ -10,7 +10,7 @@ from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_UP, localcont
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from deterministic_governance import NEVER_RAW_TREATMENTS, AccessResolution, resolve_precedence
+from never_raw import NEVER_RAW_TREATMENTS
 
 LIBRARY_PATH = Path(__file__).with_name("mask_library.json")
 REDACTED = "[REDACTED]"
@@ -191,12 +191,6 @@ def partial_treatments(classes: list[str], sql_type: str, library: dict | None =
         return set()
     return {name for rank, name, _partial, _full in _candidates(classes, sql_type, library or load_library())
             if rank == _PARTIAL}
-
-
-def resolve_column_access(classes: list[str], sql_type: str, *, library: dict | None = None, **precedence) -> AccessResolution:
-    """Resolve a column's class tags, then access, carrying the never-raw flag."""
-    treatment, partial, _full, never_raw = resolve_class(classes, sql_type, library)
-    return resolve_precedence(treatment=treatment, library_default=partial, never_raw=never_raw, **precedence)
 
 
 # Every body is non-throwing under ANSI mode, so a mask can never fail a query:

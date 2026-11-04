@@ -31,7 +31,9 @@ from generate_abac import (  # noqa: E402
     scope_ddl_to_footprint,
     write_deterministic_model,
 )
-from governance_policies import TAG_KEY, DeterministicGovernanceError, mixed_override_warning  # noqa: E402
+from governance_policies import (  # noqa: E402
+    TAG_KEY, DeterministicGovernanceError, mixed_override_warning, never_raw_raw_override_warning,
+)
 from treatment_derivation import (  # noqa: E402
     collapse_sensitivity_assignments,
     derive_treatment_model,
@@ -294,6 +296,8 @@ def _derive_deterministic(config_path: Path, env_path: Path, runtime: dict, nati
               file=sys.stderr)
     for column in model.overridden_mixed:
         print(f"WARNING: {mixed_override_warning(column)}", file=sys.stderr)
+    for column in model.ignored_never_raw_raw_overrides:
+        print(f"WARNING: {never_raw_raw_override_warning(column)}", file=sys.stderr)
     if record_governed:
         record(env_path.parent, model.tag_assignments, TAG_KEY)
     write_deterministic_model(config_path, config_path.with_name("masking_functions.sql"), model)

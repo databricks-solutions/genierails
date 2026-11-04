@@ -129,6 +129,13 @@ def test_treatment_version_raw_error_names_only_working_reviewed_routes():
     ]
 
 
+def test_treatment_version_raw_error_for_never_raw_treatments_names_no_override_route():
+    assert errors(treatment_versions={"secret": {"partial": "raw"}}) == [
+        'treatment_versions["secret"].partial may not be raw; secret is never shown raw to anyone '
+        "and no override exists"
+    ]
+
+
 def test_tier_override_validates_treatment_group_access_and_existing_tier():
     assert errors(tier_access_overrides={"email_partial": {"partial": "raw"}}) == []
     assert errors(tier_access_overrides={"missing": {"partial": "raw"}})
