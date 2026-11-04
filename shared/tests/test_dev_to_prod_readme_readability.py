@@ -11,6 +11,7 @@ both files.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -80,8 +81,10 @@ def test_every_details_link_resolves_and_every_details_section_is_linked():
 
 def test_readme_is_the_short_happy_path():
     text = README.read_text()
-    # About a 5-minute read: the rewrite took it from ~4,500 words to under 2,000.
-    assert len(text.split()) < 2000, len(text.split())
+    # About a 5-minute read: the rewrite took it from ~4,500 words to under 2,000. The plain-language pass
+    # (How it works, the glossary, a Why: line per step, what each y approves, an ack.txt example) added
+    # ~500 words for first-time readers and cut ~100 elsewhere; the cap moved to 2,400, no further.
+    assert len(text.split()) < 2400, len(text.split())
     # The same steps, in the same order, each with a one-line goal after its title.
     dev = text[text.index("\n## Dev\n"):text.index("\n## Prod\n")]
     prod = text[text.index("\n## Prod\n"):text.index("\n## Keep it safe\n")]
@@ -179,3 +182,98 @@ def test_the_relocated_facts_are_in_details_by_step():
         text = section(title)
         for fact in facts:
             assert fact in text, (title, fact)
+
+
+def test_readme_explains_the_why_in_plain_words():
+    """A first-time reader learns why they commit, what a manifest is and why access waits for masks."""
+    text = README.read_text()
+    assert set(["how-it-works", "glossary"]) <= _anchors(text)
+    # How it works comes right after the intro, before the command block; the glossary follows it.
+    order = ["\n## How it works in 1 minute\n", "\n## Words used on this page\n", "\n## The whole flow\n",
+             "\n## Before you start\n"]
+    assert [text.index(h) for h in order] == sorted(text.index(h) for h in order)
+    how = text[text.index("## How it works in 1 minute"):text.index("## Words used on this page")]
+    bullets = [line for line in how.splitlines() if line.startswith("- **")]
+    assert 4 <= len(bullets) <= 6, bullets
+    for fact in ("Rules are files in your repo", "ship the same files", "**Why commit.**",
+                 "Prod releases only a commit that passed in dev", "pull request", "**Why a manifest.**",
+                 "A manifest is a saved plan of exactly what a step will change",
+                 "refuses if anything changed since you saw it", "**Masks first, access last.**",
+                 "exclude it in the classification review", "](DETAILS.md#if-prod-stops-on-coverage-or-drift)"):
+        assert fact in how, fact
+    # No promise of an "allow this class unmasked" switch: classified columns get a mask or a corrected detection.
+    assert "unmasked for everyone" not in text and "allow it" not in how
+    # The glossary: one plain line per term, tier defined before the access-tier order in Before you start.
+    glossary = text[text.index("## Words used on this page"):text.index("## The whole flow")]
+    rows = [line for line in glossary.splitlines() if line.startswith("| **")]
+    terms = [re.match(r"\| \*\*([^*]+)\*\*", row).group(1) for row in rows]
+    assert terms == ["env", "tier", "classification tag", "treatment / mask", "rehearse", "manifest", "receipt",
+                     "ack"], terms
+    for row in rows:
+        assert len(row.split()) <= 40, row
+    assert "](REFERENCE.md#glossary)" in glossary and "\n## Glossary\n" in (WALKTHROUGH / "REFERENCE.md").read_text()
+    assert text.index("| **tier** (access-tier group) |") < text.index("| Access-tier groups |")
+    # One Why: line in every step, and in Keep it safe.
+    dev = text[text.index("\n## Dev\n"):text.index("\n## Prod\n")]
+    prod = text[text.index("\n## Prod\n"):text.index("\n## Keep it safe\n")]
+    safe = text[text.index("\n## Keep it safe\n"):text.index("\n## CI / scripted\n")]
+    for section in (dev, prod):
+        parts = re.split(r"\n(?=\*\*\d+\. )", section)[1:]
+        assert parts and all(part.count("\n*Why:* ") == 1 for part in parts), parts
+    assert safe.count("\n*Why:* ") == 1
+    for why in ("your changes go to your own repo, where teammates can review them",
+                "drafts the rules from what classification found",
+                "proves in dev that the masks really hide the data before anyone gets access",
+                "copies the exact tested rules to prod", "one safe step at a time; each step shows you its plan",
+                "a record for auditors", "catches columns tagged later"):
+        assert f"{why}" in dev + prod + safe, why
+    # Each y/N question says, in plain words, what the y approves.
+    table = text[text.index("### What each command does and what it asks"):text.index("## Before you start")]
+    assert "| Command | What it does | What it asks | What your `y` approves |" in table
+    for line in (l for l in table.splitlines() if l.startswith("| `make ")):
+        cells = [c.strip() for c in line.strip("|").split(" | ")]
+        assert len(cells) == 4 and cells[3], line
+        if "[y/N]" in cells[2]:
+            assert cells[3] != "—", line
+    assert "e.g. the masks' tag policy" in table and "exactly that round's prod changes" in table
+    # A concrete ack.txt line, and why it exists.
+    assert "```text\n# reviewed: owner group of prod_finance\n" \
+        "prod:reader:prod_finance.payments.transactions:finance_admins\n```" in prod
+    assert "GenieRails doesn't manage that access, so you accept it in writing" in prod
+
+
+def test_details_explains_why_no_class_is_raw_for_everyone():
+    """Owner decision 2026-11-05: no 'raw for everyone' switch; the reason and today's raw paths are documented."""
+    readme, details = README.read_text(), DETAILS.read_text()
+    how = readme[readme.index("## How it works in 1 minute"):readme.index("## Words used on this page")]
+    assert "](DETAILS.md#why-no-unmasked-sensitive-column)" in how
+    start = details.index("\n## Why GenieRails won't open access to an unmasked sensitive column\n")
+    section = details[start:details.index("\n## ", start + 1)]
+    for fact in ("explicit, reviewed decision before anyone gets access", "can't leak by accident",
+                 "stays masked", "live in git", "deliberately no switch that makes a class raw for everyone",
+                 "exclude the detection, or turn off auto-tagging for that class", "Everyone who can read the table",
+                 "not in git", "`coverage_acknowledged_columns`", "`access_tier_groups[0]`",
+                 "Every classified column it can read", "`raw_exempt_principals`", "the everyone group is refused",
+                 '`column_overrides = { "cat.sch.tbl.col" = { partial = "raw" } }`', "The middle tiers",
+                 "`make release-plan` refuses them until a reviewed `ack.txt` line", "Never-raw classes",
+                 "(CVV), stay masked for everyone in every case"):
+        assert fact in section, fact
+    rows = [line for line in section.splitlines() if line.startswith("| ") and not line.startswith("| Way")]
+    assert len(rows) == 4, rows
+    # Tier 1 and raw_exempt_principals see raw on every classified/masked column EXCEPT never-raw ones: the
+    # cells themselves say so, naming every class the mask library never shows raw.
+    never_raw = "except never-raw ones (CVV, card PIN, card track data, secrets)"
+    cells = {row.split(" | ")[0]: [c.strip() for c in row.strip().strip("|").split(" | ")] for row in rows}
+    tier1 = next(c for k, c in cells.items() if "`access_tier_groups[0]`" in k)
+    exempt = next(c for k, c in cells.items() if k == "| `raw_exempt_principals`")
+    assert tier1[2] == f"Every classified column it can read, {never_raw}", tier1
+    assert exempt[2] == f"Every masked column, {never_raw}", exempt
+    library = json.loads((ROOT / "shared" / "mask_library.json").read_text())
+    assert library["never_raw_classes"] == ["card_security_code", "card_pin", "card_track_data", "secret"]
+    # Only options that exist: tier_access_overrides is refused at generate, and no raw treatment exists.
+    assert "tier_access_overrides" not in section and "treatment_versions" not in section
+    # ...and the facts it cites hold in the code.
+    shared = ROOT / "shared"
+    assert "everyone would see raw values on every masked" in (shared / "deterministic_governance.py").read_text()
+    assert '"card_security_code"' in (shared / "mask_library.json").read_text().split("never_raw_classes", 1)[1][:80]
+    assert "tier_access_overrides are deferred" in (shared / "governance_policies.py").read_text()

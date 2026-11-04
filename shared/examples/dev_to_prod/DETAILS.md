@@ -11,6 +11,7 @@ The [walkthrough](README.md) keeps to the happy path. This page holds the rest: 
 - [Prod step 1: Set up and promote](#prod-step-1-set-up-and-promote)
 - [Prod step 3: Plan, release](#prod-step-3-plan-release)
 - [If prod stops on coverage or drift](#if-prod-stops-on-coverage-or-drift)
+- [Why GenieRails won't open access to an unmasked sensitive column](#why-no-unmasked-sensitive-column)
 - [Prod step 4: Record evidence](#prod-step-4-record-evidence)
 - [Keep it safe](#keep-it-safe)
 - [CI / scripted](#ci--scripted)
@@ -122,6 +123,22 @@ Prod found a sensitive tag your rules don't cover. Nothing new was granted. The 
 - **A new kind of mask**: draft and test it with the dev-only helpers (`make draft-custom-mask` / `make test-custom-mask`, see the [governance playbook](../../docs/playbooks/governance.md)). Once it passes, `make adopt-custom-mask ENV=dev TREATMENT=custom_<name>` copies it into `envs/dev/custom_masks/` and prints the `tag_treatments` line to add to `envs/dev/env.auto.tfvars`. Add it, then continue from `make generate ENV=dev` as above (its commit offer includes both). The bare `make scaffold-treatments` stub and `materialize-treatment` are legacy-mode only ([legacy mode](../../docs/legacy-mode.md)).
 
 More: [Fixing a coverage gap found in prod](REFERENCE.md#fixing-a-coverage-gap-found-in-prod).
+
+<a id="why-no-unmasked-sensitive-column"></a>
+## Why GenieRails won't open access to an unmasked sensitive column
+
+Every column Data Classification tags as sensitive needs an explicit, reviewed decision before anyone gets access to it. That way a newly tagged or forgotten column can't leak by accident: when no one has decided, it stays masked. The decisions live in git (the env files and `ack.txt`) and show in the [evidence record](#prod-step-4-record-evidence).
+
+So there is deliberately no switch that makes a class raw for everyone. These are the supported ways to show raw values today:
+
+| Way | Who sees raw | Scope | Where the decision is recorded |
+|---|---|---|---|
+| Mark the column not sensitive in Data Classification: exclude the detection, or turn off auto-tagging for that class | Everyone who can read the table | One column (exclusion), or one class in one catalog (auto-tagging) | In Catalog Explorer, not in git. On a table's first grant, a column whose name looks sensitive also needs a `coverage_acknowledged_columns` entry in `env.auto.tfvars` |
+| Put the group in the first access tier (`access_tier_groups[0]`) | That group | Every classified column it can read, except never-raw ones (CVV, card PIN, card track data, secrets) | `env.auto.tfvars`, plus an `ack.txt` line |
+| `raw_exempt_principals` | The named groups or service principals (the everyone group is refused) | Every masked column, except never-raw ones (CVV, card PIN, card track data, secrets) | Each env's own `env.auto.tfvars`, plus an `ack.txt` line |
+| `column_overrides = { "cat.sch.tbl.col" = { partial = "raw" } }` | The middle tiers | One column | Dev's `env.auto.tfvars` (promoted), plus an `ack.txt` line |
+
+The last three weaken protection that is in place, so `make release-plan` refuses them until a reviewed `ack.txt` line accepts each one. Never-raw classes, such as a card's security code (CVV), stay masked for everyone in every case.
 
 <a id="prod-step-4-record-evidence"></a>
 ## Prod step 4: Record evidence
