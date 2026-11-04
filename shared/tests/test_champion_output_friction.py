@@ -182,7 +182,11 @@ def test_deterministic_prod_banner_pushes_then_release_plan_reuses_the_source_re
     block = step[step.index("```bash"):step.index("```", step.index("```bash") + 3)]
     # At a terminal release runs release-plan (and make check) each round: the block is one line.
     assert block.split("\n")[1:] == ["make release ENV=prod", ""]
-    flat = " ".join(step.split())
+    assert "\n- It reuses dev's rehearsal; it never rehearses dev. If it says `no passing rehearsal of <commit>`" in step
+    assert "](DETAILS.md#prod-step-3-plan-release)" in step
+    details = (SHARED / "examples/dev_to_prod/DETAILS.md").read_text()
+    details = details[details.index("## Prod step 3: Plan, release"):details.index("## If prod stops")]
+    flat = " ".join(details.split())
     order = ["plans only a commit on your `origin/main` (or committed local `main` in an option-A local-only repo) that has a passing `make rehearse ENV=dev` of that same commit",
              "release-plan reuses that rehearsal itself and applies nothing in dev",
              "run make rehearse ENV=dev on this commit",

@@ -35,6 +35,8 @@ from tests.test_release_gate_make import Make
 ROOT = Path(__file__).resolve().parents[2]
 SHARED = ROOT / "shared"
 README = SHARED / "examples" / "dev_to_prod" / "README.md"
+# The walkthrough's details and edge cases, one section per README step.
+DETAILS = README.parent / "DETAILS.md"
 
 if shutil.which("make") is None or shutil.which("git") is None:
     pytest.skip("make and git are required", allow_module_level=True)
@@ -47,18 +49,37 @@ def _section(title: str) -> str:
     return text[start:end if end != -1 else None]
 
 
+def _details(title: str) -> str:
+    """A DETAILS.md section, by its heading; the README step it details links to it."""
+    text = DETAILS.read_text()
+    start = text.index(f"\n## {title}\n")
+    end = text.find("\n## ", start + 1)
+    section = text[start:end if end != -1 else None]
+    anchor = re.search(r'<a id="([^"]+)"></a>\s*$', text[:start])
+    assert anchor, f"DETAILS.md section {title!r} has no anchor"
+    return section
+
+
+def _links_to_details(readme_part: str, title: str) -> None:
+    """The README part links to the DETAILS.md section, by the section's own anchor."""
+    text = DETAILS.read_text()
+    start = text.index(f"\n## {title}\n")
+    anchor = re.search(r'<a id="([^"]+)"></a>\s*$', text[:start]).group(1)
+    assert f"](DETAILS.md#{anchor})" in readme_part, (title, anchor)
+
+
 def prod_commands() -> list[str]:
     """Each command the Prod section tells the user to run, in order, up to release-plan.
 
     Commands are the lines of its bash blocks plus the inline commit
     instruction ("Commit and push ... (`git add ...`, commit, `git push`)"), or
     the answer to promote-to's commit offer ("It then offers to commit and push
-    ... (answer `y`"), which is "answer y".
+    ...: answer `y`"), which is "answer y".
     """
     section = _section("Prod")
     commands = []
     for match in re.finditer(r"```bash\n(.*?)```|Commit and push[^\n]*?\(`(git add [^`]+)`, commit, `(git push)`\)"
-                             r"|It then offers to commit and push[^\n]*?\(answer `(y)`", section, re.S):
+                             r"|It then offers to commit and push[^\n]*?: answer `(y)`", section, re.S):
         if match.group(1):
             commands += [line.split("#")[0].strip() for line in match.group(1).splitlines()
                          if line.split("#")[0].strip()]
@@ -172,10 +193,16 @@ def test_the_prod_section_reads_as_expected():
     flow = _section("The whole flow")
     assert "make promote-to ENV=prod    # copies the reviewed rules; offers to commit + push (y)" in flow.splitlines()
     assert "Promote the rules to prod" not in flow
-    # ...and the table says which files that offer commits.
+    # ...the README's step names the files that offer commits...
+    step = _step(_section("Prod"), "1. Set up and promote.")
+    assert "- It then offers to commit and push `.gitignore`, `envs/prod/` and `envs/account/`: answer `y`." \
+        in step.splitlines()
+    assert "| `make promote-to ENV=prod` | Copies dev's reviewed rules into prod | The same commit question |" \
+        in flow.splitlines()
+    # ...and so does the full table in DETAILS.md.
     assert "| `make promote-to ENV=prod` | Copies dev's reviewed rules into prod, renamed to prod's catalogs and " \
         "groups; prints the changed files by owner | The same commit question, for `.gitignore`, `envs/prod/` and " \
-        "`envs/account/` |" in flow.splitlines()
+        "`envs/account/` |" in _details("What each command does, in full").splitlines()
 
 
 def _step(section: str, title: str) -> str:
@@ -187,9 +214,13 @@ def _step(section: str, title: str) -> str:
 def test_prod_step_1_says_to_replace_the_seeded_catalog_map_line():
     # make setup ENV=prod seeds catalog_map with placeholders; a second line is refused.
     step = _step(_section("Prod"), "1. Set up and promote.")
-    assert "replace its `deployer_principal_id` placeholder and the seeded `catalog_map` line" in step
-    assert "a second `catalog_map` line is refused" in step
+    assert "replace the `deployer_principal_id` placeholder and the seeded `catalog_map` line" in step
     assert "placeholder, and set:" not in step
+    details = _details("Prod step 1: Set up and promote")
+    _links_to_details(step, "Prod step 1: Set up and promote")
+    assert "replace its `deployer_principal_id` placeholder and the seeded `catalog_map` line" in details
+    assert "a second `catalog_map` line is refused" in details
+    assert "placeholder, and set:" not in details
     makefile = (SHARED / "Makefile.shared").read_text()
     assert 'catalog_map  = { "<$(DEFAULT_ENV)_catalog>" = "<%s_catalog>" }' in makefile
     assert "catalog_map is set twice; keep one" in (SHARED / "genie_space_placeholder.py").read_text()
@@ -226,7 +257,12 @@ def test_the_release_recipe_prints_heading_then_explanation_then_next_per_round(
 
 def test_prod_step_3_says_a_first_release_takes_several_rounds_in_the_real_messages():
     step = _step(_section("Prod"), "3. Plan, release.")
-    rounds = step[step.index("**A first release takes several rounds.**"):]
+    # The README step: several rounds, y each, until the recipe's own end line.
+    assert f"- A first release takes several rounds, masks before access. Answer `y` each round until it prints " \
+        f"`{RELEASE_COMPLETE}`." in step.splitlines()
+    _links_to_details(step, "Prod step 3: Plan, release")
+    details = _details("Prod step 3: Plan, release")
+    rounds = details[details.index("**A first release takes several rounds.**"):]
     rounds = rounds[:rounds.index("\n")]
     # The README shows one round's output in the recipe's order: heading, what it applied, Next;
     # then the end, "Release complete".
@@ -257,12 +293,16 @@ def test_prod_step_3_says_a_first_release_takes_several_rounds_in_the_real_messa
     code = flow[flow.index("```bash"):flow.index("```", flow.index("```bash") + 3)]
     assert "make release-plan" not in code and "repeats release-plan + release" not in _section("Prod")
     row = next(line for line in flow.splitlines() if line.startswith("| `make release ENV=prod` |"))
-    assert "Per round: `make release-plan` (runs `make check ENV=prod`, reuses dev's rehearsal" in row
+    assert "Plans, applies and proves one manifest per round" in row
     assert "`Approve and release manifest <id> (commit <sha>, round <n> of at most 8)? [y/N]`, once per round" in row
+    full = next(line for line in _details("What each command does, in full").splitlines()
+                if line.startswith("| `make release ENV=prod` |"))
+    assert "Per round: `make release-plan` (runs `make check ENV=prod`, reuses dev's rehearsal" in full
+    assert "`Approve and release manifest <id> (commit <sha>, round <n> of at most 8)? [y/N]`, once per round" in full
 
 
 def test_prod_step_3_tells_legacy_envs_to_skip_release_plan():
-    step = _step(_section("Prod"), "3. Plan, release.")
+    step = _details("Prod step 3: Plan, release")
     line = "Legacy envs skip `make release-plan`: run `make release ENV=prod` directly " \
         "(`release-plan` refuses them with `Legacy envs keep: make release ENV=prod`)."
     assert line in step.splitlines()
@@ -338,6 +378,15 @@ def test_the_ask_table_quotes_the_questions_the_code_asks():
     flow = _section("The whole flow")
     asks = flow[flow.index("### What each command does and what it asks"):]
     rows = {line.split("|")[1].strip(): line for line in asks.splitlines() if line.startswith("| `make ")}
+    full = {line.split("|")[1].strip(): line for line in _details("What each command does, in full").splitlines()
+            if line.startswith("| `make ")}
+    # The full table in DETAILS.md has the same rows, in the same order, and asks the same questions.
+    assert list(full) == list(rows)
+    for command, row in rows.items():
+        questions = re.findall(r"`[^`]*\[y/N\]`", row)
+        assert questions == re.findall(r"`[^`]*\[y/N\]`", full[command]), command
+        assert row.rstrip().endswith("| nothing |") == full[command].rstrip().endswith("| nothing |"), command
+    assert "](DETAILS.md#what-each-command-does-in-full)" in asks
     assert list(rows) == ["`make setup ENV=dev REPO=<url>`", "`make generate ENV=dev`", "`make rehearse ENV=dev`",
                           "`make setup ENV=prod`", "`make promote-to ENV=prod`", "`make release ENV=prod`",
                           "`make evidence ENV=prod`", "`make maintain ENV=prod`",
@@ -366,10 +415,14 @@ def test_release_describes_the_account_step_before_round_1_as_the_code_runs_it()
     flow = _section("The whole flow")
     asks = flow[flow.index("### What each command does and what it asks"):]
     row = next(line for line in asks.splitlines() if line.startswith("| `make release ENV=prod` |"))
-    assert "Before round 1 it applies the account layer when it has changes, as rehearse does" in row
     assert row.index("`Approve and apply this account manifest? [y/N]` first, only when the account plan has "
                      "changes") < row.index("`Approve and release manifest <id>")
-    step = _step(_section("Prod"), "3. Plan, release.")
+    full = next(line for line in _details("What each command does, in full").splitlines()
+                if line.startswith("| `make release ENV=prod` |"))
+    assert "Before round 1 it applies the account layer when it has changes, as rehearse does" in full
+    assert full.index("`Approve and apply this account manifest? [y/N]` first, only when the account plan has "
+                      "changes") < full.index("`Approve and release manifest <id>")
+    step = _details("Prod step 3: Plan, release")
     account = step[step.index("Before round 1 it checks the shared account layer"):]
     account = account[:account.index("\n")]
     assert step.index("Each round it plans") < step.index("Before round 1 it checks the shared account layer")
@@ -378,7 +431,7 @@ def test_release_describes_the_account_step_before_round_1_as_the_code_runs_it()
                  "then round 1 starts", "Anything else applies nothing and stops before round 1",
                  "An empty account plan asks nothing."):
         assert part in account, part
-    ci = next(line for line in _section("CI / scripted").splitlines() if line.startswith("| `make release ENV=prod` |"))
+    ci = next(line for line in _details("CI / scripted").splitlines() if line.startswith("| `make release ENV=prod` |"))
     assert "never asks about the account layer (`release-plan` refuses a non-empty account plan)" in ci
     assert ci.index("`make account-plan`") < ci.index("`make apply-account`") < ci.index("`make release-plan ENV=prod`")
     reference = (ROOT / "REFERENCE.md").read_text()
@@ -401,7 +454,12 @@ def test_release_describes_the_account_step_before_round_1_as_the_code_runs_it()
 
 
 def test_the_ci_section_names_the_low_level_commands_and_what_they_do_off_a_terminal():
-    section = _section("CI / scripted")
+    # The README's CI section says the rule and links to the low-level steps in DETAILS.md.
+    short = _section("CI / scripted")
+    assert '<a id="ci--scripted"></a>' in README.read_text()
+    assert "no flag or variable answers an approval `y` for you" in short
+    _links_to_details(short, "CI / scripted")
+    section = _details("CI / scripted")
     rows = [line for line in section.splitlines() if line.startswith("| ") and not line.startswith("| Champion")
             and not line.startswith("|---")]
     assert [row.split("|")[1].strip() for row in rows] == [
@@ -431,11 +489,15 @@ def test_the_ci_section_names_the_low_level_commands_and_what_they_do_off_a_term
 
 def test_the_walkthrough_says_setup_without_repo_keeps_the_genierails_remote():
     """Setup without REPO= keeps the canonical genierails remote, and that still deploys local main."""
-    before = _section("Before you start")
+    readme = _section("Before you start")
+    assert "No repo of your own yet? Leave `REPO=` off. The commit offers then commit locally." in readme
+    _links_to_details(readme, "Your repo and remotes")
+    before = _details("Your repo and remotes")
     assert "setup renames `origin` to `genierails` and adds no `origin`" in before
     assert "only that canonical `genierails` upgrade remote, deploys from its committed local `main`" in before
-    assert "`git remote remove genierails`" not in before
-    assert "(no remote, no GitHub account)" not in before
+    for text in (readme, before):
+        assert "`git remote remove genierails`" not in text
+        assert "(no remote, no GitHub account)" not in text
     # ...because provenance takes the local-only path for no remotes or exactly the canonical upgrade remote.
     gate = (SHARED / "scripts" / "release_gate.py").read_text()
     assert "def local_main_mode(" in gate and 'remotes != (UPSTREAM_REMOTE,)' in gate

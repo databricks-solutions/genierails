@@ -560,6 +560,7 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     """Gaps a live Azure run found: make check, an early commit, verify-access inside rehearse, both agent forms."""
     readme = (SHARED / "examples/dev_to_prod/README.md").read_text()
     ref = (SHARED / "examples/dev_to_prod/REFERENCE.md").read_text()
+    details = (SHARED / "examples/dev_to_prod/DETAILS.md").read_text()
     flow = readme[readme.index("## The whole flow"):readme.index("## Before you start")]
     before = readme[readme.index("## Before you start"):readme.index("## Dev")]
     dev = readme[readme.index("## Dev"):readme.index("## Prod")]
@@ -589,13 +590,19 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     assert "make setup ENV=prod         # then set deployer_principal_id, catalog_map, group_map" in flow
     # The table says what each command asks; release's own check is its release-plan's.
     asks = flow[flow.index("### What each command does and what it asks"):]
+    assert "| `make release ENV=prod` | Plans, applies and proves one manifest per round |" in asks
+    assert "| `make rehearse ENV=dev` | Checks, applies dev and proves the masks |" in asks
+    # ...and the full table in DETAILS.md says how.
+    full = details[details.index("## What each command does, in full"):details.index("## Your repo and remotes")]
     assert "| `make release ENV=prod` | Per round: `make release-plan` (runs `make check ENV=prod`, reuses dev's " \
-        "rehearsal, plans and writes one manifest)" in asks
-    assert "| `make rehearse ENV=dev` | Runs `make check ENV=dev` on the committed files" in asks
+        "rehearsal, plans and writes one manifest)" in full
+    assert "| `make rehearse ENV=dev` | Runs `make check ENV=dev` on the committed files" in full
 
     # Detailed walkthrough: setup's REPO= (explained before you start), then commit before generate/check/rehearse.
     assert "git remote" not in flow
-    assert "make setup ENV=dev REPO=<your-repo-url>" in before and "leave `REPO=` off" in before
+    assert "make setup ENV=dev REPO=<your-repo-url>" in before and "Leave `REPO=` off" in before
+    remotes = details[details.index("## Your repo and remotes"):details.index("## Dev step 1: Set up")]
+    assert "](DETAILS.md#your-repo-and-remotes)" in before and "leave `REPO=` off" in remotes
     step_1 = dev[dev.index("**1. Set up.**"):dev.index("**2. Commit it (own repo).**")]
     committed = dev[dev.index("**2. Commit it (own repo).**"):]
     assert "make setup ENV=dev REPO=<your-repo-url>" in step_1
@@ -609,14 +616,20 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     detailed_positions = [readme.index("make setup ENV=dev REPO=", readme.index("## Dev")),
                           readme.index("GenieRails previews the `.gitignore`, placeholder env defaults and agent file", readme.index("**2. Commit it (own repo).**"))]
     assert detailed_positions == sorted(detailed_positions)
-    assert "The same `make check` runs alone as the PR check." in dev
+    rehearse = details[details.index("## Dev step 5: Rehearse"):details.index("## Prod step 1")]
+    assert "](DETAILS.md#dev-step-5-rehearse)" in dev
+    assert "The same `make check` runs alone as the PR check." in rehearse
     assert "`verify-access` as its last gate (`_verify-access-gate`)" in dev
     assert "**Pass looks like:** `ALL EFFECTIVE`" in dev and "make verify-access ENV=dev" in dev
     assert "**Agents (preferred):**" in dev and "envs/dev/agents/" in dev
-    assert "**Also accepted:**" in dev and "genie_spaces = [{" in dev
+    setup = details[details.index("## Dev step 1: Set up"):details.index("## Dev step 2")]
+    assert "](DETAILS.md#dev-step-1-set-up)" in dev
+    assert "**Also accepted:**" in setup and "genie_spaces = [{" in setup
 
+    release = details[details.index("## Prod step 3: Plan, release"):details.index("## If prod stops")]
+    assert "](DETAILS.md#prod-step-3-plan-release)" in prod
     assert ("`make release-plan` first runs `make check ENV=prod`, which for a promoted env also runs "
-            "`promote-to CHECK=1`; if a step fails, it refuses before any lock, live call or write.") in prod
+            "`promote-to CHECK=1`; if a step fails, it refuses before any lock, live call or write.") in release
     assert "make verify-access ENV=prod" in prod
     assert "Leave the `access_tier_groups` placeholders" in prod
     assert "`rehearse` (deterministic envs) and `release-plan` run it first" in ref
@@ -632,9 +645,10 @@ def test_champion_walkthrough_dev_setup_has_no_manual_template_copy():
     step_1 = dev[dev.index("**1. Set up.**"):dev.index("**2. Commit it (own repo).**")]
     start = step_1.index("```bash\n") + len("```bash\n")
     assert step_1[start:step_1.index("```", start)] == "make setup ENV=dev REPO=<your-repo-url>\n"
+    details = (SHARED / "examples/dev_to_prod/DETAILS.md").read_text()
     for gone in ("cp ../shared/examples/dev_to_prod/", "cp ../shared/examples", "mkdir -p envs/dev/agents",
                  "copy the env + agent templates"):
-        assert gone not in readme, gone
+        assert gone not in readme and gone not in details, gone
     # What setup copied, then what to fill in, then the agent file's rename, in that order.
     order = ["make setup ENV=dev REPO=<your-repo-url>",
              "Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`]",
@@ -649,8 +663,15 @@ def test_champion_walkthrough_dev_setup_has_no_manual_template_copy():
     assert positions == sorted(positions)
     # Prod keeps promote-to as the source of its agent files.
     flow = readme[readme.index("## The whole flow"):readme.index("## Before you start")]
-    row = next(line for line in flow.splitlines() if line.startswith("| `make setup ENV=prod` |"))
-    assert "(no agent file: `promote-to` writes prod's)" in row
+    for table in (flow, details):
+        row = next(line for line in table.splitlines() if line.startswith("| `make setup ENV=prod` |"))
+        assert "(no agent file: `promote-to` writes prod's)" in row
+    # The rename's details (setup copies the agent file only with a new env file) moved to DETAILS.md.
+    setup = details[details.index("## Dev step 1: Set up"):details.index("## Dev step 2")]
+    order = ["Setup copies this walkthrough's templates into dev", "It copies only files that don't exist yet",
+             "the agent file only along with a new `env.auto.tfvars`", "never overwrites your edits",
+             "**Agents (preferred):**", "rename setup's `Finance Analytics.auto.tfvars` to your agent's name"]
+    assert [setup.index(step) for step in order] == sorted(setup.index(step) for step in order)
     # The templates' own headers say setup copies them, with no copy-it-yourself recipe for the first file.
     env_template = (SHARED / "examples/dev_to_prod/env.auto.tfvars.example").read_text()
     agent_template = (SHARED / "examples/dev_to_prod/agent.auto.tfvars.example").read_text()
@@ -663,33 +684,41 @@ def test_champion_walkthrough_dev_setup_has_no_manual_template_copy():
 def test_champion_walkthrough_lets_release_plan_reuse_the_dev_rehearsal_on_the_promotion_commit():
     """release-plan needs a passing dev rehearsal of HEAD and writes it itself from dev step 5's (dev unchanged)."""
     readme = (SHARED / "examples/dev_to_prod/README.md").read_text()
+    details = (SHARED / "examples/dev_to_prod/DETAILS.md").read_text()
     gate = (SHARED / "scripts/release_gate.py").read_text()
     flow = readme[readme.index("## The whole flow"):readme.index("## Before you start")]
     prod = readme[readme.index("## Prod"):readme.index("## Keep it safe")]
-    gap = prod[prod.index("**Reuse an existing mask**"):prod.index("**A new kind of mask**")]
+    release = details[details.index("## Prod step 3: Plan, release"):details.index("## If prod stops")]
+    gap = details[details.index("**Reuse an existing mask**"):details.index("**A new kind of mask**")]
 
     # The whole flow: promote-to (which offers the commit + push), then release (no second dev rehearse).
     code = flow[flow.index("```bash"):flow.index("```", flow.index("```bash") + 3)]
     promoted = code.index("offers to commit + push (y)", code.index("make promote-to ENV=prod"))
     assert code.index("make promote-to ENV=prod") < promoted < code.index("make release ENV=prod")
     assert "make rehearse ENV=dev" not in code[promoted:]
-    # ...and the table: release reuses dev's rehearsal (it never rehearses dev).
-    row = next(line for line in flow.splitlines() if line.startswith("| `make release ENV=prod` |"))
+    # ...and the full table: release reuses dev's rehearsal (it never rehearses dev).
+    row = next(line for line in details.splitlines() if line.startswith("| `make release ENV=prod` |"))
     assert "reuses dev's rehearsal" in row and "make rehearse" not in row
+    row = next(line for line in flow.splitlines() if line.startswith("| `make release ENV=prod` |"))
+    assert "make rehearse" not in row
 
     # Prod: promote-to offers to commit and push the promoted files, then plan; release-plan reuses dev's rehearsal.
     steps = ["It then offers to commit and push `.gitignore`, `envs/prod/`", "**3. Plan, release.**",
-             "make release ENV=prod", "make release-plan ENV=prod"]
+             "make release ENV=prod", "It reuses dev's rehearsal; it never rehearses dev."]
     positions = [prod.index(step) for step in steps]
     assert positions == sorted(positions)
     step3 = prod[prod.index("**3. Plan, release.**"):]
     assert "make rehearse ENV=dev" not in step3[:step3.index("make release ENV=prod")]
-    # What the user sees, in release_gate.py's own words.
+    assert "no passing rehearsal of" in step3 and "no passing rehearsal of" in gate
+    # What the user sees, in release_gate.py's own words, in the step's details.
+    assert release.index("Each round it plans (`make release-plan ENV=prod`)") < release.index("make release-plan ENV=prod` plans only")
     for quoted in ("no passing rehearsal of", "without re-applying", "did not reuse a rehearsal for this commit"):
-        assert quoted in gate and quoted in prod, quoted
-    assert "reusing {source}'s passing" in gate and "reusing dev's passing rehearsal of" in prod
+        assert quoted in gate and quoted in release, quoted
+    assert "reusing {source}'s passing" in gate and "reusing dev's passing rehearsal of" in release
 
     # A coverage-gap fix commits a new promotion too: release-plan reuses dev's rehearsal of the fix commit.
     after_promote = gap[gap.index("`make promote-to ENV=prod`"):]
     assert "`make rehearse ENV=dev`" not in after_promote[:after_promote.index("`make release ENV=prod`")]
-    assert "`make release-plan ENV=prod` (it reuses the dev rehearsal, or names the command to run)" in after_promote
+    # make release runs release-plan, which reuses the dev rehearsal (stale since release took over the loop:
+    # the docs name `make release ENV=prod` and its release-plan loop, not a separate release-plan step).
+    assert "`make release ENV=prod` (runs its release-plan loop)" in after_promote
