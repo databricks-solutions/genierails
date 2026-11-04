@@ -112,6 +112,26 @@ def test_live_generated_env_has_no_rulebook_drift(dev, monkeypatch, capsys):
     assert "scaffold-treatments" not in out
 
 
+def test_rulebook_audit_warns_but_does_not_drift_for_existing_never_raw_raw_column_override(
+    dev, monkeypatch, capsys,
+):
+    env_file = dev / "env.auto.tfvars"
+    env_file.write_text(
+        env_file.read_text()
+        + 'column_overrides = { "dev_fin.payments.payments.cvv" = { partial = "raw" } }\n'
+    )
+
+    rc, out = _audit(dev, monkeypatch, capsys)
+
+    assert rc == 0, out
+    assert "No drift detected." in out
+    assert (
+        'WARNING: column_overrides["dev_fin.payments.payments.cvv"].partial = "raw" has no effect: '
+        "column dev_fin.payments.payments.cvv is never shown raw to anyone and no override exists; "
+        "remove the override via make generate"
+    ) in out
+
+
 def test_an_unmapped_class_still_drifts_and_points_at_scaffold_treatments(dev, monkeypatch, capsys):
     rows = TAG_ROWS + [("dev_fin", "payments", "customers", "customer_id", "class.loyalty_tier", "")]
     rc, out = _audit(dev, monkeypatch, capsys, rows)

@@ -32,7 +32,6 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from deterministic_governance import NEVER_RAW_OVERRIDE_UNAVAILABLE, NEVER_RAW_TREATMENTS
 from mask_library import load_library, partial_treatments, resolve_class, sql_body, type_family, typed_body
 
 TAG_KEY = "gr_treatment"
@@ -47,6 +46,10 @@ UNMAPPED_MARKER = "# gr.classification_unmapped:"
 # the coverage check blocks it unless its gr_treatment has no partial version.
 MIXED_PARTIAL_MARKER = "# gr.classification_mixed_partial:"
 MIXED_PARTIAL_TREATMENT = "redact"
+NEVER_RAW_TREATMENTS = frozenset({
+    "card_security_code", "card_pin", "card_track_data", "secret",
+})
+NEVER_RAW_OVERRIDE_UNAVAILABLE = "is never shown raw to anyone and no override exists"
 
 # Warning-only heuristic.  Names and comments are deliberately not policy
 # inputs: they can suggest a review, but never choose a treatment.
@@ -337,6 +340,17 @@ def treatment_value_column(
     return None
 
 
+def never_raw_raw_override_warning(column: str) -> str:
+    return (
+        f'column_overrides["{column}"].partial = "raw" has no effect: column {column} '
+        f"{NEVER_RAW_OVERRIDE_UNAVAILABLE}; remove the override via make generate"
+    )
+
+
+def _never_raw_raw_override_error(column: str) -> str:
+    return f'column_overrides["{column}"].partial may not be raw; column {column} {NEVER_RAW_OVERRIDE_UNAVAILABLE}'
+
+
 def resolve_column(
     column: str, classes: Sequence[str], sql_type: str, *,
     library: dict | None = None,
@@ -385,11 +399,6 @@ def resolve_column(
         treatment = max(
             name for name, item in data["treatments"].items()
             if name in NEVER_RAW_TREATMENTS and set(names) & set(item["classes"])
-        )
-    if never_raw and override.get("partial") == "raw":
-        raise DeterministicGovernanceError(
-            f'column_overrides["{column}"].partial may not be raw; column {column} '
-            f"{NEVER_RAW_OVERRIDE_UNAVAILABLE}"
         )
     if not never_raw:
         version = (treatment_versions or {}).get(treatment, {}).get("partial")
@@ -694,10 +703,12 @@ def build_model(
             treatment_versions=settings.get("treatment_versions") or {},
             column_overrides=overrides,
         )
+        rule = overrides.get(column.lower()) or {}
+        if columns[column].never_raw and rule.get("partial") == "raw":
+            raise DeterministicGovernanceError(_never_raw_raw_override_error(column))
         mixed = partial_treatments(classes, sql_type, library)
         if len(mixed) > 1:
             mixed_partial.append((column, sorted(mixed)))
-            rule = overrides.get(column.lower()) or {}
             item = columns[column]
             if rule.get("treatment", item.treatment) != item.treatment or rule.get("partial", item.partial) != item.partial:
                 overridden_mixed.append(column)

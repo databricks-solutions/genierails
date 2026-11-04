@@ -60,6 +60,7 @@ for _path in (SHARED_ROOT, SHARED_ROOT / "scripts"):
 from governance_policies import (  # noqa: E402
     CUSTOM_TREATMENT, DeterministicGovernanceError, normalize_sql_type,
 )
+import governed_tables_record  # noqa: E402,F401 - keep custom-mask governance in the record-safe import closure
 from mask_library import load_library, type_family, typed_body  # noqa: E402
 
 CUSTOM_DIR = "custom_masks"

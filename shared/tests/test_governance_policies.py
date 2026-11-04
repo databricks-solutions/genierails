@@ -310,7 +310,19 @@ def test_an_override_to_redact_or_never_raw_is_kept_on_a_mixed_column():
     assert resolve_column("c.s.t.ssn", ["us_ssn"], "STRING", treatment_versions={"ssn": {"partial": "last4"}}).partial == "last4"
 
 
-def test_column_override_raw_on_never_raw_column_is_a_clear_error():
+def test_resolve_column_keeps_never_raw_when_raw_column_override_is_present():
+    item = resolve_column(
+        "cat.sch.t.cvv",
+        ["card_security_code"],
+        "STRING",
+        column_overrides={"cat.sch.t.cvv": {"partial": "raw"}},
+    )
+    assert item.treatment == "card_security_code"
+    assert item.never_raw
+    assert item.partial_sql == item.full_sql
+
+
+def test_generation_refuses_column_override_raw_on_never_raw_column_with_clear_error():
     with pytest.raises(DeterministicGovernanceError) as raised:
         _model(
             {"cat.sch.t.cvv": ["card_security_code"]},

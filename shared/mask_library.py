@@ -10,11 +10,12 @@ from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_UP, localcont
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from deterministic_governance import NEVER_RAW_TREATMENTS, AccessResolution, resolve_precedence
-
 LIBRARY_PATH = Path(__file__).with_name("mask_library.json")
 REDACTED = "[REDACTED]"
 NUMERIC_TYPES = frozenset({"BYTE", "TINYINT", "SHORT", "SMALLINT", "INT", "INTEGER", "LONG", "BIGINT", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC"})
+NEVER_RAW_TREATMENTS = frozenset({
+    "card_security_code", "card_pin", "card_track_data", "secret",
+})
 
 
 def load_library(path: Path = LIBRARY_PATH) -> dict:
@@ -193,9 +194,10 @@ def partial_treatments(classes: list[str], sql_type: str, library: dict | None =
             if rank == _PARTIAL}
 
 
-def resolve_column_access(classes: list[str], sql_type: str, *, library: dict | None = None, **precedence) -> AccessResolution:
+def resolve_column_access(classes: list[str], sql_type: str, *, library: dict | None = None, **precedence):
     """Resolve a column's class tags, then access, carrying the never-raw flag."""
     treatment, partial, _full, never_raw = resolve_class(classes, sql_type, library)
+    resolve_precedence = __import__("deterministic_governance", fromlist=["resolve_precedence"]).resolve_precedence
     return resolve_precedence(treatment=treatment, library_default=partial, never_raw=never_raw, **precedence)
 
 

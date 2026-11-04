@@ -22,8 +22,8 @@ from pathlib import Path
 from tag_vocabulary import REGISTRY
 from governance_policies import (
     column_comments_from_ddl, free_text_partial_columns, is_library_treatment_value,
-    is_never_raw, keeps_string_partial, mixed_partial_problem, parse_treatment_value,
-    treatment_value_column,
+    is_never_raw, keeps_string_partial, mixed_partial_problem, never_raw_raw_override_warning,
+    normalize_column_overrides, parse_treatment_value, treatment_value_column,
 )
 from treatment_derivation import load_treatment_config
 
@@ -733,6 +733,17 @@ def validate_coverage_gate(
         if advisory_library is not None
         and (item := treatment_value_column(column, value, cfg, advisory_library)) is not None
     }
+    overrides = normalize_column_overrides(cfg.get("column_overrides"))
+    ignored_never_raw_raw = [
+        never_raw_raw_override_warning(column)
+        for column, item in sorted(resolved_treatments.items())
+        if item.never_raw and (overrides.get(column.lower()) or {}).get("partial") == "raw"
+    ]
+    if ignored_never_raw_raw:
+        result.warn(
+            "COVERAGE ADVISORY (non-blocking) — never-raw raw column override ignored:\n"
+            "    - " + "\n    - ".join(ignored_never_raw_raw)
+        )
     free_text_partial = free_text_partial_columns(resolved_treatments, ddl_comments)
     if free_text_partial:
         result.warn(
