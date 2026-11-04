@@ -2731,7 +2731,7 @@ def test_s17_patterns_are_anchored_to_the_controller_source():
     for literal in ("active generation:  ", "waiting to retire:  ", "Unfinished policy change (run ",
                     "  status:    {t['status']}\" + (f\" at {t['failed_phase']}",
                     "the previous protection ({t['from'] or 'none'}); no column was retagged",
-                    "Abandoned generation {t['to']}; {t['from'] or 'nothing'} stays live.",
+                    "Abandoned generation {t['to']}; {restore_fp or 'nothing'} stays live.",
                     "=== Policy staged apply ({self.env_name}): {' -> '.join(t['phases'])} ===",
                     "is live and verified", "stays until a later release succeeds", "; retired {t['retire']}",
                     "(superseded by run {entry['superseded_by']}, ", "'confirmed' if entry['confirmed']"):

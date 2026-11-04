@@ -488,6 +488,12 @@ def _run_scaffold(env: Path, tmp_path: Path, treatment: str) -> subprocess.Compl
         text=True, capture_output=True, cwd=SHARED, timeout=120)
 
 
+# coverage_fix.recovery_steps for a dev -> prod chain (the dev_to_prod README's recovery sequence).
+DEV_TO_PROD_RECOVERY = ("review envs/dev/env.auto.tfvars, make generate ENV=dev (offers to commit the fix), "
+                        "make rehearse ENV=dev, make promote-to ENV=prod (offers to commit the promotion), "
+                        "make release ENV=prod")
+
+
 def test_scaffold_treatments_writes_the_envs_tag_treatments_never_shared(tmp_path):
     dev = _scaffold_env(tmp_path, "dev", DEV_ENV + "\n# reviewed\ncountry = \"\"\n", marker="paycat.s.t.loyalty")
     before = hcl2.loads((dev / "env.auto.tfvars").read_text())
@@ -502,8 +508,8 @@ def test_scaffold_treatments_writes_the_envs_tag_treatments_never_shared(tmp_pat
     assert (tmp_path / "treatment_config.json").read_bytes() == (SHARED / "treatment_config.json").read_bytes()
     assert "MAPPED class.loyalty_id -> identifier" in result.stdout
     assert "envs/dev/env.auto.tfvars tag_treatments (a governance file; shared/ is unchanged)" in result.stdout
-    assert "Next: commit envs/dev/env.auto.tfvars, make generate ENV=dev, " \
-        "make rehearse ENV=dev; commit and push after each step that changes envs/" in result.stdout
+    assert result.stdout.endswith("\nNext: review envs/dev/env.auto.tfvars, "
+                                  "make generate ENV=dev (offers to commit the fix), make rehearse ENV=dev\n")
     model = build_model(LOYALTY, LOYALTY_TYPES, after)
     assert model.unmapped == [] and model.columns["paycat.s.t.loyalty"].value.startswith("identifier__")
 
@@ -523,11 +529,9 @@ def test_scaffold_in_a_promoted_env_writes_the_env_it_is_promoted_from(tmp_path)
     assert hcl2.loads((dev / "env.auto.tfvars").read_text())["tag_treatments"] == {"class.loyalty_id": "redact"}
     assert (prod / "env.auto.tfvars").read_bytes() == prod_before, "promote-to owns prod's copy"
     assert "promote-to carries tag_treatments from envs/dev to prod." in result.stdout
-    # release-plan needs the promotion on origin/main; it reuses the dev rehearsal itself.
-    after = result.stdout[result.stdout.index("make promote-to ENV=prod"):]
-    steps = ["commit and push envs/prod/", "make release-plan ENV=prod", "it reuses the dev rehearsal",
-             "make release ENV=prod"]
-    assert [after.index(step) for step in steps] == sorted(after.index(step) for step in steps)
+    # promote-to offers the promotion's commit; make release runs release-plan, which reuses the dev
+    # rehearsal: the whole sequence, in order, with no second rehearse after the promotion.
+    assert result.stdout.endswith(f"\nNext: {DEV_TO_PROD_RECOVERY}\n")
 
 
 @pytest.mark.parametrize("treatment, message", [
@@ -569,10 +573,8 @@ def test_the_coverage_gap_fix_points_deterministic_envs_at_tag_treatments(tmp_pa
     assert "envs/dev/env.auto.tfvars; shared/ is product code" in text
     assert "make scaffold-treatments ENV=prod TREATMENT=<mask-library treatment>" in text
     assert "make promote-to ENV=prod" in text
-    # The promotion is a new commit: push it; release-plan reuses dev's rehearsal (no second rehearse).
-    after_promote = text[text.index("make promote-to ENV=prod"):]
-    assert after_promote.index("commit and push envs/prod/") < after_promote.index("make release-plan ENV=prod")
-    assert "it reuses the dev rehearsal" in after_promote and "make rehearse ENV=dev" not in after_promote
+    # The promotion is a new commit promote-to offers; make release reuses dev's rehearsal (no second rehearse).
+    assert text.endswith(f"\n       then {DEV_TO_PROD_RECOVERY}") and text.count("make rehearse ENV=dev") == 1
     assert "shared/treatment_config.json" not in text
 
 
@@ -584,9 +586,7 @@ def test_the_missing_mask_fix_in_a_deterministic_env_maps_or_adopts_never_materi
     assert "make scaffold-treatments ENV=prod TREATMENT=<mask-library treatment>" in text
     assert "make adopt-custom-mask ENV=dev TREATMENT=custom_<name>" in text
     assert "tag_treatments (or column_overrides) in envs/dev/env.auto.tfvars" in text
-    after_promote = text[text.index("make promote-to ENV=prod"):]
-    assert after_promote.index("commit and push envs/prod/") < after_promote.index("make release-plan ENV=prod")
-    assert "it reuses the dev rehearsal" in after_promote and "make rehearse ENV=dev" not in after_promote
+    assert text.endswith(f"\n       then {DEV_TO_PROD_RECOVERY}") and text.count("make rehearse ENV=dev") == 1
 
 
 @pytest.mark.parametrize("env", ["dev", "prod"])
@@ -1069,4 +1069,8 @@ def test_a_legacy_layout_env_promotes_and_plans_exactly_as_before(tmp_path):
     # The one addition since: the record of the tiers promote-to wrote (decision 8).
     record = json.loads(after.pop("prod/generated/promoted_access_tiers.json"))
     assert record["access_tier_groups"] == hcl2.loads(after["prod/env.auto.tfvars"].decode())["access_tier_groups"]
+    # And the account env's empty flock mutex file: the split now merges the shared account file
+    # under environment_lock.mutex (#297).
+    assert "account/generated/.governance.guard" not in before
+    assert after.pop("account/generated/.governance.guard") == b""
     assert after == before
