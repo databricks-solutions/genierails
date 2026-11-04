@@ -193,13 +193,6 @@ def partial_treatments(classes: list[str], sql_type: str, library: dict | None =
             if rank == _PARTIAL}
 
 
-def resolve_column_access(classes: list[str], sql_type: str, *, library: dict | None = None, **precedence):
-    """Resolve a column's class tags, then access, carrying the never-raw flag."""
-    treatment, partial, _full, never_raw = resolve_class(classes, sql_type, library)
-    resolve_precedence = __import__("deterministic_governance", fromlist=["resolve_precedence"]).resolve_precedence
-    return resolve_precedence(treatment=treatment, library_default=partial, never_raw=never_raw, **precedence)
-
-
 # Every body is non-throwing under ANSI mode, so a mask can never fail a query:
 # numeric bodies go through try_cast(value AS DECIMAL(38, 18)), which is NULL
 # for NaN, infinity and values of 1E20 or more, and then use only try_* steps

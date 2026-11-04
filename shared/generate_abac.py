@@ -8019,7 +8019,10 @@ def main():
             sys.exit(1)
         try:
             deterministic_model = deterministic_model_for(
-                auth_cfg, classification_source, ddl_text, env_dir=WORK_DIR,
+                auth_cfg,
+                classification_source,
+                ddl_text,
+                env_dir=WORK_DIR,
                 refuse_ignored_raw_overrides=True,
             )
         except DeterministicGovernanceError as exc:

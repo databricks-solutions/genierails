@@ -51,7 +51,6 @@ PARTIAL_VERSIONS = {
 VERSION_NAMES = frozenset().union(*PARTIAL_VERSIONS.values())
 # Deferred from v1: identifiers are redacted for tiers 2 and 3.
 KEYED_HASH_UNAVAILABLE = "keyed hash is not available in this version; use redacted"
-NEVER_RAW_OVERRIDE_UNAVAILABLE = "is never shown raw to anyone and no override exists"
 
 
 def _known_treatments(registry_path: Path | None = None) -> set[str]:
@@ -149,6 +148,14 @@ def resolve_precedence(
     if version == "raw":
         return AccessResolution("raw")
     return AccessResolution("partial", version)
+
+
+def resolve_column_access(classes: list[str], sql_type: str, *, library: dict | None = None, **precedence) -> AccessResolution:
+    """Resolve a column's class tags, then access, carrying the never-raw flag."""
+    from mask_library import resolve_class
+
+    treatment, partial, _full, never_raw = resolve_class(classes, sql_type, library)
+    return resolve_precedence(treatment=treatment, library_default=partial, never_raw=never_raw, **precedence)
 
 
 _FQN4 = re.compile(r"^[^.\s]+\.[^.\s]+\.[^.\s]+\.[^.\s]+$")
