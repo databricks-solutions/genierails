@@ -2255,6 +2255,55 @@ def test_adopted_create_verifies_values_without_unknown_principals(harness):
     assert not checked_values & skipped_values
 
 
+def test_bug_g_subset_with_fourteen_unknown_policies_builds_three_tier_never_raw_spec(tmp_path):
+    skipped = {f"skipped_{i}" for i in range(7)}
+    policies = []
+    for i, value in enumerate(sorted(skipped)):
+        policies.extend([
+            {"name": f"p{i}_partial", "policy_type": "POLICY_TYPE_COLUMN_MASK",
+             "to_principals": [pg.UNKNOWN],
+             "match_condition": f"hasTagValue('{pg.TAG_KEY}', '{value}')"},
+            {"name": f"p{i}_full", "policy_type": "POLICY_TYPE_COLUMN_MASK",
+             "to_principals": ["account users"], "except_principals": [pg.UNKNOWN],
+             "match_condition": f"hasTagValue('{pg.TAG_KEY}', '{value}')"},
+        ])
+    policies.append({
+        "name": "cvv_full", "policy_type": "POLICY_TYPE_COLUMN_MASK",
+        "to_principals": ["account users"],
+        "match_condition": f"hasTagValue('{pg.TAG_KEY}', 'cvv_never_raw')",
+    })
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text("fgac_policies = [\n" + ",\n".join(
+        generate_abac._render_fgac_policy_block(policy) for policy in policies) + "]\n"
+        "tag_assignments = []\n")
+    env_file = tmp_path / "env.auto.tfvars"
+    env_file.write_text('access_tier_groups = ["raw", "regional", "masked"]\n')
+
+    spa._write_subset(tfvars, {"cat.sch.payments.cvv": "cvv_never_raw"}, skip_values=skipped)
+    spec = load_spec_from_tfvars(tfvars, env_file=env_file, key_column="id")
+
+    assert len(spec.mask_config["fgac_policies"]) == 1
+    check = spec.column_masks[0]
+    assert set(check.masked_principals) == set(TIERS)
+    assert check.unmasked_principals == ()
+    assert all(principal.lower() != pg.UNKNOWN for principal in spec.principals)
+
+
+def test_verification_subset_keeps_policy_covering_skipped_and_verified_values(tmp_path):
+    tfvars = tmp_path / "abac.auto.tfvars"
+    tfvars.write_text('''fgac_policies = [{
+      name = "shared", policy_type = "POLICY_TYPE_COLUMN_MASK", to_principals = ["account users"],
+      match_condition = "hasTagValue('gr_treatment', 'skip') OR hasTagValue('gr_treatment', 'keep')"
+    }]
+    tag_assignments = []
+    ''')
+
+    spa._write_subset(tfvars, {"cat.sch.t.c": "keep"}, skip_values={"skip"})
+
+    cfg = pg._load(tfvars)
+    assert [policy["name"] for policy in cfg["fgac_policies"]] == ["shared"]
+
+
 @pytest.mark.parametrize(("edit", "message"), [
     (lambda t: t.__setitem__("render_from", "not-the-restore"), "unexpected create render target"),
     (lambda t: (t.__setitem__("from", "deadbeef"), t.__setitem__("adopted_from_state", "deadbeef")),

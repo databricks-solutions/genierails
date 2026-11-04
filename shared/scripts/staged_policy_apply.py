@@ -846,7 +846,7 @@ class Controller:
         verify_dir.mkdir(parents=True, exist_ok=True)
         tfvars = verify_dir / f"{stage}.abac.auto.tfvars"
         tfvars.write_text(layer_tfvars.read_text())
-        _write_subset(tfvars, tags)
+        _write_subset(tfvars, tags, skip_values=skip_values)
         env_cfg = pg._load(self.env_dir / "env.auto.tfvars")
         settings = (basis or {}).get("settings")
         if settings is None:
@@ -2031,9 +2031,10 @@ def _pre_marker_restored(t: dict) -> bool:
             and not t["restoring"] and not t["restore_failed"])
 
 
-def _write_subset(tfvars: Path, tags: dict) -> None:
-    """Rewrite ``tfvars`` (a copy of the layer config) with only ``tags`` as treatment tags."""
-    from generate_abac import _find_bracket_section, _render_tag_assignment_block, _replace_bracket_section
+def _write_subset(tfvars: Path, tags: dict, *, skip_values: set[str] | None = None) -> None:
+    """Rewrite a verify config for ``tags``, excluding policies only for skipped values."""
+    from generate_abac import (_find_bracket_section, _render_fgac_policy_block,
+                               _render_tag_assignment_block, _replace_bracket_section)
 
     text = tfvars.read_text()
     cfg = pg._load(tfvars)
@@ -2044,8 +2045,17 @@ def _write_subset(tfvars: Path, tags: dict) -> None:
          for c, v in sorted(tags.items())]
     if _find_bracket_section(text, "tag_assignments") is None:
         text = text.rstrip() + "\n\ntag_assignments = [\n]\n"
-    tfvars.write_text(_replace_bracket_section(text, "tag_assignments",
-                                               [_render_tag_assignment_block(a) for a in assignments]))
+    text = _replace_bracket_section(text, "tag_assignments",
+                                    [_render_tag_assignment_block(a) for a in assignments])
+    if skip_values:
+        policies = []
+        for policy in cfg.get("fgac_policies") or []:
+            values = pg.policy_values(policy)
+            if not values or not set(values) <= skip_values:
+                policies.append(policy)
+        text = _replace_bracket_section(
+            text, "fgac_policies", [_render_fgac_policy_block(policy) for policy in policies])
+    tfvars.write_text(text)
 
 
 def _sha256(path: Path) -> str:
