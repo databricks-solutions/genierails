@@ -197,8 +197,8 @@ def test_the_prod_section_reads_as_expected():
     step = _step(_section("Prod"), "1. Set up and promote.")
     assert "- It then offers to commit and push `.gitignore`, `envs/prod/` and `envs/account/`: answer `y`." \
         in step.splitlines()
-    assert "| `make promote-to ENV=prod` | Copies dev's reviewed rules into prod | The same commit question |" \
-        in flow.splitlines()
+    assert "| `make promote-to ENV=prod` | Copies dev's reviewed rules into prod | The same commit question | " \
+        "Same: save this step's files |" in flow.splitlines()
     # ...and so does the full table in DETAILS.md.
     assert "| `make promote-to ENV=prod` | Copies dev's reviewed rules into prod, renamed to prod's catalogs and " \
         "groups; prints the changed files by owner | The same commit question, for `.gitignore`, `envs/prod/` and " \
@@ -385,7 +385,11 @@ def test_the_ask_table_quotes_the_questions_the_code_asks():
     for command, row in rows.items():
         questions = re.findall(r"`[^`]*\[y/N\]`", row)
         assert questions == re.findall(r"`[^`]*\[y/N\]`", full[command]), command
-        assert row.rstrip().endswith("| nothing |") == full[command].rstrip().endswith("| nothing |"), command
+        # The README's third column is what it asks (its fourth says what a y approves; "—" when it asks nothing).
+        cells = [cell.strip() for cell in row.strip().strip("|").split(" | ")]
+        assert len(cells) == 4, row
+        assert (cells[2] == "nothing") == full[command].rstrip().endswith("| nothing |"), command
+        assert (cells[3] == "—") == (cells[2] == "nothing"), command
     assert "](DETAILS.md#what-each-command-does-in-full)" in asks
     assert list(rows) == ["`make setup ENV=dev REPO=<url>`", "`make generate ENV=dev`", "`make rehearse ENV=dev`",
                           "`make setup ENV=prod`", "`make promote-to ENV=prod`", "`make release ENV=prod`",
@@ -405,7 +409,7 @@ def test_the_ask_table_quotes_the_questions_the_code_asks():
     assert 'question = (f"Approve and release manifest {manifest[\'id\']} (commit {manifest[\'commit\'][:12]}, round "' in loop
     assert 'f"{round_no} of at most {MAX_ROUNDS})?")' in loop and "MAX_ROUNDS = 8" in loop
     for quiet in ("`make evidence ENV=prod`", "`make maintain ENV=prod`", "`make next ENV=<env>` / `make status ENV=<env>`"):
-        assert rows[quiet].rstrip().endswith("| nothing |"), quiet
+        assert rows[quiet].rstrip().endswith("| nothing | — |"), quiet
     # Acks stay a committed file, never a question.
     assert "committing `envs/prod/ack.txt`" in asks and "(an ack is never a `y/N`)" in asks
 

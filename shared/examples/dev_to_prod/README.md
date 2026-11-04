@@ -1,8 +1,34 @@
 # Ship a Genie agent from dev to prod
 
-Take a Genie agent you've curated in **dev** and ship it to **prod** with its sensitive columns masked. Databricks Data Classification finds the sensitive columns; GenieRails turns that into masks and access rules as code. No new business access is granted until every classified sensitive column the agent can reach is covered by a mask policy, checked against freshly read tags.
+Take a Genie agent you've curated in **dev** and ship it to **prod** with its sensitive columns masked.
 
-This page is the happy path. Alternatives, edge cases and CI are in [Details and edge cases](DETAILS.md); each step links to its part.
+This page is the happy path; each step links to its [details, edge cases and CI](DETAILS.md).
+
+<a id="how-it-works"></a>
+## How it works in 1 minute
+
+- **Rules are files in your repo.** Databricks Data Classification tags your sensitive columns. GenieRails turns the tags into masks and access rules, saved as files.
+- **Test in dev, ship the same files.** You prove the rules in dev; prod gets the same files, renamed to prod's catalogs and groups.
+- **Why commit.** A commit is a frozen, fingerprinted copy of what you tested. Prod releases only a commit that passed in dev, so it gets exactly what dev proved. Teammates review changes in a pull request; git keeps the history.
+- **Why a manifest.** A manifest is a saved plan of exactly what a step will change. You read it and answer `y`; GenieRails applies exactly that plan, and refuses if anything changed since you saw it.
+- **Masks first, access last.** No one new gets access until every classified column the agent can reach has a mask and a test proves the masks work. Otherwise a column could leak, so GenieRails stops.
+- **So each sensitive column needs a decision:** mask it or, if the detection is wrong, exclude it in the classification review. [Options](DETAILS.md#if-prod-stops-on-coverage-or-drift); [why no raw-for-everyone switch](DETAILS.md#why-no-unmasked-sensitive-column).
+
+<a id="glossary"></a>
+## Words used on this page
+
+All other terms: [full glossary](REFERENCE.md#glossary).
+
+| Word | In plain words |
+|---|---|
+| **env** | One place you deploy to, e.g. `dev` or `prod`, with its own `envs/<env>/` folder |
+| **tier** (access-tier group) | An existing group whose users see data at one level, e.g. `payments_ops` raw, `viewers` masked |
+| **classification tag** (`class.*`) | The tag Data Classification puts on a sensitive column, e.g. `class.email_address` |
+| **treatment / mask** | How a column is hidden from a tier, e.g. a card shown as `****-****-****-4464` |
+| **rehearse** | The full test in dev: apply the rules, then prove each tier sees what it should |
+| **manifest** | A saved plan of exactly what a step will change; you approve it with `y` |
+| **receipt** | The record that a rehearse or release passed: the commit and, for a release, who approved each round |
+| **ack** (`ack.txt`) | A committed line saying "I reviewed this access and accept it" |
 
 ## The whole flow
 
@@ -28,21 +54,21 @@ make maintain ENV=prod      # deployment machine, cron, at the last released com
 <a id="what-each-command-asks"></a>
 ### What each command does and what it asks
 
-Every command runs from `aws/` (or `azure/`). The questions appear only at a terminal; [off a terminal or in CI](#ci--scripted) nothing asks and nothing answers `y` for you. Every detail: [the full table](DETAILS.md#what-each-command-does-in-full).
+Commands run from `aws/` (or `azure/`). Questions appear only at a terminal; [off a terminal or in CI](#ci--scripted) nothing asks and nothing answers `y` for you. Every detail: [the full table](DETAILS.md#what-each-command-does-in-full).
 
-| Command | What it does | What it asks |
-|---|---|---|
-| `make setup ENV=dev REPO=<url>` | Makes the clone yours and creates dev's env and agent files | `Commit these changes and push them to origin/main? [y/N]` (no `origin`: `... and keep them local (no origin remote)? [y/N]`) |
-| `make generate ENV=dev` | Drafts the rules in `envs/dev/generated/` | The same commit question |
-| `make rehearse ENV=dev` | Checks, applies dev and proves the masks | `Approve and apply this account manifest? [y/N]`, only when the account plan has changes |
-| `make setup ENV=prod` | Creates prod's env files (no agent file: `promote-to` writes prod's) | The same commit question |
-| `make promote-to ENV=prod` | Copies dev's reviewed rules into prod | The same commit question |
-| `make release ENV=prod` | Plans, applies and proves one manifest per round | `Approve and apply this account manifest? [y/N]` first, only when the account plan has changes; then `Approve and release manifest <id> (commit <sha>, round <n> of at most 8)? [y/N]`, once per round |
-| `make evidence ENV=prod` | Records prod's live tags, masks and grants | nothing |
-| `make maintain ENV=prod` | Masks newly tagged columns | nothing |
-| `make next ENV=<env>` / `make status ENV=<env>` | Read-only: the next command / the whole picture | nothing |
+| Command | What it does | What it asks | What your `y` approves |
+|---|---|---|---|
+| `make setup ENV=dev REPO=<url>` | Makes the clone yours and creates dev's env and agent files | `Commit these changes and push them to origin/main? [y/N]` (no `origin`: `... and keep them local (no origin remote)? [y/N]`) | Save these files as a version in your repo |
+| `make generate ENV=dev` | Drafts the rules in `envs/dev/generated/` | The same commit question | Same: save this step's files |
+| `make rehearse ENV=dev` | Checks, applies dev and proves the masks | `Approve and apply this account manifest? [y/N]`, only when the account plan has changes | The account-wide setup shown, e.g. the masks' tag policy |
+| `make setup ENV=prod` | Creates prod's env files (no agent file: `promote-to` writes prod's) | The same commit question | Same: save this step's files |
+| `make promote-to ENV=prod` | Copies dev's reviewed rules into prod | The same commit question | Same: save this step's files |
+| `make release ENV=prod` | Plans, applies and proves one manifest per round | `Approve and apply this account manifest? [y/N]` first, only when the account plan has changes; then `Approve and release manifest <id> (commit <sha>, round <n> of at most 8)? [y/N]`, once per round | Account: as above. Each round: exactly that round's prod changes |
+| `make evidence ENV=prod` | Records prod's live tags, masks and grants | nothing | — |
+| `make maintain ENV=prod` | Masks newly tagged columns | nothing | — |
+| `make next ENV=<env>` / `make status ENV=<env>` | Read-only: the next command / the whole picture | nothing | — |
 
-What stays a human step: the Catalog Explorer review, filling in the env files, and committing `envs/prod/ack.txt` when prod's reader check names principals you accept (an ack is never a `y/N`).
+What stays a human step: the Catalog Explorer review, filling in the env files, and committing `envs/prod/ack.txt` when prod's reader check names owners or admins you accept (an ack is never a `y/N`).
 
 <a id="prerequisites--gather-required-values"></a>
 ## Before you start
@@ -52,7 +78,7 @@ git clone https://github.com/databricks-solutions/genierails.git
 cd genierails/aws          # or: cd azure — every make command runs from the cloud folder
 ```
 
-- Have an empty repo you own ready. Dev step 1's `make setup ENV=dev REPO=<your-repo-url>` makes this clone yours: GenieRails' `origin` becomes `genierails`, and `origin` becomes your repo.
+- Have an empty repo you own ready: dev step 1's `make setup ENV=dev REPO=<your-repo-url>` points `origin` at it and renames GenieRails' remote to `genierails`.
 - No repo of your own yet? Leave `REPO=` off. The commit offers then commit locally.
 - More: [your repo and remotes](DETAILS.md#your-repo-and-remotes).
 
@@ -70,11 +96,14 @@ cd genierails/aws          # or: cd azure — every make command runs from the c
 ## Dev
 
 **1. Set up.** Create dev's files.
+
+*Why:* with `REPO=`, your changes go to your own repo, where teammates can review them.
+
 ```bash
 make setup ENV=dev REPO=<your-repo-url>
 ```
 - Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`](env.auto.tfvars.example) to `envs/dev/env.auto.tfvars` and [`agent.auto.tfvars.example`](agent.auto.tfvars.example) to `envs/dev/agents/Finance Analytics.auto.tfvars`. It copies only files that don't exist yet, so it never overwrites your edits and a re-run changes nothing.
-- Fill in `envs/dev/auth.auto.tfvars`: the service principal and workspace. In `envs/dev/env.auto.tfvars`, replace the deployer and group placeholders:
+- Fill in `envs/dev/auth.auto.tfvars` (service principal, workspace). In `envs/dev/env.auto.tfvars`, replace the deployer and group placeholders:
   ```hcl
   deployer_principal_id = "<the dev auth.auto.tfvars databricks_client_id>"
   access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
@@ -88,35 +117,47 @@ make setup ENV=dev REPO=<your-repo-url>
 More: [more agents, inline `genie_spaces`, the `acl_groups` rules](DETAILS.md#dev-step-1-set-up).
 
 **2. Commit it (own repo).** Save what setup created.
+
+*Why:* the commit is the version you test in dev and ship to prod.
+
 - At the end of `make setup`, GenieRails previews the `.gitignore`, placeholder env defaults and agent file it created and asks to commit and push them. Answer `y`.
-- Credentials such as `auth.auto.tfvars` are never staged.
+- Credentials (`auth.auto.tfvars`) are never staged.
 - Your edits after setup are committed later, by `make generate`'s own offer.
 
 More: [why the commit matters](DETAILS.md#dev-step-2-commit-it).
 
 <a id="dev-classify"></a>
 **3. Classify (in the UI).** Tag dev's sensitive columns.
+
+*Why:* GenieRails builds the masks from these tags.
+
 - In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on.
 - When the scan finishes (the first one can take up to about a day), review the detections, exclude false positives, and turn on auto-tagging.
-- Wait until the columns show `class.*` tags such as `class.email_address`: open a table in Catalog Explorer and check its **Columns** tab.
+- Wait until the columns show `class.*` tags: check a table's **Columns** tab in Catalog Explorer.
 
 **4. Generate.** Draft the rules from the tags.
+
+*Why:* it drafts the rules from what classification found; you review instead of writing them.
+
 ```bash
 make generate ENV=dev
 ```
 - Review the `table_readers` it proposes in `envs/dev/env.auto.tfvars` and the drafted rules in `envs/dev/generated/`.
-- If the tags aren't there yet, it stops and tells you to wait. Re-run it later.
+- No tags yet? It stops and says to wait; re-run it later.
 - It then offers to commit and push `.gitignore` and `envs/dev/`. Answer `y`.
 
 To change a mask, edit `envs/dev/env.auto.tfvars` and re-run `make generate ENV=dev`. In the template's default mode a re-run replaces hand edits to the masks in `envs/dev/generated/`. More: [what a re-run keeps](DETAILS.md#dev-step-4-generate).
 
 **5. Rehearse.** Apply dev and prove the masks work.
+
+*Why:* it proves in dev that the masks really hide the data before anyone gets access.
+
 From a clean checkout at your pushed `origin/main`, in a terminal:
 ```bash
 make rehearse ENV=dev
 ```
 - It first runs `make check ENV=dev`. If a check fails, it stops before it takes the lock, writes anything or reads live dev.
-- A first deploy shows the shared account plan and asks `Approve and apply this account manifest? [y/N]`. Answer `y`.
+- A first deploy shows the shared account plan and asks `Approve and apply this account manifest? [y/N]`. That is the account-wide setup all envs share, e.g. the masks' tag policy. Answer `y`.
 - It applies dev. A first deploy goes in phases, masks before access. Then it runs `verify-access` as its last gate (`_verify-access-gate`). If it stops, fix what it reports and re-run it.
 
 **Pass looks like:** `ALL EFFECTIVE`: each test tier sees masked values, the authorized tier sees raw ones. To re-run only that proof later: `make verify-access ENV=dev`.
@@ -129,6 +170,9 @@ More: [the account layer, phases, row-pairing keys](DETAILS.md#dev-step-5-rehear
 ## Prod
 
 **1. Set up and promote.** Create prod's files and copy dev's reviewed rules.
+
+*Why:* `promote-to` copies the exact tested rules to prod.
+
 ```bash
 make setup ENV=prod
 ```
@@ -144,14 +188,19 @@ make setup ENV=prod
 ```bash
 make promote-to ENV=prod
 ```
-- It copies dev's reviewed rules into prod, renamed to prod's catalogs and groups.
 - It then offers to commit and push `.gitignore`, `envs/prod/` and `envs/account/`: answer `y`.
 
 More: [reusing dev's service principal, `catalog_map` rules, what `promote-to` copies](DETAILS.md#prod-step-1-set-up-and-promote).
 
-**2. Classify (in the UI).** Same as dev, on the prod catalog. Prod's real data may surface sensitive types dev never had.
+**2. Classify (in the UI).** Same as dev, on the prod catalog.
 
-**3. Plan, release.** Release prod, one approved round at a time. One command, at a terminal on the deployment machine:
+*Why:* prod's real data may hold sensitive types dev never had.
+
+**3. Plan, release.** Release prod, one approved round at a time.
+
+*Why:* it applies the rules to prod one safe step at a time; each step shows you its plan to approve.
+
+One command, at a terminal on the deployment machine:
 ```bash
 make release ENV=prod
 ```
@@ -159,15 +208,23 @@ make release ENV=prod
 - A first release takes several rounds, masks before access. Answer `y` each round until it prints `=== Release complete (prod) ===`.
 - It reuses dev's rehearsal; it never rehearses dev. If it says `no passing rehearsal of <commit>`, run `make rehearse ENV=dev` first.
 
-**Expect owner and admin reader refusals on the first round.** For each principal you accept, add its `prod:reader:<table>:<principal>` key to `envs/prod/ack.txt`. Commit and push that file yourself, then run `make release ENV=prod` again.
+**Expect owner and admin reader refusals on the first round.** Owners and admins usually can read prod's tables outside your tiers; GenieRails doesn't manage that access, so you accept it in writing. Add each `prod:reader:<table>:<principal>` key you accept to `envs/prod/ack.txt`, e.g.:
+```text
+# reviewed: owner group of prod_finance
+prod:reader:prod_finance.payments.transactions:finance_admins
+```
+Commit and push it yourself, then run `make release ENV=prod` again.
 
-**Pass looks like:** `ALL EFFECTIVE` (from its `verify-access` gate) and "Release complete". Business users can now open the agent and get masked answers. To re-run only that proof later: `make verify-access ENV=prod`.
+**Pass looks like:** `ALL EFFECTIVE` (from its `verify-access` gate) and "Release complete". Business users now get answers from the agent, masked for their tier. To re-run only that proof later: `make verify-access ENV=prod`.
 
 More: [each round, the account layer, rehearsal reuse, reader acks](DETAILS.md#prod-step-3-plan-release).
 
 **If it stops on coverage or drift**, prod found a sensitive tag your rules don't cover. Nothing new was granted. The message prints the fix with exact commands. More: [both fixes](DETAILS.md#if-prod-stops-on-coverage-or-drift).
 
 **4. Record evidence.** Write a compliance record of what is live.
+
+*Why:* a record for auditors of what is live in prod.
+
 ```bash
 make evidence ENV=prod
 ```
@@ -182,9 +239,12 @@ More: [warehouse, offline mode, state folder](DETAILS.md#prod-step-4-record-evid
 ```bash
 make maintain ENV=prod      # deployment machine, cron, at the last released commit
 ```
+
+*Why:* it catches columns tagged later and masks them.
+
 - Run it from the [deployment machine](../../docs/deployment-machine.md). Schedule it, e.g. with cron.
 - In a deterministic env it runs only from the last released commit, on a clean checkout.
-- It masks newly tagged columns, never grants access past a passing coverage check, and never changes the Genie agent. If it stops, it prints what to do.
+- It never grants access past a passing coverage check and never changes the Genie agent. If it stops, it prints what to do.
 
 More: [what maintain does](DETAILS.md#keep-it-safe).
 

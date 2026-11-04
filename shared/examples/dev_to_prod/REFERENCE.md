@@ -227,11 +227,13 @@ To change who has access in prod, edit `envs/prod/env.auto.tfvars`, commit it, a
 ## Glossary
 
 - **access tier** — a group of users who should see data at the same level (e.g. full / masked / least). You map one IdP group to each tier.
+- **ack (`envs/<env>/ack.txt`)** — a committed line recording that you reviewed something GenieRails would otherwise refuse and accept it, e.g. `prod:reader:<table>:<principal>` for an owner or admin who can read a governed table outside the tiers. Never a `y/N`; you commit the file yourself.
 - **ABAC (attribute-based access control)** — masks/filters that apply based on a column's *tag*, not its name — so a rule covers any column carrying that tag.
 - **`CAN_RUN` / `CAN_USE`** — Databricks permissions: `CAN_RUN` lets a group open and run a Genie agent (granted only through the coverage check); `CAN_USE` lets a principal run a SQL warehouse (needed by the deploying service principal and by `verify-access`'s temporary test principals, not by Genie end users).
 - **`class.*` tag** — a tag Unity Catalog's classifier writes on a column it finds sensitive (e.g. `class.email_address`).
 - **coverage check** — `make coverage-gate`; the blocking check that fails if any tagged-sensitive column has no covering mask/policy. The "tool says NO" step.
 - **drift** — a gap between what's tagged and what's protected; `audit-rulebook` reports it.
+- **env** — one deployment target (`dev`, `stg`, `prod`, ...), with its own `envs/<env>/` folder, workspace credentials and catalogs.
 - **entitlement / workspace assignment** — what lets a group *into* a workspace at all (applied every apply; harmless without a data grant).
 - **evidence** — the compliance record `make evidence` produces (what was scanned, tagged, protected, and approved).
 - **exposure gate (retired)** — the old on/off `business_access_enabled` switch, now ignored. Exposure follows the coverage check instead, which Terraform enforces: no new or wider `SELECT` grant or Genie run permission without a recent pass.
@@ -243,7 +245,11 @@ To change who has access in prod, edit `envs/prod/env.auto.tfvars`, commit it, a
 - **`gr_treatment`** — the one GenieRails-owned tag whose value picks a column's mask.
 - **grant chain** — `USE CATALOG → USE SCHEMA → SELECT`, the layered grants needed to read a table.
 - **IdP (identity provider)** — Entra ID / Okta; **AIM / SCIM** are how it syncs groups into Databricks. GenieRails consumes those groups.
+- **manifest** — a saved, immutable plan of exactly what one step will change: the account manifest (`account-plan`) or one release round's manifest (`release-plan`). You approve it with `y` (or a reviewer approves it in a pipeline); the apply uses exactly its saved plans and refuses if anything changed since it was planned.
 - **masking** — transforming a sensitive value for unauthorized tiers (e.g. card → `****-****-****-4464`) while authorized tiers see the raw value.
 - **principal** — an identity a query runs as (a user, group, or service principal); `verify-access` uses temporary test principals per tier.
+- **receipt** — the record of a pass: `make rehearse` writes one per commit (the commit, a fingerprint of code and inputs, the result), and a finished release writes one (commit, digests, manifest, approvals). `release-plan` needs a passing dev rehearse receipt for the same code; `maintain` needs the release receipt.
+- **rehearse** — `make rehearse ENV=dev`: the full test in dev (check, apply dev, prove the masks with `verify-access`); prod's release reuses its receipt.
 - **rulebook / rules** — the mapping `class.* → gr_treatment → mask` plus the access/row-filter policies (the portable, promoted part).
 - **row filter** — a rule that limits *which rows* a tier can see (business logic; not every flow uses one).
+- **treatment** — how a column is masked for the tiers that may not see it raw (e.g. `phone_partial`, `redact`); its `gr_treatment` tag value picks it.
