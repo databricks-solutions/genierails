@@ -310,6 +310,18 @@ def test_an_override_to_redact_or_never_raw_is_kept_on_a_mixed_column():
     assert resolve_column("c.s.t.ssn", ["us_ssn"], "STRING", treatment_versions={"ssn": {"partial": "last4"}}).partial == "last4"
 
 
+def test_column_override_raw_on_never_raw_column_is_a_clear_error():
+    with pytest.raises(DeterministicGovernanceError) as raised:
+        _model(
+            {"cat.sch.t.cvv": ["card_security_code"]},
+            column_overrides={"cat.sch.t.cvv": {"partial": "raw"}},
+        )
+    assert str(raised.value) == (
+        'column_overrides["cat.sch.t.cvv"].partial may not be raw; column cat.sch.t.cvv '
+        "is never shown raw to anyone and no override exists"
+    )
+
+
 @pytest.mark.parametrize("partial", ["raw", "last4"])
 def test_redact_treatment_versions_cannot_open_a_mixed_column(partial):
     item = resolve_column(

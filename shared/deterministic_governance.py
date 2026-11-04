@@ -53,6 +53,7 @@ PARTIAL_VERSIONS = {
 VERSION_NAMES = frozenset().union(*PARTIAL_VERSIONS.values())
 # Deferred from v1: identifiers are redacted for tiers 2 and 3.
 KEYED_HASH_UNAVAILABLE = "keyed hash is not available in this version; use redacted"
+NEVER_RAW_OVERRIDE_UNAVAILABLE = "is never shown raw to anyone and no override exists"
 
 
 def _known_treatments(registry_path: Path | None = None) -> set[str]:
@@ -268,13 +269,16 @@ def validate_config(
         elif not isinstance(rule["partial"], str):
             errors.append(f"{label}.partial must be a string")
         elif rule["partial"] == "raw":
-            errors.append(
-                f'{label}.partial may not be raw; working routes are per-column '
-                'column_overrides["cat.sch.tbl.col"] = { partial = "raw" } for middle tiers, '
-                "putting the group in the first access tier, or raw_exempt_principals. Each is a "
-                "weakening that needs an ack.txt line. If the column is not sensitive, exclude it "
-                "in Data Classification"
-            )
+            if treatment in NEVER_RAW_TREATMENTS:
+                errors.append(f"{label}.partial may not be raw; {treatment} {NEVER_RAW_OVERRIDE_UNAVAILABLE}")
+            else:
+                errors.append(
+                    f'{label}.partial may not be raw; working routes are per-column '
+                    'column_overrides["cat.sch.tbl.col"] = { partial = "raw" } for middle tiers, '
+                    "putting the group in the first access tier, or raw_exempt_principals. Each is a "
+                    "weakening that needs an ack.txt line. If the column is not sensitive, exclude it "
+                    "in Data Classification"
+                )
         elif rule["partial"] == "hmac_sha256":
             errors.append(f"{label}.partial: {KEYED_HASH_UNAVAILABLE}")
         elif rule["partial"] not in partial_versions.get(treatment, frozenset()):

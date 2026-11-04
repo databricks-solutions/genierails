@@ -223,6 +223,12 @@ def test_reference_links_resolve_and_readme_links_to_it():
     assert "](REFERENCE.md)" in (ROOT / "README.md").read_text()
 
 
+def test_dev_to_prod_reference_does_not_suggest_tier_access_overrides_are_available():
+    text = (SHARED / "examples" / "dev_to_prod" / "REFERENCE.md").read_text()
+    assert "A group access override can change only an intermediate tier" not in text
+    assert "Deterministic generation refuses `tier_access_overrides`" in text
+
+
 @pytest.mark.parametrize("text, named", [
     ("run `make release ENV=prod MANIFEST=<m>`", {"release"}),
     ("Run `make` from `aws/`; `make ENV=prod` is not a target", set()),

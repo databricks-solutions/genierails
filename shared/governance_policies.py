@@ -32,7 +32,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from deterministic_governance import NEVER_RAW_TREATMENTS
+from deterministic_governance import NEVER_RAW_OVERRIDE_UNAVAILABLE, NEVER_RAW_TREATMENTS
 from mask_library import load_library, partial_treatments, resolve_class, sql_body, type_family, typed_body
 
 TAG_KEY = "gr_treatment"
@@ -385,6 +385,11 @@ def resolve_column(
         treatment = max(
             name for name, item in data["treatments"].items()
             if name in NEVER_RAW_TREATMENTS and set(names) & set(item["classes"])
+        )
+    if never_raw and override.get("partial") == "raw":
+        raise DeterministicGovernanceError(
+            f'column_overrides["{column}"].partial may not be raw; column {column} '
+            f"{NEVER_RAW_OVERRIDE_UNAVAILABLE}"
         )
     if not never_raw:
         version = (treatment_versions or {}).get(treatment, {}).get("partial")
