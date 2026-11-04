@@ -816,6 +816,19 @@ def test_plain_release_prints_the_current_manifest_then_applies_it(make, repo):
     assert rg.last_release(repo.cloud, "prod")["manifest"]["path"] == str(manifest)
 
 
+def test_import_only_policy_manifest_summary_says_state_will_be_imported(tmp_path):
+    lines = rg.manifest_summary(tmp_path / "manifest.json", {
+        "commit": "abc123", "created_at": "now", "host": "builder", "final": False,
+        "plans": {"data_access": {"steps": [{
+            "phase": "import-adopted-treatment-tags", "kind": "import-treatment-tags",
+            "imports": {"cat.sch.t.email": "email_partial__string__12345678"},
+        }]}, "workspace": {"changes": False}},
+    })
+
+    assert "    data_access:  import 1 verified live gr_treatment assignment(s) into state" in lines
+    assert not any("data_access:  no changes" in line for line in lines)
+
+
 def test_plain_release_through_the_release_target_uses_the_current_manifest(tmp_path, repo):
     make = Make(tmp_path, repo, passthrough=("_release-manifest",))
     manifest = _planned(make)

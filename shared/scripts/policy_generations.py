@@ -137,6 +137,7 @@ STAGE_RECORD = "stage.json"
 # variable that points terraform_layer.sh at it.
 STAGE_CONFIG = Path("generated") / ".runtime" / "data_access"
 STAGE_CONFIG_ENV = "GENIERAILS_LAYER_CONFIG_DIR"
+ADOPTED_TREATMENT_IMPORTS_ENV = "GENIERAILS_ADOPTED_TREATMENT_IMPORTS"
 # The stages whose render keeps the active generation's tag values.
 KEEP_TAG_STAGES = ("create", "tighten", "restore", "abandon")
 ALL_USERS = "account users"
@@ -688,6 +689,28 @@ def _runner(env_name: str, layer_dir: Path, *args: str, capture: bool = False) -
     return result.stdout or ""
 
 
+def import_verified_adopted_treatments(env_name: str, layer_dir: Path, rendered: dict,
+                                       environ: dict) -> None:
+    """Import only controller-authorized, live-equal adopted treatment tags."""
+    raw = environ.get(ADOPTED_TREATMENT_IMPORTS_ENV, "")
+    if not raw:
+        return
+    try:
+        imports = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise StageError(f"invalid {ADOPTED_TREATMENT_IMPORTS_ENV}: {exc}") from exc
+    if not isinstance(imports, dict):
+        raise StageError(f"invalid {ADOPTED_TREATMENT_IMPORTS_ENV}: expected an object")
+    rendered_tags = dict(rendered.get("tags") or {})
+    for column, value in sorted(imports.items()):
+        if not isinstance(column, str) or not isinstance(value, str) or rendered_tags.get(column) != value:
+            raise StageError("refusing an adopted treatment import that is not exactly in the create render")
+        key = f"columns|{column}|{TAG_KEY}"
+        address = f'module.data_access.databricks_entity_tag_assignment.treatment[{json.dumps(key)}]'
+        _runner(env_name, layer_dir, "import", "-no-color", address, f"columns,{column},{TAG_KEY}")
+        print(f"Policy stage create: imported verified live treatment tag for {column}")
+
+
 def _rerun_coverage_gate(env_dir: Path, env_name: str, runner: str, stage: str = "",
                          old_fp: str = "", keep_new_tags: bool = False, *, rebind_fp: str = "",
                          opens_access: bool = False, validation_config_dir: Path | None = None) -> None:
@@ -829,6 +852,8 @@ def run_hook(stage: str, environ: dict | None = None) -> int:
         print(f"Policy stage {stage}: applied the saved plan of generation {desired['fingerprint']}")
         return 0
     write_stage(layer_dir, staged["rendered"])
+    if stage == "create":
+        import_verified_adopted_treatments(env_name, layer_dir, staged["rendered"], environ)
     if environ.get("GENIERAILS_COVERAGE_GATE_RUNNER"):
         validation_config_dir = None
         if _normal(staged.get("coverage_rendered")) != _normal(staged["rendered"]):

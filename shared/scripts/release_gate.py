@@ -1698,6 +1698,9 @@ def manifest_summary(manifest_path: Path, manifest: Mapping) -> list[str]:
     changing = [str(s.get("phase")) for s in steps if s.get("kind") == "apply" and s.get("changes")]
     if steps and [s.get("kind") for s in steps] == ["adopt"]:
         lines.append("    data_access:  adopt the legacy policies (one staged phase)")
+    elif steps and [s.get("kind") for s in steps] == ["import-treatment-tags"]:
+        count = len((steps[0].get("imports") or {}))
+        lines.append(f"    data_access:  import {count} verified live gr_treatment assignment(s) into state")
     elif not imports:
         what = f"saved plan(s) with changes, phase(s) {', '.join(changing)}" if changing else "no changes"
         lines.append(f"    data_access:  {what}"
