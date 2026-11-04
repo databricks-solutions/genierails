@@ -18,6 +18,7 @@ provider call; nothing reaches Databricks.
 from __future__ import annotations
 
 import fnmatch
+import importlib.util
 import io
 import json
 import os
@@ -35,7 +36,9 @@ import agent_files
 import generate_abac
 from agent_files import AgentFileError
 from deterministic_governance import validate_config
+from generate_abac import NativeClassificationRequiredError
 from governance_policies import DeterministicGovernanceError, build_model, column_types_from_ddl
+from sensitivity_source import ClassificationSource
 from scripts import agent_ownership as ownership, coverage_fix, promotion_txn
 from scripts import scaffold_treatments as scaffold
 from tests import test_deterministic_check_promote as base
@@ -44,6 +47,12 @@ from tests.test_check_target import FAKE_TERRAFORM, GITIGNORE, _git
 
 ROOT = base.ROOT
 SHARED = base.SHARED
+DERIVE_SPEC = importlib.util.spec_from_file_location(
+    "derive_assignments_persona", SHARED / "scripts/derive_assignments.py"
+)
+DERIVE = importlib.util.module_from_spec(DERIVE_SPEC)
+assert DERIVE_SPEC.loader is not None
+DERIVE_SPEC.loader.exec_module(DERIVE)
 BASE_COMMIT = "16c9797a5030e80a8fe0c79eb60c29ad12218407"  # origin/main before step 14
 CODEOWNERS = SHARED / "examples" / "CODEOWNERS.example"
 CLOUDS = ("aws", "azure")
@@ -333,6 +342,46 @@ def test_check_prod_passes_on_what_an_agent_file_promotion_writes(tmp_path, monk
     assert "OK: generated files (envs/prod): committed files match." in out, out
     # The plan (6) needs prod's live classification config.
     assert check.returncode == 0 or "=== make check ENV=prod: FAILED (plan) ===" in out, out
+
+
+def test_readme_agent_file_promotion_uses_committed_agent_tables_for_prod_derive(
+        tmp_path, monkeypatch):
+    """README shape: no declared tables or prod ID; promote-to's record is the footprint."""
+    repo = _agent_repo(tmp_path, monkeypatch)
+    prod = base._envs(repo) / "prod"
+    prod.mkdir()
+    (prod / "env.auto.tfvars").write_text(PROD_ENV + 'enable_classification = true\n')
+    (prod / "auth.auto.tfvars").write_text(base._auth(base.DEPLOYER))
+    result = base._make(repo, tmp_path, "promote-to", "ENV=prod")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    env_cfg = hcl2.loads((prod / "env.auto.tfvars").read_text())
+    agent_cfg = hcl2.loads((prod / "agents/Payments.auto.tfvars").read_text())
+    assert env_cfg.get("uc_tables") in (None, [])
+    assert not agent_cfg.get("genie_space_id") and not agent_cfg.get("uc_tables")
+    assert _governed(prod) == {"tables": [], "agent_tables": {"Payments": ["ppay.s.t"]}}
+
+    scanned = []
+
+    def native(table_refs, *_args, **_kwargs):
+        if not table_refs:
+            raise NativeClassificationRequiredError(
+                "No resolvable catalog.schema.table footprint is available for required native classification"
+            )
+        scanned.append(list(table_refs))
+        return ClassificationSource(tag_rows=[("ppay", "s", "t", "email", "class.email_address", "")])
+
+    monkeypatch.setattr(DERIVE, "_fetch_live_classification_source", native)
+    monkeypatch.setattr(DERIVE, "fetched_ddl_text", lambda *_a, **_k: "CREATE TABLE ppay.s.t (email STRING);")
+    out = tmp_path / "derived"
+    out.mkdir()
+    (out / "abac.auto.tfvars").write_bytes((prod / "generated/abac.auto.tfvars").read_bytes())
+    (out / "masking_functions.sql").write_bytes((prod / "generated/masking_functions.sql").read_bytes())
+
+    DERIVE.derive_assignments(out / "abac.auto.tfvars", prod / "auth.auto.tfvars",
+                              prod / "env.auto.tfvars")
+
+    assert scanned == [["ppay.s.t"]]
 
 
 def test_an_agent_only_change_adding_a_table_changes_only_agent_and_governance_owned_generated_files(
