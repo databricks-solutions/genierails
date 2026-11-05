@@ -1540,13 +1540,14 @@ def print_reports(report: Mapping) -> None:
 
 
 def carried_weakening_acknowledgements(env_dir: Path, env: str, keys: set[str]) -> dict[str, dict]:
-    """Weakening acknowledgements consumed by an earlier phase of the same unfinished transition.
+    """Weakening acknowledgements consumed by an earlier phase of the same unfinished release.
 
     After the switch phase, live can equal the desired policy generation while
-    the release still has later phases (for example grants) to apply. A weaken
-    ack then no longer matches a current weakening, but it is still part of the
-    same reviewed staged transition if a verified earlier phase manifest for the
-    current policy run listed that exact key as acknowledged.
+    the release still has later phases (for example grants or deferred Genie
+    CAN_RUN) to apply. A weaken ack then no longer matches a current weakening,
+    but it is still part of the same reviewed release if a verified earlier
+    phase manifest in the current release epoch listed that exact key as
+    acknowledged for the same staged-policy run and from/to generations.
     """
     if not keys:
         return {}
@@ -1557,19 +1558,30 @@ def carried_weakening_acknowledgements(env_dir: Path, env: str, keys: set[str]) 
     except Exception:
         return {}
     transition = journal.get("transition")
-    if not isinstance(transition, dict):
+    finished: Mapping | None = None
+    for entry in journal.get("history") or []:
+        if isinstance(entry, Mapping) and "abandoned" in entry:
+            continue
+        if isinstance(entry, Mapping) and entry.get("finished_at"):
+            finished = entry
+    run = transition if isinstance(transition, Mapping) else finished
+    if not isinstance(run, Mapping):
         return {}
-    run_id = str(transition.get("run_id") or "")
-    from_fp = str(transition.get("from") or "")
-    to_fp = str(transition.get("to") or "")
+    run_id = str(run.get("run_id") or "")
+    from_fp = str(run.get("from") or "")
+    to_fp = str(run.get("to") or "")
     if not run_id or not from_fp or not to_fp:
         return {}
     for entry in journal.get("history") or []:
-        if isinstance(entry, Mapping) and str(entry.get("run_id") or "") == run_id \
-                and ("abandoned" in entry or "finished_at" in entry):
+        if isinstance(entry, Mapping) and str(entry.get("run_id") or "") == run_id and "abandoned" in entry:
             return {}
 
     cloud_dir = cloud_dir_of(Path(env_dir))
+    epoch = release_epoch(cloud_dir, env)
+    if not isinstance(epoch, str):
+        return {}
+    if any(receipt.get("release_epoch") == epoch for receipt in release_receipts(cloud_dir, env)):
+        return {}
     directory = env_state(cloud_dir, env) / "receipts" / "phases"
     carried: dict[str, dict] = {}
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
@@ -1577,6 +1589,8 @@ def carried_weakening_acknowledgements(env_dir: Path, env: str, keys: set[str]) 
             continue
         record = _read_json(path)
         if not isinstance(record, dict) or record.get("policy_run") != run_id:
+            continue
+        if record.get("release_epoch") != epoch:
             continue
         if _phase_problem(cloud_dir, env, path, record):
             continue
@@ -1589,7 +1603,11 @@ def carried_weakening_acknowledgements(env_dir: Path, env: str, keys: set[str]) 
             continue
         weakening = (manifest.get("reports") or {}).get("weakening") or {}
         acknowledged = weakening.get("acknowledged") if isinstance(weakening, Mapping) else []
+        if not isinstance(acknowledged, list):
+            continue
         for item in acknowledged:
+            if not isinstance(item, Mapping):
+                continue
             key = str((item or {}).get("ack_key") or "")
             if key in keys:
                 carried.setdefault(key, {"manifest": manifest_id, "phase_record": str(path), "policy_run": run_id})

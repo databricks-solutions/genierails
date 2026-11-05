@@ -193,8 +193,9 @@ raw, so map a class that must never be raw to `secret` instead.
   custom mask's SQL) is reported as `custom_mask_changed` and needs a
   `<env>:weaken:<column>:<principal>` acknowledgement. In a multi-round staged
   release, a verified earlier phase manifest keeps that exact `weaken` entry
-  valid for the same unfinished policy-journal run and from/to generations; it
-  is stale again after `Release complete`, abandon, or a different run.
+  valid for the same policy-journal run and from/to generations until
+  `Release complete`; it is stale again after completion, abandon, or a
+  different run.
 - **Promotion:** `make promote-to` copies `custom_masks/` byte for byte
   (removing files the source no longer has) and reports it as governance
   files. The account tag policy accepts any `custom_*` value, so

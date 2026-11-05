@@ -2447,6 +2447,23 @@ def _released_then_switched_with_ack(env_dir: Path, run_id: str = "run-j") -> tu
     return old, new, key, record
 
 
+def _finish_transition(env_dir: Path, old: dict, new: dict, run_id: str = "run-j") -> None:
+    spa.save_journal(env_dir, {"version": 1, "active": new["fingerprint"], "pending": [], "transition": None,
+                               "history": [_finished(run_id) | {
+                                   "from": old["fingerprint"], "to": new["fingerprint"],
+                                   "finished_at": rg._now()}]})
+
+
+def _write_release_receipt(env_dir: Path, manifest_id: str = "final") -> None:
+    cloud_dir = rg.cloud_dir_of(env_dir)
+    epoch = rg.release_epoch(cloud_dir, "prod", create=True)
+    rg._write_once(rg.release_dir(cloud_dir, "prod") / f"{manifest_id}.json", {
+        "kind": "release", "version": rg.VERSION, "env": "prod", "cloud": cloud_dir.name,
+        "commit": "0123456789abcdef", "release_epoch": epoch, "manifest": {"id": manifest_id},
+        "created_at": rg._now(),
+    })
+
+
 @pytest.fixture
 def first_prod(tmp_path):
     env_dir = tmp_path / "envs" / "prod"
@@ -2661,11 +2678,28 @@ def test_carried_weakening_ack_must_belong_to_the_open_policy_run(released_prod)
     assert not report["ok"] and report["unmatched_acknowledgements"] == [key]
 
 
+def test_finished_policy_run_carries_weakening_ack_into_deferred_genie_round(released_prod):
+    old, new, key, _ = _released_then_switched_with_ack(released_prod)
+    _finish_transition(released_prod, old, new)
+    report = rg.reports(released_prod, "prod")
+    assert report["ok"] and report["unmatched_acknowledgements"] == []
+    assert report["carried_weakening_acknowledgements"][key]["policy_run"] == "run-j"
+
+
+def test_carried_weakening_ack_must_match_the_finished_generation_pair(released_prod):
+    old, new, key, _ = _released_then_switched_with_ack(released_prod)
+    _finish_transition(released_prod, old, new)
+    journal = spa.load_journal(released_prod)
+    journal["history"][0]["to"] = "different-generation"
+    spa.save_journal(released_prod, journal)
+    report = rg.reports(released_prod, "prod")
+    assert not report["ok"] and report["unmatched_acknowledgements"] == [key]
+
+
 def test_carried_weakening_ack_is_stale_after_release_complete(released_prod):
-    _, new, key, _ = _released_then_switched_with_ack(released_prod)
-    spa.save_journal(released_prod, {"version": 1, "active": new["fingerprint"], "pending": [],
-                                     "transition": None,
-                                     "history": [_finished("run-j") | {"to": new["fingerprint"]}]})
+    old, new, key, _ = _released_then_switched_with_ack(released_prod)
+    _finish_transition(released_prod, old, new)
+    _write_release_receipt(released_prod)
     report = rg.reports(released_prod, "prod")
     assert not report["ok"] and report["unmatched_acknowledgements"] == [key]
 
@@ -2686,6 +2720,32 @@ def test_carried_weakening_ack_does_not_authorize_a_new_unacked_weakening(releas
     unacked = {w["ack_key"] for w in report["weakening"]["unacknowledged"]}
     assert {"prod:weaken:prod_cat.sch.t:etl-sp", "prod:weaken:prod_cat.sch.t.email:etl-sp"} <= unacked
     assert not report["ok"]
+
+
+@pytest.mark.parametrize("acknowledged", [None, "not-a-list", [None], ["not-a-dict"]])
+def test_carried_weakening_ack_ignores_malformed_manifest_acknowledged(released_prod, acknowledged):
+    _, _, key, _ = _released_then_switched_with_ack(released_prod)
+    manifest = rg.manifests_dir(rg.cloud_dir_of(released_prod), "prod") / "phase-run-j" / "manifest.json"
+    data = json.loads(manifest.read_text())
+    os.chmod(manifest, 0o600)
+    data["reports"]["weakening"]["acknowledged"] = acknowledged
+    manifest.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    record = rg.env_state(rg.cloud_dir_of(released_prod), "prod") / "receipts" / "phases" / "phase-run-j.json"
+    record_data = json.loads(record.read_text())
+    os.chmod(record, 0o600)
+    record_data["manifest_sha256"] = rg.sha256_file(manifest)
+    record.write_text(json.dumps(record_data, indent=2, sort_keys=True) + "\n")
+    report = rg.reports(released_prod, "prod")
+    assert not report["ok"] and report["unmatched_acknowledgements"] == [key]
+
+
+def test_carried_weakening_ack_fails_closed_when_journal_is_unreadable(released_prod):
+    _released_then_switched_with_ack(released_prod)
+    journal = spa.journal_path(released_prod)
+    os.chmod(journal, 0o600)
+    journal.write_text("{not json")
+    with pytest.raises(spa.Refused, match="policy journal .* is unreadable"):
+        rg.reports(released_prod, "prod")
 
 
 # -- edits git status can't see: skip-worktree / assume-unchanged ------------------------------

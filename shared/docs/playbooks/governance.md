@@ -229,8 +229,8 @@ prod:delete-agent:<agent key>
 - `ack.txt` must be governance-owned in `CODEOWNERS`.
 - An entry that matches nothing after all checks is refused, so stale lines
   can't pile up. The exception is a `weaken` entry acknowledged by a verified
-  earlier phase manifest of the same unfinished staged policy run and the same
-  from/to generations; it stays valid until `Release complete` or abandon.
+  earlier phase manifest of the same staged policy run and the same from/to
+  generations; it stays valid until `Release complete` or abandon.
 
 ## Keep it safe between changes
 
