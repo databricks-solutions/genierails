@@ -52,9 +52,6 @@ GRANTS = [f"{TABLE}|masked", f"{TABLE}|regional"]
 PROTECTED = ("databricks_policy_info.", "databricks_entity_tag_assignment.", "databricks_grant.",
              "terraform_data.masking_functions_drop")
 CHANGE = re.compile(r"# (\S+) (will be (?:created|destroyed|updated in-place|read during apply)|must be replaced)")
-MOCK_COLUMN_MASK_USING_NULL_REKEY = {
-    ('databricks_policy_info.policies["gr_mask_cat_email_partial"]', "will be updated in-place"),
-}
 
 pytestmark = pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
 
@@ -67,7 +64,7 @@ def legacy_state(tmp_path: Path) -> Path:
     attrs = {
         "name": f"cat_{policy['name']}", "on_securable_fullname": "cat", "policy_type": policy["policy_type"],
         "to_principals": policy["to_principals"], "except_principals": None, "comment": policy["comment"],
-        "column_mask": {"function_name": "cat.sch.mask_email", "on_column": policy["match_alias"], "using": None},
+        "column_mask": {"function_name": "cat.sch.mask_email", "on_column": policy["match_alias"], "using": []},
         "match_columns": [{"condition": policy["match_condition"], "alias": policy["match_alias"]}],
         "when_condition": None, "row_filter": None,
     }
@@ -117,7 +114,10 @@ def _test_body(stages: dict) -> str:
     deterministic = (f'governance_mode = "deterministic"\n    access_tier_groups = {_hcl_value(TIERS)}\n'
                      f'    table_readers = {{ "{TABLE}" = ["regional", "masked"] }}')
     # What the root passes from the layer's state; a probe (empty state) has none.
-    applied = f"applied_table_grants = {_hcl_value(GRANTS)}"
+    # The legacy apply recorded its mask's column_mask.using as [] (every mask
+    # applied before the null render); the policies created here record null.
+    applied = (f"applied_table_grants = {_hcl_value(GRANTS)}\n"
+               f"    column_mask_empty_using_policies = {_hcl_value([LEGACY_POLICY['name']])}")
     desired_value = stages["desired"]["tags"][COLUMN]
     policy_names = sorted(p["name"] for p in stages["desired"]["fgac_policies"])
     providers = ("  providers = { databricks.account = databricks.account, databricks.workspace = "
@@ -271,6 +271,7 @@ run "untouched_replan" {{
   command   = plan
 {providers}  variables {{
     {legacy_vars}
+    column_mask_empty_using_policies = {_hcl_value([LEGACY_POLICY['name']])}
   }}
 }}
 {phase("create", stages["create"], asserts=with_legacy + f"""  assert {{
@@ -358,10 +359,9 @@ def test_old_code_apply_then_new_code_migration_destroys_nothing_and_leaves_no_g
 
     # Never opted in: nothing changes but the one-time masking re-key (the
     # legacy module recorded checkout paths in masking_functions' triggers).
-    # The historical mock-provider apply stores column_mask.using as [].
-    # Real-provider refresh returns null and is covered by
-    # test_column_mask_using_null_matches_live_null_and_reverts_non_empty_using.
-    assert set(CHANGE.findall(runs["untouched_replan"])) == MASKING_REKEY | MOCK_COLUMN_MASK_USING_NULL_REKEY, runs["untouched_replan"]
+    # The legacy mask's state holds column_mask.using = [] and the root passes
+    # its key, so the null render plans no update of it.
+    assert set(CHANGE.findall(runs["untouched_replan"])) == MASKING_REKEY, runs["untouched_replan"]
     assert is_masking_rekey(runs["untouched_replan"]), runs["untouched_replan"]
     # Create: the tag moves to its stable key (no destroy/create), the new policies are added,
     # the legacy policy and every grant are untouched.
@@ -372,14 +372,13 @@ def test_old_code_apply_then_new_code_migration_destroys_nothing_and_leaves_no_g
         assert _destroyed(runs[f"{name}_plan"]) == set(), (name, runs[f"{name}_plan"])
     # The two new policies, and the one-time masking re-key on this legacy state.
     assert set(CHANGE.findall(runs["create_plan"])) >= MASKING_REKEY and is_masking_rekey(runs["create_plan"])
-    assert re.search(r"Plan: 3 to add, [23] to change, 1 to destroy\.", runs["create_plan"])
+    assert re.search(r"Plan: 3 to add, 2 to change, 1 to destroy\.", runs["create_plan"])
     assert "Plan: 0 to add, 1 to change, 0 to destroy." in runs["switch_plan"]  # the retag
     assert "No changes." in runs["grant_plan"]
     changes = {phase: dict((a, c) for a, c in CHANGE.findall(runs[f"{phase}_plan"]))
                for phase in ("create", "switch", "grant")}
     legacy_address = f'databricks_policy_info.policies["{LEGACY_POLICY["name"]}"]'
-    assert changes["create"].get(legacy_address) in (None, "will be updated in-place"), changes
-    assert all(legacy_address not in changes[phase] for phase in ("switch", "grant")), changes
+    assert all(legacy_address not in c for c in changes.values()), changes  # never even updated
     assert all(not a.startswith("databricks_grant.table_access") for c in changes.values() for a in c), changes
     new_policies = {f'databricks_policy_info.policies["{p["name"]}"]' for p in stages["desired"]["fgac_policies"]}
     assert {a for a, c in changes["create"].items() if c == "will be created"} >= new_policies

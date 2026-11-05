@@ -554,6 +554,27 @@ def _module_column_mask_using_expression() -> str:
     return match.group(1).strip()
 
 
+ROOT_MAIN_TF = SHARED / "roots" / "data_access" / "main.tf"
+
+
+def _root_empty_using_expression() -> str:
+    """The data_access root's own-state derivation of column_mask_empty_using_policies."""
+    source = ROOT_MAIN_TF.read_text()
+    match = re.search(r"\n  column_mask_empty_using_policies = ", source)
+    assert match, "the root must derive column_mask_empty_using_policies from its own state"
+    start = index = match.end()
+    depth = 0
+    while True:
+        char = source[index]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+        index += 1
+
+
 def _policy_state(using):
     column_mask = {
         "function_name": "cat.sch.mask_email",
@@ -567,6 +588,7 @@ def _policy_state(using):
         "serial": 1,
         "lineage": "column-mask-using-regression",
         "resources": [{
+            "module": "module.data_access",
             "mode": "managed",
             "type": "databricks_policy_info",
             "name": "policies",
@@ -594,21 +616,38 @@ def _policy_state(using):
     }
 
 
-def _write_policy_using_root(root: Path, using_expression: str, using):
-    root.mkdir()
-    (root / "main.tf").write_text(f"""
-terraform {{
-  required_providers {{
-    databricks = {{
+def _write_policy_using_root(root: Path, using, *, derive: bool = True):
+    """A root shaped like data_access: it reads its own state and passes the keys to the module."""
+    (root / "mod").mkdir(parents=True)
+    required = """
+terraform {
+  required_providers {
+    databricks = {
       source  = "databricks/databricks"
       version = "~> 1.111.0"
-    }}
-  }}
-}}
-
+    }
+  }
+}
+"""
+    (root / "main.tf").write_text(required + f"""
 provider "databricks" {{
   host  = "https://example.invalid"
   token = "placeholder-token"
+}}
+
+locals {{
+  _own_state = fileexists("${{path.root}}/terraform.tfstate") ? try(jsondecode(file("${{path.root}}/terraform.tfstate")), null) : null
+  column_mask_empty_using_policies = {_root_empty_using_expression()}
+}}
+
+module "data_access" {{
+  source                           = "./mod"
+  column_mask_empty_using_policies = {"local.column_mask_empty_using_policies" if derive else "[]"}
+}}
+""")
+    (root / "mod" / "main.tf").write_text(required + f"""
+variable "column_mask_empty_using_policies" {{
+  type = list(string)
 }}
 
 resource "databricks_policy_info" "policies" {{
@@ -625,7 +664,7 @@ resource "databricks_policy_info" "policies" {{
   column_mask = {{
     function_name = "cat.sch.mask_email"
     on_column     = "email"
-    using         = {using_expression}
+    using         = {_module_column_mask_using_expression()}
   }}
   row_filter     = null
   when_condition = null
@@ -644,31 +683,43 @@ def _plan_json(root: Path, env: dict, plan_name: str) -> tuple[subprocess.Comple
     return plan, json.loads(show.stdout)
 
 
+def _plan_policy_using(tmp_path: Path, name: str, using, *, derive: bool = True):
+    root = tmp_path / name
+    env = tf_env(tmp_path / f"{name}_tf")
+    _write_policy_using_root(root, using, derive=derive)
+    tf_init(root, env=env)
+    plan, plan_json = _plan_json(root, env, f"{name}.tfplan")
+    assert plan.returncode in (0, 2), plan.stdout + plan.stderr
+    return plan, plan_json.get("resource_changes", [])
+
+
 @pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
-def test_column_mask_using_null_matches_live_null_and_reverts_non_empty_using(tmp_path):
-    """Provider 1.111 has column_mask as a single object: missing/null differs from []."""
-    using_expression = _module_column_mask_using_expression()
+def test_column_mask_using_matches_live_null_and_applied_empty_and_reverts_non_empty_using(tmp_path):
+    """Provider 1.111 has column_mask as a single object: missing/null differs from [].
 
-    null_root = tmp_path / "null_using"
-    null_env = tf_env(tmp_path / "null_tf")
-    _write_policy_using_root(null_root, using_expression, "omitted")
-    tf_init(null_root, env=null_env)
-    null_plan, null_json = _plan_json(null_root, null_env, "null.tfplan")
-    assert null_plan.returncode == 0, null_plan.stdout + null_plan.stderr + json.dumps(null_json, indent=2)
-    assert all(
-        (change.get("change") or {}).get("actions") == ["no-op"]
-        for change in null_json.get("resource_changes", [])
-    )
+    UC (adopted/imported policies, and every policy created since the null
+    render) gives null; policies applied before it hold [] in state. Neither
+    may plan an update. A non-empty live ``using`` must still revert to null.
+    """
+    for name, using in (("omitted_using", "omitted"), ("null_using", None), ("empty_using", [])):
+        plan, changes = _plan_policy_using(tmp_path, name, using)
+        assert plan.returncode == 0, (name, plan.stdout)
+        assert changes and all(c["change"]["actions"] == ["no-op"] for c in changes), (name, changes)
 
-    non_empty_root = tmp_path / "non_empty_using"
-    non_empty_env = tf_env(tmp_path / "non_empty_tf")
-    _write_policy_using_root(non_empty_root, using_expression, [{"alias": "region"}])
-    tf_init(non_empty_root, env=non_empty_env)
-    non_empty_plan, non_empty_json = _plan_json(non_empty_root, non_empty_env, "non-empty.tfplan")
-    assert non_empty_plan.returncode == 2, non_empty_plan.stdout + non_empty_plan.stderr
-    changes = non_empty_json.get("resource_changes", [])
+    plan, changes = _plan_policy_using(tmp_path, "non_empty_using", [{"alias": "region"}])
+    assert plan.returncode == 2, plan.stdout + plan.stderr
     assert len(changes) == 1
     change = changes[0]["change"]
     assert change["actions"] == ["update"]
     assert [item.get("alias") for item in change["before"]["column_mask"]["using"]] == ["region"]
     assert change["after"]["column_mask"].get("using") is None
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_column_mask_applied_empty_using_would_update_without_the_state_derivation(tmp_path):
+    """Why the root reads its state: rendering null over an applied [] is an in-place update of the mask."""
+    plan, changes = _plan_policy_using(tmp_path, "empty_using_null_render", [], derive=False)
+    assert plan.returncode == 2, plan.stdout + plan.stderr
+    assert [c["change"]["actions"] for c in changes] == [["update"]]
+    assert changes[0]["change"]["before"]["column_mask"]["using"] == []
+    assert changes[0]["change"]["after"]["column_mask"].get("using") is None

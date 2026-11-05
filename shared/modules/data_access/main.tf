@@ -647,7 +647,12 @@ resource "databricks_policy_info" "policies" {
   column_mask = each.value.policy_type == "POLICY_TYPE_COLUMN_MASK" ? {
     function_name = "${each.value.function_catalog}.${each.value.function_schema}.${each.value.function_name}"
     on_column     = each.value.match_alias
-    using         = null
+    # null matches what UC returns (adopted/imported policies, and any new
+    # policy). Policies applied before the null render keep `[]` in state;
+    # rendering `[]` for them only keeps that empty list as it is. The API
+    # request is the same either way, so this saves an in-place update of
+    # every mask after upgrade. A non-empty live `using` still reverts.
+    using = contains(var.column_mask_empty_using_policies, each.key) ? [] : null
   } : null
 
   row_filter = each.value.policy_type == "POLICY_TYPE_ROW_FILTER" ? {
