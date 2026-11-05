@@ -404,8 +404,20 @@ if [ "$LAYER" = "workspace" ] && [ -n "${GENIERAILS_STATE_DIR:-}" ] && [ "$genie
   export GENIERAILS_GENIE_ID_DIR
   RUNNER_VALUE_genie_id_dir="$GENIERAILS_GENIE_ID_DIR"
 fi
-if [ "$LAYER_CONFIG_DIR" != "$ENV_DIR" ]; then
-  RUNNER_VARS+=(-var="masking_sql_file=$LAYER_CONFIG_DIR/masking_functions.sql")
+if [ "$LAYER" = "data_access" ]; then
+  # Staged applies render here, so released state records this path. Keep using
+  # it for ordinary plan/apply runs while it exists: switching back to the
+  # split copy changes the external normalizer's query even when the SQL is
+  # identical, which makes masking_functions_drop and coverage outputs churn.
+  # A staged caller's explicit render remains authoritative.
+  MASKING_CONFIG_DIR="$LAYER_CONFIG_DIR"
+  RUNTIME_MASKING_CONFIG_DIR="$(dirname "$ENV_DIR")/generated/.runtime/data_access"
+  if [ "$LAYER_CONFIG_DIR" = "$ENV_DIR" ] && [ -f "$RUNTIME_MASKING_CONFIG_DIR/masking_functions.sql" ]; then
+    MASKING_CONFIG_DIR="$RUNTIME_MASKING_CONFIG_DIR"
+  fi
+  if [ "$MASKING_CONFIG_DIR" != "$ENV_DIR" ]; then
+    RUNNER_VARS+=(-var="masking_sql_file=$MASKING_CONFIG_DIR/masking_functions.sql")
+  fi
 fi
 # masking_functions_drop records its SQL and auth files relative to the env
 # dir (the data_access root's dirname(env_dir)); its destroy-time drop

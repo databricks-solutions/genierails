@@ -206,6 +206,37 @@ def test_the_runner_reads_a_staged_render_instead_of_the_split_config(tmp_path):
     assert f"-var-file={layer / 'abac.auto.tfvars'}" in args and not [a for a in args if "masking_sql_file" in a]
 
 
+def test_plan_after_a_staged_release_keeps_the_recorded_masking_sql_path(tmp_path):
+    """A normal plan must not rewrite masking_functions_drop after release."""
+    layer = tmp_path / "envs" / "prod" / "data_access"
+    layer.mkdir(parents=True)
+    (layer / "abac.auto.tfvars").write_text("fgac_policies = []\n")
+    (layer / "masking_functions.sql").write_text("-- same normalized SQL\n")
+    runtime = layer.parent / "generated" / ".runtime" / "data_access"
+    runtime.mkdir(parents=True)
+    (runtime / "abac.auto.tfvars").write_text("fgac_policies = []\n")
+    (runtime / "masking_functions.sql").write_text("-- same normalized SQL\n")
+    environ, log = _fake_terraform(tmp_path)
+    environ["LAYER_ENV_DIR"] = str(layer)
+
+    # Simulate the staged release which wrote masking_functions_drop's input.
+    staged_env = environ | {pg.STAGE_CONFIG_ENV: str(runtime)}
+    released = subprocess.run([RUNNER, "data_access", "prod", "apply", "-auto-approve"],
+                              text=True, capture_output=True, env=staged_env)
+    assert released.returncode == 0, released.stdout + released.stderr
+    release_args = shlex.split(log.read_text().splitlines()[1])
+    recorded = f"-var=masking_sql_file={runtime / 'masking_functions.sql'}"
+    assert recorded in release_args
+
+    log.unlink()
+    planned = subprocess.run([RUNNER, "data_access", "prod", "plan"],
+                             text=True, capture_output=True, env=environ)
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    plan_args = shlex.split(log.read_text().splitlines()[1])
+    assert recorded in plan_args
+    assert f"-var-file={layer / 'abac.auto.tfvars'}" in plan_args
+
+
 def test_the_runner_refuses_a_staged_dir_without_a_render(tmp_path):
     layer = tmp_path / "data_access"
     layer.mkdir()
