@@ -5,15 +5,15 @@ The [walkthrough](README.md) keeps to the happy path. This page holds the rest: 
 - [What each command does, in full](#what-each-command-does-in-full)
 - [Your repo and remotes](#your-repo-and-remotes)
 - [Dev step 1: Set up](#dev-step-1-set-up)
-- [Dev step 2: Commit it](#dev-step-2-commit-it)
-- [Dev step 4: Generate](#dev-step-4-generate)
-- [Dev step 5: Rehearse](#dev-step-5-rehearse)
-- [Prod step 1: Set up and promote](#prod-step-1-set-up-and-promote)
-- [Prod step 3: Plan, release](#prod-step-3-plan-release)
+- [Dev step 1: The commit offer](#dev-step-1-the-commit-offer)
+- [Dev step 3: Generate](#dev-step-3-generate)
+- [Dev step 4: Rehearse](#dev-step-4-rehearse)
+- [Prod steps 1-2: Set up and copy the rules](#prod-steps-1-2-set-up-and-copy-the-rules)
+- [Prod step 4: Release](#prod-step-4-release)
 - [If prod stops on coverage or drift](#if-prod-stops-on-coverage-or-drift)
 - [Why GenieRails won't open access to an unmasked sensitive column](#why-no-unmasked-sensitive-column)
-- [Prod step 4: Record evidence](#prod-step-4-record-evidence)
-- [Keep it safe](#keep-it-safe)
+- [Prod step 5: Record evidence](#prod-step-5-record-evidence)
+- [Keep it healthy](#keep-it-healthy)
 - [CI / scripted](#ci--scripted)
 - [Commit it](#commit-it)
 
@@ -57,19 +57,22 @@ The template starts new champions with `governance_mode = "deterministic"`; exis
 `acl_groups` is required: `make generate` stops while an agent has none. It grants only `CAN_RUN` on the agent. `SELECT` on the agent's tables comes only from `table_readers` in `env.auto.tfvars`, which `make generate` proposes for you (filled with `acl_groups`) for each table nothing covers yet. Every `acl_groups` group must be able to read every table of the agent, so pick them from `access_tier_groups` (only tier groups and `raw_exempt_principals` can be readers); otherwise `generate`, `rehearse` and `release` stop and name the table and group.
 
 <a id="dev-step-2-commit-it"></a>
-## Dev step 2: Commit it
+<a id="dev-step-1-the-commit-offer"></a>
+## Dev step 1: The commit offer
 
 At the end of step 1's `make setup`, GenieRails previews the `.gitignore`, placeholder env defaults and agent file setup created, then asks whether to commit and push them. Answer `y`; credentials and runtime files such as `auth.auto.tfvars` are never staged. With no `origin`, it commits locally only. The deployer, group and agent edits you make after setup remain uncommitted until `make generate` finishes and offers to commit them with its generated rules. `make check` reads only committed env files, a rehearse receipt counts only for a clean checkout, and `make release` releases only a commit on your `origin/main` or, for an option-A local-only repo, committed local `main`. Each later step that changes `envs/` (`make generate`, `make promote-to`) makes the same offer: answer `y` there too. Later changes go through PRs: [Commit it](#commit-it).
 
 <a id="dev-step-4-generate"></a>
-## Dev step 4: Generate
+<a id="dev-step-3-generate"></a>
+## Dev step 3: Generate
 
 `make generate ENV=dev` captures each new agent to `envs/dev/agents/<agent>.space.json` and proposes its `table_readers`. Then it shows `git diff --stat` for `.gitignore` and `envs/dev/` and asks `Commit these changes and push them to origin/main? [y/N]`: `y` commits exactly those paths and pushes (never forced; with no `origin` it commits locally only), `n` leaves git unchanged. Off a terminal, in CI or with `COMMIT=0` it asks nothing: commit and push `envs/` yourself. What a re-run keeps depends on the env's `governance_mode`:
 - **Deterministic** (the template's default): every run recomputes the column masks, the `gr_treatment` column tags, the `gr_treatment` tag policy and the mask-library functions in `masking_functions.sql` from the `class.*` tags and the mask library. It replaces hand edits to those in `envs/dev/generated/` without a warning; row filters, table tags and any custom SQL above the `-- === GenieRails deterministic mask library ===` marker in `masking_functions.sql` are kept. To change a treatment, set it in `envs/dev/env.auto.tfvars` and re-run `make generate ENV=dev`: `column_overrides` for one column, `treatment_versions` for a treatment's partial version, `tag_treatments` to map a class to another treatment ([settings](REFERENCE.md#deterministic-governance-settings)).
 - **Legacy**: re-runs keep whatever is already in `envs/dev/generated/`, including your edits, and only add rules for new columns.
 
 <a id="dev-step-5-rehearse"></a>
-## Dev step 5: Rehearse
+<a id="dev-step-4-rehearse"></a>
+## Dev step 4: Rehearse
 
 `make rehearse ENV=dev` first runs `make check ENV=dev`: a read-only check of what git tracks under `envs/`, in a scratch copy (validate, generated files current, validate-generated, the offline coverage check, mask tests and a structural plan). If a step fails, it refuses with that step's message before it takes the lock, writes anything or reads live dev. The same `make check` runs alone as the PR check.
 
@@ -80,7 +83,8 @@ At the end of step 1's `make setup`, GenieRails previews the `.gitignore`, place
 **Row-pairing keys.** You don't set a row-pairing key: it picks one per masked table (a single-column primary key, else an untagged id-like column such as `customer_id`) and proves it unique, non-null and unmasked. A deterministic env then prints the proven `verify_key_columns` line; committing it is optional and pins those keys. Only a table with no provable key needs `verify_key_columns` set ([how keys are picked](../../docs/effective-access-verification.md#how-genierails-picks-the-row-pairing-key)).
 
 <a id="prod-step-1-set-up-and-promote"></a>
-## Prod step 1: Set up and promote
+<a id="prod-steps-1-2-set-up-and-copy-the-rules"></a>
+## Prod steps 1-2: Set up and copy the rules
 
 **Same service principal as dev?** Leave `envs/prod/auth.auto.tfvars` blank and add `REUSE_SOURCE_AUTH=1 WORKSPACE_HOST=<prod host> WORKSPACE_ID=<prod id>` to the `promote-to`: it copies dev's account ID, client ID and secret into the still-blank file and never dev's host.
 
@@ -97,13 +101,14 @@ At the end of step 1's `make setup`, GenieRails previews the `.gitignore`, place
 **The commit offer.** It then offers to commit and push `.gitignore`, `envs/prod/` and `envs/account/` (the shared account layer it writes) the same way (answer `y`; off a terminal, commit and push them yourself): `make setup ENV=prod` added prod's lines to `.gitignore`, and `make rehearse` and `make release-plan` need a clean checkout.
 
 <a id="prod-step-3-plan-release"></a>
-## Prod step 3: Plan, release
+<a id="prod-step-4-release"></a>
+## Prod step 4: Release
 
 **Each round.** At a terminal on the deployment machine, `make release ENV=prod` runs round after round. Each round it plans (`make release-plan ENV=prod`), prints the manifest (its commit and what it changes) and asks `Approve and release manifest <id> (commit <sha>, round <n> of at most 8)? [y/N]`. Your `y` is the approval: it is recorded (OS user, git identity, host, terminal, time) in that round's phase record or release receipt, then exactly that manifest's saved plans are applied and the masks proved. Anything but `y` applies nothing and stops; the manifest stays current, and the next `make release ENV=prod` offers it first.
 
 **The account layer, before round 1.** Before round 1 it checks the shared account layer the way `make rehearse` does. If the account plan has changes (an account change merged since the last apply, e.g. a new treatment-tag value, a group, or `ALLOW_TAG_VALUE_REMOVAL=<key>:<value>,...` with `WAREHOUSE_ID` on its command line), it shows the account manifest and its sha256 and asks `Approve and apply this account manifest? [y/N]` (tag-value removals are named value by value in a louder warning above the same question). `y` is recorded and applies exactly that manifest through `make apply-account`'s path, under the account lock and with every `account-plan` and `apply-account` refusal (provenance included); then round 1 starts. Anything else applies nothing and stops before round 1: the account manifest stays, for `make apply-account` or the next `make release ENV=prod` to offer again. An empty account plan asks nothing.
 
-**Reusing dev's rehearsal.** `make release-plan ENV=prod` plans only a commit on your `origin/main` (or committed local `main` in an option-A local-only repo) that has a passing `make rehearse ENV=dev` of that same commit (dev is prod's `promote_from` in this walkthrough; with `promote_from = "stg"` it is `make rehearse ENV=stg`); the dev step 5 rehearsal was of an earlier commit. Since the promotion changed only `envs/prod/`, release-plan reuses that rehearsal itself and applies nothing in dev: it prints `reusing dev's passing rehearsal of <earlier commit> (nothing is applied)`, then `code and dev inputs are unchanged since the passing rehearsal of <earlier commit>; wrote a receipt for <this commit> without re-applying` and the `promote-to ENV=prod digest` it recorded. If code or `envs/dev/` changed since (or the checkout isn't clean, or dev was rehearsed only in CI), it stops with `did not reuse a rehearsal for this commit: <why>; run make rehearse ENV=dev on this commit` and `no passing rehearsal of <commit>`: run the full `make rehearse ENV=dev`, then `make release ENV=prod` again (`make release` never rehearses or applies dev itself).
+**Reusing dev's rehearsal.** `make release-plan ENV=prod` plans only a commit on your `origin/main` (or committed local `main` in an option-A local-only repo) that has a passing `make rehearse ENV=dev` of that same commit (dev is prod's `promote_from` in this walkthrough; with `promote_from = "stg"` it is `make rehearse ENV=stg`); the dev step 4 rehearsal was of an earlier commit. Since the promotion changed only `envs/prod/`, release-plan reuses that rehearsal itself and applies nothing in dev: it prints `reusing dev's passing rehearsal of <earlier commit> (nothing is applied)`, then `code and dev inputs are unchanged since the passing rehearsal of <earlier commit>; wrote a receipt for <this commit> without re-applying` and the `promote-to ENV=prod digest` it recorded. If code or `envs/dev/` changed since (or the checkout isn't clean, or dev was rehearsed only in CI), it stops with `did not reuse a rehearsal for this commit: <why>; run make rehearse ENV=dev on this commit` and `no passing rehearsal of <commit>`: run the full `make rehearse ENV=dev`, then `make release ENV=prod` again (`make release` never rehearses or applies dev itself).
 
 Legacy envs skip `make release-plan`: run `make release ENV=prod` directly (`release-plan` refuses them with `Legacy envs keep: make release ENV=prod`).
 
@@ -127,7 +132,7 @@ More: [Fixing a coverage gap found in prod](REFERENCE.md#fixing-a-coverage-gap-f
 <a id="why-no-unmasked-sensitive-column"></a>
 ## Why GenieRails won't open access to an unmasked sensitive column
 
-Every column Data Classification tags as sensitive needs an explicit, reviewed decision before anyone gets access to it. That way a newly tagged or forgotten column can't leak by accident: when no one has decided, it stays masked. The decisions live in git (the env files and `ack.txt`) and show in the [evidence record](#prod-step-4-record-evidence).
+Every column Data Classification tags as sensitive needs an explicit, reviewed decision before anyone gets access to it. That way a newly tagged or forgotten column can't leak by accident: when no one has decided, it stays masked. The decisions live in git (the env files and `ack.txt`) and show in the [evidence record](#prod-step-5-record-evidence).
 
 So there is deliberately no switch that makes a class raw for everyone. These are the supported ways to show raw values today:
 
@@ -141,12 +146,14 @@ So there is deliberately no switch that makes a class raw for everyone. These ar
 The last three weaken protection that is in place, so `make release-plan` refuses them until a reviewed `ack.txt` line accepts each one. Never-raw classes, such as a card's security code (CVV), stay masked for everyone in every case.
 
 <a id="prod-step-4-record-evidence"></a>
-## Prod step 4: Record evidence
+<a id="prod-step-5-record-evidence"></a>
+## Prod step 5: Record evidence
 
 `make evidence ENV=prod` reads the live tags, masks and grants of prod's agent tables and writes a JSON record and Markdown summary to `.genierails-state/prod/evidence/` (git-ignored, next to the release receipts; under `$GENIERAILS_STATE_DIR` when that is set, which must be outside every git checkout or git-ignored in each one). It finds the SQL warehouse itself (prod's `sql_warehouse_id`, else the one the release applied); `WAREHOUSE_ID=<id>` only pins another, and `OFFLINE=1` writes a config-only report. The checkout stays clean, so `make maintain` and the next `release-plan` run as usual. Archive the record (e.g. with the change ticket): the next run replaces it. [Details](../../docs/evidence-report.md).
 
 <a id="keep-it-safe"></a>
-## Keep it safe
+<a id="keep-it-healthy"></a>
+## Keep it healthy
 
 Run `make maintain ENV=prod` from the [deployment machine](../../docs/deployment-machine.md). It masks newly tagged columns, never grants access past a passing coverage check, and never changes the Genie agent. In a deterministic env it runs only from the last released commit, on a clean checkout. If it stops, it prints what to do: usually review a new detection in Catalog Explorer, or add a missing rule in dev and re-promote.
 

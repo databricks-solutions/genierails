@@ -191,14 +191,15 @@ def test_the_prod_section_reads_as_expected():
     ]
     # The whole flow's promote-to commits the same files itself.
     flow = _section("The whole flow")
-    assert "make promote-to ENV=prod    # copies the reviewed rules; offers to commit + push (y)" in flow.splitlines()
+    assert "make promote-to ENV=prod    # copies dev's proven rules to prod; offers to commit + push (y)" \
+        in flow.splitlines()
     assert "Promote the rules to prod" not in flow
     # ...the README's step names the files that offer commits...
-    step = _step(_section("Prod"), "1. Set up and promote.")
+    step = _step(_section("Prod"), "2. Copy the proven rules.")
     assert "- It then offers to commit and push `.gitignore`, `envs/prod/` and `envs/account/`: answer `y`." \
         in step.splitlines()
-    assert "| `make promote-to ENV=prod` | Copies dev's reviewed rules into prod | The same commit question | " \
-        "Same: save this step's files |" in flow.splitlines()
+    assert "| `make promote-to ENV=prod` | The same commit question | Same: save this step's files |" \
+        in _section("Reference").splitlines()
     # ...and so does the full table in DETAILS.md.
     assert "| `make promote-to ENV=prod` | Copies dev's reviewed rules into prod, renamed to prod's catalogs and " \
         "groups; prints the changed files by owner | The same commit question, for `.gitignore`, `envs/prod/` and " \
@@ -213,11 +214,13 @@ def _step(section: str, title: str) -> str:
 
 def test_prod_step_1_says_to_replace_the_seeded_catalog_map_line():
     # make setup ENV=prod seeds catalog_map with placeholders; a second line is refused.
-    step = _step(_section("Prod"), "1. Set up and promote.")
+    step = _step(_section("Prod"), "1. Set up.")
     assert "replace the `deployer_principal_id` placeholder and the seeded `catalog_map` line" in step
     assert "placeholder, and set:" not in step
-    details = _details("Prod step 1: Set up and promote")
-    _links_to_details(step, "Prod step 1: Set up and promote")
+    assert "Setup makes no agent file for prod: `promote-to` writes prod's." in step
+    details = _details("Prod steps 1-2: Set up and copy the rules")
+    # Steps 1 and 2 share one DETAILS.md section; step 2 (promote-to) links to it.
+    _links_to_details(_step(_section("Prod"), "2. Copy the proven rules."), "Prod steps 1-2: Set up and copy the rules")
     assert "replace its `deployer_principal_id` placeholder and the seeded `catalog_map` line" in details
     assert "a second `catalog_map` line is refused" in details
     assert "placeholder, and set:" not in details
@@ -255,13 +258,14 @@ def test_the_release_recipe_prints_heading_then_explanation_then_next_per_round(
     assert lines.index(RELEASE_COMPLETE) > headings[-1]
 
 
-def test_prod_step_3_says_a_first_release_takes_several_rounds_in_the_real_messages():
-    step = _step(_section("Prod"), "3. Plan, release.")
-    # The README step: several rounds, y each, until the recipe's own end line.
-    assert f"- A first release takes several rounds, masks before access. Answer `y` each round until it prints " \
-        f"`{RELEASE_COMPLETE}`." in step.splitlines()
-    _links_to_details(step, "Prod step 3: Plan, release")
-    details = _details("Prod step 3: Plan, release")
+def test_prod_step_4_says_a_first_release_takes_several_rounds_in_the_real_messages():
+    step = _step(_section("Prod"), "4. Release.")
+    # The README step: why several rounds (masks first, access last), y each, until the recipe's own end line.
+    assert f"*Why several rounds:* a first release goes masks first, access last: the masks, then the column tags, " \
+        f"then read access, then access to the agent. Each round is proven before the next opens more. Answer `y` each round " \
+        f"until it prints `{RELEASE_COMPLETE}`." in step.splitlines()
+    _links_to_details(step, "Prod step 4: Release")
+    details = _details("Prod step 4: Release")
     rounds = details[details.index("**A first release takes several rounds.**"):]
     rounds = rounds[:rounds.index("\n")]
     # The README shows one round's output in the recipe's order: heading, what it applied, Next;
@@ -286,14 +290,14 @@ def test_prod_step_3_says_a_first_release_takes_several_rounds_in_the_real_messa
     positions = [row.index(f"`{message}`") for message in (RELEASE_PHASE_HEADING, RELEASE_NEXT, RELEASE_COMPLETE)]
     assert positions == sorted(positions), row
     flow = _section("The whole flow")
-    assert 'make release ENV=prod       # each round: plans, shows the manifest, asks y/N, applies it; until ' \
-        '"Release complete" (first: account plan y/N, if it has changes)' in flow.splitlines()
+    assert 'make release ENV=prod       # applies prod in rounds; shows each round\'s plan, asks y/N; ends at ' \
+        '"Release complete"' in flow.splitlines()
     # The flow's commands have no release-plan line: release runs it each round, which the table says,
     # with the exact question it asks.
     code = flow[flow.index("```bash"):flow.index("```", flow.index("```bash") + 3)]
     assert "make release-plan" not in code and "repeats release-plan + release" not in _section("Prod")
-    row = next(line for line in flow.splitlines() if line.startswith("| `make release ENV=prod` |"))
-    assert "Plans, applies and proves one manifest per round" in row
+    row = next(line for line in _section("Reference").splitlines() if line.startswith("| `make release ENV=prod` |"))
+    assert "Each round: exactly that round's prod changes" in row
     assert "`Approve and release manifest <id> (commit <sha>, round <n> of at most 8)? [y/N]`, once per round" in row
     full = next(line for line in _details("What each command does, in full").splitlines()
                 if line.startswith("| `make release ENV=prod` |"))
@@ -302,7 +306,7 @@ def test_prod_step_3_says_a_first_release_takes_several_rounds_in_the_real_messa
 
 
 def test_prod_step_3_tells_legacy_envs_to_skip_release_plan():
-    step = _details("Prod step 3: Plan, release")
+    step = _details("Prod step 4: Release")
     line = "Legacy envs skip `make release-plan`: run `make release ENV=prod` directly " \
         "(`release-plan` refuses them with `Legacy envs keep: make release ENV=prod`)."
     assert line in step.splitlines()
@@ -375,26 +379,28 @@ def test_following_the_prod_section_word_for_word_reaches_a_release_manifest(cus
 
 def test_the_ask_table_quotes_the_questions_the_code_asks():
     """Each y/N the walkthrough's table promises is the exact question its command asks."""
-    flow = _section("The whole flow")
-    asks = flow[flow.index("### What each command does and what it asks"):]
+    reference = _section("Reference")
+    asks = reference[reference.index("### What each command asks"):reference.index("### Words used on this page")]
     rows = {line.split("|")[1].strip(): line for line in asks.splitlines() if line.startswith("| `make ")}
     full = {line.split("|")[1].strip(): line for line in _details("What each command does, in full").splitlines()
             if line.startswith("| `make ")}
-    # The full table in DETAILS.md has the same rows, in the same order, and asks the same questions.
-    assert list(full) == list(rows)
+    # The README lists every command of the full table in DETAILS.md that asks something, in the same order,
+    # with the same questions; the commands that ask nothing are named in one line.
+    quiet = [command for command, line in full.items() if line.rstrip().endswith("| nothing |")]
+    assert quiet == ["`make evidence ENV=prod`", "`make maintain ENV=prod`",
+                     "`make next ENV=<env>` / `make status ENV=<env>`"]
+    assert list(rows) == [command for command in full if command not in quiet]
+    assert "`evidence`, `maintain`, `next` and `status` ask nothing." in asks
     for command, row in rows.items():
         questions = re.findall(r"`[^`]*\[y/N\]`", row)
         assert questions == re.findall(r"`[^`]*\[y/N\]`", full[command]), command
-        # The README's third column is what it asks (its fourth says what a y approves; "—" when it asks nothing).
+        # The README's second column is what it asks, its third what a y approves.
         cells = [cell.strip() for cell in row.strip().strip("|").split(" | ")]
-        assert len(cells) == 4, row
-        assert (cells[2] == "nothing") == full[command].rstrip().endswith("| nothing |"), command
-        assert (cells[3] == "—") == (cells[2] == "nothing"), command
+        assert len(cells) == 3 and cells[1] != "nothing" and cells[2] not in ("", "—"), row
+        assert questions or cells[1] == "The same commit question", row
     assert "](DETAILS.md#what-each-command-does-in-full)" in asks
     assert list(rows) == ["`make setup ENV=dev REPO=<url>`", "`make generate ENV=dev`", "`make rehearse ENV=dev`",
-                          "`make setup ENV=prod`", "`make promote-to ENV=prod`", "`make release ENV=prod`",
-                          "`make evidence ENV=prod`", "`make maintain ENV=prod`",
-                          "`make next ENV=<env>` / `make status ENV=<env>`"]
+                          "`make setup ENV=prod`", "`make promote-to ENV=prod`", "`make release ENV=prod`"]
     commit_envs = (SHARED / "scripts" / "commit_envs.py").read_text()
     assert "`Commit these changes and push them to origin/main? [y/N]`" in rows["`make setup ENV=dev REPO=<url>`"]
     assert "`... and keep them local (no origin remote)? [y/N]`" in rows["`make setup ENV=dev REPO=<url>`"]
@@ -408,17 +414,18 @@ def test_the_ask_table_quotes_the_questions_the_code_asks():
     loop = (SHARED / "scripts" / "release_loop.py").read_text()
     assert 'question = (f"Approve and release manifest {manifest[\'id\']} (commit {manifest[\'commit\'][:12]}, round "' in loop
     assert 'f"{round_no} of at most {MAX_ROUNDS})?")' in loop and "MAX_ROUNDS = 8" in loop
-    for quiet in ("`make evidence ENV=prod`", "`make maintain ENV=prod`", "`make next ENV=<env>` / `make status ENV=<env>`"):
-        assert rows[quiet].rstrip().endswith("| nothing | — |"), quiet
     # Acks stay a committed file, never a question.
-    assert "committing `envs/prod/ack.txt`" in asks and "(an ack is never a `y/N`)" in asks
+    release = _step(_section("Prod"), "4. Release.")
+    assert "It's your sign-off, never a `y/N`, so no command commits it: commit and push it yourself" in release
 
 
 def test_release_describes_the_account_step_before_round_1_as_the_code_runs_it():
     """make release at a terminal asks about a non-empty account plan first (rehearse's step), then round 1."""
-    flow = _section("The whole flow")
-    asks = flow[flow.index("### What each command does and what it asks"):]
+    asks = _section("Reference")
     row = next(line for line in asks.splitlines() if line.startswith("| `make release ENV=prod` |"))
+    step = _step(_section("Prod"), "4. Release.")
+    assert "- Before round 1, if the account plan has changes, it asks the same account question as rehearse." \
+        in step.splitlines()
     assert row.index("`Approve and apply this account manifest? [y/N]` first, only when the account plan has "
                      "changes") < row.index("`Approve and release manifest <id>")
     full = next(line for line in _details("What each command does, in full").splitlines()
@@ -426,7 +433,7 @@ def test_release_describes_the_account_step_before_round_1_as_the_code_runs_it()
     assert "Before round 1 it applies the account layer when it has changes, as rehearse does" in full
     assert full.index("`Approve and apply this account manifest? [y/N]` first, only when the account plan has "
                       "changes") < full.index("`Approve and release manifest <id>")
-    step = _details("Prod step 3: Plan, release")
+    step = _details("Prod step 4: Release")
     account = step[step.index("Before round 1 it checks the shared account layer"):]
     account = account[:account.index("\n")]
     assert step.index("Each round it plans") < step.index("Before round 1 it checks the shared account layer")
@@ -494,7 +501,7 @@ def test_the_ci_section_names_the_low_level_commands_and_what_they_do_off_a_term
 def test_the_walkthrough_says_setup_without_repo_keeps_the_genierails_remote():
     """Setup without REPO= keeps the canonical genierails remote, and that still deploys local main."""
     readme = _section("Before you start")
-    assert "No repo of your own yet? Leave `REPO=` off. The commit offers then commit locally." in readme
+    assert "No repo of your own yet? Leave `REPO=` off; everything then stays in local git." in readme
     _links_to_details(readme, "Your repo and remotes")
     before = _details("Your repo and remotes")
     assert "setup renames `origin` to `genierails` and adds no `origin`" in before
