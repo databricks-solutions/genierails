@@ -166,7 +166,7 @@ def test_deterministic_next_steps_match_walkthrough(tmp_path, mode, env_name, ta
 
 def test_deterministic_prod_banner_pushes_then_release_plan_reuses_the_source_rehearsal(tmp_path):
     """release-plan needs HEAD on origin/main and a source rehearsal of that commit, which it writes itself
-    from the source's earlier rehearsal (or names make rehearse to run); the README's Prod step 3 says the same."""
+    from the source's earlier rehearsal (or names make rehearse to run); the README's Prod step 4 says the same."""
     lines = generate_next_steps(tmp_path, "full", "prod", has_sql=True, champion_flow=False, tuning=False,
                                 source_env="stg")
     text = "\n".join(lines)
@@ -177,15 +177,15 @@ def test_deterministic_prod_banner_pushes_then_release_plan_reuses_the_source_re
     assert positions == sorted(positions)
     assert "make rehearse" not in text
     readme = (SHARED / "examples/dev_to_prod/README.md").read_text()
-    prod = readme[readme.index("## Prod"):readme.index("## Keep it safe")]
-    step = prod[prod.index("**3. Plan, release.**"):prod.index("**4. Record evidence.**")]
+    prod = readme[readme.index("## Prod"):readme.index("## Keep it healthy")]
+    step = prod[prod.index("**4. Release.**"):prod.index("**5. Record evidence.**")]
     block = step[step.index("```bash"):step.index("```", step.index("```bash") + 3)]
     # At a terminal release runs release-plan (and make check) each round: the block is one line.
     assert block.split("\n")[1:] == ["make release ENV=prod", ""]
     assert "\n- It reuses dev's rehearsal; it never rehearses dev. If it says `no passing rehearsal of <commit>`" in step
-    assert "](DETAILS.md#prod-step-3-plan-release)" in step
+    assert "](DETAILS.md#prod-step-4-release)" in step
     details = (SHARED / "examples/dev_to_prod/DETAILS.md").read_text()
-    details = details[details.index("## Prod step 3: Plan, release"):details.index("## If prod stops")]
+    details = details[details.index("## Prod step 4: Release"):details.index("## If prod stops")]
     flat = " ".join(details.split())
     order = ["plans only a commit on your `origin/main` (or committed local `main` in an option-A local-only repo) that has a passing `make rehearse ENV=dev` of that same commit",
              "release-plan reuses that rehearsal itself and applies nothing in dev",

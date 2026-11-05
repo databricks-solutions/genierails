@@ -1,8 +1,10 @@
 """The champion walkthrough stays short; its details live in DETAILS.md and stay reachable.
 
-README.md is the happy path a champion reads top to bottom: the 8-command
-flow, one table, then each step as a goal, its command, a few bullets and a
-"More:" link. Edge cases, alternatives, CI and legacy behaviour moved to
+README.md is the happy path a champion reads top to bottom: a short opening
+(what GenieRails does, what you end up with, the journey), the 8-command flow,
+then each step in order as a goal, its command, a few bullets, a just-in-time
+explanation where a concept (commit, manifest, ack, y/N) first appears, and a
+"More:" link. The ask table and a small glossary close the page as reference. Edge cases, alternatives, CI and legacy behaviour moved to
 DETAILS.md, one section per step. These tests keep the README short, keep
 every anchor other docs link to, keep every README link to DETAILS.md
 resolvable (and every DETAILS.md section linked), and keep stale steps out of
@@ -22,13 +24,12 @@ README = WALKTHROUGH / "README.md"
 DETAILS = WALKTHROUGH / "DETAILS.md"
 
 # Every anchor the README had before the rewrite: other docs, SAMPLE_ENV.md and REFERENCE.md link to them.
-README_ANCHORS = ["what-each-command-asks", "prerequisites--gather-required-values", "phase-0--dev-set-up",
+README_ANCHORS = ["how-it-works", "glossary", "later-changes", "what-each-command-asks", "prerequisites--gather-required-values", "phase-0--dev-set-up",
                   "phase-1--dev-scan-draft-and-test-rules", "dev-classify", "phase-2--prod-set-up-and-promote-rules",
                   "phase-3--prod-scan-real-data", "phase-4--prod-release-and-verify", "phase-5--prod-maintain-coverage",
                   "ci--scripted", "commit-it"]
 # Heading anchors other docs link to.
-README_HEADINGS = {"the-whole-flow": "## The whole flow", "prod": "## Prod", "ci--scripted": "## CI / scripted",
-                   "commit-it": "## Commit it"}
+README_HEADINGS = {"the-whole-flow": "## The whole flow", "prod": "## Prod", "ci--scripted": "## CI / scripted"}
 
 
 def _anchors(text: str) -> set[str]:
@@ -81,17 +82,23 @@ def test_every_details_link_resolves_and_every_details_section_is_linked():
 
 def test_readme_is_the_short_happy_path():
     text = README.read_text()
-    # About a 5-minute read: the rewrite took it from ~4,500 words to under 2,000. The plain-language pass
-    # (How it works, the glossary, a Why: line per step, what each y approves, an ack.txt example) added
-    # ~500 words for first-time readers and cut ~100 elsewhere; the cap moved to 2,400, no further.
+    # About a 5-minute read: the rewrite took it from ~4,500 words to under 2,000. The plain-language passes
+    # (just-in-time explanations of commits, manifests, acks and each y/N, an ack.txt example, the closing
+    # glossary) added words for first-time readers; the cap is 2,400, no further.
     assert len(text.split()) < 2400, len(text.split())
-    # The same steps, in the same order, each with a one-line goal after its title.
+    # The steps in the order a champion runs them, each with a one-line goal after its title.
     dev = text[text.index("\n## Dev\n"):text.index("\n## Prod\n")]
-    prod = text[text.index("\n## Prod\n"):text.index("\n## Keep it safe\n")]
-    assert _steps(dev) == ["1. Set up.", "2. Commit it (own repo).", "3. Classify (in the UI).", "4. Generate.",
-                           "5. Rehearse."]
-    assert _steps(prod) == ["1. Set up and promote.", "2. Classify (in the UI).", "3. Plan, release.",
-                            "4. Record evidence."]
+    prod = text[text.index("\n## Prod\n"):text.index("\n## Keep it healthy\n")]
+    assert _steps(dev) == ["1. Set up.", "2. Review classification (in Catalog Explorer).", "3. Generate.",
+                           "4. Rehearse."]
+    assert _steps(prod) == ["1. Set up.", "2. Copy the proven rules.", "3. Review classification (in Catalog Explorer).",
+                            "4. Release.", "5. Record evidence."]
+    # The page's sections, in order: the flow map first, the reference (ask table, glossary) last.
+    order = ["\n## The whole flow\n", "\n## Before you start\n", "\n## Dev\n", "\n## Prod\n",
+             "\n## Keep it healthy\n", "\n## Later changes\n", "\n## CI / scripted\n", "\n## Reference\n",
+             "\n### What each command asks\n", "\n### Words used on this page\n"]
+    assert [text.index(h) for h in order] == sorted(text.index(h) for h in order)
+    assert re.findall(r"^##+ .+$", text, re.M) == [h.strip() for h in order]
     for line in text.splitlines():
         if re.match(r"\*\*\d+\. ", line):
             goal = line.split("**", 2)[2].strip()
@@ -106,8 +113,9 @@ def test_readme_is_the_short_happy_path():
             continue
         assert len(line.split()) <= 70, line
     # Each step with details links to them.
-    for section, titles in ((dev, ["1. Set up.", "2. Commit it (own repo).", "4. Generate.", "5. Rehearse."]),
-                            (prod, ["1. Set up and promote.", "3. Plan, release.", "4. Record evidence."])):
+    for section, titles in ((dev, ["1. Set up.", "2. Review classification (in Catalog Explorer).", "3. Generate.",
+                                   "4. Rehearse."]),
+                            (prod, ["2. Copy the proven rules.", "4. Release.", "5. Record evidence."])):
         for title in titles:
             start = section.index(f"**{title}**")
             nxt = re.compile(r"\n\*\*\d+\. ").search(section, start + 1)
@@ -138,8 +146,12 @@ def test_neither_file_brings_back_the_removed_steps():
                      "**5. Check.**", "**6. Rehearse.**"):
             assert gone not in text, gone
     # Prod's steps name no rehearse before release: release reuses dev's rehearsal.
-    prod = readme[readme.index("\n## Prod\n"):readme.index("\n## Keep it safe\n")]
+    prod = readme[readme.index("\n## Prod\n"):readme.index("\n## Keep it healthy\n")]
     assert "make rehearse ENV=dev" not in prod[:prod.index("make release ENV=prod")]
+    # The old up-front explainer and glossary-first layout stay gone.
+    for gone in ("## How it works in 1 minute", "**Why commit.**", "**Why a manifest.**", "**Masks first, access last.**",
+                 "**2. Commit it (own repo).**", "**3. Plan, release.**", "\n## Keep it safe\n", "\n## Commit it\n"):
+        assert gone not in readme, gone
 
 
 def test_the_relocated_facts_are_in_details_by_step():
@@ -158,23 +170,23 @@ def test_the_relocated_facts_are_in_details_by_step():
         "Dev step 1: Set up": ["**Also accepted:**", "`make split-agent-files`", "`acl_groups` is required",
                                "only tier groups and `raw_exempt_principals` can be readers",
                                'governance_mode = "deterministic"'],
-        "Dev step 2: Commit it": ["option-A local-only repo", "a rehearse receipt counts only for a clean checkout"],
-        "Dev step 4: Generate": ["`COMMIT=0`", "- **Deterministic**", "- **Legacy**", "`column_overrides`"],
-        "Dev step 5: Rehearse": ["`GENIERAILS_INTERACTIVE=0`", "`no resource changes`", "`make policy-abandon ENV=dev`",
+        "Dev step 1: The commit offer": ["option-A local-only repo", "a rehearse receipt counts only for a clean checkout"],
+        "Dev step 3: Generate": ["`COMMIT=0`", "- **Deterministic**", "- **Legacy**", "`column_overrides`"],
+        "Dev step 4: Rehearse": ["`GENIERAILS_INTERACTIVE=0`", "`no resource changes`", "`make policy-abandon ENV=dev`",
                                  "`verify_key_columns`", "`ERROR: account plan is non-empty`"],
-        "Prod step 1: Set up and promote": ["`REUSE_SOURCE_AUTH=1", "`allow_identity_catalog_map = true`",
+        "Prod steps 1-2: Set up and copy the rules": ["`REUSE_SOURCE_AUTH=1", "`allow_identity_catalog_map = true`",
                                             "`enable_classification = true`", "`--skip-agent`",
                                             "a second `catalog_map` line is refused"],
-        "Prod step 3: Plan, release": ["recorded (OS user, git identity, host, terminal, time)",
+        "Prod step 4: Release": ["recorded (OS user, git identity, host, terminal, time)",
                                        "`ALLOW_TAG_VALUE_REMOVAL=<key>:<value>,...`", "`promote_from = \"stg\"`",
                                        "Legacy envs skip `make release-plan`", "at most 8 rounds",
                                        "`ERROR: unacknowledged reader prod:reader:<table>:<principal>: ...`",
                                        "reports them as stale"],
         "If prod stops on coverage or drift": ["**Reuse an existing mask**", "**A new kind of mask**",
                                                "`make draft-custom-mask`", "legacy-mode only"],
-        "Prod step 4: Record evidence": ["`$GENIERAILS_STATE_DIR`", "`WAREHOUSE_ID=<id>` only pins another",
+        "Prod step 5: Record evidence": ["`$GENIERAILS_STATE_DIR`", "`WAREHOUSE_ID=<id>` only pins another",
                                          "`OFFLINE=1`"],
-        "Keep it safe": ["never changes the Genie agent", "on a clean checkout"],
+        "Keep it healthy": ["never changes the Genie agent", "on a clean checkout"],
         "CI / scripted": ["`COMMIT=1`", "`make release ENV=prod MANIFEST=<path>`", "second person"],
         "Commit it": ["`git push -u origin main`", "`make next ENV=dev` names that push"],
     }
@@ -184,69 +196,139 @@ def test_the_relocated_facts_are_in_details_by_step():
             assert fact in text, (title, fact)
 
 
-def test_readme_explains_the_why_in_plain_words():
-    """A first-time reader learns why they commit, what a manifest is and why access waits for masks."""
+def _prose(text: str) -> str:
+    """The README's prose only: no code blocks, inline code, tables, anchors or link targets."""
+    text = re.sub(r"```.*?```", "", text, flags=re.S)
+    lines = [line for line in text.splitlines() if not line.startswith("|") and not line.startswith("<a id=")]
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", "\n".join(lines))
+    return re.sub(r"`[^`]*`", "", text)
+
+
+def _step(section: str, title: str) -> str:
+    start = section.index(f"**{title}")
+    nxt = re.compile(r"\n\*\*\d+\. ").search(section, start + 1)
+    return section[start:nxt.start() if nxt else None]
+
+
+def test_readme_opens_with_what_the_flow_is_for_and_explains_each_concept_where_it_first_appears():
+    """Owner feedback 2026-11-05: say what the flow is for first, then walk the steps in order and explain a
+    commit, a manifest, an ack and each y/N at the step that first needs it, in plain words. The glossary is
+    reference at the end, not a wall up front."""
     text = README.read_text()
-    assert set(["how-it-works", "glossary"]) <= _anchors(text)
-    # How it works comes right after the intro, before the command block; the glossary follows it.
-    order = ["\n## How it works in 1 minute\n", "\n## Words used on this page\n", "\n## The whole flow\n",
-             "\n## Before you start\n"]
-    assert [text.index(h) for h in order] == sorted(text.index(h) for h in order)
-    how = text[text.index("## How it works in 1 minute"):text.index("## Words used on this page")]
-    bullets = [line for line in how.splitlines() if line.startswith("- **")]
-    assert 4 <= len(bullets) <= 6, bullets
-    for fact in ("Rules are files in your repo", "ship the same files", "**Why commit.**",
-                 "Prod releases only a commit that passed in dev", "pull request", "**Why a manifest.**",
-                 "A manifest is a saved plan of exactly what a step will change",
-                 "refuses if anything changed since you saw it", "**Masks first, access last.**",
-                 "exclude it in the classification review", "](DETAILS.md#if-prod-stops-on-coverage-or-drift)"):
-        assert fact in how, fact
-    # No promise of an "allow this class unmasked" switch: classified columns get a mask or a corrected detection.
-    assert "unmasked for everyone" not in text and "allow it" not in how
-    # The glossary: one plain line per term, tier defined before the access-tier order in Before you start.
-    glossary = text[text.index("## Words used on this page"):text.index("## The whole flow")]
+    # The opening: 3-5 plain sentences before the flow map: what GenieRails does, what you end up with,
+    # and the journey's five parts in order. No glossary or "why" bullets before the flow map.
+    opening = text[text.index("\n", text.index("# Ship")):text.index("\n## The whole flow\n")]
+    sentences = [s for s in re.split(r"(?<=[.!?])\s+", _prose(opening).strip()) if s.strip()]
+    assert 3 <= len(sentences) <= 6, sentences
+    assert "\n- " not in opening and "\n|" not in opening and "\n##" not in opening
+    for fact in ("finds the sensitive columns", "into masks and access rules", "a dev and a prod env",
+                 "each group sees only what it should", "proven before anyone new gets access"):
+        assert fact in opening, fact
+    journey = ["set up dev", "prove the rules in dev", "copy the proven rules to prod", "release prod",
+               "keep it healthy"]
+    assert [opening.index(part) for part in journey] == sorted(opening.index(part) for part in journey)
+    # One sentence introduces the flow map.
+    intro = text[text.index("\n## The whole flow\n") + len("\n## The whole flow\n"):text.index("```bash")]
+    assert [line for line in intro.splitlines() if line.strip()] == [
+        "The whole flow at a glance; the steps below walk through each line."]
+
+    dev = text[text.index("\n## Dev\n"):text.index("\n## Prod\n")]
+    prod = text[text.index("\n## Prod\n"):text.index("\n## Keep it healthy\n")]
+    after_map = _prose(text[text.index("\n## Before you start\n"):text.index("\n## Reference\n")])
+
+    # Commit: explained in Dev step 1, at setup's offer, before any other prose use of the word.
+    setup = _step(dev, "1. Set up.")
+    assert "`REPO=` (optional) makes this clone yours: `origin` becomes your repo" in setup
+    assert "Without it, everything stays in local git." in setup
+    offer = setup[setup.index('<a id="commit-it"></a>'):]
+    for fact in ("**Then it offers to commit.** GenieRails previews", "`Commit these changes and push them to "
+                 "origin/main? [y/N]`. Answer `y`.", "*What a commit is:* a saved snapshot of these files, with an ID.",
+                 "- What you test in dev is exactly what reaches prod: prod releases only a commit that passed in dev.",
+                 "- Teammates can review a change before it ships.",
+                 "- Git keeps every version, so you can see what changed and undo it later."):
+        assert fact in offer, fact
+    before = after_map[:after_map.index("*What a commit is:*")]
+    assert re.findall(r"commit", before, re.I) == ["commit"] and before.rstrip().endswith("Answer ."), before[-200:]
+    # Classification review: why a column with no decision blocks access, with the design link, in Dev step 2.
+    classify = _step(dev, "2. Review classification")
+    for fact in ("*Why this review matters:*", "GenieRails builds the masks from these tags",
+                 "Every tagged column the agent can reach needs a decision: a mask, or, if the detection is wrong, "
+                 "an exclusion here.", "GenieRails opens no new access, so nothing can leak by accident.",
+                 "](DETAILS.md#why-no-unmasked-sensitive-column)"):
+        assert fact in classify, fact
+    # Rehearse: why prove in dev first, and what the account y/N approves.
+    rehearse = _step(dev, "4. Rehearse.")
+    for fact in ("*Why prove it in dev first:* a mistake in dev is cheap.", "queries as each group to prove the masks",
+                 "Prod releases only a commit that passed here.", "`Approve and apply this account manifest? [y/N]`",
+                 "That plan is the account-wide setup all envs share, e.g. the masks' tag policy. `y` applies exactly "
+                 "what it showed"):
+        assert fact in rehearse, fact
+    assert rehearse.index("*Why prove it in dev first:*") < rehearse.index("make rehearse ENV=dev")
+    # Release: what a manifest is (the first prose use of the word), what y means, why rounds, access last.
+    release = _step(prod, "4. Release.")
+    for fact in ("*What a manifest is:* the exact list of changes this round will make, saved before anything "
+                 "happens.", "- `y` applies exactly that manifest. If anything changed since it was planned, it refuses.",
+                 "- Anything else applies nothing and stops.", "*Why several rounds:* a first release goes masks "
+                 "first, access last", "Each round is proven before the next opens more.",
+                 "Answer `y` each round until it prints `=== Release complete (prod) ===`."):
+        assert fact in release, fact
+    assert after_map.lower().index("manifest") == after_map.index("*What a manifest is:*") + len("*What a ")
+    # Ack: what ack.txt is, with a one-line example, only where the release asks for it.
+    assert "you accept it in writing: an ack, one line in `envs/prod/ack.txt` saying \"I reviewed this access " \
+        "and accept it\"" in release
+    assert "```text\n# reviewed: owner group of prod_finance\n" \
+        "prod:reader:prod_finance.payments.transactions:finance_admins\n```" in release
+    assert "never a `y/N`" in release
+    first_ack = re.search(r"\back\b", after_map).start()
+    assert first_ack == after_map.index("an ack, one line in") + len("an "), after_map[first_ack - 100:first_ack]
+    # Each concept is explained once; later mentions link back.
+    for once in ("*What a commit is:*", "*What a manifest is:*", "*Why several rounds:*", "*Why prove it in dev "
+                 "first:*", "*Why this review matters:*", "saved snapshot", "the exact list of changes"):
+        assert text.count(once) <= 2 and text[:text.index("\n## Reference\n")].count(once) == 1, once
+    assert "Do the same review as [dev step 2](#dev-classify), on the prod catalog." in _step(prod, "3. Review")
+    # Plain words: no jargon walls, short sentences.
+    for word in ("provenance", "footprint", "fingerprint", "four-eyes", "IdP", "staged"):
+        assert word.lower() not in _prose(text).lower(), word
+    principals = [m.start() for m in re.finditer(r"principal", _prose(text))]
+    assert principals and all(_prose(text)[p - 8:p] == "service " for p in principals)
+    assert "service principal (a non-human account that runs the deploys" in text
+    assert text.index("service principal (a non-human account") <= text.index("service principal")
+    for sentence in re.split(r"(?<=[.!?])\s+|\n", _prose(text)):
+        assert len(sentence.split()) <= 30, sentence
+
+    # The reference closes the page: the ask table, then a small glossary.
+    reference = text[text.index("\n## Reference\n"):]
+    table = reference[reference.index("### What each command asks"):reference.index("### Words used on this page")]
+    assert "| Command | What it asks | What your `y` approves |" in table
+    rows = [line for line in table.splitlines() if line.startswith("| `make ")]
+    assert [row.split(" | ")[0][2:] for row in rows] == [
+        "`make setup ENV=dev REPO=<url>`", "`make generate ENV=dev`", "`make rehearse ENV=dev`",
+        "`make setup ENV=prod`", "`make promote-to ENV=prod`", "`make release ENV=prod`"]
+    for line in rows:
+        cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
+        assert len(cells) == 3 and ("[y/N]" in cells[1] or cells[1] == "The same commit question"), line
+        assert cells[2] not in ("", "—"), line
+    assert "e.g. the masks' tag policy" in table and "exactly that round's prod changes" in table
+    assert "`evidence`, `maintain`, `next` and `status` ask nothing." in table
+    glossary = reference[reference.index("### Words used on this page"):]
     rows = [line for line in glossary.splitlines() if line.startswith("| **")]
     terms = [re.match(r"\| \*\*([^*]+)\*\*", row).group(1) for row in rows]
-    assert terms == ["env", "tier", "classification tag", "treatment / mask", "rehearse", "manifest", "receipt",
+    assert terms == ["env", "tier", "classification tag", "treatment / mask", "commit", "rehearse", "manifest",
                      "ack"], terms
     for row in rows:
         assert len(row.split()) <= 40, row
+    assert "| **commit** | A saved snapshot of your files, with an ID ([dev step 1](#commit-it)) |" in glossary
+    assert "| **manifest** | The exact list of changes a step will make, saved before anything happens" in glossary
     assert "](REFERENCE.md#glossary)" in glossary and "\n## Glossary\n" in (WALKTHROUGH / "REFERENCE.md").read_text()
-    assert text.index("| **tier** (access-tier group) |") < text.index("| Access-tier groups |")
-    # One Why: line in every step, and in Keep it safe.
-    dev = text[text.index("\n## Dev\n"):text.index("\n## Prod\n")]
-    prod = text[text.index("\n## Prod\n"):text.index("\n## Keep it safe\n")]
-    safe = text[text.index("\n## Keep it safe\n"):text.index("\n## CI / scripted\n")]
-    for section in (dev, prod):
-        parts = re.split(r"\n(?=\*\*\d+\. )", section)[1:]
-        assert parts and all(part.count("\n*Why:* ") == 1 for part in parts), parts
-    assert safe.count("\n*Why:* ") == 1
-    for why in ("your changes go to your own repo, where teammates can review them",
-                "drafts the rules from what classification found",
-                "proves in dev that the masks really hide the data before anyone gets access",
-                "copies the exact tested rules to prod", "one safe step at a time; each step shows you its plan",
-                "a record for auditors", "catches columns tagged later"):
-        assert f"{why}" in dev + prod + safe, why
-    # Each y/N question says, in plain words, what the y approves.
-    table = text[text.index("### What each command does and what it asks"):text.index("## Before you start")]
-    assert "| Command | What it does | What it asks | What your `y` approves |" in table
-    for line in (l for l in table.splitlines() if l.startswith("| `make ")):
-        cells = [c.strip() for c in line.strip("|").split(" | ")]
-        assert len(cells) == 4 and cells[3], line
-        if "[y/N]" in cells[2]:
-            assert cells[3] != "—", line
-    assert "e.g. the masks' tag policy" in table and "exactly that round's prod changes" in table
-    # A concrete ack.txt line, and why it exists.
-    assert "```text\n# reviewed: owner group of prod_finance\n" \
-        "prod:reader:prod_finance.payments.transactions:finance_admins\n```" in prod
-    assert "GenieRails doesn't manage that access, so you accept it in writing" in prod
+    # One plain line on why the tier order matters, where you gather the groups.
+    assert "e.g. `payments_ops` sees raw values, `viewers` masked ones. Order matters" in text
 
 
 def test_details_explains_why_no_class_is_raw_for_everyone():
     """Owner decision 2026-11-05: no 'raw for everyone' switch; the reason and today's raw paths are documented."""
     readme, details = README.read_text(), DETAILS.read_text()
-    how = readme[readme.index("## How it works in 1 minute"):readme.index("## Words used on this page")]
-    assert "](DETAILS.md#why-no-unmasked-sensitive-column)" in how
+    classify = readme[readme.index("**2. Review classification"):readme.index("**3. Generate.**")]
+    assert "](DETAILS.md#why-no-unmasked-sensitive-column)" in classify
     start = details.index("\n## Why GenieRails won't open access to an unmasked sensitive column\n")
     section = details[start:details.index("\n## ", start + 1)]
     for fact in ("explicit, reviewed decision before anyone gets access", "can't leak by accident",
