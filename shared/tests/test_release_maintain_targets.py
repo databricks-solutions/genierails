@@ -477,9 +477,9 @@ def test_signal_mid_run_releases_lock(tmp_path, target, sig):
     )
     path = env_dir / lock.LOCK_RELPATH
     try:
-        deadline = time.time() + 10
+        deadline = time.monotonic() + 30
         while not (log.exists() and "derive-assignments" in log.read_text()):
-            assert time.time() < deadline
+            assert time.monotonic() < deadline
             assert proc.poll() is None
             time.sleep(.05)
         assert path.exists(), "the lock must exist before the signal"

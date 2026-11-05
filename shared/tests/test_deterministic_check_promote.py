@@ -1090,8 +1090,9 @@ def test_promote_to_token_two_signals_leave_no_token_and_keep_first_exit(tmp_pat
         f"os.kill(os.getppid(), {second}); time.sleep(2)"
     )
     program = f'''\
-import sys, time
+import signal, sys, time
 from pathlib import Path
+signal.signal(signal.SIGINT, signal.default_int_handler)
 sys.path.insert(0, {str(SHARED / "scripts")!r})
 import promote_token
 class SlowPath(type(Path())):
@@ -1110,6 +1111,49 @@ promote_token.run(Path({str(env)!r}), [sys.executable, "-c", {child!r}])
     result = subprocess.run([sys.executable, "-c", program], timeout=10)
 
     assert result.returncode == 128 + first
+    assert not token.exists()
+
+
+def test_promote_to_token_term_then_int_during_cleanup_keeps_term_exit(tmp_path):
+    env = tmp_path / "prod"
+    env.mkdir()
+    token = tmp_path / "promote-token"
+    cleanup_mask = tmp_path / "cleanup-mask"
+    program = f'''\
+import os, signal, sys
+from pathlib import Path
+signal.signal(signal.SIGINT, signal.default_int_handler)
+sys.path.insert(0, {str(SHARED / "scripts")!r})
+import promote_token
+class InterruptingPath(type(Path())):
+    def unlink(self, *args, **kwargs):
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        assert {{signal.SIGINT, signal.SIGTERM, signal.SIGHUP}} <= blocked
+        Path({str(cleanup_mask)!r}).write_text("blocked")
+        os.kill(os.getpid(), signal.SIGINT)
+        return super().unlink(*args, **kwargs)
+def mint(env_dir):
+    path = InterruptingPath({str(token)!r})
+    path.write_text(promote_token.TOKEN_PREFIX + str(env_dir.resolve()) + "\\n")
+    path.chmod(0o600)
+    return path
+promote_token.mint = mint
+import subprocess
+real_popen = subprocess.Popen
+class SignallingPopen(real_popen):
+    def wait(self, *args, **kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)
+        return super().wait(*args, **kwargs)
+subprocess.Popen = SignallingPopen
+promote_token.run(Path({str(env)!r}), [sys.executable, "-c", "pass"])
+'''
+
+    # Deliver TERM after run installs its handlers; unlink deterministically
+    # delivers INT while cleanup has all handled signals blocked.
+    result = subprocess.run([sys.executable, "-c", program], timeout=10)
+
+    assert result.returncode == 128 + signal.SIGTERM
+    assert cleanup_mask.read_text() == "blocked"
     assert not token.exists()
 
 

@@ -81,16 +81,19 @@ REUSE = "it reuses the"
 # (a promotion, ack.txt or a prod-only setting): no second rehearse. Each passage names release-plan
 # with its reuse, then release, and never asks for a rehearse on that commit.
 DOC_REUSE = [
-    ("shared/examples/dev_to_prod/README.md", "make promote-to ENV=prod # copies the reviewed rules",
-     ["offers to commit + push (y)", "make release ENV=prod # each round: plans, shows the manifest, asks y/N"]),
-    ("shared/examples/dev_to_prod/README.md", "| `make promote-to ENV=prod` | Copies dev's reviewed rules",
-     ["The same commit question", "| `make release ENV=prod` |", "Plans, applies and proves one manifest per round"]),
+    ("shared/examples/dev_to_prod/README.md", "make promote-to ENV=prod # copies dev's proven rules to prod",
+     ["offers to commit + push (y)", "make release ENV=prod # applies prod in rounds; shows each round's plan, asks y/N"]),
+    ("shared/examples/dev_to_prod/README.md", "| `make promote-to ENV=prod` | The same commit question",
+     ["Same: save this step's files", "| `make release ENV=prod` |", "Each round: exactly that round's prod changes"]),
     ("shared/examples/dev_to_prod/DETAILS.md", "| `make promote-to ENV=prod` | Copies dev's reviewed rules",
      ["The same commit question", "| `make release ENV=prod` |", "Per round: `make release-plan`",
       "reuses dev's rehearsal", "applies exactly it"]),
-    ("shared/examples/dev_to_prod/README.md", "**3. Plan, release.**",
-     ["make release ENV=prod", "Each round shows a manifest", "It reuses dev's rehearsal; it never rehearses dev."]),
-    ("shared/examples/dev_to_prod/DETAILS.md", "## Prod step 3: Plan, release",
+    # The release step's command and manifest come first (test_access_tier_groups pins that order); from its
+    # rounds on, the step reuses dev's rehearsal and asks for no second rehearse.
+    ("shared/examples/dev_to_prod/README.md", "*Why several rounds:*",
+     ["Answer `y` each round until it prints `=== Release complete (prod) ===`", "Before round 1",
+      "It reuses dev's rehearsal; it never rehearses dev."]),
+    ("shared/examples/dev_to_prod/DETAILS.md", "## Prod step 4: Release",
      ["make release ENV=prod", "Each round it plans (`make release-plan ENV=prod`)",
       "the next `make release ENV=prod` offers it first"]),
     ("shared/examples/dev_to_prod/DETAILS.md", "**Reuse an existing mask** (the common case)",
@@ -445,13 +448,16 @@ def test_prod_setup_banner_asks_for_the_deployer_before_promote_to():
 
 def test_prod_setup_says_set_group_map_not_replace_access_tier_groups():
     """promote-to writes prod's tiers from dev's through group_map, so prod's own tier names
-    without a group_map are refused; README Prod step 1 and the setup banner say so."""
+    without a group_map are refused; README Prod step 1 and the setup banner say so (step 2's promote-to
+    writes the tiers)."""
     readme = (ROOT / "shared/examples/dev_to_prod/README.md").read_text()
-    step = readme[readme.index("**1. Set up and promote.**"):readme.index("**2. Classify")]
-    assert "group_map" in step and "Leave the `access_tier_groups` placeholders" in step, step
+    prod = readme[readme.index("\n## Prod\n"):]
+    step = prod[prod.index("**1. Set up.**"):prod.index("**2. Copy the proven rules.**")]
+    assert "group_map" in step and "Leave the `access_tier_groups` placeholders: the next step writes prod's tiers " \
+        "from dev's, through `group_map`." in step, step
     assert "`access_tier_groups` placeholders, and set" not in step
     details = (ROOT / "shared/examples/dev_to_prod/DETAILS.md").read_text()
-    details = details[details.index("## Prod step 1: Set up and promote"):details.index("## Prod step 3")]
+    details = details[details.index("## Prod steps 1-2: Set up and copy the rules"):details.index("## Prod step 4")]
     assert "Leave the `access_tier_groups` placeholders" in details
     assert "promotion refuses before writing and prints the missing `group_map` entry to add" in details
     makefile = (SHARED / "Makefile.shared").read_text()

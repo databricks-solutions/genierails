@@ -6,7 +6,7 @@ GENIERAILS_EVIDENCE_INTEGRATION and no WAREHOUSE_ID. Its record goes to the
 git-ignored state dir, so no doc asks to delete an evidence folder first. The README
 also once said adopt-custom-mask was not on main; it is. make maintain runs
 on the deployment machine (cron) at the last released commit, never in CI.
-Dev step 4 says what a generate re-run keeps in each governance mode.
+Dev step 3 says what a generate re-run keeps in each governance mode.
 """
 
 import re
@@ -35,18 +35,18 @@ def test_the_whole_flow_records_evidence_after_release_and_before_maintain():
     assert "make release-plan ENV=prod" not in lines
     order = ["make promote-to ENV=prod", "make release ENV=prod", EVIDENCE, "make maintain ENV=prod"]
     assert [lines.index(step) for step in order] == sorted(lines.index(step) for step in order)
-    assert "make evidence ENV=prod      # live compliance record" in flow.splitlines()
+    assert "make evidence ENV=prod      # writes a record of what is live" in flow.splitlines()
 
 
-def test_prod_step_4_records_evidence_after_the_release_and_its_stop_advice():
-    prod = _section(README.read_text(), "## Prod", "## Keep it safe")
-    step = prod[prod.index("**4. Record evidence.**"):]
+def test_prod_step_5_records_evidence_after_the_release_and_its_stop_advice():
+    prod = _section(README.read_text(), "## Prod", "## Keep it healthy")
+    step = prod[prod.index("**5. Record evidence.**"):]
     assert prod.index("make release ENV=prod") < prod.index("**If it stops on coverage or drift**") \
-        < prod.index("**4. Record evidence.**")
+        < prod.index("**5. Record evidence.**")
     assert f"```bash\n{EVIDENCE}\n```" in step
     assert "writes a JSON record and Markdown summary to `.genierails-state/prod/evidence/` (git-ignored" in step
-    assert "](DETAILS.md#prod-step-4-record-evidence)" in step
-    details = _section(DETAILS.read_text(), "## Prod step 4: Record evidence", "## Keep it safe")
+    assert "](DETAILS.md#prod-step-5-record-evidence)" in step
+    details = _section(DETAILS.read_text(), "## Prod step 5: Record evidence", "## Keep it healthy")
     assert "writes a JSON record and Markdown summary to `.genierails-state/prod/evidence/` (git-ignored" in details
     assert "`OFFLINE=1` writes a config-only report" in details
     assert "The checkout stays clean, so `make maintain` and the next `release-plan` run as usual." in details
@@ -111,13 +111,13 @@ def test_readme_no_longer_says_adopt_custom_mask_is_not_on_main():
 def test_maintain_runs_on_the_deployment_machine_at_the_last_released_commit_not_ci():
     readme = README.read_text()
     flow = _section(readme, "## The whole flow", "## Before you start")
-    safe = _section(readme, "## Keep it safe", "## CI / scripted")
-    line = "make maintain ENV=prod      # deployment machine, cron, at the last released commit"
+    safe = _section(readme, "## Keep it healthy", "## Later changes")
+    line = "make maintain ENV=prod      # on a schedule, on the deployment machine: masks columns tagged later"
     assert line in flow.splitlines() and line in safe.splitlines()
-    assert "Run it from the [deployment machine](../../docs/deployment-machine.md)." in safe
+    assert "Schedule it (e.g. with cron) on the [deployment machine](../../docs/deployment-machine.md)." in safe
     assert "In a deterministic env it runs only from the last released commit, on a clean checkout." in safe
     # No walkthrough line puts maintain in CI.
-    details = _section(DETAILS.read_text(), "## Keep it safe", "## CI / scripted")
+    details = _section(DETAILS.read_text(), "## Keep it healthy", "## CI / scripted")
     assert "Run `make maintain ENV=prod` from the [deployment machine](../../docs/deployment-machine.md)." in details
     assert "In a deterministic env it runs only from the last released commit, on a clean checkout." in details
     for path in (README, DETAILS, REFERENCE):
@@ -135,20 +135,20 @@ def test_maintain_runs_on_the_deployment_machine_at_the_last_released_commit_not
 
 def _generate_step(readme: str) -> str:
     dev = _section(readme, "## Dev", "## Prod")
-    return dev[dev.index("**4. Generate.**"):dev.index("**5. Rehearse.**")]
+    return dev[dev.index("**3. Generate.**"):dev.index("**4. Rehearse.**")]
 
 
 def _generate_details() -> str:
-    return _section(DETAILS.read_text(), "## Dev step 4: Generate", "## Dev step 5: Rehearse")
+    return _section(DETAILS.read_text(), "## Dev step 3: Generate", "## Dev step 4: Rehearse")
 
 
-def test_dev_step_4_says_a_deterministic_generate_replaces_masks_and_points_at_the_settings():
+def test_dev_step_3_says_a_deterministic_generate_replaces_masks_and_points_at_the_settings():
     # The README step says the default mode replaces hand edits and links to what a re-run keeps.
     readme_step = _generate_step(README.read_text())
     assert "In the template's default mode a re-run replaces hand edits to the masks in `envs/dev/generated/`." \
         in readme_step
     assert "To change a mask, edit `envs/dev/env.auto.tfvars` and re-run `make generate ENV=dev`." in readme_step
-    assert "](DETAILS.md#dev-step-4-generate)" in readme_step
+    assert "](DETAILS.md#dev-step-3-generate)" in readme_step
     assert "including your edits" not in readme_step and "edit the rules if you need to" not in readme_step
     step = _generate_details()
     assert "What a re-run keeps depends on the env's `governance_mode`:" in step
