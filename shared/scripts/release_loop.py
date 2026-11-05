@@ -181,10 +181,9 @@ def release(env: str, env_dir: Path, make: list[str], verify_key_column: str = "
         else:
             _say(f"=== Release round {round_no} ({env}): the current manifest, planned earlier, can still be "
                  "released ===")
-        manifest_sha256 = approval.manifest_sha256(current)
         try:
-            manifest = rg.load_manifest(current, env)
-        except rg.Refused as exc:
+            manifest, manifest_sha256 = approval.pin(current, env)
+        except (approval.Refused, OSError) as exc:
             print(f"ERROR: {exc}; nothing was released.", file=sys.stderr)
             return 1
         _say()

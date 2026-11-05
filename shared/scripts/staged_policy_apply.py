@@ -696,14 +696,27 @@ class Controller:
             raise Refused("the adopted principal-only drift journal has an unexpected create render target; "
                           "nothing was applied. Re-run the original 499e19a failed-create journal shape or "
                           "restore the policy journal from records.")
+        marker = journal.get("adopted_unverified") or {}
+        history_matches = any(
+            entry.get("reason") == "principal-only drift adopted from state"
+            and entry.get("adopted") == adopted and entry.get("to") == t.get("to")
+            for entry in journal.get("history") or []
+        )
+        if marker.get("fingerprint") != adopted \
+                or marker.get("restore_from") != restore_from or not history_matches:
+            raise Refused(
+                "the adopted principal-only drift journal can't be safely repaired because its adoption "
+                "marker or history entry doesn't match; nothing was applied. "
+                f"Run make policy-abandon ENV={self.env_name}, then re-plan."
+            )
         try:
             snapshot = self._snapshot(adopted)
         except (pg.StageError, OSError, ValueError) as exc:
             raise Refused(f"the adopted principal-only drift snapshot {adopted} can't be read ({exc}); "
-                          "nothing was applied.") from exc
+                          f"nothing was applied. Run make policy-abandon ENV={self.env_name}, then re-plan.") from exc
         if not pg.snapshot_intact(snapshot, adopted):
             raise Refused(f"the adopted principal-only drift snapshot {adopted} doesn't match its fingerprint; "
-                          "nothing was applied.")
+                          f"nothing was applied. Run make policy-abandon ENV={self.env_name}, then re-plan.")
         try:
             desired = self._snapshot(t["to"])
             retain = self._snapshot(t["retain"]) if t.get("retain") else None
