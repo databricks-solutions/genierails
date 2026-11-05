@@ -159,6 +159,51 @@ def assemble_report(
     }
 
 
+UNKNOWN_APPROVAL = "unknown"
+
+
+def receipt_approval(env_dir: Path) -> tuple[str, str | None, dict[str, Any]]:
+    """(approved_by, approved_at, approval_record) from the env's last release receipt.
+
+    The receipt's ``approval`` field (scripts/approval.py, release_gate.release_receipt):
+    a y typed at a terminal names its self-reported git identity and OS user;
+    ``{"via": "external"}`` is a release approved outside GenieRails (the plain
+    ``make release MANIFEST=`` path). No receipt, or one without the field,
+    is ``unknown``. Only those identity fields are read: never the question,
+    tty, host, run digest or asker of the record.
+    """
+    from scripts import release_gate as rg
+
+    try:
+        receipt = rg.last_release(rg.cloud_dir_of(env_dir), Path(env_dir).resolve().name)
+    except Exception:  # an unreadable store is no receipt: audit only, never a failure
+        receipt = None
+    if not receipt:
+        return UNKNOWN_APPROVAL, None, {"source": "none", "detail": "no release receipt for this env"}
+    record: dict[str, Any] = {"source": "release-receipt", "receipt": Path(str(receipt.get("_path", ""))).name,
+                              "commit": str(receipt.get("commit", ""))[:12]}
+    phases = receipt.get("phase_approvals")
+    if isinstance(phases, dict) and phases:
+        counts: dict[str, int] = defaultdict(int)
+        for value in phases.values():
+            counts[str(value.get("via")) if isinstance(value, dict) and value.get("via") else UNKNOWN_APPROVAL] += 1
+        record["phase_approvals"] = dict(sorted(counts.items()))
+    approval = receipt.get("approval")
+    via = approval.get("via") if isinstance(approval, dict) else None
+    record["via"] = str(via) if via else UNKNOWN_APPROVAL
+    if via == "terminal":
+        git = approval.get("git_user") if isinstance(approval.get("git_user"), dict) else {}
+        name, email, user = (str(git.get("name") or "").strip(), str(git.get("email") or "").strip(),
+                             str(approval.get("user") or "").strip())
+        who = " ".join(part for part in (name, f"<{email}>" if email else "") if part) or "unnamed git user"
+        approved_by = f"{who} (OS user {user or 'unknown'}; y typed at a terminal, self-reported)"
+        at = approval.get("approved_at")
+        return approved_by, str(at) if isinstance(at, str) and at else None, record
+    if via == "external":
+        return "external (approved outside GenieRails; the release receipt records no terminal approval)", None, record
+    return UNKNOWN_APPROVAL, None, record | {"detail": "the release receipt records no approval"}
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     """Render a compact human-readable view of the canonical JSON artifact."""
     header = report["header"]
@@ -169,8 +214,17 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Generated at: `{header['generated_at']}`",
         f"- Source: `{header['source']}`",
         f"- Approved by: `{header['approved_by']}`",
-        f"- Approved at: `{header['approved_at'] or 'pending'}`",
+        f"- Approved at: `{header['approved_at'] or 'unknown'}`",
     ]
+    record = header.get("approval_record")
+    if isinstance(record, dict) and record.get("source") == "release-receipt":
+        phases = record.get("phase_approvals") or {}
+        earlier = (", earlier phases: " + ", ".join(f"{n} {via}" for via, n in phases.items())) if phases else ""
+        detail = f"; {record['detail']}" if record.get("detail") else ""
+        lines.append(f"- Approval record: release receipt `{record.get('receipt')}` (commit `{record.get('commit')}`; "
+                     f"final round: {record.get('via')}{earlier}){detail}")
+    elif isinstance(record, dict) and record.get("detail"):
+        lines.append(f"- Approval record: {record['detail']}")
     if "column_privileges_availability" in report:
         availability = report["column_privileges_availability"]
         detail = ", ".join(f"{catalog}={status}" for catalog, status in sorted(availability.items())) or "not queried"
@@ -583,9 +637,14 @@ def main(argv: list[str] | None = None, *, collector: Callable[..., dict[str, An
     parser.add_argument("--env-dir", type=Path, default=Path.cwd())
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--warehouse-id", default=os.getenv("DATABRICKS_WAREHOUSE_ID"))
-    parser.add_argument("--approved-by", default=os.getenv("GENIERAILS_EVIDENCE_APPROVED_BY", "unapproved"))
+    parser.add_argument("--approved-by", default=os.getenv("GENIERAILS_EVIDENCE_APPROVED_BY"),
+                        help="sign the report (default: the approval the env's last release receipt records)")
     parser.add_argument("--approved-at", default=os.getenv("GENIERAILS_EVIDENCE_APPROVED_AT"))
     args = parser.parse_args(argv)
+    approval_record: dict[str, Any] = {"source": "signed"}
+    if not args.approved_by:
+        args.approved_by, receipt_at, approval_record = receipt_approval(args.env_dir)
+        args.approved_at = args.approved_at or receipt_at
     columns, tags = configured_columns(args.env_dir), configured_tags(args.env_dir)
     tables = configured_tables(args.env_dir)
     try:
@@ -604,12 +663,14 @@ def main(argv: list[str] | None = None, *, collector: Callable[..., dict[str, An
             print(f"ERROR: {exc}. No evidence was written.", file=sys.stderr)
             return 2
         report = assemble_report(state["columns"], classifications=state["classifications"], tags=state["tags"], masks=state["masks"], policies=state["policies"], abac_policies=state.get("abac_policies", []), grants=state["grants"], approved_by=args.approved_by, approved_at=args.approved_at, source="databricks-live")
+        report["header"]["approval_record"] = approval_record
         report["column_privileges_availability"] = state.get("column_privileges_availability", {})
         if "abac_policy_listing" in state:
             report["abac_policy_listing"] = state["abac_policy_listing"]
             report["abac_policies_not_evaluated"] = state.get("abac_policies_not_evaluated", [])
     else:
         report = assemble_report(columns, tags=tags, approved_by=args.approved_by, approved_at=args.approved_at)
+        report["header"]["approval_record"] = approval_record
     paths = write_report(report, output_dir)
     print("Wrote " + " and ".join(str(path) for path in paths))
     old = Path(args.env_dir) / "generated" / "evidence"

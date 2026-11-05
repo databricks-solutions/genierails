@@ -666,7 +666,8 @@ def write_result(path: Path, record: dict) -> None:
         raise
 
 
-def _failed(gate_path: Path, record: dict, inputs: dict, env_name: str, reason: str) -> int:
+def _failed(gate_path: Path, record: dict, inputs: dict, env_name: str, reason: str, *,
+            note: str = "", structural: bool = False) -> int:
     """Record a failed gate. Removing, keeping and withholding may still proceed.
 
     Without a pass, Terraform leaves new grants out of the plan (withholds
@@ -680,12 +681,16 @@ def _failed(gate_path: Path, record: dict, inputs: dict, env_name: str, reason: 
     write_result(gate_path, record)
     if inputs.get("needs_gate") is False:
         new = inputs.get("new_grants") or []
+        if structural:
+            print(STRUCTURAL_NOTE.format(env=env_name, result="did not pass") +
+                  (f" This plan withholds {len(new)} new SELECT grant(s)." if new else ""))
+            return 0
         withheld = (f" {len(new)} new SELECT grant(s) are withheld ({', '.join(new)}); make exits "
                     "non-zero after the apply." if new else "")
         print(f"WARNING: coverage check FAILED for data_access:{env_name}: {reason}\n"
               "  Proceeding because this change weakens the protection (tags, policies, masks) of no "
               "grant already in place: removals and existing grants apply." + withheld +
-              " Fix the check before opening anything.", file=sys.stderr)
+              " Fix the check before opening anything." + (f"\n  {note}" if note else ""), file=sys.stderr)
         return 0
     print(f"coverage check FAILED for data_access:{env_name}: {reason}\n"
           "  This change keeps business SELECT with weaker (or unrecorded) protection, so nothing is "
@@ -803,6 +808,48 @@ def can_run_check(env_dir: Path, env_name: str, runner: Path, apply_flags: str) 
     return 0
 
 
+# make check's structural plan (scripts/check_env.py step 6) runs this gate in
+# its scratch copy against empty state, without the live tags or DDL a release
+# reads, and _plan-layer ignores its exit code: make check's coverage verdict
+# is its own step 4 (make coverage-gate), which still fails check. So there
+# the validator report is held back and one line says what the result is.
+STRUCTURAL_NOTE = ("  Coverage check of make check's structural plan (data_access:{env}): {result}. This is not "
+                   "make check's coverage verdict (its coverage check step is): the scratch copy reads no live "
+                   "tags or DDL, and release and maintain re-check them. VERBOSE=1 shows the report.")
+
+
+def structural_check(env_dir: Path) -> bool:
+    """Whether this run is make check's structural plan (its one-use token is present; not consumed here)."""
+    from scripts.state_layout import STRUCTURAL_CHECK_TOKEN_ENV, structural_check_token_valid
+
+    return structural_check_token_valid(env_dir, os.environ.get(STRUCTURAL_CHECK_TOKEN_ENV))
+
+
+def deferred_treatments(env_dir: Path, staged: dict | None, tfvars: Path) -> tuple[int, int] | None:
+    """(tagged, governed) for a staged phase whose render tags fewer columns than its switch applies, else None.
+
+    A create, tighten, restore or abandon render keeps the active generation's
+    treatment tags (policy_generations.plan_stage); the generated config's
+    other gr_treatment tags arrive at the switch. Wording only: the decision
+    is the check's, as before.
+    """
+    from scripts import policy_generations as pg
+    from scripts.runtime_overlay import effective
+
+    if not staged or staged.get("stage") not in pg.KEEP_TAG_STAGES:
+        return None
+    try:
+        governed = {i.get("entity_name") for i in
+                    _load_tfvars(effective(env_dir, "abac.auto.tfvars")).get("tag_assignments") or []
+                    if _is_treatment(i)}
+        tagged = {i.get("entity_name") for i in _load_tfvars(tfvars).get("tag_assignments") or []
+                  if _is_treatment(i)}
+    except (GateError, OSError, ValueError):
+        return None
+    missing = governed - tagged
+    return (len(governed & tagged), len(governed)) if missing else None
+
+
 def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbose: bool,
              config_dir: Path | None = None, staged: dict | None = None,
              validation_config_dir: Path | None = None) -> int:
@@ -850,12 +897,26 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
         context = Path(handle.name)
     pending = pending_treatments(env_dir, staged)
     pending_file = None
+    note = ""
+    structural = structural_check(env_dir)
     if pending is not None:
         print(f"  First deploy: the create phase tags no column yet; its policies and functions are checked "
               f"against the {len(pending)} treatment tag(s) its switch applies")
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
             json.dump(pending, handle)
             pending_file = Path(handle.name)
+    else:
+        deferred = deferred_treatments(env_dir, staged, validation_tfvars)
+        if deferred:
+            tagged, governed = deferred
+            stage = staged["stage"]
+            print(f"  {stage.capitalize()} phase: this render tags {tagged} of the {governed} column(s) the "
+                  f"generated config governs; gr_treatment tags are applied at the switch, so the check below "
+                  "judges the render before them. New SELECT stays withheld until the grant phase, whose "
+                  "check judges the switched render.")
+            note = (f"This is the {stage} render: {governed - tagged} gr_treatment tag(s) are applied at the "
+                    "switch, so columns it reports untagged may be those; new SELECT stays withheld until the "
+                    "grant phase's check passes.")
     try:
         command = [
             sys.executable, str(VALIDATOR), "--coverage-gate", str(validation_tfvars),
@@ -869,10 +930,17 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
         if verbose:
             command.append("--verbose")
         sys.stdout.flush()
+        # make check's structural plan: hold the report back unless it is wanted or decides the plan.
+        quiet = structural and not verbose
         try:
-            validation = _run_bounded(command, label="coverage validator", cwd=layer_dir)
+            validation = _run_bounded(command, label="coverage validator", cwd=layer_dir,
+                                      **({"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True}
+                                         if quiet else {}))
         except CommandTimeout as exc:
             return _failed(gate_path, record, inputs, env_name, str(exc))
+        if quiet and (validation.returncode == 0 or inputs.get("needs_gate") is not False):
+            sys.stdout.write(validation.stdout or "")  # a pass, or a failure that stops the plan: shown as is
+            sys.stdout.flush()
     finally:
         context.unlink(missing_ok=True)
         if pending_file:
@@ -887,10 +955,11 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
         return 1
     if validation.returncode != 0:
         return _failed(gate_path, record, inputs, env_name,
-                       "coverage check failed (validate_abac.py --coverage-gate; see the report above)")
+                       "coverage check failed (validate_abac.py --coverage-gate; see the report above)",
+                       note=note, structural=structural)
     refreshed_at, detail, kept = _live_refresh(env_dir, tfvars, staged)
     if refreshed_at is None:
-        return _failed(gate_path, record, inputs, env_name, detail)
+        return _failed(gate_path, record, inputs, env_name, detail, structural=structural)
     print(f"  Live refresh ({detail}) at {refreshed_at}")
     record.update(status="pass", refreshed_at=refreshed_at, **kept)
     write_result(gate_path, record)
