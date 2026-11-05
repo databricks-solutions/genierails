@@ -29,6 +29,7 @@ from scripts import policy_generations as pg
 from scripts import staged_policy_apply as spa
 from scripts.runtime_overlay import effective
 from tests import fake_uc, script_stubs
+from tests.terraform_helpers import tf, tf_env, tf_init
 from tests.test_migration import COLUMN, ENV, LEGACY_POLICY, LEGACY_VALUE, legacy_policy, opt_in, write_legacy_state
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -177,6 +178,23 @@ def _fake_terraform(tmp_path: Path) -> tuple[dict, Path]:
     return os.environ | {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}, log
 
 
+MASK_SQL_FIXTURES = SHARED / "modules" / "data_access" / "tests" / "fixtures"
+
+
+def _mask_sql(name: str) -> str:
+    return (MASK_SQL_FIXTURES / name).read_text()
+
+
+def _last_terraform_args(log: Path) -> list[str]:
+    return shlex.split(log.read_text().splitlines()[-1])
+
+
+def _selected_masking_sql(args: list[str], layer: Path) -> Path:
+    prefix = "-var=masking_sql_file="
+    selected = next((arg.removeprefix(prefix) for arg in args if arg.startswith(prefix)), None)
+    return Path(selected) if selected else layer / "masking_functions.sql"
+
+
 def test_the_runner_reads_a_staged_render_instead_of_the_split_config(tmp_path):
     layer = tmp_path / "envs" / "dev" / "data_access"
     layer.mkdir(parents=True)
@@ -204,6 +222,163 @@ def test_the_runner_reads_a_staged_render_instead_of_the_split_config(tmp_path):
     assert subprocess.run([RUNNER, "data_access", "dev", "plan"], capture_output=True, env=environ).returncode == 0
     args = shlex.split(log.read_text().splitlines()[1])
     assert f"-var-file={layer / 'abac.auto.tfvars'}" in args and not [a for a in args if "masking_sql_file" in a]
+
+
+def test_plan_after_a_staged_release_keeps_the_recorded_masking_sql_path(tmp_path):
+    """A normal plan must not rewrite masking_functions_drop after release."""
+    layer = tmp_path / "envs" / "prod" / "data_access"
+    layer.mkdir(parents=True)
+    (layer / "abac.auto.tfvars").write_text("fgac_policies = []\n")
+    (layer / "masking_functions.sql").write_text(_mask_sql("mask_email.sql"))
+    runtime = layer.parent / "generated" / ".runtime" / "data_access"
+    runtime.mkdir(parents=True)
+    (runtime / "abac.auto.tfvars").write_text("fgac_policies = []\n")
+    # Formatting differs, but normalize_masking_sql.py gives both files the
+    # sql_hash masking_functions_drop records.
+    (runtime / "masking_functions.sql").write_text(_mask_sql("mask_email_reformatted.sql"))
+    environ, log = _fake_terraform(tmp_path)
+    environ["LAYER_ENV_DIR"] = str(layer)
+
+    # Simulate the staged release which wrote masking_functions_drop's input.
+    staged_env = environ | {pg.STAGE_CONFIG_ENV: str(runtime)}
+    released = subprocess.run([RUNNER, "data_access", "prod", "apply", "-auto-approve"],
+                              text=True, capture_output=True, env=staged_env)
+    assert released.returncode == 0, released.stdout + released.stderr
+    release_args = shlex.split(log.read_text().splitlines()[1])
+    recorded = f"-var=masking_sql_file={runtime / 'masking_functions.sql'}"
+    assert recorded in release_args
+
+    log.unlink()
+    planned = subprocess.run([RUNNER, "data_access", "prod", "plan"],
+                             text=True, capture_output=True, env=environ)
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    plan_args = shlex.split(log.read_text().splitlines()[1])
+    assert recorded in plan_args
+    assert f"-var-file={layer / 'abac.auto.tfvars'}" in plan_args
+
+
+def test_changed_split_sql_after_release_drives_plan_and_apply(tmp_path):
+    """A later reviewed split edit must replace masking_functions, not hide behind stale runtime SQL."""
+    layer = tmp_path / "envs" / "prod" / "data_access"
+    layer.mkdir(parents=True)
+    (layer / "abac.auto.tfvars").write_text("fgac_policies = []\n")
+    (layer / "masking_functions.sql").write_text(_mask_sql("mask_email.sql"))
+    runtime = layer.parent / "generated" / ".runtime" / "data_access"
+    runtime.mkdir(parents=True)
+    (runtime / "abac.auto.tfvars").write_text("fgac_policies = []\n")
+    (runtime / "masking_functions.sql").write_text(_mask_sql("mask_email.sql"))
+    environ, log = _fake_terraform(tmp_path)
+    environ["LAYER_ENV_DIR"] = str(layer)
+
+    staged = environ | {pg.STAGE_CONFIG_ENV: str(runtime)}
+    released = subprocess.run([RUNNER, "data_access", "prod", "apply", "-auto-approve"],
+                              text=True, capture_output=True, env=staged)
+    assert released.returncode == 0, released.stdout + released.stderr
+    released_hash = pg.masking_sql_hash((runtime / "masking_functions.sql").read_text())
+
+    (layer / "masking_functions.sql").write_text(_mask_sql("mask_email_changed.sql"))
+    reviewed_hash = pg.masking_sql_hash((layer / "masking_functions.sql").read_text())
+    assert reviewed_hash != released_hash  # masking_functions.triggers_replace.sql_hash changes
+    for command in ("plan", "apply"):
+        log.unlink(missing_ok=True)
+        result = subprocess.run([RUNNER, "data_access", "prod", command],
+                                text=True, capture_output=True, env=environ)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _selected_masking_sql(_last_terraform_args(log), layer) == layer / "masking_functions.sql"
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform not installed")
+def test_changed_selected_sql_replaces_functions_without_dropping(tmp_path):
+    """The path selected above replaces CREATE OR REPLACE and only updates the destroy record in place."""
+    runtime = tmp_path / "runtime.sql"
+    split = tmp_path / "split.sql"
+    runtime.write_text(_mask_sql("mask_email.sql"))
+    split.write_text(_mask_sql("mask_email_changed.sql"))
+    root = tmp_path / "terraform"
+    root.mkdir()
+    normalizer = json.dumps(str(SHARED / "modules" / "data_access" / "normalize_masking_sql.py"))
+    (root / "main.tf").write_text(f'''\
+terraform {{
+  required_providers {{
+    external = {{ source = "hashicorp/external", version = "~> 2.3" }}
+  }}
+}}
+variable "masking_sql_file" {{ type = string }}
+data "external" "normalized" {{
+  program = ["python3", {normalizer}]
+  query   = {{ sql_file = var.masking_sql_file }}
+}}
+resource "terraform_data" "masking_functions" {{
+  triggers_replace = {{ sql_hash = data.external.normalized.result.hash }}
+}}
+resource "terraform_data" "masking_functions_drop" {{
+  input = {{
+    sql_file = var.masking_sql_file
+    sql_hash = data.external.normalized.result.hash
+  }}
+}}
+''')
+    env = tf_env(tmp_path)
+    tf_init(root, env=env)
+    applied = tf(root, "apply", "-no-color", "-auto-approve", f"-var=masking_sql_file={runtime}", env=env)
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+
+    plan = tf(root, "plan", "-no-color", "-detailed-exitcode", f"-var=masking_sql_file={split}", env=env)
+    assert plan.returncode == 2, plan.stdout + plan.stderr
+    assert "terraform_data.masking_functions must be replaced" in plan.stdout
+    assert "terraform_data.masking_functions_drop will be updated in-place" in plan.stdout
+    assert "terraform_data.masking_functions_drop must be replaced" not in plan.stdout
+    assert "will be destroyed" not in plan.stdout
+
+
+def test_missing_runtime_sql_uses_the_split_path(tmp_path):
+    layer = tmp_path / "envs" / "prod" / "data_access"
+    layer.mkdir(parents=True)
+    (layer / "abac.auto.tfvars").write_text("fgac_policies = []\n")
+    (layer / "masking_functions.sql").write_text(_mask_sql("mask_email.sql"))
+    environ, log = _fake_terraform(tmp_path)
+    environ["LAYER_ENV_DIR"] = str(layer)
+
+    result = subprocess.run([RUNNER, "data_access", "prod", "plan"],
+                            text=True, capture_output=True, env=environ)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _selected_masking_sql(_last_terraform_args(log), layer) == layer / "masking_functions.sql"
+
+
+@pytest.mark.parametrize("case", ["equal", "changed", "missing", "normalization_error"])
+def test_coverage_fingerprint_and_deployment_select_the_same_sql(tmp_path, case):
+    """Coverage's console query and the deploy plan must select one identical SQL file."""
+    layer = tmp_path / "envs" / case / "data_access"
+    layer.mkdir(parents=True)
+    (layer / "abac.auto.tfvars").write_text("fgac_policies = []\n")
+    split_sql = _mask_sql("mask_email_changed.sql" if case == "changed" else "mask_email.sql")
+    (layer / "masking_functions.sql").write_text(split_sql)
+    runtime = layer.parent / "generated" / ".runtime" / "data_access"
+    if case != "missing":
+        runtime.mkdir(parents=True)
+        runtime_sql = {
+            "equal": _mask_sql("mask_email_reformatted.sql"),
+            "changed": _mask_sql("mask_email.sql"),
+            "normalization_error": "CREATE OR REPLACE FUNCTION broken",
+        }[case]
+        (runtime / "masking_functions.sql").write_text(runtime_sql)
+    expected = runtime / "masking_functions.sql" if case == "equal" else layer / "masking_functions.sql"
+    environ, log = _fake_terraform(tmp_path)
+    environ["LAYER_ENV_DIR"] = str(layer)
+
+    selected = []
+    for command in ("console", "plan"):
+        log.unlink(missing_ok=True)
+        result = subprocess.run([RUNNER, "data_access", case, command], input="output.coverage_gate_inputs\n",
+                                text=True, capture_output=True, env=environ)
+        assert result.returncode == 0, result.stdout + result.stderr
+        selected.append(_selected_masking_sql(_last_terraform_args(log), layer))
+    assert selected == [expected, expected]
+    # The root feeds the same var to filesha256 (fingerprint/protection) and
+    # normalized_masking_sql (the deployment/drop identity).
+    root = (SHARED / "modules" / "data_access" / "main.tf").read_text()
+    assert root.count("filesha256(var.masking_sql_file)") >= 3
+    assert "sql_file = var.masking_sql_file" in root
 
 
 def test_the_runner_refuses_a_staged_dir_without_a_render(tmp_path):
