@@ -163,24 +163,33 @@ UNKNOWN_APPROVAL = "unknown"
 
 
 def receipt_approval(env_dir: Path) -> tuple[str, str | None, dict[str, Any]]:
-    """(approved_by, approved_at, approval_record) from the env's last release receipt.
+    """(approved_by, approved_at, approval_record) from the env's newest release receipt.
 
-    The receipt's ``approval`` field (scripts/approval.py, release_gate.release_receipt):
-    a y typed at a terminal names its self-reported git identity and OS user;
-    ``{"via": "external"}`` is a release approved outside GenieRails (the plain
-    ``make release MANIFEST=`` path). No receipt, or one without the field,
-    is ``unknown``. Only those identity fields are read: never the question,
-    tty, host, run digest or asker of the record.
+    Only a receipt that passes the check release-plan uses for the env's
+    receipts (release_gate.newest_release_receipt: kind, env, cloud, its
+    manifest's sha256) and an ``approval`` field that is still the record it
+    embedded (approval.embedded_problem) name anyone: a y typed at a terminal
+    shows its self-reported git identity, OS user and time; ``{"via":
+    "external"}`` (the plain ``make release MANIFEST=`` path) says external.
+    A newest receipt that doesn't verify is ``unverified: <why>``, never an
+    older receipt or the name it claims; no receipt is ``unknown``. Only
+    approval.IDENTITY_FIELDS are read, never the question, tty, host, run
+    digest or asker.
     """
+    from scripts import approval as approvals
     from scripts import release_gate as rg
 
+    env_dir = Path(env_dir).resolve()
+    env = env_dir.name
     try:
-        receipt = rg.last_release(rg.cloud_dir_of(env_dir), Path(env_dir).resolve().name)
-    except Exception:  # an unreadable store is no receipt: audit only, never a failure
-        receipt = None
-    if not receipt:
+        receipt, problem = rg.newest_release_receipt(rg.cloud_dir_of(env_dir), env)
+    except Exception as exc:  # an unreadable store names no one: audit only, never a failure
+        receipt, problem = None, f"the release receipts couldn't be read ({type(exc).__name__})"
+    if receipt is None and not problem:
         return UNKNOWN_APPROVAL, None, {"source": "none", "detail": "no release receipt for this env"}
-    record: dict[str, Any] = {"source": "release-receipt", "receipt": Path(str(receipt.get("_path", ""))).name,
+    if receipt is None:
+        return f"unverified: {_short(problem)}", None, {"source": "unverified", "detail": _short(problem)}
+    record: dict[str, Any] = {"source": "release-receipt", "receipt": Path(str(receipt["_path"])).name,
                               "commit": str(receipt.get("commit", ""))[:12]}
     phases = receipt.get("phase_approvals")
     if isinstance(phases, dict) and phases:
@@ -188,20 +197,33 @@ def receipt_approval(env_dir: Path) -> tuple[str, str | None, dict[str, Any]]:
         for value in phases.values():
             counts[str(value.get("via")) if isinstance(value, dict) and value.get("via") else UNKNOWN_APPROVAL] += 1
         record["phase_approvals"] = dict(sorted(counts.items()))
-    approval = receipt.get("approval")
-    via = approval.get("via") if isinstance(approval, dict) else None
-    record["via"] = str(via) if via else UNKNOWN_APPROVAL
-    if via == "terminal":
-        git = approval.get("git_user") if isinstance(approval.get("git_user"), dict) else {}
-        name, email, user = (str(git.get("name") or "").strip(), str(git.get("email") or "").strip(),
-                             str(approval.get("user") or "").strip())
-        who = " ".join(part for part in (name, f"<{email}>" if email else "") if part) or "unnamed git user"
-        approved_by = f"{who} (OS user {user or 'unknown'}; y typed at a terminal, self-reported)"
-        at = approval.get("approved_at")
-        return approved_by, str(at) if isinstance(at, str) and at else None, record
-    if via == "external":
+    try:
+        problem = approvals.embedded_problem(env_dir, env, receipt)
+    except Exception as exc:
+        problem = f"its approval couldn't be checked ({type(exc).__name__})"
+    approval = receipt.get("approval") if isinstance(receipt.get("approval"), dict) else {}
+    if problem:
+        record["via"] = UNKNOWN_APPROVAL
+        if "approval" not in receipt:
+            return UNKNOWN_APPROVAL, None, record | {"detail": problem}
+        return f"unverified: {_short(problem)}", None, record | {"source": "unverified", "detail": _short(problem)}
+    record["via"] = str(approval["via"])
+    if approval["via"] == "external":
         return "external (approved outside GenieRails; the release receipt records no terminal approval)", None, record
-    return UNKNOWN_APPROVAL, None, record | {"detail": "the release receipt records no approval"}
+    identity = {k: approval.get(k) for k in approvals.IDENTITY_FIELDS}
+    git = identity["git_user"] if isinstance(identity["git_user"], dict) else {}
+    name, email = str(git.get("name") or "").strip(), str(git.get("email") or "").strip()
+    user = str(identity["user"] or "").strip()
+    who = " ".join(part for part in (name, f"<{email}>" if email else "") if part) or "unnamed git user"
+    at = identity["approved_at"]
+    return (f"{who} (OS user {user or 'unknown'}; y typed at a terminal, self-reported)",
+            str(at) if isinstance(at, str) and at else None, record)
+
+
+def _short(text: str, limit: int = 200) -> str:
+    """A one-line reason; absolute paths keep only their last two parts (no local paths in the report)."""
+    text = re.sub(r"(?:/[^\s/]+)+/([^\s/]+/[^\s/]+)", r"…/\1", " ".join(str(text).split()))
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def render_markdown(report: dict[str, Any]) -> str:

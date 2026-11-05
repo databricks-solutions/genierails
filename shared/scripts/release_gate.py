@@ -2660,6 +2660,28 @@ def _receipt_problem(cloud_dir: Path, env: str, receipt: Mapping) -> str:
     return ""
 
 
+def release_receipt_problem(cloud_dir: Path, env: str, receipt: Mapping | None) -> str:
+    """Why ``receipt`` isn't one of the env's release receipts ('' when it is): _receipt_problem, for readers outside."""
+    return "the receipt is unreadable" if receipt is None else _receipt_problem(Path(cloud_dir), env, receipt)
+
+
+def newest_release_receipt(cloud_dir: Path, env: str) -> tuple[dict | None, str]:
+    """The env's newest release receipt file, checked as release_phases checks receipts.
+
+    (receipt, "") when the newest file (by name: <stamp>-<commit>.json, as
+    release_receipt writes it) verifies; (None, why) when it doesn't, never an
+    older one in its place; (None, "") when there is none.
+    """
+    directory = release_dir(Path(cloud_dir), env)
+    paths = [p for p in (directory.rglob("*.json") if directory.is_dir() else []) if not p.name.startswith(".")]
+    if not paths:
+        return None, ""
+    path = max(paths, key=lambda p: (p.name, str(p)))
+    receipt = _read_json(path)
+    problem = release_receipt_problem(cloud_dir, env, receipt)
+    return (None, f"{path.name}: {problem}") if problem else (receipt | {"_path": str(path)}, "")
+
+
 def _accounted_by(receipts: list[dict], key: str, path: Path, record: Mapping | None, verified: bool,
                   canonical: bool = True) -> str:
     """The earlier release receipt that accounts for the phase record ``key`` at ``path`` ('' when none does).

@@ -243,18 +243,57 @@ def _prod(tmp_path, monkeypatch) -> Path:
 
 
 RECEIPT = "2026-11-05T002641298188Z-6d463a4340c8.json"
+COMMIT = "6d463a4340c8" + "0" * 28
+MANIFEST_ID = "20261105T002000-6d463a4340c8"
+IDENTITY = {"user": "louis.chen", "git_user": {"name": "Louis Chen", "email": "louis@example.com"},
+            "approved_at": "2026-11-05T00:25:10.000000Z"}
+PRIVATE = {"tty": "/dev/ttys004", "question": "Approve and release manifest X?", "run_sha256": "f" * 64,
+           "host": "laptop-xyz", "asker": {"pid": 424242}}
 
 
-def _receipt(env_dir: Path, approval, *, phases=None):
+def _manifest(env_dir: Path, cloud: str = "aws", env: str = "prod") -> dict:
+    """A release manifest file in the env's state, as release-plan leaves it."""
+    path = rg.manifests_dir(env_dir.parents[1], env) / MANIFEST_ID / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"kind": "release-manifest", "id": MANIFEST_ID, "commit": COMMIT, "env": env}))
+    return {"id": MANIFEST_ID, "path": str(path), "sha256": rg.sha256_file(path)}
+
+
+def _terminal_approval(env_dir: Path, manifest: dict) -> dict:
+    """What approval.embed() returns for a y at the terminal: the record, plus its path and sha256."""
+    from scripts import approval as approvals
+
+    record = {"kind": approvals.KIND, "version": approvals.VERSION, "env": "prod", "via": "terminal",
+              "manifest_kind": "release-manifest", "manifest_id": manifest["id"],
+              "manifest_path": manifest["path"], "manifest_sha256": manifest["sha256"], "commit": COMMIT,
+              "round": 1, **IDENTITY, **PRIVATE}
+    directory = approvals.approvals_dir(env_dir, "prod")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = directory / f"{manifest['id']}-20261105T002510.json"
+    path.write_text(json.dumps(record))
+    path.chmod(0o600)
+    return record | {"record": str(path), "record_sha256": rg.sha256_file(path)}
+
+
+def _receipt(env_dir: Path, approval="terminal", *, phases=None, cloud="aws", env="prod", name=RECEIPT,
+             manifest=None, raw=None) -> Path:
     directory = rg.release_dir(env_dir.parents[1], "prod")
     directory.mkdir(parents=True, exist_ok=True)
-    receipt = {"kind": "release", "version": rg.VERSION, "env": "prod", "commit": "6d463a4340c8" + "0" * 28,
-               "created_at": "2026-11-05T00:26:41.298188Z"}
-    if approval is not None:
+    path = directory / name
+    if raw is not None:
+        path.write_text(raw)
+        return path
+    manifest = manifest or _manifest(env_dir)
+    receipt = {"kind": "release", "version": rg.VERSION, "env": env, "cloud": cloud, "commit": COMMIT,
+               "manifest": manifest, "created_at": "2026-11-05T00:26:41.298188Z"}
+    if approval == "terminal":
+        receipt["approval"] = _terminal_approval(env_dir, manifest)
+    elif approval is not None:
         receipt["approval"] = approval
     if phases is not None:
         receipt["phase_approvals"] = phases
-    (directory / RECEIPT).write_text(json.dumps(receipt))
+    path.write_text(json.dumps(receipt))
+    return path
 
 
 def _evidence(env_dir) -> tuple[dict, str]:
@@ -264,16 +303,15 @@ def _evidence(env_dir) -> tuple[dict, str]:
             (out / "compliance-evidence-v1.0.md").read_text())
 
 
-TERMINAL = {"via": "terminal", "user": "louis.chen", "git_user": {"name": "Louis Chen", "email": "louis@example.com"},
-            "approved_at": "2026-11-05T00:25:10.000000Z", "tty": "/dev/ttys004",
-            "question": "Approve and release manifest X?", "run_sha256": "f" * 64, "host": "laptop-xyz",
-            "asker": {"pid": 424242}}
+def _no_private_fields(header: dict, markdown: str) -> None:
+    everything = json.dumps(header) + markdown
+    for private in ("/dev/ttys004", "Approve and release", "f" * 64, "424242", "laptop-xyz", "Mallory", "attacker"):
+        assert private not in everything
 
 
 def test_the_header_reads_the_terminal_approval_from_the_release_receipt(tmp_path, monkeypatch):
     env_dir = _prod(tmp_path, monkeypatch)
-    _receipt(env_dir, TERMINAL, phases={"p1": {"via": "terminal"}, "p2": {"via": "terminal"},
-                                        "p3": {"via": "external"}})
+    _receipt(env_dir, phases={"p1": {"via": "terminal"}, "p2": {"via": "terminal"}, "p3": {"via": "external"}})
     header, markdown = _evidence(env_dir)
     assert header["approved_by"] == ("Louis Chen <louis@example.com> (OS user louis.chen; y typed at a terminal, "
                                      "self-reported)")
@@ -284,9 +322,7 @@ def test_the_header_reads_the_terminal_approval_from_the_release_receipt(tmp_pat
     assert "- Approved by: `Louis Chen <louis@example.com>" in markdown
     assert (f"- Approval record: release receipt `{RECEIPT}` (commit `6d463a4340c8`; "
             "final round: terminal, earlier phases: 1 external, 2 terminal)") in markdown
-    everything = json.dumps(header) + markdown
-    for private in ("/dev/ttys004", "Approve and release", "f" * 64, "424242", "laptop-xyz"):
-        assert private not in everything
+    _no_private_fields(header, markdown)
 
 
 def test_an_external_approval_says_so(tmp_path, monkeypatch):
@@ -313,10 +349,98 @@ def test_no_recorded_approval_is_unknown(tmp_path, monkeypatch, approval):
 
 def test_an_explicit_signature_still_wins(tmp_path, monkeypatch):
     env_dir = _prod(tmp_path, monkeypatch)
-    _receipt(env_dir, TERMINAL)
+    _receipt(env_dir)
     monkeypatch.setenv("GENIERAILS_EVIDENCE_APPROVED_BY", "compliance@example.com")
     header, _markdown = _evidence(env_dir)
     assert header["approved_by"] == "compliance@example.com" and header["approval_record"] == {"source": "signed"}
+
+
+MALLORY = {"user": "attacker", "git_user": {"name": "Mallory", "email": "mallory@example.com"}}
+
+
+def _forge(path: Path, **changes) -> None:
+    receipt = json.loads(path.read_text())
+    for key, value in changes.items():
+        receipt[key] = value
+    path.write_text(json.dumps(receipt))
+
+
+def _unverified(env_dir, reason: str) -> None:
+    header, markdown = _evidence(env_dir)
+    assert header["approved_by"].startswith("unverified: ") and reason in header["approved_by"], header["approved_by"]
+    assert header["approved_at"] is None and header["approval_record"]["source"] == "unverified"
+    assert "Louis Chen" not in json.dumps(header) + markdown  # an older or claimed name is never shown either
+    _no_private_fields(header, markdown)
+
+
+@pytest.mark.parametrize("cloud, env", [("evilcloud", "dev"), ("aws", "dev"), ("evilcloud", "prod")])
+def test_a_foreign_receipt_never_names_its_approver(tmp_path, monkeypatch, cloud, env):
+    """Codex's repro: a receipt of evilcloud/dev placed in aws/prod named Mallory."""
+    env_dir = _prod(tmp_path, monkeypatch)
+    _receipt(env_dir, name="2026-11-04T000000000000Z-aaaaaaaaaaaa.json")  # an older, valid one
+    forged = _receipt(env_dir, cloud=cloud, env=env)
+    _forge(forged, approval={**json.loads(forged.read_text())["approval"], **MALLORY})
+    _unverified(env_dir, f"a receipt of {cloud}/{env}, not aws/prod")
+
+
+def test_an_edited_approval_field_fails_its_record_digest(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    path = _receipt(env_dir)
+    _forge(path, approval={**json.loads(path.read_text())["approval"], **MALLORY})
+    _unverified(env_dir, "its approval field differs from the record it embedded")
+    # Rewriting the record's sha256 too still fails: the file on disk has the real one.
+    approval = json.loads(path.read_text())["approval"]
+    _forge(path, approval=approval | {"record_sha256": "0" * 64})
+    _unverified(env_dir, "sha256 isn't the one the receipt embedded")
+
+
+def test_an_approval_moved_out_of_the_approvals_dir_or_made_public_is_unverified(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    path = _receipt(env_dir)
+    record = Path(json.loads(path.read_text())["approval"]["record"])
+    record.chmod(0o644)
+    _unverified(env_dir, "can't be read as written")
+    record.chmod(0o600)
+    elsewhere = tmp_path / record.name
+    elsewhere.write_bytes(record.read_bytes())
+    _forge(path, approval=json.loads(path.read_text())["approval"] | {"record": str(elsewhere)})
+    _unverified(env_dir, "isn't in the env's approvals dir")
+
+
+def test_a_receipt_of_another_or_changed_manifest_is_unverified(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    path = _receipt(env_dir)
+    manifest = json.loads(path.read_text())["manifest"]
+    Path(manifest["path"]).write_text(Path(manifest["path"]).read_text() + " ")  # the manifest changed since
+    _unverified(env_dir, "doesn't match the hash it records")
+    # A receipt naming a manifest that doesn't exist.
+    _forge(path, manifest=manifest | {"id": "20991231T000000-ffffffffffff"})
+    _unverified(env_dir, "is missing or doesn't match the hash it records")
+
+
+def test_an_approval_naming_another_manifest_is_unverified(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    path = _receipt(env_dir)
+    _forge(path, approval=json.loads(path.read_text())["approval"] | {"manifest_sha256": "1" * 64})
+    _unverified(env_dir, "its approval names another manifest than the receipt's")
+
+
+@pytest.mark.parametrize("raw", ["{truncated", "[]", ""])
+def test_an_unreadable_newest_receipt_is_unverified_not_the_older_one(tmp_path, monkeypatch, raw):
+    env_dir = _prod(tmp_path, monkeypatch)
+    _receipt(env_dir, name="2026-11-04T000000000000Z-aaaaaaaaaaaa.json")
+    _receipt(env_dir, raw=raw)
+    _unverified(env_dir, "the receipt is unreadable")
+
+
+def test_the_newest_valid_receipt_is_the_one_shown(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    _receipt(env_dir, {"via": "external"}, name="2026-11-04T000000000000Z-aaaaaaaaaaaa.json")
+    _receipt(env_dir)
+    header, _markdown = _evidence(env_dir)
+    assert header["approved_by"].startswith("Louis Chen <louis@example.com>")
+    assert header["approval_record"]["receipt"] == RECEIPT
+    assert rg.release_receipt_problem(env_dir.parents[1], "prod", None) == "the receipt is unreadable"
 
 
 # -- 4. DETAILS.md: import an env that already holds live resources ------------------------------------------
