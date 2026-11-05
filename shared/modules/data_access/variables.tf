@@ -213,6 +213,12 @@ variable "fgac_policies" {
   description = "FGAC policies scoped to governed catalogs."
 }
 
+variable "column_mask_empty_using_policies" {
+  type        = list(string)
+  default     = []
+  description = "fgac_policies keys whose applied column_mask.using is an empty list in state; they keep `[]` (null for all others)."
+}
+
 variable "sql_warehouse_id" {
   type        = string
   default     = ""

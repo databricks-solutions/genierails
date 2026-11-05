@@ -1157,6 +1157,30 @@ run "applied_by_main" {
   }
 }
 
+# terraform test keeps state in memory; a real plan reads the layer's own
+# state file (the runner's data_access_state_file snapshot). Give this
+# branch's plan the policy as main recorded it (column_mask.using = []), so
+# the root's own-state reads see what a real upgrade sees. Nothing else:
+# no coverage_gate record, so no applied grant or protection counts. Its own
+# state_key keeps gate_passes' files, and tears down before main's apply.
+run "state_snapshot" {
+  state_key = "snapshot"
+  module {
+    source = "./tests/file_writer"
+  }
+  variables {
+    files = {
+      "tests/.tmp/legacy0/data_access/terraform.tfstate" = jsonencode({ version = 4, resources = [{
+        module = "module.data_access", mode = "managed", type = "databricks_policy_info", name = "policies",
+        instances = [{ index_key = "mask_email", attributes = {
+          name        = "cat_mask_email", policy_type = "POLICY_TYPE_COLUMN_MASK",
+          column_mask = { function_name = "cat.sch.mask_email", on_column = "email", using = [] }
+        } }]
+      }] })
+    }
+  }
+}
+
 run "planned_by_this_branch" {
   state_key = "legacy"
   command   = plan

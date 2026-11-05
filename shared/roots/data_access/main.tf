@@ -155,6 +155,17 @@ locals {
     if try(resource.module, "") == "module.data_access" && try(resource.mode, "") == "managed"
     && try(resource.type, "") == "databricks_policy_info" && try(resource.name, "") == "policies"
   ]...)
+  # Masks applied before column_mask.using rendered null hold `[]` in state
+  # (the provider keeps it on refresh). The module keeps `[]` for exactly
+  # those, so upgrading doesn't plan an in-place update of every mask.
+  column_mask_empty_using_policies = sort(flatten([
+    for resource in try(local._own_state.resources, []) : [
+      for instance in try(resource.instances, []) : tostring(instance.index_key)
+      if try(instance.deposed, "") == "" && try(length(instance.attributes.column_mask.using) == 0, false)
+    ]
+    if try(resource.module, "") == "module.data_access" && try(resource.mode, "") == "managed"
+    && try(resource.type, "") == "databricks_policy_info" && try(resource.name, "") == "policies"
+  ]))
   _applied_treatment_tags = merge({}, [
     for resource in try(local._own_state.resources, []) : {
       for instance in try(resource.instances, []) : tostring(instance.index_key) => tostring(try(instance.attributes.tag_value, ""))
@@ -679,7 +690,8 @@ module "data_access" {
   raw_exempt_principals                    = var.raw_exempt_principals
   governed_tables                          = local.governed_tables
   fgac_policies                            = var.fgac_policies
-  sql_warehouse_id                         = var.sql_warehouse_id
+  column_mask_empty_using_policies         = local.column_mask_empty_using_policies
+  sql_warehouse_id                        = var.sql_warehouse_id
   warehouse_name                           = var.warehouse_name
   retain_auto_warehouse                    = local.retain_auto_warehouse
   masking_sql_file                         = var.masking_sql_file != "" ? var.masking_sql_file : "${var.env_dir}/masking_functions.sql"
