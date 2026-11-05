@@ -240,6 +240,28 @@ def test_manifest_changed_after_display_is_not_approved_or_applied(loop_make, re
     assert _unlocked(repo.prod)
 
 
+def test_manifest_disappearing_before_the_single_read_refuses_cleanly(loop_make, repo, monkeypatch, capsys):
+    manifest = _planned(loop_make)
+    real_pin = approval.pin
+
+    def disappear_then_pin(path, env, expected_manifest_sha256=None):
+        Path(path).unlink()
+        return real_pin(path, env, expected_manifest_sha256)
+
+    # The old two-read loop reaches manifest_sha256; the hardened loop reaches pin.
+    monkeypatch.setattr(approval, "pin", disappear_then_pin)
+    monkeypatch.setattr(approval, "manifest_sha256",
+                        lambda path: (Path(path).unlink(), real_pin(path, "prod"))[1])
+    monkeypatch.setattr(approval, "interactive", lambda: True)
+    monkeypatch.setattr(release_loop, "_still_releasable", lambda env_dir, env: manifest)
+
+    assert release_loop.release("prod", repo.prod, ["make"]) == 1
+    captured = capsys.readouterr()
+    assert "can't be read" in captured.err and "nothing was released" in captured.err
+    assert "Traceback" not in captured.out + captured.err
+    assert loop_make.names() == [] and not _approvals(repo) and not rg.release_receipts(repo.cloud, "prod")
+
+
 # -- the account step before round 1: rehearse's, reused ------------------------------------
 
 ACCOUNT_QUESTION = "Approve and apply this account manifest? [y/N] "

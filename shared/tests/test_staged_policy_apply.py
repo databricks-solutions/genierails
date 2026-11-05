@@ -2384,7 +2384,7 @@ def test_verification_subset_keeps_policy_covering_skipped_and_verified_values(t
 @pytest.mark.parametrize(("edit", "message"), [
     (lambda t: t.__setitem__("render_from", "not-the-restore"), "unexpected create render target"),
     (lambda t: (t.__setitem__("from", "deadbeef"), t.__setitem__("adopted_from_state", "deadbeef")),
-     "can't be read"),
+     "adoption marker or history entry doesn't match"),
 ])
 def test_repair_adopted_create_render_refuses_bad_journal_shapes(harness, edit, message):
     desired = released_fifteen_policy_env(harness)
@@ -2430,6 +2430,33 @@ def test_repair_adopted_create_render_refuses_non_matching_adopted_snapshot(harn
 
     assert harness.calls == []
     assert harness.journal() == before
+
+
+@pytest.mark.parametrize("tamper", ["marker", "history"])
+def test_repair_adopted_create_render_requires_trusted_adoption_evidence(harness, tamper):
+    desired = released_fifteen_policy_env(harness)
+    _replace_first_n_policy_principals_with_unknown(harness.env_dir, 14)
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_treatment_tags = dict(desired["tags"])
+    spa.journal_path(harness.env_dir).unlink()
+    assert harness.apply(FAKE_TF_FAIL_APPLY="create") == 1
+    journal = harness.journal()
+    journal["transition"]["render_from"] = journal["transition"]["restore_from"]
+    if tamper == "marker":
+        journal["adopted_unverified"]["fingerprint"] = "0" * 64
+    else:
+        journal["history"] = [entry for entry in journal["history"]
+                              if entry.get("reason") != "principal-only drift adopted from state"]
+    spa.save_journal(harness.env_dir, journal)
+    path = spa.journal_path(harness.env_dir)
+    before = path.read_bytes()
+    harness.calls.clear()
+
+    with pytest.raises(spa.Refused, match=r"policy-abandon ENV=.*then re-plan"):
+        harness.apply()
+
+    assert harness.calls == []
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("with_existing_journal", [False, True])

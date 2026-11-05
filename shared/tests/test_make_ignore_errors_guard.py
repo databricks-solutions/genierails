@@ -221,6 +221,24 @@ def test_gnumakeflags_are_checked_for_gnu_make_4(tmp_path, env):
     _assert_refused_without_change(shutil.which("gmake"), repo, tmp_path, "apply", "ENV=dev", env=env)
 
 
+@pytest.mark.skipif(not shutil.which("gmake"), reason="needs GNU Make 4.x as gmake")
+def test_gnu_makeflags_real_error_flag_before_eval_still_refuses(tmp_path):
+    repo = _promoted(tmp_path)
+    _assert_refused_without_change(
+        shutil.which("gmake"), repo, tmp_path, "-i", "--eval", "NOTE := harmless", "apply", "ENV=dev"
+    )
+
+
+@pytest.mark.skipif(not shutil.which("gmake"), reason="needs GNU Make 4.x as gmake")
+def test_gnu_makeflags_eval_text_does_not_false_refuse(tmp_path):
+    repo = _promoted(tmp_path)
+    result = _make(
+        shutil.which("gmake"), repo, tmp_path, "--eval", "NOTE := text-with--ignore-errors-and-k", "-n",
+        "apply", "ENV=dev",
+    )
+    assert REFUSAL not in result.stdout + result.stderr
+
+
 @pytest.mark.parametrize("make_bin", MAKE_BINARIES)
 def test_no_goal_uses_default_help_and_is_allowed_under_error_modes(make_bin, tmp_path):
     repo = _bare(tmp_path)
