@@ -1487,7 +1487,11 @@ def reports(env_dir: Path, env: str, *, reader_source: Callable[[], object] | No
                                       migrated, deletes, reactivations)
     # Unclassified acks belong to the classification check (ACK_UNCLASSIFIED today).
     reconciled = [e for e in entries if e.kind not in ("unclassified", "detached-agent")]
-    _, unmatched = reconcile(reconciled, consequences)
+    carried = carried_weakening_acknowledgements(env_dir, env, {e.key for e in reconciled if e.kind == "weaken"})
+    _, unmatched = reconcile(reconciled, consequences | {
+        key: f"acknowledged by earlier phase {value['manifest']} of the same unfinished staged policy run"
+        for key, value in carried.items()
+    })
     unacked_readers = [f for c in reader_checks for f in c["unacknowledged"]]
     return {
         "ok": weak.ok and not unacked_readers and not unmatched and not unacked_revocations,
@@ -1499,6 +1503,7 @@ def reports(env_dir: Path, env: str, *, reader_source: Callable[[], object] | No
         "readers": {"tables": tables, "inventories": reader_reports, "checks": reader_checks},
         "first_release_refused": live_evidence,
         "group_map": group_consequences, "rollback": rollbacks, "agent_deletions": deletes,
+        "carried_weakening_acknowledgements": carried,
         "unmatched_acknowledgements": [e.key for e in unmatched],
     }
 
@@ -1509,6 +1514,8 @@ def print_reports(report: Mapping) -> None:
     for check in report["readers"]["checks"]:
         for item in check["acknowledged"]:
             print(f"  ACKNOWLEDGED {item['ack_key']}: {item['consequence']}")
+    for key, carried in sorted((report.get("carried_weakening_acknowledgements") or {}).items()):
+        print(f"  ACKNOWLEDGED {key}: matched by earlier phase {carried['manifest']} of this staged release")
     tables = report["readers"]["tables"]
     print(f"  Reader check: {len(tables)} newly governed table(s) inventoried"
           + (f" ({', '.join(tables[:5])}{', ...' if len(tables) > 5 else ''})" if tables else ""))
@@ -1530,6 +1537,81 @@ def print_reports(report: Mapping) -> None:
         print(f"ERROR: unacknowledged revocation {item['ack_key']}: {item['consequence']}", file=sys.stderr)
     for key in report["unmatched_acknowledgements"]:
         print(f"ERROR: ack.txt entry matches nothing (stale): {key}", file=sys.stderr)
+
+
+def carried_weakening_acknowledgements(env_dir: Path, env: str, keys: set[str]) -> dict[str, dict]:
+    """Weakening acknowledgements consumed by an earlier phase of the same unfinished release.
+
+    After the switch phase, live can equal the desired policy generation while
+    the release still has later phases (for example grants or deferred Genie
+    CAN_RUN) to apply. A weaken ack then no longer matches a current weakening,
+    but it is still part of the same reviewed release if a verified earlier
+    phase manifest in the current release epoch listed that exact key as
+    acknowledged for the same staged-policy run and from/to generations.
+    """
+    if not keys:
+        return {}
+    from scripts.staged_policy_apply import load_journal
+
+    try:
+        journal = load_journal(Path(env_dir)) or {}
+    except Exception:
+        return {}
+    transition = journal.get("transition")
+    finished: Mapping | None = None
+    for entry in journal.get("history") or []:
+        if isinstance(entry, Mapping) and "abandoned" in entry:
+            continue
+        if isinstance(entry, Mapping) and entry.get("finished_at"):
+            finished = entry
+    run = transition if isinstance(transition, Mapping) else finished
+    if not isinstance(run, Mapping):
+        return {}
+    run_id = str(run.get("run_id") or "")
+    from_fp = str(run.get("from") or "")
+    to_fp = str(run.get("to") or "")
+    if not run_id or not from_fp or not to_fp:
+        return {}
+    for entry in journal.get("history") or []:
+        if isinstance(entry, Mapping) and str(entry.get("run_id") or "") == run_id and "abandoned" in entry:
+            return {}
+
+    cloud_dir = cloud_dir_of(Path(env_dir))
+    epoch = release_epoch(cloud_dir, env)
+    if not isinstance(epoch, str):
+        return {}
+    if any(receipt.get("release_epoch") == epoch for receipt in release_receipts(cloud_dir, env)):
+        return {}
+    directory = env_state(cloud_dir, env) / "receipts" / "phases"
+    carried: dict[str, dict] = {}
+    for path in sorted(directory.glob("*.json")) if directory.is_dir() else []:
+        if path.name.startswith("."):
+            continue
+        record = _read_json(path)
+        if not isinstance(record, dict) or record.get("policy_run") != run_id:
+            continue
+        if record.get("release_epoch") != epoch:
+            continue
+        if _phase_problem(cloud_dir, env, path, record):
+            continue
+        manifest_id = str(record.get("id") or "")
+        manifest_path = manifests_dir(cloud_dir, env) / manifest_id / "manifest.json"
+        manifest = load_manifest(manifest_path, env)
+        data_access = (manifest.get("plans") or {}).get("data_access") or {}
+        planned = data_access.get("transition") or {}
+        if str(planned.get("from") or "") != from_fp or str(planned.get("to") or "") != to_fp:
+            continue
+        weakening = (manifest.get("reports") or {}).get("weakening") or {}
+        acknowledged = weakening.get("acknowledged") if isinstance(weakening, Mapping) else []
+        if not isinstance(acknowledged, list):
+            continue
+        for item in acknowledged:
+            if not isinstance(item, Mapping):
+                continue
+            key = str((item or {}).get("ack_key") or "")
+            if key in keys:
+                carried.setdefault(key, {"manifest": manifest_id, "phase_record": str(path), "policy_run": run_id})
+    return carried
 
 
 def _databricks_reader_source(env_dir: Path, warehouse_id: str):

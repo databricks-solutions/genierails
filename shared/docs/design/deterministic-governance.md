@@ -191,6 +191,11 @@ prod:rollback:<commit>
 Each entry names the env, kind and exact object. GenieRails prints the
 before/after consequence of each and refuses entries that match nothing after
 all checks (weakening, reader and unclassified) are reconciled together, once.
+During a multi-round staged release, a `weaken` entry that an earlier verified
+phase manifest acknowledged stays matched for later rounds of that same
+policy-journal run and the same from/to generations until `Release complete`.
+After release completion, after abandon, or in a different run, it is stale
+again.
 Entries for another env are refused. The weakening keys are
 `<env>:weaken:<column|table|treatment|group_map>:<principal-or-mapping>` (`*` for
 readers outside a removed row filter, `partial` for `partial = "raw"`, and

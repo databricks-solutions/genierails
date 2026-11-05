@@ -2382,6 +2382,88 @@ def _complete_release(env_dir: Path, generation: dict, grants) -> None:
                    {"kind": "release", "version": rg.VERSION, "commit": "abcdef1234", "created_at": rg._now()})
 
 
+def _open_transition(env_dir: Path, old: dict, new: dict, run_id: str = "run-j", *, completed=None,
+                     history=()) -> None:
+    spa.save_journal(env_dir, {
+        "version": 1,
+        "active": old["fingerprint"],
+        "pending": [],
+        "transition": {
+            "run_id": run_id,
+            "from": old["fingerprint"],
+            "to": new["fingerprint"],
+            "retain": "",
+            "retire": "",
+            "tier_move": True,
+            "phases": ["create", "verify-created", "tighten", "verify-tightened", "switch",
+                       "verify-switched", "grant"],
+            "completed": list(completed or ["create", "verify-created", "tighten", "verify-tightened",
+                                            "switch", "verify-switched"]),
+            "current": "",
+            "status": "waiting",
+        },
+        "history": list(history),
+    })
+
+
+def _phase_manifest_ack(env_dir: Path, old: dict, new: dict, key: str, run_id: str = "run-j") -> Path:
+    cloud_dir = rg.cloud_dir_of(env_dir)
+    manifest_id = f"phase-{run_id}"
+    manifest = {
+        "kind": "release-manifest",
+        "version": rg.VERSION,
+        "id": manifest_id,
+        "env": "prod",
+        "cloud": cloud_dir.name,
+        "commit": "0123456789abcdef",
+        "plans": {"data_access": {"transition": {
+            "from": old["fingerprint"],
+            "to": new["fingerprint"],
+            "retain": "",
+            "retire": "",
+            "tier_move": True,
+            "phases": ["create", "verify-created", "tighten", "verify-tightened", "switch",
+                       "verify-switched", "grant"],
+            "completed": ["create", "verify-created", "tighten", "verify-tightened"],
+        }}},
+        "reports": {"weakening": {"acknowledged": [{"ack_key": key, "before": "redacted", "after": "raw"}]}},
+    }
+    path = rg.manifests_dir(cloud_dir, "prod") / manifest_id / "manifest.json"
+    rg._write_once(path, manifest)
+    _open_transition(env_dir, old, new, run_id)
+    return rg.phase_record(env_dir, "prod", path)
+
+
+def _released_then_switched_with_ack(env_dir: Path, run_id: str = "run-j") -> tuple[dict, dict, str, Path]:
+    old = pg.desired_generation(env_dir)
+    _write_generated(env_dir, tiers=["regional", "analysts", "viewers"])  # regional now sees raw.
+    new = pg.desired_generation(env_dir)
+    key = "prod:weaken:prod_cat.sch.t.email:regional"
+    (env_dir / "ack.txt").write_text(f"{key}\n")
+    assert key in {w["ack_key"] for w in rg.reports(env_dir, "prod")["weakening"]["acknowledged"]}
+    record = _phase_manifest_ack(env_dir, old, new, key, run_id)
+    _deploy(env_dir, new)  # switch applied: live now equals the desired generation.
+    _open_transition(env_dir, old, new, run_id)
+    return old, new, key, record
+
+
+def _finish_transition(env_dir: Path, old: dict, new: dict, run_id: str = "run-j") -> None:
+    spa.save_journal(env_dir, {"version": 1, "active": new["fingerprint"], "pending": [], "transition": None,
+                               "history": [_finished(run_id) | {
+                                   "from": old["fingerprint"], "to": new["fingerprint"],
+                                   "finished_at": rg._now()}]})
+
+
+def _write_release_receipt(env_dir: Path, manifest_id: str = "final") -> None:
+    cloud_dir = rg.cloud_dir_of(env_dir)
+    epoch = rg.release_epoch(cloud_dir, "prod", create=True)
+    rg._write_once(rg.release_dir(cloud_dir, "prod") / f"{manifest_id}.json", {
+        "kind": "release", "version": rg.VERSION, "env": "prod", "cloud": cloud_dir.name,
+        "commit": "0123456789abcdef", "release_epoch": epoch, "manifest": {"id": manifest_id},
+        "created_at": rg._now(),
+    })
+
+
 @pytest.fixture
 def first_prod(tmp_path):
     env_dir = tmp_path / "envs" / "prod"
@@ -2568,6 +2650,102 @@ def test_group_map_acknowledgements_are_reconciled_with_the_rest(released_prod, 
     assert rg.reports(released_prod, "prod")["ok"]
     monkeypatch.setattr(group_map, "required_acks", lambda env_dir, env, cfg: {})
     assert not rg.reports(released_prod, "prod")["ok"]  # now stale
+
+
+def test_weakening_ack_consumed_by_switch_stays_valid_until_staged_release_finishes(released_prod, capsys):
+    _, _, key, _ = _released_then_switched_with_ack(released_prod)
+    report = rg.reports(released_prod, "prod")
+    assert report["ok"] and report["unmatched_acknowledgements"] == []
+    assert report["carried_weakening_acknowledgements"][key]["policy_run"] == "run-j"
+    rg.print_reports(report)
+    assert "matched by earlier phase phase-run-j" in capsys.readouterr().out
+
+
+def test_carried_weakening_ack_fails_closed_when_phase_record_is_edited(released_prod):
+    _, _, key, record = _released_then_switched_with_ack(released_prod)
+    data = json.loads(record.read_text())
+    os.chmod(record, 0o600)
+    record.write_text(json.dumps(data | {"manifest_sha256": "0" * 64}))
+    report = rg.reports(released_prod, "prod")
+    assert not report["ok"] and report["unmatched_acknowledgements"] == [key]
+    assert report["carried_weakening_acknowledgements"] == {}
+
+
+def test_carried_weakening_ack_must_belong_to_the_open_policy_run(released_prod):
+    old, new, key, _ = _released_then_switched_with_ack(released_prod, "run-one")
+    _open_transition(released_prod, old, new, "run-two")
+    report = rg.reports(released_prod, "prod")
+    assert not report["ok"] and report["unmatched_acknowledgements"] == [key]
+
+
+def test_finished_policy_run_carries_weakening_ack_into_deferred_genie_round(released_prod):
+    old, new, key, _ = _released_then_switched_with_ack(released_prod)
+    _finish_transition(released_prod, old, new)
+    report = rg.reports(released_prod, "prod")
+    assert report["ok"] and report["unmatched_acknowledgements"] == []
+    assert report["carried_weakening_acknowledgements"][key]["policy_run"] == "run-j"
+
+
+def test_carried_weakening_ack_must_match_the_finished_generation_pair(released_prod):
+    old, new, key, _ = _released_then_switched_with_ack(released_prod)
+    _finish_transition(released_prod, old, new)
+    journal = spa.load_journal(released_prod)
+    journal["history"][0]["to"] = "different-generation"
+    spa.save_journal(released_prod, journal)
+    report = rg.reports(released_prod, "prod")
+    assert not report["ok"] and report["unmatched_acknowledgements"] == [key]
+
+
+def test_carried_weakening_ack_is_stale_after_release_complete(released_prod):
+    old, new, key, _ = _released_then_switched_with_ack(released_prod)
+    _finish_transition(released_prod, old, new)
+    _write_release_receipt(released_prod)
+    report = rg.reports(released_prod, "prod")
+    assert not report["ok"] and report["unmatched_acknowledgements"] == [key]
+
+
+def test_carried_weakening_ack_is_stale_after_abandon(released_prod):
+    old, _, key, _ = _released_then_switched_with_ack(released_prod)
+    spa.save_journal(released_prod, {"version": 1, "active": old["fingerprint"], "pending": [],
+                                     "transition": None, "history": [_abandoned("run-j")]})
+    report = rg.reports(released_prod, "prod")
+    assert not report["ok"] and report["unmatched_acknowledgements"] == [key]
+
+
+def test_carried_weakening_ack_does_not_authorize_a_new_unacked_weakening(released_prod):
+    _, _, key, _ = _released_then_switched_with_ack(released_prod)
+    _write_generated(released_prod, tiers=["regional", "analysts", "viewers"], exempt=["etl-sp"])
+    report = rg.reports(released_prod, "prod")
+    assert key in report["carried_weakening_acknowledgements"]
+    unacked = {w["ack_key"] for w in report["weakening"]["unacknowledged"]}
+    assert {"prod:weaken:prod_cat.sch.t:etl-sp", "prod:weaken:prod_cat.sch.t.email:etl-sp"} <= unacked
+    assert not report["ok"]
+
+
+@pytest.mark.parametrize("acknowledged", [None, "not-a-list", [None], ["not-a-dict"]])
+def test_carried_weakening_ack_ignores_malformed_manifest_acknowledged(released_prod, acknowledged):
+    _, _, key, _ = _released_then_switched_with_ack(released_prod)
+    manifest = rg.manifests_dir(rg.cloud_dir_of(released_prod), "prod") / "phase-run-j" / "manifest.json"
+    data = json.loads(manifest.read_text())
+    os.chmod(manifest, 0o600)
+    data["reports"]["weakening"]["acknowledged"] = acknowledged
+    manifest.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    record = rg.env_state(rg.cloud_dir_of(released_prod), "prod") / "receipts" / "phases" / "phase-run-j.json"
+    record_data = json.loads(record.read_text())
+    os.chmod(record, 0o600)
+    record_data["manifest_sha256"] = rg.sha256_file(manifest)
+    record.write_text(json.dumps(record_data, indent=2, sort_keys=True) + "\n")
+    report = rg.reports(released_prod, "prod")
+    assert not report["ok"] and report["unmatched_acknowledgements"] == [key]
+
+
+def test_carried_weakening_ack_fails_closed_when_journal_is_unreadable(released_prod):
+    _released_then_switched_with_ack(released_prod)
+    journal = spa.journal_path(released_prod)
+    os.chmod(journal, 0o600)
+    journal.write_text("{not json")
+    with pytest.raises(spa.Refused, match="policy journal .* is unreadable"):
+        rg.reports(released_prod, "prod")
 
 
 # -- edits git status can't see: skip-worktree / assume-unchanged ------------------------------
