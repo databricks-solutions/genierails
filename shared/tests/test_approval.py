@@ -487,7 +487,7 @@ def test_the_run_nonce_is_32_lowercase_hex_and_fresh_each_time():
 def test_the_real_process_chain_names_this_process_and_its_parents(monkeypatch):
     monkeypatch.undo()
     chain = approval._chain(os.getpid())
-    assert chain[0][0] == os.getpid() and chain[0][1].startswith("python")
+    assert chain[0][0] == os.getpid() and chain[0][1].lower().startswith("python")
     assert len(chain) >= 2 and all("/" not in name for _, name in chain)
 
 

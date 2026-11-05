@@ -1113,6 +1113,43 @@ promote_token.run(Path({str(env)!r}), [sys.executable, "-c", {child!r}])
     assert not token.exists()
 
 
+def test_promote_to_token_term_then_int_during_cleanup_keeps_term_exit(tmp_path):
+    env = tmp_path / "prod"
+    env.mkdir()
+    token = tmp_path / "promote-token"
+    program = f'''\
+import os, signal, sys
+from pathlib import Path
+sys.path.insert(0, {str(SHARED / "scripts")!r})
+import promote_token
+class InterruptingPath(type(Path())):
+    def unlink(self, *args, **kwargs):
+        os.kill(os.getpid(), signal.SIGINT)
+        return super().unlink(*args, **kwargs)
+def mint(env_dir):
+    path = InterruptingPath({str(token)!r})
+    path.write_text(promote_token.TOKEN_PREFIX + str(env_dir.resolve()) + "\\n")
+    path.chmod(0o600)
+    return path
+promote_token.mint = mint
+import subprocess
+real_popen = subprocess.Popen
+class SignallingPopen(real_popen):
+    def wait(self, *args, **kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)
+        return super().wait(*args, **kwargs)
+subprocess.Popen = SignallingPopen
+promote_token.run(Path({str(env)!r}), [sys.executable, "-c", "pass"])
+'''
+
+    # Deliver TERM after run installs its handlers; unlink deterministically
+    # delivers INT while cleanup has all handled signals blocked.
+    result = subprocess.run([sys.executable, "-c", program], timeout=10)
+
+    assert result.returncode == 128 + signal.SIGTERM
+    assert not token.exists()
+
+
 def test_promote_to_token_signal_at_cleanup_entry_leaves_no_token(tmp_path):
     env = tmp_path / "prod"
     env.mkdir()
