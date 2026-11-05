@@ -226,13 +226,14 @@ if command == "import":
     if resource is not None and any(i["index_key"] == key for i in resource["instances"]):
         sys.exit("resource address already exists in Terraform state")
     live_tags = json.loads(os.environ.get("FAKE_LIVE_TREATMENT_TAGS", "{}"))
-    if live_tags.get(attrs["entity_name"].lower()) != attrs["tag_value"]:
-        sys.exit("import target does not match the live treatment")
+    live_value = live_tags.get(attrs["entity_name"].lower())
+    if live_value is None:
+        sys.exit("remote treatment tag does not exist")
     if resource is None:
         resource = {"module": "module.data_access", "mode": "managed", "type": TAG[0], "name": TAG[1],
                     "instances": []}
         state["resources"].append(resource)
-    resource["instances"].append({"index_key": key, "attributes": attrs})
+    resource["instances"].append({"index_key": key, "attributes": attrs | {"tag_value": live_value}})
     json.dump(state, open(state_path, "w"), indent=1, sort_keys=True)
 elif command == "plan":
     stage = var("policy_stage")
@@ -513,6 +514,7 @@ class Harness:
 
     def __init__(self, env_dir: Path, monkeypatch, tmp_path: Path):
         self.env_dir = env_dir
+        self.monkeypatch = monkeypatch
         runner = tmp_path / "fake_terraform_layer.py"
         runner.write_text(FAKE_RUNNER)
         runner.chmod(0o755)
@@ -536,11 +538,23 @@ class Harness:
         self.live_check = "strict"
         self.simulate_access = True
         self.agent_coverage_rc = 0
-        self.live_treatment_tags: dict[str, str] | None = None
+        self._live_treatment_tags: dict[str, str] | None = None
         self.live_read_error = ""
         monkeypatch.delenv("FAKE_TF_FAIL_APPLY", raising=False)
         monkeypatch.delenv("FAKE_TF_FAIL_PLAN", raising=False)
         monkeypatch.delenv("FAKE_TF_NO_WITHHOLD_USE", raising=False)
+
+    @property
+    def live_treatment_tags(self) -> dict[str, str] | None:
+        return self._live_treatment_tags
+
+    @live_treatment_tags.setter
+    def live_treatment_tags(self, value: dict[str, str] | None) -> None:
+        self._live_treatment_tags = value
+        if value is None:
+            self.monkeypatch.delenv("FAKE_LIVE_TREATMENT_TAGS", raising=False)
+        else:
+            self.monkeypatch.setenv("FAKE_LIVE_TREATMENT_TAGS", json.dumps(value))
 
     def controller(self, **kwargs) -> spa.Controller:
         return spa.Controller(self.env_dir, "dev", hook_dir=Path("/hooks"), verify_access_cmd="simulated",
@@ -571,15 +585,11 @@ class Harness:
             else:
                 # The fake runner runs as a subprocess; it sees the failure switches.
                 os.environ.update({k: v for k, v in env.items() if k.startswith("FAKE_TF")})
-                if self.live_treatment_tags is not None:
-                    os.environ["FAKE_LIVE_TREATMENT_TAGS"] = json.dumps(self.live_treatment_tags)
                 try:
                     rc = pg.run_hook(stage, env)
                 except pg.StageError as exc:
                     print(exc, file=sys.stderr)
                     rc = 2
-                finally:
-                    os.environ.pop("FAKE_LIVE_TREATMENT_TAGS", None)
             self._check_invariants(stage, before, env)
             if stage in self.diverge_after:
                 path = self.env_dir / "data_access" / "terraform.tfstate"
@@ -1956,24 +1966,38 @@ def test_fake_terraform_import_refuses_an_address_already_in_state(harness):
     desired = released(harness)
     column, value = next(iter(desired["tags"].items()))
 
-    result = _fake_import(harness, column, value)
+    result = _fake_import(
+        harness, column, value,
+        FAKE_LIVE_TREATMENT_TAGS=json.dumps({column.lower(): value}),
+    )
 
     assert result.returncode != 0
     assert "already exists in Terraform state" in result.stderr
 
 
-def test_fake_terraform_import_refuses_when_live_treatment_differs(harness):
+def test_fake_terraform_imports_live_treatment_then_plans_rendered_update(harness, tmp_path):
     desired = released(harness)
     column, value = next(iter(desired["tags"].items()))
     _remove_treatment_tag_state(harness.env_dir)
 
-    result = _fake_import(
+    imported = _fake_import(
         harness, column, value,
         FAKE_LIVE_TREATMENT_TAGS=json.dumps({column.lower(): "other__string__deadbeef"}),
     )
+    plan = tmp_path / "import-drift.tfplan"
+    planned = subprocess.run(
+        [str(harness.runner), "data_access", "dev", "plan", f"-out={plan}", "-var=policy_stage=create"],
+        text=True, capture_output=True,
+        env=os.environ | {"LAYER_ENV_DIR": str(harness.env_dir / "data_access")},
+    )
+    assert imported.returncode == 0, imported.stderr
+    assert planned.returncode == 0, planned.stderr
+    change = next(c for c in json.loads(plan.read_text())["resource_changes"]
+                  if c["type"] == "databricks_entity_tag_assignment" and c["index"] == f"columns|{column}|gr_treatment")
 
-    assert result.returncode != 0
-    assert "does not match the live treatment" in result.stderr
+    assert change["change"]["actions"] == ["update"]
+    assert change["change"]["before"]["tag_value"] == "other__string__deadbeef"
+    assert change["change"]["after"]["tag_value"] == value
 
 
 def test_principal_only_adoption_refuses_when_live_treatment_tag_differs_from_config(harness):
@@ -2446,7 +2470,7 @@ def test_import_manifest_refuses_live_treatment_change_without_importing(harness
     out = tmp_path / "plan"
     assert harness.controller().plan(out) == 0
     column = next(iter(desired["tags"]))
-    harness.live_treatment_tags[column] = "other__string__deadbeef"
+    harness.live_treatment_tags = harness.live_treatment_tags | {column: "other__string__deadbeef"}
     log = harness.env_dir / "runner.log"
     before = log.read_text().splitlines()
 

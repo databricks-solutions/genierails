@@ -1090,8 +1090,9 @@ def test_promote_to_token_two_signals_leave_no_token_and_keep_first_exit(tmp_pat
         f"os.kill(os.getppid(), {second}); time.sleep(2)"
     )
     program = f'''\
-import sys, time
+import signal, sys, time
 from pathlib import Path
+signal.signal(signal.SIGINT, signal.default_int_handler)
 sys.path.insert(0, {str(SHARED / "scripts")!r})
 import promote_token
 class SlowPath(type(Path())):
@@ -1117,13 +1118,18 @@ def test_promote_to_token_term_then_int_during_cleanup_keeps_term_exit(tmp_path)
     env = tmp_path / "prod"
     env.mkdir()
     token = tmp_path / "promote-token"
+    cleanup_mask = tmp_path / "cleanup-mask"
     program = f'''\
 import os, signal, sys
 from pathlib import Path
+signal.signal(signal.SIGINT, signal.default_int_handler)
 sys.path.insert(0, {str(SHARED / "scripts")!r})
 import promote_token
 class InterruptingPath(type(Path())):
     def unlink(self, *args, **kwargs):
+        blocked = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        assert {{signal.SIGINT, signal.SIGTERM, signal.SIGHUP}} <= blocked
+        Path({str(cleanup_mask)!r}).write_text("blocked")
         os.kill(os.getpid(), signal.SIGINT)
         return super().unlink(*args, **kwargs)
 def mint(env_dir):
@@ -1147,6 +1153,7 @@ promote_token.run(Path({str(env)!r}), [sys.executable, "-c", "pass"])
     result = subprocess.run([sys.executable, "-c", program], timeout=10)
 
     assert result.returncode == 128 + signal.SIGTERM
+    assert cleanup_mask.read_text() == "blocked"
     assert not token.exists()
 
 
