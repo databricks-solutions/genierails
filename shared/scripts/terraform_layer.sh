@@ -405,15 +405,45 @@ if [ "$LAYER" = "workspace" ] && [ -n "${GENIERAILS_STATE_DIR:-}" ] && [ "$genie
   RUNNER_VALUE_genie_id_dir="$GENIERAILS_GENIE_ID_DIR"
 fi
 if [ "$LAYER" = "data_access" ]; then
-  # Staged applies render here, so released state records this path. Keep using
-  # it for ordinary plan/apply runs while it exists: switching back to the
-  # split copy changes the external normalizer's query even when the SQL is
-  # identical, which makes masking_functions_drop and coverage outputs churn.
-  # A staged caller's explicit render remains authoritative.
+  # Staged applies render here, so released state records this path. An
+  # ordinary run may keep using it only while it describes the same functions
+  # as the reviewed split SQL. A later promote/edit, an incomplete stage, or a
+  # normalization error falls back to the split file: fail toward deploying
+  # the reviewed config, never toward silently retaining an old stage render.
+  # A staged caller's explicit render remains authoritative because its ABAC
+  # and SQL are one render and must be read together.
   MASKING_CONFIG_DIR="$LAYER_CONFIG_DIR"
   RUNTIME_MASKING_CONFIG_DIR="$(dirname "$ENV_DIR")/generated/.runtime/data_access"
   if [ "$LAYER_CONFIG_DIR" = "$ENV_DIR" ] && [ -f "$RUNTIME_MASKING_CONFIG_DIR/masking_functions.sql" ]; then
-    MASKING_CONFIG_DIR="$RUNTIME_MASKING_CONFIG_DIR"
+    NORMALIZE_MASKING_SQL="$SCRIPT_DIR/../modules/data_access/normalize_masking_sql.py"
+    _masking_sql_hash() {
+      python3 - "$NORMALIZE_MASKING_SQL" "$1" <<'PY'
+import json
+import subprocess
+import sys
+
+result = subprocess.run(
+    [sys.executable, sys.argv[1]],
+    input=json.dumps({"sql_file": sys.argv[2]}),
+    text=True,
+    capture_output=True,
+)
+if result.returncode:
+    raise SystemExit(result.returncode)
+value = json.loads(result.stdout).get("hash", "")
+if not value:
+    raise SystemExit(1)
+print(value)
+PY
+    }
+    split_hash=""
+    runtime_hash=""
+    if split_hash="$(_masking_sql_hash "$ENV_DIR/masking_functions.sql" 2>/dev/null)" && \
+       runtime_hash="$(_masking_sql_hash "$RUNTIME_MASKING_CONFIG_DIR/masking_functions.sql" 2>/dev/null)" && \
+       [ "$split_hash" = "$runtime_hash" ]; then
+      MASKING_CONFIG_DIR="$RUNTIME_MASKING_CONFIG_DIR"
+    fi
+    unset -f _masking_sql_hash
   fi
   if [ "$MASKING_CONFIG_DIR" != "$ENV_DIR" ]; then
     RUNNER_VARS+=(-var="masking_sql_file=$MASKING_CONFIG_DIR/masking_functions.sql")
