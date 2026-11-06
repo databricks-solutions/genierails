@@ -213,10 +213,18 @@ def test_check_passes_on_a_clean_generated_tree_and_writes_nothing(repo, tmp_pat
     assert _git(repo, "status", "--porcelain") == ""
 
 
+@pytest.mark.parametrize("structural_token", ["unset", "missing", "world-readable"])
 @pytest.mark.parametrize("ci", ["", "true"])
-def test_real_plan_keeps_business_select_withheld_warning(repo, tmp_path, ci):
+def test_real_plan_keeps_business_select_withheld_warning(repo, tmp_path, ci, structural_token):
     token = mint_exposure_token(repo / "aws" / "envs" / "dev")
     run_env = {EXPOSURE_TOKEN_ENV: str(token)} | ({"CI": ci} if ci else {})
+    if structural_token == "missing":
+        run_env["GENIERAILS_STRUCTURAL_CHECK_TOKEN"] = str(tmp_path / "missing-structural-token")
+    elif structural_token == "world-readable":
+        forged = tmp_path / "forged-structural-token"
+        forged.write_text(str((repo / "aws" / "envs" / "dev").resolve()) + "\n")
+        forged.chmod(0o644)
+        run_env["GENIERAILS_STRUCTURAL_CHECK_TOKEN"] = str(forged)
     result = _make(repo, tmp_path, "plan", "ENV=dev", **run_env)
 
     out = result.stdout + result.stderr

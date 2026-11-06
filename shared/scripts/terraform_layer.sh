@@ -169,7 +169,7 @@ case "$COMMAND" in
       echo "ERROR: refusing terraform $COMMAND: a file in $ROOT_DIR can't be parsed, so the runner variables it may declare can't all be set by $(basename "$0")." >&2
       exit 2
     elif [ "$runner_vars_rc" != 0 ]; then
-      echo "ERROR: refusing terraform $COMMAND: env_dir, workspace_state_file and data_access_state_file are set only by $(basename "$0") (where the roots read Terraform state), import_walk only by it for terraform import, databricks_pipeline_auth_type only by it from a pipeline job's OIDC (scripts/terraform_env.sh), and policy_stage, held_access_grants and rebind_table_grants only by the staged policy controller (scripts/staged_policy_apply.py)." >&2
+      echo "ERROR: refusing terraform $COMMAND: env_dir, workspace_state_file, data_access_state_file, expected_pre_release_withholding and structural_check are set only by $(basename "$0") (where the roots read Terraform state and for make check's structural plan), import_walk only by it for terraform import, databricks_pipeline_auth_type only by it from a pipeline job's OIDC (scripts/terraform_env.sh), and policy_stage, held_access_grants and rebind_table_grants only by the staged policy controller (scripts/staged_policy_apply.py)." >&2
       exit 2
     fi
     ;;
