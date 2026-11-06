@@ -18,6 +18,7 @@ import hcl2
 import pytest
 
 from shared.scripts import check_env
+from shared.scripts.exposure_token import ENV_VAR as EXPOSURE_TOKEN_ENV, mint as mint_exposure_token
 
 ROOT = Path(__file__).resolve().parents[2]
 SHARED = ROOT / "shared"
@@ -75,8 +76,16 @@ case "$1" in
     esac ;;
   plan)
     expected=""
-    for arg in "$@"; do [ "$arg" = "-var=expected_pre_release_withholding=true" ] && expected=" expected-withholding"; done
-    echo "plan $(basename "$PWD")$expected" >> "$FAKE_TF_LOG"; echo "FAKE PLAN" ;;
+    structural=""
+    for arg in "$@"; do
+      [ "$arg" = "-var=expected_pre_release_withholding=true" ] && expected=" expected-withholding"
+      [ "$arg" = "-var=structural_check=true" ] && structural=" structural-check"
+    done
+    if [ "$(basename "$PWD")" = "data_access" ] && [ -z "$structural" ]; then
+      echo 'Warning: Check block assertion failed' >&2
+      echo 'run make check ENV=dev, which runs the coverage check' >&2
+    fi
+    echo "plan $(basename "$PWD")$expected$structural" >> "$FAKE_TF_LOG"; echo "FAKE PLAN" ;;
 esac
 exit 0
 """
@@ -196,11 +205,32 @@ def test_check_passes_on_a_clean_generated_tree_and_writes_nothing(repo, tmp_pat
     assert "STRUCTURAL plan: envs/dev as committed, against EMPTY state" in out
     assert "--- check 5/6: mask-library unit tests ---" in out and " passed in " in out
     assert "=== make check ENV=dev: passed ===" in out
+    assert "run make check ENV=dev, which runs the coverage check" not in out
     assert "applying targets cannot run in CI" not in out
-    assert (tmp_path / "tf.log").read_text().split("\n")[:2] == ["plan data_access",
+    assert (tmp_path / "tf.log").read_text().split("\n")[:2] == ["plan data_access structural-check",
                                                                   "plan workspace expected-withholding"]
     _assert_read_only(repo, before)
     assert _git(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("structural_token", ["unset", "missing", "world-readable"])
+@pytest.mark.parametrize("ci", ["", "true"])
+def test_real_plan_keeps_business_select_withheld_warning(repo, tmp_path, ci, structural_token):
+    token = mint_exposure_token(repo / "aws" / "envs" / "dev")
+    run_env = {EXPOSURE_TOKEN_ENV: str(token)} | ({"CI": ci} if ci else {})
+    if structural_token == "missing":
+        run_env["GENIERAILS_STRUCTURAL_CHECK_TOKEN"] = str(tmp_path / "missing-structural-token")
+    elif structural_token == "world-readable":
+        forged = tmp_path / "forged-structural-token"
+        forged.write_text(str((repo / "aws" / "envs" / "dev").resolve()) + "\n")
+        forged.chmod(0o644)
+        run_env["GENIERAILS_STRUCTURAL_CHECK_TOKEN"] = str(forged)
+    result = _make(repo, tmp_path, "plan", "ENV=dev", **run_env)
+
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "run make check ENV=dev, which runs the coverage check" in out
+    assert "plan data_access structural-check" not in (tmp_path / "tf.log").read_text()
 
 
 def test_check_fails_when_a_generated_file_is_hand_edited(repo, tmp_path):
@@ -890,7 +920,7 @@ def test_rehearse_on_a_valid_committed_config_passes_the_check_and_goes_on(repo,
     assert "=== make check ENV=dev: passed ===" in out, out
     assert "refused: make check" not in out
     # The check's structural plan ran; then rehearse went on to its first live step.
-    assert (tmp_path / "tf.log").read_text().split("\n")[:2] == ["plan data_access",
+    assert (tmp_path / "tf.log").read_text().split("\n")[:2] == ["plan data_access structural-check",
                                                                   "plan workspace expected-withholding"]
     assert "--env dev" in live, out
     _no_lock_or_receipt(repo)

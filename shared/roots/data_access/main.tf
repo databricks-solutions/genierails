@@ -235,6 +235,14 @@ variable "env_dir" {
   type = string
 }
 
+# Set only by scripts/terraform_layer.sh while make check's one-use token is
+# valid. Its empty-state data_access plan still withholds unsafe new grants;
+# it merely suppresses the warning that tells an already-running check to run.
+variable "structural_check" {
+  type    = bool
+  default = false
+}
+
 # Set only by scripts/terraform_layer.sh, on terraform import: the coverage
 # check then has a known status (modules/coverage_gate_check), so a passing
 # result doesn't make the import fail with Invalid for_each.
@@ -722,7 +730,7 @@ locals {
 
 check "business_select_withheld" {
   assert {
-    condition     = length(module.data_access.withheld_table_grants.grants) == 0 || module.data_access.withheld_table_grants.status == "pass"
+    condition     = var.structural_check || length(module.data_access.withheld_table_grants.grants) == 0 || module.data_access.withheld_table_grants.status == "pass"
     error_message = local.business_select_withheld_message
   }
 }
