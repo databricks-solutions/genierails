@@ -10,25 +10,26 @@ The journey: set up dev, prove the rules in dev, copy the proven rules to prod, 
 The whole flow at a glance; the steps below walk through each line.
 
 ```bash
-# Dev: set it up and prove it
-make setup ENV=dev REPO=<your-repo-url>   # creates dev's files (REPO= optional); offers to commit (y)
-#   fill in the env + agent files setup copied from the templates (Dev step 1)
-#   Catalog Explorer: turn on Data classification and review what it found (Dev step 2)
-make generate ENV=dev       # drafts masks and access rules from the tags; offers to commit + push (y)
-make rehearse ENV=dev       # checks, applies dev, proves the masks work; first time: asks y/N about account setup
+# Dev: build the rules and prove they work
+make setup ENV=dev REPO=<your-repo-url>   # 1. create dev's config files (REPO= is optional)
+#   then: fill in dev's env and agent files                (Dev step 1)
+#   then: turn on Data classification in Catalog Explorer  (Dev step 2)
+make generate ENV=dev       # 2. draft mask and access rules from the classification tags
+make rehearse ENV=dev       # 3. apply them to dev and prove the masks hide the data
 
 # Prod: copy what dev proved, then release it (same for stg or any env)
-make setup ENV=prod         # then set deployer_principal_id, catalog_map, group_map
-make promote-to ENV=prod    # copies dev's proven rules to prod; offers to commit + push (y)
-#   Catalog Explorer: the same review on the prod catalog
-make release ENV=prod       # applies prod in rounds; shows each round's plan, asks y/N; ends at "Release complete"
-make evidence ENV=prod      # writes a record of what is live
-make maintain ENV=prod      # on a schedule, on the deployment machine: masks columns tagged later
+make setup ENV=prod         # 4. create prod's config files
+#   then: fill in prod's env file                          (Prod step 1)
+make promote-to ENV=prod    # 5. copy dev's tested rules into prod's config
+#   then: review classification on the prod catalog        (Prod step 3)
+make release ENV=prod       # 6. apply them to prod, one approved round at a time
+make evidence ENV=prod      # 7. save a record of what is live (for audit)
+make maintain ENV=prod      # 8. run on a schedule to mask columns that get tagged later
 
-# lost? make next ENV=<env>
+# Stuck? `make next ENV=<env>` prints the next command.
 ```
 
-Questions appear only at a terminal ([CI / scripted](#ci--scripted)); each one is listed [at the end](#what-each-command-asks).
+Some commands ask `y/N` first, e.g. before a commit and push or a prod release round. They ask only at a terminal ([CI / scripted](#ci--scripted)); [the table at the end](#what-each-command-asks) lists each question.
 
 <a id="prerequisites--gather-required-values"></a>
 ## Before you start
@@ -204,7 +205,7 @@ More: [warehouse, offline mode, state folder](DETAILS.md#prod-step-5-record-evid
 New sensitive columns appear over time: `maintain` catches columns tagged after the release and masks them.
 
 ```bash
-make maintain ENV=prod      # on a schedule, on the deployment machine: masks columns tagged later
+make maintain ENV=prod
 ```
 
 - Schedule it (e.g. with cron) on the [deployment machine](../../docs/deployment-machine.md).

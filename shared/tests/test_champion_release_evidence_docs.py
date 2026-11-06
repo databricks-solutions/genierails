@@ -35,7 +35,7 @@ def test_the_whole_flow_records_evidence_after_release_and_before_maintain():
     assert "make release-plan ENV=prod" not in lines
     order = ["make promote-to ENV=prod", "make release ENV=prod", EVIDENCE, "make maintain ENV=prod"]
     assert [lines.index(step) for step in order] == sorted(lines.index(step) for step in order)
-    assert "make evidence ENV=prod      # writes a record of what is live" in flow.splitlines()
+    assert "make evidence ENV=prod      # 7. save a record of what is live (for audit)" in flow.splitlines()
 
 
 def test_prod_step_5_records_evidence_after_the_release_and_its_stop_advice():
@@ -112,8 +112,11 @@ def test_maintain_runs_on_the_deployment_machine_at_the_last_released_commit_not
     readme = README.read_text()
     flow = _section(readme, "## The whole flow", "## Before you start")
     safe = _section(readme, "## Keep it healthy", "## Later changes")
-    line = "make maintain ENV=prod      # on a schedule, on the deployment machine: masks columns tagged later"
-    assert line in flow.splitlines() and line in safe.splitlines()
+    assert "make maintain ENV=prod      # 8. run on a schedule to mask columns that get tagged later" \
+        in flow.splitlines()
+    # Keep it healthy says the rest: tagged-later columns, on the deployment machine.
+    assert "```bash\nmake maintain ENV=prod\n```" in safe
+    assert "`maintain` catches columns tagged after the release and masks them." in safe
     assert "Schedule it (e.g. with cron) on the [deployment machine](../../docs/deployment-machine.md)." in safe
     assert "In a deterministic env it runs only from the last released commit, on a clean checkout." in safe
     # No walkthrough line puts maintain in CI.

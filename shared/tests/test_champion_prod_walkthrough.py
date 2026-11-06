@@ -189,10 +189,9 @@ def test_the_prod_section_reads_as_expected():
         "make setup ENV=prod", "make promote-to ENV=prod", "answer y",
         "make release ENV=prod",
     ]
-    # The whole flow's promote-to commits the same files itself.
+    # The whole flow's promote-to copies dev's rules; its step (below) says it commits the same files itself.
     flow = _section("The whole flow")
-    assert "make promote-to ENV=prod    # copies dev's proven rules to prod; offers to commit + push (y)" \
-        in flow.splitlines()
+    assert "make promote-to ENV=prod    # 5. copy dev's tested rules into prod's config" in flow.splitlines()
     assert "Promote the rules to prod" not in flow
     # ...the README's step names the files that offer commits...
     step = _step(_section("Prod"), "2. Copy the proven rules.")
@@ -290,8 +289,11 @@ def test_prod_step_4_says_a_first_release_takes_several_rounds_in_the_real_messa
     positions = [row.index(f"`{message}`") for message in (RELEASE_PHASE_HEADING, RELEASE_NEXT, RELEASE_COMPLETE)]
     assert positions == sorted(positions), row
     flow = _section("The whole flow")
-    assert 'make release ENV=prod       # applies prod in rounds; shows each round\'s plan, asks y/N; ends at ' \
-        '"Release complete"' in flow.splitlines()
+    assert "make release ENV=prod       # 6. apply them to prod, one approved round at a time" in flow.splitlines()
+    # Each round's y/N and the "Release complete" end live in the release step, not the flow's comment.
+    step = _step(_section("Prod"), "4. Release.")
+    assert "Each round shows you its manifest and asks `Approve and release manifest <id> ...? [y/N]`." in step
+    assert "Answer `y` each round until it prints `=== Release complete (prod) ===`." in step
     # The flow's commands have no release-plan line: release runs it each round, which the table says,
     # with the exact question it asks.
     code = flow[flow.index("```bash"):flow.index("```", flow.index("```bash") + 3)]
