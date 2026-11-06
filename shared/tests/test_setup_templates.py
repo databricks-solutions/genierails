@@ -51,7 +51,7 @@ def test_setup_dev_copies_the_walkthrough_env_and_agent_templates(cloud, target,
     dev = tmp_path / cloud / "envs/dev"
     assert (dev / "env.auto.tfvars").read_bytes() == (EXAMPLES / "env.auto.tfvars.example").read_bytes()
     assert (dev / "agents" / AGENT_FILE).read_bytes() == (EXAMPLES / "agent.auto.tfvars.example").read_bytes()
-    assert 'name = "my_agent"' in (dev / "agents" / AGENT_FILE).read_text()
+    assert "name =" not in (dev / "agents" / AGENT_FILE).read_text()
     assert sorted(p.name for p in (dev / "agents").iterdir()) == [AGENT_FILE]
     # The auth file still comes from the auth template, never from the walkthrough's files.
     auth = (dev / "auth.auto.tfvars").read_text()

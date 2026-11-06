@@ -63,7 +63,7 @@ In dev you set up, find the sensitive columns, draft the rules and prove they wo
 make setup ENV=dev REPO=<your-repo-url>
 ```
 - `REPO=` (optional) makes this clone yours: `origin` becomes your repo, where teammates can review your changes. Without it, everything stays in local git.
-- Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`](env.auto.tfvars.example) to `envs/dev/env.auto.tfvars` and [`agent.auto.tfvars.example`](agent.auto.tfvars.example) to `envs/dev/agents/my_agent.auto.tfvars` when `envs/dev/agents/` has no agent file. It copies only files that don't exist yet, so it never overwrites your edits and a re-run changes nothing.
+- Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`](env.auto.tfvars.example) to `envs/dev/env.auto.tfvars` and [`agent.auto.tfvars.example`](agent.auto.tfvars.example) to `envs/dev/agents/my_agent.auto.tfvars`. It copies only files that don't exist yet, so it never overwrites your edits and a re-run changes nothing.
 
 <a id="commit-it"></a>
 **Then it offers to commit.** GenieRails previews the `.gitignore`, placeholder env defaults and agent file it created and asks `Commit these changes and push them to origin/main? [y/N]`. Answer `y`.
@@ -81,7 +81,7 @@ Now fill in the files:
   deployer_principal_id = "<the dev auth.auto.tfvars databricks_client_id>"
   access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
   ```
-- **Agents (preferred):** rename setup's `my_agent.auto.tfvars` and its `name` to your agent. Set its ID and `acl_groups` (from `access_tier_groups`):
+- **Agents (preferred):** rename setup's `my_agent.auto.tfvars` to your agent. Set its ID and `acl_groups` (from `access_tier_groups`):
   ```hcl
   genie_space_id = "01ef0000000000000000000000000000"   # Genie UI > agent > Configure > About this agent
   acl_groups     = ["regional_analysts", "viewers"]      # who gets CAN_RUN on the agent; [] means nobody

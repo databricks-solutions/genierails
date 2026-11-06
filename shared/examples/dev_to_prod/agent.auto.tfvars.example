@@ -3,8 +3,8 @@
 # ============================================================================
 # One file per agent: envs/dev/agents/<agent name>.auto.tfvars. `make setup
 # ENV=dev` copies this to envs/dev/agents/my_agent.auto.tfvars (only with a new
-# env.auto.tfvars and no agent file yet): rename this file and its name to your
-# agent. For another agent, from the cloud root (cd aws|azure):
+# env.auto.tfvars and no agent file yet): rename this file to your agent. For
+# another agent, from the cloud root (cd aws|azure):
 #   cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example "envs/dev/agents/<agent name>.auto.tfvars"
 # The file name is the agent's name: letters, digits, spaces, '_', '-' or '.'.
 # `make generate ENV=dev` captures the agent beside this file
@@ -13,8 +13,6 @@
 
 # Agent ID: Genie UI > your agent > Configure > About this agent > Agent ID
 # (or the <id> in its /genie/rooms/<id> URL). Its tables are discovered from it.
-name = "my_agent"
-
 genie_space_id = "<your-genie-space-id>"
 
 # Who may run the agent: the groups that get Genie CAN_RUN on it, and nothing

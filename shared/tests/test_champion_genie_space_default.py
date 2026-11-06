@@ -80,7 +80,7 @@ def test_template_genie_space_placeholder_is_the_only_active_footprint():
 
     # The agent lives in its own file: its ID and who may run it (decision 4).
     assert cfg["genie_spaces"] == []
-    assert agent == {"name": AGENT, "genie_space_id": PLACEHOLDER, "acl_groups": [ACL_PLACEHOLDER]}
+    assert agent == {"genie_space_id": PLACEHOLDER, "acl_groups": [ACL_PLACEHOLDER]}
     assert "uc_tables" not in cfg
     assert cfg["sql_warehouse_id"] == ""
     assert cfg["enable_classification"] is True

@@ -486,6 +486,7 @@ def setup(args: argparse.Namespace, client: Any) -> None:
     fill = "" if groups else f" (replace {ACL_PLACEHOLDER} with the groups that may run it)"
     print(f"\nThen write the agent's file, {agent_file}{fill}:\n")
     print(_agent_tfvars(space_id, groups))
+    print("\nDelete envs/dev/agents/my_agent.auto.tfvars if setup seeded that placeholder file.")
     print(f"\nGenie agent ID: {space_id}\nOwnership state: {STATE_FILE}")
 
 

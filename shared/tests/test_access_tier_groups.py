@@ -664,7 +664,7 @@ def test_champion_walkthrough_dev_setup_has_no_manual_template_copy():
              "never overwrites your edits and a re-run changes nothing",
              "Fill in `envs/dev/auth.auto.tfvars`",
              "**Agents (preferred):**",
-             "rename setup's `my_agent.auto.tfvars` and its `name` to your agent"]
+             "rename setup's `my_agent.auto.tfvars` to your agent"]
     positions = [step_1.index(step) for step in order]
     assert positions == sorted(positions)
     # Prod keeps promote-to as the source of its agent files.
@@ -676,7 +676,7 @@ def test_champion_walkthrough_dev_setup_has_no_manual_template_copy():
     setup = details[details.index("## Dev step 1: Set up"):details.index("## Dev step 1: The commit offer")]
     order = ["Setup copies this walkthrough's templates into dev", "It copies only files that don't exist yet",
              "the agent file only along with a new `env.auto.tfvars`", "never overwrites your edits",
-             "**Agents (preferred):**", "rename setup's `my_agent.auto.tfvars` and its `name` to your agent"]
+             "**Agents (preferred):**", "rename setup's `my_agent.auto.tfvars` to your agent"]
     assert [setup.index(step) for step in order] == sorted(setup.index(step) for step in order)
     # The templates' own headers say setup copies them, with no copy-it-yourself recipe for the first file.
     env_template = (SHARED / "examples/dev_to_prod/env.auto.tfvars.example").read_text()

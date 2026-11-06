@@ -6631,12 +6631,10 @@ def scenario_champion(
         for placeholder in ('"<your-genie-space-id>"', '"<group-that-may-run-the-agent>"'):
             if text.count(placeholder) != 1:
                 raise AssertionError(f"agent template no longer has exactly one {placeholder} placeholder")
-        if text.count('name = "my_agent"') != 1:
-            raise AssertionError('agent template no longer has exactly one name = "my_agent" placeholder')
         dev_agent_file.write_text(
-            text.replace('name = "my_agent"', f"name = {json.dumps(CHAMPION_SPACE_TITLE)}")
-            .replace('"<your-genie-space-id>"', f'"{dev_space_id}"')
+            text.replace('"<your-genie-space-id>"', f'"{dev_space_id}"')
             .replace('"<group-that-may-run-the-agent>"', ", ".join(json.dumps(g) for g in acl_groups))
+            + f"name = {json.dumps(CHAMPION_SPACE_TITLE)}\n"
         )
         deployer = str(_load_tfvars(auth_file).get("databricks_client_id") or "")
         if not deployer:

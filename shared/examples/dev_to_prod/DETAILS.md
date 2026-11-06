@@ -50,7 +50,7 @@ Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`](
 
 The template starts new champions with `governance_mode = "deterministic"`; existing env files are not changed.
 
-**Agents (preferred):** one file per agent in `envs/dev/agents/`; the file name is the agent's name. Before the first `make generate`, rename setup's `my_agent.auto.tfvars` and its `name` to your agent (for each further agent, copy it under that agent's name).
+**Agents (preferred):** one file per agent in `envs/dev/agents/`; the file name is the agent's name. Before the first `make generate`, rename setup's `my_agent.auto.tfvars` to your agent (for each further agent, copy it under that agent's name).
 
 **Also accepted:** the same fields inline in `env.auto.tfvars` as `genie_spaces = [{ name = "...", genie_space_id = "...", acl_groups = [...] }]` (leave `genie_spaces = []` when using agent files; with the inline list, delete setup's agent file). Prefer `agents/` files so agent and governance PRs stay separate; `make split-agent-files` moves an inline list into files later.
 
