@@ -12,6 +12,7 @@ from tests.terraform_helpers import shared_copy, tf, tf_env, tf_init
 
 
 MAIN_TF = Path(__file__).parents[1] / "modules" / "data_access" / "main.tf"
+ROOT_TF = Path(__file__).parents[1] / "roots" / "data_access" / "main.tf"
 WORKSPACE_MAIN_TF = Path(__file__).parents[1] / "modules" / "workspace" / "main.tf"
 SHARED = Path(__file__).parents[1]
 
@@ -370,9 +371,15 @@ def test_depends_on_parser_ignores_brackets_in_strings_comments_and_nested_block
 
 
 def test_business_select_requires_a_current_coverage_gate_pass():
-    table = _resource_body(MAIN_TF.read_text(), "table_access")
+    source = MAIN_TF.read_text()
+    table = _resource_body(source, "table_access")
     precondition = table[table.index("lifecycle {"):]
     assert 'condition     = local.coverage_gate_status == "pass"' in precondition
+    root = ROOT_TF.read_text()
+    withheld = root[root.index('check "business_select_withheld"'):]
+    withheld = withheld[:withheld.index("\n}")]
+    assert "var.structural_check ||" in withheld
+    assert 'module.data_access.withheld_table_grants.status == "pass"' in withheld
     # Whole-resource dependencies stay as they were: the gate adds a
     # precondition, not an edge, so no address or key changes.
     assert '"${pair.table}|${pair.principal}"' in table

@@ -457,7 +457,8 @@ def write_state_file(env_dir: Path, env: str, layer: str, out: Path) -> bool:
 # runner passes every one a root declares (declared_runner_vars), in this order, empty or
 # false when inactive, so no default decides one.
 RUNNER_VARS = ("env_dir", "workspace_state_file", "data_access_state_file", "genie_id_dir",
-               "expected_pre_release_withholding", "import_walk", "databricks_pipeline_auth_type")
+               "expected_pre_release_withholding", "structural_check", "import_walk",
+               "databricks_pipeline_auth_type")
 STRUCTURAL_CHECK_TOKEN_ENV = "GENIERAILS_STRUCTURAL_CHECK_TOKEN"
 # Variables only the staged policy controller sets (policy_generations._runner), as -var with the
 # env-lock token (environment_lock.stage_token). policy_stage selects which grants a plan withholds

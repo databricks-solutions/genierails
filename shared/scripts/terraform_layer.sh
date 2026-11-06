@@ -379,7 +379,12 @@ RUNNER_VARS=()
 unset ${!RUNNER_VALUE_@}
 RUNNER_VALUE_env_dir="$ENV_DIR"
 RUNNER_VALUE_expected_pre_release_withholding=false
+RUNNER_VALUE_structural_check=false
 RUNNER_VALUE_import_walk=false
+if [ "$LAYER:$COMMAND" = "data_access:plan" ] && \
+   python3 -c 'import os, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from state_layout import STRUCTURAL_CHECK_TOKEN_ENV, structural_check_token_valid; raise SystemExit(0 if structural_check_token_valid(Path(sys.argv[2]), os.environ.get(STRUCTURAL_CHECK_TOKEN_ENV)) else 1)' "$SCRIPT_DIR" "$(dirname "$ENV_DIR")"; then
+  RUNNER_VALUE_structural_check=true
+fi
 if [ "$LAYER:$COMMAND" = "workspace:plan" ] && \
    python3 -c 'import os, sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from state_layout import STRUCTURAL_CHECK_TOKEN_ENV, consume_structural_check_token; raise SystemExit(0 if consume_structural_check_token(Path(sys.argv[2]), os.environ.get(STRUCTURAL_CHECK_TOKEN_ENV)) else 1)' "$SCRIPT_DIR" "$ENV_DIR"; then
   RUNNER_VALUE_expected_pre_release_withholding=true
