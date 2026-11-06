@@ -19,7 +19,7 @@ import pytest
 SHARED = Path(__file__).resolve().parents[1]
 EXAMPLES = SHARED / "examples" / "dev_to_prod"
 SPACE_ID = "01champion0dev"
-AGENT = "Finance Analytics"  # the README's agent file name
+AGENT = "my_agent"  # the README's seeded agent file name
 TABLES = ["dev_fin.finance.credit_cards", "dev_fin.finance.customers", "dev_fin.finance.transactions"]
 DEPLOYER = "d0000000-0000-0000-0000-00000000d001"
 TIERS = ["payments_ops", "viewers"]

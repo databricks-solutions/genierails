@@ -46,11 +46,11 @@ No repo of your own yet? Leave `REPO=` off: setup renames `origin` to `genierail
 <a id="dev-step-1-set-up"></a>
 ## Dev step 1: Set up
 
-Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`](env.auto.tfvars.example) to `envs/dev/env.auto.tfvars` and [`agent.auto.tfvars.example`](agent.auto.tfvars.example) to `envs/dev/agents/Finance Analytics.auto.tfvars`. It copies only files that don't exist yet (the agent file only along with a new `env.auto.tfvars`, while `envs/dev/agents/` has no agent file), so it never overwrites your edits and a re-run changes nothing.
+Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`](env.auto.tfvars.example) to `envs/dev/env.auto.tfvars` and [`agent.auto.tfvars.example`](agent.auto.tfvars.example) to `envs/dev/agents/my_agent.auto.tfvars`. It copies only files that don't exist yet (the agent file only along with a new `env.auto.tfvars`, while `envs/dev/agents/` has no agent file), so it never overwrites your edits and a re-run changes nothing.
 
 The template starts new champions with `governance_mode = "deterministic"`; existing env files are not changed.
 
-**Agents (preferred):** one file per agent in `envs/dev/agents/`; the file name is the agent's name. Before the first `make generate`, rename setup's `Finance Analytics.auto.tfvars` to your agent's name (for each further agent, copy it under that agent's name).
+**Agents (preferred):** one file per agent in `envs/dev/agents/`; the file name is the agent's name. Before the first `make generate`, rename setup's `my_agent.auto.tfvars` and its `name` to your agent (for each further agent, copy it under that agent's name).
 
 **Also accepted:** the same fields inline in `env.auto.tfvars` as `genie_spaces = [{ name = "...", genie_space_id = "...", acl_groups = [...] }]` (leave `genie_spaces = []` when using agent files; with the inline list, delete setup's agent file). Prefer `agents/` files so agent and governance PRs stay separate; `make split-agent-files` moves an inline list into files later.
 

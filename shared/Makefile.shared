@@ -158,7 +158,7 @@ _is_own_env_dir = { [ -n "$(GENIERAILS_CLOUD_DIR)" ] && _own=$$(CDPATH= cd -P "$
 # overwrites a file and never writes through a symlinked agents/. Promoted envs
 # get neither: promote-to writes their agent files.
 override _WALKTHROUGH_DIR = $(SHARED_ROOT)/examples/dev_to_prod
-override _SETUP_AGENT_NAME = Finance Analytics
+override _SETUP_AGENT_NAME = my_agent
 override _SETUP_AGENT_FILE = $(_SETUP_AGENT_NAME).auto.tfvars
 # The account env's old-layout generated/ is removed, except the account lock
 # (generated/.governance.lock) and its mutex file: a live run's lock, never a leftover.

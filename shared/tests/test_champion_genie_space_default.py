@@ -27,7 +27,7 @@ TEMPLATE = SHARED / "examples/dev_to_prod/env.auto.tfvars.example"
 AGENT_TEMPLATE = SHARED / "examples/dev_to_prod/agent.auto.tfvars.example"
 ACL_PLACEHOLDER = "<group-that-may-run-the-agent>"
 # The README copies the agent template to this file name.
-AGENT = "Finance Analytics"
+AGENT = "my_agent"
 VALIDATOR = SHARED / "scripts/validate_classification_config.py"
 GUARD = SHARED / "genie_space_placeholder.py"
 MAKEFILE = SHARED / "Makefile.shared"
@@ -80,7 +80,7 @@ def test_template_genie_space_placeholder_is_the_only_active_footprint():
 
     # The agent lives in its own file: its ID and who may run it (decision 4).
     assert cfg["genie_spaces"] == []
-    assert agent == {"genie_space_id": PLACEHOLDER, "acl_groups": [ACL_PLACEHOLDER]}
+    assert agent == {"name": AGENT, "genie_space_id": PLACEHOLDER, "acl_groups": [ACL_PLACEHOLDER]}
     assert "uc_tables" not in cfg
     assert cfg["sql_warehouse_id"] == ""
     assert cfg["enable_classification"] is True

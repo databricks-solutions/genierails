@@ -659,12 +659,12 @@ def test_champion_walkthrough_dev_setup_has_no_manual_template_copy():
     order = ["make setup ENV=dev REPO=<your-repo-url>",
              "Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`]",
              "to `envs/dev/env.auto.tfvars` and [`agent.auto.tfvars.example`]",
-             "to `envs/dev/agents/Finance Analytics.auto.tfvars`",
+             "to `envs/dev/agents/my_agent.auto.tfvars`",
              "It copies only files that don't exist yet",
              "never overwrites your edits and a re-run changes nothing",
              "Fill in `envs/dev/auth.auto.tfvars`",
              "**Agents (preferred):**",
-             "rename setup's `Finance Analytics.auto.tfvars` to your agent's name"]
+             "rename setup's `my_agent.auto.tfvars` and its `name` to your agent"]
     positions = [step_1.index(step) for step in order]
     assert positions == sorted(positions)
     # Prod keeps promote-to as the source of its agent files.
@@ -676,14 +676,14 @@ def test_champion_walkthrough_dev_setup_has_no_manual_template_copy():
     setup = details[details.index("## Dev step 1: Set up"):details.index("## Dev step 1: The commit offer")]
     order = ["Setup copies this walkthrough's templates into dev", "It copies only files that don't exist yet",
              "the agent file only along with a new `env.auto.tfvars`", "never overwrites your edits",
-             "**Agents (preferred):**", "rename setup's `Finance Analytics.auto.tfvars` to your agent's name"]
+             "**Agents (preferred):**", "rename setup's `my_agent.auto.tfvars` and its `name` to your agent"]
     assert [setup.index(step) for step in order] == sorted(setup.index(step) for step in order)
     # The templates' own headers say setup copies them, with no copy-it-yourself recipe for the first file.
     env_template = (SHARED / "examples/dev_to_prod/env.auto.tfvars.example").read_text()
     agent_template = (SHARED / "examples/dev_to_prod/agent.auto.tfvars.example").read_text()
     assert "`make setup ENV=dev` copies this to envs/dev/env.auto.tfvars" in env_template
     assert "then copy this file" not in env_template
-    assert "copies this to envs/dev/agents/Finance Analytics.auto.tfvars" in agent_template
+    assert "copies this to envs/dev/agents/my_agent.auto.tfvars" in agent_template
     assert "mkdir -p envs/dev/agents" not in agent_template
 
 

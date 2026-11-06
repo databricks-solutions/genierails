@@ -14,7 +14,8 @@ import pytest
 ROOT = Path(__file__).parents[2]
 SHARED_ROOT = ROOT / "shared"
 EXAMPLES = SHARED_ROOT / "examples" / "dev_to_prod"
-AGENT_FILE = "Finance Analytics.auto.tfvars"
+AGENT_FILE = "my_agent.auto.tfvars"
+OLD_AGENT_FILE = "Finance Analytics.auto.tfvars"
 CLOUDS = ("aws", "azure")
 
 
@@ -50,6 +51,7 @@ def test_setup_dev_copies_the_walkthrough_env_and_agent_templates(cloud, target,
     dev = tmp_path / cloud / "envs/dev"
     assert (dev / "env.auto.tfvars").read_bytes() == (EXAMPLES / "env.auto.tfvars.example").read_bytes()
     assert (dev / "agents" / AGENT_FILE).read_bytes() == (EXAMPLES / "agent.auto.tfvars.example").read_bytes()
+    assert 'name = "my_agent"' in (dev / "agents" / AGENT_FILE).read_text()
     assert sorted(p.name for p in (dev / "agents").iterdir()) == [AGENT_FILE]
     # The auth file still comes from the auth template, never from the walkthrough's files.
     auth = (dev / "auth.auto.tfvars").read_text()
@@ -135,6 +137,21 @@ def test_setup_dev_keeps_existing_agent_files_and_adds_none(tmp_path):
     # The env file is new, so it still starts from the walkthrough template.
     assert ((tmp_path / "aws/envs/dev/env.auto.tfvars").read_bytes()
             == (EXAMPLES / "env.auto.tfvars.example").read_bytes())
+    assert "Setup copied the agent template" not in result.stdout
+
+
+def test_setup_dev_keeps_existing_old_seeded_agent_file_and_adds_none(tmp_path):
+    agents = tmp_path / "aws/envs/dev/agents"
+    agents.mkdir(parents=True)
+    mine = 'genie_space_id = "01ef0000000000000000000000000000"\nacl_groups = ["viewers"]\n'
+    (agents / OLD_AGENT_FILE).write_text(mine)
+
+    result = _make("aws", tmp_path, "setup", "ENV=dev")
+
+    assert result.returncode == 0, result.stderr
+    assert sorted(p.name for p in agents.iterdir()) == [OLD_AGENT_FILE]
+    assert (agents / OLD_AGENT_FILE).read_text() == mine
+    assert not (agents / AGENT_FILE).exists()
     assert "Setup copied the agent template" not in result.stdout
 
 

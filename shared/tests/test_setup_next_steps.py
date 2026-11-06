@@ -77,7 +77,7 @@ def test_setup_dev_prints_champion_phase_1_steps(cloud, tmp_path):
         "  2. Per agent, in its file in envs/dev/agents/ (the file name is the agent's name), set\n"
         "     genie_space_id to its Genie agent ID and acl_groups to the groups that may run it "
         "([] means nobody; required).\n"
-        '     Setup copied the agent template to "envs/dev/agents/Finance Analytics.auto.tfvars": before the first\n'
+        '     Setup copied the agent template to "envs/dev/agents/my_agent.auto.tfvars": before the first\n'
         "     make generate, rename it to your agent's name; for another agent, copy it under that agent's name.\n"
         "     In envs/dev/env.auto.tfvars set deployer_principal_id to the applying SP's client_id, and\n"
         "     access_tier_groups to your IdP groups, most to least privileged (the template starts new champions in deterministic mode)\n"
