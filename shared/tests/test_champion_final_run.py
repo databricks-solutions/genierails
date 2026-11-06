@@ -905,10 +905,12 @@ def test_makefile_bootstrap_recipe_scan_flags_deliberate_apply_break(target, inj
 
 def test_makefile_combined_bootstrap_apply_goal_scan_flags_deliberate_break():
     makefile = (SHARED / "Makefile.shared").read_text()
+    bootstrap_call = '$(MAKE) --no-print-directory _bootstrap ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"'
     broken = makefile.replace(
-        '@$(MAKE) --no-print-directory _bootstrap ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"',
-        '@$(MAKE) --no-print-directory _bootstrap _apply-layer ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"',
+        bootstrap_call,
+        '$(MAKE) --no-print-directory _bootstrap _apply-layer ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"',
     )
+    assert broken != makefile
 
     with pytest.raises(AssertionError):
         _assert_no_combined_bootstrap_apply_make_goals(broken)
@@ -916,10 +918,12 @@ def test_makefile_combined_bootstrap_apply_goal_scan_flags_deliberate_break():
 
 def test_makefile_combined_bootstrap_apply_goal_scan_flags_backslash_break():
     makefile = (SHARED / "Makefile.shared").read_text()
+    bootstrap_call = '$(MAKE) --no-print-directory _bootstrap ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"'
     broken = makefile.replace(
-        '@$(MAKE) --no-print-directory _bootstrap ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"',
-        '@$(MAKE) --no-print-directory _bootstrap \\\n\t\t_apply-layer ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"',
+        bootstrap_call,
+        '$(MAKE) --no-print-directory _bootstrap \\\n\t\t_apply-layer ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"',
     )
+    assert broken != makefile
 
     with pytest.raises(AssertionError):
         _assert_no_combined_bootstrap_apply_make_goals(broken)

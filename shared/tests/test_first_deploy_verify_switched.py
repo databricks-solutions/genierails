@@ -241,7 +241,7 @@ def test_pre_grant_is_set_for_the_verifies_before_grant_only(harness, tmp_path, 
     gen = fresh(harness, tmp_path, monkeypatch)
     envs = []
     controller = harness.controller()
-    controller.verification_inputs = lambda t, stages: (Path("/t"), Path("/e"))
+    controller.verification_inputs = lambda t, stages, **_: (Path("/t"), Path("/e"))
     controller._inventory = lambda t, stages: 0
     controller.run_cmd = lambda argv, env=None, check=False: envs.append(env) or staged.SimpleNamespace(returncode=0)
     t = {"to": gen["fingerprint"], "from": "", "retain": "", "switch_attempted": False, "run_id": "r"}

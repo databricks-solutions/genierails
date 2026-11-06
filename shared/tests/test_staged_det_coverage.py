@@ -253,8 +253,9 @@ def test_the_gate_cli_passes_the_rebind_and_access_flags():
     args = []
     real = cg.run_gate
 
-    def capture(*a, **_):
-        args.append(a[-1])
+    def capture(env_dir, env_name, runner, apply_flags, verbose, config_dir=None, staged=None,
+                validation_config_dir=None):
+        args.append(staged)
         return 0
 
     cg.run_gate = capture

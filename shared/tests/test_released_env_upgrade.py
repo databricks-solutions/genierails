@@ -149,6 +149,12 @@ run "released_upgrade_plan" {
   state_key = "released"
   command   = plan
 PROVIDERS_TIME
+  variables {
+    # shared/roots/data_access derives this from the current state. This direct
+    # module upgrade fixture supplies the same value to prove #310 still avoids
+    # a no-op column_mask.using [] -> null update after the retirement.
+    column_mask_empty_using_policies = ["mask_email"]
+  }
   assert {
     condition     = keys(databricks_grant.table_access) == ["cat.sch.customers|analysts"]
     error_message = "the current code must keep the released grant under the same key"
@@ -177,8 +183,9 @@ run "released_upgrade_plan_after_gate_expiry" {
   command   = plan
 PROVIDERS_TIME
   variables {
-    applied_table_grants           = ["cat.sch.customers|analysts"]
-    applied_protection_fingerprint = run.released_by_legacy_code.coverage_gate.protection_fingerprint
+    applied_table_grants             = ["cat.sch.customers|analysts"]
+    applied_protection_fingerprint   = run.released_by_legacy_code.coverage_gate.protection_fingerprint
+    column_mask_empty_using_policies = ["mask_email"]
   }
   assert {
     condition     = output.coverage_gate.status == "expired" && keys(databricks_grant.table_access) == ["cat.sch.customers|analysts"]
@@ -206,6 +213,9 @@ run "never_released_upgrade_without_a_current_gate_withholds_select" {
   state_key = "closed"
   command   = plan
 PROVIDERS_TIME
+  variables {
+    column_mask_empty_using_policies = ["mask_email"]
+  }
   assert {
     condition     = length(databricks_grant.table_access) == 0 && length(output.withheld_table_grants.grants) == 1
     error_message = "without a current pass the first grant must be withheld"
@@ -228,6 +238,9 @@ run "never_released_upgrade_grants_through_the_gate" {
   state_key = "closed"
   command   = plan
 PROVIDERS_TIME
+  variables {
+    column_mask_empty_using_policies = ["mask_email"]
+  }
   assert {
     condition     = keys(databricks_grant.table_access) == ["cat.sch.customers|analysts"]
     error_message = "with a current pass, the never-released env must plan its business SELECT"
