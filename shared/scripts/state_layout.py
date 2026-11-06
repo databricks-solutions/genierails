@@ -605,19 +605,24 @@ def mint_structural_check_token(env_dir: Path) -> Path:
     return Path(name)
 
 
-def consume_structural_check_token(env_dir: Path, token: str | None) -> bool:
+def structural_check_token_valid(env_dir: Path, token: str | None) -> bool:
+    """Whether ``token`` is a live structural-check proof for ``env_dir`` (not consumed)."""
     if not token:
         return False
     path = Path(token)
     try:
         info = path.lstat()
-        valid = (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
-                 and stat.S_IMODE(info.st_mode) == 0o600
-                 and path.read_text() == str(Path(env_dir).resolve()) + "\n")
+        return (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                and stat.S_IMODE(info.st_mode) == 0o600
+                and path.read_text() == str(Path(env_dir).resolve()) + "\n")
     except OSError:
         return False
+
+
+def consume_structural_check_token(env_dir: Path, token: str | None) -> bool:
+    valid = structural_check_token_valid(env_dir, token)
     if valid:
-        path.unlink()
+        Path(token).unlink()
     return valid
 
 

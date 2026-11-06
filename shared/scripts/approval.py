@@ -509,6 +509,54 @@ def _read_private(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+# What a reader outside the apply may show of a record (evidence_report): never its question, tty, host,
+# run digest or asker.
+IDENTITY_FIELDS = ("user", "git_user", "approved_at")
+
+
+def embedded_problem(env_dir: Path, env: str, receipt: Mapping) -> str:
+    """Why a verified release receipt's ``approval`` field can't be shown as who approved it ('' when it can).
+
+    EXTERNAL is shown as it is. A terminal approval must still be the record
+    it embedded: that file in the env's approvals dir, a private file of this
+    user's (as written), whose sha256 is the embedded ``record_sha256``, whose
+    fields are the embedded ones, and which approves the receipt's own
+    manifest (id, sha256, commit). Like the record itself this is audit:
+    someone with this uid can rewrite record and receipt together.
+    """
+    from scripts import release_gate as rg
+
+    approval = receipt.get("approval")
+    if not isinstance(approval, dict):
+        return "the release receipt records no approval"
+    if approval == EXTERNAL:
+        return ""
+    if approval.get("via") != VIA_TERMINAL:
+        return "its approval is neither a terminal record nor external"
+    manifest = receipt.get("manifest") if isinstance(receipt.get("manifest"), dict) else {}
+    tied = {"env": env, "manifest_id": manifest.get("id"), "manifest_sha256": manifest.get("sha256"),
+            "commit": receipt.get("commit")}
+    if any(approval.get(k) != v for k, v in tied.items()):
+        return "its approval names another manifest than the receipt's"
+    path = Path(str(approval.get("record") or ""))
+    try:
+        if not path.is_absolute() or os.path.realpath(path.parent) != os.path.realpath(approvals_dir(env_dir, env)):
+            return "its approval record isn't in the env's approvals dir"
+        data = _read_private(path)
+        digest = rg.sha256_file(path)
+    except (Refused, OSError):
+        return "its approval record can't be read as written (missing, or not a private file of this user's)"
+    if digest != approval.get("record_sha256"):
+        return "its approval record's sha256 isn't the one the receipt embedded"
+    if data is None or data.get("kind") != KIND or data.get("version") != VERSION:
+        return f"its approval record isn't a version {VERSION} approval record"
+    record_fields = {k: v for k, v in data.items()}
+    embedded = {k: v for k, v in approval.items() if k not in ("record", "record_sha256")}
+    if record_fields != embedded:
+        return "its approval field differs from the record it embedded"
+    return ""
+
+
 def embed(env_dir: Path, env: str, manifest_path: Path, approval_path: Path | None) -> dict:
     """A receipt's ``approval`` field: the checked record, or EXTERNAL when none was given."""
     return dict(EXTERNAL) if approval_path is None else check(env_dir, env, manifest_path, approval_path)

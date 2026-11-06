@@ -159,6 +159,73 @@ def assemble_report(
     }
 
 
+UNKNOWN_APPROVAL = "unknown"
+
+
+def receipt_approval(env_dir: Path) -> tuple[str, str | None, dict[str, Any]]:
+    """(approved_by, approved_at, approval_record) from the env's newest release receipt.
+
+    Only a receipt that passes the check release-plan uses for the env's
+    receipts (release_gate.newest_release_receipt: kind, env, cloud, its
+    manifest's sha256) and an ``approval`` field that is still the record it
+    embedded (approval.embedded_problem) name anyone: a y typed at a terminal
+    shows its self-reported git identity, OS user and time; ``{"via":
+    "external"}`` (the plain ``make release MANIFEST=`` path) says external.
+    A newest receipt that doesn't verify is ``unverified: <why>``, never an
+    older receipt or the name it claims; no receipt is ``unknown``. Only
+    approval.IDENTITY_FIELDS are read, never the question, tty, host, run
+    digest or asker.
+    """
+    from scripts import approval as approvals
+    from scripts import release_gate as rg
+
+    env_dir = Path(env_dir).resolve()
+    env = env_dir.name
+    try:
+        receipt, problem = rg.newest_release_receipt(rg.cloud_dir_of(env_dir), env)
+    except Exception as exc:  # an unreadable store names no one: audit only, never a failure
+        receipt, problem = None, f"the release receipts couldn't be read ({type(exc).__name__})"
+    if receipt is None and not problem:
+        return UNKNOWN_APPROVAL, None, {"source": "none", "detail": "no release receipt for this env"}
+    if receipt is None:
+        return f"unverified: {_short(problem)}", None, {"source": "unverified", "detail": _short(problem)}
+    record: dict[str, Any] = {"source": "release-receipt", "receipt": Path(str(receipt["_path"])).name,
+                              "commit": str(receipt.get("commit", ""))[:12]}
+    phases = receipt.get("phase_approvals")
+    if isinstance(phases, dict) and phases:
+        counts: dict[str, int] = defaultdict(int)
+        for value in phases.values():
+            counts[str(value.get("via")) if isinstance(value, dict) and value.get("via") else UNKNOWN_APPROVAL] += 1
+        record["phase_approvals"] = dict(sorted(counts.items()))
+    try:
+        problem = approvals.embedded_problem(env_dir, env, receipt)
+    except Exception as exc:
+        problem = f"its approval couldn't be checked ({type(exc).__name__})"
+    approval = receipt.get("approval") if isinstance(receipt.get("approval"), dict) else {}
+    if problem:
+        record["via"] = UNKNOWN_APPROVAL
+        if "approval" not in receipt:
+            return UNKNOWN_APPROVAL, None, record | {"detail": problem}
+        return f"unverified: {_short(problem)}", None, record | {"source": "unverified", "detail": _short(problem)}
+    record["via"] = str(approval["via"])
+    if approval["via"] == "external":
+        return "external (approved outside GenieRails; the release receipt records no terminal approval)", None, record
+    identity = {k: approval.get(k) for k in approvals.IDENTITY_FIELDS}
+    git = identity["git_user"] if isinstance(identity["git_user"], dict) else {}
+    name, email = str(git.get("name") or "").strip(), str(git.get("email") or "").strip()
+    user = str(identity["user"] or "").strip()
+    who = " ".join(part for part in (name, f"<{email}>" if email else "") if part) or "unnamed git user"
+    at = identity["approved_at"]
+    return (f"{who} (OS user {user or 'unknown'}; y typed at a terminal, self-reported)",
+            str(at) if isinstance(at, str) and at else None, record)
+
+
+def _short(text: str, limit: int = 200) -> str:
+    """A one-line reason; absolute paths keep only their last two parts (no local paths in the report)."""
+    text = re.sub(r"(?:/[^\s/]+)+/([^\s/]+/[^\s/]+)", r"…/\1", " ".join(str(text).split()))
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 def render_markdown(report: dict[str, Any]) -> str:
     """Render a compact human-readable view of the canonical JSON artifact."""
     header = report["header"]
@@ -169,8 +236,17 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Generated at: `{header['generated_at']}`",
         f"- Source: `{header['source']}`",
         f"- Approved by: `{header['approved_by']}`",
-        f"- Approved at: `{header['approved_at'] or 'pending'}`",
+        f"- Approved at: `{header['approved_at'] or 'unknown'}`",
     ]
+    record = header.get("approval_record")
+    if isinstance(record, dict) and record.get("source") == "release-receipt":
+        phases = record.get("phase_approvals") or {}
+        earlier = (", earlier phases: " + ", ".join(f"{n} {via}" for via, n in phases.items())) if phases else ""
+        detail = f"; {record['detail']}" if record.get("detail") else ""
+        lines.append(f"- Approval record: release receipt `{record.get('receipt')}` (commit `{record.get('commit')}`; "
+                     f"final round: {record.get('via')}{earlier}){detail}")
+    elif isinstance(record, dict) and record.get("detail"):
+        lines.append(f"- Approval record: {record['detail']}")
     if "column_privileges_availability" in report:
         availability = report["column_privileges_availability"]
         detail = ", ".join(f"{catalog}={status}" for catalog, status in sorted(availability.items())) or "not queried"
@@ -583,9 +659,14 @@ def main(argv: list[str] | None = None, *, collector: Callable[..., dict[str, An
     parser.add_argument("--env-dir", type=Path, default=Path.cwd())
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--warehouse-id", default=os.getenv("DATABRICKS_WAREHOUSE_ID"))
-    parser.add_argument("--approved-by", default=os.getenv("GENIERAILS_EVIDENCE_APPROVED_BY", "unapproved"))
+    parser.add_argument("--approved-by", default=os.getenv("GENIERAILS_EVIDENCE_APPROVED_BY"),
+                        help="sign the report (default: the approval the env's last release receipt records)")
     parser.add_argument("--approved-at", default=os.getenv("GENIERAILS_EVIDENCE_APPROVED_AT"))
     args = parser.parse_args(argv)
+    approval_record: dict[str, Any] = {"source": "signed"}
+    if not args.approved_by:
+        args.approved_by, receipt_at, approval_record = receipt_approval(args.env_dir)
+        args.approved_at = args.approved_at or receipt_at
     columns, tags = configured_columns(args.env_dir), configured_tags(args.env_dir)
     tables = configured_tables(args.env_dir)
     try:
@@ -604,12 +685,14 @@ def main(argv: list[str] | None = None, *, collector: Callable[..., dict[str, An
             print(f"ERROR: {exc}. No evidence was written.", file=sys.stderr)
             return 2
         report = assemble_report(state["columns"], classifications=state["classifications"], tags=state["tags"], masks=state["masks"], policies=state["policies"], abac_policies=state.get("abac_policies", []), grants=state["grants"], approved_by=args.approved_by, approved_at=args.approved_at, source="databricks-live")
+        report["header"]["approval_record"] = approval_record
         report["column_privileges_availability"] = state.get("column_privileges_availability", {})
         if "abac_policy_listing" in state:
             report["abac_policy_listing"] = state["abac_policy_listing"]
             report["abac_policies_not_evaluated"] = state.get("abac_policies_not_evaluated", [])
     else:
         report = assemble_report(columns, tags=tags, approved_by=args.approved_by, approved_at=args.approved_at)
+        report["header"]["approval_record"] = approval_record
     paths = write_report(report, output_dir)
     print("Wrote " + " and ".join(str(path) for path in paths))
     old = Path(args.env_dir) / "generated" / "evidence"
