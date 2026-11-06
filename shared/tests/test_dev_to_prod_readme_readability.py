@@ -383,9 +383,8 @@ FLOW_BLOCK = [
     "",
     "# Stuck? `make next ENV=<env>` prints the next command.",
 ]
-FLOW_AFTER = ("Some commands ask `y/N` first, e.g. before a commit and push or a prod release round. They ask only "
-              "at a terminal ([CI / scripted](#ci--scripted)); [the table at the end](#what-each-command-asks) "
-              "lists each question.")
+FLOW_AFTER = ("Some commands ask `y/N`, only at a terminal ([CI / scripted](#ci--scripted)): e.g. before a commit "
+              "and push or a prod release round. [The table at the end](#what-each-command-asks) lists each question.")
 # The crammed comments the block used to carry: none may come back.
 OLD_FLOW_COMMENTS = [
     "creates dev's files (REPO= optional); offers to commit (y)",
