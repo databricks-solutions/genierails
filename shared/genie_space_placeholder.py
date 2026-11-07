@@ -34,6 +34,12 @@ def _display_path(path: Path) -> str:
     return str(path)
 
 
+def _link_display(path: Path) -> str:
+    """_display_path for a symlink itself: only its parent is resolved, never the link."""
+    parent = _display_path(Path(path).parent / "x")
+    return f"{parent[:-1]}{Path(path).name}"
+
+
 def _is_placeholder(value) -> bool:
     return isinstance(value, str) and ("<" in value or ">" in value)
 
@@ -90,6 +96,11 @@ def agent_file_placeholder_error(settings: dict, path: Path) -> str | None:
 
 def agent_files_placeholder_errors(env_dir: Path) -> list[str]:
     """Every unfilled placeholder in the env's agents/*.auto.tfvars."""
+    from agent_files import bad_entries, bad_entries_error
+
+    bad = bad_entries(Path(env_dir))
+    if bad:  # never opened: a dir or broken link would crash, a FIFO would block
+        return [bad_entries_error([_link_display(path) for path in bad])]
     errors = []
     for path in sorted((Path(env_dir) / "agents").glob("*.auto.tfvars")):
         text = path.read_text()
