@@ -412,6 +412,55 @@ def _run_create_gate(h, tmp_path: Path, gen: dict, *, validation_dir: Path | Non
     )
 
 
+def _active_old_generation_without_new_treatment(h, tmp_path: Path, monkeypatch) -> tuple[dict, dict]:
+    gen = fresh(h, tmp_path, monkeypatch, column_classes={"cat.sch.t.email": ["email_address"]})
+    old = dict(gen, tags={})
+    old["fingerprint"] = pg.model_fingerprint(
+        {"fgac_policies": old["fgac_policies"], "tag_assignments": []},
+        old["functions_sql"],
+    )
+    assert old["fingerprint"] != gen["fingerprint"]
+    assert pg.snapshot_intact(old, old["fingerprint"])
+    pg.save_snapshot(h.env_dir, old)
+    pg.save_snapshot(h.env_dir, gen)
+    spa.save_journal(h.env_dir, spa.empty_journal() | {
+        "active": old["fingerprint"],
+        "transition": {
+            "run_id": "r1",
+            "from": old["fingerprint"],
+            "to": gen["fingerprint"],
+            "retain": "",
+            "status": "running",
+        },
+    })
+    return gen, old
+
+
+def _run_old_generation_gate(h, tmp_path: Path, gen: dict, old: dict, stage: str) -> tuple[int, dict]:
+    staged = pg.plan_stage(stage, gen, old, None)
+    rendered_dir = pg.write_stage(h.env_dir / "data_access", staged["rendered"])
+    validation_dir = None
+    if pg._normal(staged["coverage_rendered"]) != pg._normal(staged["rendered"]):
+        validation_dir = pg.write_stage(
+            h.env_dir / "data_access",
+            staged["coverage_rendered"],
+            out_dir=pg.coverage_config_dir(h.env_dir),
+        )
+    runner = _runner_answer(tmp_path, {
+        "fingerprint": "old-gen-fp",
+        "grant_tables": ["cat.sch.t"],
+        "acknowledged_columns": [],
+        "needs_gate": False,
+        "new_grants": ["cat.sch.t|raw"],
+    })
+    rc = cg.run_gate(
+        h.env_dir, "prod", runner, "", False, rendered_dir,
+        {"stage": stage, "old_fingerprint": old["fingerprint"], "keep_new_tags": False},
+        validation_dir,
+    )
+    return rc, json.loads((h.env_dir / "data_access" / cg.GATE_FILENAME).read_text())
+
+
 def test_the_create_render_of_a_first_deploy_is_judged_as_one(harness, tmp_path, monkeypatch):
     gen = fresh(harness, tmp_path, monkeypatch)
     _journaled_first_deploy(harness, gen)
@@ -460,6 +509,49 @@ def test_first_deploy_create_gate_still_withholds_for_a_real_gap(harness, tmp_pa
     assert gate["status"] == "fail"
     assert "classified but unprotected columns" in output.out
     assert "1 new SELECT grant(s) are withheld (cat.sch.t|raw)" in output.err
+
+
+@pytest.mark.parametrize("stage", ["create", "tighten"])
+def test_create_and_tighten_gate_validate_end_state_tags_for_active_old_generation(
+        harness, tmp_path, monkeypatch, capfd, stage):
+    gen, old = _active_old_generation_without_new_treatment(harness, tmp_path, monkeypatch)
+    rc, gate = _run_old_generation_gate(harness, tmp_path, gen, old, stage)
+    output = capfd.readouterr()
+    assert rc == 0
+    assert gate["status"] == "pass", (gate, output.out[-3000:], output.err[-1500:])
+    assert gate["uncovered_columns"] == ["cat.sch.t.email"]
+
+
+def test_coverage_rendered_uses_end_state_tags_only_for_pre_switch_validation_phases(
+        harness, tmp_path, monkeypatch):
+    gen, old = _active_old_generation_without_new_treatment(harness, tmp_path, monkeypatch)
+    phases = {}
+
+    for stage in pg.APPLY_STAGES:
+        staged = pg.plan_stage(stage, gen, old, None)
+        coverage_tags = staged["coverage_rendered"]["tags"]
+        rendered_tags = staged["rendered"]["tags"]
+        phases[stage] = {
+            "rendered_tags_are_desired": rendered_tags == gen["tags"],
+            "coverage_tags_are_desired": coverage_tags == gen["tags"],
+            "coverage_differs_from_rendered": pg._normal(staged["coverage_rendered"]) != pg._normal(
+                staged["rendered"]),
+        }
+
+    assert phases == {
+        "create": {"rendered_tags_are_desired": False, "coverage_tags_are_desired": True,
+                   "coverage_differs_from_rendered": True},
+        "tighten": {"rendered_tags_are_desired": False, "coverage_tags_are_desired": True,
+                    "coverage_differs_from_rendered": True},
+        "switch": {"rendered_tags_are_desired": True, "coverage_tags_are_desired": True,
+                   "coverage_differs_from_rendered": False},
+        "restore": {"rendered_tags_are_desired": False, "coverage_tags_are_desired": True,
+                    "coverage_differs_from_rendered": True},
+        "retire": {"rendered_tags_are_desired": True, "coverage_tags_are_desired": True,
+                   "coverage_differs_from_rendered": False},
+        "abandon": {"rendered_tags_are_desired": False, "coverage_tags_are_desired": False,
+                    "coverage_differs_from_rendered": False},
+    }
 
 
 @pytest.mark.parametrize("journal", [
