@@ -80,6 +80,8 @@ At the end of step 1's `make setup`, GenieRails previews the `.gitignore`, place
 
 **Phases and the proof.** It applies in dev, then runs `verify-access` as its last gate (`_verify-access-gate`), querying as each test tier. A first deploy applies in phases: the masking functions and policies first, then the column tags, then (once the masks are verified live) the tier groups' `USE_CATALOG`, `USE_SCHEMA` and `SELECT`; Genie `CAN_RUN` follows the SELECT. If it stops at the first phase, nothing is live yet: fix what it reports and re-run `make rehearse ENV=dev` (it resumes), or drop the change with `make policy-abandon ENV=dev`.
 
+**Prod already set up, still with placeholders?** The receipt then prints `promote-to ENV=prod: no digest yet (envs/prod is not set up yet: ...)`. That's expected: fill in prod's files, then `make promote-to ENV=prod` and `make release ENV=prod`. Its release-plan reuses this rehearsal for the promotion commit and records prod's digest then; nothing in dev is applied again.
+
 **Row-pairing keys.** You don't set a row-pairing key: it picks one per masked table (a single-column primary key, else an untagged id-like column such as `customer_id`) and proves it unique, non-null and unmasked. A deterministic env then prints the proven `verify_key_columns` line; committing it is optional and pins those keys. Only a table with no provable key needs `verify_key_columns` set ([how keys are picked](../../docs/effective-access-verification.md#how-genierails-picks-the-row-pairing-key)).
 
 <a id="prod-step-1-set-up-and-promote"></a>
