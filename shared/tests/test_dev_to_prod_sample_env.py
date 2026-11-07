@@ -466,6 +466,30 @@ def test_default_state_file_writes_repo_root_not_shared(tmp_path):
     assert not (repo / "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json").exists()
 
 
+@pytest.mark.parametrize("placeholder_exists", [False, True])
+def test_setup_reminds_to_delete_seeded_agent_placeholder_unconditionally(
+    tmp_path, monkeypatch, capsys, placeholder_exists
+):
+    copied = _load_sample_copy(tmp_path)
+    placeholder = tmp_path / "repo/envs/dev/agents/my_agent.auto.tfvars"
+    if placeholder_exists:
+        placeholder.parent.mkdir(parents=True)
+        placeholder.write_text("# seeded placeholder\n")
+    monkeypatch.setattr(copied, "_run_sql", lambda *args: None)
+    client = Mock()
+    client.config.host = "https://workspace"
+    client.api_client.do.return_value = {"space_id": "space-1"}
+    args = Namespace(
+        catalog="catalog", schema="schema", warehouse_id="warehouse-1", rows=1,
+        skip_agent=False, create_groups=False,
+    )
+
+    copied.setup(args, client)
+
+    reminder = "Delete envs/dev/agents/my_agent.auto.tfvars if setup seeded that placeholder file."
+    assert capsys.readouterr().out.count(reminder) == 1
+
+
 def test_legacy_opt_in_preflight_failure_removes_nothing(teardown_env, monkeypatch):
     state_file, install = teardown_env
     account = _account_with([])
