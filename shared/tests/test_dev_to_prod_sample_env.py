@@ -360,6 +360,33 @@ def test_skip_agent_seeds_tables_without_creating_a_genie_agent(tmp_path, monkey
     assert "Skipping the Genie agent" in capsys.readouterr().out
 
 
+def test_state_file_is_written_at_the_repo_root_owner_only(tmp_path, monkeypatch):
+    state_file = tmp_path / "repo" / ".dev_to_prod_sample_env.json"
+    monkeypatch.setattr(sample, "STATE_FILE", state_file)
+    monkeypatch.setattr(sample, "LEGACY_STATE_FILE", tmp_path / "repo" / "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json")
+
+    sample._save_states({"key": {"schema": "schema"}})
+
+    assert state_file.exists()
+    assert state_file.stat().st_mode & 0o777 == 0o600
+    assert json.loads(state_file.read_text()) == {"key": {"schema": "schema"}}
+
+
+def test_legacy_state_file_is_migrated_to_the_repo_root(tmp_path, monkeypatch):
+    state_file = tmp_path / "repo" / ".dev_to_prod_sample_env.json"
+    legacy = tmp_path / "repo" / "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({"old": {"schema": "old"}}))
+    monkeypatch.setattr(sample, "STATE_FILE", state_file)
+    monkeypatch.setattr(sample, "LEGACY_STATE_FILE", legacy)
+
+    assert sample._load_states() == {"old": {"schema": "old"}}
+
+    assert not legacy.exists()
+    assert state_file.exists()
+    assert state_file.stat().st_mode & 0o777 == 0o600
+
+
 def test_legacy_opt_in_preflight_failure_removes_nothing(teardown_env, monkeypatch):
     state_file, install = teardown_env
     account = _account_with([])
@@ -400,8 +427,9 @@ def test_legacy_opt_in_delete_failure_reports_incomplete(teardown_env, monkeypat
 
 def test_untracked_existing_schema_names_the_per_clone_state_file_to_copy(tmp_path, monkeypatch):
     """A fresh clone has no ownership state, so a schema an earlier clone created is refused."""
-    state_file = tmp_path / ".dev_to_prod_sample_env.json"
+    state_file = tmp_path / "repo" / ".dev_to_prod_sample_env.json"
     monkeypatch.setattr(sample, "STATE_FILE", state_file)
+    monkeypatch.setattr(sample, "LEGACY_STATE_FILE", tmp_path / "repo/shared/examples/dev_to_prod/.dev_to_prod_sample_env.json")
 
     def run_sql(client, warehouse_id, sql):
         raise RuntimeError("[SCHEMA_ALREADY_EXISTS] Cannot create schema because it already exists")
@@ -417,6 +445,6 @@ def test_untracked_existing_schema_names_the_per_clone_state_file_to_copy(tmp_pa
     message = str(raised.value)
     assert "cat.dev_to_prod_demo already exists but is not tracked as owned by this script" in message
     assert f"recorded per clone in the git-ignored {state_file}" in message
-    assert f"copy that clone's .dev_to_prod_sample_env.json to {state_file}" in message
+    assert f"copy that clone's .dev_to_prod_sample_env.json to the new clone's {state_file}" in message
     assert "otherwise choose another --schema" in message
     assert not state_file.exists()

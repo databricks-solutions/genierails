@@ -19,7 +19,9 @@ except ImportError:  # Keep --help useful before dependencies are installed.
     AccountClient = WorkspaceClient = None  # type: ignore[assignment,misc]
 
 DEFAULT_SCHEMA, DEFAULT_ROWS = "dev_to_prod_demo", 200
-STATE_FILE = Path(__file__).with_name(".dev_to_prod_sample_env.json")
+STATE_FILE_NAME = ".dev_to_prod_sample_env.json"
+STATE_FILE = Path(__file__).resolve().parents[3] / STATE_FILE_NAME
+LEGACY_STATE_FILE = Path(__file__).with_name(STATE_FILE_NAME)
 DOMAINS, REGIONS = ("gmail.com", "hotmail.com", "outlook.com", "yahoo.com"), ("APAC", "EMEA", "AMER")
 FIRST_NAMES = ("Olivia", "Liam", "Emma", "Noah", "Amelia", "Mateo", "Sophia", "Ethan", "Isabella", "Lucas", "Mia", "Benjamin", "Ava", "Daniel", "Harper", "James", "Camila", "Henry", "Layla", "Alexander")
 LAST_NAMES = ("Anderson", "Patel", "Nguyen", "Williams", "Garcia", "Johnson", "Martinez", "Brown", "Kim", "Wilson", "Taylor", "Thomas", "Lee", "Hernandez", "Clark", "Lewis", "Walker", "Hall", "Young", "King")
@@ -318,17 +320,43 @@ def _sample_rows(count: int) -> dict[str, list[tuple[Any, ...]]]:
     return result
 
 
+def _read_state_file(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read ownership state {path}: {exc}") from exc
+
+
+def _write_state_file(path: Path, states: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(states, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.chmod(path, 0o600)
+
+
+def _migrate_legacy_state() -> None:
+    if LEGACY_STATE_FILE == STATE_FILE or not LEGACY_STATE_FILE.exists():
+        return
+    legacy = _read_state_file(LEGACY_STATE_FILE)
+    states = _read_state_file(STATE_FILE) if STATE_FILE.exists() else {}
+    merged = {**legacy, **states}
+    _write_state_file(STATE_FILE, merged)
+    LEGACY_STATE_FILE.unlink()
+
+
 def _load_states() -> dict[str, Any]:
+    _migrate_legacy_state()
     if not STATE_FILE.exists():
         return {}
-    try:
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"cannot read ownership state {STATE_FILE}: {exc}") from exc
+    os.chmod(STATE_FILE, 0o600)
+    return _read_state_file(STATE_FILE)
 
 
 def _save_states(states: dict[str, Any]) -> None:
-    STATE_FILE.write_text(json.dumps(states, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_state_file(STATE_FILE, states)
 
 
 def _state_key(client: Any, catalog: str, schema: str) -> str:
@@ -434,7 +462,8 @@ def setup(args: argparse.Namespace, client: Any) -> None:
                 raise RuntimeError(
                     f"schema {args.catalog}.{args.schema} already exists but is not tracked as owned by this script. "
                     f"Ownership is recorded per clone in the git-ignored {STATE_FILE}, which has no entry for it. "
-                    f"If a run from another clone created it, copy that clone's {STATE_FILE.name} to {STATE_FILE} "
+                    f"If a run from another clone created it, copy that clone's {STATE_FILE.name} to the new clone's "
+                    f"{STATE_FILE} "
                     f"(merge the entries if this one already has a file) and re-run; otherwise choose another --schema. "
                     f"Databricks said: {detail}"
                 ) from exc

@@ -1096,6 +1096,18 @@ def test_a_normal_clone_with_caches_is_clean(repo):
     assert status["clean_tree"] is True, status
 
 
+def test_repo_root_sample_state_file_does_not_dirty_rehearse_clean_check(repo):
+    from shared.scripts import release_gate as rg
+
+    _vendor_shared(repo)
+    state_file = repo / ".dev_to_prod_sample_env.json"
+    state_file.write_text('{"https://workspace|catalog|schema": {"schema_created": true}}\n')
+    state_file.chmod(0o600)
+    assert _git(repo, "status", "--porcelain") == ""
+    status = rg.checkout_status(_envs(repo) / "dev")
+    assert status["clean_tree"] is True, status
+
+
 @pytest.mark.parametrize("planted, pattern", [
     ("countries/ZZ.yaml", "ZZ.yaml\n"),             # r4 repro: load_country_overlays(["ZZ"]) reads it
     ("industries/zz.yaml", "zz.yaml\n"),
