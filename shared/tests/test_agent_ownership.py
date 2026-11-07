@@ -518,6 +518,34 @@ def test_promote_seeds_settings_once_and_rewrites_the_capture(tmp_path):
     assert json.loads((prod / "agents" / "Sales.space.json").read_text()) == promoted
 
 
+def test_dev_to_prod_template_copies_use_file_names_for_agent_identity(tmp_path):
+    """Renaming or copying the setup template must not leave every agent titled my_agent."""
+    template = (SHARED / "examples" / "dev_to_prod" / "agent.auto.tfvars.example").read_text()
+    dev = _env(tmp_path, env_cfg='sql_warehouse_id = "a1b2c3d4e5f60718"\n')
+    prod = tmp_path / "envs" / "prod"
+    prod.mkdir()
+    (prod / "env.auto.tfvars").write_text('sql_warehouse_id = "prodwh0000000001"\n')
+
+    for name, space_id in (("Sales Analytics", "sales-id"), ("Ops Agent", "ops-id")):
+        (dev / "agents" / f"{name}.auto.tfvars").write_text(
+            template.replace('"<your-genie-space-id>"', f'"{space_id}"')
+            .replace('"<group-that-may-run-the-agent>"', '"viewers"')
+        )
+        ownership.write_payload(_payload(), agent_files.capture_path(dev, name))
+
+    spaces = agent_files.merged_config(dev)["genie_spaces"]
+    assert [space["name"] for space in spaces] == ["Ops Agent", "Sales Analytics"]
+    assert [space["key"] for space in spaces] == ["ops_agent", "sales_analytics"]
+
+    assert agent_promote.promote(dev, prod, {"dev_sales": "prod_sales"}) == ["Ops Agent", "Sales Analytics"]
+    prod_spaces = agent_files.merged_config(prod)["genie_spaces"]
+    assert [space["name"] for space in prod_spaces] == ["Ops Agent", "Sales Analytics"]
+    assert [space["key"] for space in prod_spaces] == ["ops_agent", "sales_analytics"]
+    assert sorted(path.name for path in (prod / "agents").glob("*.auto.tfvars")) == [
+        "Ops Agent.auto.tfvars", "Sales Analytics.auto.tfvars"
+    ]
+
+
 @pytest.mark.parametrize("mode, expected", [
     ('governance_mode = "deterministic"\n', ["prod_sales_analysts", "etl"]),
     # group_map applies only to a deterministic target; a legacy one is seeded as before.

@@ -27,7 +27,7 @@ TEMPLATE = SHARED / "examples/dev_to_prod/env.auto.tfvars.example"
 AGENT_TEMPLATE = SHARED / "examples/dev_to_prod/agent.auto.tfvars.example"
 ACL_PLACEHOLDER = "<group-that-may-run-the-agent>"
 # The README copies the agent template to this file name.
-AGENT = "Finance Analytics"
+AGENT = "my_agent"
 VALIDATOR = SHARED / "scripts/validate_classification_config.py"
 GUARD = SHARED / "genie_space_placeholder.py"
 MAKEFILE = SHARED / "Makefile.shared"

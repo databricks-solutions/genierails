@@ -603,8 +603,8 @@ def test_make_setup_y_commits_only_its_safe_paths_and_leaves_rehearse_clean(repo
     assert not any(path.endswith("auth.auto.tfvars") for path in committed)
     # The walkthrough templates setup copied ride the same offer (README Dev steps 1 and 2).
     assert "aws/envs/dev/env.auto.tfvars" in committed
-    assert "aws/envs/dev/agents/Finance Analytics.auto.tfvars" in committed
-    assert "Finance Analytics.auto.tfvars" in out[out.index("=== Commit"):]
+    assert "aws/envs/dev/agents/my_agent.auto.tfvars" in committed
+    assert "my_agent.auto.tfvars" in out[out.index("=== Commit"):]
     assert not _git(checkout, "diff", "--cached", "--name-only")
     assert not _git(checkout, "status", "--porcelain")  # rehearse's clean-check sees a clean checkout
 
@@ -630,7 +630,7 @@ def test_make_setup_twice_second_run_is_a_no_op(tmp_path):
 
     assert second == 0, second_out
     assert "Nothing to commit: .gitignore, envs/dev/ and envs/account/ match HEAD." in second_out
-    assert sorted(p.name for p in (checkout / "aws/envs/dev/agents").iterdir()) == ["Finance Analytics.auto.tfvars"]
+    assert sorted(p.name for p in (checkout / "aws/envs/dev/agents").iterdir()) == ["my_agent.auto.tfvars"]
     assert "setup offers to commit and push the .gitignore and env files it created; answer y" not in second_out
     assert "already had uncommitted changes" not in second_out
     assert PROMPT not in second_out
