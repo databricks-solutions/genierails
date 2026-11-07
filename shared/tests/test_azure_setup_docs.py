@@ -22,7 +22,7 @@ def test_sample_env_rerun_claim_is_scoped_to_the_clone_holding_the_state_file():
     assert "Re-runs are safe." not in text
     assert "**Re-runs are safe from the same clone.**" in text
     assert "`.dev_to_prod_sample_env.json` at the repo root, a git-ignored file in *this clone*" in text
-    assert "copy the earlier clone's `.dev_to_prod_sample_env.json` to the new clone's repo root" in text
+    assert "copy the earlier clone's `.dev_to_prod_sample_env.json` to this clone's repo root" in text
 
 
 def test_sample_env_state_file_name_matches_the_script():
@@ -31,7 +31,7 @@ def test_sample_env_state_file_name_matches_the_script():
     assert 'LEGACY_STATE_FILE = Path(__file__).with_name(STATE_FILE_NAME)' in script
     # The doc and the error call it git-ignored.
     assert "/.dev_to_prod_sample_env.json" in (ROOT / ".gitignore").read_text().splitlines()
-    assert ".dev_to_prod_sample_env.json" not in (SHARED / "examples/dev_to_prod/.gitignore").read_text().splitlines()
+    assert ".dev_to_prod_sample_env.json" in (SHARED / "examples/dev_to_prod/.gitignore").read_text().splitlines()
 
 
 def test_prod_sample_command_uses_the_prod_profile_not_host_alone():

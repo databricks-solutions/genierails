@@ -424,6 +424,8 @@ def test_git_status_ignores_every_runtime_file_and_tracks_every_committed_one(
     for env, mode in envs.items():
         base = f"{cloud}/envs/{env}"
         committed += [f"{base}/{f}" for f in COMMITTED_ANY]
+        if env == "dev":
+            committed.append(f"{base}/agents/my_agent.auto.tfvars")
         runtime += [f"{base}/{f}" for f in RUNTIME_ANY]
         (runtime if mode == "deterministic" else committed).extend(f"{base}/{f}" for f in LAYER_FILES)
         if mode == "deterministic":

@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import random
+import stat
 import sys
 import time
 from datetime import date, timedelta
@@ -320,7 +322,25 @@ def _sample_rows(count: int) -> dict[str, list[tuple[Any, ...]]]:
     return result
 
 
+def _path_exists_no_follow(path: Path) -> bool:
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _refuse_state_symlink(path: Path) -> None:
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(mode):
+        raise RuntimeError(f"refusing symlinked ownership state {path}")
+
+
 def _read_state_file(path: Path) -> dict[str, Any]:
+    _refuse_state_symlink(path)
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -329,19 +349,34 @@ def _read_state_file(path: Path) -> dict[str, Any]:
 
 def _write_state_file(path: Path, states: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(path, flags, 0o600)
+    _refuse_state_symlink(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise RuntimeError(f"refusing symlinked ownership state {path}") from exc
+        raise
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        st = os.fstat(handle.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise RuntimeError(f"refusing non-regular ownership state {path}")
+        os.fchmod(handle.fileno(), 0o600)
         json.dump(states, handle, indent=2, sort_keys=True)
         handle.write("\n")
-    os.chmod(path, 0o600)
 
 
 def _migrate_legacy_state() -> None:
-    if LEGACY_STATE_FILE == STATE_FILE or not LEGACY_STATE_FILE.exists():
+    if LEGACY_STATE_FILE == STATE_FILE or not _path_exists_no_follow(LEGACY_STATE_FILE):
         return
     legacy = _read_state_file(LEGACY_STATE_FILE)
-    states = _read_state_file(STATE_FILE) if STATE_FILE.exists() else {}
+    states = _read_state_file(STATE_FILE) if _path_exists_no_follow(STATE_FILE) else {}
+    conflicts = sorted(key for key in set(legacy) & set(states) if legacy[key] != states[key])
+    if conflicts:
+        raise RuntimeError(
+            f"cannot migrate ownership state because {LEGACY_STATE_FILE} and {STATE_FILE} disagree for "
+            f"{', '.join(conflicts)}; merge them manually. Both files were kept."
+        )
     merged = {**legacy, **states}
     _write_state_file(STATE_FILE, merged)
     LEGACY_STATE_FILE.unlink()
@@ -349,9 +384,8 @@ def _migrate_legacy_state() -> None:
 
 def _load_states() -> dict[str, Any]:
     _migrate_legacy_state()
-    if not STATE_FILE.exists():
+    if not _path_exists_no_follow(STATE_FILE):
         return {}
-    os.chmod(STATE_FILE, 0o600)
     return _read_state_file(STATE_FILE)
 
 
@@ -462,7 +496,7 @@ def setup(args: argparse.Namespace, client: Any) -> None:
                 raise RuntimeError(
                     f"schema {args.catalog}.{args.schema} already exists but is not tracked as owned by this script. "
                     f"Ownership is recorded per clone in the git-ignored {STATE_FILE}, which has no entry for it. "
-                    f"If a run from another clone created it, copy that clone's {STATE_FILE.name} to the new clone's "
+                    f"If a run from another clone created it, copy that clone's {STATE_FILE.name} to this clone's "
                     f"{STATE_FILE} "
                     f"(merge the entries if this one already has a file) and re-run; otherwise choose another --schema. "
                     f"Databricks said: {detail}"
