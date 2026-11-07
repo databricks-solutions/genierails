@@ -72,7 +72,7 @@ def promoted(env_dir: Path) -> bool:
 def _load_hcl(path: Path) -> dict:
     if not path.is_file():
         return {}
-    import hcl2  # here, so check-links (make _bootstrap) runs before the packages are installed
+    import hcl2  # here, so check-entries (make _bootstrap) runs before the packages are installed
 
     try:
         with path.open() as handle:
@@ -117,37 +117,40 @@ def space_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
-def broken_links(env_dir: Path) -> list[Path]:
-    """agents/, or an agent or capture file in it, that is a symlink to no file (dangling, a loop, a dir).
+def bad_entries(env_dir: Path) -> list[Path]:
+    """agents/ if it is not a directory, or an agent or capture file in it that is not a regular file.
 
-    Only the link itself is examined: it is never read, followed or written through.
+    A directory, FIFO, socket or device, or a symlink whose target is missing,
+    loops or is not a regular file. Only stat() is used (is_dir/is_file): an
+    entry is never opened (a FIFO would block), followed into or written through.
+    A valid symlink to a regular file (or a symlinked agents/ dir) is fine.
     """
     folder = agents_dir(env_dir)
-    if folder.is_symlink() and not folder.is_dir():
-        return [folder]
     if not folder.is_dir():
-        return []
+        return [folder] if folder.is_symlink() or folder.exists() else []
     return sorted(path for path in folder.iterdir()
-                  if path.name.endswith((SETTINGS_SUFFIX, CAPTURE_SUFFIX)) and path.is_symlink()
-                  and not path.is_file())
+                  if path.name.endswith((SETTINGS_SUFFIX, CAPTURE_SUFFIX)) and not path.is_file())
 
 
-def broken_links_error(paths: list) -> str:
-    """One line naming every broken link (paths as Paths or display strings)."""
-    kind = "directory" if len(paths) == 1 and Path(paths[0]).name == AGENTS_DIR else "file"
-    return (f"broken symlink {', '.join(str(path) for path in paths)} (its target is missing, loops or is not a "
-            f"{kind}); fix or remove it, then run the command again")
+def bad_entries_error(paths: list) -> str:
+    """One line naming every bad entry (paths as Paths or display strings)."""
+    if len(paths) == 1 and Path(paths[0]).name == AGENTS_DIR:
+        return (f"{paths[0]} is not a directory (or is a symlink whose target is missing, loops or is not a "
+                "directory); fix or remove it, then run the command again")
+    return (f"{', '.join(str(path) for path in paths)}: not a regular file (a directory, FIFO or other special "
+            "file, or a symlink whose target is missing, loops or is not a file); fix or remove it, "
+            "then run the command again")
 
 
-def refuse_broken_links(env_dir: Path) -> None:
-    """Refuse an env whose agents/ holds a broken symlink: a dangling agent file must not read as an empty agent."""
-    broken = broken_links(env_dir)
-    if broken:
-        raise AgentFileError(broken_links_error(broken))
+def refuse_bad_entries(env_dir: Path) -> None:
+    """Refuse an env whose agents/ holds an entry no reader may open (it must not read as an empty agent)."""
+    bad = bad_entries(env_dir)
+    if bad:
+        raise AgentFileError(bad_entries_error(bad))
 
 
 def names(env_dir: Path) -> list[str]:
-    refuse_broken_links(env_dir)
+    refuse_bad_entries(env_dir)
     folder = agents_dir(env_dir)
     if not folder.is_dir():
         return []
@@ -630,7 +633,7 @@ def split(env_dir: Path, file_names: str = "") -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=("tfvars", "validate", "split", "check-links"))
+    parser.add_argument("command", choices=("tfvars", "validate", "split", "check-entries"))
     parser.add_argument("--env-dir", type=Path, required=True,
                         help="envs/<env> (the workspace env dir, not data_access/)")
     parser.add_argument("--layer", choices=("workspace", "data_access"), default="workspace")
@@ -639,8 +642,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="split: existing-terraform-key=agent-file-name pairs (AGENT_FILE_NAMES)")
     args = parser.parse_args(argv)
     try:
-        if args.command == "check-links":
-            refuse_broken_links(args.env_dir)
+        if args.command == "check-entries":
+            refuse_bad_entries(args.env_dir)
             return 0
         if args.command == "validate":
             merged_config(args.env_dir)

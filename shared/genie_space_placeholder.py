@@ -96,11 +96,11 @@ def agent_file_placeholder_error(settings: dict, path: Path) -> str | None:
 
 def agent_files_placeholder_errors(env_dir: Path) -> list[str]:
     """Every unfilled placeholder in the env's agents/*.auto.tfvars."""
-    from agent_files import broken_links, broken_links_error
+    from agent_files import bad_entries, bad_entries_error
 
-    broken = broken_links(Path(env_dir))
-    if broken:  # never read through: a loop or dangling link would crash, or read as no agent
-        return [broken_links_error([_link_display(path) for path in broken])]
+    bad = bad_entries(Path(env_dir))
+    if bad:  # never opened: a dir or broken link would crash, a FIFO would block
+        return [bad_entries_error([_link_display(path) for path in bad])]
     errors = []
     for path in sorted((Path(env_dir) / "agents").glob("*.auto.tfvars")):
         text = path.read_text()

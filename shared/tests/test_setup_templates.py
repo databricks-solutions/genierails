@@ -180,7 +180,7 @@ def test_setup_dev_never_follows_a_dangling_agent_symlink(tmp_path):
     result = _make("aws", tmp_path, "init-env", "ENV=dev")
 
     assert result.returncode != 0, result.stdout + result.stderr
-    assert "broken symlink" in result.stderr and "Traceback" not in result.stdout + result.stderr
+    assert "not a regular file" in result.stderr and "Traceback" not in result.stdout + result.stderr
     assert not (agents.parent / "env.auto.tfvars").exists()
     assert not target.exists()
     assert (agents / AGENT_FILE).is_symlink()
