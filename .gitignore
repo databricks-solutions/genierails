@@ -29,6 +29,9 @@ envs/
 # Rehearse/release receipts and release manifests (unless GENIERAILS_STATE_DIR is set)
 .genierails-state/
 
+# Dev-to-prod sample ownership record (per-clone runtime state)
+/.dev_to_prod_sample_env.json
+
 # Local import IDs
 import_ids.env
 

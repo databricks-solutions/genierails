@@ -7,12 +7,14 @@ without credentials.
 """
 
 import base64
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import hcl2
 import pytest
@@ -1094,6 +1096,43 @@ def test_a_normal_clone_with_caches_is_clean(repo):
     assert _git(repo, "status", "--porcelain") == ""
     status = rg.checkout_status(_envs(repo) / "dev")
     assert status["clean_tree"] is True, status
+
+
+def test_sample_setup_state_record_location_allows_rehearse_clean_check(repo):
+    from shared.scripts import release_gate as rg
+
+    _vendor_shared(repo)
+    script = repo / "shared/examples/dev_to_prod/setup_sample_env.py"
+    spec = importlib.util.spec_from_file_location(f"sample_setup_{id(repo)}", script)
+    sample = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(sample)
+    sample._run_sql = lambda *args: None
+    client = SimpleNamespace(config=SimpleNamespace(host="https://workspace"))
+    args = SimpleNamespace(catalog="catalog", schema="schema", warehouse_id="wh", rows=1, skip_agent=True)
+
+    sample.setup(args, client)
+
+    assert (repo / ".dev_to_prod_sample_env.json").exists()
+    assert not (repo / "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json").exists()
+    assert _git(repo, "status", "--porcelain") == ""
+    status = rg.checkout_status(_envs(repo) / "dev")
+    assert status["clean_tree"] is True, status
+
+
+def test_legacy_sample_state_under_shared_refuses_rehearse_clean_check(repo):
+    from shared.scripts import release_gate as rg
+
+    _vendor_shared(repo)
+    old_record = repo / "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json"
+    old_record.write_text('{"https://workspace|catalog|schema": {"schema_created": true}}\n')
+    assert _git(repo, "status", "--porcelain") == ""
+
+    status = rg.checkout_status(_envs(repo) / "dev")
+
+    assert status["clean_tree"] is False, status
+    assert ("ignored file under shared/ (not in the code fingerprint; commit or delete it): "
+            "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json") in status["dirty"]
 
 
 @pytest.mark.parametrize("planted, pattern", [

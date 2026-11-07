@@ -3,6 +3,7 @@ import importlib.util
 from argparse import Namespace
 from unittest.mock import Mock
 import json
+import shutil
 
 import pytest
 
@@ -12,6 +13,17 @@ SPEC = importlib.util.spec_from_file_location("setup_sample_env", MODULE)
 sample = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(sample)
+
+
+def _load_sample_copy(tmp_path):
+    script = tmp_path / "repo" / "shared/examples/dev_to_prod/setup_sample_env.py"
+    script.parent.mkdir(parents=True)
+    shutil.copy2(MODULE, script)
+    spec = importlib.util.spec_from_file_location(f"setup_sample_env_copy_{id(tmp_path)}", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_existing_space_same_warehouse_is_a_noop():
@@ -360,6 +372,100 @@ def test_skip_agent_seeds_tables_without_creating_a_genie_agent(tmp_path, monkey
     assert "Skipping the Genie agent" in capsys.readouterr().out
 
 
+def test_state_file_is_written_at_the_repo_root_owner_only(tmp_path, monkeypatch):
+    state_file = tmp_path / "repo" / ".dev_to_prod_sample_env.json"
+    monkeypatch.setattr(sample, "STATE_FILE", state_file)
+    monkeypatch.setattr(sample, "LEGACY_STATE_FILE", tmp_path / "repo" / "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json")
+
+    sample._save_states({"key": {"schema": "schema"}})
+
+    assert state_file.exists()
+    assert state_file.stat().st_mode & 0o777 == 0o600
+    assert json.loads(state_file.read_text()) == {"key": {"schema": "schema"}}
+
+
+def test_legacy_state_file_is_migrated_to_the_repo_root(tmp_path, monkeypatch):
+    state_file = tmp_path / "repo" / ".dev_to_prod_sample_env.json"
+    legacy = tmp_path / "repo" / "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({"old": {"schema": "old"}}))
+    monkeypatch.setattr(sample, "STATE_FILE", state_file)
+    monkeypatch.setattr(sample, "LEGACY_STATE_FILE", legacy)
+
+    assert sample._load_states() == {"old": {"schema": "old"}}
+
+    assert not legacy.exists()
+    assert state_file.exists()
+    assert state_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_legacy_migration_refuses_conflicting_shared_keys_without_writing(tmp_path, monkeypatch):
+    state_file = tmp_path / "repo" / ".dev_to_prod_sample_env.json"
+    legacy = tmp_path / "repo" / "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json"
+    legacy.parent.mkdir(parents=True)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({"same": {"schema": "s"}, "old": {"groups_created": ["g1"]}}))
+    state_file.write_text(json.dumps({"same": {"schema": "DIFFERENT"}, "root": {"schema_created": True}}))
+    before_root = state_file.read_text()
+    before_legacy = legacy.read_text()
+    monkeypatch.setattr(sample, "STATE_FILE", state_file)
+    monkeypatch.setattr(sample, "LEGACY_STATE_FILE", legacy)
+
+    with pytest.raises(RuntimeError, match="disagree.*same") as raised:
+        sample._load_states()
+
+    message = str(raised.value)
+    assert str(legacy) in message and str(state_file) in message
+    assert state_file.read_text() == before_root
+    assert legacy.read_text() == before_legacy
+
+
+def test_state_file_refuses_root_symlink_without_touching_target(tmp_path, monkeypatch):
+    state_file = tmp_path / "repo" / ".dev_to_prod_sample_env.json"
+    target = tmp_path / "precious.json"
+    target.write_text("PRECIOUS")
+    state_file.parent.mkdir(parents=True)
+    state_file.symlink_to(target)
+    monkeypatch.setattr(sample, "STATE_FILE", state_file)
+    monkeypatch.setattr(sample, "LEGACY_STATE_FILE", tmp_path / "repo" / "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json")
+
+    with pytest.raises(RuntimeError, match="symlinked ownership state"):
+        sample._save_states({"key": {"schema": "schema"}})
+
+    assert target.read_text() == "PRECIOUS"
+    assert state_file.is_symlink()
+
+
+def test_legacy_state_file_refuses_symlink_without_migrating(tmp_path, monkeypatch):
+    state_file = tmp_path / "repo" / ".dev_to_prod_sample_env.json"
+    legacy = tmp_path / "repo" / "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json"
+    target = tmp_path / "legacy-target.json"
+    target.write_text(json.dumps({"old": {"schema": "old"}}))
+    legacy.parent.mkdir(parents=True)
+    legacy.symlink_to(target)
+    monkeypatch.setattr(sample, "STATE_FILE", state_file)
+    monkeypatch.setattr(sample, "LEGACY_STATE_FILE", legacy)
+
+    with pytest.raises(RuntimeError, match="symlinked ownership state"):
+        sample._load_states()
+
+    assert legacy.is_symlink()
+    assert not state_file.exists()
+    assert json.loads(target.read_text()) == {"old": {"schema": "old"}}
+
+
+def test_default_state_file_writes_repo_root_not_shared(tmp_path):
+    copied = _load_sample_copy(tmp_path)
+    repo = tmp_path / "repo"
+
+    copied._save_states({"key": {"schema": "schema"}})
+
+    assert copied.STATE_FILE == repo / ".dev_to_prod_sample_env.json"
+    assert copied.STATE_FILE.exists()
+    assert copied.STATE_FILE.stat().st_mode & 0o777 == 0o600
+    assert not (repo / "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json").exists()
+
+
 def test_legacy_opt_in_preflight_failure_removes_nothing(teardown_env, monkeypatch):
     state_file, install = teardown_env
     account = _account_with([])
@@ -400,8 +506,9 @@ def test_legacy_opt_in_delete_failure_reports_incomplete(teardown_env, monkeypat
 
 def test_untracked_existing_schema_names_the_per_clone_state_file_to_copy(tmp_path, monkeypatch):
     """A fresh clone has no ownership state, so a schema an earlier clone created is refused."""
-    state_file = tmp_path / ".dev_to_prod_sample_env.json"
+    state_file = tmp_path / "repo" / ".dev_to_prod_sample_env.json"
     monkeypatch.setattr(sample, "STATE_FILE", state_file)
+    monkeypatch.setattr(sample, "LEGACY_STATE_FILE", tmp_path / "repo/shared/examples/dev_to_prod/.dev_to_prod_sample_env.json")
 
     def run_sql(client, warehouse_id, sql):
         raise RuntimeError("[SCHEMA_ALREADY_EXISTS] Cannot create schema because it already exists")
@@ -417,6 +524,6 @@ def test_untracked_existing_schema_names_the_per_clone_state_file_to_copy(tmp_pa
     message = str(raised.value)
     assert "cat.dev_to_prod_demo already exists but is not tracked as owned by this script" in message
     assert f"recorded per clone in the git-ignored {state_file}" in message
-    assert f"copy that clone's .dev_to_prod_sample_env.json to {state_file}" in message
+    assert f"copy that clone's .dev_to_prod_sample_env.json to this clone's {state_file}" in message
     assert "otherwise choose another --schema" in message
     assert not state_file.exists()

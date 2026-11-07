@@ -21,15 +21,16 @@ def test_sample_env_rerun_claim_is_scoped_to_the_clone_holding_the_state_file():
     text = _flat(SAMPLE_ENV)
     assert "Re-runs are safe." not in text
     assert "**Re-runs are safe from the same clone.**" in text
-    assert "`shared/examples/dev_to_prod/.dev_to_prod_sample_env.json`, a git-ignored file in *this clone*" in text
-    assert ("copy the earlier clone's `.dev_to_prod_sample_env.json` into the new clone's "
-            "`shared/examples/dev_to_prod/`") in text
+    assert "`.dev_to_prod_sample_env.json` at the repo root, a git-ignored file in *this clone*" in text
+    assert "copy the earlier clone's `.dev_to_prod_sample_env.json` to this clone's repo root" in text
 
 
 def test_sample_env_state_file_name_matches_the_script():
     script = (SHARED / "examples/dev_to_prod/setup_sample_env.py").read_text()
-    assert 'STATE_FILE = Path(__file__).with_name(".dev_to_prod_sample_env.json")' in script
+    assert 'STATE_FILE = Path(__file__).resolve().parents[3] / STATE_FILE_NAME' in script
+    assert 'LEGACY_STATE_FILE = Path(__file__).with_name(STATE_FILE_NAME)' in script
     # The doc and the error call it git-ignored.
+    assert "/.dev_to_prod_sample_env.json" in (ROOT / ".gitignore").read_text().splitlines()
     assert ".dev_to_prod_sample_env.json" in (SHARED / "examples/dev_to_prod/.gitignore").read_text().splitlines()
 
 
