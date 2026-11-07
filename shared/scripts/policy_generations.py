@@ -464,9 +464,18 @@ def plan_stage(stage: str, desired: dict, old: dict | None, retire: dict | None,
     functions = _merge_functions(*(g["functions_sql"] for g in [desired, old, retire] if g))
     rendered = {"fgac_policies": [policies[name] for name in sorted(policies)], "tags": tags,
                 "functions_sql": functions}
+    coverage_tags = tags
+    if stage in ("create", "tighten", "restore"):
+        # The coverage gate decides whether the protection this transition
+        # will expose is complete.  These pre-switch renders intentionally
+        # keep old/no treatment assignments live, so validate against the
+        # generated end-state treatments while Terraform still plans the
+        # staged render above.
+        coverage_tags = desired_tags
+
     coverage_rendered = {
         "fgac_policies": [coverage_policies[name] for name in sorted(coverage_policies)],
-        "tags": tags,
+        "tags": coverage_tags,
         "functions_sql": functions,
     }
     return {

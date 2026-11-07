@@ -23,6 +23,7 @@ roots/data_access/main.tf.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -80,7 +81,7 @@ def harness(tmp_path, monkeypatch):
     assert not h.invariant_problems, h.invariant_problems
 
 
-def _refresh(env_dir: Path, ddl_text: str = EMAIL_DDL) -> None:
+def _refresh(env_dir: Path, ddl_text: str = EMAIL_DDL, column_classes: dict | None = None) -> None:
     """What make's live refresh (derive-assignments, full mode) leaves before the controller runs."""
     from scripts.runtime_overlay import effective
 
@@ -88,15 +89,17 @@ def _refresh(env_dir: Path, ddl_text: str = EMAIL_DDL) -> None:
     ddl.parent.mkdir(exist_ok=True)
     ddl.write_text(ddl_text)
     cg.write_refresh_record(env_dir / cg.REFRESH_RELPATH, mode="full", ddl_path=ddl,
-                            config_path=effective(env_dir, "abac.auto.tfvars"))
+                            config_path=effective(env_dir, "abac.auto.tfvars"),
+                            column_classes=column_classes)
 
 
-def fresh(h, tmp_path: Path, monkeypatch, *, ddl_text: str = EMAIL_DDL, **env) -> dict:
+def fresh(h, tmp_path: Path, monkeypatch, *, ddl_text: str = EMAIL_DDL,
+          column_classes: dict | None = None, **env) -> dict:
     """A fresh deterministic env as make generate leaves it: nothing applied, the real coverage check on."""
     gen = write_env(h.env_dir, deployer=OLD_SP, **env)
     _promoted(h, gen)
     access_file(h).write_text(json.dumps({"grants": sorted(GRANTS), "client_id": OLD_SP, "gone": []}))
-    _refresh(h.env_dir, ddl_text)
+    _refresh(h.env_dir, ddl_text, column_classes)
     runner = tmp_path / "gated-runner"
     runner.write_text(GATED_RUNNER.format(python=sys.executable, inner=str(pg.RUNNER)))
     runner.chmod(0o755)
@@ -384,6 +387,31 @@ def _render(h, gen, stage="create") -> Path:
     return pg.write_stage(h.env_dir / "data_access", rendered) / "abac.auto.tfvars"
 
 
+def _runner_answer(path: Path, answer: dict) -> Path:
+    encoded = base64.b64encode(json.dumps(answer).encode()).decode()
+    runner = path / "runner"
+    runner.write_text(f"#!/bin/sh\necho '+ terraform console'\necho '\"{encoded}\"'\n")
+    runner.chmod(0o755)
+    return runner
+
+
+def _run_create_gate(h, tmp_path: Path, gen: dict, *, validation_dir: Path | None = None) -> int:
+    staged = pg.plan_stage("create", gen, None, None)
+    rendered_dir = pg.write_stage(h.env_dir / "data_access", staged["rendered"])
+    runner = _runner_answer(tmp_path, {
+        "fingerprint": "create-fp",
+        "grant_tables": ["cat.sch.t"],
+        "acknowledged_columns": [],
+        "needs_gate": False,
+        "new_grants": ["cat.sch.t|raw"],
+    })
+    return cg.run_gate(
+        h.env_dir, "prod", runner, "", False, rendered_dir,
+        {"stage": "create", "old_fingerprint": "", "keep_new_tags": False},
+        validation_dir,
+    )
+
+
 def test_the_create_render_of_a_first_deploy_is_judged_as_one(harness, tmp_path, monkeypatch):
     gen = fresh(harness, tmp_path, monkeypatch)
     _journaled_first_deploy(harness, gen)
@@ -399,6 +427,39 @@ def test_the_create_render_of_a_first_deploy_is_judged_as_one(harness, tmp_path,
     # A phase that opens access with those columns untagged still refuses.
     refreshed_at, detail, _ = cg._live_refresh(harness.env_dir, tfvars, staged | {"opens_access": True})
     assert refreshed_at is None and "this phase opens access" in detail
+
+
+def test_first_deploy_create_gate_validates_the_generated_end_state(harness, tmp_path, monkeypatch):
+    gen = fresh(harness, tmp_path, monkeypatch,
+                column_classes={"cat.sch.t.email": ["email_address"]})
+    _journaled_first_deploy(harness, gen)
+    staged = pg.plan_stage("create", gen, None, None)
+    assert staged["rendered"]["tags"] == {}
+    assert staged["coverage_rendered"]["tags"] == gen["tags"]
+    validation_dir = pg.write_stage(
+        harness.env_dir / "data_access", staged["coverage_rendered"], out_dir=pg.coverage_config_dir(harness.env_dir),
+    )
+
+    assert _run_create_gate(harness, tmp_path, gen, validation_dir=validation_dir) == 0
+    gate = json.loads((harness.env_dir / "data_access" / cg.GATE_FILENAME).read_text())
+    assert gate["status"] == "pass"
+    assert gate["uncovered_columns"] == ["cat.sch.t.email"]
+
+
+def test_first_deploy_create_gate_still_withholds_for_a_real_gap(harness, tmp_path, monkeypatch, capfd):
+    gen = fresh(harness, tmp_path, monkeypatch,
+                column_classes={"cat.sch.t.email": ["email_address"]})
+    _journaled_first_deploy(harness, gen)
+    broken = dict(pg.plan_stage("create", gen, None, None)["coverage_rendered"])
+    broken["fgac_policies"] = []
+    validation_dir = pg.write_stage(harness.env_dir / "data_access", broken, out_dir=pg.coverage_config_dir(harness.env_dir))
+
+    assert _run_create_gate(harness, tmp_path, gen, validation_dir=validation_dir) == 0
+    output = capfd.readouterr()
+    gate = json.loads((harness.env_dir / "data_access" / cg.GATE_FILENAME).read_text())
+    assert gate["status"] == "fail"
+    assert "classified but unprotected columns" in output.out
+    assert "1 new SELECT grant(s) are withheld (cat.sch.t|raw)" in output.err
 
 
 @pytest.mark.parametrize("journal", [
