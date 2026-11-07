@@ -683,9 +683,44 @@ def _write_rehearse(cloud_dir: Path, env: str, receipt: dict) -> Path:
     return _write_once(rehearse_dir(cloud_dir, env) / receipt["commit"] / name, seal(receipt))
 
 
+def target_setup_problems(cloud_dir: Path, target: str) -> list[str]:
+    """The placeholders promote-to ENV=<target> refuses in the target env's files ([] when none).
+
+    Exactly what promote-to itself refuses before it writes anything: its placeholder guard
+    (genie_space_placeholder.py --promotion-destination: access_tier_groups placeholders are
+    allowed, promote-to writes them) and a ``<...>`` catalog_map (saved_settings.catalog_map_dict).
+    So no digest is skipped that promote-to could have produced.
+    """
+    from genie_space_placeholder import agent_files_placeholder_errors, placeholder_errors
+    from scripts.saved_settings import catalog_map_dict
+
+    env_dir = Path(cloud_dir) / "envs" / target
+    path = env_dir / "env.auto.tfvars"
+    try:
+        cfg = _load_hcl(path)
+    except Exception:  # a malformed file is promote-to's own failure, reported as before
+        return []
+    problems = agent_files_placeholder_errors(env_dir) + placeholder_errors(
+        cfg, path, allow_access_tier_placeholders=True)
+    try:
+        catalog_map_dict(cfg.get("catalog_map"))
+    except ValueError as exc:
+        if "placeholder" in str(exc):
+            problems.append(f"replace the catalog_map placeholders in envs/{target}/env.auto.tfvars with each "
+                            "source catalog and its catalog in this env")
+    return problems
+
+
 def _target_digests(cloud_dir: Path, env: str, makefile: Path, make: str) -> dict:
     targets = {}
     for target in promotion_targets(cloud_dir, env):
+        unset = target_setup_problems(cloud_dir, target)
+        if unset:
+            # promote-to refuses these placeholders, so there is no digest and provenance still refuses
+            # this commit; the promotion commit gets its own receipt (release-plan's reuse) with one.
+            targets[target] = {"digest": None, "error": f"envs/{target} is not set up yet: {unset[0]}",
+                               "not_set_up": True}
+            continue
         digest, error = promoted_digest(cloud_dir, makefile, make, target)
         targets[target] = {"digest": digest} | ({"error": error} if error else {})
     return targets
@@ -733,7 +768,7 @@ def _write_reused(cloud_dir: Path, env: str, status: Mapping, fp: Mapping, earli
           f"{earlier['commit'][:12]}; wrote a receipt for {status['commit'][:12]} without re-applying ===")
     print(f"  Receipt: {path}")
     _print_unclean(status)
-    _print_targets(receipt["targets"])
+    _print_targets(receipt["targets"], env)
     return path
 
 
@@ -825,7 +860,7 @@ def rehearse_finish(env_dir: Path, env: str, result: str, makefile: Path, make: 
     print(f"Rehearse receipt ({result}{'' if status['clean_tree'] else ', NOT a clean checkout'}): {path}")
     _print_unclean(status)
     if result == "passed":
-        _print_targets(receipt["targets"])
+        _print_targets(receipt["targets"], env)
     else:
         print(f"  rehearse failed: {reason or 'see above'}", file=sys.stderr)
     return seal(receipt) | {"_path": str(path)}
@@ -840,10 +875,16 @@ def _print_unclean(status: Mapping) -> None:
               "commit or remove these, then rehearse again.")
 
 
-def _print_targets(targets: Mapping) -> None:
+def _print_targets(targets: Mapping, env: str) -> None:
     for target, info in sorted(targets.items()):
         if info.get("digest"):
             print(f"  promote-to ENV={target} digest: {info['digest'][:16]}")
+        elif info.get("not_set_up"):
+            # Expected before the target's setup (the walkthrough rehearses dev first): not a refusal.
+            print(f"  promote-to ENV={target}: no digest yet ({info['error']}). That's expected until "
+                  f"{target} is set up: fill in envs/{target}/env.auto.tfvars, then make promote-to "
+                  f"ENV={target} and make release ENV={target}; its release-plan reuses this {env} rehearsal "
+                  f"while the code and {env}'s inputs are unchanged")
         else:
             print(f"  promote-to ENV={target}: no digest ({info.get('error', 'unknown error')}); "
                   f"release-plan ENV={target} will refuse this commit")

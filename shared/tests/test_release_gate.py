@@ -785,6 +785,92 @@ def test_provenance_refuses_a_receipt_without_a_digest_for_the_env(repo, monkeyp
         rg.provenance(repo.prod, "prod")
 
 
+# -- a promotion target not set up yet (friction F1) -------------------------------------
+
+# What make setup ENV=prod seeds: the env template plus the promotion settings, placeholders unfilled.
+SEEDED_PROD = ((SHARED / "env.auto.tfvars.example").read_text()
+               + '\n# Promotion source and catalog renames; replace both catalog placeholders.\n'
+                 'promote_from = "dev"\ncatalog_map  = { "<dev_catalog>" = "<prod_catalog>" }\n')
+# Deployer filled in, catalog_map still seeded: promote-to's catalog_map validation refuses it.
+CATALOG_PLACEHOLDER_PROD = PROD_ENV.replace('{ "dev_cat" = "prod_cat" }', '{ "<dev_catalog>" = "<prod_catalog>" }')
+
+
+def _like_promote_to(calls: list):
+    """promote-to in a scratch copy: it refuses a placeholder env, else writes what is committed."""
+    def digest(cloud, makefile, make, target):
+        calls.append(target)
+        if "<" in (Path(cloud) / "envs" / target / "env.auto.tfvars").read_text():
+            return None, f"promote-to ENV={target} failed in a scratch copy"
+        return rg.generated_digest(Path(cloud) / "envs" / target / "generated"), ""
+    return digest
+
+
+@pytest.mark.parametrize("prod_env", [SEEDED_PROD, CATALOG_PLACEHOLDER_PROD], ids=["seeded", "catalog_map"])
+def test_rehearse_with_a_placeholder_prod_says_prod_is_not_set_up_not_that_release_plan_refuses(
+        repo, monkeypatch, capsys, prod_env):
+    calls: list = []
+    monkeypatch.setattr(rg, "promoted_digest", _like_promote_to(calls))
+    repo.commit({"aws/envs/prod/env.auto.tfvars": prod_env}, message="setup prod")
+    capsys.readouterr()
+    receipt = rehearse(repo)
+    out = capsys.readouterr().out
+    assert "will refuse" not in out, out
+    assert "promote-to ENV=prod: no digest yet (envs/prod is not set up yet: replace" in out, out
+    assert ("That's expected until prod is set up: fill in envs/prod/env.auto.tfvars, then make promote-to "
+            "ENV=prod and make release ENV=prod; its release-plan reuses this dev rehearsal") in out, out
+    # promote-to would refuse the placeholders, so the scratch copy is never built.
+    assert calls == []
+    assert receipt["targets"]["prod"]["digest"] is None and receipt["targets"]["prod"]["not_set_up"] is True
+    # Provenance is unchanged: this commit has no prod digest, so release-plan refuses it.
+    with pytest.raises(rg.Refused, match=r"no promote-to ENV=prod digest \(envs/prod is not set up yet"):
+        rg.provenance(repo.prod, "prod")
+
+
+def test_a_configured_prod_whose_promote_to_fails_still_says_release_plan_will_refuse(repo, monkeypatch, capsys):
+    monkeypatch.setattr(rg, "promoted_digest", _like_promote_to([]))
+    repo.commit({"aws/envs/prod/env.auto.tfvars": SEEDED_PROD}, message="setup prod")
+    rehearse(repo)
+    assert "no digest yet (envs/prod is not set up yet" in capsys.readouterr().out
+    # Filled in, but promote-to itself fails: no placeholder to blame, so the refusal is named.
+    monkeypatch.setattr(rg, "promoted_digest", lambda *a: (None, "promote-to ENV=prod failed in a scratch copy"))
+    repo.commit({"aws/envs/prod/env.auto.tfvars": PROD_ENV, "aws/envs/dev/env.auto.tfvars": DEV_ENV + "# changed\n"})
+    rehearse(repo)
+    out = capsys.readouterr().out
+    assert ("promote-to ENV=prod: no digest (promote-to ENV=prod failed in a scratch copy); release-plan "
+            "ENV=prod will refuse this commit") in out, out
+    assert "not set up yet" not in out
+
+
+def test_rehearse_then_setup_prod_then_promote_to_then_release_plan_reuses_the_rehearsal(repo, monkeypatch, capsys):
+    """The walkthrough order with prod's files committed early: dev rehearses while prod is a
+    placeholder, the promotion commit is released on that rehearsal, and a stale prod still refuses."""
+    calls: list = []
+    monkeypatch.setattr(rg, "promoted_digest", _like_promote_to(calls))
+    repo.commit({"aws/envs/prod/env.auto.tfvars": SEEDED_PROD}, message="setup prod")
+    first = rehearse(repo)
+    assert "not set up yet" in capsys.readouterr().out
+    # make setup ENV=prod filled in, then make promote-to ENV=prod (committed by its offer).
+    promoted = repo.commit({"aws/envs/prod/env.auto.tfvars": PROD_ENV,
+                            "aws/envs/prod/generated/masking_functions.sql": "-- promoted\n"},
+                           message="Promote the rules to prod")
+    assert _reuse(repo) is None
+    out = capsys.readouterr().out
+    assert f"reusing dev's passing rehearsal of {first['commit'][:12]} (nothing is applied)" in out, out
+    assert "promote-to ENV=prod digest: " in out and "will refuse" not in out and "not set up" not in out, out
+    receipt = rg.passing_receipt(repo.cloud, "dev", promoted)
+    assert receipt["applied"] is False and receipt["reused_from"] == first["commit"]
+    assert receipt["targets"]["prod"] == {"digest": rg.generated_digest(repo.prod / "generated")}
+    assert calls == ["prod"]
+    assert rg.provenance(repo.prod, "prod")["commit"] == promoted
+    # A hand edit to prod's generated files (not what promote-to writes) still refuses on its reused receipt.
+    monkeypatch.setattr(rg, "promoted_digest", lambda *a: (receipt["targets"]["prod"]["digest"], ""))
+    edited = repo.commit({"aws/envs/prod/generated/masking_functions.sql": "-- edited by hand\n"})
+    assert _reuse(repo) is None
+    assert rg.passing_receipt(repo.cloud, "dev", edited)["applied"] is False
+    with pytest.raises(rg.Refused, match="stale promotion"):
+        rg.provenance(repo.prod, "prod")
+
+
 def _release_receipt_at(repo: Repo, commit: str) -> None:
     rg._write_once(rg.release_dir(repo.cloud, "prod") / f"{rg._now().replace(':', '')}-{commit[:12]}.json",
                    {"kind": "release", "version": rg.VERSION, "commit": commit, "created_at": rg._now()})
