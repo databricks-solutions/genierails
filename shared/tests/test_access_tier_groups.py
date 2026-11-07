@@ -567,16 +567,19 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     prod = readme[readme.index("## Prod"):readme.index("## Keep it healthy")]
     reference = readme[readme.index("\n## Reference\n"):]
 
-    # The whole flow: own repo (setup REPO=) and first commit first; rehearse and release (its release-plan)
-    # run make check themselves, so the flow has no separate check line, and the commit offers and the
-    # y/N questions replace the git, account-plan and release-plan lines.
-    order = ["make setup ENV=dev REPO=<your-repo-url>", "offers to commit (y)",
-             "fill in the env + agent files setup copied from the templates (Dev step 1)",
-             "make generate ENV=dev", "offers to commit + push (y)",
-             "make rehearse ENV=dev       # checks, applies dev, proves the masks work; first time: asks y/N about "
-             "account setup",
-             "make setup ENV=prod", "make promote-to ENV=prod", "make release ENV=prod",
-             "make evidence ENV=prod", "make maintain ENV=prod", "# lost? make next ENV=<env>"]
+    # The whole flow: own repo (setup REPO=) first; rehearse and release (its release-plan) run make check
+    # themselves, so the flow has no separate check line, and the commit offers and the y/N questions
+    # (in the steps and the ask table, not the flow's comments) replace the git, account-plan and
+    # release-plan lines.
+    order = ["make setup ENV=dev REPO=<your-repo-url>   # 1. create dev's config files",
+             "#   then: fill in dev's env and agent files", "(Dev step 1)",
+             "#   then: turn on Data classification in Catalog Explorer", "(Dev step 2)",
+             "make generate ENV=dev       # 2. ",
+             "make rehearse ENV=dev       # 3. apply them to dev and prove the masks hide the data",
+             "make setup ENV=prod         # 4. ", "#   then: fill in prod's env file", "(Prod step 1)",
+             "make promote-to ENV=prod    # 5. ", "#   then: review classification on the prod catalog",
+             "make release ENV=prod       # 6. ", "make evidence ENV=prod      # 7. ",
+             "make maintain ENV=prod      # 8. ", "# Stuck? `make next ENV=<env>` prints the next command."]
     positions = [flow.index(step) for step in order]
     assert positions == sorted(positions)
     commands = [line.split("#")[0].strip() for line in flow.splitlines()
@@ -589,7 +592,14 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
                  "git push", "git remote", "GENIERAILS_EVIDENCE_INTEGRATION", "generated/evidence"):
         assert gone not in code, gone
     assert "Data classification" in flow
-    assert "make setup ENV=prod         # then set deployer_principal_id, catalog_map, group_map" in flow
+    assert "make setup ENV=prod         # 4. create prod's config files" in flow.splitlines()
+    # Prod's keys are named in prod step 1, where the reader meets them, not in the flow.
+    for key in ("deployer_principal_id", "catalog_map", "group_map"):
+        assert key not in code, key
+        assert f"`{key}`" in prod[prod.index("**1. Set up.**"):prod.index("**2. Copy the proven rules.**")], key
+    assert "It first runs `make check ENV=dev`." in dev
+    assert "A first deploy shows the shared account plan and asks `Approve and apply this account manifest? [y/N]`." \
+        in dev
     # The reference table says what each command asks; the steps say what rehearse and release do.
     asks = reference[reference.index("### What each command asks"):]
     assert "| `make release ENV=prod` | `Approve and apply this account manifest? [y/N]` first" in asks
@@ -625,7 +635,7 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     rehearse = details[details.index("## Dev step 4: Rehearse"):details.index("## Prod steps 1-2")]
     assert "](DETAILS.md#dev-step-4-rehearse)" in dev
     assert "The same `make check` runs alone as the PR check." in rehearse
-    assert "`verify-access` as its last gate (`_verify-access-gate`)" in dev
+    assert "Its last gate is `verify-access` (`_verify-access-gate`)." in dev
     assert "**Pass looks like:** `ALL EFFECTIVE`" in dev and "make verify-access ENV=dev" in dev
     assert "**Agents (preferred):**" in dev and "envs/dev/agents/" in dev
     setup = details[details.index("## Dev step 1: Set up"):details.index("## Dev step 1: The commit offer")]
@@ -697,11 +707,13 @@ def test_champion_walkthrough_lets_release_plan_reuse_the_dev_rehearsal_on_the_p
     release = details[details.index("## Prod step 4: Release"):details.index("## If prod stops")]
     gap = details[details.index("**Reuse an existing mask**"):details.index("**A new kind of mask**")]
 
-    # The whole flow: promote-to (which offers the commit + push), then release (no second dev rehearse).
+    # The whole flow: promote-to (whose commit + push offer prod step 2 and the ask table name), then
+    # release (no second dev rehearse).
     code = flow[flow.index("```bash"):flow.index("```", flow.index("```bash") + 3)]
-    promoted = code.index("offers to commit + push (y)", code.index("make promote-to ENV=prod"))
-    assert code.index("make promote-to ENV=prod") < promoted < code.index("make release ENV=prod")
+    promoted = code.index("make promote-to ENV=prod    # 5. copy dev's tested rules into prod's config")
+    assert promoted < code.index("make release ENV=prod       # 6. ")
     assert "make rehearse ENV=dev" not in code[promoted:]
+    assert "| `make promote-to ENV=prod` | The same commit question |" in readme
     # ...and the full table: release reuses dev's rehearsal (it never rehearses dev).
     row = next(line for line in details.splitlines() if line.startswith("| `make release ENV=prod` |"))
     assert "reuses dev's rehearsal" in row and "make rehearse" not in row

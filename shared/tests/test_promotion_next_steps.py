@@ -81,8 +81,8 @@ REUSE = "it reuses the"
 # (a promotion, ack.txt or a prod-only setting): no second rehearse. Each passage names release-plan
 # with its reuse, then release, and never asks for a rehearse on that commit.
 DOC_REUSE = [
-    ("shared/examples/dev_to_prod/README.md", "make promote-to ENV=prod # copies dev's proven rules to prod",
-     ["offers to commit + push (y)", "make release ENV=prod # applies prod in rounds; shows each round's plan, asks y/N"]),
+    ("shared/examples/dev_to_prod/README.md", "make promote-to ENV=prod # 5. copy dev's tested rules into prod's config",
+     ["make release ENV=prod # 6. apply them to prod, one approved round at a time"]),
     ("shared/examples/dev_to_prod/README.md", "| `make promote-to ENV=prod` | The same commit question",
      ["Same: save this step's files", "| `make release ENV=prod` |", "Each round: exactly that round's prod changes"]),
     ("shared/examples/dev_to_prod/DETAILS.md", "| `make promote-to ENV=prod` | Copies dev's reviewed rules",

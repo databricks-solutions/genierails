@@ -359,3 +359,131 @@ def test_details_explains_why_no_class_is_raw_for_everyone():
     assert "everyone would see raw values on every masked" in (shared / "deterministic_governance.py").read_text()
     assert '"card_security_code"' in (shared / "mask_library.json").read_text().split("never_raw_classes", 1)[1][:80]
     assert "tier_access_overrides are deferred" in (shared / "governance_policies.py").read_text()
+
+
+# The 8-command block at the top, exactly. Each comment says one plain thing the command does for you; the
+# human steps between commands are "then:" lines pointing at their step. Commit offers, y/N prompts, the
+# first-time account approval and prod's keys live in the steps and the ask table, not in the comments.
+FLOW_BLOCK = [
+    "# Dev: build the rules and prove they work",
+    "make setup ENV=dev REPO=<your-repo-url>   # 1. create dev's config files (REPO= is optional)",
+    "#   then: fill in dev's env and agent files                (Dev step 1)",
+    "#   then: turn on Data classification in Catalog Explorer  (Dev step 2)",
+    "make generate ENV=dev       # 2. draft mask and access rules from the classification tags",
+    "make rehearse ENV=dev       # 3. apply them to dev and prove the masks hide the data",
+    "",
+    "# Prod: copy what dev proved, then release it (same for stg or any env)",
+    "make setup ENV=prod         # 4. create prod's config files",
+    "#   then: fill in prod's env file                          (Prod step 1)",
+    "make promote-to ENV=prod    # 5. copy dev's tested rules into prod's config",
+    "#   then: review classification on the prod catalog        (Prod step 3)",
+    "make release ENV=prod       # 6. apply them to prod, one approved round at a time",
+    "make evidence ENV=prod      # 7. save a record of what is live (for audit)",
+    "make maintain ENV=prod      # 8. run on a schedule to mask columns that get tagged later",
+    "",
+    "# Stuck? `make next ENV=<env>` prints the next command.",
+]
+FLOW_AFTER = ("Some commands ask `y/N`, only at a terminal ([CI / scripted](#ci--scripted)): e.g. before a commit "
+              "and push or a prod release round. [The table at the end](#what-each-command-asks) lists each question.")
+# The crammed comments the block used to carry: none may come back.
+OLD_FLOW_COMMENTS = [
+    "creates dev's files (REPO= optional); offers to commit (y)",
+    "fill in the env + agent files setup copied from the templates",
+    "Catalog Explorer: turn on Data classification and review what it found",
+    "drafts masks and access rules from the tags; offers to commit + push (y)",
+    "checks, applies dev, proves the masks work; first time: asks y/N about account setup",
+    "then set deployer_principal_id, catalog_map, group_map",
+    "copies dev's proven rules to prod; offers to commit + push (y)",
+    "Catalog Explorer: the same review on the prod catalog",
+    "applies prod in rounds; shows each round's plan, asks y/N; ends at \"Release complete\"",
+    "writes a record of what is live",
+    "on a schedule, on the deployment machine: masks columns tagged later",
+    "# lost? make next ENV=<env>",
+]
+
+
+def _flow_block(text: str) -> list[str]:
+    flow = text[text.index("\n## The whole flow\n"):text.index("\n## Before you start\n")]
+    start = flow.index("```bash\n") + len("```bash\n")
+    return flow[start:flow.index("\n```", start)].splitlines()
+
+
+def test_the_flow_block_says_one_plain_thing_per_command():
+    text = README.read_text()
+    block = _flow_block(text)
+    assert block == FLOW_BLOCK
+    # The 8 commands, in order, numbered 1-8; nothing else runs in the block.
+    commands = [line for line in block if line and not line.startswith("#")]
+    assert [line.split("#")[0].strip() for line in commands] == [
+        "make setup ENV=dev REPO=<your-repo-url>", "make generate ENV=dev", "make rehearse ENV=dev",
+        "make setup ENV=prod", "make promote-to ENV=prod", "make release ENV=prod", "make evidence ENV=prod",
+        "make maintain ENV=prod"]
+    assert [re.search(r"# (\d)\. ", line).group(1) for line in commands] == [str(n) for n in range(1, 9)]
+    # One idea per comment: no lists of side effects, no prompts, no internal keys before the reader meets them.
+    for line in block:
+        comment = line.split("#", 1)[1] if "#" in line else ""
+        for crammed in (";", "y/N", "(y)", "offers", "commit", "push", "deployer_principal_id", "catalog_map",
+                        "group_map", "acl_groups", "manifest", "account"):
+            assert crammed not in comment, (crammed, line)
+    # Human steps are "then:" lines naming their step, never a command.
+    humans = [line for line in block if line.startswith("#   ")]
+    assert humans and all(line.startswith("#   then: ") and re.search(r"\((Dev|Prod) step \d\)$", line)
+                          for line in humans)
+    for old in OLD_FLOW_COMMENTS:
+        assert old not in "\n".join(block), old
+    # One sentence introduces the block; one says where the y/N questions are.
+    flow = text[text.index("\n## The whole flow\n"):text.index("\n## Before you start\n")]
+    after = flow[flow.index("\n```\n", flow.index("```bash")) + len("\n```\n"):]
+    assert [line for line in after.splitlines() if line.strip() and not line.startswith("<a id=")] == [FLOW_AFTER]
+
+
+def test_the_facts_moved_out_of_the_flow_comments_live_in_the_steps_and_ask_table():
+    text = README.read_text()
+    dev = text[text.index("\n## Dev\n"):text.index("\n## Prod\n")]
+    prod = text[text.index("\n## Prod\n"):text.index("\n## Keep it healthy\n")]
+    healthy = text[text.index("\n## Keep it healthy\n"):text.index("\n## Later changes\n")]
+    asks = text[text.index("### What each command asks"):text.index('<a id="glossary"></a>')]
+    rows = {line.split(" | ")[0].strip("| `"): line for line in asks.splitlines() if line.startswith("| `make ")}
+    moved = [
+        # setup ENV=dev: REPO= is optional, the templates it copies, its commit offer.
+        (_step(dev, "1. Set up."), ["`REPO=` (optional) makes this clone yours", "Without it, everything stays in local git.",
+                                    "Setup copies this walkthrough's templates into dev",
+                                    "**Then it offers to commit.**", "Answer `y`."]),
+        (rows["make setup ENV=dev REPO=<url>"], ["`Commit these changes and push them to origin/main? [y/N]`"]),
+        # Dev step 2: turn on Data classification and review what it found.
+        (_step(dev, "2. Review classification"), ["**Data classification**: turn it on", "review the detections"]),
+        # generate: its commit and push offer.
+        (_step(dev, "3. Generate."), ["It then offers to commit and push `.gitignore` and `envs/dev/`. Answer `y`."]),
+        (rows["make generate ENV=dev"], ["The same commit question"]),
+        # rehearse: runs make check first; first time, asks y/N about the account setup.
+        (_step(dev, "4. Rehearse."), ["It first runs `make check ENV=dev`.",
+                                      "A first deploy shows the shared account plan and asks `Approve and apply this "
+                                      "account manifest? [y/N]`."]),
+        (rows["make rehearse ENV=dev"], ["`Approve and apply this account manifest? [y/N]`, only when the account plan"]),
+        # setup ENV=prod: which keys to set in prod's env file.
+        (_step(prod, "1. Set up."), ["replace the `deployer_principal_id` placeholder and the seeded `catalog_map` line",
+                                     "group_map   = {"]),
+        (rows["make setup ENV=prod"], ["The same commit question"]),
+        # promote-to: its commit and push offer.
+        (_step(prod, "2. Copy the proven rules."), ["It then offers to commit and push `.gitignore`, `envs/prod/` and "
+                                                    "`envs/account/`: answer `y`."]),
+        (rows["make promote-to ENV=prod"], ["The same commit question"]),
+        # Prod step 3: the same classification review on the prod catalog.
+        (_step(prod, "3. Review classification"), ["Do the same review as [dev step 2](#dev-classify), on the prod catalog."]),
+        # release: shows each round's manifest, asks y/N, ends at Release complete; the account question first.
+        (_step(prod, "4. Release."), ["Each round shows you its manifest and asks `Approve and release manifest <id> ...? [y/N]`.",
+                                      "Answer `y` each round until it prints `=== Release complete (prod) ===`.",
+                                      "Before round 1, if the account plan has changes, it asks the same account question"]),
+        (rows["make release ENV=prod"], ["`Approve and apply this account manifest? [y/N]` first",
+                                         "once per round"]),
+        # evidence: writes a record of what is live.
+        (_step(prod, "5. Record evidence."), ["Write a record of what is live in prod, for auditors."]),
+        # maintain: on a schedule, on the deployment machine, masks columns tagged later.
+        (healthy, ["`maintain` catches columns tagged after the release and masks them.",
+                   "Schedule it (e.g. with cron) on the [deployment machine](../../docs/deployment-machine.md)."]),
+    ]
+    for where, facts in moved:
+        for fact in facts:
+            assert fact in where, fact
+    # The commands that ask nothing, and next.
+    assert "`evidence`, `maintain`, `next` and `status` ask nothing." in asks

@@ -10,25 +10,26 @@ The journey: set up dev, prove the rules in dev, copy the proven rules to prod, 
 The whole flow at a glance; the steps below walk through each line.
 
 ```bash
-# Dev: set it up and prove it
-make setup ENV=dev REPO=<your-repo-url>   # creates dev's files (REPO= optional); offers to commit (y)
-#   fill in the env + agent files setup copied from the templates (Dev step 1)
-#   Catalog Explorer: turn on Data classification and review what it found (Dev step 2)
-make generate ENV=dev       # drafts masks and access rules from the tags; offers to commit + push (y)
-make rehearse ENV=dev       # checks, applies dev, proves the masks work; first time: asks y/N about account setup
+# Dev: build the rules and prove they work
+make setup ENV=dev REPO=<your-repo-url>   # 1. create dev's config files (REPO= is optional)
+#   then: fill in dev's env and agent files                (Dev step 1)
+#   then: turn on Data classification in Catalog Explorer  (Dev step 2)
+make generate ENV=dev       # 2. draft mask and access rules from the classification tags
+make rehearse ENV=dev       # 3. apply them to dev and prove the masks hide the data
 
 # Prod: copy what dev proved, then release it (same for stg or any env)
-make setup ENV=prod         # then set deployer_principal_id, catalog_map, group_map
-make promote-to ENV=prod    # copies dev's proven rules to prod; offers to commit + push (y)
-#   Catalog Explorer: the same review on the prod catalog
-make release ENV=prod       # applies prod in rounds; shows each round's plan, asks y/N; ends at "Release complete"
-make evidence ENV=prod      # writes a record of what is live
-make maintain ENV=prod      # on a schedule, on the deployment machine: masks columns tagged later
+make setup ENV=prod         # 4. create prod's config files
+#   then: fill in prod's env file                          (Prod step 1)
+make promote-to ENV=prod    # 5. copy dev's tested rules into prod's config
+#   then: review classification on the prod catalog        (Prod step 3)
+make release ENV=prod       # 6. apply them to prod, one approved round at a time
+make evidence ENV=prod      # 7. save a record of what is live (for audit)
+make maintain ENV=prod      # 8. run on a schedule to mask columns that get tagged later
 
-# lost? make next ENV=<env>
+# Stuck? `make next ENV=<env>` prints the next command.
 ```
 
-Questions appear only at a terminal ([CI / scripted](#ci--scripted)); each one is listed [at the end](#what-each-command-asks).
+Some commands ask `y/N`, only at a terminal ([CI / scripted](#ci--scripted)): e.g. before a commit and push or a prod release round. [The table at the end](#what-each-command-asks) lists each question.
 
 <a id="prerequisites--gather-required-values"></a>
 ## Before you start
@@ -73,7 +74,7 @@ make setup ENV=dev REPO=<your-repo-url>
 - Teammates can review a change before it ships.
 - Git keeps every version, so you can see what changed and undo it later.
 
-Credentials (`auth.auto.tfvars`) are never committed. The edits you make next are committed by `make generate`'s own offer; later steps that write files offer the same way.
+Credentials (`auth.auto.tfvars`) are never committed. The edits you make next are committed by `make generate`'s offer; later steps that write files offer too.
 
 Now fill in the files:
 - Fill in `envs/dev/auth.auto.tfvars` (service principal, workspace). In `envs/dev/env.auto.tfvars`, replace the deployer and group placeholders:
@@ -94,7 +95,7 @@ More: [more agents, inline `genie_spaces`, the `acl_groups` rules](DETAILS.md#de
 
 - In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on.
 - When the scan finishes (the first one can take up to about a day), review the detections, exclude false positives, and turn on auto-tagging.
-- Wait until the columns show `class.*` tags: check a table's **Columns** tab in Catalog Explorer.
+- Wait until a table's **Columns** tab in Catalog Explorer shows `class.*` tags.
 
 *Why this review matters:* each tag says "this column is sensitive", and GenieRails builds the masks from these tags. Every tagged column the agent can reach needs a decision: a mask, or, if the detection is wrong, an exclusion here. Until it has one, GenieRails opens no new access, so nothing can leak by accident. More: [why there's no "raw for everyone" switch](DETAILS.md#why-no-unmasked-sensitive-column).
 
@@ -104,7 +105,7 @@ More: [more agents, inline `genie_spaces`, the `acl_groups` rules](DETAILS.md#de
 make generate ENV=dev
 ```
 - Review the `table_readers` it proposes in `envs/dev/env.auto.tfvars` (who may read each table) and the drafted rules in `envs/dev/generated/`.
-- No tags yet? It stops and says to wait; re-run it later.
+- No tags yet? It stops and says to wait; re-run later.
 - It then offers to commit and push `.gitignore` and `envs/dev/`. Answer `y`.
 
 To change a mask, edit `envs/dev/env.auto.tfvars` and re-run `make generate ENV=dev`. In the template's default mode a re-run replaces hand edits to the masks in `envs/dev/generated/`. More: [what a re-run keeps](DETAILS.md#dev-step-3-generate).
@@ -119,9 +120,9 @@ make rehearse ENV=dev
 ```
 - It first runs `make check ENV=dev`. If a check fails, it stops before it takes the lock, writes anything or reads live dev.
 - A first deploy shows the shared account plan and asks `Approve and apply this account manifest? [y/N]`. That plan is the account-wide setup all envs share, e.g. the masks' tag policy. `y` applies exactly what it showed; answer `y`.
-- It applies dev, in phases on a first deploy: masks before access. Then it runs `verify-access` as its last gate (`_verify-access-gate`).
+- It applies dev, in phases on a first deploy: masks before access. Its last gate is `verify-access` (`_verify-access-gate`).
 
-**Pass looks like:** `ALL EFFECTIVE`: each test tier sees masked values, the authorized tier sees raw ones. To re-run only that proof later: `make verify-access ENV=dev`.
+**Pass looks like:** `ALL EFFECTIVE`: each test tier sees masked values, the authorized tier sees raw ones. Re-run only that proof with `make verify-access ENV=dev`.
 
 More: [the account layer, phases, row-pairing keys](DETAILS.md#dev-step-4-rehearse).
 
@@ -161,7 +162,7 @@ Prod's real data may hold sensitive types dev never had.
 
 **4. Release.** Apply the rules to prod, one approved round at a time.
 
-One command, at a terminal on the deployment machine:
+At a terminal on the deployment machine:
 ```bash
 make release ENV=prod
 ```
@@ -182,7 +183,7 @@ prod:reader:prod_finance.payments.transactions:finance_admins
 ```
 It's your sign-off, never a `y/N`, so no command commits it: commit and push it yourself, then run `make release ENV=prod` again.
 
-**Pass looks like:** `ALL EFFECTIVE` (from its `verify-access` gate) and "Release complete". To re-run only that proof later: `make verify-access ENV=prod`.
+**Pass looks like:** `ALL EFFECTIVE` (from its `verify-access` gate) and "Release complete". Re-run only that proof with `make verify-access ENV=prod`.
 
 More: [each round, the account layer, rehearsal reuse, reader acks](DETAILS.md#prod-step-4-release).
 
@@ -204,19 +205,19 @@ More: [warehouse, offline mode, state folder](DETAILS.md#prod-step-5-record-evid
 New sensitive columns appear over time: `maintain` catches columns tagged after the release and masks them.
 
 ```bash
-make maintain ENV=prod      # on a schedule, on the deployment machine: masks columns tagged later
+make maintain ENV=prod
 ```
 
 - Schedule it (e.g. with cron) on the [deployment machine](../../docs/deployment-machine.md).
 - In a deterministic env it runs only from the last released commit, on a clean checkout.
-- It never grants access past a passing coverage check and never changes the Genie agent. If it stops, it prints what to do.
+- It never grants access past a passing coverage check or changes the Genie agent; if it stops, it prints what to do.
 
 More: [what maintain does](DETAILS.md#keep-it-healthy).
 
 <a id="later-changes"></a>
 ## Later changes
 
-Every later change goes through a pull request (PR) into `main`, with `make check` as its check. Commit by hand only what no command offers: `envs/prod/ack.txt`, edits on a branch for a PR, and anything you answered `n` to. More: [commits and PRs](DETAILS.md#commit-it), [Pipelines](../../docs/pipelines.md), and the [agents](../../docs/playbooks/agents.md), [governance](../../docs/playbooks/governance.md) and [one-team](../../docs/playbooks/one-team.md) playbooks.
+Later changes go through a pull request (PR) into `main`, checked by `make check`. Commit by hand only what no command offers: `envs/prod/ack.txt`, edits on a branch for a PR, and anything you answered `n` to. More: [commits and PRs](DETAILS.md#commit-it), [Pipelines](../../docs/pipelines.md), and the [agents](../../docs/playbooks/agents.md), [governance](../../docs/playbooks/governance.md) and [one-team](../../docs/playbooks/one-team.md) playbooks.
 
 <a id="ci--scripted"></a>
 ## CI / scripted
