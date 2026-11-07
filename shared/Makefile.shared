@@ -262,8 +262,13 @@ _prepare-env:
 		fi; \
 	done
 
+# An agents/ entry that is not a regular file (a directory, FIFO, or a symlink
+# whose target is missing, loops or is not a file) is refused before _prepare-env
+# writes anything: setup's template copy and every agent reader would otherwise
+# follow it, crash on it, block on it, or read it as an agent with no settings.
 _bootstrap:
 	@$(MAKE) --no-print-directory _guard-root ENV="$(ENV)" ENV_ORIGIN="$(ENV_ORIGIN)"
+	@python3 "$(SHARED_ROOT)/agent_files.py" check-entries --env-dir "$(ENV_DIR)"
 	@$(MAKE) --no-print-directory _prepare-env ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" ENV_ORIGIN="$(ENV_ORIGIN)"
 
 # make promote's refusal for a destination whose governance_mode it cannot read or

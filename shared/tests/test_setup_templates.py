@@ -1,7 +1,7 @@
 """make setup ENV=dev copies the walkthrough's env and agent templates (README Dev step 1).
 
 Only files that don't exist yet are written: a re-run, an existing env or agent file and a
-symlinked agents/ are left alone, and promoted envs (prod) get neither template.
+symlinked agents/ are left alone (a broken agent link is refused), and promoted envs (prod) get neither template.
 """
 
 import os
@@ -176,10 +176,12 @@ def test_setup_dev_never_follows_a_dangling_agent_symlink(tmp_path):
     target = tmp_path / "outside.auto.tfvars"
     (agents / AGENT_FILE).symlink_to(target)
 
-    # init-env runs setup's copy without its banner (whose placeholder advice reads each agent file).
+    # A dangling agent file is refused before setup's copy (test_agent_broken_symlink.py).
     result = _make("aws", tmp_path, "init-env", "ENV=dev")
 
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "not a regular file" in result.stderr and "Traceback" not in result.stdout + result.stderr
+    assert not (agents.parent / "env.auto.tfvars").exists()
     assert not target.exists()
     assert (agents / AGENT_FILE).is_symlink()
     assert sorted(p.name for p in agents.iterdir()) == [AGENT_FILE]
