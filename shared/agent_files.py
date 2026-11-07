@@ -41,8 +41,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import hcl2
-
 AGENTS_DIR = "agents"
 SETTINGS_SUFFIX = ".auto.tfvars"
 CAPTURE_SUFFIX = ".space.json"
@@ -74,6 +72,8 @@ def promoted(env_dir: Path) -> bool:
 def _load_hcl(path: Path) -> dict:
     if not path.is_file():
         return {}
+    import hcl2  # here, so check-links (make _bootstrap) runs before the packages are installed
+
     try:
         with path.open() as handle:
             return hcl2.load(handle)
@@ -117,7 +117,37 @@ def space_key(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
+def broken_links(env_dir: Path) -> list[Path]:
+    """agents/, or an agent or capture file in it, that is a symlink to no file (dangling, a loop, a dir).
+
+    Only the link itself is examined: it is never read, followed or written through.
+    """
+    folder = agents_dir(env_dir)
+    if folder.is_symlink() and not folder.is_dir():
+        return [folder]
+    if not folder.is_dir():
+        return []
+    return sorted(path for path in folder.iterdir()
+                  if path.name.endswith((SETTINGS_SUFFIX, CAPTURE_SUFFIX)) and path.is_symlink()
+                  and not path.is_file())
+
+
+def broken_links_error(paths: list) -> str:
+    """One line naming every broken link (paths as Paths or display strings)."""
+    kind = "directory" if len(paths) == 1 and Path(paths[0]).name == AGENTS_DIR else "file"
+    return (f"broken symlink {', '.join(str(path) for path in paths)} (its target is missing, loops or is not a "
+            f"{kind}); fix or remove it, then run the command again")
+
+
+def refuse_broken_links(env_dir: Path) -> None:
+    """Refuse an env whose agents/ holds a broken symlink: a dangling agent file must not read as an empty agent."""
+    broken = broken_links(env_dir)
+    if broken:
+        raise AgentFileError(broken_links_error(broken))
+
+
 def names(env_dir: Path) -> list[str]:
+    refuse_broken_links(env_dir)
     folder = agents_dir(env_dir)
     if not folder.is_dir():
         return []
@@ -600,7 +630,7 @@ def split(env_dir: Path, file_names: str = "") -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=("tfvars", "validate", "split"))
+    parser.add_argument("command", choices=("tfvars", "validate", "split", "check-links"))
     parser.add_argument("--env-dir", type=Path, required=True,
                         help="envs/<env> (the workspace env dir, not data_access/)")
     parser.add_argument("--layer", choices=("workspace", "data_access"), default="workspace")
@@ -609,6 +639,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="split: existing-terraform-key=agent-file-name pairs (AGENT_FILE_NAMES)")
     args = parser.parse_args(argv)
     try:
+        if args.command == "check-links":
+            refuse_broken_links(args.env_dir)
+            return 0
         if args.command == "validate":
             merged_config(args.env_dir)
             return 0
