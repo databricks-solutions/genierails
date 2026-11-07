@@ -2641,3 +2641,126 @@ def test_failed_grant_keeps_the_verified_protection_and_resumes_at_grant(harness
     assert harness.apply() == 0
     assert harness.calls == ["grant"]
     assert harness.journal()["pending"][0]["fingerprint"] == old["fingerprint"]
+
+
+# -- the one adoption trust check (marker + history entry + intact snapshot) ----------------------
+# _repair_adopted_create_render, _verified_adopted_treatment_imports and
+# _trusted_adopted_unknown_values all ask Controller._adoption_trust; each must refuse when any
+# one piece of the adoption evidence is edited, including the marker's restore_from alone.
+
+def _adopted_failed_create(harness):
+    desired = released_fifteen_policy_env(harness)
+    _replace_first_n_policy_principals_with_unknown(harness.env_dir, 14)
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.live_treatment_tags = dict(desired["tags"])
+    spa.journal_path(harness.env_dir).unlink()
+    assert harness.apply(FAKE_TF_FAIL_APPLY="create") == 1
+    # The failed create imported the treatment tags; drop them again so the import caller has
+    # state-missing tags to vouch for (otherwise it returns {} whatever the evidence).
+    _remove_treatment_tag_state(harness.env_dir)
+    harness.calls.clear()
+    return harness.journal()
+
+
+def _adoption_caller_trusts(harness, caller: str) -> bool:
+    """Whether ``caller`` trusts the on-disk adoption evidence (False = it refused)."""
+    controller = harness.controller()
+    journal = harness.journal()
+    t = journal["transition"]
+    try:
+        if caller == "repair":
+            controller._repair_adopted_create_render(journal, t)
+            return True
+        if caller == "imports":
+            return bool(controller._verified_adopted_treatment_imports(t))
+        return bool(controller._trusted_adopted_unknown_values(t))
+    except spa.Refused:
+        return False
+
+
+def _tamper_adoption(harness, tamper: str) -> None:
+    journal = harness.journal()
+    adopted = journal["transition"]["adopted_from_state"]
+    entries = [entry for entry in journal["history"] if entry.get("reason") == spa.ADOPTION_HISTORY_REASON]
+    assert entries
+    if tamper == "snapshot":
+        snapshot = pg.load_snapshot(harness.env_dir, adopted)
+        snapshot["fgac_policies"][0]["comment"] = "edited"
+        pg.save_snapshot(harness.env_dir, snapshot)
+        return
+    if tamper == "marker_restore_from":
+        assert journal["adopted_unverified"]["restore_from"] == spa._restore_fingerprint(journal["transition"])
+        journal["adopted_unverified"]["restore_from"] = "0" * 64
+    elif tamper == "marker_fingerprint":
+        journal["adopted_unverified"]["fingerprint"] = "0" * 64
+    elif tamper == "marker_missing":
+        journal.pop("adopted_unverified")
+    elif tamper == "history_missing":
+        journal["history"] = [entry for entry in journal["history"] if entry not in entries]
+    elif tamper == "history_adopted":
+        for entry in entries:
+            entry["adopted"] = "0" * 64
+    elif tamper == "history_to":
+        for entry in entries:
+            entry["to"] = "0" * 64
+    elif tamper == "history_reason":
+        for entry in entries:
+            entry["reason"] = "edited"
+    else:
+        raise AssertionError(tamper)
+    spa.save_journal(harness.env_dir, journal)
+
+
+ADOPTION_CALLERS = ["repair", "imports", "unknown_values"]
+ADOPTION_TAMPERS = ["marker_restore_from", "marker_fingerprint", "marker_missing", "history_missing",
+                    "history_adopted", "history_to", "history_reason", "snapshot"]
+
+
+@pytest.mark.parametrize("caller", ADOPTION_CALLERS)
+def test_adoption_trust_callers_trust_untampered_evidence(harness, caller):
+    _adopted_failed_create(harness)
+
+    assert _adoption_caller_trusts(harness, caller)
+
+
+@pytest.mark.parametrize("tamper", ADOPTION_TAMPERS)
+@pytest.mark.parametrize("caller", ADOPTION_CALLERS)
+def test_adoption_trust_every_caller_refuses_tampered_evidence(harness, caller, tamper):
+    _adopted_failed_create(harness)
+    _tamper_adoption(harness, tamper)
+
+    assert not _adoption_caller_trusts(harness, caller)
+    assert harness.calls == []
+
+
+@pytest.mark.parametrize("caller", ADOPTION_CALLERS)
+def test_adoption_trust_marker_restore_from_only_edit_is_refused(harness, caller):
+    journal = _adopted_failed_create(harness)
+    before = json.loads(json.dumps(journal))
+    journal["adopted_unverified"]["restore_from"] = "0" * 64
+    spa.save_journal(harness.env_dir, journal)
+    edited = harness.journal()
+    # Only the marker's restore_from differs.
+    assert {k: v for k, v in edited.items() if k != "adopted_unverified"} == \
+        {k: v for k, v in before.items() if k != "adopted_unverified"}
+    assert {k: v for k, v in edited["adopted_unverified"].items() if k != "restore_from"} == \
+        {k: v for k, v in before["adopted_unverified"].items() if k != "restore_from"}
+
+    assert not _adoption_caller_trusts(harness, caller)
+    if caller == "repair":
+        with pytest.raises(spa.Refused, match="adoption marker or history entry doesn't match"):
+            harness.apply()
+        assert harness.calls == []
+        assert harness.journal() == edited
+
+
+def test_adoption_trust_callers_all_use_the_shared_check():
+    import inspect
+
+    source = inspect.getsource(spa.Controller)
+    for name in ("_repair_adopted_create_render", "_verified_adopted_treatment_imports",
+                 "_trusted_adopted_unknown_values"):
+        body = inspect.getsource(getattr(spa.Controller, name))
+        assert "self._adoption_trust(" in body, name
+        assert "adopted_unverified" not in body and "snapshot_intact(snapshot, adopted)" not in body, name
+    assert source.count("principal-only drift adopted from state\"\n") == 0

@@ -398,6 +398,23 @@ def _render_fingerprint(t: dict) -> str:
     return str(t.get("render_from") or t.get("from") or "")
 
 
+ADOPTION_HISTORY_REASON = "principal-only drift adopted from state"
+
+
+def adoption_record_matches(journal: dict, t: dict, adopted: str) -> bool:
+    """Whether the journal's adoption marker and history entry both vouch for ``t``'s adopted generation.
+
+    The marker must name the adopted generation and the transition's restore target, and the
+    history must hold the principal-only adoption entry for this adopted -> to change.
+    """
+    marker = journal.get("adopted_unverified") or {}
+    if marker.get("fingerprint") != adopted or marker.get("restore_from") != _restore_fingerprint(t):
+        return False
+    return any(entry.get("reason") == ADOPTION_HISTORY_REASON
+               and entry.get("adopted") == adopted and entry.get("to") == t.get("to")
+               for entry in journal.get("history") or [])
+
+
 def _adopted_unverified(journal: dict, fingerprint: str) -> dict | None:
     adopted = journal.get("adopted_unverified") or {}
     return adopted if adopted.get("fingerprint") == fingerprint else None
@@ -684,6 +701,21 @@ class Controller:
             transition["render_from"] = render_from
         return transition
 
+    def _adoption_trust(self, journal: dict, t: dict, adopted: str) -> tuple[str, dict | None]:
+        """The one adoption trust check: matching marker + history entry, then an intact snapshot.
+
+        Returns ``("record", None)`` when the marker or history entry doesn't vouch for the
+        adoption (the snapshot isn't read), ``("tampered", snapshot)`` when the adopted snapshot
+        no longer hashes to its fingerprint, and ``("trusted", snapshot)`` otherwise.  Snapshot
+        read errors (pg.StageError, OSError, ValueError) propagate; each caller maps them.
+        """
+        if not adoption_record_matches(journal, t, adopted):
+            return "record", None
+        snapshot = self._snapshot(adopted)
+        if not pg.snapshot_intact(snapshot, adopted):
+            return "tampered", snapshot
+        return "trusted", snapshot
+
     def _repair_adopted_create_render(self, journal: dict, t: dict) -> None:
         """Old failed-create journals rendered create from restore_from; resume from adopted live instead."""
         adopted = t.get("adopted_from_state") or ""
@@ -696,25 +728,18 @@ class Controller:
             raise Refused("the adopted principal-only drift journal has an unexpected create render target; "
                           "nothing was applied. Re-run the original 499e19a failed-create journal shape or "
                           "restore the policy journal from records.")
-        marker = journal.get("adopted_unverified") or {}
-        history_matches = any(
-            entry.get("reason") == "principal-only drift adopted from state"
-            and entry.get("adopted") == adopted and entry.get("to") == t.get("to")
-            for entry in journal.get("history") or []
-        )
-        if marker.get("fingerprint") != adopted \
-                or marker.get("restore_from") != restore_from or not history_matches:
+        try:
+            trust, snapshot = self._adoption_trust(journal, t, adopted)
+        except (pg.StageError, OSError, ValueError) as exc:
+            raise Refused(f"the adopted principal-only drift snapshot {adopted} can't be read ({exc}); "
+                          f"nothing was applied. Run make policy-abandon ENV={self.env_name}, then re-plan.") from exc
+        if trust == "record":
             raise Refused(
                 "the adopted principal-only drift journal can't be safely repaired because its adoption "
                 "marker or history entry doesn't match; nothing was applied. "
                 f"Run make policy-abandon ENV={self.env_name}, then re-plan."
             )
-        try:
-            snapshot = self._snapshot(adopted)
-        except (pg.StageError, OSError, ValueError) as exc:
-            raise Refused(f"the adopted principal-only drift snapshot {adopted} can't be read ({exc}); "
-                          f"nothing was applied. Run make policy-abandon ENV={self.env_name}, then re-plan.") from exc
-        if not pg.snapshot_intact(snapshot, adopted):
+        if trust == "tampered":
             raise Refused(f"the adopted principal-only drift snapshot {adopted} doesn't match its fingerprint; "
                           f"nothing was applied. Run make policy-abandon ENV={self.env_name}, then re-plan.")
         try:
@@ -772,16 +797,10 @@ class Controller:
         if not adopted or adopted != t.get("from") or _render_fingerprint(t) != adopted \
                 or "create" in (t.get("completed") or []) or t.get("switch_attempted"):
             return {}
-        journal = load_journal(self.env_dir) or {}
-        marker = journal.get("adopted_unverified") or {}
-        if marker.get("fingerprint") != adopted or marker.get("restore_from") != _restore_fingerprint(t):
+        trust, snapshot = self._adoption_trust(load_journal(self.env_dir) or {}, t, adopted)
+        if trust == "record":
             return {}
-        if not any(entry.get("reason") == "principal-only drift adopted from state"
-                   and entry.get("adopted") == adopted and entry.get("to") == t.get("to")
-                   for entry in journal.get("history") or []):
-            return {}
-        snapshot = self._snapshot(adopted)
-        if not pg.snapshot_intact(snapshot, adopted):
+        if trust == "tampered":
             raise Refused(f"the adopted principal-only drift snapshot {adopted} doesn't match its fingerprint; "
                           "no treatment tag was imported")
         live = live_from_state(_read_state(self.env_dir))
@@ -935,18 +954,11 @@ class Controller:
         if not adopted or adopted != t.get("from") or _render_fingerprint(t) != adopted:
             return set()
         journal = load_journal(self.env_dir) or {}
-        marker = journal.get("adopted_unverified") or {}
-        if marker.get("fingerprint") != adopted or marker.get("restore_from") != _restore_fingerprint(t):
-            return set()
-        if not any(entry.get("reason") == "principal-only drift adopted from state"
-                   and entry.get("adopted") == adopted and entry.get("to") == t.get("to")
-                   for entry in journal.get("history") or []):
-            return set()
         try:
-            snapshot = self._snapshot(adopted)
+            trust, snapshot = self._adoption_trust(journal, t, adopted)
         except (pg.StageError, OSError, ValueError):
             return set()
-        if not pg.snapshot_intact(snapshot, adopted):
+        if trust != "trusted":
             return set()
         return {pg.policy_value(policy) for policy in snapshot.get("fgac_policies") or []
                 if pg.UNKNOWN in ((policy.get("to_principals") or []) + (policy.get("except_principals") or []))}
