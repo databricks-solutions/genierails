@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from tests import script_stubs
+from tests.terraform_helpers import shared_copy
 
 from scripts import environment_lock
 
@@ -87,12 +88,7 @@ def _ci_allowed_stubs(tmp_path: Path) -> dict[str, str]:
 
 
 def test_make_import_returns_the_data_access_failure_after_workspace_import_runs(tmp_path):
-    shared = tmp_path / "shared"
-    (shared / "scripts").mkdir(parents=True)
-    (shared / "Makefile.shared").write_text((ROOT / "shared" / "Makefile.shared").read_text())
-    (shared / "agent_files.py").write_text((ROOT / "shared" / "agent_files.py").read_text())
-    (shared / "env.auto.tfvars.example").write_text((ROOT / "shared" / "env.auto.tfvars.example").read_text())
-    (shared / "auth.auto.tfvars.example").write_text((ROOT / "shared" / "auth.auto.tfvars.example").read_text())
+    shared = shared_copy(tmp_path, stub_genie=False)
     log = tmp_path / "imports.jsonl"
     importer = shared / "scripts" / "import_existing.sh"
     importer.write_text(f"#!/bin/sh\n"
