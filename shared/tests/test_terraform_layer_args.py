@@ -8,6 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from tests.terraform_helpers import shared_copy
 
 ROOT = Path(__file__).parents[2]
 RUNNER = ROOT / "shared" / "scripts" / "terraform_layer.sh"
@@ -105,27 +106,22 @@ def test_data_access_runner_loads_discovered_table_facts(tmp_path):
     assert f"-var-file={discovered}" in plan_args
 
 
+def _workspace_root(tmp_path):
+    return tmp_path / "shared" / "roots" / "workspace"
+
+
 def _runner_with_stale_lock(tmp_path, init_error):
     """A copy of the runner whose workspace root has a lock file, and a fake
     terraform whose read-only init fails with init_error."""
-    scripts = tmp_path / "project" / "scripts"
-    scripts.mkdir(parents=True)
-    runner = scripts / RUNNER.name
-    runner.write_text(RUNNER.read_text())
-    runner.chmod(0o755)
-    # The runner's sibling: it moves the scheduled job between state files.
-    (scripts / "move_scheduled_job.py").write_text((RUNNER.parent / "move_scheduled_job.py").read_text())
-    (scripts / "state_layout.py").write_text((RUNNER.parent / "state_layout.py").read_text())
-    (scripts / "state_file_permissions.py").write_text(
-        (RUNNER.parent / "state_file_permissions.py").read_text()
-    )
-    # And every helper it sources (terraform_env.sh: the auth scrub before init).
+    # The whole shared/ code tree (shared_copy), so every helper the runner
+    # calls or sources is there however many it gains.
+    runner = shared_copy(tmp_path) / "scripts" / RUNNER.name
+    # The sourced auth scrub (terraform_env.sh) runs before init.
     sourced = re.findall(r'^\s*\. "\$SCRIPT_DIR/([^"]+)"', RUNNER.read_text(), re.M)
     assert "terraform_env.sh" in sourced, sourced
     for helper in sourced:
-        (scripts / helper).write_text((RUNNER.parent / helper).read_text())
-    root = tmp_path / "project" / "roots" / "workspace"
-    root.mkdir(parents=True)
+        assert (runner.parent / helper).is_file(), helper
+    root = _workspace_root(tmp_path)
     (root / ".terraform.lock.hcl").write_text(
         'provider "registry.terraform.io/hashicorp/null" {\n  version     = "3.3.2"\n}\n')
 
@@ -178,7 +174,7 @@ def test_other_init_failures_still_fail(tmp_path):
     assert result.returncode != 0
     assert "Failed to query available provider packages" in result.stderr
     assert [shlex.split(line)[0] for line in log.read_text().splitlines()] == ["init"]
-    assert not (tmp_path / "project" / "roots" / "workspace" / ".terraform-init.lock.d").exists()
+    assert not (_workspace_root(tmp_path) / ".terraform-init.lock.d").exists()
 
 
 def _locking_runner(tmp_path):
@@ -198,7 +194,7 @@ def test_killed_init_holder_is_reclaimed(tmp_path):
     holder = subprocess.Popen([runner, "workspace", "dev", "plan"], env=holder_env,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                               start_new_session=True)
-    owner = tmp_path / "project/roots/workspace/.terraform-init.lock.d/owner"
+    owner = _workspace_root(tmp_path) / ".terraform-init.lock.d" / "owner"
     for _ in range(100):
         if owner.exists():
             break
@@ -218,7 +214,7 @@ def test_live_init_holder_is_never_stolen_and_wait_times_out(tmp_path):
                               env={**env, "FAKE_INIT_SLEEP": "30"},
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                               start_new_session=True)
-    owner = tmp_path / "project/roots/workspace/.terraform-init.lock.d/owner"
+    owner = _workspace_root(tmp_path) / ".terraform-init.lock.d" / "owner"
     for _ in range(100):
         if owner.exists():
             break
@@ -249,7 +245,7 @@ def test_concurrent_waiters_atomically_reclaim_one_dead_owner(tmp_path):
         f'  rmdir "{guard}" 2>/dev/null || true\n'
         "fi\n"
     )
-    lock = tmp_path / "project/roots/workspace/.terraform-init.lock.d"
+    lock = _workspace_root(tmp_path) / ".terraform-init.lock.d"
     for _trial in range(20):
         lock.mkdir()
         (lock / "owner").write_text(
