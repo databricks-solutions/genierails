@@ -90,6 +90,7 @@ def test_make_import_returns_the_data_access_failure_after_workspace_import_runs
     shared = tmp_path / "shared"
     (shared / "scripts").mkdir(parents=True)
     (shared / "Makefile.shared").write_text((ROOT / "shared" / "Makefile.shared").read_text())
+    (shared / "agent_files.py").write_text((ROOT / "shared" / "agent_files.py").read_text())
     (shared / "env.auto.tfvars.example").write_text((ROOT / "shared" / "env.auto.tfvars.example").read_text())
     (shared / "auth.auto.tfvars.example").write_text((ROOT / "shared" / "auth.auto.tfvars.example").read_text())
     log = tmp_path / "imports.jsonl"

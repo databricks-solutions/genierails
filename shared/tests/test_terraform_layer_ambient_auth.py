@@ -189,7 +189,8 @@ def test_the_runner_always_sets_its_switches_last(tmp_path, layer, command, args
     env_dir = tmp_path / "envs" / {"account": "account", "data_access": "dev/data_access"}.get(layer, "dev")
     forged = {f"RUNNER_VALUE_{name}": "/forged" for name in
               ("env_dir", "workspace_state_file", "data_access_state_file", "genie_id_dir",
-               "import_walk", "expected_pre_release_withholding", "databricks_pipeline_auth_type")}
+               "import_walk", "expected_pre_release_withholding", "structural_check",
+               "databricks_pipeline_auth_type")}
     calls = _run(tmp_path, layer, command, *args, env_dir=env_dir, **forged)
     runner_call = [argv for argv, _ in calls if argv.startswith(command + " ")]
     assert len(runner_call) == 1, calls
@@ -198,8 +199,8 @@ def test_the_runner_always_sets_its_switches_last(tmp_path, layer, command, args
         "workspace": [f"-var=env_dir={env_dir}", "-var=workspace_state_file=", "-var=data_access_state_file=",
                       "-var=genie_id_dir=", "-var=expected_pre_release_withholding=false",
                       f"-var=import_walk={walk}", f"-var={PIPELINE_VAR}="],
-        "data_access": [f"-var=env_dir={env_dir}", "-var=data_access_state_file=", f"-var=import_walk={walk}",
-                        f"-var={PIPELINE_VAR}="],
+        "data_access": [f"-var=env_dir={env_dir}", "-var=data_access_state_file=",
+                        "-var=structural_check=false", f"-var=import_walk={walk}", f"-var={PIPELINE_VAR}="],
         "account": [f"-var={PIPELINE_VAR}="],
     }[layer]
     argv = runner_call[0].split()
@@ -315,9 +316,10 @@ def test_every_shipped_root_parses_and_declares_its_runner_variables():
     sys.path.insert(0, str(RUNNER.parent))
     from state_layout import RUNNER_VARS, declared_runner_vars
     roots = RUNNER.parents[1] / "roots"
-    assert declared_runner_vars(roots / "workspace") == list(RUNNER_VARS)
+    assert declared_runner_vars(roots / "workspace") == [
+        name for name in RUNNER_VARS if name != "structural_check"]
     assert declared_runner_vars(roots / "data_access") == [
-        "env_dir", "data_access_state_file", "import_walk", "databricks_pipeline_auth_type"]
+        "env_dir", "data_access_state_file", "structural_check", "import_walk", "databricks_pipeline_auth_type"]
     assert declared_runner_vars(roots / "account") == ["databricks_pipeline_auth_type"]
 
 
