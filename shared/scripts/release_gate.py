@@ -1438,7 +1438,8 @@ def first_release_contract(env_dir: Path, before: Mapping, after: Mapping, *, re
     return {t: r for t, r in contract.items() if r}
 
 
-def live_release_evidence(after: Mapping, inventories) -> list[str]:
+def live_release_evidence(env_dir: Path, after: Mapping, inventories,
+                          account_group_source: Callable[[], Mapping[str, Iterable[str]]] | None = None) -> list[str]:
     """Tier members that already read a governed table live: a first release can't have granted that.
 
     SELECT is a first release's last round, so before it no tier reads. A tier
@@ -1447,19 +1448,50 @@ def live_release_evidence(after: Mapping, inventories) -> list[str]:
     data_access state is missing) or was granted outside GenieRails. Neither is
     trusted as a baseline: live grants made outside GenieRails would then pass
     unreviewed. A tier whose membership the inventory couldn't list is evidence
-    too, since its nested readers can't be told apart.
+    too, since its nested readers can't be told apart. The sole first-release
+    exception is a generated group Terraform will assign to this workspace
+    which exists in the account: resolve its membership through account SCIM.
+    A direct or nested live SELECT found through that closure remains evidence.
     """
     from reader_inventory import group_members_of
+    import group_map
 
     tiers = sorted(set(after["settings"].get("access_tier_groups") or []))
+    listed = {str(g).casefold() for inv in inventories for g in inv.group_closure}
+    missing = {tier for tier in tiers if inventories and tier.casefold() not in listed}
+    assigned = set(group_map.workspace_assigned_groups(env_dir, after["settings"]))
+    account_only = missing & assigned
+    account_closure: dict[str, tuple[str, ...]] = {}
+    if account_only:
+        try:
+            direct = dict((account_group_source or
+                           (lambda: group_map.account_group_members(env_dir, account_only)))())
+        except Exception as exc:
+            raise Refused(f"the first-release account group membership check failed: {exc}") from exc
+        absent = sorted(account_only - set(direct))
+        if absent:
+            raise Refused("the first-release account group membership check could not find: " + ", ".join(absent))
+
+        def expand(name: str, visiting: set[str] | None = None) -> set[str]:
+            visiting = set(visiting or ())
+            if name in visiting:
+                return {name}
+            visiting.add(name)
+            result = {name}
+            for member in direct.get(name, ()):
+                member = str(member)
+                result.update(expand(member, visiting) if member in direct else {member})
+            return result
+
+        account_closure = {tier: tuple(sorted(expand(tier))) for tier in account_only}
+
     evidence = []
     for inv in inventories:
-        members = group_members_of(inv.group_closure, tiers, any_case=True)
+        members = group_members_of(dict(inv.group_closure) | account_closure, tiers, any_case=True)
         evidence += [f"{r.principal} can read {inv.table} via " + "; ".join(r.reasons)
                      for r in inv.readers if r.principal.casefold() in members]
-    listed = {str(g).casefold() for inv in inventories for g in inv.group_closure}
     evidence += [f"{t}'s members couldn't be listed (not in the workspace groups)"
-                 for t in tiers if inventories and t.casefold() not in listed]
+                 for t in tiers if t in missing - account_only]
     return evidence
 
 
@@ -1472,7 +1504,8 @@ def _deployer_principal(settings: Mapping) -> str:
 
 
 def reports(env_dir: Path, env: str, *, reader_source: Callable[[], object] | None = None,
-            rollback: Mapping | None = None) -> dict:
+            rollback: Mapping | None = None,
+            account_group_source: Callable[[], Mapping[str, Iterable[str]]] | None = None) -> dict:
     """Reader inventory and refuse-weakening, reconciled once against ack.txt."""
     from ack_file import merge_consequences, reconcile
     from reader_inventory import Grant, check_readers, inventory_readers
@@ -1506,7 +1539,7 @@ def reports(env_dir: Path, env: str, *, reader_source: Callable[[], object] | No
             reader_consequences.update(check.consequences)
     contract = first_release_contract(env_dir, before, after, released=released)
     # Live evidence of a release fails closed: every SELECT is compared with what is deployed.
-    live_evidence = live_release_evidence(after, inventories) if contract else []
+    live_evidence = live_release_evidence(env_dir, after, inventories, account_group_source) if contract else []
     if live_evidence:
         contract = {}
     baseline = {**before, "table_readers": contract} if contract else before

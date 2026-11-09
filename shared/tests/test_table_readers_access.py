@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import hcl2
 import pytest
@@ -744,16 +745,152 @@ row_filters = [{ table = "c.s.t", column = "r", values_by_group = { prod_rf = ["
 '''
 
 
-def _check(env, existing):
+def _check(env, existing, account=()):
     return gm.main(["check", "--env-dir", str(env), "--env", "prod", "--command-name", "make release"],
-                   lister=lambda _d: existing)
+                   lister=lambda _d: existing, account_lister=lambda _d: account)
+
+
+def _generated_groups(env, names):
+    (env / "generated" / "abac.auto.tfvars").write_text(
+        "groups = {\n" + "".join(f"  {json.dumps(name)} = {{}}\n" for name in names) + "}\n")
+
+
+def test_account_group_members_resolves_only_requested_nested_closure(tmp_path, monkeypatch):
+    import databricks.sdk
+
+    env = _env(tmp_path, 'governance_mode = "deterministic"\naccess_tier_groups = ["tier"]\n')
+    (env / "auth.auto.tfvars").write_text(
+        'databricks_account_id = "account"\n'
+        'databricks_client_id = "client"\n'
+        'databricks_client_secret = "secret"\n')
+
+    def member(kind, value):
+        return SimpleNamespace(ref=f"{kind}/{value}", value=value)
+
+    records = [
+        SimpleNamespace(id="tier-id", display_name="tier", members=[member("Groups", "child-id")]),
+        SimpleNamespace(id="child-id", display_name="child", members=[member("Users", "good-user")]),
+        SimpleNamespace(id="stale-id", display_name="unrelated", members=[member("Users", "broken-user")]),
+        SimpleNamespace(id="bad-tier-id", display_name="bad-tier", members=[member("Groups", "bad-child-id")]),
+        SimpleNamespace(id="bad-child-id", display_name="bad-child", members=[member("Users", "broken-user")]),
+    ]
+
+    def user(value):
+        if value == "broken-user":
+            raise RuntimeError("stale account member")
+        return SimpleNamespace(user_name="reader@example.com")
+
+    client = SimpleNamespace(
+        groups=SimpleNamespace(list=lambda **_kwargs: records),
+        users=SimpleNamespace(get=user),
+        service_principals=SimpleNamespace(get=lambda _value: None),
+    )
+    monkeypatch.setattr(databricks.sdk, "AccountClient", lambda **_kwargs: client)
+
+    assert gm.account_group_members(env, ["tier"]) == {
+        "tier": {"child"}, "child": {"reader@example.com"}}
+    with pytest.raises(RuntimeError, match="stale account member"):
+        gm.account_group_members(env, ["bad-tier"])
 
 
 def test_every_resulting_group_must_exist_live_mapped_or_not(tmp_path, capsys):
     env = _env(tmp_path, MAPPED_PROD, name="prod")
+    _generated_groups(env, ["prod_raw", "prod_partial", "full"])
     assert _check(env, ["prod_raw", "prod_partial", "full", "prod_rf"]) == 0
     assert _check(env, ["prod_raw", "prod_partial", "prod_rf"]) == 1  # unmapped "full" is missing
-    assert "don't exist in prod (after group_map): full" in capsys.readouterr().err
+    assert "don't exist in the Databricks account after group_map: full" in capsys.readouterr().err
+
+
+def test_source_first_deploy_accepts_generated_account_groups_before_workspace_assignment(tmp_path):
+    """The live aws-5 shape: source dev, no group_map, account-only generated tiers."""
+    groups = ["aws5_payments_ops", "aws5_regional_analysts", "aws5_viewers"]
+    env = _env(tmp_path, 'governance_mode = "deterministic"\n'
+               f'access_tier_groups = {json.dumps(groups)}\n'
+               f'genie_spaces = [{{ name = "Payments", acl_groups = {json.dumps(groups)} }}]\n', name="dev")
+    _generated_groups(env, groups)
+    assert gm.main(["check", "--env-dir", str(env), "--env", "dev", "--command-name", "make rehearse"],
+                   lister=lambda _d: [], account_lister=lambda _d: groups) == 0
+
+
+def test_account_missing_workspace_assigned_group_still_refuses(tmp_path, capsys):
+    env = _env(tmp_path, MAPPED_PROD, name="prod")
+    _generated_groups(env, ["prod_raw", "prod_partial", "full"])
+    assert _check(env, ["prod_rf"], account=["prod_raw", "prod_partial"]) == 1
+    err = capsys.readouterr().err
+    assert "Databricks account after group_map: full" in err
+    assert "group_map" in err and "make promote-to" in err
+
+
+def test_account_lookup_error_for_workspace_assigned_group_fails_closed(tmp_path, capsys):
+    env = _env(tmp_path, MAPPED_PROD, name="prod")
+    _generated_groups(env, ["prod_raw", "prod_partial", "full"])
+
+    def broken(_d):
+        raise RuntimeError("account SCIM unavailable")
+
+    assert gm.main(["check", "--env-dir", str(env), "--env", "prod"],
+                   lister=lambda _d: ["prod_rf"], account_lister=broken) == 2
+    assert "group check could not run: account SCIM unavailable" in capsys.readouterr().err
+
+
+def test_source_missing_group_message_does_not_suggest_promotion(tmp_path, capsys):
+    env = _env(tmp_path, MAPPED_PROD.replace(
+        'group_map = { dev_raw = "prod_raw", dev_partial = "prod_partial" }\n', ''), name="dev")
+    _generated_groups(env, ["prod_raw", "prod_partial", "full"])
+    assert gm.main(["check", "--env-dir", str(env), "--env", "dev", "--command-name", "make rehearse"],
+                   lister=lambda _d: ["prod_rf"], account_lister=lambda _d: []) == 1
+    err = capsys.readouterr().err
+    assert "don't exist in the Databricks account:" in err
+    assert "Sync these exact IdP group names" in err
+    assert "group_map" not in err and "promote-to" not in err
+
+
+def test_account_only_non_tier_acl_group_still_requires_workspace_visibility(tmp_path, capsys):
+    env = _env(tmp_path, '''governance_mode = "deterministic"
+access_tier_groups = ["tier"]
+raw_exempt_principals = ["engineering"]
+genie_spaces = [{ name = "Sales", acl_groups = ["tier", "engineering"] }]
+table_readers = { "c.s.t" = ["tier", "engineering"] }
+''')
+    _generated_groups(env, ["tier"])
+    assert gm.main(["check", "--env-dir", str(env), "--env", "dev"], lister=lambda _d: [],
+                   account_lister=lambda _d: ["tier", "engineering"]) == 1
+    err = capsys.readouterr().err
+    assert "won't be assigned" in err and "engineering" in err
+
+
+@pytest.mark.parametrize(("setting", "name"), [
+    ('table_readers = { "c.s.t" = ["readers_only"] }', "readers_only"),
+    ('row_filters = [{ table = "c.s.t", column = "r", values_by_group = { region_only = ["x"] } }]',
+     "region_only"),
+])
+def test_account_only_non_generated_reference_requires_workspace_visibility(tmp_path, capsys, setting, name):
+    env = _env(tmp_path, 'governance_mode = "deterministic"\naccess_tier_groups = ["tier"]\n' + setting + "\n")
+    _generated_groups(env, ["tier"])
+    assert gm.main(["check", "--env-dir", str(env), "--env", "dev"], lister=lambda _d: ["tier"],
+                   account_lister=lambda _d: [name]) == 1
+    assert name in capsys.readouterr().err
+
+
+def test_genie_only_never_treats_generated_account_groups_as_workspace_assignments(tmp_path, capsys):
+    env = _env(tmp_path, '''governance_mode = "deterministic"
+genie_only = true
+access_tier_groups = ["tier"]
+''')
+    _generated_groups(env, ["tier"])
+    assert gm.main(["check", "--env-dir", str(env), "--env", "dev"], lister=lambda _d: [],
+                   account_lister=lambda _d: ["tier"]) == 1
+    assert "tier" in capsys.readouterr().err
+
+
+def test_env_tier_omitted_from_generated_groups_is_not_treated_as_an_assignment(tmp_path, capsys):
+    env = _env(tmp_path, '''governance_mode = "deterministic"
+access_tier_groups = ["generated_tier", "stale_env_tier"]
+''')
+    _generated_groups(env, ["generated_tier"])
+    assert gm.main(["check", "--env-dir", str(env), "--env", "dev"], lister=lambda _d: [],
+                   account_lister=lambda _d: ["generated_tier", "stale_env_tier"]) == 1
+    assert "stale_env_tier" in capsys.readouterr().err
 
 
 POLICY_ONLY = '''fgac_policies = [
@@ -806,9 +943,9 @@ def test_a_principal_named_only_in_a_promoted_policy_must_exist_live(tmp_path, c
     (env / "data_access" / "abac.auto.tfvars").write_text(POLICY_ONLY)
     assert _check(env, LIVE) == 1
     err = capsys.readouterr().err
-    assert "prod_policy_only" in err and "don't exist in prod" in err
+    assert "prod_policy_only" in err and "aren't visible in the prod workspace" in err
     # account users (the full policy's target) is built in, never looked up.
-    assert "account users" not in err.split("don't exist in prod", 1)[1]
+    assert "account users" not in err.split("aren't visible in the prod workspace", 1)[1]
     assert _check(env, LIVE + ["prod_policy_only"]) == 0
 
 

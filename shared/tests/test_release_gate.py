@@ -2453,6 +2453,12 @@ def _shape_source(extra_grants=(), groups=None, *, listed_tiers=SHAPE_TIERS):
                       admins={SHAPE_OWNER}, deployer=SHAPE_DEPLOYER)
 
 
+def _shape_generated_groups(env_dir: Path):
+    path = env_dir / "generated" / "abac.auto.tfvars"
+    with path.open("a") as handle:
+        handle.write("groups = {\n" + "".join(f'  "{tier}" = {{}}\n' for tier in SHAPE_TIERS) + "}\n")
+
+
 def _refusals(report) -> list[str]:
     return sorted([f"weakening {w['ack_key']}" for w in report["weakening"]["unacknowledged"]]
                   + [f"reader {f['ack_key']}" for c in report["readers"]["checks"] for f in c["unacknowledged"]])
@@ -2688,10 +2694,93 @@ def test_a_case_variant_of_a_tier_reading_live_is_evidence_of_a_release(tmp_path
 def test_a_tier_whose_members_cant_be_listed_drops_the_first_release_baseline(tmp_path):
     env_dir = tmp_path / "envs" / "prod"
     tier_selects = _lost_receipt_widening(env_dir)
+    _shape_generated_groups(env_dir)
+    # genie_only means Terraform will not assign even a generated group, so
+    # account presence cannot justify the first-release shortcut.
+    with (env_dir / "env.auto.tfvars").open("a") as handle:
+        handle.write("genie_only = true\n")
     source = _shape_source(listed_tiers=SHAPE_TIERS[1:])
     report = rg.reports(env_dir, "prod", reader_source=lambda: source)
     assert report["first_release_refused"] == [f"{SHAPE_TIERS[0]}'s members couldn't be listed (not in the workspace groups)"]
     assert {w["ack_key"] for w in report["weakening"]["unacknowledged"]} == tier_selects and not report["ok"]
+
+
+def test_account_only_generated_tier_keeps_first_release_baseline(tmp_path):
+    env_dir = tmp_path / "envs" / "prod"
+    _lost_receipt_widening(env_dir)
+    _shape_generated_groups(env_dir)
+    source = _shape_source(listed_tiers=SHAPE_TIERS[1:])
+    account = {tier: set() for tier in SHAPE_TIERS}
+    report = rg.reports(env_dir, "prod", reader_source=lambda: source,
+                        account_group_source=lambda: account)
+    assert report["first_release_refused"] == []
+    assert _refusals(report) == [] and report["ok"]
+
+
+def test_account_only_generated_tier_member_with_live_select_is_release_evidence(tmp_path):
+    from reader_inventory import Grant
+
+    env_dir = tmp_path / "envs" / "prod"
+    tier_selects = _lost_receipt_widening(env_dir)
+    _shape_generated_groups(env_dir)
+    member = "payer@example.com"
+    source = _shape_source([Grant("TABLE", SHAPE_TABLES[0], member, "SELECT")],
+                           listed_tiers=SHAPE_TIERS[1:])
+    account = {**{tier: set() for tier in SHAPE_TIERS}, SHAPE_TIERS[0]: {member}}
+    report = rg.reports(env_dir, "prod", reader_source=lambda: source,
+                        account_group_source=lambda: account)
+    assert any(e.startswith(f"{member} can read") for e in report["first_release_refused"])
+    assert {w["ack_key"] for w in report["weakening"]["unacknowledged"]} == tier_selects
+
+
+def _assert_nested_account_reader_is_release_evidence(tmp_path, reader):
+    from reader_inventory import Grant
+
+    env_dir = tmp_path / "envs" / "prod"
+    tier_selects = _lost_receipt_widening(env_dir)
+    _shape_generated_groups(env_dir)
+    child = "payments_child"
+    source = _shape_source([Grant("TABLE", SHAPE_TABLES[0], reader, "SELECT")],
+                           listed_tiers=SHAPE_TIERS[1:])
+    account = {**{tier: set() for tier in SHAPE_TIERS},
+               SHAPE_TIERS[0]: {child}, child: {"payer@example.com"}}
+    report = rg.reports(env_dir, "prod", reader_source=lambda: source,
+                        account_group_source=lambda: account)
+    assert any(e.startswith(f"{reader} can read") for e in report["first_release_refused"])
+    assert {w["ack_key"] for w in report["weakening"]["unacknowledged"]} == tier_selects
+    assert not report["ok"]
+
+
+def test_nested_account_user_with_live_select_is_release_evidence(tmp_path):
+    _assert_nested_account_reader_is_release_evidence(tmp_path, "payer@example.com")
+
+
+def test_nested_account_group_with_live_select_is_release_evidence(tmp_path):
+    _assert_nested_account_reader_is_release_evidence(tmp_path, "payments_child")
+
+
+def test_account_only_generated_tier_missing_from_account_fails_closed(tmp_path):
+    env_dir = tmp_path / "envs" / "prod"
+    _lost_receipt_widening(env_dir)
+    _shape_generated_groups(env_dir)
+    source = _shape_source(listed_tiers=SHAPE_TIERS[1:])
+    account = {tier: set() for tier in SHAPE_TIERS[1:]}
+    with pytest.raises(rg.Refused, match=f"could not find: {SHAPE_TIERS[0]}"):
+        rg.reports(env_dir, "prod", reader_source=lambda: source,
+                   account_group_source=lambda: account)
+
+
+def test_first_release_account_membership_lookup_error_fails_closed(tmp_path):
+    env_dir = tmp_path / "envs" / "prod"
+    _lost_receipt_widening(env_dir)
+    _shape_generated_groups(env_dir)
+    source = _shape_source(listed_tiers=SHAPE_TIERS[1:])
+
+    def broken():
+        raise RuntimeError("account SCIM unavailable")
+
+    with pytest.raises(rg.Refused, match="account group membership check failed: account SCIM unavailable"):
+        rg.reports(env_dir, "prod", reader_source=lambda: source, account_group_source=broken)
 
 
 def test_a_real_first_release_with_no_tier_select_live_keeps_the_contract_baseline(first_prod):

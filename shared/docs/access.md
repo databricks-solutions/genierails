@@ -121,12 +121,19 @@ group_map = { dev_analysts = "prod_analysts", dev_viewers = "prod_viewers" }
   that is one is refused. Many-to-one mappings are refused (they would merge
   tiers or readers), and so is mapping `account users`.
 - `promote-to` reads only committed files. `rehearse` and `release` check
-  live, before the lock: every group the env names (tiers, readers,
-  `acl_groups`, row-filter groups, mapped or not) and every principal of the
-  committed promoted policies (`data_access/abac.auto.tfvars` and
-  `generated/abac.auto.tfvars`, `to_principals` and `except_principals`)
-  must exist in the workspace, as a group or a service principal
-  (application ID). `account users` is built in and not looked up; the
+  live, before the lock. Groups in the generated `groups` block may exist only
+  at account level on a first deploy: that block is exactly what GenieRails'
+  workspace layer assigns to the workspace, so workspace SCIM cannot see them
+  yet. In `genie_only` mode the workspace layer assigns no groups. Account
+  lookup is fail-closed. An env tier or agent `acl_groups` entry does not by
+  itself cause an assignment; `raw_exempt_principals`, `table_readers`,
+  row-filter groups, and policy-only principals outside the generated group
+  set must already be visible in the workspace. Every principal of the
+  committed promoted policies
+  (`data_access/abac.auto.tfvars` and `generated/abac.auto.tfvars`,
+  `to_principals` and `except_principals`) must satisfy the applicable rule.
+  Service principals remain workspace-checked by application ID.
+  `account users` is built in and not looked up; the
   env's own deployer SP is accepted. Dev's `raw_exempt_principals` are not
   carried into prod policies: promotion replaces them with prod's own. Dev's
   deployer SP isn't either: where a policy exempts it, promotion puts prod's
