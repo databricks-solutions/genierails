@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import hcl2
 import pytest
@@ -752,6 +753,44 @@ def _check(env, existing, account=()):
 def _generated_groups(env, names):
     (env / "generated" / "abac.auto.tfvars").write_text(
         "groups = {\n" + "".join(f"  {json.dumps(name)} = {{}}\n" for name in names) + "}\n")
+
+
+def test_account_group_members_resolves_only_requested_nested_closure(tmp_path, monkeypatch):
+    import databricks.sdk
+
+    env = _env(tmp_path, 'governance_mode = "deterministic"\naccess_tier_groups = ["tier"]\n')
+    (env / "auth.auto.tfvars").write_text(
+        'databricks_account_id = "account"\n'
+        'databricks_client_id = "client"\n'
+        'databricks_client_secret = "secret"\n')
+
+    def member(kind, value):
+        return SimpleNamespace(ref=f"{kind}/{value}", value=value)
+
+    records = [
+        SimpleNamespace(id="tier-id", display_name="tier", members=[member("Groups", "child-id")]),
+        SimpleNamespace(id="child-id", display_name="child", members=[member("Users", "good-user")]),
+        SimpleNamespace(id="stale-id", display_name="unrelated", members=[member("Users", "broken-user")]),
+        SimpleNamespace(id="bad-tier-id", display_name="bad-tier", members=[member("Groups", "bad-child-id")]),
+        SimpleNamespace(id="bad-child-id", display_name="bad-child", members=[member("Users", "broken-user")]),
+    ]
+
+    def user(value):
+        if value == "broken-user":
+            raise RuntimeError("stale account member")
+        return SimpleNamespace(user_name="reader@example.com")
+
+    client = SimpleNamespace(
+        groups=SimpleNamespace(list=lambda **_kwargs: records),
+        users=SimpleNamespace(get=user),
+        service_principals=SimpleNamespace(get=lambda _value: None),
+    )
+    monkeypatch.setattr(databricks.sdk, "AccountClient", lambda **_kwargs: client)
+
+    assert gm.account_group_members(env, ["tier"]) == {
+        "tier": {"child"}, "child": {"reader@example.com"}}
+    with pytest.raises(RuntimeError, match="stale account member"):
+        gm.account_group_members(env, ["bad-tier"])
 
 
 def test_every_resulting_group_must_exist_live_mapped_or_not(tmp_path, capsys):

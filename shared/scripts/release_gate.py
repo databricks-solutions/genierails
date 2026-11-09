@@ -1464,7 +1464,8 @@ def live_release_evidence(env_dir: Path, after: Mapping, inventories,
     account_closure: dict[str, tuple[str, ...]] = {}
     if account_only:
         try:
-            direct = dict((account_group_source or (lambda: group_map.account_group_members(env_dir)))())
+            direct = dict((account_group_source or
+                           (lambda: group_map.account_group_members(env_dir, account_only)))())
         except Exception as exc:
             raise Refused(f"the first-release account group membership check failed: {exc}") from exc
         absent = sorted(account_only - set(direct))

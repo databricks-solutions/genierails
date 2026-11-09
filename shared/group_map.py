@@ -201,8 +201,14 @@ def _account_groups(env_dir: Path) -> list[str]:
     return names
 
 
-def account_group_members(env_dir: Path) -> dict[str, set[str]]:
-    """Account group name -> direct member names, with every member resolved fail-closed."""
+def account_group_members(env_dir: Path, roots: Iterable[str]) -> dict[str, set[str]]:
+    """Direct membership for requested account groups and their nested groups.
+
+    Group records are listed once so roots and nested group IDs can be located,
+    but users and service principals are resolved only inside that reachable
+    closure. Every error inside the closure fails closed; unrelated stale
+    account-group members cannot block a release.
+    """
     from databricks.sdk import AccountClient
 
     auth_path = Path(env_dir) / "auth.auto.tfvars"
@@ -219,6 +225,10 @@ def account_group_members(env_dir: Path) -> dict[str, set[str]]:
     client = AccountClient(host=host, account_id=required["databricks_account_id"],
                            client_id=required["databricks_client_id"],
                            client_secret=required["databricks_client_secret"], auth_type="oauth-m2m")
+    records = list(client.groups.list(attributes="id,displayName,members"))
+    by_name = {str(group.display_name): group for group in records
+               if getattr(group, "display_name", None)}
+    by_id = {str(group.id): group for group in records if getattr(group, "id", None)}
     names: dict[tuple[str, str], str] = {}
 
     def member_name(member) -> str:
@@ -234,17 +244,33 @@ def account_group_members(env_dir: Path) -> dict[str, set[str]]:
             elif kind == "ServicePrincipals":
                 value = getattr(client.service_principals.get(member_id), "application_id", None)
             else:
-                value = getattr(client.groups.get(member_id), "display_name", None)
+                value = getattr(by_id.get(member_id), "display_name", None)
             if not value:
                 raise GroupMapError(f"cannot resolve account {kind} member {member_id!r}")
             names[key] = str(value)
         return names[key]
 
     groups: dict[str, set[str]] = {}
-    for group in client.groups.list(attributes="id,displayName,members"):
-        if not getattr(group, "display_name", None):
+
+    def visit(group) -> None:
+        name = getattr(group, "display_name", None)
+        if not name:
             raise GroupMapError(f"account group {getattr(group, 'id', '?')!r} has no visible name")
-        groups[str(group.display_name)] = {member_name(member) for member in group.members or []}
+        name = str(name)
+        if name in groups:
+            return
+        groups[name] = set()
+        for member in group.members or []:
+            resolved = member_name(member)
+            groups[name].add(resolved)
+            reference = str(getattr(member, "ref", "") or getattr(member, "$ref", "") or "")
+            if "/Groups/" in f"/{reference.lstrip('/')}":
+                visit(by_id[str(getattr(member, "value", "") or "")])
+
+    for root in roots:
+        group = by_name.get(str(root))
+        if group is not None:
+            visit(group)
     return groups
 
 
