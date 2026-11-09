@@ -121,13 +121,15 @@ group_map = { dev_analysts = "prod_analysts", dev_viewers = "prod_viewers" }
   that is one is refused. Many-to-one mappings are refused (they would merge
   tiers or readers), and so is mapping `account users`.
 - `promote-to` reads only committed files. `rehearse` and `release` check
-  live, before the lock. Groups in `access_tier_groups` or an agent's
-  `acl_groups` may exist only at account level on a first deploy: GenieRails'
-  workspace layer assigns those groups to the workspace, so workspace SCIM
-  cannot see them yet. Account lookup is fail-closed. Other references
-  (`table_readers`, row-filter groups, and policy-only principals) do not by
-  themselves cause a workspace assignment and must already be visible in the
-  workspace. Every principal of the committed promoted policies
+  live, before the lock. Groups in the generated `groups` block may exist only
+  at account level on a first deploy: that block is exactly what GenieRails'
+  workspace layer assigns to the workspace, so workspace SCIM cannot see them
+  yet. In `genie_only` mode the workspace layer assigns no groups. Account
+  lookup is fail-closed. An env tier or agent `acl_groups` entry does not by
+  itself cause an assignment; `raw_exempt_principals`, `table_readers`,
+  row-filter groups, and policy-only principals outside the generated group
+  set must already be visible in the workspace. Every principal of the
+  committed promoted policies
   (`data_access/abac.auto.tfvars` and `generated/abac.auto.tfvars`,
   `to_principals` and `except_principals`) must satisfy the applicable rule.
   Service principals remain workspace-checked by application ID.

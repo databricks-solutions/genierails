@@ -23,7 +23,8 @@ from scripts import release_gate as rg
 from scripts import sticky_governance
 from tests import script_stubs
 from tests import test_prod_coverage_gap_fix as uc
-from tests.test_release_gate import DEV_ENV, EMPTY_ABAC, PROD_ENV, Repo
+from tests.test_release_gate import (DEV_ENV, EMPTY_ABAC, PROD_ENV, Repo, SHAPE_DEPLOYER, SHAPE_OWNER,
+                                     SHAPE_TABLES, SHAPE_TIERS, _shape_generated_groups, _write_shape)
 
 ROOT = Path(__file__).resolve().parents[2]
 LEGACY_ENV = 'promote_from = "dev"\n'
@@ -85,6 +86,35 @@ if {name!r} == "reports" and "--plan-dir" in args:
 if {name!r} == "live":
     print(Path({live!r}).read_text().strip())
 sys.exit(int(Path({rc!r}).read_text()) if Path({rc!r}).exists() else 0)
+'''
+
+FIRST_RELEASE_REPORTS = r'''#!{python}
+import json, sys
+from pathlib import Path
+sys.path.insert(0, {shared!r})
+from scripts import release_gate as rg
+from reader_inventory import FakeSource, Grant
+
+args = sys.argv[1:]
+env_dir = Path(args[args.index("--env-dir") + 1])
+env = args[args.index("--env") + 1]
+plan_dir = Path(args[args.index("--plan-dir") + 1])
+tables, tiers = {tables!r}, {tiers!r}
+catalog, schema = tables[0].split(".")[:2]
+schema_name = f"{{catalog}}.{{schema}}"
+owners = {{("CATALOG", catalog): {owner!r}, ("SCHEMA", schema_name): {owner!r}}}
+owners.update({{("TABLE", table): {owner!r} for table in tables}})
+grants = [Grant("CATALOG", catalog, {deployer!r}, "SELECT"),
+          Grant("CATALOG", catalog, {deployer!r}, "MANAGE"),
+          Grant("SCHEMA", schema_name, {deployer!r}, "SELECT")]
+grants += [Grant("TABLE", table, {deployer!r}, "SELECT") for table in tables]
+source = FakeSource(grant_rows=grants, owners=owners, groups={{}}, admins={{{owner!r}}}, deployer={deployer!r})
+report = rg.reports(env_dir, env, reader_source=lambda: source,
+                    account_group_source=lambda: {{tier: set() for tier in tiers}})
+(plan_dir / "reports.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+Path({capture!r}).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+rg.print_reports(report)
+raise SystemExit(0 if report["ok"] else 1)
 '''
 
 
@@ -267,6 +297,37 @@ def test_release_plan_refused_by_the_reports_writes_no_manifest(make, repo):
     assert result.returncode != 0 and "reader or weakening check" in result.stderr
     assert not list(rg.manifests_dir(repo.cloud, "prod").glob("*/manifest.json"))
     assert not list(rg.manifests_dir(repo.cloud, "prod").glob(".pending-*"))
+
+
+def test_first_prod_release_with_account_only_generated_tiers_needs_only_owner_acks(make, repo):
+    _write_shape(repo.dev)
+    _shape_generated_groups(repo.dev)
+    for path in (repo.dev / "env.auto.tfvars", repo.dev / "generated" / "abac.auto.tfvars"):
+        path.write_text(path.read_text().replace("prod_cat", "dev_cat"))
+    _write_shape(repo.prod)
+    _shape_generated_groups(repo.prod)
+    with (repo.prod / "env.auto.tfvars").open("a") as handle:
+        handle.write('promote_from = "dev"\ncatalog_map = { "dev_cat" = "prod_cat" }\n')
+    (repo.prod / "ack.txt").write_text("".join(
+        f"prod:reader:{table}:{SHAPE_OWNER}\n" for table in SHAPE_TABLES))
+    repo.git("add", "-A")
+    repo.git("commit", "-m", "first release shape")
+    repo.git("push", "-q", "origin", "main")
+
+    capture = make.tmp / "first-release-report.json"
+    reports = make._write("first-release-reports", FIRST_RELEASE_REPORTS.format(
+        python=sys.executable, shared=str(ROOT / "shared"), tables=SHAPE_TABLES, tiers=SHAPE_TIERS,
+        owner=SHAPE_OWNER, deployer=SHAPE_DEPLOYER, capture=str(capture)))
+    assert make("rehearse", "dev").returncode == 0
+    make.reset()
+    result = make("release-plan", "prod", stubs={"release_gate.py reports": str(reports)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(capture.read_text())
+    assert report["ok"] and report["first_release_refused"] == []
+    assert report["weakening"]["unacknowledged"] == []
+    acknowledged = {item["ack_key"] for check in report["readers"]["checks"]
+                    for item in check["acknowledged"]}
+    assert acknowledged == {f"prod:reader:{table}:{SHAPE_OWNER}" for table in SHAPE_TABLES}
 
 
 @pytest.mark.parametrize("cloud", ["aws", "azure"])

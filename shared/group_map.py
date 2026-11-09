@@ -16,9 +16,10 @@ and agent checks read the destination's own, mapped config).
 
 promote-to stays a pure function of committed files. What needs the live
 destination runs in rehearse and release (release-plan once it exists):
-``check`` accepts access-tier and agent ACL groups which exist in the account,
-because the workspace layer assigns those groups to a fresh workspace. Other
-principals must already be visible in the workspace. It refuses every
+``check`` accepts groups in the generated ``groups`` block which exist in the
+account, because those are exactly the groups the workspace layer assigns to a
+fresh workspace (unless ``genie_only`` is true). Other principals must already
+be visible in the workspace. It refuses every
 resulting group that meets neither condition, mapped or not, including every
 principal of the committed promoted policies, and ``check-ack`` refuses a changed ``group_map`` (added, removed or
 retargeted mapping, against the one the last apply used) unless each change
@@ -115,18 +116,24 @@ def referenced_groups(cfg: Mapping) -> list[str]:
     return sorted(g for g in groups if isinstance(g, str) and g.lower() not in EVERYONE)
 
 
-def workspace_assigned_groups(cfg: Mapping) -> list[str]:
-    """Groups the workspace Terraform layer assigns, so account presence is enough.
+def workspace_assigned_groups(env_dir: Path, cfg: Mapping | None = None) -> list[str]:
+    """Generated groups Terraform will assign to the workspace on this apply.
 
-    Access tiers receive workspace entitlements and each agent's ``acl_groups``
-    receive a workspace permission assignment. ``table_readers``, row-filter
-    groups and policy-only principals do not independently create an assignment.
+    ``modules/workspace`` creates account permission assignments and workspace
+    entitlements for exactly ``var.groups``. The workspace root receives that
+    map from the generated config; env tiers and agent ACLs are not substitutes
+    for it. ``genie_only`` disables every assignment even if generated groups
+    are present.
     """
-    groups: set[str] = {g for g in cfg.get("access_tier_groups") or [] if isinstance(g, str)}
-    for space in cfg.get("genie_spaces") or []:
-        if isinstance(space, dict):
-            groups.update(g for g in space.get("acl_groups") or [] if isinstance(g, str))
-    return sorted(g for g in groups if g.lower() not in EVERYONE)
+    env_dir = Path(env_dir)
+    cfg = cfg if cfg is not None else _load_hcl(env_dir / "env.auto.tfvars")
+    if cfg.get("genie_only") is True:
+        return []
+    generated = _load_hcl(env_dir / "generated" / "abac.auto.tfvars")
+    groups = generated.get("groups") or {}
+    if not isinstance(groups, dict):
+        raise GroupMapError(f"{env_dir / 'generated' / 'abac.auto.tfvars'}: groups must be a map")
+    return sorted(str(g) for g in groups if str(g).lower() not in EVERYONE)
 
 
 # Committed promotion output whose policies name principals: the split
@@ -192,6 +199,53 @@ def _account_groups(env_dir: Path) -> list[str]:
             raise GroupMapError(f"account group {getattr(group, 'id', '?')!r} has no visible name")
         names.append(str(group.display_name))
     return names
+
+
+def account_group_members(env_dir: Path) -> dict[str, set[str]]:
+    """Account group name -> direct member names, with every member resolved fail-closed."""
+    from databricks.sdk import AccountClient
+
+    auth_path = Path(env_dir) / "auth.auto.tfvars"
+    auth = _load_hcl(auth_path)
+    host = auth.get("databricks_account_host") or "https://accounts.cloud.databricks.com"
+    required = {
+        "databricks_account_id": auth.get("databricks_account_id"),
+        "databricks_client_id": auth.get("databricks_client_id"),
+        "databricks_client_secret": auth.get("databricks_client_secret"),
+    }
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        raise GroupMapError(f"cannot list account group members: {auth_path} is missing {', '.join(missing)}")
+    client = AccountClient(host=host, account_id=required["databricks_account_id"],
+                           client_id=required["databricks_client_id"],
+                           client_secret=required["databricks_client_secret"], auth_type="oauth-m2m")
+    names: dict[tuple[str, str], str] = {}
+
+    def member_name(member) -> str:
+        member_id = str(getattr(member, "value", "") or "")
+        reference = str(getattr(member, "ref", "") or getattr(member, "$ref", "") or "")
+        kind = reference.rstrip("/").rsplit("/", 2)[-2] if "/" in reference.rstrip("/") else ""
+        if not member_id or kind not in {"Users", "ServicePrincipals", "Groups"}:
+            raise GroupMapError(f"account group member {member_id or '?'} has no supported SCIM reference")
+        key = (kind, member_id)
+        if key not in names:
+            if kind == "Users":
+                value = getattr(client.users.get(member_id), "user_name", None)
+            elif kind == "ServicePrincipals":
+                value = getattr(client.service_principals.get(member_id), "application_id", None)
+            else:
+                value = getattr(client.groups.get(member_id), "display_name", None)
+            if not value:
+                raise GroupMapError(f"cannot resolve account {kind} member {member_id!r}")
+            names[key] = str(value)
+        return names[key]
+
+    groups: dict[str, set[str]] = {}
+    for group in client.groups.list(attributes="id,displayName,members"):
+        if not getattr(group, "display_name", None):
+            raise GroupMapError(f"account group {getattr(group, 'id', '?')!r} has no visible name")
+        groups[str(group.display_name)] = {member_name(member) for member in group.members or []}
+    return groups
 
 
 def applied_record_path(env_dir: Path) -> Path:
@@ -285,18 +339,18 @@ def main(argv: list[str] | None = None, lister: Callable[[Path], Iterable[str]] 
         deployer = str(cfg.get("deployer_principal_id") or "")
         workspace_names = set(lister(args.env_dir)) if not problems else set()
         all_missing = missing_groups(cfg, workspace_names, policy_names, deployer) if not problems else []
-        assignable_missing = sorted(set(all_missing) & set(workspace_assigned_groups(cfg)))
+        assignable_missing = sorted(set(all_missing) & set(workspace_assigned_groups(args.env_dir, cfg)))
         account_names = set(account_lister(args.env_dir)) if assignable_missing else set()
         account_missing = sorted(set(assignable_missing) - account_names)
         workspace_missing = sorted(set(all_missing) - set(assignable_missing))
         unacked = ack_problems(args.env_dir, args.env, cfg) if not problems else []
+        from scripts.release_gate import PROMOTED, env_role
+        promoted = env_role(args.env_dir) == PROMOTED
     except Exception as exc:  # an unreadable account or ack file never passes
         print(f"ERROR: {args.command_name} refused: the group check could not run: {exc}", file=sys.stderr)
         return 2
     for problem in problems:
         print(f"ERROR: {args.command_name} refused: {problem}", file=sys.stderr)
-    from scripts.release_gate import PROMOTED, env_role
-    promoted = env_role(args.env_dir) == PROMOTED
     if account_missing:
         where = " after group_map" if promoted else ""
         action = ("Correct group_map in env.auto.tfvars, sync the mapped groups into this account, and re-run "
@@ -309,8 +363,8 @@ def main(argv: list[str] | None = None, lister: Callable[[Path], Iterable[str]] 
         where = (f" ({', '.join(in_policies)} named in the promoted policies)" if in_policies else "")
         action = ("Correct group_map and re-run make promote-to, or assign the existing account group to the "
                   "workspace before retrying." if promoted else
-                  "If GenieRails should assign it, add it to access_tier_groups or an agent's acl_groups; "
-                  "otherwise assign the existing account group to this workspace before retrying.")
+                  "Regenerate so the intended tier is present in the generated groups block, or assign the "
+                  "existing account group to this workspace before retrying.")
         print(f"ERROR: {args.command_name} refused: these groups aren't visible in the {args.env} workspace "
               f"and won't be assigned by GenieRails' workspace layer: {', '.join(workspace_missing)}{where}. "
               f"{action}", file=sys.stderr)
