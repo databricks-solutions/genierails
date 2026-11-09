@@ -744,16 +744,58 @@ row_filters = [{ table = "c.s.t", column = "r", values_by_group = { prod_rf = ["
 '''
 
 
-def _check(env, existing):
+def _check(env, existing, account=()):
     return gm.main(["check", "--env-dir", str(env), "--env", "prod", "--command-name", "make release"],
-                   lister=lambda _d: existing)
+                   lister=lambda _d: existing, account_lister=lambda _d: account)
 
 
 def test_every_resulting_group_must_exist_live_mapped_or_not(tmp_path, capsys):
     env = _env(tmp_path, MAPPED_PROD, name="prod")
     assert _check(env, ["prod_raw", "prod_partial", "full", "prod_rf"]) == 0
     assert _check(env, ["prod_raw", "prod_partial", "prod_rf"]) == 1  # unmapped "full" is missing
-    assert "don't exist in prod (after group_map): full" in capsys.readouterr().err
+    assert "don't exist in the Databricks account after group_map: full" in capsys.readouterr().err
+
+
+def test_first_deploy_accepts_account_groups_the_workspace_layer_will_assign(tmp_path):
+    """Fresh IdP groups are account-visible before workspace SCIM can see them."""
+    env = _env(tmp_path, MAPPED_PROD, name="prod")
+    (env / "data_access" / "abac.auto.tfvars").write_text('''fgac_policies = [{
+      name = "p", policy_type = "POLICY_TYPE_COLUMN_MASK", catalog = "c",
+      to_principals = ["prod_partial"], except_principals = ["prod_raw", "full"]
+    }]\n''')
+    # Only the unmanaged row-filter group is already workspace-visible. The
+    # access tiers and agent ACL are deliberately absent from workspace SCIM.
+    assert _check(env, ["prod_rf"], account=["prod_raw", "prod_partial", "full"]) == 0
+
+
+def test_account_missing_workspace_assigned_group_still_refuses(tmp_path, capsys):
+    env = _env(tmp_path, MAPPED_PROD, name="prod")
+    assert _check(env, ["prod_rf"], account=["prod_raw", "prod_partial"]) == 1
+    err = capsys.readouterr().err
+    assert "Databricks account after group_map: full" in err
+    assert "group_map" in err and "make promote-to" in err
+
+
+def test_account_lookup_error_for_workspace_assigned_group_fails_closed(tmp_path, capsys):
+    env = _env(tmp_path, MAPPED_PROD, name="prod")
+
+    def broken(_d):
+        raise RuntimeError("account SCIM unavailable")
+
+    assert gm.main(["check", "--env-dir", str(env), "--env", "prod"],
+                   lister=lambda _d: ["prod_rf"], account_lister=broken) == 2
+    assert "group check could not run: account SCIM unavailable" in capsys.readouterr().err
+
+
+def test_source_missing_group_message_does_not_suggest_promotion(tmp_path, capsys):
+    env = _env(tmp_path, MAPPED_PROD.replace(
+        'group_map = { dev_raw = "prod_raw", dev_partial = "prod_partial" }\n', ''), name="dev")
+    assert gm.main(["check", "--env-dir", str(env), "--env", "dev", "--command-name", "make rehearse"],
+                   lister=lambda _d: ["prod_rf"], account_lister=lambda _d: []) == 1
+    err = capsys.readouterr().err
+    assert "don't exist in the Databricks account:" in err
+    assert "Sync these exact IdP group names" in err
+    assert "group_map" not in err and "promote-to" not in err
 
 
 POLICY_ONLY = '''fgac_policies = [
@@ -806,9 +848,9 @@ def test_a_principal_named_only_in_a_promoted_policy_must_exist_live(tmp_path, c
     (env / "data_access" / "abac.auto.tfvars").write_text(POLICY_ONLY)
     assert _check(env, LIVE) == 1
     err = capsys.readouterr().err
-    assert "prod_policy_only" in err and "don't exist in prod" in err
+    assert "prod_policy_only" in err and "aren't visible in the prod workspace" in err
     # account users (the full policy's target) is built in, never looked up.
-    assert "account users" not in err.split("don't exist in prod", 1)[1]
+    assert "account users" not in err.split("aren't visible in the prod workspace", 1)[1]
     assert _check(env, LIVE + ["prod_policy_only"]) == 0
 
 

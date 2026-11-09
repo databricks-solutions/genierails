@@ -16,8 +16,11 @@ and agent checks read the destination's own, mapped config).
 
 promote-to stays a pure function of committed files. What needs the live
 destination runs in rehearse and release (release-plan once it exists):
-``check`` refuses any resulting group that doesn't exist there, mapped or
-not, including every principal of the committed promoted policies, and ``check-ack`` refuses a changed ``group_map`` (added, removed or
+``check`` accepts access-tier and agent ACL groups which exist in the account,
+because the workspace layer assigns those groups to a fresh workspace. Other
+principals must already be visible in the workspace. It refuses every
+resulting group that meets neither condition, mapped or not, including every
+principal of the committed promoted policies, and ``check-ack`` refuses a changed ``group_map`` (added, removed or
 retargeted mapping, against the one the last apply used) unless each change
 is acknowledged as ``<env>:weaken:group_map:<dev>=<target>`` in
 ``envs/<env>/ack.txt`` (for a removed mapping the target is the dev group
@@ -112,6 +115,20 @@ def referenced_groups(cfg: Mapping) -> list[str]:
     return sorted(g for g in groups if isinstance(g, str) and g.lower() not in EVERYONE)
 
 
+def workspace_assigned_groups(cfg: Mapping) -> list[str]:
+    """Groups the workspace Terraform layer assigns, so account presence is enough.
+
+    Access tiers receive workspace entitlements and each agent's ``acl_groups``
+    receive a workspace permission assignment. ``table_readers``, row-filter
+    groups and policy-only principals do not independently create an assignment.
+    """
+    groups: set[str] = {g for g in cfg.get("access_tier_groups") or [] if isinstance(g, str)}
+    for space in cfg.get("genie_spaces") or []:
+        if isinstance(space, dict):
+            groups.update(g for g in space.get("acl_groups") or [] if isinstance(g, str))
+    return sorted(g for g in groups if g.lower() not in EVERYONE)
+
+
 # Committed promotion output whose policies name principals: the split
 # data_access config Terraform applies and the generated config it comes from.
 PROMOTED_CONFIGS = (Path("data_access") / "abac.auto.tfvars", Path("generated") / "abac.auto.tfvars")
@@ -148,6 +165,32 @@ def _workspace_groups(env_dir: Path) -> list[str]:
     for sp in client.service_principals.list(attributes="applicationId"):
         if getattr(sp, "application_id", None):
             names.append(str(sp.application_id))
+    return names
+
+
+def _account_groups(env_dir: Path) -> list[str]:
+    """Account group display names, using the same account source as generate's IdP preflight."""
+    from databricks.sdk import AccountClient
+
+    auth_path = Path(env_dir) / "auth.auto.tfvars"
+    auth = _load_hcl(auth_path)
+    host = auth.get("databricks_account_host") or "https://accounts.cloud.databricks.com"
+    required = {
+        "databricks_account_id": auth.get("databricks_account_id"),
+        "databricks_client_id": auth.get("databricks_client_id"),
+        "databricks_client_secret": auth.get("databricks_client_secret"),
+    }
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        raise GroupMapError(f"cannot list account groups: {auth_path} is missing {', '.join(missing)}")
+    client = AccountClient(host=host, account_id=required["databricks_account_id"],
+                           client_id=required["databricks_client_id"],
+                           client_secret=required["databricks_client_secret"], auth_type="oauth-m2m")
+    names = []
+    for group in client.groups.list(attributes="displayName"):
+        if not getattr(group, "display_name", None):
+            raise GroupMapError(f"account group {getattr(group, 'id', '?')!r} has no visible name")
+        names.append(str(group.display_name))
     return names
 
 
@@ -217,7 +260,8 @@ def record_applied(env_dir: Path, cfg: Mapping) -> None:
     path.write_text(json.dumps({SETTING: mapping(cfg)}, indent=2, sort_keys=True) + "\n")
 
 
-def main(argv: list[str] | None = None, lister: Callable[[Path], Iterable[str]] = _workspace_groups) -> int:
+def main(argv: list[str] | None = None, lister: Callable[[Path], Iterable[str]] = _workspace_groups,
+         account_lister: Callable[[Path], Iterable[str]] = _account_groups) -> int:
     shared = Path(__file__).resolve().parent
     if str(shared) not in sys.path:
         sys.path.insert(0, str(shared))
@@ -239,25 +283,43 @@ def main(argv: list[str] | None = None, lister: Callable[[Path], Iterable[str]] 
         problems = validation_errors(cfg)
         policy_names = policy_principals(args.env_dir) if not problems else []
         deployer = str(cfg.get("deployer_principal_id") or "")
-        missing = missing_groups(cfg, lister(args.env_dir), policy_names, deployer) if not problems else []
+        workspace_names = set(lister(args.env_dir)) if not problems else set()
+        all_missing = missing_groups(cfg, workspace_names, policy_names, deployer) if not problems else []
+        assignable_missing = sorted(set(all_missing) & set(workspace_assigned_groups(cfg)))
+        account_names = set(account_lister(args.env_dir)) if assignable_missing else set()
+        account_missing = sorted(set(assignable_missing) - account_names)
+        workspace_missing = sorted(set(all_missing) - set(assignable_missing))
         unacked = ack_problems(args.env_dir, args.env, cfg) if not problems else []
     except Exception as exc:  # an unreadable account or ack file never passes
         print(f"ERROR: {args.command_name} refused: the group check could not run: {exc}", file=sys.stderr)
         return 2
     for problem in problems:
         print(f"ERROR: {args.command_name} refused: {problem}", file=sys.stderr)
-    if missing:
-        in_policies = [name for name in missing if name in set(policy_names)]
+    from scripts.release_gate import PROMOTED, env_role
+    promoted = env_role(args.env_dir) == PROMOTED
+    if account_missing:
+        where = " after group_map" if promoted else ""
+        action = ("Correct group_map in env.auto.tfvars, sync the mapped groups into this account, and re-run "
+                  "make promote-to." if promoted else
+                  "Sync these exact IdP group names into this Databricks account, then re-run the command.")
+        print(f"ERROR: {args.command_name} refused: these workspace-assigned groups don't exist in the "
+              f"Databricks account{where}: {', '.join(account_missing)}. {action}", file=sys.stderr)
+    if workspace_missing:
+        in_policies = [name for name in workspace_missing if name in set(policy_names)]
         where = (f" ({', '.join(in_policies)} named in the promoted policies)" if in_policies else "")
-        print(f"ERROR: {args.command_name} refused: these groups don't exist in {args.env} "
-              f"(after group_map): {', '.join(missing)}{where}. Create them, or map the dev names with "
-              "group_map in env.auto.tfvars and re-run make promote-to.", file=sys.stderr)
+        action = ("Correct group_map and re-run make promote-to, or assign the existing account group to the "
+                  "workspace before retrying." if promoted else
+                  "If GenieRails should assign it, add it to access_tier_groups or an agent's acl_groups; "
+                  "otherwise assign the existing account group to this workspace before retrying.")
+        print(f"ERROR: {args.command_name} refused: these groups aren't visible in the {args.env} workspace "
+              f"and won't be assigned by GenieRails' workspace layer: {', '.join(workspace_missing)}{where}. "
+              f"{action}", file=sys.stderr)
     if unacked:
         print(f"ERROR: {args.command_name} refused: group_map changed since the last apply, which is a "
               f"weakening. Review, then add to {args.env_dir / 'ack.txt'}:", file=sys.stderr)
         for line in unacked:
             print(f"  {line}", file=sys.stderr)
-    return 1 if problems or missing or unacked else 0
+    return 1 if problems or account_missing or workspace_missing or unacked else 0
 
 
 if __name__ == "__main__":
