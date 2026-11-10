@@ -371,27 +371,6 @@ def _abandoned_first_deploy(journal: dict, target: str) -> bool:
                 and history[-1].get("abandoned") == target and history[-1].get("run_id"))
 
 
-def _verified_import_only_phase(env_dir: Path, env_name: str) -> tuple[bool, str]:
-    """Prove that the current release has applied only recorded imports so far."""
-    try:
-        from scripts import release_gate as rg
-
-        cloud = rg.cloud_dir_of(env_dir)
-        epoch = rg.release_epoch(cloud, env_name, create=False)
-        linked, unlinked, _, ignored = rg.release_phases(env_dir, env_name, epoch)
-        if unlinked or ignored:
-            return False, "the release has unverified phase or receipt records"
-        for manifest_id in reversed(linked):
-            path = rg.manifests_dir(cloud, env_name) / manifest_id / "manifest.json"
-            manifest = rg.load_manifest(path, env_name)
-            data_access = ((manifest.get("plans") or {}).get("data_access") or {})
-            if data_access.get("imports_only") and (manifest.get("imports") or {}).get("count", 0) > 0:
-                return True, f"verified imports-only release phase {manifest_id}"
-        return False, "no verified imports-only release phase exists"
-    except Exception as exc:
-        return False, f"could not verify an imports-only release phase ({exc})"
-
-
 def _unrecorded_first_release(env_dir: Path, env_name: str, stage: str,
                               journal: dict | None, target: str) -> tuple[bool, str]:
     """Whether release-plan can treat an unjournaled empty generation as the env's first release."""
@@ -408,8 +387,10 @@ def _unrecorded_first_release(env_dir: Path, env_name: str, stage: str,
         receipt, problem = rg.newest_release_receipt(rg.cloud_dir_of(env_dir), env_name)
     except Exception as exc:
         return False, f"could not prove this is the env's first release ({exc})"
-    if live.get("policies"):
-        return False, "the data_access state already holds deterministic policies"
+    if live.get("policies") or live.get("tags"):
+        return False, ("the data_access state already holds deterministic policies or treatment tags; tags in "
+                       "state without a verifying policy journal are not treated as a first release, and SELECT "
+                       "stays withheld until the grant phase")
     if problem:
         return False, f"the newest release receipt is invalid ({problem})"
     if receipt:
@@ -420,12 +401,6 @@ def _unrecorded_first_release(env_dir: Path, env_name: str, stage: str,
         return False, f"could not prove SELECT is still withheld ({exc})"
     if grants:
         return False, f"the data_access state already grants SELECT on {', '.join(sorted(grants)[:5])}"
-    if live.get("tags"):
-        imported, import_reason = _verified_import_only_phase(env_dir, env_name)
-        if not imported:
-            return False, ("the data_access state holds treatment tags without a deterministic policy, but "
-                           f"{import_reason}")
-        return True, f"{import_reason}; no deterministic policy, SELECT grant, or prior release receipt"
     why = "matching first-deploy abandon history; " if abandoned else ""
     return True, why + "no live deterministic generation, SELECT grant, or prior release receipt"
 
