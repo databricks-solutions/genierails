@@ -240,3 +240,27 @@ def test_reference_scopes_the_direct_release_and_apply_paths_to_legacy():
     assert rg.APPLY_OWNERS[rg.PROMOTED]["apply-governance"] == ("maintain",)
     assert rg.APPLY_OWNERS[rg.REHEARSE]["apply"] == ("rehearse",)
     assert rg.APPLY_OWNERS[rg.REHEARSE]["apply-governance"] == ("rehearse", "ungovern")
+
+
+def test_the_evidence_docs_say_what_the_approval_header_proves_and_what_it_cannot():
+    """The header names the terminal and what started make, and never claims a human typed the y."""
+    doc = EVIDENCE_DOC.read_text()
+    for phrase in ("terminal (its device name, e.g. `ttys004`)", "by command name only (no arguments, paths or "
+                   "environment)", "`via make <- zsh <- login (make started from a shell)`",
+                   "`via make <- python3 <- zsh (make started by python3, not a shell: a script or driver)`",
+                   "`process chain not recorded`", "`self-reported: GenieRails cannot prove a human typed it`",
+                   "`unverified: <why>` and names no one"):
+        assert phrase in doc, phrase
+    reference = REFERENCE.read_text()
+    bullet = next(line for line in reference.splitlines() if line.startswith("- Evidence (walkthrough Prod step 5"))
+    assert "`make started by python3, not a shell: a script or driver`" in bullet
+    assert "GenieRails cannot prove a human typed it" in bullet and "`unverified: <why>`" in bullet
+    row = next(line for line in (SHARED.parent / "REFERENCE.md").read_text().splitlines()
+               if line.startswith("| `make evidence` |"))
+    assert "GenieRails cannot prove a human typed it" in row and "`unverified: <why>`" in row
+    assert "`not a shell: a script or driver`" in row
+    details = _section(DETAILS.read_text(), "## Prod step 5: Record evidence", "## Keep it healthy")
+    assert "`make started by python3, not a shell`" in details
+    assert "GenieRails cannot prove a human typed it" in details
+    for text in (doc, bullet, row, details):
+        assert "y typed at a terminal, self-reported" not in text

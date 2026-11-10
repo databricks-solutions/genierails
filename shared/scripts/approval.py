@@ -11,7 +11,14 @@ record, because approval can happen outside GenieRails (a pipeline's approval
 step, a reviewer). Their receipts then say ``{"via": "external"}``. A forged
 record forges only that audit trail; it never bypasses a check, since every
 check stays in the primitives. A record is honest about being self-reported:
-the OS user name and the git identity of the person at the terminal.
+the OS user name and the git identity of the person at the terminal, the
+terminal, and ``process_chain``: the command names (basenames, no pids,
+arguments or environment) of the make that asked and up to
+CHAIN_ABOVE_MAKE of its ancestors, nearest first (e.g. ``["make", "zsh",
+"login"]``, or ``["make", "python3", ...]`` when a script started make). A
+shell above make doesn't prove a person typed the y either: a driver can run
+a shell on a terminal it controls. Records written before process_chain
+existed have no such field and still count.
 
 Nothing approves without a person at a terminal: there is no flag, variable or
 answer file that says yes. ``interactive`` is true only when all of these hold:
@@ -121,6 +128,9 @@ APPROVALS_DIR = "approvals"
 INTERACTIVE_ENV = "GENIERAILS_INTERACTIVE"
 RUN_ENV = "GENIERAILS_APPROVAL_RUN"  # the consumer's per-run nonce (module docstring)
 MAKES = frozenset({"make", "gmake", "gnumake"})
+SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "fish", "tcsh", "csh"})
+CHAIN_ABOVE_MAKE = 3  # how many of the asking make's ancestors a record names
+_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-")
 SUFFIX = "[y/N]"
 YES_ANSWERS = ("y", "yes")
 ERROR = 3
@@ -286,6 +296,19 @@ def _asker(chain: list[tuple[int, str]]) -> dict:
     raise Refused("the prompt didn't run in a make recipe (no make above it); nothing was approved")
 
 
+def command_name(name: object) -> str:
+    """A process's command name as a record (and the evidence header) may show it: its basename, made only of
+    letters, digits and ``._+-``, at most 32 characters; anything else is ``?``."""
+    text = os.path.basename(str(name or "").strip()).lstrip("-") if isinstance(name, str) else ""
+    return text if 0 < len(text) <= 32 and set(text) <= _NAME_CHARS else "?"
+
+
+def process_chain(chain: list[tuple[int, str]], asker: Mapping) -> list[str]:
+    """The record's ``process_chain``: the asking make and up to CHAIN_ABOVE_MAKE ancestors, names only."""
+    index = next(i for i, (pid, _) in enumerate(chain) if pid == asker["make_pid"])
+    return [command_name(name) for _, name in chain[index:index + 1 + CHAIN_ABOVE_MAKE]]
+
+
 def _asked_above(asker) -> None:
     """Refuse unless the record's asker still runs above this process, directly under the same make."""
     chain = _chain(os.getppid())
@@ -417,7 +440,8 @@ def record(env_dir: Path, env: str, manifest_path: Path, question: str, *, run: 
     if not interactive(environ, stdin, stdout):
         raise Refused(NOT_A_TERMINAL)
     run = run_of((os.environ if environ is None else environ) if run is None else {RUN_ENV: run})
-    asker = _asker(_chain(os.getpid()))
+    chain = _chain(os.getpid())
+    asker = _asker(chain)
     env_dir, manifest_path = Path(env_dir), Path(manifest_path).resolve()
     if expected_manifest_sha256 is None:
         manifest, digest = _load_manifest(env_dir, env, manifest_path), manifest_sha256(manifest_path)
@@ -430,7 +454,7 @@ def record(env_dir: Path, env: str, manifest_path: Path, question: str, *, run: 
         "manifest_sha256": digest, "commit": manifest["commit"],
         "via": VIA_TERMINAL, "user": _user(), "git_user": _git_user(env_dir), "host": socket.gethostname(),
         "tty": _tty(), "approved_at": approved_at, "question": prompt(question), "round": round_no,
-        "run_sha256": run_sha256(run), "asker": asker,
+        "run_sha256": run_sha256(run), "asker": asker, "process_chain": process_chain(chain, asker),
     }
     directory = _private_dir(approvals_dir(env_dir, env))
     stamp = approved_at.replace(":", "").replace(".", "")
@@ -509,9 +533,18 @@ def _read_private(path: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-# What a reader outside the apply may show of a record (evidence_report): never its question, tty, host,
-# run digest or asker.
-IDENTITY_FIELDS = ("user", "git_user", "approved_at")
+# What a reader outside the apply may show of a record (evidence_report): never its question, host, run
+# digest or asker (pids); the tty only as its device name (terminal_name), process_chain as recorded (names).
+IDENTITY_FIELDS = ("user", "git_user", "approved_at", "tty", "process_chain")
+
+
+def terminal_name(tty: object) -> str:
+    """A record's tty as a reader may show it: ``ttys004`` or ``pts/3`` (never a path); '' when unrecorded."""
+    text = str(tty or "") if isinstance(tty, str) else ""
+    rest = text.removeprefix("/dev/")
+    if rest.startswith("pts/") and command_name(rest[4:]) == rest[4:]:
+        return rest
+    return command_name(text) if text else ""
 
 
 def embedded_problem(env_dir: Path, env: str, receipt: Mapping) -> str:
