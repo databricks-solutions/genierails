@@ -259,14 +259,16 @@ def _manifest(env_dir: Path, cloud: str = "aws", env: str = "prod") -> dict:
     return {"id": MANIFEST_ID, "path": str(path), "sha256": rg.sha256_file(path)}
 
 
-def _terminal_approval(env_dir: Path, manifest: dict) -> dict:
-    """What approval.embed() returns for a y at the terminal: the record, plus its path and sha256."""
+def _terminal_approval(env_dir: Path, manifest: dict, extra: dict | None = None) -> dict:
+    """What approval.embed() returns for a y at the terminal: the record, plus its path and sha256.
+
+    With no ``extra`` it is a record from before process_chain (#314's shape)."""
     from scripts import approval as approvals
 
     record = {"kind": approvals.KIND, "version": approvals.VERSION, "env": "prod", "via": "terminal",
               "manifest_kind": "release-manifest", "manifest_id": manifest["id"],
               "manifest_path": manifest["path"], "manifest_sha256": manifest["sha256"], "commit": COMMIT,
-              "round": 1, **IDENTITY, **PRIVATE}
+              "round": 1, **IDENTITY, **PRIVATE, **(extra or {})}
     directory = approvals.approvals_dir(env_dir, "prod")
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = directory / f"{manifest['id']}-20261105T002510.json"
@@ -276,7 +278,7 @@ def _terminal_approval(env_dir: Path, manifest: dict) -> dict:
 
 
 def _receipt(env_dir: Path, approval="terminal", *, phases=None, cloud="aws", env="prod", name=RECEIPT,
-             manifest=None, raw=None) -> Path:
+             manifest=None, raw=None, record=None) -> Path:
     directory = rg.release_dir(env_dir.parents[1], "prod")
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
@@ -287,7 +289,7 @@ def _receipt(env_dir: Path, approval="terminal", *, phases=None, cloud="aws", en
     receipt = {"kind": "release", "version": rg.VERSION, "env": env, "cloud": cloud, "commit": COMMIT,
                "manifest": manifest, "created_at": "2026-11-05T00:26:41.298188Z"}
     if approval == "terminal":
-        receipt["approval"] = _terminal_approval(env_dir, manifest)
+        receipt["approval"] = _terminal_approval(env_dir, manifest, record)
     elif approval is not None:
         receipt["approval"] = approval
     if phases is not None:
@@ -313,8 +315,11 @@ def test_the_header_reads_the_terminal_approval_from_the_release_receipt(tmp_pat
     env_dir = _prod(tmp_path, monkeypatch)
     _receipt(env_dir, phases={"p1": {"via": "terminal"}, "p2": {"via": "terminal"}, "p3": {"via": "external"}})
     header, markdown = _evidence(env_dir)
-    assert header["approved_by"] == ("Louis Chen <louis@example.com> (OS user louis.chen; y typed at a terminal, "
-                                     "self-reported)")
+    assert header["approved_by"] == ("Louis Chen <louis@example.com> (y typed on terminal ttys004 by OS user "
+                                     "louis.chen; process chain not recorded; self-reported: GenieRails cannot "
+                                     "prove a human typed it)")
+    assert header["approval_record"]["terminal"] == "ttys004"
+    assert header["approval_record"]["process_chain"] == "not recorded"
     assert header["approved_at"] == "2026-11-05T00:25:10.000000Z"
     assert header["approval_record"]["receipt"] == RECEIPT
     assert header["approval_record"]["phase_approvals"] == {"external": 1, "terminal": 2}
@@ -323,6 +328,69 @@ def test_the_header_reads_the_terminal_approval_from_the_release_receipt(tmp_pat
     assert (f"- Approval record: release receipt `{RECEIPT}` (commit `6d463a4340c8`; "
             "final round: terminal, earlier phases: 1 external, 2 terminal)") in markdown
     _no_private_fields(header, markdown)
+
+
+SELF_REPORTED = "self-reported: GenieRails cannot prove a human typed it)"
+
+
+def test_a_y_at_a_terminal_under_make_from_a_shell_names_the_shell(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    _receipt(env_dir, record={"process_chain": ["make", "zsh", "login"]})
+    header, markdown = _evidence(env_dir)
+    assert header["approved_by"] == ("Louis Chen <louis@example.com> (y typed on terminal ttys004 by OS user "
+                                     "louis.chen; via make <- zsh <- login (make started from a shell); "
+                                     + SELF_REPORTED)
+    assert header["approval_record"]["process_chain"] == ["make", "zsh", "login"]
+    assert f"- Approved by: `{header['approved_by']}`" in markdown
+    _no_private_fields(header, markdown)
+
+
+def test_a_y_at_a_terminal_under_make_started_by_a_python_driver_says_not_a_shell(tmp_path, monkeypatch):
+    """aws-5: a driver ran make on a pty and typed the y after the owner approved in chat."""
+    env_dir = _prod(tmp_path, monkeypatch)
+    _receipt(env_dir, record={"tty": "/dev/pts/7", "process_chain": ["make", "python3", "zsh"]})
+    header, markdown = _evidence(env_dir)
+    assert header["approved_by"] == ("Louis Chen <louis@example.com> (y typed on terminal pts/7 by OS user "
+                                     "louis.chen; via make <- python3 <- zsh (make started by python3, not a "
+                                     "shell: a script or driver); " + SELF_REPORTED)
+    assert "/dev/pts" not in json.dumps(header) + markdown
+    _no_private_fields(header, markdown)
+
+
+@pytest.mark.parametrize("chain, shown", [
+    (["/usr/local/bin/make", "/opt/homebrew/bin/python3.12"],
+     "via make <- python3.12 (make started by python3.12, not a shell: a script or driver)"),
+    (["make", "python3 driver.py --token=s3cr3t", "zsh"], "via make <- ? <- zsh (make started by ?, not a shell"),
+    (["make", "-bash"], "via make <- bash (make started from a shell)"),
+    (["make"], "via make (what started make not recorded)"),
+    (["make", "a", "b", "c", "d", "e"], "via make <- a <- b <- c (make started by a"),
+    ("make <- zsh", "process chain not recorded"),
+    ([], "process chain not recorded"),
+])
+def test_the_process_chain_shows_only_bounded_basenames(tmp_path, monkeypatch, chain, shown):
+    env_dir = _prod(tmp_path, monkeypatch)
+    _receipt(env_dir, record={"process_chain": chain})
+    header, markdown = _evidence(env_dir)
+    assert shown in header["approved_by"] and header["approved_by"].endswith(SELF_REPORTED), header["approved_by"]
+    everything = json.dumps(header) + markdown
+    assert "s3cr3t" not in everything and "/usr/local" not in everything and "/opt/homebrew" not in everything
+    assert " d " not in header["approved_by"] and "<- e" not in header["approved_by"]
+
+
+def test_an_edited_process_chain_or_tty_fails_its_record_digest(tmp_path, monkeypatch):
+    """A receipt (or record) rewritten to claim a shell parent is unverified, like any edited field."""
+    env_dir = _prod(tmp_path, monkeypatch)
+    path = _receipt(env_dir, record={"process_chain": ["make", "python3", "zsh"]})
+    approval = json.loads(path.read_text())["approval"]
+    _forge(path, approval=approval | {"process_chain": ["make", "zsh"]})
+    _unverified(env_dir, "its approval field differs from the record it embedded")
+    _forge(path, approval=approval | {"tty": "/dev/console"})
+    _unverified(env_dir, "its approval field differs from the record it embedded")
+    record = Path(approval["record"])
+    record.write_text(json.dumps(json.loads(record.read_text()) | {"process_chain": ["make", "zsh"]}))
+    record.chmod(0o600)
+    _forge(path, approval=approval | {"process_chain": ["make", "zsh"]})
+    _unverified(env_dir, "sha256 isn't the one the receipt embedded")
 
 
 def test_an_external_approval_says_so(tmp_path, monkeypatch):

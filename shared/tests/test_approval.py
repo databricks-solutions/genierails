@@ -200,7 +200,8 @@ def test_record_is_written_once_0600_in_a_0700_dir_and_says_who_approved(repo, m
         "manifest_id": m["id"], "manifest_path": str(manifest.resolve()), "manifest_sha256": rg.sha256_file(manifest),
         "commit": repo.head(), "via": "terminal", "user": "", "git_user": {}, "host": data["host"], "tty": "",
         "approved_at": "", "question": f"{QUESTION} [y/N] ", "round": 2,
-        "run_sha256": approval.run_sha256(NONCE), "asker": {"pid": 4242, "make_pid": 4241}}
+        "run_sha256": approval.run_sha256(NONCE), "asker": {"pid": 4242, "make_pid": 4241},
+        "process_chain": ["make", "zsh"]}
     assert data["user"] and data["approved_at"] >= m["created_at"]
     assert set(data["git_user"]) == {"name", "email"}
 
@@ -478,6 +479,27 @@ def test_the_asker_is_the_nearest_process_directly_under_a_make():
     assert approval._asker([(20, "python3"), (19, "make"), (1, "launchd")]) == {"pid": 20, "make_pid": 19}
 
 
+def test_the_process_chain_is_the_asking_make_and_up_to_three_ancestors_names_only():
+    chain = [(12, "python3"), (11, "sh"), (10, "make"), (9, "Python"), (8, "-zsh"), (7, "login"), (6, "launchd")]
+    asker = approval._asker(chain)
+    assert approval.process_chain(chain, asker) == ["make", "Python", "zsh", "login"]
+    assert approval.process_chain([(20, "python3"), (19, "make")], {"pid": 20, "make_pid": 19}) == ["make"]
+    # ps names are basenames already; anything else a process can call itself is never recorded as is.
+    assert [approval.command_name(n) for n in ("/usr/bin/make", "python3.12", "a b", "x" * 33, "", None, 7,
+                                               "tmux: server", "../..", "node")] == [
+        "make", "python3.12", "?", "?", "?", "?", "?", "?", "..", "node"]
+    assert approval.SHELLS >= {"sh", "bash", "zsh"} and not approval.SHELLS & {"python3", "make", "node"}
+
+
+def test_a_terminal_is_shown_by_its_device_name_only():
+    assert approval.terminal_name("/dev/ttys004") == "ttys004"
+    assert approval.terminal_name("/dev/pts/3") == "pts/3"
+    assert approval.terminal_name("/home/u/../dev/pts/x y") == "?"
+    assert approval.terminal_name("") == "" and approval.terminal_name(None) == ""
+    assert "tty" in approval.IDENTITY_FIELDS and "process_chain" in approval.IDENTITY_FIELDS
+    assert not {"question", "host", "run_sha256", "asker", "manifest_path"} & set(approval.IDENTITY_FIELDS)
+
+
 def test_the_run_nonce_is_32_lowercase_hex_and_fresh_each_time():
     first, second = approval.new_run(), approval.new_run()
     assert first != second and approval.run_of({approval.RUN_ENV: first}) == first
@@ -738,6 +760,10 @@ def test_approve_on_a_terminal_writes_the_record_only_on_y(repo, manifest, tmp_p
     data = json.loads(record.read_text())
     assert data["via"] == "terminal" and data["round"] == 3 and data["tty"].startswith("/dev/")
     assert data["run_sha256"] == approval.run_sha256(NONCE)
+    # The real chain above the recorder: the asking make first, then what started it (here pytest), names only.
+    names = data["process_chain"]
+    assert names[0] == "make" and 2 <= len(names) <= 1 + approval.CHAIN_ABOVE_MAKE, names
+    assert all(name == approval.command_name(name) != "?" and "/" not in name for name in names), names
     # The recipe that asked (the shell running it), directly under the top-level make.
     asker = data["asker"]
     assert set(asker) == {"pid", "make_pid"} and asker["pid"] != asker["make_pid"]
