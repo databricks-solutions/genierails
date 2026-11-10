@@ -357,8 +357,32 @@ def _is_treatment(item: dict) -> bool:
     return item.get("entity_type") == "columns" and item.get("tag_key") == TAG_KEY
 
 
+def _unrecorded_first_release(env_dir: Path, env_name: str, stage: str, journal_seen: bool) -> tuple[bool, str]:
+    """Whether release-plan can treat an unjournaled empty generation as the env's first release."""
+    if stage != "create":
+        return False, "unjournaled first release is only recognized for the create phase"
+    if journal_seen:
+        return False, "the policy journal exists but records no first deploy"
+    try:
+        from scripts import release_gate as rg
+        from scripts import staged_policy_apply as spa
+
+        live = spa.live_from_state(spa._read_state(env_dir))
+        receipt, problem = rg.newest_release_receipt(rg.cloud_dir_of(env_dir), env_name)
+    except Exception as exc:
+        return False, f"could not prove this is the env's first release ({exc})"
+    if live.get("policies") or live.get("tags"):
+        return False, "the data_access state already holds deterministic policies or treatment tags"
+    if problem:
+        return False, f"the newest release receipt is invalid ({problem})"
+    if receipt:
+        return False, f"a prior release receipt exists ({receipt.get('_path')})"
+    return True, "no live deterministic generation and no prior release receipt"
+
+
 def staged_generation_assignments(env_dir: Path, stage: str, old_fingerprint: str, keep_new_tags: bool = False,
-                                  rebind_fingerprint: str = "", opens_access: bool = False) -> tuple[list, list, dict]:
+                                  rebind_fingerprint: str = "", opens_access: bool = False,
+                                  env_name: str | None = None) -> tuple[list, list, dict]:
     """(desired, staged, kept) tag assignments of a phase that keeps a deterministic generation's values.
 
     The deterministic counterpart of staged_migration_assignments: ``staged``
@@ -402,7 +426,8 @@ def staged_generation_assignments(env_dir: Path, stage: str, old_fingerprint: st
     if stage not in pg.KEEP_TAG_STAGES:
         raise GateError(f"the {stage} phase applies the desired values")
     try:
-        journal = spa.load_journal(env_dir) or {}
+        loaded_journal = spa.load_journal(env_dir)
+        journal = loaded_journal or {}
         snapshot = pg.load_snapshot(env_dir, old_fingerprint) if old_fingerprint else None
         generation = pg.desired_generation(env_dir)
     except (spa.Refused, pg.StageError, OSError, ValueError) as exc:
@@ -411,8 +436,11 @@ def staged_generation_assignments(env_dir: Path, stage: str, old_fingerprint: st
     transition = journal.get("transition") or {}
     if not old_fingerprint:
         if not first_deploy(journal, stage, target):
-            raise GateError("no active generation is recorded for the phase to keep, and the policy journal "
-                            f"records no first deploy of {target}")
+            first_release, first_release_reason = _unrecorded_first_release(
+                env_dir, env_name or env_dir.name, stage, loaded_journal is not None)
+            if not first_release:
+                raise GateError("no active generation is recorded for the phase to keep, and the policy journal "
+                                f"records no first deploy of {target}; {first_release_reason}")
         if rebind_fingerprint:
             raise GateError("a first deploy has no restore to re-point")
         snapshot = {"tags": {}}
@@ -438,7 +466,7 @@ def staged_generation_assignments(env_dir: Path, stage: str, old_fingerprint: st
         if problems:
             raise GateError(f"the generated config isn't the unfinished change {changed_fp} with only its "
                             f"principals moved: {'; '.join(problems[:3])}")
-    elif stage != "abandon" and transition.get("to") != target:
+    elif old_fingerprint and stage != "abandon" and transition.get("to") != target:
         raise GateError(f"the policy journal records no transition from {old_fingerprint} to {target}")
     if old_fingerprint and not pg.snapshot_intact(snapshot, old_fingerprint):
         raise GateError(f"the snapshot of {old_fingerprint} doesn't match its fingerprint (edited since it was "
@@ -473,7 +501,7 @@ def first_deploy(journal: dict, stage: str, target: str) -> bool:
             and (stage == "abandon" or transition.get("to") == target))
 
 
-def pending_treatments(env_dir: Path, staged: dict | None) -> list | None:
+def pending_treatments(env_dir: Path, staged: dict | None, env_name: str | None = None) -> list | None:
     """The treatment tags a first deploy's create render is checked against, else None.
 
     That render holds the generation's policies and functions but tags no
@@ -490,14 +518,16 @@ def pending_treatments(env_dir: Path, staged: dict | None) -> list | None:
             or staged.get("rebind_fingerprint") or staged.get("opens_access"):
         return None
     try:
-        desired, _, _ = staged_generation_assignments(env_dir, "create", "", bool(staged.get("keep_new_tags")))
+        desired, _, _ = staged_generation_assignments(
+            env_dir, "create", "", bool(staged.get("keep_new_tags")), env_name=env_name)
     except GateError:
         return None
     return [item for item in desired if _is_treatment(item)]
 
 
 def staged_kept_assignments(env_dir: Path, stage: str, old_fingerprint: str, keep_new_tags: bool = False,
-                            rebind_fingerprint: str = "", opens_access: bool = False) -> tuple[list, list, dict]:
+                            rebind_fingerprint: str = "", opens_access: bool = False,
+                            env_name: str | None = None) -> tuple[list, list, dict]:
     """(desired, staged, kept) of a phase that keeps the active generation's values: legacy or deterministic."""
     from scripts import migration
 
@@ -505,20 +535,22 @@ def staged_kept_assignments(env_dir: Path, stage: str, old_fingerprint: str, kee
         desired, staged = staged_migration_assignments(env_dir, stage, old_fingerprint, keep_new_tags)
         return desired, staged, {}
     return staged_generation_assignments(env_dir, stage, old_fingerprint, keep_new_tags,
-                                         rebind_fingerprint, opens_access)
+                                         rebind_fingerprint, opens_access, env_name)
 
 
-def live_refresh(env_dir: Path, tfvars: Path, staged: dict | None = None) -> tuple[str | None, str]:
+def live_refresh(env_dir: Path, tfvars: Path, staged: dict | None = None,
+                 env_name: str | None = None) -> tuple[str | None, str]:
     """The refreshed_at of a live refresh that matches the gated inputs, or why not.
 
     ``staged`` (stage, old_fingerprint, keep_new_tags, and optionally
     rebind_fingerprint and opens_access) names the staged phase that rendered
     ``tfvars``; see staged_kept_assignments.
     """
-    return _live_refresh(env_dir, tfvars, staged)[:2]
+    return _live_refresh(env_dir, tfvars, staged, env_name)[:2]
 
 
-def _live_refresh(env_dir: Path, tfvars: Path, staged: dict | None = None) -> tuple[str | None, str, dict]:
+def _live_refresh(env_dir: Path, tfvars: Path, staged: dict | None = None,
+                  env_name: str | None = None) -> tuple[str | None, str, dict]:
     """live_refresh, with what a pass records about the generation a staged phase kept."""
     path = env_dir / REFRESH_RELPATH
     hint = "make runs derive-assignments first; re-run the same make command"
@@ -545,7 +577,7 @@ def _live_refresh(env_dir: Path, tfvars: Path, staged: dict | None = None) -> tu
         stage, old = staged["stage"], staged["old_fingerprint"]
         legacy = old.startswith(LEGACY_PREFIX)
         try:
-            desired, kept, facts = staged_kept_assignments(env_dir, **staged)
+            desired, kept, facts = staged_kept_assignments(env_dir, **staged, env_name=env_name)
         except GateError as exc:
             if legacy:
                 return None, (f"the {stage} render's tag_assignments don't match the last live refresh, and it "
@@ -895,7 +927,7 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
             "column_classes": refresh_column_classes(env_dir),
         }, handle)
         context = Path(handle.name)
-    pending = pending_treatments(env_dir, staged)
+    pending = pending_treatments(env_dir, staged, env_name)
     pending_file = None
     note = ""
     structural = structural_check(env_dir)
@@ -957,7 +989,7 @@ def run_gate(env_dir: Path, env_name: str, runner: Path, apply_flags: str, verbo
         return _failed(gate_path, record, inputs, env_name,
                        "coverage check failed (validate_abac.py --coverage-gate; see the report above)",
                        note=note, structural=structural)
-    refreshed_at, detail, kept = _live_refresh(env_dir, tfvars, staged)
+    refreshed_at, detail, kept = _live_refresh(env_dir, tfvars, staged, env_name)
     if refreshed_at is None:
         return _failed(gate_path, record, inputs, env_name, detail, structural=structural)
     print(f"  Live refresh ({detail}) at {refreshed_at}")
