@@ -406,7 +406,7 @@ def _run_create_gate(h, tmp_path: Path, gen: dict, *, validation_dir: Path | Non
         "new_grants": ["cat.sch.t|raw"],
     })
     return cg.run_gate(
-        h.env_dir, "prod", runner, "", False, rendered_dir,
+        h.env_dir, h.env_dir.name, runner, "", False, rendered_dir,
         {"stage": "create", "old_fingerprint": "", "keep_new_tags": False},
         validation_dir,
     )
@@ -469,6 +469,14 @@ def _write_release_receipt(env_dir: Path, env: str = "prod") -> None:
     receipt_path = rg.release_dir(cloud, env) / "20990101T000000Z-released.json"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     receipt_path.write_text(json.dumps(receipt, sort_keys=True) + "\n")
+
+
+def _release_receipt_dir(env_dir: Path) -> Path:
+    from scripts import release_gate as rg
+
+    directory = rg.release_dir(rg.cloud_dir_of(env_dir), env_dir.name)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
 def _active_old_generation_without_new_treatment(h, tmp_path: Path, monkeypatch) -> tuple[dict, dict]:
@@ -629,6 +637,48 @@ def test_unjournaled_empty_old_generation_refuses_after_a_prod_release_receipt(h
     refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
     assert refreshed_at is None and kept == {}
     assert "a prior release receipt exists" in detail
+    assert cg.pending_treatments(harness.env_dir, staged) is None
+
+
+def test_unjournaled_empty_old_generation_refuses_with_invalid_newest_release_receipt(
+        harness, tmp_path, monkeypatch):
+    gen = fresh(harness, tmp_path, monkeypatch)
+    (_release_receipt_dir(harness.env_dir) / "20990101T000000Z-broken.json").write_text("{not json")
+    tfvars = _render(harness, gen)
+    staged = {"stage": "create", "old_fingerprint": "", "keep_new_tags": False}
+
+    refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
+    assert refreshed_at is None and kept == {}
+    assert "records no first deploy" in detail and "newest release receipt is invalid" in detail
+    assert cg.pending_treatments(harness.env_dir, staged) is None
+
+
+def test_unjournaled_empty_old_generation_refuses_when_first_release_proof_raises(
+        harness, tmp_path, monkeypatch):
+    gen = fresh(harness, tmp_path, monkeypatch)
+    tfvars = _render(harness, gen)
+
+    def boom(*_args, **_kwargs):
+        raise spa.Refused("remote state pull failed")
+
+    monkeypatch.setattr(spa, "_read_state", boom)
+    staged = {"stage": "create", "old_fingerprint": "", "keep_new_tags": False}
+
+    refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
+    assert refreshed_at is None and kept == {}
+    assert "records no first deploy" in detail and "could not prove this is the env's first release" in detail
+    assert cg.pending_treatments(harness.env_dir, staged) is None
+
+
+def test_unjournaled_empty_old_generation_is_not_first_release_for_tighten(harness, tmp_path, monkeypatch):
+    gen = fresh(harness, tmp_path, monkeypatch)
+    tfvars = _render(harness, gen)
+    staged = {"stage": "tighten", "old_fingerprint": "", "keep_new_tags": False}
+
+    refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
+    assert refreshed_at is None and kept == {}
+    assert "records no first deploy" in detail
+    assert "only recognized for the create phase" in detail
     assert cg.pending_treatments(harness.env_dir, staged) is None
 
 

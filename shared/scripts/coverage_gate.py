@@ -357,8 +357,10 @@ def _is_treatment(item: dict) -> bool:
     return item.get("entity_type") == "columns" and item.get("tag_key") == TAG_KEY
 
 
-def _unrecorded_first_release(env_dir: Path, env_name: str, journal_seen: bool) -> tuple[bool, str]:
+def _unrecorded_first_release(env_dir: Path, env_name: str, stage: str, journal_seen: bool) -> tuple[bool, str]:
     """Whether release-plan can treat an unjournaled empty generation as the env's first release."""
+    if stage != "create":
+        return False, "unjournaled first release is only recognized for the create phase"
     if journal_seen:
         return False, "the policy journal exists but records no first deploy"
     try:
@@ -435,7 +437,7 @@ def staged_generation_assignments(env_dir: Path, stage: str, old_fingerprint: st
     if not old_fingerprint:
         if not first_deploy(journal, stage, target):
             first_release, first_release_reason = _unrecorded_first_release(
-                env_dir, env_name or env_dir.name, loaded_journal is not None)
+                env_dir, env_name or env_dir.name, stage, loaded_journal is not None)
             if not first_release:
                 raise GateError("no active generation is recorded for the phase to keep, and the policy journal "
                                 f"records no first deploy of {target}; {first_release_reason}")
