@@ -453,7 +453,8 @@ def test_release_describes_the_account_step_before_round_1_as_the_code_runs_it()
     assert release.index("Before round 1, when the account plan has changes") \
         < release.index("`Approve and apply this account manifest? [y/N]`") \
         < release.index("with the same per-run nonce as every round's") \
-        < release.index("anything else applies nothing and stops before any `release-plan`") \
+        < release.index("anything else records the manifest as declined") \
+        < release.index("applies nothing and stops before any `release-plan`") \
         < release.index("Then each round")
     assert "a deterministic `release` asks the same account question first (before round 1)" in reference
     # ...as the code does: the release recipe runs rehearse's own account step before the loop.
