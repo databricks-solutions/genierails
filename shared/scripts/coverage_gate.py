@@ -387,10 +387,13 @@ def _unrecorded_first_release(env_dir: Path, env_name: str, stage: str,
         receipt, problem = rg.newest_release_receipt(rg.cloud_dir_of(env_dir), env_name)
     except Exception as exc:
         return False, f"could not prove this is the env's first release ({exc})"
-    if live.get("policies") or live.get("tags"):
-        return False, ("the data_access state already holds deterministic policies or treatment tags; tags in "
-                       "state without a verifying policy journal are not treated as a first release, and SELECT "
-                       "stays withheld until the grant phase")
+    if live.get("policies"):
+        return False, ("the data_access state already holds deterministic policies, so it is not treated as a "
+                       "first release and SELECT stays withheld until the grant phase")
+    if live.get("tags"):
+        return False, ("the data_access state already holds treatment tags; tags in state without a verifying "
+                       "policy journal are not treated as a first release, and SELECT stays withheld until the "
+                       "grant phase")
     if problem:
         return False, f"the newest release receipt is invalid ({problem})"
     if receipt:

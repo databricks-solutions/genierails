@@ -495,6 +495,15 @@ def _write_treatment_only_state(env_dir: Path, gen: dict) -> None:
     path.write_text(json.dumps(state))
 
 
+def _write_policies_only_state(env_dir: Path, gen: dict) -> None:
+    _write_live_generation_state(env_dir, gen)
+    path = env_dir / "data_access" / "terraform.tfstate"
+    state = json.loads(path.read_text())
+    state["resources"] = [resource for resource in state["resources"]
+                          if resource.get("type") != "databricks_entity_tag_assignment"]
+    path.write_text(json.dumps(state))
+
+
 def _write_unrelated_import_phase(env_dir: Path) -> None:
     """A real imports-only round: it imports catalog config, never gr_treatment."""
     from scripts import import_record
@@ -770,6 +779,23 @@ def test_unjournaled_empty_old_generation_refuses_when_prod_already_has_live_gen
     refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
     assert refreshed_at is None and kept == {}
     assert "already holds deterministic policies" in detail
+    assert cg.pending_treatments(harness.env_dir, staged) is None
+
+
+@pytest.mark.parametrize("abandoned", [False, True], ids=["no-journal", "abandoned-first-deploy"])
+def test_policies_only_state_is_not_a_first_release(harness, tmp_path, monkeypatch, abandoned):
+    gen = fresh(harness, tmp_path, monkeypatch)
+    _write_policies_only_state(harness.env_dir, gen)
+    if abandoned:
+        _abandoned_first_deploy_journal(harness.env_dir, gen["fingerprint"])
+    tfvars = _render(harness, gen)
+    staged = {"stage": "create", "old_fingerprint": "", "keep_new_tags": False}
+
+    refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
+    assert refreshed_at is None and kept == {}
+    assert "already holds deterministic policies" in detail
+    assert "treatment tags" not in detail
+    assert "SELECT stays withheld until the grant phase" in detail
     assert cg.pending_treatments(harness.env_dir, staged) is None
 
 
