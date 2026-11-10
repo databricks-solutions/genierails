@@ -479,6 +479,83 @@ def _release_receipt_dir(env_dir: Path) -> Path:
     return directory
 
 
+def _abandoned_first_deploy_journal(env_dir: Path, fingerprint: str) -> None:
+    spa.save_journal(env_dir, spa.empty_journal() | {
+        "history": [{"run_id": "abandoned-first", "abandoned": fingerprint,
+                     "at": "2026-01-01T00:00:00+00:00"}],
+    })
+
+
+def _write_treatment_only_state(env_dir: Path, gen: dict) -> None:
+    _write_live_generation_state(env_dir, gen)
+    path = env_dir / "data_access" / "terraform.tfstate"
+    state = json.loads(path.read_text())
+    state["resources"] = [resource for resource in state["resources"]
+                          if resource.get("type") != "databricks_policy_info"]
+    path.write_text(json.dumps(state))
+
+
+def _write_policies_only_state(env_dir: Path, gen: dict) -> None:
+    _write_live_generation_state(env_dir, gen)
+    path = env_dir / "data_access" / "terraform.tfstate"
+    state = json.loads(path.read_text())
+    state["resources"] = [resource for resource in state["resources"]
+                          if resource.get("type") != "databricks_entity_tag_assignment"]
+    path.write_text(json.dumps(state))
+
+
+def _write_unrelated_import_phase(env_dir: Path) -> None:
+    """A real imports-only round: it imports catalog config, never gr_treatment."""
+    from scripts import import_record
+    from scripts import release_gate as rg
+
+    cloud = rg.cloud_dir_of(env_dir)
+    manifest_id = "20260101T000000-imports"
+    directory = rg.manifests_dir(cloud, env_dir.name) / manifest_id
+    directory.mkdir(parents=True, exist_ok=True)
+    imports = directory / "imports.jsonl"
+    entry = {
+        "kind": "import", "layer": "data_access",
+        "address": 'module.data_access.databricks_data_classification_catalog_config.classification["cat"]',
+        "id": "catalogs/cat/config",
+    }
+    imports.write_text(json.dumps(entry) + "\n")
+    loaded = import_record.load(imports, env_dir)
+    manifest = {
+        "kind": "release-manifest", "version": rg.VERSION, "id": manifest_id,
+        "env": env_dir.name, "cloud": cloud.name, "commit": "a" * 40,
+        "plans": {"data_access": {"steps": [], "final": False, "imports_only": True}},
+        "imports": {"count": len(loaded), "file": imports.name,
+                    "sha256": rg.sha256_file(imports), "entries": loaded},
+    }
+    manifest_path = directory / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+    record = {
+        "kind": "release-phase", "version": rg.VERSION, "env": env_dir.name,
+        "commit": manifest["commit"], "id": manifest_id, "manifest": str(manifest_path),
+        "manifest_sha256": rg.sha256_file(manifest_path),
+        "release_epoch": rg.release_epoch(cloud, env_dir.name, create=True), "policy_run": "",
+        "approval": {"via": "external"}, "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    phase = rg.env_state(cloud, env_dir.name) / "receipts" / "phases" / f"{manifest_id}.json"
+    phase.parent.mkdir(parents=True, exist_ok=True)
+    phase.write_text(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _write_select_state(env_dir: Path, *, binding: str | None) -> None:
+    layer = env_dir / "data_access"
+    state = {
+        "version": 4,
+        "outputs": {"coverage_gate": {"value": {"deployment_binding": binding}}} if binding is not None else {},
+        "resources": [{
+            "module": "module.data_access", "mode": "managed",
+            "type": "databricks_grant", "name": "table_access",
+            "instances": [{"index_key": "cat.sch.t|raw", "attributes": {}}],
+        }],
+    }
+    (layer / "terraform.tfstate").write_text(json.dumps(state))
+
+
 def _active_old_generation_without_new_treatment(h, tmp_path: Path, monkeypatch) -> tuple[dict, dict]:
     gen = fresh(h, tmp_path, monkeypatch, column_classes={"cat.sch.t.email": ["email_address"]})
     old = dict(gen, tags={})
@@ -564,6 +641,83 @@ def test_release_plan_create_of_a_first_prod_release_needs_no_policy_journal(har
     assert gate["status"] == "pass"
 
 
+def test_release_plan_create_after_abandoning_the_first_deploy_is_still_first_release(
+        harness, tmp_path, monkeypatch):
+    gen = fresh(harness, tmp_path, monkeypatch, column_classes={"cat.sch.t.email": ["email_address"]})
+    _abandoned_first_deploy_journal(harness.env_dir, gen["fingerprint"])
+    tfvars = _render(harness, gen)
+    staged = {"stage": "create", "old_fingerprint": "", "keep_new_tags": False}
+
+    refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
+    assert refreshed_at is not None, detail
+    assert "first deploy keeps no column tagged" in detail
+    assert kept["uncovered_columns"] == ["cat.sch.t.email"]
+    assert _run_create_gate(harness, tmp_path, gen) == 0
+
+
+def test_abandoned_first_deploy_evidence_does_not_hide_a_real_coverage_gap(
+        harness, tmp_path, monkeypatch, capfd):
+    gen = fresh(harness, tmp_path, monkeypatch, column_classes={"cat.sch.t.email": ["email_address"]})
+    _abandoned_first_deploy_journal(harness.env_dir, gen["fingerprint"])
+    broken = dict(pg.plan_stage("create", gen, None, None)["coverage_rendered"])
+    broken["fgac_policies"] = []
+    validation = pg.write_stage(harness.env_dir / "data_access", broken,
+                                out_dir=pg.coverage_config_dir(harness.env_dir))
+
+    assert _run_create_gate(harness, tmp_path, gen, validation_dir=validation) == 0
+    output = capfd.readouterr()
+    assert "classified but unprotected columns" in output.out
+    assert "new SELECT grant(s) are withheld" in output.err
+
+
+def test_treatment_tags_after_an_imports_only_round_are_not_unjournaled_first_release(
+        harness, tmp_path, monkeypatch):
+    gen = fresh(harness, tmp_path, monkeypatch, column_classes={"cat.sch.t.email": ["email_address"]})
+    _write_treatment_only_state(harness.env_dir, gen)
+    _write_unrelated_import_phase(harness.env_dir)
+    tfvars = _render(harness, gen)
+    staged = {"stage": "create", "old_fingerprint": "", "keep_new_tags": False}
+
+    refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
+    assert refreshed_at is None and kept == {}
+    assert "tags in state without a verifying policy journal are not treated as a first release" in detail
+    assert "SELECT stays withheld until the grant phase" in detail
+    assert cg.pending_treatments(harness.env_dir, staged) is None
+
+
+def test_abandoned_first_deploy_with_select_in_state_is_not_a_first_release(
+        harness, tmp_path, monkeypatch):
+    gen = fresh(harness, tmp_path, monkeypatch, column_classes={"cat.sch.t.email": ["email_address"]})
+    _abandoned_first_deploy_journal(harness.env_dir, gen["fingerprint"])
+    _write_select_state(harness.env_dir, binding=cg.deployment_binding(harness.env_dir / "data_access"))
+    tfvars = _render(harness, gen)
+    staged = {"stage": "create", "old_fingerprint": "", "keep_new_tags": False}
+
+    refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
+    assert refreshed_at is None and kept == {}
+    assert "already grants SELECT on cat.sch.t" in detail
+    assert cg.pending_treatments(harness.env_dir, staged) is None
+
+
+@pytest.mark.parametrize("history", [
+    [{"run_id": "abandoned-first", "abandoned": "wrong"}],
+    [{"abandoned": "target"}],
+    [{"run_id": "abandoned-first", "abandoned": "target"}, {"run_id": "later", "abandoned": "wrong"}],
+])
+def test_tampered_abandon_history_is_not_first_release(harness, tmp_path, monkeypatch, history):
+    gen = fresh(harness, tmp_path, monkeypatch, column_classes={"cat.sch.t.email": ["email_address"]})
+    history = [{**entry, "abandoned": gen["fingerprint"] if entry["abandoned"] == "target"
+                else entry["abandoned"]} for entry in history]
+    spa.save_journal(harness.env_dir, spa.empty_journal() | {"history": history})
+    tfvars = _render(harness, gen)
+    staged = {"stage": "create", "old_fingerprint": "", "keep_new_tags": False}
+
+    refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
+    assert refreshed_at is None and kept == {}
+    assert "matching abandoned first deploy" in detail
+    assert cg.pending_treatments(harness.env_dir, staged) is None
+
+
 def test_first_deploy_create_gate_validates_the_generated_end_state(harness, tmp_path, monkeypatch):
     gen = fresh(harness, tmp_path, monkeypatch,
                 column_classes={"cat.sch.t.email": ["email_address"]})
@@ -624,7 +778,24 @@ def test_unjournaled_empty_old_generation_refuses_when_prod_already_has_live_gen
 
     refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
     assert refreshed_at is None and kept == {}
-    assert "already holds deterministic policies or treatment tags" in detail
+    assert "already holds deterministic policies" in detail
+    assert cg.pending_treatments(harness.env_dir, staged) is None
+
+
+@pytest.mark.parametrize("abandoned", [False, True], ids=["no-journal", "abandoned-first-deploy"])
+def test_policies_only_state_is_not_a_first_release(harness, tmp_path, monkeypatch, abandoned):
+    gen = fresh(harness, tmp_path, monkeypatch)
+    _write_policies_only_state(harness.env_dir, gen)
+    if abandoned:
+        _abandoned_first_deploy_journal(harness.env_dir, gen["fingerprint"])
+    tfvars = _render(harness, gen)
+    staged = {"stage": "create", "old_fingerprint": "", "keep_new_tags": False}
+
+    refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
+    assert refreshed_at is None and kept == {}
+    assert "already holds deterministic policies" in detail
+    assert "treatment tags" not in detail
+    assert "SELECT stays withheld until the grant phase" in detail
     assert cg.pending_treatments(harness.env_dir, staged) is None
 
 

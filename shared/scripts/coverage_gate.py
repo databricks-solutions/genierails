@@ -357,12 +357,28 @@ def _is_treatment(item: dict) -> bool:
     return item.get("entity_type") == "columns" and item.get("tag_key") == TAG_KEY
 
 
-def _unrecorded_first_release(env_dir: Path, env_name: str, stage: str, journal_seen: bool) -> tuple[bool, str]:
+def _abandoned_first_deploy(journal: dict, target: str) -> bool:
+    """Whether the journal only records an abandoned first deploy of ``target``.
+
+    Abandon clears the transition before the next release-plan.  Its history is
+    therefore the durable proof that the otherwise-empty journal belonged to a
+    first deploy, rather than a damaged journal whose active generation vanished.
+    """
+    if journal.get("active") or journal.get("transition") or journal.get("pending"):
+        return False
+    history = journal.get("history") or []
+    return bool(history and isinstance(history[-1], dict)
+                and history[-1].get("abandoned") == target and history[-1].get("run_id"))
+
+
+def _unrecorded_first_release(env_dir: Path, env_name: str, stage: str,
+                              journal: dict | None, target: str) -> tuple[bool, str]:
     """Whether release-plan can treat an unjournaled empty generation as the env's first release."""
     if stage != "create":
         return False, "unjournaled first release is only recognized for the create phase"
-    if journal_seen:
-        return False, "the policy journal exists but records no first deploy"
+    abandoned = bool(journal and _abandoned_first_deploy(journal, target))
+    if journal is not None and not abandoned:
+        return False, "the policy journal exists but records no first deploy or matching abandoned first deploy"
     try:
         from scripts import release_gate as rg
         from scripts import staged_policy_apply as spa
@@ -371,13 +387,25 @@ def _unrecorded_first_release(env_dir: Path, env_name: str, stage: str, journal_
         receipt, problem = rg.newest_release_receipt(rg.cloud_dir_of(env_dir), env_name)
     except Exception as exc:
         return False, f"could not prove this is the env's first release ({exc})"
-    if live.get("policies") or live.get("tags"):
-        return False, "the data_access state already holds deterministic policies or treatment tags"
+    if live.get("policies"):
+        return False, ("the data_access state already holds deterministic policies, so it is not treated as a "
+                       "first release and SELECT stays withheld until the grant phase")
+    if live.get("tags"):
+        return False, ("the data_access state already holds treatment tags; tags in state without a verifying "
+                       "policy journal are not treated as a first release, and SELECT stays withheld until the "
+                       "grant phase")
     if problem:
         return False, f"the newest release receipt is invalid ({problem})"
     if receipt:
         return False, f"a prior release receipt exists ({receipt.get('_path')})"
-    return True, "no live deterministic generation and no prior release receipt"
+    try:
+        grants = granted_tables(env_dir / data_access_subdir())
+    except GateError as exc:
+        return False, f"could not prove SELECT is still withheld ({exc})"
+    if grants:
+        return False, f"the data_access state already grants SELECT on {', '.join(sorted(grants)[:5])}"
+    why = "matching first-deploy abandon history; " if abandoned else ""
+    return True, why + "no live deterministic generation, SELECT grant, or prior release receipt"
 
 
 def staged_generation_assignments(env_dir: Path, stage: str, old_fingerprint: str, keep_new_tags: bool = False,
@@ -437,7 +465,7 @@ def staged_generation_assignments(env_dir: Path, stage: str, old_fingerprint: st
     if not old_fingerprint:
         if not first_deploy(journal, stage, target):
             first_release, first_release_reason = _unrecorded_first_release(
-                env_dir, env_name or env_dir.name, stage, loaded_journal is not None)
+                env_dir, env_name or env_dir.name, stage, loaded_journal, target)
             if not first_release:
                 raise GateError("no active generation is recorded for the phase to keep, and the policy journal "
                                 f"records no first deploy of {target}; {first_release_reason}")
