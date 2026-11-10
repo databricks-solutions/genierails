@@ -154,12 +154,12 @@ def account_manifest(repo: Repo, *, changes: bool, manifest_id: str = "a1",
     return directory / "manifest.json"
 
 
-def account_declined(path: Path) -> None:
+def account_declined(repo: Repo, path: Path) -> dict:
     """What the y/N's N records (release_gate.account_manifest_decline): declined.json, the saved plan deleted."""
-    (path.parent / rg.ACCOUNT_DECLINED).write_text(json.dumps({
-        "kind": "account-manifest-declined", "manifest_id": json.loads(path.read_text())["id"],
-        "declined_at": "2026-01-01T00:01:00Z"}))
-    (path.parent / "account.tfplan").unlink(missing_ok=True)
+    record, left = rg.account_manifest_decline(repo.cloud / "envs" / "account", "account", path,
+                                               rg.sha256_file(path), via="rehearse")
+    assert not left
+    return json.loads(record.read_text())
 
 
 def manifest(repo: Repo, manifest_id: str = "m1", env: str = "prod") -> Path:
@@ -252,7 +252,7 @@ def test_committed_first_deploy_plans_the_account_layer(world, repo):
 
 def test_a_declined_account_manifest_is_not_pending_and_never_suggested(world, repo):
     path = account_manifest(repo, changes=True)
-    account_declined(path)
+    declined_at = account_declined(repo, path)["declined_at"]
     account = world.status("dev")["account"]
     assert account["pending"] == []
     assert [(m["id"], m["state"]) for m in account["inactive"]] == [("a1", "declined")]
@@ -260,17 +260,49 @@ def test_a_declined_account_manifest_is_not_pending_and_never_suggested(world, r
     assert command == "make rehearse ENV=dev" and "apply-account" not in command + why
     lines = world.run("status", "dev").stdout.splitlines()
     assert "  Account:     no pending account manifest" in lines
-    assert ("               declined manifest a1 (declined at its y/N 2026-01-01T00:01:00Z), nothing to apply"
-            in lines)
+    assert f"               declined manifest a1 (declined at its y/N {declined_at}), nothing to apply" in lines
 
 
-def test_a_declined_manifest_with_its_saved_plan_left_is_still_not_pending(world, repo):
+def _bad_decline(repo: Repo, path: Path, shape: str) -> None:
+    """Codex's repro shapes for a declined.json that must not hide a genuine pending manifest."""
+    record = path.parent / rg.ACCOUNT_DECLINED
+    good = account_declined(repo, path)
+    (path.parent / "account.tfplan").write_bytes(b"plan")  # the genuine plan is still there
+    record.unlink()
+    if shape == "empty-object":
+        record.write_text("{}")
+    elif shape == "malformed":
+        record.write_text("{not json")
+    elif shape == "symlink":
+        target = repo.tmp / "elsewhere.json"
+        target.write_text(json.dumps(good))
+        os.chmod(target, 0o600)
+        record.symlink_to(target)
+        return
+    elif shape == "mode-0644":
+        record.write_text(json.dumps(good))
+        os.chmod(record, 0o644)
+        return
+    else:
+        key, value = {"wrong-env": ("env", "dev"), "wrong-manifest-id": ("manifest_id", "a0"),
+                      "wrong-digest": ("manifest_sha256", "0" * 64)}[shape]
+        record.write_text(json.dumps(good | {key: value}))
+    os.chmod(record, 0o600)
+
+
+@pytest.mark.parametrize("shape", ["empty-object", "malformed", "symlink", "wrong-env", "wrong-manifest-id",
+                                   "wrong-digest", "mode-0644"])
+def test_a_decline_record_that_does_not_count_never_hides_a_pending_manifest(world, repo, shape):
     path = account_manifest(repo, changes=True)
-    (path.parent / rg.ACCOUNT_DECLINED).write_text("not json")  # unreadable: still declined
-    assert (path.parent / "account.tfplan").is_file()
+    _bad_decline(repo, path, shape)
     account = world.status("dev")["account"]
-    assert account["pending"] == [] and account["inactive"][0]["state"] == "declined"
-    assert "apply-account" not in " ".join(world.next("dev"))
+    assert [m["id"] for m in account["pending"]] == ["a1"] and account["inactive"] == []
+    assert account["pending"][0]["decline_invalid"]
+    # apply-account refuses it while that file is there, so next plans again rather than suggest it.
+    command, why = world.next("dev")
+    assert command == "make account-plan" and "decline record doesn't count" in why
+    [line] = [l for l in world.run("status", "dev").stdout.splitlines() if l.startswith("  Account:")]
+    assert line.startswith("  Account:     pending manifest a1 (HEAD) [its decline record doesn't count: ")
 
 
 def test_an_account_manifest_superseded_by_a_newer_no_op_plan_is_not_pending(world, repo):

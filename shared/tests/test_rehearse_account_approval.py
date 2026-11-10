@@ -166,6 +166,8 @@ def test_anything_but_y_applies_nothing_and_never_starts_the_dev_rehearsal(amake
     record = json.loads((manifest.parent / rg.ACCOUNT_DECLINED).read_text())
     assert record["manifest_id"] == json.loads(manifest.read_text())["id"] and record["via"] == "rehearse"
     assert record["manifest_sha256"] == rg.sha256_file(manifest)
+    assert oct((manifest.parent / rg.ACCOUNT_DECLINED).stat().st_mode & 0o777) == "0o600"
+    assert rg.account_manifest_declined(manifest) is not None
     assert not (manifest.parent / "account.tfplan").exists() and manifest.is_file()
     _nothing_in_dev(amake, repo)
 

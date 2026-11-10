@@ -90,6 +90,7 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2155,54 +2156,127 @@ def account_manifest_paths(cloud_dir: Path, env: str = ACCOUNT_ENV) -> list[Path
 
 
 ACCOUNT_DECLINED = "declined.json"
+ACCOUNT_DECLINED_KIND = "account-manifest-declined"
+ACCOUNT_DECLINED_KEYS = frozenset({"kind", "version", "env", "manifest_kind", "manifest_id", "manifest_sha256",
+                                   "commit", "via", "host", "declined_at"})
+ACCOUNT_DECLINED_VIA = ("rehearse", "release")
 
 
-def account_manifest_declined(manifest_path: Path) -> dict | None:
-    """The decline record next to an account manifest, or None when it was never declined.
+def account_manifest_decline_state(manifest_path: Path, manifest: Mapping, env: str = ACCOUNT_ENV) -> tuple[str, str]:
+    """("none" | "valid" | "invalid", detail) for the decline record next to an account manifest.
 
-    Anything at the path counts (an unreadable or non-file record too): a
-    declined manifest is never applied, whatever happened to its record.
+    A record counts ("valid") only when it is a regular 0600 file of this
+    user (opened without following a symlink and checked by fstat), holds
+    exactly the versioned schema account_manifest_decline writes, and names
+    this env, the manifest's id and commit and the manifest's sha256 now.
+    Anything else at the path is "invalid": status/next and selection then
+    treat the manifest as not declined (never hide it), while apply-account
+    refuses it until the record is gone. ``detail`` is the declined_at time
+    (valid) or why the record doesn't count (invalid); it never echoes the record.
     """
     path = Path(manifest_path).parent / ACCOUNT_DECLINED
-    if not (path.exists() or path.is_symlink()):
-        return None
-    data = _read_json(path) if path.is_file() and not path.is_symlink() else None
-    return data if isinstance(data, dict) else {"unreadable": str(path)}
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return "none", ""
+    except OSError as exc:
+        return "invalid", f"{path} can't be read ({type(exc).__name__})"
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
+        return "invalid", f"{path} is not a regular file this run can open without following a link ({type(exc).__name__})"
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return "invalid", f"{path} is not a regular file"
+        if info.st_uid != os.getuid():
+            return "invalid", f"{path} is not owned by this user"
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            return "invalid", f"{path} has mode {oct(stat.S_IMODE(info.st_mode))}, not 0o600"
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            raw = handle.read(65536)
+    finally:
+        os.close(fd)
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return "invalid", f"{path} is not valid JSON"
+    if not isinstance(record, dict) or set(record) != ACCOUNT_DECLINED_KEYS:
+        return "invalid", f"{path} is not a decline record (unexpected fields)"
+    try:
+        digest = sha256_file(Path(manifest_path))
+    except OSError:
+        return "invalid", f"the manifest {manifest_path} can't be read"
+    expected = {"kind": ACCOUNT_DECLINED_KIND, "version": VERSION, "env": env, "manifest_kind": "account-manifest",
+                "manifest_id": manifest.get("id"), "manifest_sha256": digest, "commit": manifest.get("commit")}
+    wrong = sorted(key for key, value in expected.items() if record.get(key) != value)
+    if wrong or not manifest.get("id"):
+        return "invalid", f"{path} does not match this manifest ({', '.join(wrong) or 'manifest id'})"
+    if record.get("via") not in ACCOUNT_DECLINED_VIA or not all(
+            isinstance(record.get(key), str) and record.get(key) for key in ("host", "declined_at")):
+        return "invalid", f"{path} is not a decline record (via, host or declined_at)"
+    return "valid", record["declined_at"]
+
+
+def account_manifest_declined(manifest_path: Path, manifest: Mapping | None = None,
+                              env: str = ACCOUNT_ENV) -> dict | None:
+    """The valid decline record's {declined_at}, or None (no record, or one that doesn't count)."""
+    if manifest is None:
+        manifest = _read_json(Path(manifest_path)) or {}
+    state, detail = account_manifest_decline_state(manifest_path, manifest, env)
+    return {"declined_at": detail} if state == "valid" else None
 
 
 def account_manifest_decline(env_dir: Path, env: str, manifest_path: Path, expected_sha256: str, *,
                              via: str = "") -> tuple[Path, list[Path]]:
     """Record the N answered to an account manifest's y/N and delete its saved plan (it holds credentials).
 
-    Write-once ``declined.json`` next to the manifest; the manifest itself
-    stays (append-only). Under the account lock, so no apply-account of it
-    is running. apply-account refuses a declined manifest, account-plan's
-    selection skips it, and make status/next show it as declined. Returns
-    (record, plans it couldn't delete).
+    Takes the account lock first; then, under it, reloads the manifest and
+    refuses unless its sha256 is still the one shown and it has no account
+    receipt, so the record is never written for other bytes or after an
+    apply. The record (account_manifest_decline_state's schema, 0600) is
+    written to an O_EXCL temp file and renamed into place, never through a
+    link; a valid record already there is kept. The manifest itself stays
+    (append-only). apply-account refuses a declined manifest, selection skips
+    it, make status/next show it as declined. Returns (record, plans it
+    couldn't delete).
     """
     from scripts import environment_lock
 
     env_dir, manifest_path = Path(env_dir), Path(manifest_path)
-    manifest = load_account_manifest(manifest_path, env)
-    if sha256_file(manifest_path) != expected_sha256:
-        raise Refused(f"{manifest_path} changed after it was shown; its decline was not recorded")
-    if account_manifest_used(cloud_dir_of(env_dir), env, str(manifest.get("id") or "")):
-        raise Refused(f"{manifest_path} already has an account receipt; there is nothing to decline")
+    if via not in ACCOUNT_DECLINED_VIA:
+        raise Refused(f"--via must be one of {', '.join(ACCOUNT_DECLINED_VIA)}; the decline was not recorded")
     ok, message, _nonce = environment_lock.acquire(env_dir, os.getpid(), "decline-account")
     if not ok:
         raise Refused(f"the decline of {manifest_path} was not recorded: {message}")
     left = []
     try:
+        raw = _read_nofollow(manifest_path)
+        if raw is None or sha256_bytes(raw) != expected_sha256:
+            raise Refused(f"{manifest_path} changed after it was shown; its decline was not recorded")
+        manifest = load_account_manifest(manifest_path, env)
+        if sha256_file(manifest_path) != expected_sha256:
+            raise Refused(f"{manifest_path} changed after it was shown; its decline was not recorded")
+        if account_manifest_used(cloud_dir_of(env_dir), env, str(manifest.get("id") or "")):
+            raise Refused(f"{manifest_path} already has an account receipt; its decline was not recorded")
         record = manifest_path.parent / ACCOUNT_DECLINED
-        payload = {"kind": "account-manifest-declined", "version": VERSION, "env": env,
-                   "manifest_id": manifest.get("id"), "manifest_sha256": expected_sha256,
-                   "commit": manifest.get("commit"), "via": via, "host": socket.gethostname(),
-                   "declined_at": _now()}
-        if account_manifest_declined(manifest_path) is None:
-            fd = os.open(record, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o400)
-            with os.fdopen(fd, "w") as handle:
-                os.fchmod(handle.fileno(), 0o400)
-                handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        if account_manifest_decline_state(manifest_path, manifest, env)[0] != "valid":
+            payload = {"kind": ACCOUNT_DECLINED_KIND, "version": VERSION, "env": env,
+                       "manifest_kind": "account-manifest", "manifest_id": manifest.get("id"),
+                       "manifest_sha256": expected_sha256, "commit": manifest.get("commit"), "via": via,
+                       "host": socket.gethostname(), "declined_at": _now()}
+            temp = manifest_path.parent / f".{ACCOUNT_DECLINED}.{secrets.token_hex(8)}.tmp"
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            try:
+                with os.fdopen(fd, "w") as handle:
+                    os.fchmod(handle.fileno(), 0o600)
+                    handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp, record)  # replaces a link or junk record itself, never its target
+            except BaseException:
+                temp.unlink(missing_ok=True)
+                raise
         entry = manifest.get("plan") or {}
         if entry.get("file"):
             plan = manifest_path.parent / Path(str(entry["file"])).name
@@ -2215,6 +2289,20 @@ def account_manifest_decline(env_dir: Path, env: str, manifest_path: Path, expec
     finally:
         environment_lock.release_lock(env_dir, os.getpid())
     return record, left
+
+
+def _read_nofollow(path: Path) -> bytes | None:
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return handle.read()
+    finally:
+        os.close(fd)
 
 
 def newer_account_manifest(cloud_dir: Path, env: str, manifest: Mapping) -> Path | None:
@@ -2241,7 +2329,7 @@ def select_account_manifest(env_dir: Path, env: str) -> Path:
         plan = path.parent / str(entry.get("file") or "")
         if (manifest and manifest.get("kind") == "account-manifest" and manifest.get("version") == VERSION
                 and manifest.get("env") == env and manifest.get("commit") == status["commit"]
-                and not account_manifest_noop(manifest) and account_manifest_declined(path) is None
+                and not account_manifest_noop(manifest) and account_manifest_declined(path, manifest, env) is None
                 and entry.get("file") == "account.tfplan" and plan.is_file()
                 and not account_manifest_used(cloud_dir, env, str(manifest.get("id") or ""))):
             candidates.append((path, manifest))
@@ -2273,10 +2361,12 @@ def account_manifest_check(env_dir: Path, env: str, manifest_path: Path, *, remo
         drift.append(f"the manifest is for {manifest.get('cloud')}, not {cloud_dir_of(env_dir).name}")
     if account_manifest_used(cloud_dir_of(env_dir), env, str(manifest.get("id") or "")):
         drift.append("the manifest already has an account receipt; account manifests are single-use")
-    declined = account_manifest_declined(manifest_path)
-    if declined is not None:
-        drift.append("the manifest was declined at its y/N" + (f" ({declined['declined_at']})"
-                     if declined.get("declined_at") else "") + "; a declined manifest is never applied")
+    declined, detail = account_manifest_decline_state(manifest_path, manifest, env)
+    if declined == "valid":
+        drift.append(f"the manifest was declined at its y/N ({detail}); a declined manifest is never applied")
+    elif declined == "invalid":
+        drift.append(f"the manifest has a decline record that doesn't count ({detail}); it is never applied "
+                     "while that file is there")
     serial = account_state_serial(env_dir)
     if serial != manifest.get("state_serial"):
         drift.append(f"the account state changed since account-plan (serial "
