@@ -1285,7 +1285,10 @@ _apply-account-locked: _guard-not-databricks-compute
 # 'Approve and apply this account manifest? [y/N]' (default No; tag-value
 # removals are named in a louder warning above the same question), records the
 # y (approval.py approve), then applies exactly that manifest through
-# _apply-account-locked MANIFEST= APPROVAL=. The manifest is the one valid
+# _apply-account-locked MANIFEST= APPROVAL=. Any other answer records the manifest as
+# declined (release_gate.py account-manifest-decline: declined.json, its saved
+# plan deleted, under the account lock), so apply-account refuses it and
+# make status/next don't show it as pending. The manifest is the one valid
 # unreceipted one for HEAD (account-manifest-select + account-manifest-check),
 # else a new one from _account-plan-locked. Every account-plan and
 # apply-account refusal stays in those recipes; nothing is skipped. It holds no
@@ -1389,7 +1392,11 @@ override _ACCOUNT_APPROVE_APPLY = ( \
 	case "$$ap_rc:$$ap_out" in \
 		"0:genierails-approval:v1:approved:"?*) record="$${ap_out\#genierails-approval:v1:approved:}" ;; \
 		"1:genierails-approval:v1:no") \
-			echo "$(1): not applied. The account manifest $$manifest stays; apply it later with make apply-account, or re-run make $(1) ENV=$(ENV) to be asked again. Nothing was locked or applied in $(ENV)." >&2; exit 1 ;; \
+			if $(_RELEASE_GATE) account-manifest-decline --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --manifest "$$manifest" --expect-digest "$$digest" --via $(1) >/dev/null; then \
+				echo "$(1): not applied. The account manifest $$manifest is recorded as declined and its saved plan deleted, so make apply-account refuses it and make status/next no longer show it as pending; re-run make $(1) ENV=$(ENV) to plan the account layer again and be asked again. Nothing was applied in $(ENV), and $(ENV) was not locked." >&2; \
+			else \
+				echo "$(1): not applied. The decline of the account manifest $$manifest could not be recorded (above); re-run make $(1) ENV=$(ENV) to be asked again. Nothing was applied in $(ENV), and $(ENV) was not locked." >&2; \
+			fi; exit 1 ;; \
 		"1:genierails-approval:v1:refused") echo "$(1): the approval prompt refused (above); nothing was approved or applied." >&2; exit 1 ;; \
 		*) echo "ERROR: the approval prompt ($(SHARED_ROOT)/scripts/approval.py approve) gave no valid answer (exit $$ap_rc); nothing was approved or applied." >&2; exit 1 ;; \
 	esac; \

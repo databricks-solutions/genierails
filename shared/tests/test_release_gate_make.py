@@ -665,6 +665,144 @@ def test_apply_account_refuses_without_any_manifest(make, repo):
     assert not [c for c in make.calls() if c[0] == "runner"]
 
 
+def _decline(make: Make, manifest: Path, digest: str | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(Path(rg.__file__)), "account-manifest-decline",
+                           "--env-dir", str(make.repo.cloud / "envs" / "account"), "--env", "account",
+                           "--manifest", str(manifest), "--expect-digest", digest or rg.sha256_file(manifest),
+                           "--via", "rehearse"], text=True, capture_output=True, env=os.environ | make.repo.env)
+
+
+def test_a_declined_account_manifest_is_refused_by_apply_account_even_by_name(tmp_path, repo):
+    make = Make(tmp_path, repo, passthrough=("_apply-account-locked",))
+    manifest = _account_planned(make)
+    result = _decline(make, manifest)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"Declined: {manifest.parent / rg.ACCOUNT_DECLINED}"
+    assert not (manifest.parent / "account.tfplan").exists() and manifest.is_file()
+    assert not environment_lock.lock_path(repo.cloud / "envs" / "account").exists()
+    result = make("apply-account", "account", f"MANIFEST={manifest}")
+    assert result.returncode != 0
+    assert "the manifest was declined at its y/N (" in result.stderr and "Run make account-plan again" in result.stderr
+    result = make("apply-account", "account")
+    assert result.returncode != 0 and "no unreceipted account manifest for HEAD" in result.stderr
+    assert not [c for c in make.calls() if c[0] == "runner" and c[3:4] == ["apply-plan"]]
+    assert not rg.account_receipts(repo.cloud, "account")
+
+
+def test_a_declined_record_alone_still_refuses_apply_account(tmp_path, repo):
+    # Even with the saved plan back (say its delete failed), a valid record refuses the manifest.
+    make = Make(tmp_path, repo, passthrough=("_apply-account-locked",))
+    manifest = _account_planned(make)
+    plan = manifest.parent / "account.tfplan"
+    saved = plan.read_bytes()
+    assert _decline(make, manifest).returncode == 0
+    plan.write_bytes(saved)
+    os.chmod(plan, 0o400)
+    record = manifest.parent / rg.ACCOUNT_DECLINED
+    assert oct(record.stat().st_mode & 0o777) == "0o600"
+    assert set(json.loads(record.read_text())) == rg.ACCOUNT_DECLINED_KEYS
+    result = make("apply-account", "account", f"MANIFEST={manifest}")
+    assert result.returncode != 0 and "the manifest was declined at its y/N (" in result.stderr
+    result = make("apply-account", "account")
+    assert result.returncode != 0 and "no unreceipted account manifest for HEAD" in result.stderr
+    assert not rg.account_receipts(repo.cloud, "account")
+
+
+def test_apply_account_ignores_a_decline_record_that_does_not_count(tmp_path, repo):
+    # A forged or broken declined.json never blocks a genuine manifest: apply-account runs as with no record.
+    make = Make(tmp_path, repo, passthrough=("_apply-account-locked",))
+    manifest = _account_planned(make)
+    os.chmod(manifest.parent, 0o700)
+    (manifest.parent / rg.ACCOUNT_DECLINED).write_text("{}")
+    result = make("apply-account", "account")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "decline" not in result.stderr
+    assert len([c for c in make.calls() if c[:4] == ["runner", "account", "account", "apply-plan"]]) == 1
+    [receipt] = rg.account_receipts(repo.cloud, "account")
+    assert receipt["manifest"]["path"] == str(manifest)
+
+
+def _race_at_lock(monkeypatch, change):
+    real = environment_lock.acquire
+
+    def acquire(*args, **kwargs):
+        change()  # after any pre-lock check, before the lock is held
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(environment_lock, "acquire", acquire)
+
+
+def test_a_manifest_changed_between_the_pre_check_and_the_lock_is_never_declined(tmp_path, repo, monkeypatch):
+    make = Make(tmp_path, repo, passthrough=("_apply-account-locked",))
+    manifest = _account_planned(make)
+    shown = rg.sha256_file(manifest)
+
+    def change():
+        os.chmod(manifest, 0o600)
+        data = json.loads(manifest.read_text())
+        manifest.write_text(json.dumps(data | {"host": "elsewhere"}))
+
+    _race_at_lock(monkeypatch, change)
+    with pytest.raises(rg.Refused, match="changed after it was shown; its decline was not recorded"):
+        rg.account_manifest_decline(repo.cloud / "envs" / "account", "account", manifest, shown, via="rehearse")
+    assert not (manifest.parent / rg.ACCOUNT_DECLINED).exists()
+    assert rg.account_manifest_declined(manifest) is None
+    assert (manifest.parent / "account.tfplan").is_file()
+
+
+def test_a_manifest_applied_between_the_pre_check_and_the_lock_is_never_declined(tmp_path, repo, monkeypatch):
+    make = Make(tmp_path, repo, passthrough=("_apply-account-locked",))
+    manifest = _account_planned(make)
+    manifest_id = json.loads(manifest.read_text())["id"]
+
+    def apply():
+        path = rg.env_state(repo.cloud, "account") / "receipts" / "account" / "r.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"kind": "account", "version": rg.VERSION, "commit": repo.head(),
+                                    "manifest": {"id": manifest_id}, "created_at": rg._now()}))
+
+    _race_at_lock(monkeypatch, apply)
+    with pytest.raises(rg.Refused, match="already has an account receipt; its decline was not recorded"):
+        rg.account_manifest_decline(repo.cloud / "envs" / "account", "account", manifest,
+                                    rg.sha256_file(manifest), via="rehearse")
+    assert not (manifest.parent / rg.ACCOUNT_DECLINED).exists()
+
+
+def test_a_decline_replaces_a_symlinked_record_without_writing_its_target(tmp_path, repo):
+    make = Make(tmp_path, repo, passthrough=("_apply-account-locked",))
+    manifest = _account_planned(make)
+    target = tmp_path / "target.json"
+    target.write_text("keep\n")
+    os.chmod(manifest.parent, 0o700)
+    (manifest.parent / rg.ACCOUNT_DECLINED).symlink_to(target)
+    assert rg.account_manifest_decline_state(manifest, json.loads(manifest.read_text()))[0] == "invalid"
+    assert _decline(make, manifest).returncode == 0
+    record = manifest.parent / rg.ACCOUNT_DECLINED
+    assert not record.is_symlink() and target.read_text() == "keep\n"
+    assert rg.account_manifest_declined(manifest) is not None
+    assert not list(manifest.parent.glob(".declined.json.*"))
+
+
+def test_account_manifest_decline_refuses_a_changed_manifest_a_used_one_and_a_held_lock(tmp_path, repo):
+    make = Make(tmp_path, repo, passthrough=("_apply-account-locked",))
+    manifest = _account_planned(make)
+    result = _decline(make, manifest, digest="0" * 64)
+    assert result.returncode != 0 and "changed after it was shown; its decline was not recorded" in result.stderr
+    account_dir = repo.cloud / "envs" / "account"
+    ok, message, _ = environment_lock.acquire(account_dir, 1, "apply-account")
+    assert ok, message
+    try:
+        result = _decline(make, manifest)
+    finally:
+        environment_lock.lock_path(account_dir).unlink()
+    assert result.returncode != 0 and "was not recorded" in result.stderr and "held by make apply-account" in result.stderr
+    assert not (manifest.parent / rg.ACCOUNT_DECLINED).exists() and (manifest.parent / "account.tfplan").is_file()
+    applied = make("apply-account", "account")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    result = _decline(make, manifest)
+    assert result.returncode != 0 and "already has an account receipt" in result.stderr
+
+
 def test_apply_account_refuses_in_ci(make, repo):
     result = make("apply-account", "account", "MANIFEST=/m/manifest.json", ci=True)
     assert result.returncode != 0 and "applying targets cannot run in CI" in result.stderr
