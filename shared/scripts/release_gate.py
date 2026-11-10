@@ -2169,9 +2169,10 @@ def account_manifest_decline_state(manifest_path: Path, manifest: Mapping, env: 
     user (opened without following a symlink and checked by fstat), holds
     exactly the versioned schema account_manifest_decline writes, and names
     this env, the manifest's id and commit and the manifest's sha256 now.
-    Anything else at the path is "invalid": status/next and selection then
-    treat the manifest as not declined (never hide it), while apply-account
-    refuses it until the record is gone. ``detail`` is the declined_at time
+    Anything else at the path is "invalid" and is ignored everywhere:
+    status/next, selection and apply-account treat the manifest exactly as
+    if there were no record (a forged or broken file never hides or blocks
+    a genuine manifest; every other apply-account check still applies). ``detail`` is the declined_at time
     (valid) or why the record doesn't count (invalid); it never echoes the record.
     """
     path = Path(manifest_path).parent / ACCOUNT_DECLINED
@@ -2364,9 +2365,6 @@ def account_manifest_check(env_dir: Path, env: str, manifest_path: Path, *, remo
     declined, detail = account_manifest_decline_state(manifest_path, manifest, env)
     if declined == "valid":
         drift.append(f"the manifest was declined at its y/N ({detail}); a declined manifest is never applied")
-    elif declined == "invalid":
-        drift.append(f"the manifest has a decline record that doesn't count ({detail}); it is never applied "
-                     "while that file is there")
     serial = account_state_serial(env_dir)
     if serial != manifest.get("state_serial"):
         drift.append(f"the account state changed since account-plan (serial "

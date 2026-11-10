@@ -708,17 +708,18 @@ def test_a_declined_record_alone_still_refuses_apply_account(tmp_path, repo):
     assert not rg.account_receipts(repo.cloud, "account")
 
 
-def test_a_decline_record_that_does_not_count_is_still_refused_by_apply_account(tmp_path, repo):
+def test_apply_account_ignores_a_decline_record_that_does_not_count(tmp_path, repo):
+    # A forged or broken declined.json never blocks a genuine manifest: apply-account runs as with no record.
     make = Make(tmp_path, repo, passthrough=("_apply-account-locked",))
     manifest = _account_planned(make)
     os.chmod(manifest.parent, 0o700)
     (manifest.parent / rg.ACCOUNT_DECLINED).write_text("{}")
-    for args in ((f"MANIFEST={manifest}",), ()):  # selected (not hidden), then refused by the check
-        result = make("apply-account", "account", *args)
-        assert result.returncode != 0
-        assert "has a decline record that doesn't count" in result.stderr, result.stderr
-    assert not [c for c in make.calls() if c[0] == "runner" and c[3:4] == ["apply-plan"]]
-    assert not rg.account_receipts(repo.cloud, "account")
+    result = make("apply-account", "account")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "decline" not in result.stderr
+    assert len([c for c in make.calls() if c[:4] == ["runner", "account", "account", "apply-plan"]]) == 1
+    [receipt] = rg.account_receipts(repo.cloud, "account")
+    assert receipt["manifest"]["path"] == str(manifest)
 
 
 def _race_at_lock(monkeypatch, change):

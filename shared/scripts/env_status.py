@@ -331,7 +331,7 @@ def _account(cloud_dir: Path, commit: str) -> dict:
                 "at_head": manifest.get("commit") == commit, "plan_saved": plan_saved}
         decline, detail = rg.account_manifest_decline_state(path, manifest)
         if decline == "invalid":
-            # Never hidden by a record that doesn't count; apply-account refuses it while the file is there.
+            # A record that doesn't count is ignored (as apply-account ignores it): never hides the manifest.
             item["decline_invalid"] = detail
         if decline == "valid":
             state, why = "declined", f"declined at its y/N {detail}"
@@ -589,10 +589,8 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
             account = report["account"]
             due = [m for m in account["pending"] if m["at_head"] and m["plan_saved"]]
             first = not rehearsal["receipts"] and not account["receipts"] and not account["manifests"]
-            # apply-account refuses a manifest with a decline record that doesn't count: plan again instead.
-            replan = bool(due) and bool(due[0].get("decline_invalid"))
             if due or first:
-                command = "make apply-account" if due and not replan else "make account-plan"
+                command = "make apply-account" if due else "make account-plan"
                 account_marker = (rg.remote_backed_provenance_recorded(cloud_dir, rg.ACCOUNT_ENV)
                                   if git.get("local_only") else "")
                 if account_marker:
@@ -607,12 +605,11 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
                 # On a terminal rehearse itself shows the account plan and asks y/N (Makefile
                 # _ACCOUNT_APPROVE_APPLY); next can't see the caller's terminal, so the primitive leads.
                 on_a_terminal = f"; or, on a terminal, make rehearse ENV={env} shows it and asks y/N"
-                if replan:
-                    return live(command, f"the account manifest {due[0]['id']} for HEAD is not applied, but its "
-                                f"decline record doesn't count ({due[0]['decline_invalid']}), so apply-account "
-                                "refuses it; plan the account layer again" + on_a_terminal)
+                # A decline record that doesn't count is ignored everywhere (apply-account too): only a note.
+                ignored = (f" (the decline record beside it doesn't count and is ignored: {due[0]['decline_invalid']})"
+                           if due and due[0].get("decline_invalid") else "")
                 return live(command, f"the approved account manifest {due[0]['id']} for HEAD is not applied yet"
-                            + on_a_terminal if due else "first deploy: rehearse refuses a non-empty account plan "
+                            + ignored + on_a_terminal if due else "first deploy: rehearse refuses a non-empty account plan "
                             "(the new gr_treatment tag policy), so plan the account layer and get its manifest "
                             "approved" + on_a_terminal)
             why = f"no passing rehearsal of HEAD {git['head'][:12]} from this receipt store"
@@ -819,7 +816,7 @@ def _text(report: dict) -> list[str]:
         pending = account["pending"]
         lines.append("  Account:     " + ("no pending account manifest" if not pending else "; ".join(
             f"pending manifest {m['id']} ({'HEAD' if m['at_head'] else 'commit ' + str(m['commit'])[:12]})"
-            + (f" [its decline record doesn't count: {m['decline_invalid']}]" if m.get("decline_invalid") else "")
+            + (f" [its decline record doesn't count and is ignored: {m['decline_invalid']}]" if m.get("decline_invalid") else "")
             for m in pending)))
         for m in account.get("inactive") or []:
             lines.append(f"               {m['state']} manifest {m['id']} ({m['why']}), nothing to apply")
