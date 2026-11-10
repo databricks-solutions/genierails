@@ -27,12 +27,25 @@ from scripts import environment_lock
 from scripts import release_gate as rg
 from tests.pty_harness import CTRL_C, CTRL_D, pty_run
 from tests.test_release_gate import EMPTY_ABAC
+from tests.test_env_status import World
 from tests.test_release_gate_make import Make, _account_planned, repo  # noqa: F401 (fixtures)
 
 QUESTION = "Approve and apply this account manifest? [y/N] "
 PROBE = ["runner", "account", "account", "plan", "-input=false", "-detailed-exitcode"]
 NOT_APPLIED = "rehearse: not applied. The account manifest "
 SPLIT = Path(rg.__file__).with_name("split_abac_config.py")
+DECLINED = (" is recorded as declined and its saved plan deleted, so make apply-account refuses it and make "
+            "status/next no longer show it as pending; re-run make rehearse ENV=dev to plan the account layer again "
+            "and be asked again. Nothing was applied in dev, and dev was not locked.")
+# An account plan that finds nothing to change (as after an import adopted what the declined manifest created).
+NOOP_RUNNER = """#!/bin/sh
+if [ "$1" = account ] && [ "$3" = plan ]; then
+    for arg in "$@"; do case "$arg" in -out=*) : > "${{arg#-out=}}" ;; esac; done
+    exit 0
+fi
+if [ "$1" = account ] && [ "$3" = show ]; then echo '{{"resource_changes": []}}'; exit 0; fi
+exec {runner} "$@"
+"""
 PLAN_RUNNER = """#!/bin/sh
 printf '%s\\n' "[\\"runner\\", \\"$1\\", \\"$2\\", \\"$3\\"]" >> {log}
 exit {rc}
@@ -146,12 +159,91 @@ def test_anything_but_y_applies_nothing_and_never_starts_the_dev_rehearsal(amake
     rc, shown = pty_make(amake, "rehearse", "dev", answer=answer)
     assert rc != 0, shown
     manifest = _manifest(shown)
-    assert (f"{NOT_APPLIED}{manifest} stays; apply it later with make apply-account, or re-run make rehearse "
-            "ENV=dev to be asked again. Nothing was locked or applied in dev.") in shown
+    assert f"{NOT_APPLIED}{manifest}{DECLINED}" in shown
     assert "_apply-account-locked" not in amake.names() and "sync-tags" not in amake.names()
     assert not rg.account_receipts(repo.cloud, "account") and not _approvals(repo)
-    assert (manifest.parent / "account.tfplan").exists()  # still there for make apply-account
+    # The N is recorded next to the manifest; the credential-bearing saved plan is gone (#229/#243).
+    record = json.loads((manifest.parent / rg.ACCOUNT_DECLINED).read_text())
+    assert record["manifest_id"] == json.loads(manifest.read_text())["id"] and record["via"] == "rehearse"
+    assert record["manifest_sha256"] == rg.sha256_file(manifest)
+    assert not (manifest.parent / "account.tfplan").exists() and manifest.is_file()
     _nothing_in_dev(amake, repo)
+
+
+def test_a_declined_manifest_is_refused_by_apply_account_and_never_offered_again(amake, repo):
+    rc, shown = pty_make(amake, "rehearse", "dev", answer="n")
+    assert rc != 0, shown
+    declined = _manifest(shown)
+    amake.reset()
+    result = amake("apply-account", "account", f"MANIFEST={declined}")
+    assert result.returncode != 0
+    assert "the manifest was declined at its y/N" in result.stderr and "Nothing was applied" in result.stderr
+    result = amake("apply-account", "account")
+    assert result.returncode != 0 and "no unreceipted account manifest for HEAD" in result.stderr
+    assert not [c for c in amake.calls() if c[0] == "runner" and c[3:4] == ["apply-plan"]]
+    assert not rg.account_receipts(repo.cloud, "account")
+    amake.reset()
+    time.sleep(1.1)  # manifest ids are per second
+    rc, shown = pty_make(amake, "rehearse", "dev", answer="y")
+    assert rc == 0, shown
+    assert "_account-plan-locked" in amake.names() and _manifest(shown) != declined
+    [receipt] = rg.account_receipts(repo.cloud, "account")
+    assert receipt["manifest"]["path"] == str(_manifest(shown))
+
+
+def test_declined_in_rehearse_then_a_no_op_account_plan_leaves_nothing_pending(amake, repo, tmp_path):
+    # Live on aws-5: N at rehearse's account y/N, then a later account-plan (after an import) found nothing to
+    # change. make status kept listing the declined manifest as pending.
+    rc, shown = pty_make(amake, "rehearse", "dev", answer="n")
+    assert rc != 0, shown
+    declined = _manifest(shown)
+    declined_id = json.loads(declined.read_text())["id"]
+    time.sleep(1.1)  # manifest ids are per second
+    noop = tmp_path / "noop-account-runner"
+    noop.write_text(NOOP_RUNNER.format(runner=amake.stubs["runner"]))
+    noop.chmod(0o755)
+    result = amake("account-plan", "account", root_runner=noop)
+    assert result.returncode == 0, result.stdout + result.stderr
+    newest = Path(next(line.split(":", 1)[1].strip() for line in result.stdout.splitlines()
+                       if "Manifest (immutable):" in line))
+    assert rg.account_manifest_noop(json.loads(newest.read_text()))
+    world = World(tmp_path, repo)
+    account = world.status("dev")["account"]
+    assert account["pending"] == []
+    assert [(m["id"], m["state"]) for m in account["inactive"]] == [(declined_id, "declined")]
+    command, why = world.next("dev")
+    assert "apply-account" not in command + why
+    lines = world.run("status", "dev").stdout.splitlines()
+    assert "  Account:     no pending account manifest" in lines
+    assert any(line.strip().startswith(f"declined manifest {declined_id} (") and line.endswith("nothing to apply")
+               for line in lines), lines
+    result = amake("apply-account", "account", f"MANIFEST={declined}")
+    assert result.returncode != 0 and "the manifest was declined at its y/N" in result.stderr
+    assert "superseded by a newer account-plan" in result.stderr
+    assert not rg.account_receipts(repo.cloud, "account")
+
+
+def test_a_decline_is_not_recorded_while_another_run_holds_the_account_lock(amake, repo):
+    held = {}
+
+    def lock_account():
+        ok, message, _ = environment_lock.acquire(_account_dir(repo), 1, "apply-account")  # pid 1: always alive
+        assert ok, message
+        held["ok"] = True
+
+    try:
+        rc, shown = pty_make(amake, "rehearse", "dev", answer="n", before_answer=lock_account)
+    finally:
+        if held:
+            environment_lock.lock_path(_account_dir(repo)).unlink()
+    assert rc != 0, shown
+    manifest = _manifest(shown)
+    assert DECLINED not in shown
+    assert f"The decline of the account manifest {manifest} could not be recorded (above)" in shown
+    assert "is held by make apply-account" in shown
+    assert not (manifest.parent / rg.ACCOUNT_DECLINED).exists()
+    assert (manifest.parent / "account.tfplan").exists()
+    assert not rg.account_receipts(repo.cloud, "account") and not _approvals(repo)
 
 
 def test_ctrl_c_at_the_prompt_approves_and_locks_nothing(amake, repo):

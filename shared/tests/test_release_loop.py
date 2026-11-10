@@ -365,11 +365,13 @@ def test_anything_but_y_for_the_account_manifest_applies_nothing_and_stops_befor
     rc, shown = _on_a_pty(make, [answer, "y"], account_changes=True)
     assert rc == MAKE_FAILED, shown
     manifest = _account_manifest(shown)
-    assert (f"release: not applied. The account manifest {manifest} stays; apply it later with make "
-            "apply-account, or re-run make release ENV=prod to be asked again. Nothing was locked or applied in "
-            "prod.") in shown
+    assert (f"release: not applied. The account manifest {manifest} is recorded as declined and its saved plan "
+            "deleted, so make apply-account refuses it and make status/next no longer show it as pending; re-run "
+            "make release ENV=prod to plan the account layer again and be asked again. Nothing was applied in prod, "
+            "and prod was not locked.") in shown
     assert shown.count(PROMPT) == 1 and "Release round 1" not in shown
-    assert (manifest.parent / "account.tfplan").exists()  # still there for make apply-account
+    assert json.loads((manifest.parent / rg.ACCOUNT_DECLINED).read_text())["via"] == "release"
+    assert not (manifest.parent / "account.tfplan").exists()  # declined: its credential-bearing plan is gone
     _nothing_released(make, repo)
 
 

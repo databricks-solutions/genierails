@@ -2154,6 +2154,69 @@ def account_manifest_paths(cloud_dir: Path, env: str = ACCOUNT_ENV) -> list[Path
     return sorted(manifests_dir(cloud_dir, env).glob("*/manifest.json"))
 
 
+ACCOUNT_DECLINED = "declined.json"
+
+
+def account_manifest_declined(manifest_path: Path) -> dict | None:
+    """The decline record next to an account manifest, or None when it was never declined.
+
+    Anything at the path counts (an unreadable or non-file record too): a
+    declined manifest is never applied, whatever happened to its record.
+    """
+    path = Path(manifest_path).parent / ACCOUNT_DECLINED
+    if not (path.exists() or path.is_symlink()):
+        return None
+    data = _read_json(path) if path.is_file() and not path.is_symlink() else None
+    return data if isinstance(data, dict) else {"unreadable": str(path)}
+
+
+def account_manifest_decline(env_dir: Path, env: str, manifest_path: Path, expected_sha256: str, *,
+                             via: str = "") -> tuple[Path, list[Path]]:
+    """Record the N answered to an account manifest's y/N and delete its saved plan (it holds credentials).
+
+    Write-once ``declined.json`` next to the manifest; the manifest itself
+    stays (append-only). Under the account lock, so no apply-account of it
+    is running. apply-account refuses a declined manifest, account-plan's
+    selection skips it, and make status/next show it as declined. Returns
+    (record, plans it couldn't delete).
+    """
+    from scripts import environment_lock
+
+    env_dir, manifest_path = Path(env_dir), Path(manifest_path)
+    manifest = load_account_manifest(manifest_path, env)
+    if sha256_file(manifest_path) != expected_sha256:
+        raise Refused(f"{manifest_path} changed after it was shown; its decline was not recorded")
+    if account_manifest_used(cloud_dir_of(env_dir), env, str(manifest.get("id") or "")):
+        raise Refused(f"{manifest_path} already has an account receipt; there is nothing to decline")
+    ok, message, _nonce = environment_lock.acquire(env_dir, os.getpid(), "decline-account")
+    if not ok:
+        raise Refused(f"the decline of {manifest_path} was not recorded: {message}")
+    left = []
+    try:
+        record = manifest_path.parent / ACCOUNT_DECLINED
+        payload = {"kind": "account-manifest-declined", "version": VERSION, "env": env,
+                   "manifest_id": manifest.get("id"), "manifest_sha256": expected_sha256,
+                   "commit": manifest.get("commit"), "via": via, "host": socket.gethostname(),
+                   "declined_at": _now()}
+        if account_manifest_declined(manifest_path) is None:
+            fd = os.open(record, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o400)
+            with os.fdopen(fd, "w") as handle:
+                os.fchmod(handle.fileno(), 0o400)
+                handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        entry = manifest.get("plan") or {}
+        if entry.get("file"):
+            plan = manifest_path.parent / Path(str(entry["file"])).name
+            try:
+                plan.unlink(missing_ok=True)
+            except OSError:
+                print(f"WARNING: declined saved plan {plan} contains credentials and could not be deleted; "
+                      "delete it by hand.", file=sys.stderr)
+                left.append(plan)
+    finally:
+        environment_lock.release_lock(env_dir, os.getpid())
+    return record, left
+
+
 def newer_account_manifest(cloud_dir: Path, env: str, manifest: Mapping) -> Path | None:
     """Newest unreceipted account manifest written after ``manifest``, if any."""
     older_key = (str(manifest.get("created_at") or ""), str(manifest.get("id") or ""))
@@ -2178,7 +2241,7 @@ def select_account_manifest(env_dir: Path, env: str) -> Path:
         plan = path.parent / str(entry.get("file") or "")
         if (manifest and manifest.get("kind") == "account-manifest" and manifest.get("version") == VERSION
                 and manifest.get("env") == env and manifest.get("commit") == status["commit"]
-                and not account_manifest_noop(manifest)
+                and not account_manifest_noop(manifest) and account_manifest_declined(path) is None
                 and entry.get("file") == "account.tfplan" and plan.is_file()
                 and not account_manifest_used(cloud_dir, env, str(manifest.get("id") or ""))):
             candidates.append((path, manifest))
@@ -2210,6 +2273,10 @@ def account_manifest_check(env_dir: Path, env: str, manifest_path: Path, *, remo
         drift.append(f"the manifest is for {manifest.get('cloud')}, not {cloud_dir_of(env_dir).name}")
     if account_manifest_used(cloud_dir_of(env_dir), env, str(manifest.get("id") or "")):
         drift.append("the manifest already has an account receipt; account manifests are single-use")
+    declined = account_manifest_declined(manifest_path)
+    if declined is not None:
+        drift.append("the manifest was declined at its y/N" + (f" ({declined['declined_at']})"
+                     if declined.get("declined_at") else "") + "; a declined manifest is never applied")
     serial = account_state_serial(env_dir)
     if serial != manifest.get("state_serial"):
         drift.append(f"the account state changed since account-plan (serial "
@@ -3124,6 +3191,10 @@ def main(argv: list[str] | None = None) -> int:
     cmd.add_argument("--field", default="", help="print one manifest field (json path a.b) instead")
     cmd.add_argument("--allow-removal", default="", help="ALLOW_TAG_VALUE_REMOVAL at apply time (must match)")
     command("account-manifest-select")
+    cmd = command("account-manifest-decline")
+    cmd.add_argument("--manifest", type=Path, required=True)
+    cmd.add_argument("--expect-digest", required=True)
+    cmd.add_argument("--via", default="")
     command("account-manifest-summary").add_argument("--manifest", type=Path, required=True)
     cmd = command("account-manifest-info")
     cmd.add_argument("--manifest", type=Path, required=True)
@@ -3245,6 +3316,10 @@ def main(argv: list[str] | None = None) -> int:
             manifest = load_account_manifest(path, args.env)
             print(path)
             print(f"Selected account manifest {manifest['id']} (sha256 {sha256_file(path)})", file=sys.stderr)
+        elif args.command == "account-manifest-decline":
+            record, _left = account_manifest_decline(args.env_dir, args.env, args.manifest, args.expect_digest,
+                                                    via=args.via)
+            print(f"Declined: {record}")
         elif args.command == "account-manifest-info":
             manifest = load_account_manifest(args.manifest, args.env)
             print(f"Selected account manifest {manifest['id']} (sha256 {sha256_file(args.manifest)})")
