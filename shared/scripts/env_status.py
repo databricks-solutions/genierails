@@ -306,18 +306,56 @@ def _lock(env_dir: Path) -> dict:
 
 
 def _account(cloud_dir: Path, commit: str) -> dict:
+    """Unreceipted account manifests that change something: ``pending`` (apply-account could still take it)
+    or ``inactive`` (declined, superseded or stale: nothing to apply), read from local files only.
+
+    The state serial apply-account also checks is not read (that can pull remote state), so a pending
+    one may still be refused there; every other check here is one apply-account makes too.
+    """
     paths = rg.account_manifest_paths(cloud_dir)
-    pending = []
+    manifests = []
     for path in paths:
         manifest = rg._read_json(path)
-        if (not manifest or manifest.get("kind") != "account-manifest" or manifest.get("env") != rg.ACCOUNT_ENV
-                or rg.account_manifest_noop(manifest)
+        if manifest and manifest.get("kind") == "account-manifest" and manifest.get("env") == rg.ACCOUNT_ENV:
+            manifests.append((path, manifest))
+    newest = max(((str(m.get("created_at") or ""), str(m.get("id") or "")) for _, m in manifests), default=None)
+    inputs = None
+    pending, inactive = [], []
+    for path, manifest in manifests:
+        if (rg.account_manifest_noop(manifest)
                 or rg.account_manifest_used(cloud_dir, rg.ACCOUNT_ENV, str(manifest.get("id") or ""))):
             continue
-        pending.append({"id": manifest.get("id"), "path": str(path), "commit": manifest.get("commit"),
-                        "at_head": manifest.get("commit") == commit,
-                        "plan_saved": (path.parent / "account.tfplan").is_file()})
-    return {"manifests": len(paths), "receipts": len(rg.account_receipts(cloud_dir)), "pending": pending}
+        entry = manifest.get("plan") or {}
+        plan_saved = entry.get("file") == "account.tfplan" and (path.parent / "account.tfplan").is_file()
+        item = {"id": manifest.get("id"), "path": str(path), "commit": manifest.get("commit"),
+                "at_head": manifest.get("commit") == commit, "plan_saved": plan_saved}
+        decline, detail = rg.account_manifest_decline_state(path, manifest)
+        if decline == "invalid":
+            # A record that doesn't count is ignored (as apply-account ignores it): never hides the manifest.
+            item["decline_invalid"] = detail
+        if decline == "valid":
+            state, why = "declined", f"declined at its y/N {detail}"
+        elif (str(manifest.get("created_at") or ""), str(manifest.get("id") or "")) != newest:
+            state, why = "superseded", "superseded by a newer account-plan"
+        elif not item["at_head"]:
+            state, why = "stale", f"planned for commit {str(manifest.get('commit') or '?')[:12]}, not HEAD"
+        elif not plan_saved:
+            state, why = "stale", "its saved plan is gone"
+        else:
+            if inputs is None:
+                try:
+                    inputs = rg.account_input_hashes(cloud_dir / "envs" / rg.ACCOUNT_ENV)
+                except rg.Refused as exc:
+                    inputs = str(exc)
+            if isinstance(inputs, str):
+                state, why = "stale", f"its account inputs can't be checked ({inputs})"
+            elif inputs != manifest.get("inputs"):
+                state, why = "stale", "the account inputs changed since account-plan"
+            else:
+                state, why = "pending", ""
+        (pending if state == "pending" else inactive).append(item | {"state": state, "why": why})
+    return {"manifests": len(paths), "receipts": len(rg.account_receipts(cloud_dir)), "pending": pending,
+            "inactive": inactive}
 
 
 def _evidence(env_dir: Path, git: dict) -> dict:
@@ -567,8 +605,11 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
                 # On a terminal rehearse itself shows the account plan and asks y/N (Makefile
                 # _ACCOUNT_APPROVE_APPLY); next can't see the caller's terminal, so the primitive leads.
                 on_a_terminal = f"; or, on a terminal, make rehearse ENV={env} shows it and asks y/N"
+                # A decline record that doesn't count is ignored everywhere (apply-account too): only a note.
+                ignored = (f" (the decline record beside it doesn't count and is ignored: {due[0]['decline_invalid']})"
+                           if due and due[0].get("decline_invalid") else "")
                 return live(command, f"the approved account manifest {due[0]['id']} for HEAD is not applied yet"
-                            + on_a_terminal if due else "first deploy: rehearse refuses a non-empty account plan "
+                            + ignored + on_a_terminal if due else "first deploy: rehearse refuses a non-empty account plan "
                             "(the new gr_treatment tag policy), so plan the account layer and get its manifest "
                             "approved" + on_a_terminal)
             why = f"no passing rehearsal of HEAD {git['head'][:12]} from this receipt store"
@@ -775,7 +816,10 @@ def _text(report: dict) -> list[str]:
         pending = account["pending"]
         lines.append("  Account:     " + ("no pending account manifest" if not pending else "; ".join(
             f"pending manifest {m['id']} ({'HEAD' if m['at_head'] else 'commit ' + str(m['commit'])[:12]})"
+            + (f" [its decline record doesn't count and is ignored: {m['decline_invalid']}]" if m.get("decline_invalid") else "")
             for m in pending)))
+        for m in account.get("inactive") or []:
+            lines.append(f"               {m['state']} manifest {m['id']} ({m['why']}), nothing to apply")
     evidence = report["evidence"]
     if evidence["exists"]:
         lines.append(f"  Evidence:    {evidence['path']}/ ({evidence['files']} file(s)"

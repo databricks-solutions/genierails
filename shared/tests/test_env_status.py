@@ -138,14 +138,28 @@ def account_applied(repo: Repo) -> None:
                                 "manifest": {"id": "a1"}, "created_at": "2026-01-01T00:00:00Z"}))
 
 
-def account_manifest(repo: Repo, *, changes: bool) -> None:
-    directory = rg.manifests_dir(repo.cloud, "account") / "a1"
+def account_manifest(repo: Repo, *, changes: bool, manifest_id: str = "a1",
+                     created_at: str = "2026-01-01T00:00:00Z", inputs=None) -> Path:
+    """An unreceipted account manifest as account-plan writes it (inputs: the account inputs' hashes now)."""
+    directory = rg.manifests_dir(repo.cloud, "account") / manifest_id
     directory.mkdir(parents=True)
-    (directory / "account.tfplan").write_bytes(b"plan")
+    if changes:  # account-plan keeps no saved plan for a no-op manifest
+        (directory / "account.tfplan").write_bytes(b"plan")
     (directory / "manifest.json").write_text(json.dumps({
-        "kind": "account-manifest", "version": rg.VERSION, "env": "account", "id": "a1", "commit": repo.head(),
-        "created_at": "2026-01-01T00:00:00Z", "plan": {"file": "account.tfplan", "changes": changes},
+        "kind": "account-manifest", "version": rg.VERSION, "env": "account", "id": manifest_id,
+        "commit": repo.head(), "created_at": created_at,
+        "plan": {"file": "account.tfplan", "changes": changes} if changes else {"changes": False},
+        "inputs": rg.account_input_hashes(repo.cloud / "envs" / "account") if inputs is None else inputs,
         "tag_sync": []}))
+    return directory / "manifest.json"
+
+
+def account_declined(repo: Repo, path: Path) -> dict:
+    """What the y/N's N records (release_gate.account_manifest_decline): declined.json, the saved plan deleted."""
+    record, left = rg.account_manifest_decline(repo.cloud / "envs" / "account", "account", path,
+                                               rg.sha256_file(path), via="rehearse")
+    assert not left
+    return json.loads(record.read_text())
 
 
 def manifest(repo: Repo, manifest_id: str = "m1", env: str = "prod") -> Path:
@@ -231,7 +245,134 @@ def test_committed_first_deploy_plans_the_account_layer(world, repo):
     assert world.next("dev") == ("make apply-account",
                                  "the approved account manifest a1 for HEAD is not applied yet; or, on a "
                                  "terminal, make rehearse ENV=dev shows it and asks y/N")
-    assert world.status("dev")["account"]["pending"][0]["id"] == "a1"
+    account = world.status("dev")["account"]
+    assert [m["id"] for m in account["pending"]] == ["a1"] and account["inactive"] == []
+    assert "  Account:     pending manifest a1 (HEAD)" in world.run("status", "dev").stdout.splitlines()
+
+
+def test_a_declined_account_manifest_is_not_pending_and_never_suggested(world, repo):
+    path = account_manifest(repo, changes=True)
+    declined_at = account_declined(repo, path)["declined_at"]
+    account = world.status("dev")["account"]
+    assert account["pending"] == []
+    assert [(m["id"], m["state"]) for m in account["inactive"]] == [("a1", "declined")]
+    command, why = world.next("dev")
+    assert command == "make rehearse ENV=dev" and "apply-account" not in command + why
+    lines = world.run("status", "dev").stdout.splitlines()
+    assert "  Account:     no pending account manifest" in lines
+    assert f"               declined manifest a1 (declined at its y/N {declined_at}), nothing to apply" in lines
+
+
+BAD_DECLINE_SHAPES = ["empty-object", "malformed", "symlink", "fifo", "directory", "mode-0644", "wrong-env",
+                      "wrong-manifest-id", "wrong-digest", "wrong-version"]
+
+
+def _bad_decline(repo: Repo, path: Path, shape: str) -> None:
+    """Codex's repro shapes for a declined.json that must be ignored: never hide a genuine pending manifest."""
+    record = path.parent / rg.ACCOUNT_DECLINED
+    good = account_declined(repo, path)
+    (path.parent / "account.tfplan").write_bytes(b"plan")  # the genuine plan is still there
+    record.unlink()
+    if shape == "empty-object":
+        record.write_text("{}")
+    elif shape == "malformed":
+        record.write_text("{not json")
+    elif shape == "symlink":
+        target = repo.tmp / "elsewhere.json"
+        target.write_text(json.dumps(good))
+        os.chmod(target, 0o600)
+        record.symlink_to(target)
+        return
+    elif shape == "fifo":
+        os.mkfifo(record, 0o600)
+        return
+    elif shape == "directory":
+        record.mkdir(mode=0o700)
+        return
+    elif shape == "mode-0644":
+        record.write_text(json.dumps(good))
+        os.chmod(record, 0o644)
+        return
+    else:
+        key, value = {"wrong-env": ("env", "dev"), "wrong-manifest-id": ("manifest_id", "a0"),
+                      "wrong-digest": ("manifest_sha256", "0" * 64), "wrong-version": ("version", 999)}[shape]
+        record.write_text(json.dumps(good | {key: value}))
+    os.chmod(record, 0o600)
+
+
+@pytest.mark.parametrize("shape", BAD_DECLINE_SHAPES)
+def test_a_decline_record_that_does_not_count_never_hides_a_pending_manifest(world, repo, shape):
+    path = account_manifest(repo, changes=True)
+    _bad_decline(repo, path, shape)
+    account = world.status("dev")["account"]
+    assert [m["id"] for m in account["pending"]] == ["a1"] and account["inactive"] == []
+    assert account["pending"][0]["decline_invalid"]
+    assert rg.select_account_manifest(repo.cloud / "envs" / "account", "account") == path
+    [line] = [l for l in world.run("status", "dev").stdout.splitlines() if l.startswith("  Account:")]
+    assert line.startswith("  Account:     pending manifest a1 (HEAD) [its decline record doesn't count and is "
+                           "ignored: ")
+
+
+@pytest.mark.parametrize("shape", BAD_DECLINE_SHAPES)
+def test_next_ignores_a_decline_record_that_does_not_count(world, repo, shape):
+    # Exactly as with no record: apply-account (which ignores it too), plus only a note.
+    path = account_manifest(repo, changes=True)
+    _bad_decline(repo, path, shape)
+    command, why = world.next("dev")
+    assert command == "make apply-account", (command, why)
+    assert why.startswith("the approved account manifest a1 for HEAD is not applied yet (the decline record "
+                          "beside it doesn't count and is ignored: ")
+    assert why.endswith("; or, on a terminal, make rehearse ENV=dev shows it and asks y/N")
+
+
+def test_a_correctly_bound_decline_record_hides_the_manifest_from_next_and_selection(world, repo):
+    path = account_manifest(repo, changes=True)
+    account_declined(repo, path)
+    assert world.status("dev")["account"]["inactive"][0]["state"] == "declined"
+    assert world.next("dev")[0] != "make apply-account"
+    with pytest.raises(rg.Refused, match="no unreceipted account manifest"):
+        rg.select_account_manifest(repo.cloud / "envs" / "account", "account")
+
+
+def test_an_account_manifest_superseded_by_a_newer_no_op_plan_is_not_pending(world, repo):
+    # A later account-plan (after an import) finds nothing to change; its saved-plan cleanup may not have run.
+    old = account_manifest(repo, changes=True)
+    account_manifest(repo, changes=False, manifest_id="a2", created_at="2026-01-01T00:05:00Z")
+    assert (old.parent / "account.tfplan").is_file()
+    account = world.status("dev")["account"]
+    assert account["pending"] == []
+    assert [(m["id"], m["state"]) for m in account["inactive"]] == [("a1", "superseded")]
+    assert "apply-account" not in " ".join(world.next("dev"))
+    assert ("               superseded manifest a1 (superseded by a newer account-plan), nothing to apply"
+            in world.run("status", "dev").stdout.splitlines())
+
+
+def test_only_the_newest_of_two_pending_account_manifests_is_pending(world, repo):
+    account_manifest(repo, changes=True)
+    account_manifest(repo, changes=True, manifest_id="a2", created_at="2026-01-01T00:05:00Z")
+    account = world.status("dev")["account"]
+    assert [m["id"] for m in account["pending"]] == ["a2"]
+    assert [(m["id"], m["state"]) for m in account["inactive"]] == [("a1", "superseded")]
+    assert world.next("dev")[0] == "make apply-account"
+    assert "a2 for HEAD" in world.next("dev")[1]
+
+
+def test_an_account_manifest_whose_inputs_changed_is_stale_not_pending(world, repo):
+    account_manifest(repo, changes=True, inputs=[{"path": "abac.auto.tfvars", "sha256": "0" * 64}])
+    account = world.status("dev")["account"]
+    assert account["pending"] == []
+    assert [(m["state"], m["why"]) for m in account["inactive"]] == [
+        ("stale", "the account inputs changed since account-plan")]
+    assert "apply-account" not in " ".join(world.next("dev"))
+
+
+def test_an_account_manifest_of_an_older_commit_is_stale_not_pending(world, repo):
+    account_manifest(repo, changes=True)
+    repo.commit({"shared/docs/notes.md": "later\n"})
+    account = world.status("dev")["account"]
+    assert account["pending"] == [] and account["inactive"][0]["state"] == "stale"
+    assert "not HEAD" in account["inactive"][0]["why"]
+    assert "apply-account" not in " ".join(world.next("dev"))
 
 
 def test_local_only_pending_remote_backed_account_manifest_restores_origin(world, repo):
