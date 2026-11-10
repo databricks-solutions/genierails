@@ -169,12 +169,15 @@ def receipt_approval(env_dir: Path) -> tuple[str, str | None, dict[str, Any]]:
     receipts (release_gate.newest_release_receipt: kind, env, cloud, its
     manifest's sha256) and an ``approval`` field that is still the record it
     embedded (approval.embedded_problem) name anyone: a y typed at a terminal
-    shows its self-reported git identity, OS user and time; ``{"via":
+    shows its self-reported git identity, OS user, terminal (device name),
+    the command names above the make that asked (or "not recorded" for a
+    record older than process_chain) and time, and says GenieRails can't prove
+    a person typed it; ``{"via":
     "external"}`` (the plain ``make release MANIFEST=`` path) says external.
     A newest receipt that doesn't verify is ``unverified: <why>``, never an
     older receipt or the name it claims; no receipt is ``unknown``. Only
-    approval.IDENTITY_FIELDS are read, never the question, tty, host, run
-    digest or asker.
+    approval.IDENTITY_FIELDS are read, never the question, host, run digest,
+    asker pids or the tty's path.
     """
     from scripts import approval as approvals
     from scripts import release_gate as rg
@@ -216,8 +219,27 @@ def receipt_approval(env_dir: Path) -> tuple[str, str | None, dict[str, Any]]:
     user = str(identity["user"] or "").strip()
     who = " ".join(part for part in (name, f"<{email}>" if email else "") if part) or "unnamed git user"
     at = identity["approved_at"]
-    return (f"{who} (OS user {user or 'unknown'}; y typed at a terminal, self-reported)",
+    terminal = approvals.terminal_name(identity["tty"])
+    chain, launched = _launched(identity["process_chain"])
+    record |= {"terminal": terminal or UNKNOWN_APPROVAL, "process_chain": chain or "not recorded"}
+    return (f"{who} (y typed on terminal {terminal or 'unknown'} by OS user {user or 'unknown'}; {launched}; "
+            "self-reported: GenieRails cannot prove a human typed it)",
             str(at) if isinstance(at, str) and at else None, record)
+
+
+def _launched(chain: Any) -> tuple[list[str], str]:
+    """(names, wording) for a record's process_chain: what started the make that asked, names only."""
+    from scripts import approval as approvals
+
+    if not isinstance(chain, list) or not chain:
+        return [], "process chain not recorded"
+    names = [approvals.command_name(name) for name in chain[:1 + approvals.CHAIN_ABOVE_MAKE]]
+    via = " <- ".join(names)
+    if len(names) < 2:
+        return names, f"via {via} (what started make not recorded)"
+    if names[1] in approvals.SHELLS:
+        return names, f"via {via} (make started from a shell)"
+    return names, f"via {via} (make started by {names[1]}, not a shell: a script or driver)"
 
 
 def _short(text: str, limit: int = 200) -> str:
