@@ -479,6 +479,48 @@ def _release_receipt_dir(env_dir: Path) -> Path:
     return directory
 
 
+def _abandoned_first_deploy_journal(env_dir: Path, fingerprint: str) -> None:
+    spa.save_journal(env_dir, spa.empty_journal() | {
+        "history": [{"run_id": "abandoned-first", "abandoned": fingerprint,
+                     "at": "2026-01-01T00:00:00+00:00"}],
+    })
+
+
+def _verified_import_only_phase(env_dir: Path, env: str) -> None:
+    from scripts import release_gate as rg
+
+    cloud = rg.cloud_dir_of(env_dir)
+    manifest_id = "20260101T000000-imports"
+    manifest_path = rg.manifests_dir(cloud, env) / manifest_id / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "kind": "release-manifest", "version": rg.VERSION, "id": manifest_id,
+        "env": env, "cloud": cloud.name, "commit": "a" * 40,
+        "plans": {"data_access": {"steps": [], "final": False, "imports_only": True}},
+        "imports": {"count": 1, "file": "imports.jsonl", "sha256": "recorded"},
+    }
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+    epoch = rg.release_epoch(cloud, env, create=True)
+    record = {
+        "kind": "release-phase", "version": rg.VERSION, "env": env, "commit": manifest["commit"],
+        "id": manifest_id, "manifest": str(manifest_path),
+        "manifest_sha256": rg.sha256_file(manifest_path), "release_epoch": epoch,
+        "policy_run": "", "approval": {"via": "external"}, "created_at": "2026-01-01T00:00:00+00:00",
+    }
+    phase = rg.env_state(cloud, env) / "receipts" / "phases" / f"{manifest_id}.json"
+    phase.parent.mkdir(parents=True, exist_ok=True)
+    phase.write_text(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _write_treatment_only_state(env_dir: Path, gen: dict) -> None:
+    _write_live_generation_state(env_dir, gen)
+    path = env_dir / "data_access" / "terraform.tfstate"
+    state = json.loads(path.read_text())
+    state["resources"] = [resource for resource in state["resources"]
+                          if resource.get("type") != "databricks_policy_info"]
+    path.write_text(json.dumps(state))
+
+
 def _active_old_generation_without_new_treatment(h, tmp_path: Path, monkeypatch) -> tuple[dict, dict]:
     gen = fresh(h, tmp_path, monkeypatch, column_classes={"cat.sch.t.email": ["email_address"]})
     old = dict(gen, tags={})
@@ -564,6 +606,65 @@ def test_release_plan_create_of_a_first_prod_release_needs_no_policy_journal(har
     assert gate["status"] == "pass"
 
 
+def test_release_plan_create_after_abandoning_the_first_deploy_is_still_first_release(
+        harness, tmp_path, monkeypatch):
+    gen = fresh(harness, tmp_path, monkeypatch, column_classes={"cat.sch.t.email": ["email_address"]})
+    _abandoned_first_deploy_journal(harness.env_dir, gen["fingerprint"])
+    tfvars = _render(harness, gen)
+    staged = {"stage": "create", "old_fingerprint": "", "keep_new_tags": False}
+
+    refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
+    assert refreshed_at is not None, detail
+    assert "first deploy keeps no column tagged" in detail
+    assert kept["uncovered_columns"] == ["cat.sch.t.email"]
+    assert _run_create_gate(harness, tmp_path, gen) == 0
+
+
+def test_abandoned_first_deploy_evidence_does_not_hide_a_real_coverage_gap(
+        harness, tmp_path, monkeypatch, capfd):
+    gen = fresh(harness, tmp_path, monkeypatch, column_classes={"cat.sch.t.email": ["email_address"]})
+    _abandoned_first_deploy_journal(harness.env_dir, gen["fingerprint"])
+    broken = dict(pg.plan_stage("create", gen, None, None)["coverage_rendered"])
+    broken["fgac_policies"] = []
+    validation = pg.write_stage(harness.env_dir / "data_access", broken,
+                                out_dir=pg.coverage_config_dir(harness.env_dir))
+
+    assert _run_create_gate(harness, tmp_path, gen, validation_dir=validation) == 0
+    output = capfd.readouterr()
+    assert "classified but unprotected columns" in output.out
+    assert "new SELECT grant(s) are withheld" in output.err
+
+
+def test_release_plan_after_import_only_treatment_round_is_still_pre_switch(
+        harness, tmp_path, monkeypatch):
+    gen = fresh(harness, tmp_path, monkeypatch, column_classes={"cat.sch.t.email": ["email_address"]})
+    _write_treatment_only_state(harness.env_dir, gen)
+    _verified_import_only_phase(harness.env_dir, harness.env_dir.name)
+    tfvars = _render(harness, gen)
+    staged = {"stage": "create", "old_fingerprint": "", "keep_new_tags": False}
+
+    refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
+    assert refreshed_at is not None, detail
+    assert kept["uncovered_columns"] == ["cat.sch.t.email"]
+    assert _run_create_gate(harness, tmp_path, gen) == 0
+
+
+def test_import_only_treatment_evidence_does_not_hide_a_real_coverage_gap(
+        harness, tmp_path, monkeypatch, capfd):
+    gen = fresh(harness, tmp_path, monkeypatch, column_classes={"cat.sch.t.email": ["email_address"]})
+    _write_treatment_only_state(harness.env_dir, gen)
+    _verified_import_only_phase(harness.env_dir, harness.env_dir.name)
+    broken = dict(pg.plan_stage("create", gen, None, None)["coverage_rendered"])
+    broken["fgac_policies"] = []
+    validation = pg.write_stage(harness.env_dir / "data_access", broken,
+                                out_dir=pg.coverage_config_dir(harness.env_dir))
+
+    assert _run_create_gate(harness, tmp_path, gen, validation_dir=validation) == 0
+    output = capfd.readouterr()
+    assert "classified but unprotected columns" in output.out
+    assert "new SELECT grant(s) are withheld" in output.err
+
+
 def test_first_deploy_create_gate_validates_the_generated_end_state(harness, tmp_path, monkeypatch):
     gen = fresh(harness, tmp_path, monkeypatch,
                 column_classes={"cat.sch.t.email": ["email_address"]})
@@ -624,7 +725,7 @@ def test_unjournaled_empty_old_generation_refuses_when_prod_already_has_live_gen
 
     refreshed_at, detail, kept = cg._live_refresh(harness.env_dir, tfvars, staged)
     assert refreshed_at is None and kept == {}
-    assert "already holds deterministic policies or treatment tags" in detail
+    assert "already holds deterministic policies" in detail
     assert cg.pending_treatments(harness.env_dir, staged) is None
 
 
