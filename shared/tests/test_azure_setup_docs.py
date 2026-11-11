@@ -69,7 +69,8 @@ def test_bootstrap_docs_name_sp_name_before_a_duplicate_sp_is_created():
     assert "**Already have a deployment SP? Pass its exact display name as `SP_NAME`.**" in text
     assert "or it creates a second SP named `genierails-deployer` and mints a new secret for it" in text
     assert "make bootstrap-sp ACCOUNT_ID=<id> SP_NAME=<deployer-sp-display-name>" in AZURE_PREREQS
-    assert "pass `SP_NAME=<its name>` for an existing SP" in (ROOT / "README.md").read_text()
+    assert ("It reuses an SP only by exact display name (`SP_NAME`, default `genierails-deployer`): pass "
+            "`SP_NAME=<its name>` for an existing SP, or it creates a second one.") in (ROOT / "REFERENCE.md").read_text()
 
 
 def test_plan_docs_list_what_plan_does_not_check_with_the_scripts_wording():
