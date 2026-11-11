@@ -82,7 +82,8 @@ REUSE = "it reuses the"
 # with its reuse, then release, and never asks for a rehearse on that commit.
 DOC_REUSE = [
     ("shared/examples/dev_to_prod/README.md", "make promote-to ENV=prod # 5. copy dev's tested rules into prod's config",
-     ["make release ENV=prod # 6. apply them to prod, one approved round at a time"]),
+     ["make release ENV=prod # 6. apply them to prod in a few small steps, showing you each step's changes "
+      "to approve"]),
     ("shared/examples/dev_to_prod/README.md", "| `make promote-to ENV=prod` | The same commit question",
      ["Same: save this step's files", "| `make release ENV=prod` |", "Each round: exactly that round's prod changes"]),
     ("shared/examples/dev_to_prod/DETAILS.md", "| `make promote-to ENV=prod` | Copies dev's reviewed rules",
@@ -91,8 +92,8 @@ DOC_REUSE = [
     # The release step's command and manifest come first (test_access_tier_groups pins that order); from its
     # rounds on, the step reuses dev's rehearsal and asks for no second rehearse.
     ("shared/examples/dev_to_prod/README.md", "*Why several rounds:*",
-     ["Answer `y` each round until it prints `=== Release complete (prod) ===`", "Before round 1",
-      "It reuses dev's rehearsal; it never rehearses dev."]),
+     ["Answer `y` each round until it prints `=== Release complete (prod) ===`", "Before the first round",
+      "It checks that this exact version already passed in dev."]),
     ("shared/examples/dev_to_prod/DETAILS.md", "## Prod step 4: Release",
      ["make release ENV=prod", "Each round it plans (`make release-plan ENV=prod`)",
       "the next `make release ENV=prod` offers it first"]),

@@ -289,7 +289,7 @@ def test_prod_step_4_says_a_first_release_takes_several_rounds_in_the_real_messa
     positions = [row.index(f"`{message}`") for message in (RELEASE_PHASE_HEADING, RELEASE_NEXT, RELEASE_COMPLETE)]
     assert positions == sorted(positions), row
     flow = _section("The whole flow")
-    assert "make release ENV=prod       # 6. apply them to prod, one approved round at a time" in flow.splitlines()
+    assert "make release ENV=prod       # 6. apply them to prod in a few small steps, showing you each step's changes to approve" in flow.splitlines()
     # Each round's y/N and the "Release complete" end live in the release step, not the flow's comment.
     step = _step(_section("Prod"), "4. Release.")
     assert "Each round shows you its manifest and asks `Approve and release manifest <id> ...? [y/N]`." in step
@@ -426,7 +426,7 @@ def test_release_describes_the_account_step_before_round_1_as_the_code_runs_it()
     asks = _section("Reference")
     row = next(line for line in asks.splitlines() if line.startswith("| `make release ENV=prod` |"))
     step = _step(_section("Prod"), "4. Release.")
-    assert "- Before round 1, if the account plan has changes, it asks the same account question as rehearse." \
+    assert "- Before the first round, if the account-wide setup needs changes, it asks the same question as rehearse." \
         in step.splitlines()
     assert row.index("`Approve and apply this account manifest? [y/N]` first, only when the account plan has "
                      "changes") < row.index("`Approve and release manifest <id>")
@@ -504,7 +504,7 @@ def test_the_ci_section_names_the_low_level_commands_and_what_they_do_off_a_term
 def test_the_walkthrough_says_setup_without_repo_keeps_the_genierails_remote():
     """Setup without REPO= keeps the canonical genierails remote, and that still deploys local main."""
     readme = _section("Before you start")
-    assert "No repo of your own yet? Leave `REPO=` off; everything then stays in local git." in readme
+    assert "No repo of your own yet? Leave `REPO=` off; you can add one later." in readme
     _links_to_details(readme, "Your repo and remotes")
     before = _details("Your repo and remotes")
     assert "setup renames `origin` to `genierails` and adds no `origin`" in before
