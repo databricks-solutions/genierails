@@ -322,7 +322,8 @@ class Scratch:
         sys.stdout.flush()
         if not quiet_success:
             return subprocess.run(command, env=env).returncode
-        result = subprocess.run(command, env=env, text=True, capture_output=True)
+        result = subprocess.run(command, env=env, text=True, encoding="utf-8", errors="replace",
+                                capture_output=True)
         stdout = _without_promote_complete_banner(result.stdout)
         if result.returncode == 0:
             print(stdout, end="")
@@ -353,6 +354,17 @@ def _display(rel: str) -> str:
     return f"envs/{rel}"
 
 
+_PROMOTE_COMPLETE_BANNER_PREFIXES = (
+    "  Next: fix ",
+    "  Next: edit ",
+    "        (same service principal as ",
+    "  Then: in Catalog Explorer, open the ",
+    "        When the scan finishes, review detections, exclude false positives, enable auto-tagging,",
+    "        and wait for class.* tags,",
+    "        then ",
+)
+
+
 def _without_promote_complete_banner(text: str) -> str:
     lines = text.splitlines(keepends=True)
     filtered, skipping = [], False
@@ -360,7 +372,7 @@ def _without_promote_complete_banner(text: str) -> str:
         if line.startswith("=== Promote complete:"):
             skipping = True
             continue
-        if skipping and (line.strip() == "" or line.startswith(" ")):
+        if skipping and line.startswith(_PROMOTE_COMPLETE_BANNER_PREFIXES):
             continue
         skipping = False
         filtered.append(line)
@@ -416,7 +428,7 @@ def _promote_check(args) -> None:
         before = _snapshot(scratch.envs)
         extra = [f"FROM={args.from_env}"] if args.from_env else []
         extra += [f"CATALOG_MAP={args.catalog_map}"] if args.catalog_map else []
-        print("  Running promote-to in a scratch copy; paths and next steps it prints refer to that copy.")
+        print("  Running promote-to in a scratch copy; scratch paths in its output refer to that copy.")
         if scratch.make("promote-to", f"ENV={args.env}", *extra, quiet_success=True) != 0:
             raise CheckFailed(f"promote-to ENV={args.env} failed in the scratch copy (see above)")
         flags = " ".join(extra)

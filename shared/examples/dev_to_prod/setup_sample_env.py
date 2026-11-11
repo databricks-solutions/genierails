@@ -37,6 +37,7 @@ SAMPLE_GROUPS = ("dev_to_prod_payments_ops", "dev_to_prod_regional_analysts", "d
 # The sample agent's file name, envs/dev/agents/<SAMPLE_AGENT>.auto.tfvars (its name).
 SAMPLE_AGENT = "Dev-to-Prod Walkthrough"
 ACL_PLACEHOLDER = "<group-that-may-run-the-agent>"
+SETUP_PLACEHOLDER = Path("envs/dev/agents/my_agent.auto.tfvars")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -411,6 +412,13 @@ def _space_exists(client: Any, space_id: str) -> bool:
         raise
 
 
+def _seeded_setup_placeholders() -> list[Path]:
+    repo = STATE_FILE.parent
+    return [Path(cloud) / SETUP_PLACEHOLDER for cloud in ("aws", "azure")
+            if (repo / cloud / SETUP_PLACEHOLDER).is_file()
+            and not (repo / cloud / SETUP_PLACEHOLDER).is_symlink()]
+
+
 def _space_payload(warehouse_id: str, tables: list[str], title: str) -> dict[str, str]:
     return {"warehouse_id": warehouse_id, "title": title,
             "description": "Optional synthetic PII environment for the GenieRails dev-to-prod walkthrough.",
@@ -549,8 +557,8 @@ def setup(args: argparse.Namespace, client: Any) -> None:
     fill = "" if groups else f" (replace {ACL_PLACEHOLDER} with the groups that may run it)"
     print(f"\nThen write the agent's file, {agent_file}{fill}:\n")
     print(_agent_tfvars(space_id, groups))
-    if (STATE_FILE.parent / "envs/dev/agents/my_agent.auto.tfvars").is_file():
-        print("\nDelete envs/dev/agents/my_agent.auto.tfvars if setup seeded that placeholder file.")
+    for placeholder in _seeded_setup_placeholders():
+        print(f"\nDelete {placeholder} if setup seeded that placeholder file.")
     print(f"\nGenie agent ID: {space_id}\nOwnership state: {STATE_FILE}")
 
 
