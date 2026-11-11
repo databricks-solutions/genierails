@@ -107,7 +107,10 @@ def test_make_commands_appear_only_in_get_started():
 def test_readme_says_it_controls_who_can_use_the_genie_agent():
     text = _text()
     intro = text[text.index("\n# GenieRails\n"):text.index(f"\n{SECTIONS[0]}\n")]
-    assert "It also controls who can use each Genie agent, and only opens that access once the masks are in place." in intro
+    # Access opens only after the masks are applied AND verified (the staged release runs verify-access
+    # before its grant phase, and Genie access comes last), so say "proven", not merely "in place".
+    assert "It also controls who can use each Genie agent, and only opens that access once the masks are proven to work." in intro
+    assert not re.search(r"masks (?:are|were) (?:in place|applied|there)\b", _prose(text)), "say the masks are proven to work"
     why = _section(text, "## Why use it")
     assert ("Nobody gets new access to an agent or its data until every sensitive column Data Classification "
             "finds in its tables has a mask.") in why

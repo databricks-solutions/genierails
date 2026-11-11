@@ -6,7 +6,7 @@
 
 GenieRails lets you give business users a Genie agent over your data without exposing sensitive columns.
 
-Databricks [Data Classification](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) finds the sensitive columns, like emails and card numbers. GenieRails turns what it finds into masks and access rules, tests them in dev, then releases the same tested rules to prod. It also controls who can use each Genie agent, and only opens that access once the masks are in place. You don't write any Terraform.
+Databricks [Data Classification](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) finds the sensitive columns, like emails and card numbers. GenieRails turns what it finds into masks and access rules, tests them in dev, then releases the same tested rules to prod. It also controls who can use each Genie agent, and only opens that access once the masks are proven to work. You don't write any Terraform.
 
 ## Why use it
 
