@@ -181,7 +181,9 @@ def test_the_relocated_facts_are_in_details_by_step():
                                        "`ALLOW_TAG_VALUE_REMOVAL=<key>:<value>,...`", "`promote_from = \"stg\"`",
                                        "Legacy envs skip `make release-plan`", "at most 8 rounds",
                                        "`ERROR: unacknowledged reader prod:reader:<table>:<principal>: ...`",
-                                       "reports them as stale"],
+                                       "reports them as stale",
+                                       "They see masked values like anyone outside the tiers",
+                                       "they could change grants or policies outside GenieRails"],
         "If prod stops on coverage or drift": ["**Reuse an existing mask**", "**A new kind of mask**",
                                                "`make draft-custom-mask`", "legacy-mode only"],
         "Prod step 5: Record evidence": ["`$GENIERAILS_STATE_DIR`", "`WAREHOUSE_ID=<id>` only pins another",
@@ -275,7 +277,8 @@ def test_readme_opens_with_what_the_flow_is_for_and_explains_each_concept_where_
     # Release: what a manifest is (the first prose use of the word), what y means, why rounds, access last.
     release = _step(prod, "4. Release.")
     for fact in ("*What a manifest is:* the exact list of changes this round will make, saved before anything "
-                 "happens.", "- `y` applies exactly that manifest. If anything changed since it was planned, it refuses.",
+                 "happens.", "- `y` applies exactly that manifest. If your files or prod changed since it showed you, it "
+                 "applies nothing.",
                  "- Anything else applies nothing and stops.", "*Why several rounds:* a first release goes masks "
                  "first, access last", "Each round is proven before the next opens more.",
                  "Answer `y` each round until it prints `=== Release complete (prod) ===`."):
@@ -284,16 +287,23 @@ def test_readme_opens_with_what_the_flow_is_for_and_explains_each_concept_where_
     # Ack: what ack.txt is, with a one-line example, only where the release asks for it.
     # Owner and admin readers, in plain words (owner feedback 2026-11-11): why the first release stops, what an
     # ack is, what to do; the key format's detail lives in DETAILS.md.
+    # Owners and admins read the tables but see masked values: every _full mask applies to `account users`
+    # except the tiers and raw_exempt_principals (governance_policies.py). Never claim they see raw data.
     for fact in ("**The first release stops to ask about owners and admins.**",
-                 "Owners of the prod catalog or tables, and admins, can always read the raw data.",
-                 "GenieRails can't take that away, so it asks you to confirm you know about them: an ack, one line "
-                 "in `envs/prod/ack.txt` saying \"I reviewed this access and accept it\".",
+                 "Catalog owners and admins can read prod's tables even though they're not in your tiers.",
+                 "They still see masked values, but GenieRails didn't grant this access and can't remove it.",
+                 "So it asks you to confirm you know about it: an ack, one line in `envs/prod/ack.txt` saying "
+                 "\"I reviewed this access and accept it\".",
                  "Copy the `prod:reader:...` key from each printed line you accept",
                  "commit and push it yourself, then run `make release ENV=prod` again."):
         assert fact in release, fact
-    assert release.index("can always read the raw data") < release.index("an ack, one line") \
+    owners = release[release.index("**The first release stops"):release.index("```text")]
+    assert not re.search(r"\braw\b", owners), owners
+    assert '"to_principals": ["account users"]' in (ROOT / "shared" / "governance_policies.py").read_text()
+    assert release.index("They still see masked values") < release.index("an ack, one line") \
         < release.index("Copy the `prod:reader:...` key") < release.index("```text")
-    for gone in ("reader refusals", "<principal>", "GenieRails doesn't manage that access"):
+    for gone in ("reader refusals", "<principal>", "GenieRails doesn't manage that access", "can always read the raw",
+                 "If anything changed since it was planned", "Before round 1", "the account plan has changes"):
         assert gone not in release, gone
     # Rehearsal reuse, in one plain sentence; the release step's goal says what a round is.
     assert "- It checks that this exact version already passed in dev. If not, it says `no passing rehearsal of " \
@@ -509,7 +519,8 @@ def test_the_facts_moved_out_of_the_flow_comments_live_in_the_steps_and_ask_tabl
         # release: shows each round's manifest, asks y/N, ends at Release complete; the account question first.
         (_step(prod, "4. Release."), ["Each round shows you its manifest and asks `Approve and release manifest <id> ...? [y/N]`.",
                                       "Answer `y` each round until it prints `=== Release complete (prod) ===`.",
-                                      "Before round 1, if the account plan has changes, it asks the same account question"]),
+                                      "Before the first round, if the account-wide setup needs changes, it asks the same question as "
+                                      "rehearse."]),
         (rows["make release ENV=prod"], ["`Approve and apply this account manifest? [y/N]` first",
                                          "once per round"]),
         # evidence: writes a record of what is live.

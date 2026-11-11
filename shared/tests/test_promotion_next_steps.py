@@ -92,7 +92,7 @@ DOC_REUSE = [
     # The release step's command and manifest come first (test_access_tier_groups pins that order); from its
     # rounds on, the step reuses dev's rehearsal and asks for no second rehearse.
     ("shared/examples/dev_to_prod/README.md", "*Why several rounds:*",
-     ["Answer `y` each round until it prints `=== Release complete (prod) ===`", "Before round 1",
+     ["Answer `y` each round until it prints `=== Release complete (prod) ===`", "Before the first round",
       "It checks that this exact version already passed in dev."]),
     ("shared/examples/dev_to_prod/DETAILS.md", "## Prod step 4: Release",
      ["make release ENV=prod", "Each round it plans (`make release-plan ENV=prod`)",

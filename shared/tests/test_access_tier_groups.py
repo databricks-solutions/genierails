@@ -635,7 +635,10 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     rehearse = details[details.index("## Dev step 4: Rehearse"):details.index("## Prod steps 1-2")]
     assert "](DETAILS.md#dev-step-4-rehearse)" in dev
     assert "The same `make check` runs alone as the PR check." in rehearse
-    assert "Its last gate is `verify-access` (`_verify-access-gate`)." in dev
+    # The proof's internals live in DETAILS.md; the README says it in plain words.
+    assert "- It applies dev; on a first deploy, masks before access." in dev
+    assert "Its last gate is" not in dev and "_verify-access-gate" not in dev
+    assert "then runs `verify-access` as its last gate (`_verify-access-gate`), querying as each test tier" in rehearse
     assert "**Pass looks like:** `ALL EFFECTIVE`" in dev and "make verify-access ENV=dev" in dev
     assert "**Agents (preferred):**" in dev and "envs/dev/agents/" in dev
     setup = details[details.index("## Dev step 1: Set up"):details.index("## Dev step 1: The commit offer")]

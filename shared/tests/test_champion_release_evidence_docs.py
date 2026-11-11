@@ -118,7 +118,7 @@ def test_maintain_runs_on_the_deployment_machine_at_the_last_released_commit_not
     assert "```bash\nmake maintain ENV=prod\n```" in safe
     assert "`maintain` catches columns tagged after the release and masks them." in safe
     assert "Schedule it (e.g. with cron) on the [deployment machine](../../docs/deployment-machine.md)." in safe
-    assert "In a deterministic env it runs only from the last released commit, on a clean checkout." in safe
+    assert "- In the default mode it runs only on the commit you last released, with no local edits." in safe
     # No walkthrough line puts maintain in CI.
     details = _section(DETAILS.read_text(), "## Keep it healthy", "## CI / scripted")
     assert "Run `make maintain ENV=prod` from the [deployment machine](../../docs/deployment-machine.md)." in details

@@ -114,13 +114,13 @@ To change a mask, edit `envs/dev/env.auto.tfvars` and re-run `make generate ENV=
 
 *Why prove it in dev first:* a mistake in dev is cheap. Rehearse applies the real rules, then queries as each group to prove the masks hide what they should. Prod releases only a commit that passed here.
 
-From a clean checkout at your pushed `origin/main`, in a terminal:
+From a clean checkout of what you pushed, in a terminal:
 ```bash
 make rehearse ENV=dev
 ```
 - It first runs `make check ENV=dev`. If a check fails, it stops before it takes the lock, writes anything or reads live dev.
 - A first deploy shows the shared account plan and asks `Approve and apply this account manifest? [y/N]`. That plan is the account-wide setup all envs share, e.g. the masks' tag policy. `y` applies exactly what it showed; answer `y`.
-- It applies dev, in phases on a first deploy: masks before access. Its last gate is `verify-access` (`_verify-access-gate`).
+- It applies dev; on a first deploy, masks before access.
 
 **Pass looks like:** `ALL EFFECTIVE`: each test tier sees masked values, the authorized tier sees raw ones. Re-run only that proof with `make verify-access ENV=dev`.
 
@@ -168,24 +168,25 @@ make release ENV=prod
 ```
 
 *What a manifest is:* the exact list of changes this round will make, saved before anything happens. Each round shows you its manifest and asks `Approve and release manifest <id> ...? [y/N]`.
-- `y` applies exactly that manifest. If anything changed since it was planned, it refuses.
+- `y` applies exactly that manifest. If your files or prod changed since it showed you, it applies nothing.
 - Anything else applies nothing and stops.
 
 *Why several rounds:* a first release goes masks first, access last: the masks, then the column tags, then read access, then access to the agent. Each round is proven before the next opens more. Answer `y` each round until it prints `=== Release complete (prod) ===`.
 
-- Before round 1, if the account plan has changes, it asks the same account question as rehearse.
+- Before the first round, if the account-wide setup needs changes, it asks the same question as rehearse.
 - It checks that this exact version already passed in dev. If not, it says `no passing rehearsal of <commit>`: run `make rehearse ENV=dev` first.
 
-**The first release stops to ask about owners and admins.** Owners of the prod catalog or tables, and admins, can always read the raw data. GenieRails can't take that away, so it asks you to confirm you know about them: an ack, one line in `envs/prod/ack.txt` saying "I reviewed this access and accept it". Copy the `prod:reader:...` key from each printed line you accept, e.g.:
+**The first release stops to ask about owners and admins.** Catalog owners and admins can read prod's tables even though they're not in your tiers. They still see masked values, but GenieRails didn't grant this access and can't remove it. So it asks you to confirm you know about it: an ack, one line in `envs/prod/ack.txt` saying "I reviewed this access and accept it".
+Copy the `prod:reader:...` key from each printed line you accept, e.g.:
 ```text
 # reviewed: owner group of prod_finance
 prod:reader:prod_finance.payments.transactions:finance_admins
 ```
 It's your sign-off, never a `y/N`, so no command commits it: commit and push it yourself, then run `make release ENV=prod` again.
 
-**Pass looks like:** `ALL EFFECTIVE` (from its `verify-access` gate) and "Release complete". Re-run only that proof with `make verify-access ENV=prod`.
+**Pass looks like:** `ALL EFFECTIVE` and "Release complete". Re-run only that proof with `make verify-access ENV=prod`.
 
-More: [each round, the account layer, rehearsal reuse, reader acks](DETAILS.md#prod-step-4-release).
+More: [rounds, the account setup, reader acks](DETAILS.md#prod-step-4-release).
 
 **If it stops on coverage or drift**, prod found a sensitive tag your rules don't cover. Nothing new was granted; the message prints the fix. More: [both fixes](DETAILS.md#if-prod-stops-on-coverage-or-drift).
 
@@ -209,7 +210,7 @@ make maintain ENV=prod
 ```
 
 - Schedule it (e.g. with cron) on the [deployment machine](../../docs/deployment-machine.md).
-- In a deterministic env it runs only from the last released commit, on a clean checkout.
+- In the default mode it runs only on the commit you last released, with no local edits.
 - It never grants access past a passing coverage check or changes the Genie agent; if it stops, it prints what to do.
 
 More: [what maintain does](DETAILS.md#keep-it-healthy).

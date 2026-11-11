@@ -426,7 +426,7 @@ def test_release_describes_the_account_step_before_round_1_as_the_code_runs_it()
     asks = _section("Reference")
     row = next(line for line in asks.splitlines() if line.startswith("| `make release ENV=prod` |"))
     step = _step(_section("Prod"), "4. Release.")
-    assert "- Before round 1, if the account plan has changes, it asks the same account question as rehearse." \
+    assert "- Before the first round, if the account-wide setup needs changes, it asks the same question as rehearse." \
         in step.splitlines()
     assert row.index("`Approve and apply this account manifest? [y/N]` first, only when the account plan has "
                      "changes") < row.index("`Approve and release manifest <id>")
