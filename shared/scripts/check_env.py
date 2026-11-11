@@ -310,7 +310,8 @@ class Scratch:
     def close(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def make(self, target: str, *args: str, extra_env: dict[str, str] | None = None) -> int:
+    def make(self, target: str, *args: str, extra_env: dict[str, str] | None = None,
+             quiet_success: bool = False) -> int:
         env = {k: v for k, v in os.environ.items() if k not in LEAKED_VARS} | (extra_env or {})
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         # The copy has no runtime overlay: regenerations write generated/ in
@@ -319,7 +320,17 @@ class Scratch:
         command = [self.make_bin, "-C", str(self.cloud), "--no-print-directory", target,
                    f"CLOUD_ROOT={self.cloud}", f"SHARED_ROOT={SHARED_ROOT}", *args]
         sys.stdout.flush()
-        return subprocess.run(command, env=env).returncode
+        if not quiet_success:
+            return subprocess.run(command, env=env).returncode
+        result = subprocess.run(command, env=env, text=True, capture_output=True)
+        stdout = _without_promote_complete_banner(result.stdout)
+        if result.returncode == 0:
+            print(stdout, end="")
+            print(result.stderr, end="", file=sys.stderr)
+        else:
+            print(result.stdout, end="")
+            print(result.stderr, end="", file=sys.stderr)
+        return result.returncode
 
     def add_credentials(self, env_name: str) -> None:
         """Copy the env's and account's auth files into the throwaway copy."""
@@ -340,6 +351,20 @@ class Scratch:
 
 def _display(rel: str) -> str:
     return f"envs/{rel}"
+
+
+def _without_promote_complete_banner(text: str) -> str:
+    lines = text.splitlines(keepends=True)
+    filtered, skipping = [], False
+    for line in lines:
+        if line.startswith("=== Promote complete:"):
+            skipping = True
+            continue
+        if skipping and (line.strip() == "" or line.startswith(" ")):
+            continue
+        skipping = False
+        filtered.append(line)
+    return "".join(filtered)
 
 
 def _compare(before: dict, after: dict, *, missing_ok: set[str]) -> tuple[list[str], list[str]]:
@@ -392,7 +417,7 @@ def _promote_check(args) -> None:
         extra = [f"FROM={args.from_env}"] if args.from_env else []
         extra += [f"CATALOG_MAP={args.catalog_map}"] if args.catalog_map else []
         print("  Running promote-to in a scratch copy; paths and next steps it prints refer to that copy.")
-        if scratch.make("promote-to", f"ENV={args.env}", *extra) != 0:
+        if scratch.make("promote-to", f"ENV={args.env}", *extra, quiet_success=True) != 0:
             raise CheckFailed(f"promote-to ENV={args.env} failed in the scratch copy (see above)")
         flags = " ".join(extra)
         _report(f"promote-to ENV={args.env} CHECK=1", before, _snapshot(scratch.envs),

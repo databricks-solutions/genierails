@@ -443,6 +443,7 @@ def test_promote_check_passes_on_committed_promote_output_and_writes_nothing(pro
     out = result.stdout + result.stderr
     assert result.returncode == 0, out
     assert "OK: promote-to ENV=prod CHECK=1: committed files match." in out
+    assert "Promote complete" not in out
     assert "applying targets cannot run in CI" not in out
     _assert_read_only(promoted, before)
     assert _git(promoted, "status", "--porcelain") == ""
@@ -460,6 +461,7 @@ def test_promote_check_fails_when_promote_output_is_hand_edited(promoted, tmp_pa
     assert result.returncode != 0
     assert f"envs/{path}: differs from the regenerated file" in result.stderr
     assert "Run make promote-to ENV=prod and commit the result." in result.stderr
+    assert "Promote complete" not in result.stdout + result.stderr
     _assert_read_only(promoted, before)
 
 
