@@ -1,6 +1,6 @@
 # GenieRails Documentation
 
-New here? Pick a path in the [project overview](../../README.md#pick-your-path): **govern and promote agents** starts with the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/)**; **govern tables only** starts with [Govern tables only](playbooks/governance.md#govern-tables-only).
+New here? Start in the [project overview](../../README.md#get-started): **govern and promote agents** starts with the **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/)**; **govern tables only** starts with [Govern tables only](playbooks/governance.md#govern-tables-only). For how releases check git (reviewed `origin/main` commits, or a local-only repo's committed `main`), see [`make release-plan`](../../REFERENCE.md) and the [deployment machine](deployment-machine.md); for the coverage check that withholds new access, see [Architecture](architecture.md).
 
 ### Start
 - **[Dev-to-Prod Walkthrough](../examples/dev_to_prod/)** — the champion flow: one agent, end to end.

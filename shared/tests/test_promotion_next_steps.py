@@ -157,8 +157,9 @@ DOC_REUSE = [
 DOC_ORDER = [
     ("shared/examples/dev_to_prod/REFERENCE.md", "- Then `make rehearse ENV=dev`, `make promote-to ENV=prod`",
      ["`make promote-to ENV=prod`", "`make release ENV=prod`", "legacy envs have no `release-plan`"]),
-    ("README.md", "promote the *rules* to prod",
-     ["release a rehearsed commit", "`make release ENV=prod`", "a y/N per manifest"]),
+    ("README.md", "4. **Release to prod.**",
+     ["copy the tested rules to prod", "prod scans its own data", "`make release ENV=prod`",
+      "one approved step at a time", "Masks go on before anyone gets access"]),
     ("shared/docs/pipelines.md", "**`make release-plan ENV=prod`** refuses",
      ["of prod's source env (`promote_from`, dev by default)"]),
     ("shared/docs/legacy-migration.md", "make promote-to ENV=prod # 2d.",
