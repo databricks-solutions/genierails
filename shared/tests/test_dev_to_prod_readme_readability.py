@@ -238,8 +238,16 @@ def test_readme_opens_with_what_the_flow_is_for_and_explains_each_concept_where_
 
     # Commit: explained in Dev step 1, at setup's offer, before any other prose use of the word.
     setup = _step(dev, "1. Set up.")
-    assert "`REPO=` (optional) makes this clone yours: `origin` becomes your repo" in setup
-    assert "Without it, everything stays in local git." in setup
+    # REPO= in plain words (owner feedback 2026-11-11): what the URL is, why GenieRails pushes there, what
+    # happens without it; no "origin" jargon in the prose (git's remote names live in DETAILS.md).
+    for fact in ("`REPO=` (optional) is the URL of your own git repository, e.g. "
+                 "`https://github.com/your-org/genierails-config`.",
+                 "GenieRails saves your changes there (it asks first), so teammates can review them.",
+                 "Without it, everything is saved only on this machine; you can add it later."):
+        assert fact in setup, fact
+    assert "origin" not in _prose(setup[:setup.index('<a id="commit-it"></a>')])
+    for gone in ("makes this clone yours", "`origin` becomes your repo", "stays in local git"):
+        assert gone not in text, gone
     offer = setup[setup.index('<a id="commit-it"></a>'):]
     for fact in ("**Then it offers to commit.** GenieRails previews", "`Commit these changes and push them to "
                  "origin/main? [y/N]`. Answer `y`.", "*What a commit is:* a saved snapshot of these files, with an ID.",
@@ -274,8 +282,25 @@ def test_readme_opens_with_what_the_flow_is_for_and_explains_each_concept_where_
         assert fact in release, fact
     assert after_map.lower().index("manifest") == after_map.index("*What a manifest is:*") + len("*What a ")
     # Ack: what ack.txt is, with a one-line example, only where the release asks for it.
-    assert "you accept it in writing: an ack, one line in `envs/prod/ack.txt` saying \"I reviewed this access " \
-        "and accept it\"" in release
+    # Owner and admin readers, in plain words (owner feedback 2026-11-11): why the first release stops, what an
+    # ack is, what to do; the key format's detail lives in DETAILS.md.
+    for fact in ("**The first release stops to ask about owners and admins.**",
+                 "Owners of the prod catalog or tables, and admins, can always read the raw data.",
+                 "GenieRails can't take that away, so it asks you to confirm you know about them: an ack, one line "
+                 "in `envs/prod/ack.txt` saying \"I reviewed this access and accept it\".",
+                 "Copy the `prod:reader:...` key from each printed line you accept",
+                 "commit and push it yourself, then run `make release ENV=prod` again."):
+        assert fact in release, fact
+    assert release.index("can always read the raw data") < release.index("an ack, one line") \
+        < release.index("Copy the `prod:reader:...` key") < release.index("```text")
+    for gone in ("reader refusals", "<principal>", "GenieRails doesn't manage that access"):
+        assert gone not in release, gone
+    # Rehearsal reuse, in one plain sentence; the release step's goal says what a round is.
+    assert "- It checks that this exact version already passed in dev. If not, it says `no passing rehearsal of " \
+        "<commit>`: run `make rehearse ENV=dev` first." in release
+    assert "**4. Release.** Apply the rules to prod in a few small steps (rounds); you approve each one." in release
+    for gone in ("never rehearses dev", "reuses dev's rehearsal", "one approved round at a time"):
+        assert gone not in text, gone
     assert "```text\n# reviewed: owner group of prod_finance\n" \
         "prod:reader:prod_finance.payments.transactions:finance_admins\n```" in release
     assert "never a `y/N`" in release
@@ -366,7 +391,7 @@ def test_details_explains_why_no_class_is_raw_for_everyone():
 # first-time account approval and prod's keys live in the steps and the ask table, not in the comments.
 FLOW_BLOCK = [
     "# Dev: build the rules and prove they work",
-    "make setup ENV=dev REPO=<your-repo-url>   # 1. create dev's config files (REPO= is optional)",
+    "make setup ENV=dev REPO=<your-repo-url>   # 1. create dev's config files (optional REPO = URL of your own git repo, e.g. on GitHub, for team review)",
     "#   then: fill in dev's env and agent files                (Dev step 1)",
     "#   then: turn on Data classification in Catalog Explorer  (Dev step 2)",
     "make generate ENV=dev       # 2. draft mask and access rules from the classification tags",
@@ -377,7 +402,7 @@ FLOW_BLOCK = [
     "#   then: fill in prod's env file                          (Prod step 1)",
     "make promote-to ENV=prod    # 5. copy dev's tested rules into prod's config",
     "#   then: review classification on the prod catalog        (Prod step 3)",
-    "make release ENV=prod       # 6. apply them to prod, one approved round at a time",
+    "make release ENV=prod       # 6. apply them to prod in a few small steps, showing you each step's changes to approve",
     "make evidence ENV=prod      # 7. save a record of what is live (for audit)",
     "make maintain ENV=prod      # 8. run on a schedule to mask columns that get tagged later",
     "",
@@ -399,6 +424,8 @@ OLD_FLOW_COMMENTS = [
     "writes a record of what is live",
     "on a schedule, on the deployment machine: masks columns tagged later",
     "# lost? make next ENV=<env>",
+    "(REPO= is optional)",
+    "one approved round at a time",
 ]
 
 
@@ -429,6 +456,14 @@ def test_the_flow_block_says_one_plain_thing_per_command():
     humans = [line for line in block if line.startswith("#   ")]
     assert humans and all(line.startswith("#   then: ") and re.search(r"\((Dev|Prod) step \d\)$", line)
                           for line in humans)
+    # Owner feedback 2026-11-11: the REPO comment says what REPO is and what it's for; the release comment says,
+    # in plain words, that it goes in small steps you approve.
+    repo = block[1].split("#", 1)[1]
+    for fact in ("optional", "URL of your own git repo", "GitHub", "team review"):
+        assert fact in repo, fact
+    release = next(line for line in block if line.startswith("make release ENV=prod")).split("#", 1)[1]
+    for fact in ("small steps", "each step's changes", "approve"):
+        assert fact in release, fact
     for old in OLD_FLOW_COMMENTS:
         assert old not in "\n".join(block), old
     # One sentence introduces the block; one says where the y/N questions are.
@@ -446,7 +481,8 @@ def test_the_facts_moved_out_of_the_flow_comments_live_in_the_steps_and_ask_tabl
     rows = {line.split(" | ")[0].strip("| `"): line for line in asks.splitlines() if line.startswith("| `make ")}
     moved = [
         # setup ENV=dev: REPO= is optional, the templates it copies, its commit offer.
-        (_step(dev, "1. Set up."), ["`REPO=` (optional) makes this clone yours", "Without it, everything stays in local git.",
+        (_step(dev, "1. Set up."), ["`REPO=` (optional) is the URL of your own git repository",
+                                    "Without it, everything is saved only on this machine",
                                     "Setup copies this walkthrough's templates into dev",
                                     "**Then it offers to commit.**", "Answer `y`."]),
         (rows["make setup ENV=dev REPO=<url>"], ["`Commit these changes and push them to origin/main? [y/N]`"]),

@@ -2,7 +2,7 @@
 
 Databricks Data Classification finds the sensitive columns in your tables, like emails and card numbers. GenieRails turns those findings into masks and access rules for your Genie agent. You end up with a dev and a prod env where each group sees only what it should, proven before anyone new gets access.
 
-The journey: set up dev, prove the rules in dev, copy the proven rules to prod, release prod, and keep it healthy. This is the happy path; each step links to its [details, edge cases and CI](DETAILS.md), and words are explained [at the end](#glossary).
+The journey: set up dev, prove the rules in dev, copy the proven rules to prod, release prod, and keep it healthy. Each step links to its [details and edge cases](DETAILS.md); words are explained [at the end](#glossary).
 
 <a id="how-it-works"></a>
 ## The whole flow
@@ -11,7 +11,7 @@ The whole flow at a glance; the steps below walk through each line.
 
 ```bash
 # Dev: build the rules and prove they work
-make setup ENV=dev REPO=<your-repo-url>   # 1. create dev's config files (REPO= is optional)
+make setup ENV=dev REPO=<your-repo-url>   # 1. create dev's config files (optional REPO = URL of your own git repo, e.g. on GitHub, for team review)
 #   then: fill in dev's env and agent files                (Dev step 1)
 #   then: turn on Data classification in Catalog Explorer  (Dev step 2)
 make generate ENV=dev       # 2. draft mask and access rules from the classification tags
@@ -22,7 +22,7 @@ make setup ENV=prod         # 4. create prod's config files
 #   then: fill in prod's env file                          (Prod step 1)
 make promote-to ENV=prod    # 5. copy dev's tested rules into prod's config
 #   then: review classification on the prod catalog        (Prod step 3)
-make release ENV=prod       # 6. apply them to prod, one approved round at a time
+make release ENV=prod       # 6. apply them to prod in a few small steps, showing you each step's changes to approve
 make evidence ENV=prod      # 7. save a record of what is live (for audit)
 make maintain ENV=prod      # 8. run on a schedule to mask columns that get tagged later
 
@@ -40,7 +40,7 @@ cd genierails/aws          # or: cd azure — every make command runs from the c
 ```
 
 - Have an empty repo you own ready for dev step 1's `make setup ENV=dev REPO=<your-repo-url>`.
-- No repo of your own yet? Leave `REPO=` off; everything then stays in local git.
+- No repo of your own yet? Leave `REPO=` off; you can add one later.
 - More: [your repo and remotes](DETAILS.md#your-repo-and-remotes).
 
 | You need | Notes |
@@ -63,7 +63,7 @@ In dev you set up, find the sensitive columns, draft the rules and prove they wo
 ```bash
 make setup ENV=dev REPO=<your-repo-url>
 ```
-- `REPO=` (optional) makes this clone yours: `origin` becomes your repo, where teammates can review your changes. Without it, everything stays in local git.
+- `REPO=` (optional) is the URL of your own git repository, e.g. `https://github.com/your-org/genierails-config`. GenieRails saves your changes there (it asks first), so teammates can review them. Without it, everything is saved only on this machine; you can add it later.
 - Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`](env.auto.tfvars.example) to `envs/dev/env.auto.tfvars` and [`agent.auto.tfvars.example`](agent.auto.tfvars.example) to `envs/dev/agents/my_agent.auto.tfvars`. It copies only files that don't exist yet, so it never overwrites your edits and a re-run changes nothing.
 
 <a id="commit-it"></a>
@@ -74,7 +74,7 @@ make setup ENV=dev REPO=<your-repo-url>
 - Teammates can review a change before it ships.
 - Git keeps every version, so you can see what changed and undo it later.
 
-Credentials (`auth.auto.tfvars`) are never committed. The edits you make next are committed by `make generate`'s offer; later steps that write files offer too.
+Credentials (`auth.auto.tfvars`) are never committed. `make generate`'s offer commits the edits you make next.
 
 Now fill in the files:
 - Fill in `envs/dev/auth.auto.tfvars` (service principal, workspace). In `envs/dev/env.auto.tfvars`, replace the deployer and group placeholders:
@@ -94,8 +94,8 @@ More: [more agents, inline `genie_spaces`, the `acl_groups` rules](DETAILS.md#de
 **2. Review classification (in Catalog Explorer).** Let Databricks find and tag dev's sensitive columns.
 
 - In **Catalog Explorer**, open the dev catalog → **Details** → **Data classification**: turn it on.
-- When the scan finishes (the first one can take up to about a day), review the detections, exclude false positives, and turn on auto-tagging.
-- Wait until a table's **Columns** tab in Catalog Explorer shows `class.*` tags.
+- When the scan finishes (the first can take about a day), review the detections, exclude false positives, and turn on auto-tagging.
+- Wait until a table's **Columns** tab shows `class.*` tags.
 
 *Why this review matters:* each tag says "this column is sensitive", and GenieRails builds the masks from these tags. Every tagged column the agent can reach needs a decision: a mask, or, if the detection is wrong, an exclusion here. Until it has one, GenieRails opens no new access, so nothing can leak by accident. More: [why there's no "raw for everyone" switch](DETAILS.md#why-no-unmasked-sensitive-column).
 
@@ -131,7 +131,7 @@ More: [the account layer, phases, row-pairing keys](DETAILS.md#dev-step-4-rehear
 <a id="phase-4--prod-release-and-verify"></a>
 ## Prod
 
-In prod you don't write rules again: you copy the ones dev proved, then release them.
+In prod you don't write rules again: you copy dev's proven ones, then release them.
 
 **1. Set up.** Create prod's files.
 
@@ -160,7 +160,7 @@ More: [reusing dev's service principal, `catalog_map` rules, what `promote-to` c
 
 Prod's real data may hold sensitive types dev never had.
 
-**4. Release.** Apply the rules to prod, one approved round at a time.
+**4. Release.** Apply the rules to prod in a few small steps (rounds); you approve each one.
 
 At a terminal on the deployment machine:
 ```bash
@@ -174,9 +174,9 @@ make release ENV=prod
 *Why several rounds:* a first release goes masks first, access last: the masks, then the column tags, then read access, then access to the agent. Each round is proven before the next opens more. Answer `y` each round until it prints `=== Release complete (prod) ===`.
 
 - Before round 1, if the account plan has changes, it asks the same account question as rehearse.
-- It reuses dev's rehearsal; it never rehearses dev. If it says `no passing rehearsal of <commit>`, run `make rehearse ENV=dev` first.
+- It checks that this exact version already passed in dev. If not, it says `no passing rehearsal of <commit>`: run `make rehearse ENV=dev` first.
 
-**Expect owner and admin reader refusals on the first round.** Owners and admins usually can read prod's tables outside your tiers. GenieRails doesn't manage that access, so you accept it in writing: an ack, one line in `envs/prod/ack.txt` saying "I reviewed this access and accept it". Add each printed `prod:reader:<table>:<principal>` key you accept, e.g.:
+**The first release stops to ask about owners and admins.** Owners of the prod catalog or tables, and admins, can always read the raw data. GenieRails can't take that away, so it asks you to confirm you know about them: an ack, one line in `envs/prod/ack.txt` saying "I reviewed this access and accept it". Copy the `prod:reader:...` key from each printed line you accept, e.g.:
 ```text
 # reviewed: owner group of prod_finance
 prod:reader:prod_finance.payments.transactions:finance_admins
@@ -195,7 +195,7 @@ More: [each round, the account layer, rehearsal reuse, reader acks](DETAILS.md#p
 make evidence ENV=prod
 ```
 - It writes a JSON record and Markdown summary to `.genierails-state/prod/evidence/` (git-ignored).
-- Archive the record, e.g. with the change ticket: the next run replaces it.
+- Archive it, e.g. with the change ticket: the next run replaces it.
 
 More: [warehouse, offline mode, state folder](DETAILS.md#prod-step-5-record-evidence).
 

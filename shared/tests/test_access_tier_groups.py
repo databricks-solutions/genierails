@@ -605,7 +605,7 @@ def test_champion_walkthrough_covers_check_commit_verify_and_agent_forms():
     assert "| `make release ENV=prod` | `Approve and apply this account manifest? [y/N]` first" in asks
     assert "| `make rehearse ENV=dev` | `Approve and apply this account manifest? [y/N]`, only when" in asks
     assert "**4. Rehearse.** Apply the rules to dev and prove the masks work." in dev
-    assert "**4. Release.** Apply the rules to prod, one approved round at a time." in prod
+    assert "**4. Release.** Apply the rules to prod in a few small steps (rounds); you approve each one." in prod
     # ...and the full table in DETAILS.md says how.
     full = details[details.index("## What each command does, in full"):details.index("## Your repo and remotes")]
     assert "| `make release ENV=prod` | Per round: `make release-plan` (runs `make check ENV=prod`, reuses dev's " \
@@ -722,7 +722,7 @@ def test_champion_walkthrough_lets_release_plan_reuse_the_dev_rehearsal_on_the_p
 
     # Prod: promote-to offers to commit and push the promoted files, then plan; release-plan reuses dev's rehearsal.
     steps = ["It then offers to commit and push `.gitignore`, `envs/prod/`", "**4. Release.**",
-             "make release ENV=prod", "It reuses dev's rehearsal; it never rehearses dev."]
+             "make release ENV=prod", "It checks that this exact version already passed in dev."]
     positions = [prod.index(step) for step in steps]
     assert positions == sorted(positions)
     step3 = prod[prod.index("**4. Release.**"):]

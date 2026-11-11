@@ -37,7 +37,7 @@ The walkthrough's [table](README.md#what-each-command-asks), with every detail:
 <a id="your-repo-and-remotes"></a>
 ## Your repo and remotes
 
-[Dev step 1](README.md#phase-0--dev-set-up)'s `make setup ENV=dev REPO=<your-repo-url>` makes this clone yours. It renames `origin` (GenieRails) to `genierails`, kept for upgrades, and adds `origin` = your repo. The remote change itself never pushes; setup's final commit offer may. Re-running with the same `REPO=` changes no remotes; a different `REPO=` once `origin` exists is refused (setup never repoints a remote), and so is a checkout nested inside another repo. Only `REPO=` on the command line counts (or one inherited through `MAKEFLAGS`, which make can't tell apart); an exported shell `REPO` is ignored.
+[Dev step 1](README.md#phase-0--dev-set-up)'s `make setup ENV=dev REPO=<your-repo-url>` makes this clone yours. Git calls the repo you push to `origin`; a fresh clone's `origin` is GenieRails. Setup renames that `origin` to `genierails`, kept for upgrades, and adds `origin` = your repo. With no `origin` yet (you left `REPO=` off before), a later `make setup ENV=dev REPO=<your-repo-url>` just adds it. The remote change itself never pushes; setup's final commit offer may. Re-running with the same `REPO=` changes no remotes; a different `REPO=` once `origin` exists is refused (setup never repoints a remote), and so is a checkout nested inside another repo. Only `REPO=` on the command line counts (or one inherited through `MAKEFLAGS`, which make can't tell apart); an exported shell `REPO` is ignored.
 
 Prefer to manage remotes yourself? Run `git remote rename origin genierails` and `git remote add origin <your-repo-url>` before setup and leave `REPO=` off.
 
