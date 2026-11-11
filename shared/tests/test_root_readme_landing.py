@@ -93,6 +93,34 @@ def test_get_started_points_to_the_walkthrough_and_make_next():
     assert positions == sorted(positions), steps
 
 
+def test_make_commands_appear_only_in_get_started():
+    """What/why/how text describes outcomes; the command teaser lives only in Get started."""
+    text = _text()
+    start = _section(text, "## Get started")
+    rest = text.replace(start, "\n")
+    found = re.findall(r"\bmake [A-Za-z][\w-]*", rest)
+    assert not found, found
+    assert "`make` commands" not in rest
+    assert "make evidence" not in rest
+
+
+def test_readme_says_it_controls_who_can_use_the_genie_agent():
+    text = _text()
+    intro = text[text.index("\n# GenieRails\n"):text.index(f"\n{SECTIONS[0]}\n")]
+    # Access opens only after the masks are applied AND verified (the staged release runs verify-access
+    # before its grant phase, and Genie access comes last), so say "proven", not merely "in place".
+    assert "It also controls who can use each Genie agent, and only opens that access once the masks are proven to work." in intro
+    assert not re.search(r"masks (?:are|were) (?:in place|applied|there)\b", _prose(text)), "say the masks are proven to work"
+    why = _section(text, "## Why use it")
+    assert ("Nobody gets new access to an agent or its data until every sensitive column Data Classification "
+            "finds in its tables has a mask.") in why
+    assert "Prod only takes changes that were committed and tested" in why
+    how = _section(text, "## How it works")
+    assert "who can use each Genie agent, using your existing groups" in how
+    assert "Masks go on before anyone gets access to the tables or the agent." in how
+    assert "every sensitive column it can reach" not in text
+
+
 def test_other_ways_and_docs_link_the_playbooks_and_reference():
     text = _text()
     other = _section(text, "## Other ways to use it")
