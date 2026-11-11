@@ -113,6 +113,19 @@ def _make(repo, tmp_path, *args, **env):
                           text=True, capture_output=True, env=_env(tmp_path, **env), timeout=300)
 
 
+def _fake_make(tmp_path, stdout, stderr="", returncode=0):
+    fake = tmp_path / f"fake-make-{returncode}"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"sys.stdout.write({stdout!r})\n"
+        f"sys.stderr.write({stderr!r})\n"
+        f"sys.exit({returncode})\n"
+    )
+    fake.chmod(0o755)
+    return fake
+
+
 def _snapshot(envs):
     return {str(p.relative_to(envs)): (os.readlink(p) if p.is_symlink() else p.read_bytes() if p.is_file() else None)
             for p in sorted(envs.rglob("*"))}
@@ -193,6 +206,87 @@ _baseline = _state
 
 def _assert_read_only(repo, before):
     assert _state(repo) == before
+
+
+def test_promote_complete_filter_keeps_indented_output_after_known_banner_lines():
+    text = (
+        "before\n"
+        "=== Promote complete: dev -> prod ===\n"
+        "  Next: edit /tmp/scratch/aws/envs/prod/auth.auto.tfvars  (prod workspace credentials)\n"
+        "        (same service principal as dev? add REUSE_SOURCE_AUTH=1 WORKSPACE_HOST=<prod host> WORKSPACE_ID=<prod id>)\n"
+        "  Then: in Catalog Explorer, open the prod catalog > Details tab > Data classification and turn it on.\n"
+        "        When the scan finishes, review detections, exclude false positives, enable auto-tagging,\n"
+        "        and wait for class.* tags,\n"
+        "        then make release-plan ENV=prod, make release ENV=prod (the walkthrough's Prod section)\n"
+        "  WARNING: this line is after the banner and must remain visible\n"
+        "    refused: this indented diagnostic must remain visible too\n"
+        "Promotion changes, by owner:\n"
+    )
+
+    filtered = check_env._without_promote_complete_banner(text)
+
+    assert "Promote complete" not in filtered
+    assert "Next: edit" not in filtered
+    assert "Data classification" not in filtered
+    assert "make release-plan ENV=prod" not in filtered
+    assert "  WARNING: this line is after the banner and must remain visible\n" in filtered
+    assert "    refused: this indented diagnostic must remain visible too\n" in filtered
+    assert "Promotion changes, by owner:\n" in filtered
+
+
+def test_scratch_make_failure_prints_full_output_and_preserves_return_code(tmp_path, capsys):
+    cloud = tmp_path / "aws"
+    cloud.mkdir()
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("# fake\n")
+    stdout = (
+        "before failure\n"
+        "=== Promote complete: dev -> prod ===\n"
+        "  Next: edit scratch auth\n"
+        "ERROR: simulated stdout failure\n"
+        "  Refused: nothing was changed\n"
+        "    refused: nested detail\n"
+    )
+    stderr = "ERROR: simulated stderr failure\n  refused: stderr detail\n"
+    scratch = check_env.Scratch(cloud, makefile, str(_fake_make(tmp_path, stdout, stderr, 17)))
+    try:
+        rc = scratch.make("promote-to", "ENV=prod", quiet_success=True)
+    finally:
+        scratch.close()
+
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert rc == 17
+    assert "=== Promote complete: dev -> prod ===" in out
+    assert "ERROR: simulated stdout failure" in out
+    assert "  Refused: nothing was changed" in out
+    assert "    refused: nested detail" in out
+    assert "ERROR: simulated stderr failure" in out
+    assert "  refused: stderr detail" in out
+
+
+def test_promote_check_failure_reports_scratch_failure_after_full_output(tmp_path, capsys):
+    cloud = tmp_path / "aws"
+    cloud.mkdir()
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("# fake\n")
+    stdout = "ERROR: refused by scratch promote\n  Refused: restored scratch files\n"
+    fake = _fake_make(tmp_path, stdout, returncode=23)
+
+    rc = check_env.main([
+        "promote-check",
+        "--env", "prod",
+        "--cloud-dir", str(cloud),
+        "--makefile", str(makefile),
+        "--make", str(fake),
+    ])
+
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert rc == 1
+    assert "ERROR: refused by scratch promote" in out
+    assert "  Refused: restored scratch files" in out
+    assert "promote-to ENV=prod failed in the scratch copy (see above)" in out
 
 
 @pytest.mark.parametrize("ci", ["", "true"])
@@ -443,6 +537,7 @@ def test_promote_check_passes_on_committed_promote_output_and_writes_nothing(pro
     out = result.stdout + result.stderr
     assert result.returncode == 0, out
     assert "OK: promote-to ENV=prod CHECK=1: committed files match." in out
+    assert "Promote complete" not in out
     assert "applying targets cannot run in CI" not in out
     _assert_read_only(promoted, before)
     assert _git(promoted, "status", "--porcelain") == ""
@@ -460,6 +555,7 @@ def test_promote_check_fails_when_promote_output_is_hand_edited(promoted, tmp_pa
     assert result.returncode != 0
     assert f"envs/{path}: differs from the regenerated file" in result.stderr
     assert "Run make promote-to ENV=prod and commit the result." in result.stderr
+    assert "Promote complete" not in result.stdout + result.stderr
     _assert_read_only(promoted, before)
 
 

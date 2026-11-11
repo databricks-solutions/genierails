@@ -3,12 +3,15 @@ import importlib.util
 from argparse import Namespace
 from unittest.mock import Mock
 import json
+import os
 import shutil
+import subprocess
 
 import pytest
 
 
 MODULE = Path(__file__).parents[1] / "examples" / "dev_to_prod" / "setup_sample_env.py"
+ROOT = Path(__file__).parents[2]
 SPEC = importlib.util.spec_from_file_location("setup_sample_env", MODULE)
 sample = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -24,6 +27,24 @@ def _load_sample_copy(tmp_path):
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def _sample_args():
+    return Namespace(
+        catalog="catalog", schema="schema", warehouse_id="warehouse-1", rows=1,
+        skip_agent=False, create_groups=False,
+    )
+
+
+def _run_sample_setup(module, monkeypatch, capsys):
+    monkeypatch.setattr(module, "_run_sql", lambda *args: None)
+    client = Mock()
+    client.config.host = "https://workspace"
+    client.api_client.do.return_value = {"space_id": "space-1"}
+
+    module.setup(_sample_args(), client)
+
+    return capsys.readouterr().out
 
 
 def test_existing_space_same_warehouse_is_a_noop():
@@ -466,28 +487,56 @@ def test_default_state_file_writes_repo_root_not_shared(tmp_path):
     assert not (repo / "shared/examples/dev_to_prod/.dev_to_prod_sample_env.json").exists()
 
 
+@pytest.mark.parametrize("cloud", ["aws", "azure"])
 @pytest.mark.parametrize("placeholder_exists", [False, True])
-def test_setup_reminds_to_delete_seeded_agent_placeholder_unconditionally(
-    tmp_path, monkeypatch, capsys, placeholder_exists
+def test_setup_reminds_to_delete_seeded_agent_placeholder_only_when_present(
+    tmp_path, monkeypatch, capsys, cloud, placeholder_exists
 ):
     copied = _load_sample_copy(tmp_path)
-    placeholder = tmp_path / "repo/envs/dev/agents/my_agent.auto.tfvars"
+    placeholder = tmp_path / f"repo/{cloud}/envs/dev/agents/my_agent.auto.tfvars"
     if placeholder_exists:
         placeholder.parent.mkdir(parents=True)
         placeholder.write_text("# seeded placeholder\n")
-    monkeypatch.setattr(copied, "_run_sql", lambda *args: None)
-    client = Mock()
-    client.config.host = "https://workspace"
-    client.api_client.do.return_value = {"space_id": "space-1"}
-    args = Namespace(
-        catalog="catalog", schema="schema", warehouse_id="warehouse-1", rows=1,
-        skip_agent=False, create_groups=False,
+
+    out = _run_sample_setup(copied, monkeypatch, capsys)
+
+    reminder = f"Delete {cloud}/envs/dev/agents/my_agent.auto.tfvars if setup seeded that placeholder file."
+    assert out.count(reminder) == (1 if placeholder_exists else 0)
+
+
+def test_setup_ignores_placeholder_at_repo_root_envs(tmp_path, monkeypatch, capsys):
+    copied = _load_sample_copy(tmp_path)
+    wrong = tmp_path / "repo/envs/dev/agents/my_agent.auto.tfvars"
+    wrong.parent.mkdir(parents=True)
+    wrong.write_text("# wrong place\n")
+
+    out = _run_sample_setup(copied, monkeypatch, capsys)
+
+    assert "Delete " not in out
+
+
+def test_setup_reminder_detects_placeholder_written_by_real_make_setup(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    aws = repo / "aws"
+    aws.mkdir(parents=True)
+    shutil.copy2(ROOT / "aws" / "Makefile", aws / "Makefile")
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("MAKEFLAGS", "MAKELEVEL", "ENV", "_SEED_WALKTHROUGH")}
+
+    result = subprocess.run(
+        ["make", "--no-print-directory", "setup", "ENV=dev", "COMMIT=0", "GITIGNORE=off",
+         f"SHARED_ROOT={ROOT / 'shared'}"],
+        cwd=aws, text=True, capture_output=True, env=env, stdin=subprocess.DEVNULL,
+        timeout=120,
     )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (aws / "envs/dev/agents/my_agent.auto.tfvars").is_file()
+    copied = _load_sample_copy(tmp_path)
 
-    copied.setup(args, client)
+    out = _run_sample_setup(copied, monkeypatch, capsys)
 
-    reminder = "Delete envs/dev/agents/my_agent.auto.tfvars if setup seeded that placeholder file."
-    assert capsys.readouterr().out.count(reminder) == 1
+    reminder = "Delete aws/envs/dev/agents/my_agent.auto.tfvars if setup seeded that placeholder file."
+    assert out.count(reminder) == 1
 
 
 def test_legacy_opt_in_preflight_failure_removes_nothing(teardown_env, monkeypatch):
