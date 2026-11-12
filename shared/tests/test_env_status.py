@@ -231,6 +231,26 @@ def test_after_setup(tmp_path, monkeypatch):
     assert command == "edit envs/dev/env.auto.tfvars" and "placeholder" in why
 
 
+# F7 (aws-6/azure-4): next said make generate before Data Classification was on. Whether it is (or has tagged
+# anything) lives in the workspace; status/next are offline, so the step names classification first.
+@pytest.mark.parametrize("mode", ["deterministic", "legacy"])
+def test_before_generate_next_names_data_classification_first(world, repo, mode):
+    shutil.rmtree(repo.dev / "generated")
+    if mode == "legacy":
+        (repo.dev / "env.auto.tfvars").write_text(LEGACY)
+    repo.commit({})
+    command, why = world.next("dev")
+    assert command == "turn on Data Classification in Catalog Explorer, then make generate ENV=dev"
+    assert why.startswith("envs/dev/generated/ has no abac.auto.tfvars yet. generate drafts rules from the "
+                          "class.* tags Data Classification puts on sensitive columns"), why
+    assert "already tagged? run make generate ENV=dev now" in why
+    assert not command.startswith("make "), command  # never a bare make generate first
+    if mode == "deterministic":  # a deterministic prod walks to its source's step: the same wording
+        assert world.next("prod")[0] == command
+    text = world.run("next", "dev").stdout
+    assert text.startswith("turn on Data Classification in Catalog Explorer, then make generate ENV=dev\n"), text
+
+
 def test_after_generate_uncommitted(world, repo):
     (repo.dev / "generated" / "abac.auto.tfvars").write_text(EMPTY_ABAC + "# reviewed\n")
     command, why = world.next("dev")
@@ -484,14 +504,38 @@ def test_rehearsed_with_a_stale_promotion_promotes(world, repo, monkeypatch):
 
 def test_promoted_uncommitted_then_committed(world, repo):
     account_applied(repo)
-    rehearse(repo)
+    rehearsed = rehearse(repo)
     (repo.prod / "generated" / "masking_functions.sql").write_text("-- promoted\n")
     assert world.next("prod")[0] == "git add envs/ && git commit"
     head = repo.commit({})
-    assert world.next("prod") == ("make rehearse ENV=dev", f"release-plan ENV=prod needs a passing rehearsal of dev "
-                                                           f"at HEAD {head[:12]}; no passing rehearsal of HEAD "
-                                                           f"{head[:12]} from this receipt store; release-plan "
-                                                           "needs one")
+    # F1 (aws-6/azure-4): the promotion commit changed only envs/prod/, so release-plan reuses dev's
+    # rehearsal itself (release_gate.rehearse_reuse); next never sends the champion to make rehearse ENV=dev.
+    reuse = (f"dev's inputs are unchanged since its passing rehearsal of {rehearsed['commit'][:12]}: release-plan "
+             f"reuses it for HEAD {head[:12]} (nothing is applied in dev; no make rehearse ENV=dev needed)")
+    assert world.next("prod") == ("make release-plan ENV=prod", reuse)
+    assert world.next("dev") == ("make release-plan ENV=prod", reuse)
+    status = world.status("prod")
+    assert status["rehearsal"]["passing"] is False
+    assert status["rehearsal"]["reusable_from"] == rehearsed["commit"]
+    text = world.run("status", "prod").stdout
+    assert f"which release-plan reuses (nothing is applied)" in text, text
+    # What next promised is what release-plan does: it writes the reused receipt and provenance accepts it.
+    assert rg.rehearse_reuse(repo.prod, "prod", Path("Makefile"), "make") is None
+    assert rg.passing_receipt(repo.cloud, "dev", head)["reused_from"] == rehearsed["commit"]
+    rg.provenance(repo.prod, "prod")
+
+
+def test_promoted_after_a_dev_input_change_still_rehearses_dev(world, repo):
+    account_applied(repo)
+    rehearse(repo)
+    head = repo.commit({"aws/envs/dev/agents/extra.auto.tfvars": "# dev changed\n",
+                        "aws/envs/prod/generated/masking_functions.sql": "-- promoted\n"})
+    command, why = world.next("prod")
+    assert command == "make rehearse ENV=dev", why
+    assert f"needs a passing rehearsal of dev at HEAD {head[:12]}" in why
+    assert world.status("prod")["rehearsal"]["reusable_from"] is None
+    assert "did not reuse" not in why and "reuses" not in why
+    assert "inputs of dev changed" in rg.rehearse_reuse(repo.prod, "prod", Path("Makefile"), "make")
 
 
 def test_rehearsed_but_not_on_origin_main_pushes(world, repo):

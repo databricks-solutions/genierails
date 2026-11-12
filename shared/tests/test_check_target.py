@@ -518,6 +518,76 @@ def test_check_refusals(repo, tmp_path, args, message):
     _assert_read_only(repo, before)
 
 
+# F2 (aws-6/azure-4): rehearse, release-plan and make check run promote-to in a scratch copy that writes
+# nothing outside it; its "=== Promote agents" / "=== Cross-env promote" banners read like a re-promote.
+SCRATCH_PROMOTE_STDOUT = (
+    "  Using saved FROM and CATALOG_MAP from envs/prod/env.auto.tfvars: FROM=dev CATALOG_MAP=a=b\n"
+    "=== Promote agents (dev -> prod) ===\n"
+    "  AWS-6 Walkthrough: promoted\n"
+    "=== Cross-env promote: dev -> prod ===\n"
+    "  WARNING: this warning must stay visible\n"
+    "=== Promote complete: dev -> prod ===\n"
+)
+SCRATCH_BANNERS = ("=== Promote agents", "=== Cross-env promote", "AWS-6 Walkthrough: promoted", "Promote complete")
+
+
+def test_scratch_make_summary_hides_promote_banners_on_success(tmp_path, capsys):
+    cloud = tmp_path / "aws"
+    cloud.mkdir()
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("# fake\n")
+    fake = _fake_make(tmp_path, SCRATCH_PROMOTE_STDOUT, "stderr note\n", 0)
+    scratch = check_env.Scratch(cloud, makefile, str(fake))
+    try:
+        assert scratch.make("promote-to", "ENV=prod", summary="    checked (no changes made)") == 0
+    finally:
+        scratch.close()
+    captured = capsys.readouterr()
+    for banner in SCRATCH_BANNERS:
+        assert banner not in captured.out + captured.err, banner
+    assert captured.out == ("  Using saved FROM and CATALOG_MAP from envs/prod/env.auto.tfvars: FROM=dev CATALOG_MAP=a=b\n"
+                            "  WARNING: this warning must stay visible\n    checked (no changes made)\n")
+    assert captured.err == "stderr note\n"
+
+
+def test_scratch_make_summary_prints_everything_on_failure(tmp_path, capsys):
+    cloud = tmp_path / "aws"
+    cloud.mkdir()
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("# fake\n")
+    fake = _fake_make(tmp_path, SCRATCH_PROMOTE_STDOUT + "ERROR: simulated\n", "refused: detail\n", 3)
+    scratch = check_env.Scratch(cloud, makefile, str(fake))
+    try:
+        assert scratch.make("promote-to", "ENV=prod", summary="    checked (no changes made)") == 3
+    finally:
+        scratch.close()
+    captured = capsys.readouterr()
+    assert "=== Promote agents (dev -> prod) ===" in captured.out and "ERROR: simulated" in captured.out
+    assert "refused: detail" in captured.err
+    assert "checked (no changes made)" not in captured.out
+
+
+def test_rehearse_digest_recompute_is_quiet_about_the_scratch_promote(tmp_path, capsys):
+    from scripts import release_gate as rg
+
+    cloud = tmp_path / "aws"
+    (cloud / "envs" / "prod").mkdir(parents=True)
+    (cloud / "envs" / "prod" / "env.auto.tfvars").write_text("# prod\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("# fake\n")
+    fake = _fake_make(tmp_path, SCRATCH_PROMOTE_STDOUT, "", 0)
+    digest, error = rg.promoted_digest(cloud, makefile, str(fake), "prod")
+    out = capsys.readouterr().out
+    assert digest and not error, (error, out)
+    for banner in SCRATCH_BANNERS:
+        assert banner not in out, banner
+    assert "Recomputing the promote-to ENV=prod digest in a scratch copy (nothing is promoted or written" in out
+    assert "checked what promote-to ENV=prod writes (no changes made)" in out
+    assert "WARNING: this warning must stay visible" in out
+
+
 @pytest.mark.parametrize("target", [["check", "ENV=dev"], ["promote-to", "ENV=prod", "CHECK=1"]])
 def test_dry_run_runs_nothing(repo, tmp_path, target):
     before = _baseline(repo)
@@ -538,6 +608,11 @@ def test_promote_check_passes_on_committed_promote_output_and_writes_nothing(pro
     assert result.returncode == 0, out
     assert "OK: promote-to ENV=prod CHECK=1: committed files match." in out
     assert "Promote complete" not in out
+    # F2: the scratch promote-to's banners would read like a re-promote; it says it checks instead.
+    for banner in ("=== Promote agents", "=== Cross-env promote"):
+        assert banner not in out, banner
+    assert "Checking envs/prod's promoted files are current (promote-to ENV=prod in a scratch copy; nothing is " \
+        "promoted or written here" in out
     assert "applying targets cannot run in CI" not in out
     _assert_read_only(promoted, before)
     assert _git(promoted, "status", "--porcelain") == ""

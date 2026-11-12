@@ -184,7 +184,7 @@ if [ "$3" = plan ]; then
   wrote_plan=0
   for arg in "$@"; do case "$arg" in -out=*) printf plan > "${arg#-out=}";; esac; done
   for arg in "$@"; do case "$arg" in -out=*) wrote_plan=1;; esac; done
-  [ "$wrote_plan" = 1 ] && exit 2 || exit 0
+  [ "$wrote_plan" = 1 ] && exit "${FAKE_PLAN_RC:-2}" || exit 0
 fi
 if [ "$3" = show ]; then
   if [ -f "$FAKE_SHOW" ]; then cat "$FAKE_SHOW"; else printf '{"resource_changes":[{"change":{"actions":["update"]}}]}\\n'; fi
@@ -506,6 +506,36 @@ def test_apply_account_without_an_opt_in_leaves_undesired_values_in_place(tmp_pa
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Tag values removed: none" in result.stdout
     assert repo.live()["gr_treatment"] == ["email_partial__string__0a1b2c3d", "new_value", "retired_by_hand"]
+
+
+def test_account_plan_with_changes_names_apply_account(tmp_path):
+    repo = Repo(tmp_path, LIVE)
+    result = repo.account_plan()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.rstrip().endswith("  Review it and its saved plan, get it approved, then run:\n"
+                                           "    make apply-account"), result.stdout
+    assert "Nothing to apply" not in result.stdout
+
+
+# F6 (azure-4): a no-change account-plan said "run make apply-account", which refuses a no-op manifest.
+def test_account_plan_without_changes_says_there_is_nothing_to_apply(tmp_path):
+    repo = Repo(tmp_path, {"gr_treatment": ["email_partial__string__0a1b2c3d", "new_value"]})
+    repo.env["FAKE_PLAN_RC"] = "0"
+    result = repo.account_plan()
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert "  Account plan: no changes" in out and "  Tag values removed: none" in out
+    assert "Tag values added" not in out
+    assert ("  Nothing to apply: the account layer already matches (no Terraform changes and no tag values to "
+            "add or remove).\n  No make apply-account is needed; run make next ENV=<env> for the next step.") in out
+    for gone in ("then run:", "    make apply-account", "Approving this manifest", "get it approved"):
+        assert gone not in out, gone
+    manifest = next(line.split(":", 1)[1].strip() for line in out.splitlines() if "Manifest (immutable):" in line)
+    from scripts import release_gate as rg
+    assert rg.account_manifest_noop(json.loads(Path(manifest).read_text()))
+    # The step it no longer suggests refuses that manifest anyway.
+    applied = repo.make("apply-account", "account", f"MANIFEST={manifest}")
+    assert applied.returncode != 0 and "has nothing to apply" in applied.stdout + applied.stderr
 
 
 def test_account_plan_surfaces_removals_in_its_output_and_manifest(tmp_path):
