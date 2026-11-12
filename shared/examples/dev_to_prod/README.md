@@ -48,9 +48,9 @@ cd genierails/aws          # or: cd azure — every make command runs from the c
 | The [prerequisites](../../docs/prerequisites.md) | Tools, a deploying service principal (a non-human account that runs the deploys: `make bootstrap-sp`), groups synced from your identity provider |
 | Your Genie **Agent ID** | Genie UI → agent → **Configure** → *About this agent*. *No agent yet?* Use the [sample environment](SAMPLE_ENV.md) |
 | Who may run the agent | Its `acl_groups`: the groups that get Genie `CAN_RUN`, chosen from your access-tier groups |
-| Deploying SP application ID | Each env's `databricks_client_id` (`auth.auto.tfvars`), also set in the env file as `deployer_principal_id` (not secret) |
+| Deploying SP application ID | Each env's `databricks_client_id` (`auth.auto.tfvars`), also set in the env file as `deployer_principal_id` |
 | Access-tier groups | Your existing groups, most- to least-privileged, e.g. `payments_ops` sees raw values, `viewers` masked ones. Order matters: a tier listed above a masked tier also gets the agent and sees those columns unmasked |
-| Dev and prod catalog names | e.g. `dev_finance` and `prod_finance` |
+| Dev and prod catalog names | e.g. `dev_finance` and `prod_finance`. Bind an ISOLATED catalog [to its own workspace](DETAILS.md#your-catalogs) |
 
 <a id="phase-0--dev-set-up"></a>
 <a id="phase-1--dev-scan-draft-and-test-rules"></a>
@@ -82,7 +82,7 @@ Now fill in the files:
   deployer_principal_id = "<the dev auth.auto.tfvars databricks_client_id>"
   access_tier_groups = ["payments_ops", "regional_analysts", "viewers"]
   ```
-- **Agents (preferred):** rename setup's `my_agent.auto.tfvars` to your agent. Set its ID and `acl_groups` (from `access_tier_groups`):
+- **Agents (preferred):** rename setup's `my_agent.auto.tfvars` to your agent, named uniquely in the prod workspace ([why](DETAILS.md#agent-names)). Set its ID and `acl_groups` (from `access_tier_groups`):
   ```hcl
   genie_space_id = "01ef0000000000000000000000000000"   # Genie UI > agent > Configure > About this agent
   acl_groups     = ["regional_analysts", "viewers"]      # who gets CAN_RUN on the agent; [] means nobody
@@ -142,7 +142,7 @@ make setup ENV=prod
 - In `envs/prod/env.auto.tfvars`, replace the `deployer_principal_id` placeholder and the seeded `catalog_map` line, and set the rest:
   ```hcl
   catalog_map = { "dev_finance" = "prod_finance" }   # dev catalog = prod catalog
-  sql_warehouse_id = "<existing-prod-warehouse-id>"   # or "" to create a new serverless warehouse
+  sql_warehouse_id = "<existing-prod-warehouse-id>"   # or "" for a new serverless one
   group_map   = { "payments_ops" = "prod_payments_ops" }   # dev group = prod group, only where they differ
   ```
 - Leave the `access_tier_groups` placeholders: the next step writes prod's tiers from dev's, through `group_map`.
@@ -158,7 +158,7 @@ More: [reusing dev's service principal, `catalog_map` rules, what `promote-to` c
 
 **3. Review classification (in Catalog Explorer).** Do the same review as [dev step 2](#dev-classify), on the prod catalog.
 
-Prod's real data may hold sensitive types dev never had.
+Prod's data may hold sensitive types dev never had.
 
 **4. Release.** Apply the rules to prod in a few small steps (rounds); you approve each one.
 
@@ -196,7 +196,7 @@ More: [rounds, the account setup, reader acks](DETAILS.md#prod-step-4-release).
 make evidence ENV=prod
 ```
 - It writes a JSON record and Markdown summary to `.genierails-state/prod/evidence/` (git-ignored).
-- Archive it, e.g. with the change ticket: the next run replaces it.
+- Archive it: the next run replaces it.
 
 More: [warehouse, offline mode, state folder](DETAILS.md#prod-step-5-record-evidence).
 
@@ -211,7 +211,7 @@ make maintain ENV=prod
 
 - Schedule it (e.g. with cron) on the [deployment machine](../../docs/deployment-machine.md).
 - In the default mode it runs only on the commit you last released, with no local edits.
-- It never grants access past a passing coverage check or changes the Genie agent; if it stops, it prints what to do.
+- It never grants access past a passing coverage check or changes the Genie agent; a stop prints the fix.
 
 More: [what maintain does](DETAILS.md#keep-it-healthy).
 
@@ -223,14 +223,14 @@ Later changes go through a pull request (PR) into `main`, checked by `make check
 <a id="ci--scripted"></a>
 ## CI / scripted
 
-Off a terminal (a pipeline, CI, piped output) nothing asks, and no flag or variable answers an approval `y` for you. Pipelines and two-person approval use the low-level steps: [CI / scripted](DETAILS.md#ci--scripted).
+Off a terminal (CI, a pipeline) nothing asks, and no flag or variable answers an approval `y` for you. Pipelines and two-person approval use the low-level steps: [CI / scripted](DETAILS.md#ci--scripted).
 
 ## Reference
 
 <a id="what-each-command-asks"></a>
 ### What each command asks
 
-`evidence`, `maintain`, `next` and `status` ask nothing. Every detail: [the full table](DETAILS.md#what-each-command-does-in-full).
+`evidence`, `maintain`, `next` and `status` ask nothing. [The full table](DETAILS.md#what-each-command-does-in-full).
 
 | Command | What it asks | What your `y` approves |
 |---|---|---|

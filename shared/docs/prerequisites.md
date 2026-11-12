@@ -116,11 +116,23 @@ choice, not a REST storage location. Open a SQL warehouse in the target
 workspace and run, for example, `CREATE CATALOG dev_finance;` and `CREATE
 CATALOG prod_finance;`, or create each catalog in Catalog Explorer.
 
-If you set a catalog's isolation mode to **ISOLATED**, also bind it explicitly
-to the workspace that must use it: Catalog Explorer → catalog → **Workspaces**
-→ assign the current workspace. Changing the isolation mode does not create
-that binding; without it the catalog is unreachable from every workspace,
-including the one where you changed the setting.
+If you set a catalog's isolation mode to **ISOLATED**, bind it to its own
+workspace (dev catalog to the dev workspace, prod catalog to the prod
+workspace): only the workspaces you assign can use an isolated catalog, and
+changing the mode alone assigns none. Without the binding the catalog is
+unreachable from every workspace, including the one where you changed the
+setting. To bind it, open Catalog Explorer → the catalog → **Workspaces** tab →
+**Assign to workspaces**, or run:
+
+```bash
+databricks workspace-bindings update-bindings catalog <catalog> \
+  --json '{"add": [{"workspace_id": <workspace-id>, "binding_type": "BINDING_TYPE_READ_WRITE"}]}' \
+  --profile <workspace-profile>
+```
+
+The workspace ID is the number after `o=` in the workspace's URL. See
+Databricks' [workspace-catalog binding](https://docs.databricks.com/aws/en/catalogs/binding)
+([Azure](https://learn.microsoft.com/en-us/azure/databricks/catalogs/binding)).
 
 </details>
 
