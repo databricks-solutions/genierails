@@ -13,15 +13,29 @@ class Hcl2VersionError(SystemExit):
 
 
 def _major(version: str) -> int | None:
-    match = re.match(r"\s*(\d+)", version)
+    match = re.match(r"\s*v?(\d+)", version)
     return int(match.group(1)) if match else None
+
+
+def installed_version() -> str:
+    """Best-effort python-hcl2 version, including PYTHONPATH/vendor installs."""
+    try:
+        version = importlib.metadata.version(PACKAGE)
+    except importlib.metadata.PackageNotFoundError:
+        version = ""
+    if version:
+        return version
+    try:
+        import hcl2
+    except ImportError:
+        return ""
+    return str(getattr(hcl2, "__version__", "") or "")
 
 
 def assert_supported_hcl2() -> None:
     """Refuse python-hcl2 8.x+, whose tfvars string output differs from 7.x."""
-    try:
-        version = importlib.metadata.version(PACKAGE)
-    except importlib.metadata.PackageNotFoundError:
+    version = installed_version()
+    if not version:
         return
     major = _major(version)
     if major is not None and major >= 8:

@@ -322,7 +322,8 @@ def test_promote_and_ungovern_print_the_mode_aware_release_steps():
 def test_promote_auth_hint_distinguishes_missing_from_malformed(tmp_path, auth_text, expected, absent):
     makefile = (SHARED / "Makefile.shared").read_text()
     promote = makefile[makefile.index("=== Promote complete:"):]
-    assert 'if [ $$status -eq 2 ]; then' in promote
+    assert 'if [ $$status -eq 4 ]; then' in promote
+    assert 'elif [ $$status -eq 2 ]; then' in promote
     assert 'Next: fix $$dest_env_dir/auth.auto.tfvars (not valid HCL)' in promote
     assert 'elif [ $$status -ne 0 ]; then' in promote
     assert 'Next: edit $$dest_env_dir/auth.auto.tfvars' in promote
@@ -331,7 +332,8 @@ def test_promote_auth_hint_distinguishes_missing_from_malformed(tmp_path, auth_t
         auth.write_text(auth_text)
     recipe = (
         'status=0; python3 "$(SHARED_ROOT)/scripts/auth_configured.py" "$(CLOUD_ROOT)/auth.auto.tfvars" '
-        '|| status=$$?; if [ $$status -eq 2 ]; then echo "Next: fix (not valid HCL)"; '
+        '|| status=$$?; if [ $$status -eq 4 ]; then exit 1; '
+        'elif [ $$status -eq 2 ]; then echo "Next: fix (not valid HCL)"; '
         'elif [ $$status -ne 0 ]; then echo "Next: edit (workspace credentials)"; fi'
     )
     result = _make(tmp_path, recipe=recipe)

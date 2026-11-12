@@ -48,7 +48,7 @@ echo ""
 
 # --- Check prerequisites ---
 if ! python3 -c "import hcl2" 2>/dev/null; then
-  echo "ERROR: python-hcl2 is required. Install with: pip install python-hcl2"
+  echo "ERROR: python-hcl2 is required. Install with: pip install 'python-hcl2>=7.3.1,<8'"
   exit 2
 fi
 

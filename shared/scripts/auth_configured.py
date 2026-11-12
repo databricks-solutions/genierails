@@ -13,6 +13,8 @@ except ModuleNotFoundError:  # imported as scripts.auth_configured
     Hcl2VersionError = _hcl2_guard.Hcl2VersionError
     import_hcl2 = _hcl2_guard.import_hcl2
 
+HCL2_VERSION_ERROR_EXIT = 4
+
 
 class AuthStatus(Enum):
     CONFIGURED = "configured"
@@ -110,6 +112,6 @@ if __name__ == "__main__":
         status = auth_status(Path(sys.argv[1])) if len(sys.argv) == 2 else AuthStatus.INCOMPLETE
     except Hcl2VersionError as exc:
         print(exc, file=sys.stderr)
-        raise SystemExit(2) from None
+        raise SystemExit(HCL2_VERSION_ERROR_EXIT) from None
     raise SystemExit({AuthStatus.CONFIGURED: 0, AuthStatus.INCOMPLETE: 1,
                       AuthStatus.MALFORMED: 2, AuthStatus.UNREADABLE: 3}[status])

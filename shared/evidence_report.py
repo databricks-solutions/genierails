@@ -317,7 +317,9 @@ def _load_hcl(path: Path) -> dict[str, Any]:
     try:
         from scripts.hcl2_guard import import_hcl2
     except ImportError as exc:
-        raise RuntimeError("python-hcl2 is required; install it with: pip install python-hcl2") from exc
+        raise RuntimeError(
+            "python-hcl2 is required; install it with: pip install 'python-hcl2>=7.3.1,<8'"
+        ) from exc
     hcl2 = import_hcl2()
     with path.open(encoding="utf-8") as handle:
         return hcl2.load(handle)
