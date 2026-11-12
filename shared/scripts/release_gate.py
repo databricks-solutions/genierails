@@ -2083,7 +2083,10 @@ def workspace_plan_has_only_stale_widening_output(data: Mapping | None) -> bool:
         actions = (item.get("change") or {}).get("actions") or []
         if any(action not in ("no-op", "read") for action in actions):
             return False
-    outputs = data.get("output_changes") or {}
+    outputs = {
+        key: change for key, change in (data.get("output_changes") or {}).items()
+        if (change or {}).get("actions") != ["no-op"]
+    }
     if set(outputs) != {"genie_space_can_run_widening"}:
         return False
     change = outputs["genie_space_can_run_widening"] or {}
@@ -2093,6 +2096,17 @@ def workspace_plan_has_only_stale_widening_output(data: Mapping | None) -> bool:
     if set(before) != set(after):
         return False
     return any(before[key] for key in before) and all(after[key] == [] for key in after)
+
+
+def workspace_plan_display_text(text: str) -> str:
+    """Drop Terraform's apply hint for the private temporary plan make deletes on EXIT."""
+    return re.sub(
+        r"\nSaved the plan to: .*?\n\nTo perform exactly these actions, run the following command to apply:\n"
+        r"\s+terraform apply .*?(?:\n|\Z)",
+        "\n",
+        text,
+        flags=re.DOTALL,
+    )
 
 
 def account_manifest_write(env_dir: Path, env: str, plan_dir: Path, prov: Mapping) -> Path:
@@ -3281,6 +3295,7 @@ def main(argv: list[str] | None = None) -> int:
     cmd = command("workspace-plan-display")
     cmd.add_argument("--show-json", type=Path, required=True)
     cmd.add_argument("--plan-output", type=Path, required=True)
+    command("workspace-plan-disposition").add_argument("--show-json", type=Path, required=True)
     command("tag-policy-delete-guard").add_argument("--show-json", type=Path, required=True)
     cmd = command("account-tag-sync-diff")
     cmd.add_argument("--out", type=Path, required=True)
@@ -3376,10 +3391,15 @@ def main(argv: list[str] | None = None) -> int:
             if data is None:
                 raise Refused(f"{args.show_json} is not valid terraform show -json output")
             if workspace_plan_has_only_stale_widening_output(data):
-                print("No changes. No resource changes; the released CAN_RUN ACLs already match. "
-                      "Terraform's stale pre-release widening output is omitted.")
+                print("No changes. No resource changes; the configured CAN_RUN ACLs already match. "
+                      "Terraform's stale plan-time widening diagnostic is omitted.")
             else:
-                print(args.plan_output.read_text(), end="")
+                print(workspace_plan_display_text(args.plan_output.read_text()), end="")
+        elif args.command == "workspace-plan-disposition":
+            data = _read_json(args.show_json)
+            if data is None:
+                raise Refused(f"{args.show_json} is not valid terraform show -json output")
+            print("stale-widening-only" if workspace_plan_has_only_stale_widening_output(data) else "changes")
         elif args.command == "tag-policy-delete-guard":
             require_no_tag_policy_deletes(_read_json(args.show_json))
         elif args.command == "account-tag-sync-diff":

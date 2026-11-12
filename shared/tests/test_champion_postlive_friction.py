@@ -251,12 +251,12 @@ PRIVATE = {"tty": "/dev/ttys004", "question": "Approve and release manifest X?",
            "host": "laptop-xyz", "asker": {"pid": 424242}}
 
 
-def _manifest(env_dir: Path, cloud: str = "aws", env: str = "prod") -> dict:
+def _manifest(env_dir: Path, cloud: str = "aws", env: str = "prod", manifest_id: str = MANIFEST_ID) -> dict:
     """A release manifest file in the env's state, as release-plan leaves it."""
-    path = rg.manifests_dir(env_dir.parents[1], env) / MANIFEST_ID / "manifest.json"
+    path = rg.manifests_dir(env_dir.parents[1], env) / manifest_id / "manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"kind": "release-manifest", "id": MANIFEST_ID, "commit": COMMIT, "env": env}))
-    return {"id": MANIFEST_ID, "path": str(path), "sha256": rg.sha256_file(path)}
+    path.write_text(json.dumps({"kind": "release-manifest", "id": manifest_id, "commit": COMMIT, "env": env}))
+    return {"id": manifest_id, "path": str(path), "sha256": rg.sha256_file(path)}
 
 
 def _terminal_approval(env_dir: Path, manifest: dict, extra: dict | None = None) -> dict:
@@ -278,7 +278,7 @@ def _terminal_approval(env_dir: Path, manifest: dict, extra: dict | None = None)
 
 
 def _receipt(env_dir: Path, approval="terminal", *, phases=None, cloud="aws", env="prod", name=RECEIPT,
-             manifest=None, raw=None, record=None) -> Path:
+             manifest=None, raw=None, record=None, phase_manifests=None) -> Path:
     directory = rg.release_dir(env_dir.parents[1], "prod")
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
@@ -294,6 +294,8 @@ def _receipt(env_dir: Path, approval="terminal", *, phases=None, cloud="aws", en
         receipt["approval"] = approval
     if phases is not None:
         receipt["phase_approvals"] = phases
+    if phase_manifests is not None:
+        receipt["phase_manifests"] = phase_manifests
     path.write_text(json.dumps(receipt))
     return path
 
@@ -313,7 +315,13 @@ def _no_private_fields(header: dict, markdown: str) -> None:
 
 def test_the_header_reads_the_terminal_approval_from_the_release_receipt(tmp_path, monkeypatch):
     env_dir = _prod(tmp_path, monkeypatch)
-    _receipt(env_dir, phases={"p1": {"via": "terminal"}, "p2": {"via": "terminal"}, "p3": {"via": "external"}})
+    phase_manifests = [_manifest(env_dir, manifest_id=f"phase-{n}") for n in range(1, 4)]
+    phases = {
+        phase_manifests[0]["id"]: _terminal_approval(env_dir, phase_manifests[0]),
+        phase_manifests[1]["id"]: _terminal_approval(env_dir, phase_manifests[1]),
+        phase_manifests[2]["id"]: {"via": "external"},
+    }
+    _receipt(env_dir, phases=phases, phase_manifests=list(phases))
     header, markdown = _evidence(env_dir)
     assert header["approved_by"] == ("Louis Chen <louis@example.com> (y typed on terminal ttys004 by OS user "
                                      "louis.chen; process chain not recorded; self-reported: GenieRails cannot "
@@ -329,6 +337,19 @@ def test_the_header_reads_the_terminal_approval_from_the_release_receipt(tmp_pat
     assert (f"- Approval record: release receipt `{RECEIPT}` (commit `6d463a4340c8`; "
             "final round: terminal, earlier phases: 1 external, 2 terminal)") in markdown
     _no_private_fields(header, markdown)
+
+
+def test_unlinked_or_unverified_phase_approvals_are_never_counted_as_terminal(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    linked = _manifest(env_dir, manifest_id="phase-linked")
+    forged = _terminal_approval(env_dir, linked) | {"manifest_id": "somewhere-else"}
+    _receipt(env_dir, phases={linked["id"]: forged, "not-a-phase": {"via": "terminal"}},
+             phase_manifests=[linked["id"]])
+    header, markdown = _evidence(env_dir)
+    record = header["approval_record"]
+    assert record["round_approvals"] == {"terminal": 1, "unverified": 1}
+    assert record["phase_approvals_not_counted"] == {"unlinked": 1}
+    assert "earlier phases: 1 unverified" in markdown
 
 
 SELF_REPORTED = "self-reported: GenieRails cannot prove a human typed it)"

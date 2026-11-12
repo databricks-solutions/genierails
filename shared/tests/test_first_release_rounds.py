@@ -121,6 +121,14 @@ elif role == "runner" and args[:1] == ["workspace"] and "plan" in args:
     Path(next(a for a in args if a.startswith("-out="))[5:]).write_text(
         json.dumps({"can_run": world["coverage"]}))
     rc = 2
+elif role == "runner" and args[:2] == ["workspace", "prod"] and "show" in args:
+    saved = json.loads(Path(args[-1]).read_text())
+    print(json.dumps({
+        "resource_changes": ([{"change": {"actions": ["create"]}}] if saved["can_run"] else []),
+        "output_changes": {"genie_space_can_run_widening": {
+            "actions": ["update"], "before": {"sales": []},
+            "after": {"sales": (["analysts"] if saved["can_run"] else [])}}},
+    }))
 elif role == "runner" and args[:1] == ["workspace"] and "apply-plan" in args:
     if json.loads(Path(args[-1]).read_text())["can_run"]:
         world["can_run"] = True

@@ -20,6 +20,7 @@ import pytest
 
 from scripts import approval
 from scripts import release_gate as rg
+import evidence_report
 from tests.test_approval import QUESTION, THIS_RUN, _forge, _record, this_run  # noqa: F401 (autouse fixture)
 from tests.test_release_gate import (  # noqa: F401 (fixtures)
     _second_manifest, account_manifest, manifest, repo,
@@ -115,6 +116,23 @@ def test_every_round_approved_at_the_terminal_is_on_the_final_receipt(repo, mani
     assert linked["via"] == "terminal" and linked["manifest_sha256"] == rg.sha256_file(manifest)
     assert linked == approval.check(repo.prod, "prod", manifest, phase_approval)
     assert rg.maintain_check(repo.prod, "prod")["commit"] == repo.head()
+
+
+def test_first_release_counts_imports_staged_and_final_terminal_approvals(repo, manifest):
+    """Five release-loop y's: imports, three staged phases, then the final workspace round."""
+    phases = [manifest]
+    for round_no in range(1, 5):
+        current = phases[-1]
+        rg.phase_record(repo.prod, "prod", current, _record(repo, current, round_no=round_no))
+        phases.append(_second_manifest(repo))
+    final = phases[-1]
+    receipt_path = rg.release_receipt(repo.prod, "prod", final, _record(repo, final, round_no=5))
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["phase_manifests"] == [_id(path) for path in phases[:-1]]
+    assert len(receipt["phase_approvals"]) == 4
+    _approved_by, _approved_at, approval_record = evidence_report.receipt_approval(repo.prod)
+    assert approval_record["round_approvals"] == {"terminal": 5}
+    assert approval_record["phase_approvals"] == approval_record["earlier_phase_approvals"] == {"terminal": 4}
 
 
 @pytest.mark.parametrize("writer", ["phase-record", "release-receipt"])

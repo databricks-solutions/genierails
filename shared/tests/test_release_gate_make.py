@@ -88,6 +88,24 @@ if {name!r} == "live":
 sys.exit(int(Path({rc!r}).read_text()) if Path({rc!r}).exists() else 0)
 '''
 
+WORKSPACE_PLAN_RUNNER = r'''#!{python}
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+with open({log!r}, "a") as handle:
+    handle.write(json.dumps(args) + "\n")
+command = args[2]
+if command == "plan":
+    out = next(Path(arg.split("=", 1)[1]) for arg in args if arg.startswith("-out="))
+    out.write_bytes(b"saved workspace plan")
+    print("Terraform will perform the following actions:\n  # visible change\n\nPlan: 1 to add, 0 to change, 0 to destroy.")
+    print(f"\nSaved the plan to: {{out}}\n\nTo perform exactly these actions, run the following command to apply:\n    terraform apply \"{{out}}\"")
+elif command == "show":
+    print(Path(os.environ["WORKSPACE_SHOW_JSON"]).read_text())
+else:
+    raise SystemExit(f"unexpected runner command: {{args}}")
+'''
+
 FIRST_RELEASE_REPORTS = r'''#!{python}
 import json, sys
 from pathlib import Path
@@ -203,9 +221,56 @@ class Make:
         self.log.unlink(missing_ok=True)
 
 
+def _workspace_plan_runner(tmp_path: Path, show: dict) -> tuple[Path, Path]:
+    log, shown = tmp_path / "workspace-runner.jsonl", tmp_path / "workspace-show.json"
+    shown.write_text(json.dumps(show))
+    runner = tmp_path / "workspace-plan-runner"
+    runner.write_text(WORKSPACE_PLAN_RUNNER.format(python=sys.executable, log=str(log)))
+    runner.chmod(0o755)
+    return runner, shown
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     return Repo(tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("after,suppressed", [([], True), (["auditors"], False)])
+def test_workspace_plan_layer_suppresses_only_stale_widening_and_never_prints_deleted_plan_hint(
+        tmp_path, repo, after, suppressed):
+    make = Make(tmp_path, repo)
+    (repo.prod / "agents").mkdir()
+    (repo.prod / "agents" / "Sales.auto.tfvars").write_text(
+        'genie_space_id = ""\nacl_groups = ["analysts"]\n'
+        'uc_tables = ["prod_cat.sales.customers"]\nsql_warehouse_id = "wh"\n')
+    (repo.prod / "abac.auto.tfvars").write_text(EMPTY_ABAC)
+    show = {"resource_changes": [], "output_changes": {
+        "genie_space_can_run_widening": {
+            "actions": ["update"], "before": {"sales": ["analysts"]}, "after": {"sales": after}},
+        "genie_space_missing_grants": {
+            "actions": ["no-op"], "before": {"sales": []}, "after": {"sales": []}},
+    }}
+    runner, shown = _workspace_plan_runner(tmp_path, show)
+    result = make("_plan-layer", "prod", "LAYER=workspace", "TARGET_ENV=prod",
+                  f"LAYER_ENV_DIR={repo.prod}", root_runner=runner,
+                  environ_extra={"WORKSPACE_SHOW_JSON": str(shown)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    if suppressed:
+        assert "No changes. No resource changes" in result.stdout
+        assert "# visible change" not in result.stdout
+    else:
+        assert "# visible change" in result.stdout
+        assert "No changes. No resource changes" not in result.stdout
+    assert "Saved the plan to:" not in result.stdout
+    calls = [json.loads(line) for line in (tmp_path / "workspace-runner.jsonl").read_text().splitlines()]
+    assert [call[2] for call in calls if call[2] in ("plan", "show")] == ["plan", "show"]
+
+
+def test_release_plan_roots_marks_only_the_stale_widening_output_as_no_workspace_change():
+    recipe = (ROOT / "shared" / "Makefile.shared").read_text().split("_release-plan-roots:", 1)[1].split(
+        "# make release ENV=", 1)[0]
+    assert "workspace-plan-disposition" in recipe
+    assert 'if [ "$$disposition" = stale-widening-only ]; then status=0' in recipe
 
 
 @pytest.fixture
