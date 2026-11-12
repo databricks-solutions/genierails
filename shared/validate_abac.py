@@ -8,7 +8,7 @@ Checks:
   3. Cross-references between both files
 
 Usage:
-  pip install python-hcl2          # one-time
+  pip install 'python-hcl2>=7.3.1,<8'  # one-time
   python validate_abac.py abac.auto.tfvars masking_functions.sql
   python validate_abac.py abac.auto.tfvars   # skip SQL check
 """
@@ -26,12 +26,13 @@ from governance_policies import (
     normalize_column_overrides, parse_treatment_value, treatment_value_column,
 )
 from treatment_derivation import load_treatment_config
+from scripts.hcl2_guard import PIN
 
 try:
     import hcl2
 except ImportError:
     print("ERROR: python-hcl2 is required.  Install with:")
-    print("  pip install python-hcl2")
+    print(f"  pip install '{PIN}'")
     sys.exit(2)
 
 VALID_ENTITY_TYPES = {"tables", "columns"}

@@ -177,10 +177,11 @@ def persist_access_tier_groups(path: Path, groups: list[str]) -> None:
     Idempotent for the same groups; refuses (ValueError) to overwrite a
     different non-empty saved value.
     """
-    import hcl2
+    from scripts.hcl2_guard import import_hcl2
 
     target = Path(path).resolve()
     text = target.read_text()
+    hcl2 = import_hcl2()
     before = hcl2.loads(text)
     had_placeholders = isinstance(before.get(SETTING), list) and _all_placeholders(before[SETTING])
     saved = persisted_access_tier_groups(before, target)

@@ -20,15 +20,16 @@ WORK_DIR = Path.cwd()
 
 def _load_hcl(path: Path) -> dict:
     try:
-        import hcl2
+        from hcl2_guard import import_hcl2
     except ImportError:
         import subprocess
 
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "--quiet", "python-hcl2>=7.3.1,<8"],
         )
-        import hcl2
+        from hcl2_guard import import_hcl2
 
+    hcl2 = import_hcl2()
     with open(path) as f:
         return hcl2.load(f)
 

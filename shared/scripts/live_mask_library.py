@@ -169,9 +169,10 @@ def main() -> int:
     parser.add_argument("--env-file", type=Path)
     args = parser.parse_args()
     if args.auth_file and args.env_file:
-        import hcl2
+        from hcl2_guard import import_hcl2
         from databricks.sdk import WorkspaceClient
 
+        hcl2 = import_hcl2()
         try:
             auth = hcl2.load(args.auth_file.open())
         except Exception:

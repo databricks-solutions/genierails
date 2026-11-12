@@ -381,8 +381,9 @@ def required_mask_columns(
 
 def required_mask_columns_from_tfvars(tfvars_file: Path) -> set[tuple[str, str]]:
     """required_mask_columns of a data_access abac.auto.tfvars."""
-    import hcl2
+    from scripts.hcl2_guard import import_hcl2
 
+    hcl2 = import_hcl2()
     with open(tfvars_file) as f:
         data = hcl2.load(f)
     return required_mask_columns(data.get("fgac_policies", []) or [], data.get("tag_assignments", []) or [])
@@ -1740,9 +1741,10 @@ def _require_live_enabled() -> None:
 
 def load_auth(auth_file: Path) -> dict[str, str]:
     """Parse an auth.auto.tfvars file into host/client_id/client_secret."""
-    import hcl2  # local import: only needed for the live path
+    from scripts.hcl2_guard import import_hcl2
 
     try:
+        hcl2 = import_hcl2()
         with open(auth_file) as f:
             auth = hcl2.load(f)
     except Exception:
@@ -3241,9 +3243,10 @@ def load_key_map(env_file: Optional[Path]) -> dict[str, str]:
     """The verify_key_columns setting of an env.auto.tfvars ({} when absent)."""
     if env_file is None or not Path(env_file).is_file():
         return {}
-    import hcl2
+    from scripts.hcl2_guard import import_hcl2
 
     try:
+        hcl2 = import_hcl2()
         with open(env_file) as f:
             return normalize_key_map(hcl2.load(f).get("verify_key_columns"))
     except Exception as exc:
@@ -3414,8 +3417,9 @@ def load_spec_from_tfvars(
     key_column_by_table: Optional[Mapping[str, str]] = None,
 ) -> VerificationSpec:
     """Derive a spec from a data_access abac.auto.tfvars (+ optional account tfvars)."""
-    import hcl2
+    from scripts.hcl2_guard import import_hcl2
 
+    hcl2 = import_hcl2()
     with open(tfvars_file) as f:
         data = hcl2.load(f)
     env_data: dict[str, Any] = {}

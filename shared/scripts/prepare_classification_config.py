@@ -6,13 +6,13 @@ import os
 import sys
 from pathlib import Path
 
-import hcl2
 from databricks.sdk.errors import NotFound
 
 SHARED_ROOT = Path(__file__).resolve().parent.parent
 if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
 
+from scripts.hcl2_guard import import_hcl2
 from scripts.footprint import FootprintError, resolve_footprint
 from scripts.auth_configured import workspace_client as WorkspaceClient
 from scripts.auth_configured import AuthStatus, auth_status
@@ -22,6 +22,7 @@ def _load(path: Path) -> dict:
     if not path.is_file():
         raise SystemExit(f"ERROR: {path} is missing")
     try:
+        hcl2 = import_hcl2()
         with path.open() as handle:
             return hcl2.load(handle)
     except Exception:
@@ -50,6 +51,7 @@ def _load_auth(path: Path) -> dict:
             f"fill in {path} (workspace host, client ID, and client secret)"
         ) from None
     try:
+        hcl2 = import_hcl2()
         with path.open() as handle:
             return hcl2.load(handle)
     except OSError:

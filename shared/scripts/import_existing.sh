@@ -33,6 +33,12 @@ MODULE_DIR="$(pwd)"
 MODULE_BASENAME="$(basename "$MODULE_DIR")"
 ENV_NAME="$MODULE_BASENAME"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 - "$SCRIPT_DIR/.." <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from scripts.hcl2_guard import assert_supported_hcl2
+assert_supported_hcl2()
+PY
 TF_RUNNER="${TERRAFORM_RUNNER:-$SCRIPT_DIR/terraform_layer.sh}"
 
 if [ "$MODULE_BASENAME" = "account" ]; then

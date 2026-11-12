@@ -45,13 +45,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Protocol
 
-import hcl2
-
 SHARED_ROOT = Path(__file__).resolve().parents[1]
 for _path in (SHARED_ROOT, SHARED_ROOT / "scripts"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+from scripts.hcl2_guard import import_hcl2  # noqa: E402
 from governance_policies import (  # noqa: E402
     CUSTOM_TREATMENT, DeterministicGovernanceError, normalize_sql_type, tag_treatment_errors,
 )
@@ -80,6 +79,7 @@ MAX_ITEMS = 10
 
 def _env_cfg(env_dir: Path) -> dict:
     try:
+        hcl2 = import_hcl2()
         return hcl2.loads((env_dir / "env.auto.tfvars").read_text())
     except Exception as exc:  # hcl2 raises lark errors
         raise Refused(f"envs/{env_dir.name}/env.auto.tfvars is not valid HCL: {exc}") from exc

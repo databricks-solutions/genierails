@@ -48,10 +48,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-import hcl2
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from auth_tfvars import template_text  # noqa: E402
+from hcl2_guard import import_hcl2  # noqa: E402
 
 TEMPLATE_KEYS = ("databricks_account_id", "databricks_client_id", "databricks_client_secret",
                  "databricks_workspace_id", "databricks_workspace_host")
@@ -100,6 +99,7 @@ def _identity(info: os.stat_result) -> tuple:
 
 def _parse(data: bytes, path: Path) -> dict:
     try:
+        hcl2 = import_hcl2()
         value = hcl2.loads(data.decode())
     except Exception:
         value = None
@@ -112,6 +112,7 @@ def _parse(data: bytes, path: Path) -> dict:
 
 def _load(path: Path) -> dict:
     try:
+        hcl2 = import_hcl2()
         value = hcl2.loads(path.read_text())
     except Exception:
         value = None
@@ -243,6 +244,7 @@ def prepare(source: Path, dest: Path, dest_env_file: Path | None, host: str, wor
     values.update(resolved)
     rendered = _render(dest_data.decode(), values)
     try:
+        hcl2 = import_hcl2()
         check = hcl2.loads(rendered)
     except Exception:
         check = None

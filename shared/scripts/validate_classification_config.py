@@ -4,12 +4,11 @@
 import sys
 from pathlib import Path
 
-import hcl2
-
 SHARED_ROOT = Path(__file__).resolve().parent.parent
 if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
 
+from scripts.hcl2_guard import import_hcl2  # noqa: E402
 from genie_space_placeholder import _display_path, agent_files_placeholder_error, placeholder_error  # noqa: E402
 from scripts.footprint import FootprintError, load_env_config, resolve_footprint
 
@@ -17,6 +16,7 @@ from scripts.footprint import FootprintError, load_env_config, resolve_footprint
 def main() -> int:
     path = Path(sys.argv[1])
     try:
+        hcl2 = import_hcl2()
         with path.open() as handle:
             config = hcl2.load(handle)
     except OSError:

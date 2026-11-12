@@ -10,6 +10,7 @@ optional third argument) sets allow_identity_catalog_map = true.
 Usage:
     python validate_catalog_map.py <source_env_dir> <dest_catalog_map> [<dest_env_dir>]
 """
+import importlib
 import sys
 import os
 
@@ -22,10 +23,14 @@ if str(SHARED_ROOT) not in sys.path:
 from scripts.footprint import FootprintError, resolve_footprint
 
 try:
-    import hcl2
+    from hcl2_guard import import_hcl2
+except ModuleNotFoundError:
+    import_hcl2 = importlib.import_module("scripts.hcl2_guard").import_hcl2
 except ImportError:
     print("ERROR: python-hcl2 required")
     sys.exit(2)
+
+hcl2 = import_hcl2()
 
 
 def main():

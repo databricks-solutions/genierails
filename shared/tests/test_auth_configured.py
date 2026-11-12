@@ -3,6 +3,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 from auth_configured import AuthStatus, auth_configured, auth_status, workspace_client  # noqa: E402
+from hcl2_guard import Hcl2VersionError  # noqa: E402
 
 import pytest
 
@@ -60,3 +61,32 @@ def test_auth_configured_rejects_common_placeholders(tmp_path, value):
                     'databricks_workspace_host = "https://dbc.example.com"\n'
                     'databricks_client_secret = "secret"\n')
     assert not auth_configured(auth)
+
+
+def test_auth_configured_refuses_python_hcl2_8(monkeypatch, tmp_path):
+    import hcl2_guard
+
+    auth = tmp_path / "auth.auto.tfvars"
+    auth.write_text('databricks_client_id = "client"\n'
+                    'databricks_workspace_host = "https://dbc.example.com"\n'
+                    'databricks_client_secret = "secret"\n')
+    monkeypatch.setattr(hcl2_guard.importlib.metadata, "version", lambda _name: "8.1.4")
+    with pytest.raises(Hcl2VersionError) as raised:
+        auth_configured(auth)
+    message = str(raised.value)
+    assert message == (
+        "ERROR: installed python-hcl2 8.1.4 is unsupported; "
+        "fix with: pip install 'python-hcl2>=7.3.1,<8'"
+    )
+    assert "secret" not in message
+
+
+def test_auth_configured_allows_python_hcl2_7(monkeypatch, tmp_path):
+    import hcl2_guard
+
+    auth = tmp_path / "auth.auto.tfvars"
+    auth.write_text('databricks_client_id = "client"\n'
+                    'databricks_workspace_host = "https://dbc.example.com"\n'
+                    'databricks_client_secret = "secret"\n')
+    monkeypatch.setattr(hcl2_guard.importlib.metadata, "version", lambda _name: "7.3.1")
+    assert auth_configured(auth)

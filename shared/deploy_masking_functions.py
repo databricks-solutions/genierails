@@ -399,7 +399,9 @@ def load_credentials(auth_file: str, host: str) -> None:
         fail(f"{auth_file} is not valid HCL")
     if status is AuthStatus.INCOMPLETE:
         fail(f"fill in {auth_file} (workspace host, client ID, and client secret)")
-    import hcl2
+    from scripts.hcl2_guard import import_hcl2
+
+    hcl2 = import_hcl2()
 
     try:
         with open(auth_file) as f:

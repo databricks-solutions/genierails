@@ -235,9 +235,10 @@ def remap_policy_names(
     output is a function of the commit alone. make release-plan keeps the names
     prod already deploys in an ignored overlay (scripts/runtime_overlay.py).
     """
-    import hcl2
+    from scripts.hcl2_guard import import_hcl2
 
     try:
+        hcl2 = import_hcl2()
         policies = hcl2.loads(source_text).get("fgac_policies") or []
     except Exception as exc:
         raise ValueError(f"Cannot parse the source fgac_policies: {exc}") from exc
@@ -434,10 +435,11 @@ def map_group_keys(hcl_text: str, group_map: dict[str, str], exempt: set[str]) -
     promotion (PromotionError). The result is re-read; a layout this can't
     rename in place refuses rather than leave a dev name behind.
     """
-    import hcl2
+    from scripts.hcl2_guard import import_hcl2
 
     if not group_map:
         return hcl_text
+    hcl2 = import_hcl2()
     cfg = hcl2.loads(hcl_text)
     for key in ("groups", "group_members"):
         value = cfg.get(key)
@@ -499,12 +501,13 @@ def _brace_delta(line: str) -> int:
 
 def _deployer_ids(args, hcl_text: str) -> tuple[str, str] | None:
     """(source, destination) committed deployer IDs for a deterministic source (deployer_identity.py)."""
-    import hcl2
+    from scripts.hcl2_guard import import_hcl2
     from deployer_identity import DeployerIdentityError, promotion_deployers
 
     if not args.source_env or not args.group_map_env:
         return None
     try:
+        hcl2 = import_hcl2()
         return promotion_deployers(args.source_env.parent, args.group_map_env.parent,
                                    hcl2.loads(hcl_text).get("fgac_policies") or [])
     except DeployerIdentityError as exc:
@@ -512,10 +515,11 @@ def _deployer_ids(args, hcl_text: str) -> tuple[str, str] | None:
 
 
 def _group_map_inputs(args) -> tuple[dict[str, str], set[str], list[str] | None]:
-    import hcl2
+    from scripts.hcl2_guard import import_hcl2
 
     if not args.group_map_env or not args.group_map_env.is_file():
         return {}, set(), None
+    hcl2 = import_hcl2()
     dest = hcl2.loads(args.group_map_env.read_text())
     if dest.get("governance_mode", "legacy") != "deterministic":
         return {}, set(), None

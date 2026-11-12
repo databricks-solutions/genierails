@@ -45,7 +45,7 @@ from verify_effective_access import normalize_key_map
 from walkthrough_marker import PROMOTED_HEADER, follows_walkthrough
 
 try:
-    import hcl2
+    from scripts.hcl2_guard import import_hcl2
 except ImportError:
     print("ERROR: python-hcl2 required")
     sys.exit(2)
@@ -405,6 +405,7 @@ def main():
     id_to_name = {}
     source_space_configs = {}
     if os.path.exists(generated_path):
+        hcl2 = import_hcl2()
         generated_cfg = hcl2.load(open(generated_path))
         id_to_name = generated_cfg.get("genie_space_id_to_name") or {}
         source_space_configs = generated_cfg.get("genie_space_configs") or {}
