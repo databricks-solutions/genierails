@@ -161,10 +161,11 @@ def _json_digest(value) -> str:
 
 
 def _load_hcl(path: Path) -> dict:
-    import hcl2
-
     if not Path(path).is_file():
         return {}
+    from scripts.hcl2_guard import import_hcl2
+
+    hcl2 = import_hcl2()
     return hcl2.loads(Path(path).read_text()) or {}
 
 

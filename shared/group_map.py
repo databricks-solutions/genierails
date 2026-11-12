@@ -46,10 +46,11 @@ class GroupMapError(ValueError):
 
 
 def _load_hcl(path: Path) -> dict:
-    import hcl2
-
     if not path.is_file():
         return {}
+    from scripts.hcl2_guard import import_hcl2
+
+    hcl2 = import_hcl2()
     try:
         value = hcl2.loads(path.read_text())
     except Exception as exc:

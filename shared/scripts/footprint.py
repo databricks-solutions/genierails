@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 from pathlib import Path
 
-import hcl2
+try:
+    from hcl2_guard import import_hcl2
+except ModuleNotFoundError:  # imported as scripts.footprint
+    import_hcl2 = importlib.import_module("scripts.hcl2_guard").import_hcl2
 
 
 def load_env_config(env_dir: str | Path) -> dict:
@@ -32,6 +36,7 @@ def load_hcl(path: Path) -> dict:
     if not path.is_file():
         return {}
     try:
+        hcl2 = import_hcl2()
         with path.open() as handle:
             value = hcl2.load(handle)
     except Exception as exc:

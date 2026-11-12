@@ -60,6 +60,15 @@
 
 set -e
 
+script_dir_for_hcl2_guard="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 - "$script_dir_for_hcl2_guard/.." <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from scripts.hcl2_guard import assert_supported_hcl2
+assert_supported_hcl2()
+PY
+unset script_dir_for_hcl2_guard
+
 # A host passed alongside both Terraform SP values is explicit. Everything
 # else may be ambient shell/CLI state and must never select a workspace.
 EXPLICIT_SP_HOST=""
@@ -890,6 +899,7 @@ load_layer_auth() {
       1) echo "ERROR: fill in ${auth_tfvars} (workspace host, client ID, and client secret)." >&2; return 1 ;;
       2) echo "ERROR: ${auth_tfvars} is not valid HCL." >&2; return 1 ;;
       3) echo "ERROR: ${auth_tfvars} can't be read." >&2; return 1 ;;
+      4) return 1 ;;
       *) echo "ERROR: could not validate ${auth_tfvars}." >&2; return 1 ;;
     esac
     DATABRICKS_HOST=$(python3 -c 'import hcl2,sys; print(hcl2.load(open(sys.argv[1]))["databricks_workspace_host"])' "$auth_tfvars")

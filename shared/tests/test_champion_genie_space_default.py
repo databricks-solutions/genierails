@@ -473,7 +473,7 @@ def test_sample_env_snippet_replaces_template_lines_without_duplicates():
     assert agent == {"genie_space_id": "01ef7b3c2a4d5e6f", "acl_groups": [ACL_PLACEHOLDER]}
     created = hcl2.loads(module._agent_tfvars("01ef7b3c2a4d5e6f", module.SAMPLE_GROUPS))
     assert created["acl_groups"] == list(module.SAMPLE_GROUPS)
-    assert module.SAMPLE_AGENT == "Dev-to-Prod Walkthrough"
+    assert module.sample_agent_name("dev_finance") == "Dev-to-Prod Walkthrough dev_finance"
     for key in ("genie_spaces", "sql_warehouse_id", "uc_tables"):
         assert sum(
             line.startswith(f"{key} =") for line in merged.splitlines()

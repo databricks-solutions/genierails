@@ -4,9 +4,8 @@ import sys
 import os
 from pathlib import Path
 
-import hcl2
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from scripts.hcl2_guard import import_hcl2  # noqa: E402
 from agent_files import AgentFileError, merged_config  # noqa: E402
 from deterministic_governance import validate_config  # noqa: E402
 from scripts.custom_masks import env_errors  # noqa: E402
@@ -16,6 +15,7 @@ from scripts.scheduled_governance_scope import error as scheduled_governance_err
 def main() -> int:
     path = Path(sys.argv[1])
     try:
+        hcl2 = import_hcl2()
         cfg = hcl2.loads(path.read_text())
         # The per-agent files (agents/*.auto.tfvars) are validated with it.
         cfg = merged_config(path.parent, cfg)

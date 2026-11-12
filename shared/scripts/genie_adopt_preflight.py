@@ -209,7 +209,9 @@ def load_auth(env_dir: Path) -> dict:
         raise ValueError(f"{path} is not valid HCL") from None
     if status is AuthStatus.INCOMPLETE:
         raise ValueError(f"fill in {path} (workspace host, client ID, and client secret)") from None
-    import hcl2
+    from scripts.hcl2_guard import import_hcl2
+
+    hcl2 = import_hcl2()
     with path.open() as handle:
         config = hcl2.load(handle)
     config["_auth_file"] = path

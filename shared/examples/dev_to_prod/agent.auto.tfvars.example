@@ -7,6 +7,8 @@
 # another agent, from the cloud root (cd aws|azure):
 #   cp ../shared/examples/dev_to_prod/agent.auto.tfvars.example "envs/dev/agents/<agent name>.auto.tfvars"
 # The file name is the agent's name: letters, digits, spaces, '_', '-' or '.'.
+# Keep it unique in the prod workspace: prod's agent gets this name as its title,
+# and `make release ENV=prod` takes over an existing agent with exactly that title.
 # `make generate ENV=dev` captures the agent beside this file
 # (<agent name>.space.json) and `make promote-to ENV=prod` seeds prod's file.
 # ============================================================================

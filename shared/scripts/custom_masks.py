@@ -50,13 +50,12 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
-import hcl2
-
 SHARED_ROOT = Path(__file__).resolve().parents[1]
 for _path in (SHARED_ROOT, SHARED_ROOT / "scripts"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+from scripts.hcl2_guard import import_hcl2  # noqa: E402
 from governance_policies import (  # noqa: E402
     CUSTOM_TREATMENT, DeterministicGovernanceError, normalize_sql_type,
 )
@@ -535,6 +534,7 @@ def env_errors(env_dir: Path, cfg: dict) -> tuple[dict | None, list[str], list[s
 
 def _env_cfg(env_dir: Path) -> dict:
     try:
+        hcl2 = import_hcl2()
         return hcl2.loads(read_text(env_dir, Path(env_dir) / "env.auto.tfvars", under=None))
     except Refused:
         raise

@@ -27,11 +27,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+try:
+    from hcl2_guard import import_hcl2
+except ModuleNotFoundError:
+    import importlib
+    import_hcl2 = importlib.import_module("scripts.hcl2_guard").import_hcl2
+
 SHARED_ROOT = Path(__file__).resolve().parent.parent
 if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
-
-import hcl2  # noqa: E402
 
 from access_tier_groups import _assignment_spans, _hcl_string, display_path  # noqa: E402
 from verify_effective_access import normalize_key_map  # noqa: E402
@@ -46,6 +50,7 @@ def _parse(text: str, path: Path) -> dict:
     if len(re.findall(r"(?m)^\s*catalog_map\s*=", text)) > 1:
         raise ValueError(f"{display_path(path)}: catalog_map is set twice; keep one")
     try:
+        hcl2 = import_hcl2()
         return hcl2.loads(text)
     except Exception as exc:
         raise ValueError(f"cannot parse {display_path(path)}: {exc}") from exc

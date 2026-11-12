@@ -12,15 +12,16 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-import hcl2
-
 SHARED = Path(__file__).resolve().parents[1]
 if str(SHARED) not in sys.path:
     sys.path.insert(0, str(SHARED))  # run by path from make: `scripts.` imports need shared/
 
+from scripts.hcl2_guard import import_hcl2  # noqa: E402
+
 
 def _load_hcl(path: Path) -> dict[str, Any]:
     try:
+        hcl2 = import_hcl2()
         with path.open() as handle:
             return hcl2.load(handle)
     except Exception:

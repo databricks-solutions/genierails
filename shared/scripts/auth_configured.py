@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """Exit successfully when workspace OAuth M2M credentials are non-placeholder values."""
 
+import importlib
 import sys
 from enum import Enum
 from pathlib import Path
 
-import hcl2
+try:
+    from hcl2_guard import Hcl2VersionError, import_hcl2
+except ModuleNotFoundError:  # imported as scripts.auth_configured
+    _hcl2_guard = importlib.import_module("scripts.hcl2_guard")
+    Hcl2VersionError = _hcl2_guard.Hcl2VersionError
+    import_hcl2 = _hcl2_guard.import_hcl2
+
+HCL2_VERSION_ERROR_EXIT = 4
 
 
 class AuthStatus(Enum):
@@ -30,8 +38,11 @@ def _configured(config: dict, name: str) -> bool:
 
 def auth_status(path: Path) -> AuthStatus:
     try:
+        hcl2 = import_hcl2()
         with path.open() as handle:
             config = hcl2.load(handle)
+    except Hcl2VersionError:
+        raise
     except FileNotFoundError:
         return AuthStatus.INCOMPLETE
     except OSError:
@@ -63,8 +74,11 @@ def workspace_client(auth_file: Path, **kwargs):
     if status is AuthStatus.INCOMPLETE:
         raise RuntimeError(f"fill in {path} (workspace host, client ID, and client secret)") from None
     try:
+        hcl2 = import_hcl2()
         with path.open() as handle:
             config = hcl2.load(handle)
+    except Hcl2VersionError:
+        raise
     except OSError:
         raise RuntimeError(f"{path} can't be read") from None
     except UnicodeError:
@@ -94,6 +108,10 @@ def oauth_config(config: dict, **kwargs):
 
 
 if __name__ == "__main__":
-    status = auth_status(Path(sys.argv[1])) if len(sys.argv) == 2 else AuthStatus.INCOMPLETE
+    try:
+        status = auth_status(Path(sys.argv[1])) if len(sys.argv) == 2 else AuthStatus.INCOMPLETE
+    except Hcl2VersionError as exc:
+        print(exc, file=sys.stderr)
+        raise SystemExit(HCL2_VERSION_ERROR_EXIT) from None
     raise SystemExit({AuthStatus.CONFIGURED: 0, AuthStatus.INCOMPLETE: 1,
                       AuthStatus.MALFORMED: 2, AuthStatus.UNREADABLE: 3}[status])

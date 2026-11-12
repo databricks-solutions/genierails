@@ -20,10 +20,16 @@ import re
 import sys
 from pathlib import Path
 
-import hcl2
-
 SHARED_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SHARED_ROOT))
+
+try:
+    from hcl2_guard import import_hcl2
+except ModuleNotFoundError:
+    import importlib
+    import_hcl2 = importlib.import_module("scripts.hcl2_guard").import_hcl2
+
+hcl2 = import_hcl2()
 
 from generate_abac import (  # noqa: E402
     _fetch_live_classification_source,

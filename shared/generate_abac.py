@@ -124,6 +124,8 @@ REQUIRED_PACKAGES = {
 
 def _ensure_packages():
     """Auto-install required packages if missing."""
+    from scripts.hcl2_guard import assert_supported_hcl2
+
     missing = []
     for pip_name, import_name in REQUIRED_PACKAGES.items():
         try:
@@ -135,6 +137,7 @@ def _ensure_packages():
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "--quiet", *missing],
         )
+    assert_supported_hcl2()
     try:
         __import__("databricks.sdk.useragent")
     except (ImportError, ModuleNotFoundError):
@@ -361,7 +364,9 @@ def _load_tfvars(path: Path, label: str, *, strict: bool = False) -> dict:
     """Load a single .tfvars file. Returns empty dict if not found."""
     if not path.exists():
         return {}
-    import hcl2
+    from scripts.hcl2_guard import import_hcl2
+
+    hcl2 = import_hcl2()
     try:
         with open(path) as f:
             cfg = hcl2.load(f)

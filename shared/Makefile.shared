@@ -288,6 +288,7 @@ override _PROMOTE_MODE_HINT = echo "       Set governance_mode = \"legacy\" or \
 _guarded-bootstrap:
 	@set -e; \
 	if [ -z "$(_MAKE_DRY_RUN)" ]; then \
+	python3 -c 'import sys; sys.path.insert(0, "$(SHARED_ROOT)"); from scripts.hcl2_guard import assert_supported_hcl2; assert_supported_hcl2()' || exit 1; \
 	if [ -n "$(and $(filter promote,$(MAKECMDGOALS)),$(strip $(DEST_ENV)))" ]; then \
 		dest_mode="$$($(_GOVERNANCE_MODE_OF) "$(DEST_ENV_DIR)/env.auto.tfvars" 2>/dev/null)" || { echo "ERROR: cannot read governance_mode for destination $(DEST_ENV); refusing make promote." >&2; $(_PROMOTE_MODE_HINT); exit 1; }; \
 		case "$$dest_mode" in legacy) ;; deterministic) $(_PROMOTE_TO_TOKEN) check --env-dir "$(DEST_ENV_DIR)" || { echo "ERROR: make promote SOURCE_ENV=... DEST_ENV=$(DEST_ENV) is refused for deterministic destinations." >&2; echo "       Use: make promote-to ENV=$(DEST_ENV)" >&2; exit 1; } ;; *) echo "ERROR: unsupported governance_mode '$$dest_mode' for destination $(DEST_ENV); refusing make promote." >&2; $(_PROMOTE_MODE_HINT); exit 1 ;; esac; \
@@ -767,7 +768,9 @@ override _COMMIT_ENVS = python3 "$(SHARED_ROOT)/scripts/commit_envs.py" --cloud-
 generate: _guarded-bootstrap _guard-workspace-target ## Run generate_abac.py in the selected workspace environment (set SPACE="Name" to regenerate only one space; set MODE=governance|genie for self-service Genie deployments)
 	@echo "=== Generate ABAC Config ($(ENV)$(if $(SPACE), — space: $(SPACE),)$(if $(MODE), — mode: $(MODE),)) ==="
 	@status=0; python3 "$(SHARED_ROOT)/scripts/auth_configured.py" "$(ENV_DIR)/auth.auto.tfvars" || status=$$?; \
-	if [ $$status -eq 2 ]; then \
+	if [ $$status -eq 4 ]; then \
+		exit 1; \
+	elif [ $$status -eq 2 ]; then \
 		echo "ERROR: $(_SETUP_ENV_REL)/auth.auto.tfvars is not valid HCL" >&2; exit 1; \
 	elif [ $$status -eq 3 ]; then \
 		echo "ERROR: $(_SETUP_ENV_REL)/auth.auto.tfvars can't be read" >&2; exit 1; \
@@ -808,7 +811,9 @@ capture: _guard-workspace-target ## Export one dev Genie agent's config to envs/
 	@if [ -z "$(SPACE)" ]; then echo 'ERROR: SPACE="<agent>" is required.' >&2; exit 1; fi
 	@if [ "$(ENV)" != "$(DEFAULT_ENV)" ]; then echo "ERROR: capture runs only with ENV=$(DEFAULT_ENV); promote-to carries agents to $(ENV)." >&2; exit 1; fi
 	@status=0; python3 "$(SHARED_ROOT)/scripts/auth_configured.py" "$(ENV_DIR)/auth.auto.tfvars" || status=$$?; \
-	if [ $$status -eq 2 ]; then \
+	if [ $$status -eq 4 ]; then \
+		exit 1; \
+	elif [ $$status -eq 2 ]; then \
 		echo "ERROR: $(_SETUP_ENV_REL)/auth.auto.tfvars is not valid HCL" >&2; exit 1; \
 	elif [ $$status -eq 3 ]; then \
 		echo "ERROR: $(_SETUP_ENV_REL)/auth.auto.tfvars can't be read" >&2; exit 1; \
@@ -2006,7 +2011,9 @@ promote: $(_PROMOTE_DATABRICKS_GUARD) _guarded-bootstrap _guard-workspace-target
 		echo ""; \
 		echo "=== Promote complete: $(SOURCE_ENV) -> $(DEST_ENV) ==="; \
 		status=0; python3 "$(SHARED_ROOT)/scripts/auth_configured.py" "$$dest_env_dir/auth.auto.tfvars" || status=$$?; \
-		if [ $$status -eq 2 ]; then \
+		if [ $$status -eq 4 ]; then \
+			exit 1; \
+		elif [ $$status -eq 2 ]; then \
 			echo "  Next: fix $$dest_env_dir/auth.auto.tfvars (not valid HCL)"; \
 		elif [ $$status -eq 3 ]; then \
 			echo "  Next: fix $$dest_env_dir/auth.auto.tfvars (can't be read)"; \

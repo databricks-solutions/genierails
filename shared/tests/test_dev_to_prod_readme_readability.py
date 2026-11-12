@@ -534,3 +534,61 @@ def test_the_facts_moved_out_of_the_flow_comments_live_in_the_steps_and_ask_tabl
             assert fact in where, fact
     # The commands that ask nothing, and next.
     assert "`evidence`, `maintain`, `next` and `status` ask nothing." in asks
+
+
+def test_docs_warn_that_an_agent_name_must_be_unique_in_the_prod_workspace():
+    readme, details = README.read_text(), DETAILS.read_text()
+    sample_env = (WALKTHROUGH / "SAMPLE_ENV.md").read_text()
+    example = (WALKTHROUGH / "agent.auto.tfvars.example").read_text()
+    # The sample no longer suggests one fixed agent file name every repo would share.
+    assert "agents/Dev-to-Prod Walkthrough.auto.tfvars" not in sample_env
+    assert "`envs/dev/agents/Dev-to-Prod Walkthrough <catalog>.auto.tfvars`" in sample_env
+    assert "**Keep the agent's name unique in the prod workspace.**" in sample_env
+    assert "`make release ENV=prod` takes that agent over instead of creating a new one" in sample_env
+    assert "[why](DETAILS.md#agent-names)" in sample_env
+    # The README's rename step says so, and DETAILS explains the adoption in plain words.
+    dev = readme[readme.index("\n## Dev\n"):readme.index("\n## Prod\n")]
+    assert "named uniquely in the prod workspace ([why](DETAILS.md#agent-names))" in dev
+    assert '<a id="agent-names"></a>' in details
+    why = details[details.index('<a id="agent-names"></a>'):]
+    why = why[:why.index("\n\n", len('<a id="agent-names"></a>\n'))]
+    for fact in ("**Pick an agent name no other agent in the prod workspace has.**",
+                 "The name is the title prod's agent gets (unless you set an explicit title).",
+                 "a Genie agent with exactly that title",
+                 "it takes that agent over instead of making a new one",
+                 "Two or more matches stop the release instead.",
+                 "`Dev-to-Prod Walkthrough <dev catalog>`"):
+        assert fact in why, fact
+    for sentence in re.split(r"(?<=[.!?])\s+", why):
+        assert len(sentence.split()) <= 30, sentence
+    assert "takes over an existing agent with exactly that title" in example
+
+
+def test_docs_say_an_isolated_catalog_must_be_bound_to_its_own_workspace():
+    readme, details = README.read_text(), DETAILS.read_text()
+    cli = "databricks workspace-bindings update-bindings catalog <catalog>"
+    docs = "https://docs.databricks.com/aws/en/catalogs/binding"
+    azure_docs = "https://learn.microsoft.com/en-us/azure/databricks/catalogs/binding"
+    # README prerequisites: one short line where the catalogs are listed, linking the how.
+    row = next(line for line in readme.splitlines() if line.startswith("| Dev and prod catalog names |"))
+    assert "Bind an ISOLATED catalog [to its own workspace](DETAILS.md#your-catalogs)" in row
+    assert len(row.split()) <= 40, row
+    # DETAILS: why, and both ways to do it, cited.
+    section = details[details.index('<a id="your-catalogs"></a>\n## Your catalogs\n'):]
+    section = section[:section.index("\n<a id=", 1)]
+    for fact in ("**An isolated catalog must be bound to its own workspace.**",
+                 "only the workspaces you assign to it can use it",
+                 "Changing the mode does not, by itself, assign any workspace",
+                 "Bind the dev catalog to the dev workspace, and the prod catalog to the prod workspace",
+                 "**Workspaces** tab → **Assign to workspaces**", cli, '"binding_type": "BINDING_TYPE_READ_WRITE"',
+                 "number after `o=`", docs, azure_docs):
+        assert fact in section, fact
+    assert "- [Your catalogs](#your-catalogs)" in details
+    # The shared prerequisites, where catalogs are created, and Azure's.
+    prereq = (ROOT / "shared/docs/prerequisites.md").read_text()
+    check4 = prereq[prereq.index('<a id="required-features"></a>'):prereq.index('<a id="identity-provider-group-sync-required"></a>')]
+    for fact in ("CREATE CATALOG dev_finance;", "bind it to its own", "**Workspaces** tab →",
+                 "**Assign to workspaces**", cli, "--profile <workspace-profile>", docs, azure_docs):
+        assert fact in check4, fact
+    azure = (ROOT / "azure/docs/azure-prerequisites.md").read_text()
+    assert "**Workspaces** tab" in azure and "databricks workspace-bindings update-bindings" in azure

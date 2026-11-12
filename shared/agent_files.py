@@ -72,7 +72,9 @@ def promoted(env_dir: Path) -> bool:
 def _load_hcl(path: Path) -> dict:
     if not path.is_file():
         return {}
-    import hcl2  # here, so check-entries (make _bootstrap) runs before the packages are installed
+    from scripts.hcl2_guard import import_hcl2
+
+    hcl2 = import_hcl2()
 
     try:
         with path.open() as handle:

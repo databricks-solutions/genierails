@@ -8,6 +8,7 @@ import errno
 import json
 import os
 import random
+import re
 import stat
 import sys
 import time
@@ -34,8 +35,12 @@ TABLES = {
 }
 # Demo access tiers for --create-groups, most to least privileged.
 SAMPLE_GROUPS = ("dev_to_prod_payments_ops", "dev_to_prod_regional_analysts", "dev_to_prod_viewers")
-# The sample agent's file name, envs/dev/agents/<SAMPLE_AGENT>.auto.tfvars (its name).
-SAMPLE_AGENT = "Dev-to-Prod Walkthrough"
+# The sample agent's name (its file envs/dev/agents/<name>.auto.tfvars) starts
+# with this and ends with the dev catalog. The name is the title prod's agent is
+# created with, and a prod create first adopts the one existing Genie agent with
+# exactly that title (scripts/genie_space.sh), so a fixed name would let a second
+# repo on the same prod workspace take over the first repo's prod agent.
+SAMPLE_AGENT_PREFIX = "Dev-to-Prod Walkthrough"
 ACL_PLACEHOLDER = "<group-that-may-run-the-agent>"
 SETUP_PLACEHOLDER = Path("envs/dev/agents/my_agent.auto.tfvars")
 
@@ -476,6 +481,19 @@ def _tfvars(tables: list[str], warehouse_id: str, groups: Iterable[str] = ()) ->
 sql_warehouse_id = "{warehouse_id}"{groups_line}'''
 
 
+def sample_agent_name(catalog: str) -> str:
+    """The suggested agent name: the prefix and the dev catalog, as an agent file name allows."""
+    suffix = re.sub(r"[^A-Za-z0-9 _.-]", "_", catalog).replace("..", "_").strip()
+    return f"{SAMPLE_AGENT_PREFIX} {suffix}" if suffix else SAMPLE_AGENT_PREFIX
+
+
+TITLE_WARNING = (
+    "The agent's name is, by default, its title in prod, and it must be unique in the prod workspace: if a Genie agent "
+    "there already has exactly this title (say, from another repo), make release ENV=prod takes that "
+    "agent over instead of creating a new one. Pick another name if it is taken."
+)
+
+
 def _agent_tfvars(space_id: str, groups: Iterable[str] = ()) -> str:
     """The sample agent's file: its ID, and who may run it (the created tiers, else a placeholder)."""
     acl = ", ".join(f'"{group}"' for group in (tuple(groups) or (ACL_PLACEHOLDER,)))
@@ -553,10 +571,11 @@ def setup(args: argparse.Namespace, client: Any) -> None:
     replaced = "sql_warehouse_id and access_tier_groups lines" if groups else "sql_warehouse_id line"
     print(f"[4/4] Complete. In envs/dev/env.auto.tfvars, REPLACE the {replaced} with this snippet:\n")
     print(_tfvars(tables, args.warehouse_id, groups))
-    agent_file = f"envs/dev/agents/{SAMPLE_AGENT}.auto.tfvars"
+    agent_file = f"envs/dev/agents/{sample_agent_name(args.catalog)}.auto.tfvars"
     fill = "" if groups else f" (replace {ACL_PLACEHOLDER} with the groups that may run it)"
     print(f"\nThen write the agent's file, {agent_file}{fill}:\n")
     print(_agent_tfvars(space_id, groups))
+    print(f"\n{TITLE_WARNING}")
     for placeholder in _seeded_setup_placeholders():
         print(f"\nDelete {placeholder} if setup seeded that placeholder file.")
     print(f"\nGenie agent ID: {space_id}\nOwnership state: {STATE_FILE}")
