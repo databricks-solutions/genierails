@@ -4,6 +4,7 @@ The [walkthrough](README.md) keeps to the happy path. This page holds the rest: 
 
 - [What each command does, in full](#what-each-command-does-in-full)
 - [Your repo and remotes](#your-repo-and-remotes)
+- [Your catalogs](#your-catalogs)
 - [Dev step 1: Set up](#dev-step-1-set-up)
 - [Dev step 1: The commit offer](#dev-step-1-the-commit-offer)
 - [Dev step 3: Generate](#dev-step-3-generate)
@@ -43,6 +44,18 @@ Prefer to manage remotes yourself? Run `git remote rename origin genierails` and
 
 No repo of your own yet? Leave `REPO=` off: setup renames `origin` to `genierails` and adds no `origin`, so the commit offers commit locally (no GitHub account needed). A repo with no remotes, or only that canonical `genierails` upgrade remote, deploys from its committed local `main`; extra remotes or a `genierails` remote pointing anywhere else are refused until you fix them or add your own `origin`. In the `genierails`-only layout, Git URL rewrites are refused too, because they can make the upgrade remote ambiguous; remove the rewrite or add your own `origin`.
 
+<a id="your-catalogs"></a>
+## Your catalogs
+
+GenieRails works on catalogs that already exist; it does not create them. Create the dev and prod catalogs first (how: [prerequisites, check 4](../../docs/prerequisites.md#required-features)).
+
+**An isolated catalog must be bound to its own workspace.** If you set a catalog's isolation mode to `ISOLATED`, only the workspaces you assign to it can use it. Changing the mode does not, by itself, assign any workspace, so the catalog can end up usable from none, not even the one you changed it in. Bind the dev catalog to the dev workspace, and the prod catalog to the prod workspace:
+
+- **Catalog Explorer:** open the catalog → **Workspaces** tab → **Assign to workspaces** → pick the workspace.
+- **Databricks CLI:** `databricks workspace-bindings update-bindings catalog <catalog> --json '{"add": [{"workspace_id": <workspace-id>, "binding_type": "BINDING_TYPE_READ_WRITE"}]}' --profile <workspace-profile>`
+
+The workspace ID is the number after `o=` in the workspace's URL. See Databricks' [workspace-catalog binding](https://docs.databricks.com/aws/en/catalogs/binding) docs ([Azure](https://learn.microsoft.com/en-us/azure/databricks/catalogs/binding)).
+
 <a id="dev-step-1-set-up"></a>
 ## Dev step 1: Set up
 
@@ -51,6 +64,9 @@ Setup copies this walkthrough's templates into dev: [`env.auto.tfvars.example`](
 The template starts new champions with `governance_mode = "deterministic"`; existing env files are not changed.
 
 **Agents (preferred):** one file per agent in `envs/dev/agents/`; the file name is the agent's name. Before the first `make generate`, rename setup's `my_agent.auto.tfvars` to your agent (for each further agent, copy it under that agent's name).
+
+<a id="agent-names"></a>
+**Pick an agent name no other agent in the prod workspace has.** The name is the title prod's agent gets (unless you set an explicit title). When `make release ENV=prod` creates prod's agent, it first looks in the prod workspace for a Genie agent with exactly that title. If it finds one, it takes that agent over instead of making a new one: this repo then manages it, including who may run it. So on a shared workspace, a second repo that reuses a name, such as the sample's, would take over the first repo's prod agent. Two or more matches stop the release instead. Include something only yours, such as your catalog name; the [sample environment](SAMPLE_ENV.md) suggests `Dev-to-Prod Walkthrough <dev catalog>`.
 
 **Also accepted:** the same fields inline in `env.auto.tfvars` as `genie_spaces = [{ name = "...", genie_space_id = "...", acl_groups = [...] }]` (leave `genie_spaces = []` when using agent files; with the inline list, delete setup's agent file). Prefer `agents/` files so agent and governance PRs stay separate; `make split-agent-files` moves an inline list into files later.
 

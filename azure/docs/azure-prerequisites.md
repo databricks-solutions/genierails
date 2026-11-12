@@ -9,7 +9,9 @@ This guide covers Azure-specific setup required before deploying GenieRails on A
 3. **Databricks Account** on Azure with at least one workspace
 4. **Existing Unity Catalog catalogs** for dev and prod. On a fresh metastore,
    the metastore owner or a principal with `CREATE CATALOG` creates them. If a
-   catalog is set to `ISOLATED`, explicitly bind it to its workspace; isolation
+   catalog is set to `ISOLATED`, explicitly bind it to its own workspace
+   (Catalog Explorer → the catalog → **Workspaces** tab → **Assign to
+   workspaces**, or `databricks workspace-bindings update-bindings`); isolation
    mode alone does not add a binding. See the shared
    [prerequisites](../../shared/docs/prerequisites.md#required-features).
 

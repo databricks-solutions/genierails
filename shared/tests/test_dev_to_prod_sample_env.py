@@ -600,3 +600,50 @@ def test_untracked_existing_schema_names_the_per_clone_state_file_to_copy(tmp_pa
     assert f"copy that clone's .dev_to_prod_sample_env.json to this clone's {state_file}" in message
     assert "otherwise choose another --schema" in message
     assert not state_file.exists()
+
+
+# Agent-name uniqueness (aws-6/azure-4): a prod create adopts the one existing
+# Genie agent whose title matches exactly, so a fixed sample name let a second
+# repo on a shared prod workspace take over the first repo's prod agent.
+def test_sample_agent_name_is_derived_from_the_dev_catalog():
+    import sys
+    sys.path.insert(0, str(ROOT / "shared"))
+    from agent_files import check_name
+
+    assert not hasattr(sample, "SAMPLE_AGENT")
+    assert sample.sample_agent_name("dev_finance") == "Dev-to-Prod Walkthrough dev_finance"
+    assert sample.sample_agent_name("louis_dev") != sample.sample_agent_name("other_dev")
+    # Any UC catalog name still gives a valid agent file name.
+    for catalog in ("dev_finance", "my-cat", "cat with space", "weird`cat", "a..b", "Cat.ü"):
+        assert check_name(sample.sample_agent_name(catalog)).startswith("Dev-to-Prod Walkthrough ")
+
+
+def test_setup_names_the_agent_file_after_the_catalog_and_warns_about_title_takeover(
+    tmp_path, monkeypatch, capsys
+):
+    copied = _load_sample_copy(tmp_path)
+
+    out = _run_sample_setup(copied, monkeypatch, capsys)
+
+    assert "envs/dev/agents/Dev-to-Prod Walkthrough catalog.auto.tfvars" in out
+    assert "envs/dev/agents/Dev-to-Prod Walkthrough.auto.tfvars" not in out
+    assert out.count(sample.TITLE_WARNING) == 1
+    warning = " ".join(sample.TITLE_WARNING.split())
+    for fact in ("its title in prod", "unique in the prod workspace", "exactly this title",
+                 "make release ENV=prod takes that agent over instead of creating a new one",
+                 "Pick another name"):
+        assert fact in warning, fact
+    # The warning follows the agent file it is about.
+    assert out.index("genie_space_id = ") < out.index(sample.TITLE_WARNING)
+
+
+def test_title_warning_matches_how_prod_adopts_by_title():
+    # The warning describes genie_space.sh's create: exactly one exact-title
+    # match is adopted; several matches refuse.
+    script = (ROOT / "shared/scripts/genie_space.sh").read_text()
+    assert 'if space_title == os.environ["TITLE_TO_MATCH"]:' in script
+    assert 'Adopted existing Genie agent ${matching_ids[0]} titled' in script
+    assert "Multiple Genie agents have the exact title" in script
+    # The default title is the agent's name.
+    module = (ROOT / "shared/modules/workspace/main.tf").read_text()
+    assert 'GENIE_TITLE              = each.value.config.title != "" ? each.value.config.title : each.value.name' in module
