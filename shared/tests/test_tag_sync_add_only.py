@@ -184,7 +184,7 @@ if [ "$3" = plan ]; then
   wrote_plan=0
   for arg in "$@"; do case "$arg" in -out=*) printf plan > "${arg#-out=}";; esac; done
   for arg in "$@"; do case "$arg" in -out=*) wrote_plan=1;; esac; done
-  [ "$wrote_plan" = 1 ] && exit "${FAKE_PLAN_RC:-2}" || exit 0
+  [ "$wrote_plan" = 1 ] && exit 2 || exit 0
 fi
 if [ "$3" = show ]; then
   if [ -f "$FAKE_SHOW" ]; then cat "$FAKE_SHOW"; else printf '{"resource_changes":[{"change":{"actions":["update"]}}]}\\n'; fi
@@ -520,7 +520,7 @@ def test_account_plan_with_changes_names_apply_account(tmp_path):
 # F6 (azure-4): a no-change account-plan said "run make apply-account", which refuses a no-op manifest.
 def test_account_plan_without_changes_says_there_is_nothing_to_apply(tmp_path):
     repo = Repo(tmp_path, {"gr_treatment": ["email_partial__string__0a1b2c3d", "new_value"]})
-    repo.env["FAKE_PLAN_RC"] = "0"
+    _terraform_sees_no_changes(repo)
     result = repo.account_plan()
     assert result.returncode == 0, result.stdout + result.stderr
     out = result.stdout
