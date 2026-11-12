@@ -34,12 +34,11 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
-import hcl2
-
 SHARED = Path(__file__).resolve().parents[1]
 if str(SHARED) not in sys.path:
     sys.path.insert(0, str(SHARED))
 
+from scripts.hcl2_guard import import_hcl2  # noqa: E402
 from scripts.footprint import (FootprintError, load_discovered_footprint, load_env_config,  # noqa: E402
                                resolve_footprint)
 from scripts.state_layout import state_json  # noqa: E402
@@ -59,6 +58,7 @@ def _load_hcl(path: Path) -> dict:
     if not path.is_file():
         return {}
     try:
+        hcl2 = import_hcl2()
         with path.open() as handle:
             value = hcl2.load(handle)
     except Exception as exc:

@@ -13,10 +13,14 @@ Usage:
 A missing or unparsable file passes: the other env checks report it.
 """
 
+import importlib
 import sys
 from pathlib import Path
 
-import hcl2
+try:
+    from hcl2_guard import import_hcl2
+except ModuleNotFoundError:  # imported as scripts.scheduled_governance_scope
+    import_hcl2 = importlib.import_module("scripts.hcl2_guard").import_hcl2
 
 
 def _enabled(value) -> bool:
@@ -42,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     for arg in argv if argv is not None else sys.argv[1:]:
         path = Path(arg)
         try:
+            hcl2 = import_hcl2()
             cfg = hcl2.loads(path.read_text())
         except Exception:
             continue

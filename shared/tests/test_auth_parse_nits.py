@@ -142,6 +142,25 @@ def test_audit_schema_drift_auth_omits_secret(tmp_path):
     _assert_no_secret(str(raised.value))
 
 
+def test_audit_schema_drift_refuses_python_hcl2_8_without_secret(monkeypatch, tmp_path):
+    from scripts import audit_schema_drift as asd
+    from scripts import hcl2_guard
+
+    auth = tmp_path / "auth.auto.tfvars"
+    auth.write_text('databricks_client_id = "client"\n'
+                    'databricks_workspace_host = "https://dbc.example.com"\n'
+                    f'databricks_client_secret = "{SECRET_FRAGMENT}"\n')
+    monkeypatch.setattr(hcl2_guard.importlib.metadata, "version", lambda _name: "8.1.4")
+    with pytest.raises(hcl2_guard.Hcl2VersionError) as raised:
+        asd._load_hcl(auth)
+    message = str(raised.value)
+    assert message == (
+        "ERROR: installed python-hcl2 8.1.4 is unsupported; "
+        "fix with: pip install 'python-hcl2>=7.3.1,<8'"
+    )
+    _assert_no_secret(message)
+
+
 # -- N2: dangling auth symlink is refused, never written through ---------------
 
 @pytest.mark.skipif(__import__("shutil").which("make") is None, reason="make not installed")

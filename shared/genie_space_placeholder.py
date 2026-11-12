@@ -106,9 +106,10 @@ def agent_files_placeholder_errors(env_dir: Path) -> list[str]:
         text = path.read_text()
         if "<" not in text and ">" not in text:
             continue
-        import hcl2
+        from scripts.hcl2_guard import import_hcl2
 
         try:
+            hcl2 = import_hcl2()
             settings = hcl2.loads(text)
         except Exception:
             errors.append(_parse_error(path))
@@ -165,10 +166,11 @@ def main() -> int:
             continue  # a missing file passes (ENV=account, a destination not created yet)
         # Every supplied env file is parsed once, so a malformed one is always
         # reported, --promotion-destination or not.
-        import hcl2
+        from scripts.hcl2_guard import import_hcl2
 
         text = path.read_text()
         try:
+            hcl2 = import_hcl2()
             config = hcl2.loads(text)
         except Exception:
             errors.append(_parse_error(path))

@@ -66,11 +66,11 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import hcl2
-
 SHARED_ROOT = Path(__file__).resolve().parent.parent
 if str(SHARED_ROOT) not in sys.path:
     sys.path.insert(0, str(SHARED_ROOT))
+from scripts.hcl2_guard import import_hcl2  # noqa: E402
+
 RUNNER = SHARED_ROOT / "scripts" / "terraform_layer.sh"
 VALIDATOR = SHARED_ROOT / "validate_abac.py"
 GATE_FILENAME = ".coverage_gate.json"
@@ -156,6 +156,7 @@ def _load_tfvars(path: Path) -> dict:
     if not path.is_file():
         return {}
     try:
+        hcl2 = import_hcl2()
         return hcl2.loads(path.read_text())
     except Exception as exc:
         if path.name != "auth.auto.tfvars":

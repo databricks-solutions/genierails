@@ -72,11 +72,12 @@ def _load_hcl(path: Path) -> dict:
     if not path.is_file():
         return {}
     try:
-        import hcl2
+        from scripts.hcl2_guard import import_hcl2
     except ImportError as exc:
         raise RuntimeError(
             f"cannot parse {path}: python-hcl2 is not installed"
         ) from exc
+    hcl2 = import_hcl2()
     try:
         with path.open() as f:
             value = hcl2.load(f)
@@ -683,6 +684,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Mode: {args.mode}")
 
     try:
+        from scripts.hcl2_guard import import_hcl2
+        import_hcl2()
         from scripts.footprint import FootprintError
         managed_tables = extract_managed_tables(env_dir)
     except ImportError as exc:

@@ -84,15 +84,16 @@ def _load_auth():
             f"ERROR: fill in {auth_path} (workspace host, client ID, and client secret)"
         ) from None
     try:
-        import hcl2
+        from hcl2_guard import import_hcl2
     except ImportError:
         import subprocess
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", "--quiet", "python-hcl2>=7.3.1,<8"],
         )
-        import hcl2
+        from hcl2_guard import import_hcl2
 
     try:
+        hcl2 = import_hcl2()
         with open(auth_path) as f:
             cfg = hcl2.load(f)
     except Exception:
@@ -441,8 +442,9 @@ def main(argv=None):
     tfvars_path = Path(args.tfvars)
     desired_policies = []
     if tfvars_path.exists():
-        import hcl2
+        from hcl2_guard import import_hcl2
 
+        hcl2 = import_hcl2()
         with open(tfvars_path) as f:
             desired_policies = hcl2.load(f).get("tag_policies", [])
     if not desired_policies and not removals:
