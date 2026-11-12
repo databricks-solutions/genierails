@@ -347,6 +347,7 @@ def test_plan_real_target_runs_configured_workspace_layers(tmp_path):
         f"printf '%s|%s\\n' \"$LAYER_ENV_DIR\" \"$*\" >> \"{runner_log}\"\n"
         f"if [ \"$1 $3\" = 'data_access console' ]; then echo '\"{inputs}\"'; fi\n"
         f"if [ \"$1 $3\" = 'workspace console' ]; then echo '\"{closed_can_run}\"'; fi\n"
+        "if [ \"$1 $3\" = 'workspace show' ]; then echo '{\"resource_changes\":[],\"output_changes\":{}}'; fi\n"
     )
     runner.chmod(0o755)
     # Stands in for the live UC refresh (tests never reach Databricks); fails.
@@ -374,7 +375,8 @@ def test_plan_real_target_runs_configured_workspace_layers(tmp_path):
     assert calls[:2] == [f"{data_access_dir}|data_access dev console"] * 2
     assert any(call.startswith(f"{data_access_dir}|data_access dev plan") for call in calls)
     assert f"{env_dir}|workspace dev console" in calls
-    assert f"{env_dir}|workspace dev plan" in calls
+    assert any(call.startswith(f"{env_dir}|workspace dev plan -out=") for call in calls)
+    assert f"{env_dir}|workspace dev show -json" in "\n".join(calls)
     # No flag makes the gate "not required" any more: it always runs.
     assert "not required" not in result.stdout
     assert "=== Coverage Check (data_access:dev) ===" in result.stdout

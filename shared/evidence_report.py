@@ -195,6 +195,7 @@ def receipt_approval(env_dir: Path) -> tuple[str, str | None, dict[str, Any]]:
     record: dict[str, Any] = {"source": "release-receipt", "receipt": Path(str(receipt["_path"])).name,
                               "commit": str(receipt.get("commit", ""))[:12]}
     phases = receipt.get("phase_approvals")
+    cloud_dir = rg.cloud_dir_of(env_dir)
     linked_phases = {str(value) for value in receipt.get("phase_manifests") or []}
     round_counts: dict[str, int] = defaultdict(int)
     if isinstance(phases, dict) and phases:
@@ -204,9 +205,25 @@ def receipt_approval(env_dir: Path) -> tuple[str, str | None, dict[str, Any]]:
             if str(phase) not in linked_phases:
                 not_counted["unlinked"] += 1
                 continue
-            via = str(value.get("via")) if isinstance(value, dict) and value.get("via") else UNKNOWN_APPROVAL
+            manifest_path = rg.manifests_dir(cloud_dir, env) / str(phase) / "manifest.json"
+            if not manifest_path.is_file():
+                not_counted["missing manifest"] += 1
+                continue
+            phase_path = rg.env_state(cloud_dir, env) / "receipts" / "phases" / f"{phase}.json"
+            phase_record = rg._read_json(phase_path)
+            if phase_record is None:
+                not_counted["missing phase record"] += 1
+                continue
+            try:
+                phase_problem = rg._phase_problem(cloud_dir, env, phase_path, phase_record)
+            except Exception as exc:
+                phase_problem = f"the phase record couldn't be checked ({type(exc).__name__})"
+            if phase_problem:
+                not_counted["unverified phase record"] += 1
+                continue
+            claimed_via = str(value.get("via")) if isinstance(value, dict) and value.get("via") else UNKNOWN_APPROVAL
+            via = claimed_via if claimed_via in ("terminal", "external") else UNKNOWN_APPROVAL
             if via == "terminal":
-                manifest_path = rg.manifests_dir(rg.cloud_dir_of(env_dir), env) / str(phase) / "manifest.json"
                 try:
                     manifest = rg._read_json(manifest_path) or {}
                     phase_receipt = {

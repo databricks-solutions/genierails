@@ -123,11 +123,14 @@ elif role == "runner" and args[:1] == ["workspace"] and "plan" in args:
     rc = 2
 elif role == "runner" and args[:2] == ["workspace", "prod"] and "show" in args:
     saved = json.loads(Path(args[-1]).read_text())
+    mode = world.get("workspace_show", "release")
+    before = {"sales": (["analysts"] if mode == "stale" else [])}
+    after = {"sales": ([] if mode == "stale" else ["analysts"] if mode == "release" else ["auditors"])}
     print(json.dumps({
-        "resource_changes": ([{"change": {"actions": ["create"]}}] if saved["can_run"] else []),
+        "resource_changes": ([{"change": {"actions": ["create"]}}]
+                             if saved["can_run"] and mode == "release" else []),
         "output_changes": {"genie_space_can_run_widening": {
-            "actions": ["update"], "before": {"sales": []},
-            "after": {"sales": (["analysts"] if saved["can_run"] else [])}}},
+            "actions": ["update"], "before": before, "after": after}},
     }))
 elif role == "runner" and args[:1] == ["workspace"] and "apply-plan" in args:
     if json.loads(Path(args[-1]).read_text())["can_run"]:
@@ -154,7 +157,7 @@ def build_world(tmp_path, monkeypatch, passthrough=()):
     state = tmp_path / "world.json"
     state.write_text(json.dumps({"masks": False, "select": False, "can_run": False, "coverage": False,
                                  "can_run_desired": False, "finished": False, "completed": [],
-                                 "events": [], "violations": []}))
+                                 "events": [], "violations": [], "workspace_show": "release"}))
     fake = tmp_path / "world.py"
     fake.write_text(WORLD)
     for role in ("staged", "gate", "runner", "agents"):
@@ -194,3 +197,17 @@ def test_a_first_release_opens_can_run_only_after_masks_and_select_and_never_end
     assert "deferred: the saved grant phase opens SELECT first" in rounds[2].stdout
     assert "This manifest opened the SELECT the Genie agents need" in rounds[2].stdout
     assert rg.last_release(repo.cloud, "prod") is not None
+
+
+@pytest.mark.parametrize(("mode", "changes"), [("stale", False), ("widening", True)])
+def test_release_plan_records_only_a_stale_empty_widening_as_no_workspace_change(world, mode, changes):
+    make, repo, state, stubs = world
+    current = json.loads(state.read_text())
+    current.update({"masks": True, "select": True, "coverage": True, "can_run": True,
+                    "finished": True, "workspace_show": mode})
+    state.write_text(json.dumps(current))
+    assert make("rehearse", "dev").returncode == 0
+    plan = make("release-plan", "prod", "IMPORT_EXISTING_SCRIPT=true", stubs=stubs)
+    assert plan.returncode == 0, plan.stdout + plan.stderr
+    manifest = json.loads(rg.current_manifest(repo.prod, "prod").read_text())
+    assert manifest["plans"]["workspace"]["changes"] is changes

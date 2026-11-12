@@ -221,9 +221,9 @@ class Make:
         self.log.unlink(missing_ok=True)
 
 
-def _workspace_plan_runner(tmp_path: Path, show: dict) -> tuple[Path, Path]:
+def _workspace_plan_runner(tmp_path: Path, show: dict | str) -> tuple[Path, Path]:
     log, shown = tmp_path / "workspace-runner.jsonl", tmp_path / "workspace-show.json"
-    shown.write_text(json.dumps(show))
+    shown.write_text(json.dumps(show) if isinstance(show, dict) else show)
     runner = tmp_path / "workspace-plan-runner"
     runner.write_text(WORKSPACE_PLAN_RUNNER.format(python=sys.executable, log=str(log)))
     runner.chmod(0o755)
@@ -264,6 +264,22 @@ def test_workspace_plan_layer_suppresses_only_stale_widening_and_never_prints_de
     assert "Saved the plan to:" not in result.stdout
     calls = [json.loads(line) for line in (tmp_path / "workspace-runner.jsonl").read_text().splitlines()]
     assert [call[2] for call in calls if call[2] in ("plan", "show")] == ["plan", "show"]
+
+
+def test_workspace_plan_layer_prints_the_plan_when_show_output_is_not_json(tmp_path, repo):
+    make = Make(tmp_path, repo)
+    (repo.prod / "agents").mkdir()
+    (repo.prod / "agents" / "Sales.auto.tfvars").write_text(
+        'genie_space_id = ""\nacl_groups = ["analysts"]\n'
+        'uc_tables = ["prod_cat.sales.customers"]\nsql_warehouse_id = "wh"\n')
+    (repo.prod / "abac.auto.tfvars").write_text(EMPTY_ABAC)
+    runner, shown = _workspace_plan_runner(tmp_path, "not terraform json\n")
+    result = make("_plan-layer", "prod", "LAYER=workspace", "TARGET_ENV=prod",
+                  f"LAYER_ENV_DIR={repo.prod}", root_runner=runner,
+                  environ_extra={"WORKSPACE_SHOW_JSON": str(shown)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "# visible change" in result.stdout
+    assert "Saved the plan to:" not in result.stdout
 
 
 def test_release_plan_roots_marks_only_the_stale_widening_output_as_no_workspace_change():

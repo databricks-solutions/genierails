@@ -255,7 +255,8 @@ def _manifest(env_dir: Path, cloud: str = "aws", env: str = "prod", manifest_id:
     """A release manifest file in the env's state, as release-plan leaves it."""
     path = rg.manifests_dir(env_dir.parents[1], env) / manifest_id / "manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"kind": "release-manifest", "id": manifest_id, "commit": COMMIT, "env": env}))
+    path.write_text(json.dumps({"kind": "release-manifest", "version": rg.VERSION,
+                                "id": manifest_id, "commit": COMMIT, "env": env}))
     return {"id": manifest_id, "path": str(path), "sha256": rg.sha256_file(path)}
 
 
@@ -275,6 +276,16 @@ def _terminal_approval(env_dir: Path, manifest: dict, extra: dict | None = None)
     path.write_text(json.dumps(record))
     path.chmod(0o600)
     return record | {"record": str(path), "record_sha256": rg.sha256_file(path)}
+
+
+def _phase_record(env_dir: Path, manifest: dict) -> None:
+    path = rg.env_state(rg.cloud_dir_of(env_dir), "prod") / "receipts" / "phases" / f"{manifest['id']}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "kind": "release-phase", "version": rg.VERSION, "env": "prod", "commit": COMMIT,
+        "id": manifest["id"], "manifest_sha256": manifest["sha256"],
+        "policy_run": "", "release_epoch": "test-release",
+    }))
 
 
 def _receipt(env_dir: Path, approval="terminal", *, phases=None, cloud="aws", env="prod", name=RECEIPT,
@@ -316,6 +327,8 @@ def _no_private_fields(header: dict, markdown: str) -> None:
 def test_the_header_reads_the_terminal_approval_from_the_release_receipt(tmp_path, monkeypatch):
     env_dir = _prod(tmp_path, monkeypatch)
     phase_manifests = [_manifest(env_dir, manifest_id=f"phase-{n}") for n in range(1, 4)]
+    for phase in phase_manifests:
+        _phase_record(env_dir, phase)
     phases = {
         phase_manifests[0]["id"]: _terminal_approval(env_dir, phase_manifests[0]),
         phase_manifests[1]["id"]: _terminal_approval(env_dir, phase_manifests[1]),
@@ -342,6 +355,7 @@ def test_the_header_reads_the_terminal_approval_from_the_release_receipt(tmp_pat
 def test_unlinked_or_unverified_phase_approvals_are_never_counted_as_terminal(tmp_path, monkeypatch):
     env_dir = _prod(tmp_path, monkeypatch)
     linked = _manifest(env_dir, manifest_id="phase-linked")
+    _phase_record(env_dir, linked)
     forged = _terminal_approval(env_dir, linked) | {"manifest_id": "somewhere-else"}
     _receipt(env_dir, phases={linked["id"]: forged, "not-a-phase": {"via": "terminal"}},
              phase_manifests=[linked["id"]])
@@ -350,6 +364,27 @@ def test_unlinked_or_unverified_phase_approvals_are_never_counted_as_terminal(tm
     assert record["round_approvals"] == {"terminal": 1, "unverified": 1}
     assert record["phase_approvals_not_counted"] == {"unlinked": 1}
     assert "earlier phases: 1 unverified" in markdown
+
+
+def test_linked_approvals_without_manifests_or_phase_records_are_not_counted(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    _receipt(env_dir, phases={"p9": {"via": "admin-signed"}, "p8": {"via": "external"}},
+             phase_manifests=["p9", "p8"])
+    header, markdown = _evidence(env_dir)
+    record = header["approval_record"]
+    assert record["round_approvals"] == {"terminal": 1}
+    assert record["phase_approvals"] == record["earlier_phase_approvals"] == {}
+    assert record["phase_approvals_not_counted"] == {"missing manifest": 2}
+    assert "not counted: 2 missing manifest" in markdown
+
+
+def test_a_verified_phase_with_an_unknown_via_uses_the_unknown_bucket(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    phase = _manifest(env_dir, manifest_id="phase-admin-signed")
+    _phase_record(env_dir, phase)
+    _receipt(env_dir, phases={phase["id"]: {"via": "admin-signed"}}, phase_manifests=[phase["id"]])
+    header, _markdown = _evidence(env_dir)
+    assert header["approval_record"]["round_approvals"] == {"terminal": 1, "unknown": 1}
 
 
 SELF_REPORTED = "self-reported: GenieRails cannot prove a human typed it)"

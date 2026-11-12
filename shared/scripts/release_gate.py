@@ -3389,7 +3389,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "workspace-plan-display":
             data = _read_json(args.show_json)
             if data is None:
-                raise Refused(f"{args.show_json} is not valid terraform show -json output")
+                print(workspace_plan_display_text(args.plan_output.read_text()), end="")
+                return 0
             if workspace_plan_has_only_stale_widening_output(data):
                 print("No changes. No resource changes; the configured CAN_RUN ACLs already match. "
                       "Terraform's stale plan-time widening diagnostic is omitted.")
