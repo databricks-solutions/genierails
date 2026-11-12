@@ -322,7 +322,8 @@ def test_the_header_reads_the_terminal_approval_from_the_release_receipt(tmp_pat
     assert header["approval_record"]["process_chain"] == "not recorded"
     assert header["approved_at"] == "2026-11-05T00:25:10.000000Z"
     assert header["approval_record"]["receipt"] == RECEIPT
-    assert header["approval_record"]["phase_approvals"] == {"external": 1, "terminal": 2}
+    assert header["approval_record"]["earlier_phase_approvals"] == {"external": 1, "terminal": 2}
+    assert header["approval_record"]["round_approvals"] == {"external": 1, "terminal": 3}
     assert "unapproved" not in markdown and "pending" not in markdown
     assert "- Approved by: `Louis Chen <louis@example.com>" in markdown
     assert (f"- Approval record: release receipt `{RECEIPT}` (commit `6d463a4340c8`; "

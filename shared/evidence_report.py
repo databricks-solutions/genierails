@@ -195,11 +195,13 @@ def receipt_approval(env_dir: Path) -> tuple[str, str | None, dict[str, Any]]:
     record: dict[str, Any] = {"source": "release-receipt", "receipt": Path(str(receipt["_path"])).name,
                               "commit": str(receipt.get("commit", ""))[:12]}
     phases = receipt.get("phase_approvals")
+    round_counts: dict[str, int] = defaultdict(int)
     if isinstance(phases, dict) and phases:
         counts: dict[str, int] = defaultdict(int)
         for value in phases.values():
             counts[str(value.get("via")) if isinstance(value, dict) and value.get("via") else UNKNOWN_APPROVAL] += 1
-        record["phase_approvals"] = dict(sorted(counts.items()))
+        round_counts.update(counts)
+        record["earlier_phase_approvals"] = dict(sorted(counts.items()))
     try:
         problem = approvals.embedded_problem(env_dir, env, receipt)
     except Exception as exc:
@@ -211,6 +213,8 @@ def receipt_approval(env_dir: Path) -> tuple[str, str | None, dict[str, Any]]:
             return UNKNOWN_APPROVAL, None, record | {"detail": problem}
         return f"unverified: {_short(problem)}", None, record | {"source": "unverified", "detail": _short(problem)}
     record["via"] = str(approval["via"])
+    round_counts[record["via"]] += 1
+    record["round_approvals"] = dict(sorted(round_counts.items()))
     if approval["via"] == "external":
         return "external (approved outside GenieRails; the release receipt records no terminal approval)", None, record
     identity = {k: approval.get(k) for k in approvals.IDENTITY_FIELDS}
@@ -262,7 +266,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     ]
     record = header.get("approval_record")
     if isinstance(record, dict) and record.get("source") == "release-receipt":
-        phases = record.get("phase_approvals") or {}
+        phases = record.get("earlier_phase_approvals") or {}
         earlier = (", earlier phases: " + ", ".join(f"{n} {via}" for via, n in phases.items())) if phases else ""
         detail = f"; {record['detail']}" if record.get("detail") else ""
         lines.append(f"- Approval record: release receipt `{record.get('receipt')}` (commit `{record.get('commit')}`; "
