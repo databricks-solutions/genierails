@@ -10,6 +10,7 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -529,6 +530,87 @@ SCRATCH_PROMOTE_STDOUT = (
     "=== Promote complete: dev -> prod ===\n"
 )
 SCRATCH_BANNERS = ("=== Promote agents", "=== Cross-env promote", "AWS-6 Walkthrough: promoted", "Promote complete")
+
+
+# The exact lines a real promote-to prints as it promotes (agent_promote.py, Makefile.shared):
+# the only lines the scratch filter may drop.
+REAL_PROMOTION_BANNERS = [
+    "=== Promote agents (dev -> prod) ===",
+    "=== Cross-env promote: dev -> prod ===",
+    "=== Cross-env promote: dev -> stg_2 ===",
+    "  AWS-6 Walkthrough: promoted",
+    "  Dev-to-Prod Walkthrough -> Prod Walkthrough: promoted",
+    "  AWS-6 Walkthrough: promoted; seeded agents/AWS-6 Walkthrough.auto.tfvars (acl_groups from dev, "
+    "through group_map)",
+    "  my_agent: promoted; prod keeps acl_groups ['prod_analysts'] (dev has ['dev_analysts'], through group_map)",
+]
+# Lines a filter must never swallow (the #335 regression): warnings, errors and refusals,
+# including ones shaped like a banner, and near-misses of the banner formats.
+KEPT_PROBES = [
+    "  WARNING: promoted",
+    "  ERROR: promoted; details",
+    "  refused: promoted",
+    "  Refused: promoted",
+    "  error: promoted",
+    "  warning: promoted",
+    "  FAILED: promoted",
+    "  failed to copy: promoted",
+    "  permission denied: promoted",
+    "  !! promoted",
+    "  agent!: promoted",
+    "  NOTE: promoted",
+    "  INFO: promoted",
+    "  SKIPPED: promoted",
+    "  x: promoted; anything else",
+    "  x: promoted; seeded agents/x.auto.tfvars (acl_groups from dev, through group_map) extra",
+    "    nested: promoted",
+    "=== Promote agents (dev -> prod) === WARNING",
+    "=== Cross-env promote: dev -> prod; refused ===",
+    "=== Promote complete: dev -> prod ===",
+    "  promoted",
+    "ERROR: promote-to agents: bad file",
+    "  WARNING: this warning must stay visible",
+]
+
+
+def _filter_keeps_every_probe() -> list[str]:
+    """The probe lines the current filter would drop ([] when it keeps them all)."""
+    text = "".join(line + "\n" for line in KEPT_PROBES)
+    return [line for line in KEPT_PROBES if line + "\n" not in check_env._without_promotion_banners(text)]
+
+
+@pytest.mark.parametrize("line", REAL_PROMOTION_BANNERS)
+def test_scratch_filter_drops_exactly_the_real_promotion_banners(line):
+    assert check_env._without_promotion_banners(line + "\n") == ""
+
+
+@pytest.mark.parametrize("line", KEPT_PROBES)
+def test_scratch_filter_never_drops_warnings_errors_refusals_or_near_misses(line):
+    text = f"before\n{line}\nafter\n"
+    assert check_env._without_promotion_banners(text) == text
+
+
+def test_a_loosened_scratch_filter_is_caught(monkeypatch):
+    assert _filter_keeps_every_probe() == []
+    # The #342 first-cut pattern, with the deny check off: it swallows warnings and refusals.
+    monkeypatch.setattr(check_env, "_NEVER_DROPPED", re.compile(r"(?!)"))
+    monkeypatch.setattr(check_env, "_PROMOTION_BANNERS", (re.compile(r"  \S.*: promoted(;.*)?"),))
+    dropped = _filter_keeps_every_probe()
+    for line in ("  WARNING: promoted", "  ERROR: promoted; details", "  refused: promoted"):
+        assert line in dropped, dropped
+
+
+def test_the_deny_check_is_needed_even_with_the_exact_allowlist(monkeypatch):
+    # "  WARNING: promoted" has the exact per-agent shape; only the deny check keeps it.
+    monkeypatch.setattr(check_env, "_NEVER_DROPPED", re.compile(r"(?!)"))
+    assert "  WARNING: promoted" in _filter_keeps_every_probe()
+
+
+def test_the_deny_check_alone_keeps_probes_against_a_loose_allowlist(monkeypatch):
+    monkeypatch.setattr(check_env, "_PROMOTION_BANNERS", (re.compile(r".*"),))
+    dropped = _filter_keeps_every_probe()
+    for line in ("  WARNING: promoted", "  ERROR: promoted; details", "  refused: promoted", "  !! promoted"):
+        assert line not in dropped, dropped
 
 
 def test_scratch_make_summary_hides_promote_banners_on_success(tmp_path, capsys):

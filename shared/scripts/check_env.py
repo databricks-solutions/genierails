@@ -378,13 +378,36 @@ _PROMOTE_COMPLETE_BANNER_PREFIXES = (
 )
 
 
-# What a real promote-to prints as it promotes (Makefile.shared's cross-env promote and
-# agent_promote.py): in a scratch copy nothing is promoted, so these lines would mislead.
-_PROMOTION_BANNER = re.compile(r"^(=== Promote agents \(.*\) ===|=== Cross-env promote: .* ===|  \S.*: promoted(;.*)?)$")
+# What a real promote-to prints as it promotes, exactly (Makefile.shared's cross-env promote
+# banner and agent_promote.py's banner and per-agent lines): in a scratch copy nothing is
+# promoted, so on success only these lines are dropped. An exact allowlist: anything else,
+# however close, is kept.
+_ENV_NAME = r"[A-Za-z0-9_-]+"
+_AGENT_LABEL = r"[A-Za-z0-9][A-Za-z0-9 _.'()-]*(?: -> [A-Za-z0-9][A-Za-z0-9 _.'()-]*)?"
+_GROUPS = r"\[[^\]\n]*\]"
+_PROMOTION_BANNERS = tuple(re.compile(pattern) for pattern in (
+    rf"=== Promote agents \({_ENV_NAME} -> {_ENV_NAME}\) ===",
+    rf"=== Cross-env promote: {_ENV_NAME} -> {_ENV_NAME} ===",
+    rf"  {_AGENT_LABEL}: promoted",
+    rf"  {_AGENT_LABEL}: promoted; seeded agents/[A-Za-z0-9 _.'()-]+\.auto\.tfvars "
+    rf"\(acl_groups from {_ENV_NAME}, through group_map\)",
+    rf"  {_AGENT_LABEL}: promoted; {_ENV_NAME} keeps acl_groups {_GROUPS} \({_ENV_NAME} has {_GROUPS}, "
+    r"through group_map\)",
+))
+# Checked before any banner match: a line that reads like a warning, error, refusal or other
+# diagnostic (an all-caps "NOTE:"/"INFO:" prefix) is always kept, even one shaped like a
+# banner (e.g. "  WARNING: promoted").
+_NEVER_DROPPED = re.compile(r"(?i:warn|error|refus|fail|denied|invalid|!)|^\s*[A-Z]{3,}:")
+
+
+def _is_promotion_banner(line: str) -> bool:
+    if _NEVER_DROPPED.search(line):
+        return False
+    return any(pattern.fullmatch(line) for pattern in _PROMOTION_BANNERS)
 
 
 def _without_promotion_banners(text: str) -> str:
-    return "".join(line for line in text.splitlines(keepends=True) if not _PROMOTION_BANNER.match(line.rstrip("\n")))
+    return "".join(line for line in text.splitlines(keepends=True) if not _is_promotion_banner(line.rstrip("\n")))
 
 
 def _without_promote_complete_banner(text: str) -> str:

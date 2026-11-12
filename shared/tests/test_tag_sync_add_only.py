@@ -673,7 +673,16 @@ def _terraform_sees_no_changes(repo):
 def test_a_tag_values_only_manifest_without_terraform_changes_stays_applicable(tmp_path, removal, live_after):
     repo = Repo(tmp_path, LIVE)
     _terraform_sees_no_changes(repo)
-    manifest = Path(repo.account_manifest(*removal))
+    planned = repo.account_plan(*removal)
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    # F6: no Terraform changes, but tag values to add (and remove): it is applied, so account-plan
+    # names make apply-account and never says there is nothing to apply.
+    assert "Nothing to apply" not in planned.stdout and "No make apply-account is needed" not in planned.stdout
+    assert planned.stdout.rstrip().endswith("  Review it and its saved plan, get it approved, then run:\n"
+                                            "    make apply-account"), planned.stdout
+    assert "  Tag values added: gr_treatment: ['new_value']" in planned.stdout
+    manifest = Path(next(line.split(":", 1)[1].strip() for line in planned.stdout.splitlines()
+                         if "Manifest (immutable):" in line))
     data = json.loads(manifest.read_text())
     assert data["plan"]["changes"] is False
     assert data["plan"]["file"] == "account.tfplan"
