@@ -89,6 +89,8 @@ case "$1" in
       echo 'run make check ENV=dev, which runs the coverage check' >&2
     fi
     echo "plan $(basename "$PWD")$expected$structural" >> "$FAKE_TF_LOG"; echo "FAKE PLAN" ;;
+  show)
+    echo '{{"resource_changes": [], "output_changes": {{}}}}' ;;
 esac
 exit 0
 """

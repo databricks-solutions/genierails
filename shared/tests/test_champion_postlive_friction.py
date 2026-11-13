@@ -251,12 +251,13 @@ PRIVATE = {"tty": "/dev/ttys004", "question": "Approve and release manifest X?",
            "host": "laptop-xyz", "asker": {"pid": 424242}}
 
 
-def _manifest(env_dir: Path, cloud: str = "aws", env: str = "prod") -> dict:
+def _manifest(env_dir: Path, cloud: str = "aws", env: str = "prod", manifest_id: str = MANIFEST_ID) -> dict:
     """A release manifest file in the env's state, as release-plan leaves it."""
-    path = rg.manifests_dir(env_dir.parents[1], env) / MANIFEST_ID / "manifest.json"
+    path = rg.manifests_dir(env_dir.parents[1], env) / manifest_id / "manifest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"kind": "release-manifest", "id": MANIFEST_ID, "commit": COMMIT, "env": env}))
-    return {"id": MANIFEST_ID, "path": str(path), "sha256": rg.sha256_file(path)}
+    path.write_text(json.dumps({"kind": "release-manifest", "version": rg.VERSION,
+                                "id": manifest_id, "commit": COMMIT, "env": env}))
+    return {"id": manifest_id, "path": str(path), "sha256": rg.sha256_file(path)}
 
 
 def _terminal_approval(env_dir: Path, manifest: dict, extra: dict | None = None) -> dict:
@@ -277,8 +278,18 @@ def _terminal_approval(env_dir: Path, manifest: dict, extra: dict | None = None)
     return record | {"record": str(path), "record_sha256": rg.sha256_file(path)}
 
 
+def _phase_record(env_dir: Path, manifest: dict) -> None:
+    path = rg.env_state(rg.cloud_dir_of(env_dir), "prod") / "receipts" / "phases" / f"{manifest['id']}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "kind": "release-phase", "version": rg.VERSION, "env": "prod", "commit": COMMIT,
+        "id": manifest["id"], "manifest_sha256": manifest["sha256"],
+        "policy_run": "", "release_epoch": "test-release",
+    }))
+
+
 def _receipt(env_dir: Path, approval="terminal", *, phases=None, cloud="aws", env="prod", name=RECEIPT,
-             manifest=None, raw=None, record=None) -> Path:
+             manifest=None, raw=None, record=None, phase_manifests=None) -> Path:
     directory = rg.release_dir(env_dir.parents[1], "prod")
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
@@ -294,6 +305,8 @@ def _receipt(env_dir: Path, approval="terminal", *, phases=None, cloud="aws", en
         receipt["approval"] = approval
     if phases is not None:
         receipt["phase_approvals"] = phases
+    if phase_manifests is not None:
+        receipt["phase_manifests"] = phase_manifests
     path.write_text(json.dumps(receipt))
     return path
 
@@ -313,7 +326,15 @@ def _no_private_fields(header: dict, markdown: str) -> None:
 
 def test_the_header_reads_the_terminal_approval_from_the_release_receipt(tmp_path, monkeypatch):
     env_dir = _prod(tmp_path, monkeypatch)
-    _receipt(env_dir, phases={"p1": {"via": "terminal"}, "p2": {"via": "terminal"}, "p3": {"via": "external"}})
+    phase_manifests = [_manifest(env_dir, manifest_id=f"phase-{n}") for n in range(1, 4)]
+    for phase in phase_manifests:
+        _phase_record(env_dir, phase)
+    phases = {
+        phase_manifests[0]["id"]: _terminal_approval(env_dir, phase_manifests[0]),
+        phase_manifests[1]["id"]: _terminal_approval(env_dir, phase_manifests[1]),
+        phase_manifests[2]["id"]: {"via": "external"},
+    }
+    _receipt(env_dir, phases=phases, phase_manifests=list(phases))
     header, markdown = _evidence(env_dir)
     assert header["approved_by"] == ("Louis Chen <louis@example.com> (y typed on terminal ttys004 by OS user "
                                      "louis.chen; process chain not recorded; self-reported: GenieRails cannot "
@@ -322,12 +343,66 @@ def test_the_header_reads_the_terminal_approval_from_the_release_receipt(tmp_pat
     assert header["approval_record"]["process_chain"] == "not recorded"
     assert header["approved_at"] == "2026-11-05T00:25:10.000000Z"
     assert header["approval_record"]["receipt"] == RECEIPT
-    assert header["approval_record"]["phase_approvals"] == {"external": 1, "terminal": 2}
+    assert header["approval_record"]["earlier_phase_approvals"] == {"external": 1, "terminal": 2}
+    assert header["approval_record"]["round_approvals"] == {"external": 1, "terminal": 3}
     assert "unapproved" not in markdown and "pending" not in markdown
     assert "- Approved by: `Louis Chen <louis@example.com>" in markdown
     assert (f"- Approval record: release receipt `{RECEIPT}` (commit `6d463a4340c8`; "
             "final round: terminal, earlier phases: 1 external, 2 terminal)") in markdown
     _no_private_fields(header, markdown)
+
+
+def test_unlinked_or_unverified_phase_approvals_are_never_counted_as_terminal(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    linked = _manifest(env_dir, manifest_id="phase-linked")
+    _phase_record(env_dir, linked)
+    forged = _terminal_approval(env_dir, linked) | {"manifest_id": "somewhere-else"}
+    _receipt(env_dir, phases={linked["id"]: forged, "not-a-phase": {"via": "terminal"}},
+             phase_manifests=[linked["id"]])
+    header, markdown = _evidence(env_dir)
+    record = header["approval_record"]
+    assert record["round_approvals"] == {"terminal": 1, "unverified": 1}
+    assert record["phase_approvals_not_counted"] == {"unlinked": 1}
+    assert "earlier phases: 1 unverified" in markdown
+
+
+def test_linked_approvals_without_manifests_or_phase_records_are_not_counted(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    _receipt(env_dir, phases={"p9": {"via": "admin-signed"}, "p8": {"via": "external"}},
+             phase_manifests=["p9", "p8"])
+    header, markdown = _evidence(env_dir)
+    record = header["approval_record"]
+    assert record["round_approvals"] == {"terminal": 1}
+    assert record["phase_approvals"] == record["earlier_phase_approvals"] == {}
+    assert record["phase_approvals_not_counted"] == {"missing manifest": 2}
+    assert "not counted: 2 missing manifest" in markdown
+
+
+def test_a_linked_approval_with_a_forged_phase_record_is_not_counted(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    phase = _manifest(env_dir, manifest_id="phase-forged-record")
+    _phase_record(env_dir, phase)
+    phase_path = rg.env_state(rg.cloud_dir_of(env_dir), "prod") / "receipts" / "phases" / f"{phase['id']}.json"
+    forged = json.loads(phase_path.read_text())
+    forged["manifest_sha256"] = "0" * 64
+    phase_path.write_text(json.dumps(forged))
+    _receipt(env_dir, phases={phase["id"]: {"via": "external"}}, phase_manifests=[phase["id"]])
+
+    header, markdown = _evidence(env_dir)
+    record = header["approval_record"]
+    assert record["round_approvals"] == {"terminal": 1}
+    assert record["phase_approvals"] == record["earlier_phase_approvals"] == {}
+    assert record["phase_approvals_not_counted"] == {"unverified phase record": 1}
+    assert "not counted: 1 unverified phase record" in markdown
+
+
+def test_a_verified_phase_with_an_unknown_via_uses_the_unknown_bucket(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    phase = _manifest(env_dir, manifest_id="phase-admin-signed")
+    _phase_record(env_dir, phase)
+    _receipt(env_dir, phases={phase["id"]: {"via": "admin-signed"}}, phase_manifests=[phase["id"]])
+    header, _markdown = _evidence(env_dir)
+    assert header["approval_record"]["round_approvals"] == {"terminal": 1, "unknown": 1}
 
 
 SELF_REPORTED = "self-reported: GenieRails cannot prove a human typed it)"

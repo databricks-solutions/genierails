@@ -195,11 +195,54 @@ def receipt_approval(env_dir: Path) -> tuple[str, str | None, dict[str, Any]]:
     record: dict[str, Any] = {"source": "release-receipt", "receipt": Path(str(receipt["_path"])).name,
                               "commit": str(receipt.get("commit", ""))[:12]}
     phases = receipt.get("phase_approvals")
+    cloud_dir = rg.cloud_dir_of(env_dir)
+    linked_phases = {str(value) for value in receipt.get("phase_manifests") or []}
+    round_counts: dict[str, int] = defaultdict(int)
     if isinstance(phases, dict) and phases:
         counts: dict[str, int] = defaultdict(int)
-        for value in phases.values():
-            counts[str(value.get("via")) if isinstance(value, dict) and value.get("via") else UNKNOWN_APPROVAL] += 1
-        record["phase_approvals"] = dict(sorted(counts.items()))
+        not_counted: dict[str, int] = defaultdict(int)
+        for phase, value in phases.items():
+            if str(phase) not in linked_phases:
+                not_counted["unlinked"] += 1
+                continue
+            manifest_path = rg.manifests_dir(cloud_dir, env) / str(phase) / "manifest.json"
+            if not manifest_path.is_file():
+                not_counted["missing manifest"] += 1
+                continue
+            phase_path = rg.env_state(cloud_dir, env) / "receipts" / "phases" / f"{phase}.json"
+            phase_record = rg._read_json(phase_path)
+            if phase_record is None:
+                not_counted["missing phase record"] += 1
+                continue
+            try:
+                phase_problem = rg._phase_problem(cloud_dir, env, phase_path, phase_record)
+            except Exception as exc:
+                phase_problem = f"the phase record couldn't be checked ({type(exc).__name__})"
+            if phase_problem:
+                not_counted["unverified phase record"] += 1
+                continue
+            claimed_via = str(value.get("via")) if isinstance(value, dict) and value.get("via") else UNKNOWN_APPROVAL
+            via = claimed_via if claimed_via in ("terminal", "external") else UNKNOWN_APPROVAL
+            if via == "terminal":
+                try:
+                    manifest = rg._read_json(manifest_path) or {}
+                    phase_receipt = {
+                        "approval": value,
+                        "manifest": {"id": str(phase), "sha256": rg.sha256_file(manifest_path)},
+                        "commit": manifest.get("commit"),
+                    }
+                    phase_problem = approvals.embedded_problem(env_dir, env, phase_receipt)
+                except Exception as exc:
+                    phase_problem = f"the phase approval couldn't be checked ({type(exc).__name__})"
+                if phase_problem:
+                    via = "unverified"
+            counts[via] += 1
+        round_counts.update(counts)
+        earlier = dict(sorted(counts.items()))
+        record["phase_approvals"] = earlier  # schema 1.0 compatibility
+        record["earlier_phase_approvals"] = earlier
+        if not_counted:
+            record["phase_approvals_not_counted"] = dict(sorted(not_counted.items()))
     try:
         problem = approvals.embedded_problem(env_dir, env, receipt)
     except Exception as exc:
@@ -211,6 +254,8 @@ def receipt_approval(env_dir: Path) -> tuple[str, str | None, dict[str, Any]]:
             return UNKNOWN_APPROVAL, None, record | {"detail": problem}
         return f"unverified: {_short(problem)}", None, record | {"source": "unverified", "detail": _short(problem)}
     record["via"] = str(approval["via"])
+    round_counts[record["via"]] += 1
+    record["round_approvals"] = dict(sorted(round_counts.items()))
     if approval["via"] == "external":
         return "external (approved outside GenieRails; the release receipt records no terminal approval)", None, record
     identity = {k: approval.get(k) for k in approvals.IDENTITY_FIELDS}
@@ -262,11 +307,14 @@ def render_markdown(report: dict[str, Any]) -> str:
     ]
     record = header.get("approval_record")
     if isinstance(record, dict) and record.get("source") == "release-receipt":
-        phases = record.get("phase_approvals") or {}
+        phases = record.get("earlier_phase_approvals") or {}
         earlier = (", earlier phases: " + ", ".join(f"{n} {via}" for via, n in phases.items())) if phases else ""
+        not_counted = record.get("phase_approvals_not_counted") or {}
+        omitted = (", not counted: " + ", ".join(f"{n} {why}" for why, n in not_counted.items())) \
+            if not_counted else ""
         detail = f"; {record['detail']}" if record.get("detail") else ""
         lines.append(f"- Approval record: release receipt `{record.get('receipt')}` (commit `{record.get('commit')}`; "
-                     f"final round: {record.get('via')}{earlier}){detail}")
+                     f"final round: {record.get('via')}{earlier}{omitted}){detail}")
     elif isinstance(record, dict) and record.get("detail"):
         lines.append(f"- Approval record: {record['detail']}")
     if "column_privileges_availability" in report:

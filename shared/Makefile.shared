@@ -1769,6 +1769,12 @@ _release-plan-roots: _guard-not-databricks-compute
 		python3 "$(GENIE_ADOPT_PREFLIGHT_SCRIPT)" "$(ENV_DIR)" --arm --quiet; \
 		set +e; (umask 077; LAYER_ENV_DIR="$(ENV_DIR)" "$(ROOT_RUNNER)" workspace "$(ENV)" plan -input=false -detailed-exitcode -out="$$plan_dir/workspace.tfplan"); status=$$?; set -e; \
 		if [ $$status -ne 0 ] && [ $$status -ne 2 ]; then echo "ERROR: workspace plan failed." >&2; exit 1; fi; \
+		if [ $$status -eq 2 ]; then \
+			show_json="$$plan_dir/workspace.show.json"; \
+			(umask 077; LAYER_ENV_DIR="$(ENV_DIR)" "$(ROOT_RUNNER)" workspace "$(ENV)" show -json "$$plan_dir/workspace.tfplan" > "$$show_json") || { rm -f "$$show_json"; echo "ERROR: workspace plan could not be inspected." >&2; exit 1; }; \
+			disposition="$$($(_RELEASE_GATE) workspace-plan-disposition --env-dir "$(ENV_DIR)" --env "$(ENV)" --show-json "$$show_json")"; rm -f "$$show_json"; \
+			if [ "$$disposition" = stale-widening-only ]; then status=0; echo "  No resource changes; ignored Terraform's stale plan-time CAN_RUN widening diagnostic."; fi; \
+		fi; \
 		printf '{"file": "workspace.tfplan", "changes": %s}\n' "$$([ $$status -eq 2 ] && echo true || echo false)" > "$$plan_dir/workspace.json"; \
 	fi
 
@@ -2203,7 +2209,17 @@ _plan-layer:
 		stage_flag="-var=policy_stage=preview"; \
 	fi; \
 	echo "=== Terraform Plan ($$layer:$$target_env) ==="; \
-	LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan $$stage_flag
+	if [ "$$layer" = workspace ]; then \
+		plan_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/genierails-workspace-plan.XXXXXX")"; trap 'rm -rf "$$plan_dir"' EXIT; \
+		if ! (umask 077; LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan $$stage_flag -out="$$plan_dir/workspace.tfplan" >"$$plan_dir/plan.txt" 2>&1); then cat "$$plan_dir/plan.txt"; exit 1; fi; \
+		if ! (umask 077; LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" show -json "$$plan_dir/workspace.tfplan" >"$$plan_dir/show.json"); then \
+			sed '/^Saved the plan to:/,$$d' "$$plan_dir/plan.txt"; \
+		else \
+			$(_RELEASE_GATE) workspace-plan-display --env-dir "$$env_dir" --env "$$target_env" --show-json "$$plan_dir/show.json" --plan-output "$$plan_dir/plan.txt"; \
+		fi; \
+	else \
+		LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan $$stage_flag; \
+	fi
 
 plan: override CLASSIFICATION_READ_ONLY := 1
 plan: _guarded-bootstrap ## Run terraform plan for the selected layer or workspace env

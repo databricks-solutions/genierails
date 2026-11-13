@@ -1457,6 +1457,31 @@ def test_account_manifest_summary_says_plainly_what_the_plan_changes(plan, line)
     assert f"  Account plan: {line}" in lines
 
 
+def test_workspace_plan_recognizes_only_the_post_release_widening_output_correction():
+    # terraform show -json includes every declared root output; unchanged
+    # siblings use actions=["no-op"] (the workspace root currently has 18).
+    plan = {"resource_changes": [], "output_changes": {
+        "genie_space_can_run_widening": {
+            "actions": ["update"], "before": {"sales": ["analysts"]}, "after": {"sales": []}},
+        "genie_space_missing_grants": {
+            "actions": ["no-op"], "before": {"sales": []}, "after": {"sales": []}},
+        "genie_space_acls_applied": {"actions": ["no-op"], "before": True, "after": True},
+    }}
+    assert rg.workspace_plan_has_only_stale_widening_output(plan)
+
+
+@pytest.mark.parametrize("plan", [
+    {"resource_changes": [], "output_changes": {"genie_space_can_run_widening": {
+        "actions": ["update"], "before": {"sales": []}, "after": {"sales": ["analysts"]}}}},
+    {"resource_changes": [{"change": {"actions": ["update"]}}], "output_changes": {
+        "genie_space_can_run_widening": {"before": {"sales": ["analysts"]}, "after": {"sales": []}}}},
+    {"resource_changes": [], "output_changes": {"another_output": {
+        "actions": ["update"], "before": 1, "after": 2}}},
+])
+def test_workspace_plan_never_hides_a_real_widening_resource_change_or_other_output(plan):
+    assert not rg.workspace_plan_has_only_stale_widening_output(plan)
+
+
 @pytest.mark.parametrize("text, expected", [
     ("", []), ("k:b,k:a, k:a ", ["k:a", "k:b"]), ("k:a:b", ["k:a:b"]),
 ])
