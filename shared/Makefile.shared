@@ -2210,7 +2210,14 @@ _plan-layer:
 	fi; \
 	echo "=== Terraform Plan ($$layer:$$target_env) ==="; \
 	if [ "$$layer" = workspace ]; then \
-		plan_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/genierails-workspace-plan.XXXXXX")"; trap 'rm -rf "$$plan_dir"' EXIT; \
+		engine_root="$$(cd "$(CLOUD_ROOT)/.." && pwd -P)" || exit 1; \
+		repo_root="$$(git -C "$$env_dir" rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "$$engine_root")"; \
+		repo_root="$$(cd "$$repo_root" && pwd -P)" || exit 1; \
+		tmp_root="$${TMPDIR:-/tmp}"; tmp_root="$$(cd "$$tmp_root" 2>/dev/null && pwd -P || printf /tmp)"; \
+		case "$$tmp_root/" in "$$repo_root/"*|"$$engine_root/"*) tmp_root="/tmp" ;; esac; \
+		plan_dir="$$(mktemp -d "$$tmp_root/genierails-workspace-plan.XXXXXX")" || exit 1; chmod 700 "$$plan_dir"; \
+		trap '$(_NO_SIGNALS); rm -rf "$$plan_dir"' EXIT; \
+		trap '$(_NO_SIGNALS); exit 129' HUP; trap '$(_NO_SIGNALS); exit 130' INT; trap '$(_NO_SIGNALS); exit 143' TERM; \
 		if ! (umask 077; LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan $$stage_flag -out="$$plan_dir/workspace.tfplan" >"$$plan_dir/plan.txt" 2>&1); then cat "$$plan_dir/plan.txt"; exit 1; fi; \
 		if ! (umask 077; LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" show -json "$$plan_dir/workspace.tfplan" >"$$plan_dir/show.json"); then \
 			sed '/^Saved the plan to:/,$$d' "$$plan_dir/plan.txt"; \

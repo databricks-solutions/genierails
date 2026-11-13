@@ -89,7 +89,7 @@ sys.exit(int(Path({rc!r}).read_text()) if Path({rc!r}).exists() else 0)
 '''
 
 WORKSPACE_PLAN_RUNNER = r'''#!{python}
-import json, os, sys
+import json, os, stat, sys
 from pathlib import Path
 args = sys.argv[1:]
 with open({log!r}, "a") as handle:
@@ -98,8 +98,17 @@ command = args[2]
 if command == "plan":
     out = next(Path(arg.split("=", 1)[1]) for arg in args if arg.startswith("-out="))
     out.write_bytes(b"saved workspace plan")
+    if os.environ.get("WORKSPACE_PLAN_PROBE"):
+        with open(os.environ["WORKSPACE_PLAN_PROBE"], "a") as probe:
+            probe.write(json.dumps({{
+                "path": str(out),
+                "mode": stat.S_IMODE(out.stat().st_mode),
+                "dir_mode": stat.S_IMODE(out.parent.stat().st_mode),
+            }}) + "\n")
     print("Terraform will perform the following actions:\n  # visible change\n\nPlan: 1 to add, 0 to change, 0 to destroy.")
     print(f"\nSaved the plan to: {{out}}\n\nTo perform exactly these actions, run the following command to apply:\n    terraform apply \"{{out}}\"")
+    if os.environ.get("WORKSPACE_PLAN_FAIL_AFTER_WRITE"):
+        raise SystemExit(1)
 elif command == "show":
     print(Path(os.environ["WORKSPACE_SHOW_JSON"]).read_text())
     raise SystemExit({show_rc})
@@ -302,6 +311,38 @@ def test_workspace_plan_layer_prints_the_plan_when_show_fails_with_stale_only_js
     assert "# visible change" in result.stdout
     assert "No changes" not in result.stdout
     assert "Saved the plan to:" not in result.stdout
+
+
+@pytest.mark.parametrize("fail_after_write", [False, True])
+def test_workspace_plan_layer_uses_private_external_temp_plan_and_cleans_it_up(tmp_path, repo, fail_after_write):
+    make = Make(tmp_path, repo)
+    (repo.prod / "agents").mkdir()
+    (repo.prod / "agents" / "Sales.auto.tfvars").write_text(
+        'genie_space_id = ""\nacl_groups = ["analysts"]\n'
+        'uc_tables = ["prod_cat.sales.customers"]\nsql_warehouse_id = "wh"\n')
+    (repo.prod / "abac.auto.tfvars").write_text(EMPTY_ABAC)
+    runner, shown = _workspace_plan_runner(tmp_path, {"resource_changes": [], "output_changes": {}})
+    repo_local_tmp = repo.root / "tmp"
+    repo_local_tmp.mkdir()
+    probe = tmp_path / "workspace-plan-probe.jsonl"
+    extra = {
+        "WORKSPACE_SHOW_JSON": str(shown),
+        "WORKSPACE_PLAN_PROBE": str(probe),
+        "TMPDIR": str(repo_local_tmp),
+    }
+    if fail_after_write:
+        extra["WORKSPACE_PLAN_FAIL_AFTER_WRITE"] = "1"
+    result = make("_plan-layer", "prod", "LAYER=workspace", "TARGET_ENV=prod",
+                  f"LAYER_ENV_DIR={repo.prod}", root_runner=runner, environ_extra=extra)
+    assert (result.returncode != 0) is fail_after_write, result.stdout + result.stderr
+    records = [json.loads(line) for line in probe.read_text().splitlines()]
+    assert len(records) == 1
+    plan = Path(records[0]["path"])
+    assert records[0]["mode"] == 0o600
+    assert records[0]["dir_mode"] == 0o700
+    assert not plan.is_relative_to(repo.root)
+    assert not plan.exists()
+    assert not plan.parent.exists()
 
 
 def test_release_plan_roots_marks_only_the_stale_widening_output_as_no_workspace_change():
