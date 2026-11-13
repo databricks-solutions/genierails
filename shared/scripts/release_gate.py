@@ -463,8 +463,11 @@ def promoted_digest(cloud_dir: Path, makefile: Path, make: str, target: str) -> 
     except CheckFailed as exc:
         return None, str(exc)
     try:
-        print(f"  Recomputing the promote-to ENV={target} digest in a scratch copy:")
-        if scratch.make("promote-to", f"ENV={target}") != 0:
+        # A scratch copy: nothing is promoted or written outside it, so its banners stay quiet on success.
+        print(f"  Recomputing the promote-to ENV={target} digest in a scratch copy (nothing is promoted or "
+              "written; on failure its output follows)")
+        if scratch.make("promote-to", f"ENV={target}",
+                        summary=f"    checked what promote-to ENV={target} writes (no changes made)") != 0:
             return None, f"promote-to ENV={target} failed in a scratch copy"
         return generated_digest(scratch.envs / target / "generated"), ""
     finally:
@@ -507,16 +510,18 @@ def reusable_receipt(cloud_dir: Path, env: str, fingerprint: str, repo: Path, co
 
 
 def reuse_candidates(cloud_dir: Path, env: str, fingerprint: str, repo: Path,
-                     commit: str) -> tuple[dict | None, list[str]]:
+                     commit: str, *, receipts: list[dict] | None = None) -> tuple[dict | None, list[str]]:
     """The receipt a rehearsal of ``commit`` may reuse, and why the other fingerprint matches can't be.
 
-    Shared by rehearse and release-plan. A receipt provenance would accept
-    (``receipt_problem``) whose fingerprint is today's (the reuse-only checks:
-    the same inputs, of a commit that is an ancestor of ``commit``, not a
-    divergent branch).
+    Shared by rehearse, release-plan and make status/next. A receipt provenance
+    would accept (``receipt_problem``) whose fingerprint is today's (the
+    reuse-only checks: the same inputs, of a commit that is an ancestor of
+    ``commit``, not a divergent branch). ``receipts``: this store's rehearse
+    receipts when the caller already read them without creating a store id
+    (status is read-only); default ``rehearse_receipts``.
     """
     found, rejected = None, []
-    for receipt in rehearse_receipts(cloud_dir, env):
+    for receipt in rehearse_receipts(cloud_dir, env) if receipts is None else receipts:
         if receipt.get("fingerprint") != fingerprint or receipt.get("result") != "passed":
             continue  # a failed run is never a candidate; one edited to "passed" is, and is refused below
         why = receipt_problem(receipt, env) or (
@@ -2462,6 +2467,22 @@ def account_manifest_summary(manifest_path: Path, manifest: Mapping) -> list[str
     return lines
 
 
+def account_manifest_next(manifest_path: Path, manifest: Mapping) -> list[str]:
+    """What make account-plan says after the summary: approve and apply it, or (a no-op) nothing to apply.
+
+    apply-account refuses a no-op manifest (account_manifest_drift), so it is never suggested for one.
+    """
+    if account_manifest_noop(manifest):
+        return [f"  Manifest (immutable): {manifest_path}",
+                "  Nothing to apply: the account layer already matches (no Terraform changes and no tag values "
+                "to add or remove).",
+                "  No make apply-account is needed; run make next ENV=<env> for the next step."]
+    return [f"  Manifest (immutable): {manifest_path}",
+            "  Approving this manifest approves exactly the plan and the tag-value removals above.",
+            "  Review it and its saved plan, get it approved, then run:",
+            "    make apply-account"]
+
+
 def _plan_entry(plan_dir: Path, root: str) -> dict:
     """A saved plan of the account or workspace root (see make release-plan)."""
     info = _read_json(plan_dir / f"{root}.json")
@@ -3285,6 +3306,7 @@ def main(argv: list[str] | None = None) -> int:
     cmd.add_argument("--expect-digest", required=True)
     cmd.add_argument("--via", default="")
     command("account-manifest-summary").add_argument("--manifest", type=Path, required=True)
+    command("account-manifest-next").add_argument("--manifest", type=Path, required=True)
     cmd = command("account-manifest-info")
     cmd.add_argument("--manifest", type=Path, required=True)
     for name in ("release-receipt", "phase-record", "account-receipt"):
@@ -3400,6 +3422,8 @@ def main(argv: list[str] | None = None) -> int:
                   "account inputs and tag-policy diff (approved removals) match.")
         elif args.command == "account-manifest-summary":
             print("\n".join(account_manifest_summary(args.manifest, load_account_manifest(args.manifest, args.env))))
+        elif args.command == "account-manifest-next":
+            print("\n".join(account_manifest_next(args.manifest, load_account_manifest(args.manifest, args.env))))
         elif args.command == "account-manifest-select":
             path = select_account_manifest(args.env_dir, args.env)
             manifest = load_account_manifest(path, args.env)

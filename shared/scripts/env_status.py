@@ -209,6 +209,26 @@ def _git(env_dir: Path, cloud_dir: Path, remote: str, branch: str) -> dict:
     }
 
 
+def _reusable_from(cloud_dir: Path, source: str, commit: str, mine: list[dict]) -> str | None:
+    """The earlier passing rehearsal release-plan (or make rehearse) would reuse for HEAD, read-only.
+
+    The same rule release_gate.rehearse_reuse applies, without its lock or write: a clean
+    checkout at ``commit`` whose code, ``source`` and account inputs match a sealed passing
+    receipt of an ancestor commit in this store. None when it wouldn't reuse one.
+    """
+    source_dir = cloud_dir / "envs" / source
+    try:
+        status = rg.checkout_status(source_dir)
+        if not status["clean_tree"] or status["commit"] != commit:
+            return None
+        repo = Path(status["repo"])
+        fp = rg.inputs_fingerprint(repo, cloud_dir, source)
+        earlier, _rejected = rg.reuse_candidates(cloud_dir, source, fp["fingerprint"], repo, commit, receipts=mine)
+    except Exception:  # anything unreadable: no reuse claimed (release-plan decides and says why)
+        return None
+    return str(earlier["commit"]) if earlier else None
+
+
 def _rehearsal(cloud_dir: Path, source: str, commit: str, env: str = "") -> dict:
     store = _store(cloud_dir, source)
     mine = [r for r in _rehearsals(cloud_dir, source) if store and r.get("store") == store]
@@ -219,6 +239,8 @@ def _rehearsal(cloud_dir: Path, source: str, commit: str, env: str = "") -> dict
                            if r.get("commit") == commit and r.get("store") != store]),
            "unclean": len([r for r in at_head if r.get("result") == "passed" and r.get("clean_tree") is not True]),
            "failed": len([r for r in at_head if r.get("result") != "passed"])}
+    if not passing and store and commit:
+        out["reusable_from"] = _reusable_from(cloud_dir, source, commit, mine)
     if passing:
         receipt = passing[-1]
         out |= {"receipt": receipt["_path"], "created_at": receipt.get("created_at"),
@@ -551,7 +573,7 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
             return live(f"make release ENV={env}", f"{env} uses legacy governance: release derives, checks, "
                         "applies and verifies in one run (legacy envs have no release-plan)")
         if not report["generated"]:
-            return live(f"make generate ENV={env}", f"{rel}/generated/ has no abac.auto.tfvars yet")
+            return live(*_generate_step(env, rel))
         targets = report.get("promotion_targets") or []
         then = f"; once it passes, make promote-to ENV={targets[0]}" if targets else ""
         return live(f"make rehearse ENV={env}", "legacy envs keep no rehearse receipt, so status can't tell "
@@ -580,12 +602,14 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
 
     if role == rg.REHEARSE:
         if not report["generated"]:
-            return live(f"make generate ENV={env}", f"{rel}/generated/ has no abac.auto.tfvars yet")
+            return live(*_generate_step(env, rel))
         step = commit_first()
         if step:
             return step
         rehearsal = report["rehearsal"]
-        if not rehearsal["passing"]:
+        targets = report.get("promotion_targets") or []
+        # release-plan ENV=<target> reuses an unchanged rehearsal itself, so a promoted target's step leads.
+        if not rehearsal["passing"] and not (rehearsal.get("reusable_from") and targets):
             account = report["account"]
             due = [m for m in account["pending"] if m["at_head"] and m["plan_saved"]]
             first = not rehearsal["receipts"] and not account["receipts"] and not account["manifests"]
@@ -618,7 +642,6 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
             elif rehearsal["foreign"]:
                 why += f" ({rehearsal['foreign']} receipt(s) for it came from another store and don't count)"
             return live(f"make rehearse ENV={env}", why + "; release-plan needs one")
-        targets = report.get("promotion_targets") or []
         if not targets:
             if not (cloud_dir / "envs" / "prod").exists():
                 return ("make setup ENV=prod", f"{env} is rehearsed at HEAD and no env is promoted from it yet")
@@ -632,7 +655,10 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
             if not command.startswith("make maintain"):
                 return command, why
             steady = steady or (command, why)
-        return steady or ("nothing to do", f"{env} is rehearsed at HEAD")
+        if steady or rehearsal["passing"]:
+            return steady or ("nothing to do", f"{env} is rehearsed at HEAD")
+        return ("nothing to do", f"{env}'s inputs are unchanged since its passing rehearsal of "
+                f"{rehearsal['reusable_from'][:12]}")
 
     # promoted
     source = config["promote_from"]
@@ -670,7 +696,8 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
         return live(f"make maintain ENV={env}", f"{env} is released at HEAD; maintain keeps it reconciled "
                     "(scheduled)")
     rehearsal = report["rehearsal"]
-    if not rehearsal["passing"]:
+    reuse = rehearsal.get("reusable_from") if not rehearsal["passing"] else None
+    if not rehearsal["passing"] and not reuse:
         # The source's own next step gets it there (generate, commit, the account layer, rehearse).
         need = f"release-plan ENV={env} needs a passing rehearsal of {source} at HEAD {git['head'][:12]}"
         if source not in _seen:
@@ -683,7 +710,8 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
         return live(f"make rehearse ENV={source}", need)
     if rehearsal.get("target_digest") == "stale":
         return (f"make promote-to ENV={env}", f"{rel}/generated doesn't match what promote-to produces from "
-                f"{source} at this commit (stale promotion); then commit, push, make rehearse ENV={source}")
+                f"{source} at this commit (stale promotion); then commit and push it (release-plan reuses {source}'s "
+                "rehearsal while its inputs are unchanged)")
     if rehearsal.get("target_digest") == "missing":
         return live(f"make rehearse ENV={source}", f"the rehearsal of {source} at HEAD recorded no promote-to "
                     f"ENV={env} digest ({env} was not a promotion target then)")
@@ -697,6 +725,11 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
                 f"HEAD {git['head'][:12]} is older than the last release {last['commit'][:12]}; release-plan "
                 "refuses an out-of-order release without that acknowledgement")
     why = f"{source} is rehearsed at HEAD {git['head'][:12]} and {rel}/generated matches it"
+    if reuse:
+        # release-plan's rehearse-reuse writes that receipt itself (nothing is applied in the source env).
+        why = (f"{source}'s inputs are unchanged since its passing rehearsal of {reuse[:12]}: release-plan "
+               f"reuses it for HEAD {git['head'][:12]} (nothing is applied in {source}; no make rehearse "
+               f"ENV={source} needed)")
     if rounds:
         why = f"round {rounds} of the first release is applied; plan round {rounds + 1}"
     elif release["phases_at_head"]:
@@ -704,6 +737,19 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
     elif current.get("id") and not current.get("at_head") and not current.get("released"):
         why += f" (the current manifest {current['id']} plans another commit, so release would refuse it)"
     return live(f"make release-plan ENV={env}", why)
+
+
+def _generate_step(env: str, rel: str) -> tuple[str, str]:
+    """The first generate: it drafts rules from Data Classification's class.* tags.
+
+    Whether classification is on, or has tagged anything yet, lives in the workspace, and
+    status/next read only local files (no network), so the step names classification first.
+    """
+    return (f"turn on Data Classification in Catalog Explorer, then make generate ENV={env}",
+            f"{rel}/generated/ has no abac.auto.tfvars yet. generate drafts rules from the class.* tags Data "
+            f"Classification puts on sensitive columns: in Catalog Explorer turn it on for the {env} catalog and "
+            "wait for those tags (status reads only local files, so it can't see them); already tagged? run "
+            f"make generate ENV={env} now")
 
 
 def collect_for_next(cloud_dir: Path, env: str, remote: str, branch: str) -> dict:
@@ -765,6 +811,9 @@ def _text(report: dict) -> list[str]:
                 text += f" ({rehearsal['failed']} failed at HEAD)"
             if rehearsal["foreign"]:
                 text += f" ({rehearsal['foreign']} from another store, informational)"
+            if rehearsal.get("reusable_from"):
+                text += (f"; its inputs are unchanged since the passing rehearsal of {rehearsal['reusable_from'][:12]}, "
+                         "which release-plan reuses (nothing is applied)")
         lines.append(f"  Rehearsal:   {text}")
     release = report.get("release")
     if release:

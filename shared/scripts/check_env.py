@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -311,7 +312,15 @@ class Scratch:
         shutil.rmtree(self.root, ignore_errors=True)
 
     def make(self, target: str, *args: str, extra_env: dict[str, str] | None = None,
-             quiet_success: bool = False) -> int:
+             quiet_success: bool = False, summary: str = "") -> int:
+        """Run ``make target`` in the copy and return its exit code.
+
+        ``quiet_success``: capture the output; on success print it without promote-to's
+        closing next-steps banner. ``summary`` (implies that): on success also drop the
+        promotion banners (``_without_promotion_banners``) and end with ``summary``, so a
+        scratch promote-to that writes nothing outside the copy doesn't read like a
+        re-promote. A failure always prints everything.
+        """
         env = {k: v for k, v in os.environ.items() if k not in LEAKED_VARS} | (extra_env or {})
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         # The copy has no runtime overlay: regenerations write generated/ in
@@ -320,12 +329,16 @@ class Scratch:
         command = [self.make_bin, "-C", str(self.cloud), "--no-print-directory", target,
                    f"CLOUD_ROOT={self.cloud}", f"SHARED_ROOT={SHARED_ROOT}", *args]
         sys.stdout.flush()
-        if not quiet_success:
+        if not quiet_success and not summary:
             return subprocess.run(command, env=env).returncode
         result = subprocess.run(command, env=env, text=True, encoding="utf-8", errors="replace",
                                 capture_output=True)
         stdout = _without_promote_complete_banner(result.stdout)
-        if result.returncode == 0:
+        if result.returncode == 0 and summary:
+            print(_without_promotion_banners(stdout), end="")
+            print(result.stderr, end="", file=sys.stderr)
+            print(summary)
+        elif result.returncode == 0:
             print(stdout, end="")
             print(result.stderr, end="", file=sys.stderr)
         else:
@@ -363,6 +376,38 @@ _PROMOTE_COMPLETE_BANNER_PREFIXES = (
     "        and wait for class.* tags,",
     "        then ",
 )
+
+
+# What a real promote-to prints as it promotes, exactly (Makefile.shared's cross-env promote
+# banner and agent_promote.py's banner and per-agent lines): in a scratch copy nothing is
+# promoted, so on success only these lines are dropped. An exact allowlist: anything else,
+# however close, is kept.
+_ENV_NAME = r"[A-Za-z0-9_-]+"
+_AGENT_LABEL = r"[A-Za-z0-9][A-Za-z0-9 _.'()-]*(?: -> [A-Za-z0-9][A-Za-z0-9 _.'()-]*)?"
+_GROUPS = r"\[[^\]\n]*\]"
+_PROMOTION_BANNERS = tuple(re.compile(pattern) for pattern in (
+    rf"=== Promote agents \({_ENV_NAME} -> {_ENV_NAME}\) ===",
+    rf"=== Cross-env promote: {_ENV_NAME} -> {_ENV_NAME} ===",
+    rf"  {_AGENT_LABEL}: promoted",
+    rf"  {_AGENT_LABEL}: promoted; seeded agents/[A-Za-z0-9 _.'()-]+\.auto\.tfvars "
+    rf"\(acl_groups from {_ENV_NAME}, through group_map\)",
+    rf"  {_AGENT_LABEL}: promoted; {_ENV_NAME} keeps acl_groups {_GROUPS} \({_ENV_NAME} has {_GROUPS}, "
+    r"through group_map\)",
+))
+# Checked before any banner match: a line that reads like a warning, error, refusal or other
+# diagnostic (an all-caps "NOTE:"/"INFO:" prefix) is always kept, even one shaped like a
+# banner (e.g. "  WARNING: promoted").
+_NEVER_DROPPED = re.compile(r"(?i:warn|error|refus|fail|denied|invalid|!)|^\s*[A-Z]{3,}:")
+
+
+def _is_promotion_banner(line: str) -> bool:
+    if _NEVER_DROPPED.search(line):
+        return False
+    return any(pattern.fullmatch(line) for pattern in _PROMOTION_BANNERS)
+
+
+def _without_promotion_banners(text: str) -> str:
+    return "".join(line for line in text.splitlines(keepends=True) if not _is_promotion_banner(line.rstrip("\n")))
 
 
 def _without_promote_complete_banner(text: str) -> str:
@@ -428,8 +473,11 @@ def _promote_check(args) -> None:
         before = _snapshot(scratch.envs)
         extra = [f"FROM={args.from_env}"] if args.from_env else []
         extra += [f"CATALOG_MAP={args.catalog_map}"] if args.catalog_map else []
-        print("  Running promote-to in a scratch copy; scratch paths in its output refer to that copy.")
-        if scratch.make("promote-to", f"ENV={args.env}", *extra, quiet_success=True) != 0:
+        # A scratch copy: nothing is promoted or written outside it, so its banners stay quiet on success.
+        print(f"  Checking envs/{args.env}'s promoted files are current (promote-to ENV={args.env} in a scratch "
+              "copy; nothing is promoted or written here; on failure its output follows):")
+        if scratch.make("promote-to", f"ENV={args.env}", *extra,
+                        summary="    scratch promote-to finished; comparing with the committed files") != 0:
             raise CheckFailed(f"promote-to ENV={args.env} failed in the scratch copy (see above)")
         flags = " ".join(extra)
         _report(f"promote-to ENV={args.env} CHECK=1", before, _snapshot(scratch.envs),

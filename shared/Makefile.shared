@@ -720,7 +720,7 @@ enable-classification: _guard-not-ci-apply _guarded-bootstrap _guard-workspace-t
 		elif [ "$$($(_IS_DETERMINISTIC) "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null)" = 1 ]; then \
 			src="$$(python3 -c 'import sys,hcl2; print(hcl2.load(open(sys.argv[1])).get("promote_from") or "dev")' "$(ENV_DIR)/env.auto.tfvars" 2>/dev/null)"; \
 			echo "Automatic tagging is on. Wait for class.* tags to appear in Catalog Explorer, then run:"; \
-			echo "  make release-plan ENV=$(ENV)   (after make rehearse ENV=$${src:-dev} on the same commit)"; \
+			echo "  make release-plan ENV=$(ENV)   (it reuses $${src:-dev}'s passing rehearsal; only if $${src:-dev} changed since, make rehearse ENV=$${src:-dev} first)"; \
 			echo "  Get that manifest approved, then: make release ENV=$(ENV)"; \
 		else \
 			echo "Automatic tagging is on. Wait for class.* tags to appear in Catalog Explorer, then run:"; \
@@ -1237,10 +1237,7 @@ _account-plan-locked: _guard-not-databricks-compute
 	echo ""; \
 	echo "=== Account plan ==="; \
 	$(_RELEASE_GATE) account-manifest-summary --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --manifest "$$manifest" || exit 1; \
-	echo "  Manifest (immutable): $$manifest"; \
-	echo "  Approving this manifest approves exactly the plan and the tag-value removals above."; \
-	echo "  Review it and its saved plan, get it approved, then run:"; \
-	echo "    make apply-account"
+	$(_RELEASE_GATE) account-manifest-next --env-dir "$(ACCOUNT_ENV_DIR)" --env "$(ACCOUNT_ENV)" --manifest "$$manifest" || exit 1
 
 apply-account: _guard-not-ci-apply _guarded-bootstrap ## Apply shared account resources from the one approved account manifest (or MANIFEST=<path>)
 	@$(_DRY_RUN_GUARD); \

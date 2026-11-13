@@ -10,6 +10,7 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -518,6 +519,157 @@ def test_check_refusals(repo, tmp_path, args, message):
     _assert_read_only(repo, before)
 
 
+# F2 (aws-6/azure-4): rehearse, release-plan and make check run promote-to in a scratch copy that writes
+# nothing outside it; its "=== Promote agents" / "=== Cross-env promote" banners read like a re-promote.
+SCRATCH_PROMOTE_STDOUT = (
+    "  Using saved FROM and CATALOG_MAP from envs/prod/env.auto.tfvars: FROM=dev CATALOG_MAP=a=b\n"
+    "=== Promote agents (dev -> prod) ===\n"
+    "  AWS-6 Walkthrough: promoted\n"
+    "=== Cross-env promote: dev -> prod ===\n"
+    "  WARNING: this warning must stay visible\n"
+    "=== Promote complete: dev -> prod ===\n"
+)
+SCRATCH_BANNERS = ("=== Promote agents", "=== Cross-env promote", "AWS-6 Walkthrough: promoted", "Promote complete")
+
+
+# The exact lines a real promote-to prints as it promotes (agent_promote.py, Makefile.shared):
+# the only lines the scratch filter may drop.
+REAL_PROMOTION_BANNERS = [
+    "=== Promote agents (dev -> prod) ===",
+    "=== Cross-env promote: dev -> prod ===",
+    "=== Cross-env promote: dev -> stg_2 ===",
+    "  AWS-6 Walkthrough: promoted",
+    "  Dev-to-Prod Walkthrough -> Prod Walkthrough: promoted",
+    "  AWS-6 Walkthrough: promoted; seeded agents/AWS-6 Walkthrough.auto.tfvars (acl_groups from dev, "
+    "through group_map)",
+    "  my_agent: promoted; prod keeps acl_groups ['prod_analysts'] (dev has ['dev_analysts'], through group_map)",
+]
+# Lines a filter must never swallow (the #335 regression): warnings, errors and refusals,
+# including ones shaped like a banner, and near-misses of the banner formats.
+KEPT_PROBES = [
+    "  WARNING: promoted",
+    "  ERROR: promoted; details",
+    "  refused: promoted",
+    "  Refused: promoted",
+    "  error: promoted",
+    "  warning: promoted",
+    "  FAILED: promoted",
+    "  failed to copy: promoted",
+    "  permission denied: promoted",
+    "  !! promoted",
+    "  agent!: promoted",
+    "  NOTE: promoted",
+    "  INFO: promoted",
+    "  SKIPPED: promoted",
+    "  x: promoted; anything else",
+    "  x: promoted; seeded agents/x.auto.tfvars (acl_groups from dev, through group_map) extra",
+    "    nested: promoted",
+    "=== Promote agents (dev -> prod) === WARNING",
+    "=== Cross-env promote: dev -> prod; refused ===",
+    "=== Promote complete: dev -> prod ===",
+    "  promoted",
+    "ERROR: promote-to agents: bad file",
+    "  WARNING: this warning must stay visible",
+]
+
+
+def _filter_keeps_every_probe() -> list[str]:
+    """The probe lines the current filter would drop ([] when it keeps them all)."""
+    text = "".join(line + "\n" for line in KEPT_PROBES)
+    return [line for line in KEPT_PROBES if line + "\n" not in check_env._without_promotion_banners(text)]
+
+
+@pytest.mark.parametrize("line", REAL_PROMOTION_BANNERS)
+def test_scratch_filter_drops_exactly_the_real_promotion_banners(line):
+    assert check_env._without_promotion_banners(line + "\n") == ""
+
+
+@pytest.mark.parametrize("line", KEPT_PROBES)
+def test_scratch_filter_never_drops_warnings_errors_refusals_or_near_misses(line):
+    text = f"before\n{line}\nafter\n"
+    assert check_env._without_promotion_banners(text) == text
+
+
+def test_a_loosened_scratch_filter_is_caught(monkeypatch):
+    assert _filter_keeps_every_probe() == []
+    # The #342 first-cut pattern, with the deny check off: it swallows warnings and refusals.
+    monkeypatch.setattr(check_env, "_NEVER_DROPPED", re.compile(r"(?!)"))
+    monkeypatch.setattr(check_env, "_PROMOTION_BANNERS", (re.compile(r"  \S.*: promoted(;.*)?"),))
+    dropped = _filter_keeps_every_probe()
+    for line in ("  WARNING: promoted", "  ERROR: promoted; details", "  refused: promoted"):
+        assert line in dropped, dropped
+
+
+def test_the_deny_check_is_needed_even_with_the_exact_allowlist(monkeypatch):
+    # "  WARNING: promoted" has the exact per-agent shape; only the deny check keeps it.
+    monkeypatch.setattr(check_env, "_NEVER_DROPPED", re.compile(r"(?!)"))
+    assert "  WARNING: promoted" in _filter_keeps_every_probe()
+
+
+def test_the_deny_check_alone_keeps_probes_against_a_loose_allowlist(monkeypatch):
+    monkeypatch.setattr(check_env, "_PROMOTION_BANNERS", (re.compile(r".*"),))
+    dropped = _filter_keeps_every_probe()
+    for line in ("  WARNING: promoted", "  ERROR: promoted; details", "  refused: promoted", "  !! promoted"):
+        assert line not in dropped, dropped
+
+
+def test_scratch_make_summary_hides_promote_banners_on_success(tmp_path, capsys):
+    cloud = tmp_path / "aws"
+    cloud.mkdir()
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("# fake\n")
+    fake = _fake_make(tmp_path, SCRATCH_PROMOTE_STDOUT, "stderr note\n", 0)
+    scratch = check_env.Scratch(cloud, makefile, str(fake))
+    try:
+        assert scratch.make("promote-to", "ENV=prod", summary="    checked (no changes made)") == 0
+    finally:
+        scratch.close()
+    captured = capsys.readouterr()
+    for banner in SCRATCH_BANNERS:
+        assert banner not in captured.out + captured.err, banner
+    assert captured.out == ("  Using saved FROM and CATALOG_MAP from envs/prod/env.auto.tfvars: FROM=dev CATALOG_MAP=a=b\n"
+                            "  WARNING: this warning must stay visible\n    checked (no changes made)\n")
+    assert captured.err == "stderr note\n"
+
+
+def test_scratch_make_summary_prints_everything_on_failure(tmp_path, capsys):
+    cloud = tmp_path / "aws"
+    cloud.mkdir()
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("# fake\n")
+    fake = _fake_make(tmp_path, SCRATCH_PROMOTE_STDOUT + "ERROR: simulated\n", "refused: detail\n", 3)
+    scratch = check_env.Scratch(cloud, makefile, str(fake))
+    try:
+        assert scratch.make("promote-to", "ENV=prod", summary="    checked (no changes made)") == 3
+    finally:
+        scratch.close()
+    captured = capsys.readouterr()
+    assert "=== Promote agents (dev -> prod) ===" in captured.out and "ERROR: simulated" in captured.out
+    assert "refused: detail" in captured.err
+    assert "checked (no changes made)" not in captured.out
+
+
+def test_rehearse_digest_recompute_is_quiet_about_the_scratch_promote(tmp_path, capsys):
+    from scripts import release_gate as rg
+
+    cloud = tmp_path / "aws"
+    (cloud / "envs" / "prod").mkdir(parents=True)
+    (cloud / "envs" / "prod" / "env.auto.tfvars").write_text("# prod\n")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("# fake\n")
+    fake = _fake_make(tmp_path, SCRATCH_PROMOTE_STDOUT, "", 0)
+    digest, error = rg.promoted_digest(cloud, makefile, str(fake), "prod")
+    out = capsys.readouterr().out
+    assert digest and not error, (error, out)
+    for banner in SCRATCH_BANNERS:
+        assert banner not in out, banner
+    assert "Recomputing the promote-to ENV=prod digest in a scratch copy (nothing is promoted or written" in out
+    assert "checked what promote-to ENV=prod writes (no changes made)" in out
+    assert "WARNING: this warning must stay visible" in out
+
+
 @pytest.mark.parametrize("target", [["check", "ENV=dev"], ["promote-to", "ENV=prod", "CHECK=1"]])
 def test_dry_run_runs_nothing(repo, tmp_path, target):
     before = _baseline(repo)
@@ -538,6 +690,11 @@ def test_promote_check_passes_on_committed_promote_output_and_writes_nothing(pro
     assert result.returncode == 0, out
     assert "OK: promote-to ENV=prod CHECK=1: committed files match." in out
     assert "Promote complete" not in out
+    # F2: the scratch promote-to's banners would read like a re-promote; it says it checks instead.
+    for banner in ("=== Promote agents", "=== Cross-env promote"):
+        assert banner not in out, banner
+    assert "Checking envs/prod's promoted files are current (promote-to ENV=prod in a scratch copy; nothing is " \
+        "promoted or written here" in out
     assert "applying targets cannot run in CI" not in out
     _assert_read_only(promoted, before)
     assert _git(promoted, "status", "--porcelain") == ""

@@ -508,6 +508,36 @@ def test_apply_account_without_an_opt_in_leaves_undesired_values_in_place(tmp_pa
     assert repo.live()["gr_treatment"] == ["email_partial__string__0a1b2c3d", "new_value", "retired_by_hand"]
 
 
+def test_account_plan_with_changes_names_apply_account(tmp_path):
+    repo = Repo(tmp_path, LIVE)
+    result = repo.account_plan()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.rstrip().endswith("  Review it and its saved plan, get it approved, then run:\n"
+                                           "    make apply-account"), result.stdout
+    assert "Nothing to apply" not in result.stdout
+
+
+# F6 (azure-4): a no-change account-plan said "run make apply-account", which refuses a no-op manifest.
+def test_account_plan_without_changes_says_there_is_nothing_to_apply(tmp_path):
+    repo = Repo(tmp_path, {"gr_treatment": ["email_partial__string__0a1b2c3d", "new_value"]})
+    _terraform_sees_no_changes(repo)
+    result = repo.account_plan()
+    assert result.returncode == 0, result.stdout + result.stderr
+    out = result.stdout
+    assert "  Account plan: no changes" in out and "  Tag values removed: none" in out
+    assert "Tag values added" not in out
+    assert ("  Nothing to apply: the account layer already matches (no Terraform changes and no tag values to "
+            "add or remove).\n  No make apply-account is needed; run make next ENV=<env> for the next step.") in out
+    for gone in ("then run:", "    make apply-account", "Approving this manifest", "get it approved"):
+        assert gone not in out, gone
+    manifest = next(line.split(":", 1)[1].strip() for line in out.splitlines() if "Manifest (immutable):" in line)
+    from scripts import release_gate as rg
+    assert rg.account_manifest_noop(json.loads(Path(manifest).read_text()))
+    # The step it no longer suggests refuses that manifest anyway.
+    applied = repo.make("apply-account", "account", f"MANIFEST={manifest}")
+    assert applied.returncode != 0 and "has nothing to apply" in applied.stdout + applied.stderr
+
+
 def test_account_plan_surfaces_removals_in_its_output_and_manifest(tmp_path):
     repo = Repo(tmp_path, LIVE)
     result = repo.account_plan("ALLOW_TAG_VALUE_REMOVAL=gr_treatment:retired_by_hand", "WAREHOUSE_ID=wh-1")
@@ -643,7 +673,16 @@ def _terraform_sees_no_changes(repo):
 def test_a_tag_values_only_manifest_without_terraform_changes_stays_applicable(tmp_path, removal, live_after):
     repo = Repo(tmp_path, LIVE)
     _terraform_sees_no_changes(repo)
-    manifest = Path(repo.account_manifest(*removal))
+    planned = repo.account_plan(*removal)
+    assert planned.returncode == 0, planned.stdout + planned.stderr
+    # F6: no Terraform changes, but tag values to add (and remove): it is applied, so account-plan
+    # names make apply-account and never says there is nothing to apply.
+    assert "Nothing to apply" not in planned.stdout and "No make apply-account is needed" not in planned.stdout
+    assert planned.stdout.rstrip().endswith("  Review it and its saved plan, get it approved, then run:\n"
+                                            "    make apply-account"), planned.stdout
+    assert "  Tag values added: gr_treatment: ['new_value']" in planned.stdout
+    manifest = Path(next(line.split(":", 1)[1].strip() for line in planned.stdout.splitlines()
+                         if "Manifest (immutable):" in line))
     data = json.loads(manifest.read_text())
     assert data["plan"]["changes"] is False
     assert data["plan"]["file"] == "account.tfplan"

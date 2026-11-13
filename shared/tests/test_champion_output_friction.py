@@ -926,13 +926,13 @@ def _auto_tagging_env(tmp_path, name, *, promote_from=None, mode="deterministic"
 # promoted) and the governance mode, not the literal name "prod".
 @pytest.mark.parametrize("name, promote_from, mode, expected, absent", [
     ("prod", None, "deterministic",
-     "  make release-plan ENV=prod   (after make rehearse ENV=dev on the same commit)\n"
+     "  make release-plan ENV=prod   (it reuses dev's passing rehearsal; only if dev changed since, make rehearse ENV=dev first)\n"
      "  Get that manifest approved, then: make release ENV=prod\n", "make generate"),
     ("stg", "dev", "deterministic",
-     "  make release-plan ENV=stg   (after make rehearse ENV=dev on the same commit)\n"
+     "  make release-plan ENV=stg   (it reuses dev's passing rehearsal; only if dev changed since, make rehearse ENV=dev first)\n"
      "  Get that manifest approved, then: make release ENV=stg\n", "make generate"),
     ("prod", "stg", "deterministic",
-     "  make release-plan ENV=prod   (after make rehearse ENV=stg on the same commit)\n", "make rehearse ENV=dev"),
+     "  make release-plan ENV=prod   (it reuses stg's passing rehearsal; only if stg changed since, make rehearse ENV=stg first)\n", "make rehearse ENV=dev"),
     ("stg", "dev", "legacy", "then run:\n  make release ENV=stg\n", "generate"),
 ], ids=["prod", "stg-promoted", "prod-from-stg", "stg-promoted-legacy"])
 def test_real_target_auto_tagging_hint_follows_env_role_and_mode(real_cloud, tmp_path, name, promote_from, mode,
