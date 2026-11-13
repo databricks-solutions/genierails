@@ -378,6 +378,24 @@ def test_linked_approvals_without_manifests_or_phase_records_are_not_counted(tmp
     assert "not counted: 2 missing manifest" in markdown
 
 
+def test_a_linked_approval_with_a_forged_phase_record_is_not_counted(tmp_path, monkeypatch):
+    env_dir = _prod(tmp_path, monkeypatch)
+    phase = _manifest(env_dir, manifest_id="phase-forged-record")
+    _phase_record(env_dir, phase)
+    phase_path = rg.env_state(rg.cloud_dir_of(env_dir), "prod") / "receipts" / "phases" / f"{phase['id']}.json"
+    forged = json.loads(phase_path.read_text())
+    forged["manifest_sha256"] = "0" * 64
+    phase_path.write_text(json.dumps(forged))
+    _receipt(env_dir, phases={phase["id"]: {"via": "external"}}, phase_manifests=[phase["id"]])
+
+    header, markdown = _evidence(env_dir)
+    record = header["approval_record"]
+    assert record["round_approvals"] == {"terminal": 1}
+    assert record["phase_approvals"] == record["earlier_phase_approvals"] == {}
+    assert record["phase_approvals_not_counted"] == {"unverified phase record": 1}
+    assert "not counted: 1 unverified phase record" in markdown
+
+
 def test_a_verified_phase_with_an_unknown_via_uses_the_unknown_bucket(tmp_path, monkeypatch):
     env_dir = _prod(tmp_path, monkeypatch)
     phase = _manifest(env_dir, manifest_id="phase-admin-signed")

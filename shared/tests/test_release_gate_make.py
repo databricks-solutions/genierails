@@ -102,6 +102,7 @@ if command == "plan":
     print(f"\nSaved the plan to: {{out}}\n\nTo perform exactly these actions, run the following command to apply:\n    terraform apply \"{{out}}\"")
 elif command == "show":
     print(Path(os.environ["WORKSPACE_SHOW_JSON"]).read_text())
+    raise SystemExit({show_rc})
 else:
     raise SystemExit(f"unexpected runner command: {{args}}")
 '''
@@ -221,11 +222,11 @@ class Make:
         self.log.unlink(missing_ok=True)
 
 
-def _workspace_plan_runner(tmp_path: Path, show: dict | str) -> tuple[Path, Path]:
+def _workspace_plan_runner(tmp_path: Path, show: dict | str, show_rc: int = 0) -> tuple[Path, Path]:
     log, shown = tmp_path / "workspace-runner.jsonl", tmp_path / "workspace-show.json"
     shown.write_text(json.dumps(show) if isinstance(show, dict) else show)
     runner = tmp_path / "workspace-plan-runner"
-    runner.write_text(WORKSPACE_PLAN_RUNNER.format(python=sys.executable, log=str(log)))
+    runner.write_text(WORKSPACE_PLAN_RUNNER.format(python=sys.executable, log=str(log), show_rc=show_rc))
     runner.chmod(0o755)
     return runner, shown
 
@@ -279,6 +280,27 @@ def test_workspace_plan_layer_prints_the_plan_when_show_output_is_not_json(tmp_p
                   environ_extra={"WORKSPACE_SHOW_JSON": str(shown)})
     assert result.returncode == 0, result.stdout + result.stderr
     assert "# visible change" in result.stdout
+    assert "Saved the plan to:" not in result.stdout
+
+
+def test_workspace_plan_layer_prints_the_plan_when_show_fails_with_stale_only_json(tmp_path, repo):
+    make = Make(tmp_path, repo)
+    (repo.prod / "agents").mkdir()
+    (repo.prod / "agents" / "Sales.auto.tfvars").write_text(
+        'genie_space_id = ""\nacl_groups = ["analysts"]\n'
+        'uc_tables = ["prod_cat.sales.customers"]\nsql_warehouse_id = "wh"\n')
+    (repo.prod / "abac.auto.tfvars").write_text(EMPTY_ABAC)
+    stale_only = {"resource_changes": [], "output_changes": {
+        "genie_space_can_run_widening": {
+            "actions": ["update"], "before": {"sales": ["analysts"]}, "after": {"sales": []}},
+    }}
+    runner, shown = _workspace_plan_runner(tmp_path, stale_only, show_rc=1)
+    result = make("_plan-layer", "prod", "LAYER=workspace", "TARGET_ENV=prod",
+                  f"LAYER_ENV_DIR={repo.prod}", root_runner=runner,
+                  environ_extra={"WORKSPACE_SHOW_JSON": str(shown)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "# visible change" in result.stdout
+    assert "No changes" not in result.stdout
     assert "Saved the plan to:" not in result.stdout
 
 

@@ -2216,9 +2216,10 @@ _plan-layer:
 		plan_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/genierails-workspace-plan.XXXXXX")"; trap 'rm -rf "$$plan_dir"' EXIT; \
 		if ! (umask 077; LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan $$stage_flag -out="$$plan_dir/workspace.tfplan" >"$$plan_dir/plan.txt" 2>&1); then cat "$$plan_dir/plan.txt"; exit 1; fi; \
 		if ! (umask 077; LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" show -json "$$plan_dir/workspace.tfplan" >"$$plan_dir/show.json"); then \
-			$(_RELEASE_GATE) workspace-plan-display --env-dir "$$env_dir" --env "$$target_env" --show-json "$$plan_dir/show.json" --plan-output "$$plan_dir/plan.txt"; exit 0; \
+			sed '/^Saved the plan to:/,$$d' "$$plan_dir/plan.txt"; \
+		else \
+			$(_RELEASE_GATE) workspace-plan-display --env-dir "$$env_dir" --env "$$target_env" --show-json "$$plan_dir/show.json" --plan-output "$$plan_dir/plan.txt"; \
 		fi; \
-		$(_RELEASE_GATE) workspace-plan-display --env-dir "$$env_dir" --env "$$target_env" --show-json "$$plan_dir/show.json" --plan-output "$$plan_dir/plan.txt"; \
 	else \
 		LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan $$stage_flag; \
 	fi
