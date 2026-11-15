@@ -388,8 +388,11 @@ def test_every_makefile_plan_writer_runs_under_umask_077():
     """Each ``terraform plan -out=`` in the recipes writes the plan owner-only from creation."""
     text = (ROOT / "shared" / "Makefile.shared").read_text()
     writers = [line for line in text.splitlines() if " plan " in line and "-out=" in line]
-    assert len(writers) == 4
+    assert len(writers) == 5
     assert all("(umask 077; " in line for line in writers), [w for w in writers if "(umask 077; " not in w]
+    check_workspace = next(line for line in writers if '-out="$$plan_dir/workspace.tfplan"' in line
+                           and '"$$target_env" plan $$stage_flag' in line)
+    assert 'LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan' in check_workspace
 
 
 MODE_RUNNER = """#!{python}

@@ -970,7 +970,12 @@ def test_no_saved_plan_file_is_written_by_the_product():
     apply_layer = apply_layer[:apply_layer.index("\n\n")]
     account_apply = apply_layer[apply_layer.index('elif [ "$$layer" = "account" ]; then'):]
     account_apply = account_apply[:account_apply.index('elif [ "$$staged" = 1 ]; then')]
-    allowed = re.findall(tf_out, account_plan) + re.findall(tf_out, roots) + re.findall(tf_out, account_apply)
+    plan_layer = makefile[makefile.index("\n_plan-layer:"):]
+    plan_layer = plan_layer[:plan_layer.index("\n\n")]
+    workspace_check = plan_layer[plan_layer.index('if [ "$$layer" = workspace ]; then'):]
+    workspace_check = workspace_check[:workspace_check.index('else \\')]
+    allowed = (re.findall(tf_out, account_plan) + re.findall(tf_out, roots) + re.findall(tf_out, workspace_check)
+               + re.findall(tf_out, account_apply))
     assert re.findall(tf_out, makefile) == allowed
     assert re.findall(tf_out, roots) == ['-out="$$plan_dir/account.tfplan"',
                                          '-out="$$plan_dir/workspace.tfplan");']
@@ -982,6 +987,14 @@ def test_no_saved_plan_file_is_written_by_the_product():
     assert re.findall(tf_out, account_apply) == ['-out="$$account_plan_dir/account.tfplan")']
     assert 'account_plan_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/genierails-account-apply.XXXXXX")"' in account_apply
     assert 'trap \'rm -rf "$$account_plan_dir"\' EXIT' in account_apply
+    assert re.findall(tf_out, workspace_check) == ['-out="$$plan_dir/workspace.tfplan"']
+    assert 'repo_root="$$(git -C "$$env_dir" rev-parse --show-toplevel 2>/dev/null || printf \'%s\\n\' "$$engine_root")";' in workspace_check
+    assert 'case "$$tmp_root/" in "$$repo_root/"*|"$$engine_root/"*) tmp_root="/tmp" ;; esac;' in workspace_check
+    assert 'plan_dir="$$(mktemp -d "$$tmp_root/genierails-workspace-plan.XXXXXX")" || exit 1; chmod 700 "$$plan_dir";' in workspace_check
+    assert 'trap \'$(_NO_SIGNALS); rm -rf "$$plan_dir"\' EXIT' in workspace_check
+    assert "trap '$(_NO_SIGNALS); exit 130' INT" in workspace_check
+    assert ('(umask 077; LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan '
+            '$$stage_flag -out="$$plan_dir/workspace.tfplan" >"$$plan_dir/plan.txt" 2>&1)') in workspace_check
     _assert_tag_policy_delete_guard_precedes_account_apply_plan(makefile)
 
 
@@ -1023,6 +1036,35 @@ _ACCOUNT_PLAN_OUT = '-out="$$plan_dir/account.tfplan"); status=$$?; set -e; \\\n
     ('trap \'rm -rf "$$account_plan_dir"\' EXIT', 'trap \'true\' EXIT'),
 ])
 def test_saved_plan_check_flags_account_plan_breaks(monkeypatch, tmp_path, old, new):
+    makefile = (SHARED / "Makefile.shared").read_text()
+    assert makefile.count(old) == 1
+    layer = tmp_path / "scripts/terraform_layer.sh"
+    layer.parent.mkdir()
+    layer.write_text((SHARED / "scripts/terraform_layer.sh").read_text())
+    (tmp_path / "Makefile.shared").write_text(makefile.replace(old, new))
+    monkeypatch.setattr(sys.modules[__name__], "SHARED", tmp_path)
+    with pytest.raises(AssertionError):
+        test_no_saved_plan_file_is_written_by_the_product()
+
+
+@pytest.mark.parametrize("old, new", [
+    # make check's temporary workspace plan is no longer owner-only from creation.
+    ('(umask 077; LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan',
+     '(LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan'),
+    # The temporary workspace plan may be created under a repo-local TMPDIR.
+    ('case "$$tmp_root/" in "$$repo_root/"*|"$$engine_root/"*) tmp_root="/tmp" ;; esac;',
+     'true;'),
+    # The temporary workspace plan directory is no longer private.
+    ('plan_dir="$$(mktemp -d "$$tmp_root/genierails-workspace-plan.XXXXXX")" || exit 1; chmod 700 "$$plan_dir";',
+     'plan_dir="$$(mktemp -d "$$tmp_root/genierails-workspace-plan.XXXXXX")" || exit 1;'),
+    # A failed or interrupted workspace check leaves its temporary saved plan behind.
+    ('trap \'$(_NO_SIGNALS); rm -rf "$$plan_dir"\' EXIT', 'trap \'true\' EXIT'),
+    ('trap \'$(_NO_SIGNALS); rm -rf "$$plan_dir"\' EXIT; \\\n\t\ttrap \'$(_NO_SIGNALS); exit 129\' HUP; '
+     'trap \'$(_NO_SIGNALS); exit 130\' INT; trap \'$(_NO_SIGNALS); exit 143\' TERM;',
+     'trap \'$(_NO_SIGNALS); rm -rf "$$plan_dir"\' EXIT; \\\n\t\ttrap \'exit 129\' HUP; '
+     'trap \'exit 130\' INT; trap \'exit 143\' TERM;'),
+])
+def test_saved_plan_check_flags_workspace_check_plan_breaks(monkeypatch, tmp_path, old, new):
     makefile = (SHARED / "Makefile.shared").read_text()
     assert makefile.count(old) == 1
     layer = tmp_path / "scripts/terraform_layer.sh"
