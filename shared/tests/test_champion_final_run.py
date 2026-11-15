@@ -989,10 +989,14 @@ def test_no_saved_plan_file_is_written_by_the_product():
     assert 'trap \'rm -rf "$$account_plan_dir"\' EXIT' in account_apply
     assert re.findall(tf_out, workspace_check) == ['-out="$$plan_dir/workspace.tfplan"']
     assert 'repo_root="$$(git -C "$$env_dir" rev-parse --show-toplevel 2>/dev/null || printf \'%s\\n\' "$$engine_root")";' in workspace_check
-    assert 'case "$$tmp_root/" in "$$repo_root/"*|"$$engine_root/"*) tmp_root="/tmp" ;; esac;' in workspace_check
+    assert 'if [ -n "$${TMPDIR:-}" ] && { [ ! -O "$$tmp_root" ] ||' in workspace_check
+    assert 'case "$$tmp_root/" in "$$repo_root/"*|"$$engine_root/"*) tmp_root="$$default_tmp" ;; esac;' in workspace_check
+    assert 'echo "check: no safe temporary directory (set TMPDIR to an owner-controlled directory)" >&2;' in workspace_check
     assert 'plan_dir="$$(mktemp -d "$$tmp_root/genierails-workspace-plan.XXXXXX")" || exit 1; chmod 700 "$$plan_dir";' in workspace_check
     assert 'trap \'$(_NO_SIGNALS); rm -rf "$$plan_dir"\' EXIT' in workspace_check
+    assert "trap '$(_NO_SIGNALS); exit 129' HUP" in workspace_check
     assert "trap '$(_NO_SIGNALS); exit 130' INT" in workspace_check
+    assert "trap '$(_NO_SIGNALS); exit 143' TERM" in workspace_check
     assert ('(umask 077; LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan '
             '$$stage_flag -out="$$plan_dir/workspace.tfplan" >"$$plan_dir/plan.txt" 2>&1)') in workspace_check
     _assert_tag_policy_delete_guard_precedes_account_apply_plan(makefile)
@@ -1052,8 +1056,11 @@ def test_saved_plan_check_flags_account_plan_breaks(monkeypatch, tmp_path, old, 
     ('(umask 077; LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan',
      '(LAYER_ENV_DIR="$(LAYER_ENV_DIR)" "$(ROOT_RUNNER)" "$$layer" "$$target_env" plan'),
     # The temporary workspace plan may be created under a repo-local TMPDIR.
-    ('case "$$tmp_root/" in "$$repo_root/"*|"$$engine_root/"*) tmp_root="/tmp" ;; esac;',
+    ('case "$$tmp_root/" in "$$repo_root/"*|"$$engine_root/"*) tmp_root="$$default_tmp" ;; esac;',
      'true;'),
+    # An unsafe or foreign TMPDIR is no longer rejected in favour of /tmp.
+    ('if [ -n "$${TMPDIR:-}" ] && { [ ! -O "$$tmp_root" ] ||',
+     'if false && { [ ! -O "$$tmp_root" ] ||'),
     # The temporary workspace plan directory is no longer private.
     ('plan_dir="$$(mktemp -d "$$tmp_root/genierails-workspace-plan.XXXXXX")" || exit 1; chmod 700 "$$plan_dir";',
      'plan_dir="$$(mktemp -d "$$tmp_root/genierails-workspace-plan.XXXXXX")" || exit 1;'),
@@ -1063,6 +1070,15 @@ def test_saved_plan_check_flags_account_plan_breaks(monkeypatch, tmp_path, old, 
      'trap \'$(_NO_SIGNALS); exit 130\' INT; trap \'$(_NO_SIGNALS); exit 143\' TERM;',
      'trap \'$(_NO_SIGNALS); rm -rf "$$plan_dir"\' EXIT; \\\n\t\ttrap \'exit 129\' HUP; '
      'trap \'exit 130\' INT; trap \'exit 143\' TERM;'),
+    # EXIT alone is insufficient: shell termination must first reach it.
+    ('trap \'$(_NO_SIGNALS); rm -rf "$$plan_dir"\' EXIT; \\\n\t\ttrap \'$(_NO_SIGNALS); exit 129\' HUP; '
+     'trap \'$(_NO_SIGNALS); exit 130\' INT; trap \'$(_NO_SIGNALS); exit 143\' TERM;',
+     'trap \'$(_NO_SIGNALS); rm -rf "$$plan_dir"\' EXIT; \\\n\t\t'
+     'trap \'$(_NO_SIGNALS); exit 130\' INT; trap \'$(_NO_SIGNALS); exit 143\' TERM;'),
+    ('trap \'$(_NO_SIGNALS); rm -rf "$$plan_dir"\' EXIT; \\\n\t\ttrap \'$(_NO_SIGNALS); exit 129\' HUP; '
+     'trap \'$(_NO_SIGNALS); exit 130\' INT; trap \'$(_NO_SIGNALS); exit 143\' TERM;',
+     'trap \'$(_NO_SIGNALS); rm -rf "$$plan_dir"\' EXIT; \\\n\t\ttrap \'$(_NO_SIGNALS); exit 129\' HUP; '
+     'trap \'$(_NO_SIGNALS); exit 130\' INT;'),
 ])
 def test_saved_plan_check_flags_workspace_check_plan_breaks(monkeypatch, tmp_path, old, new):
     makefile = (SHARED / "Makefile.shared").read_text()

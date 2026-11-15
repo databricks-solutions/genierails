@@ -312,6 +312,29 @@ def test_check_passes_on_a_clean_generated_tree_and_writes_nothing(repo, tmp_pat
     assert _git(repo, "status", "--porcelain") == ""
 
 
+def test_check_ignores_a_world_writable_non_sticky_tmpdir(repo, tmp_path):
+    unsafe = tmp_path / "unsafe-tmp"
+    unsafe.mkdir()
+    unsafe.chmod(0o777)
+    log = tmp_path / "mktemp.log"
+    wrapper = tmp_path / "bin" / "mktemp"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "$MKTEMP_LOG"\n'
+        'exec /usr/bin/mktemp "$@"\n'
+    )
+    wrapper.chmod(0o755)
+
+    result = _make(repo, tmp_path, "check", "ENV=dev", TMPDIR=str(unsafe), MKTEMP_LOG=str(log))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = log.read_text().splitlines()
+    workspace = [line for line in calls if "genierails-workspace-plan." in line]
+    assert len(workspace) == 1
+    assert workspace[0].endswith("/tmp/genierails-workspace-plan.XXXXXX")
+    assert all(str(unsafe) not in line for line in workspace)
+
+
 @pytest.mark.parametrize("structural_token", ["unset", "missing", "world-readable"])
 @pytest.mark.parametrize("ci", ["", "true"])
 def test_real_plan_keeps_business_select_withheld_warning(repo, tmp_path, ci, structural_token):
