@@ -739,6 +739,66 @@ def test_unknown_policy_type_is_listed_not_evaluated_and_flagged_in_markdown(mon
     assert "| prod_retail.crm.customers | deny_all | prod_retail |" in markdown
 
 
+def test_principals_that_no_longer_resolve_are_warned_not_claimed_intact(monkeypatch, tmp_path, capsys):
+    """F2: a deleted principal shows live as 'unknown'; the report must say so, not read 'complete' and intact."""
+    policies = _prod_policies()
+    ssn_full = next(p for p in policies if p.name == f"prod_retail_gr_mask_prod_retail_{SSN}_full")
+    ssn_full.except_principals = sorted(["unknown" if p == "prod_tier_partial" else p
+                                         for p in ssn_full.except_principals])
+    cvv_full = next(p for p in policies if p.name == f"prod_retail_gr_mask_prod_retail_{CVV}_full")
+    cvv_full.to_principals = ["unknown"]
+    _prod_client(monkeypatch, policies=policies)
+    env_dir = tmp_path / "aws" / "envs" / "prod"
+    env_dir.mkdir(parents=True)
+    _auth_file(env_dir)
+    (env_dir / "env.auto.tfvars").write_text(f"uc_tables = {json.dumps(PROD_TABLES)}\n")
+    monkeypatch.setenv("GENIERAILS_EVIDENCE_INTEGRATION", "1")
+
+    # A warning, not a failure: the masks still apply, so make evidence still writes and exits 0.
+    assert main(["--env-dir", str(env_dir), "--warehouse-id", "warehouse-1"]) == 0
+
+    out = _out(env_dir)
+    artifact = json.loads((out / "compliance-evidence-v1.0.json").read_text())
+    # Catalog-level policies are effective on both tables but listed once each, sorted by securable and name.
+    assert artifact["abac_unresolved_principals"] == [
+        {"policy": f"prod_retail_gr_mask_prod_retail_{CVV}_full", "on_securable": "prod_retail",
+         "to_principals": 1, "except_principals": 0},
+        {"policy": f"prod_retail_gr_mask_prod_retail_{SSN}_full", "on_securable": "prod_retail",
+         "to_principals": 0, "except_principals": 1},
+    ]
+    # The listing itself is still complete (every policy was evaluated); masks are still attached.
+    assert artifact["abac_policy_listing"] == {"status": "complete", "tables": 2, "policies": 15}
+    assert _evidence(artifact, "prod_retail.crm.customers.ssn")["applied_policies"] != []
+    warning = (f"2 exception/target principal(s) no longer resolve (deleted?; listed as 'unknown'): "
+               f"prod_retail_gr_mask_prod_retail_{CVV}_full (to), "
+               f"prod_retail_gr_mask_prod_retail_{SSN}_full (except). Those masks still apply, but the "
+               "exceptions/targets they document are NOT intact; fix the principals and re-run make evidence")
+    markdown = (out / "compliance-evidence-v1.0.md").read_text()
+    assert ("- ABAC policies: `complete` (15 effective on 2 tables; documented exceptions NOT intact, "
+            "see the warning below)") in markdown
+    assert "- ABAC policies: `complete` (15 effective on 2 tables)\n" not in markdown
+    assert f"- **WARNING: {warning}.**" in markdown
+    stdout = capsys.readouterr().out
+    assert f"WARNING: {warning}." in stdout
+    assert "selected-secret" not in stdout + markdown + json.dumps(artifact)
+
+
+def test_resolved_principals_add_no_warning(monkeypatch, tmp_path, capsys):
+    _prod_client(monkeypatch)
+    env_dir = tmp_path / "aws" / "envs" / "prod"
+    env_dir.mkdir(parents=True)
+    _auth_file(env_dir)
+    (env_dir / "env.auto.tfvars").write_text(f"uc_tables = {json.dumps(PROD_TABLES)}\n")
+    monkeypatch.setenv("GENIERAILS_EVIDENCE_INTEGRATION", "1")
+    assert main(["--env-dir", str(env_dir), "--warehouse-id", "warehouse-1"]) == 0
+    out = _out(env_dir)
+    artifact = json.loads((out / "compliance-evidence-v1.0.json").read_text())
+    assert artifact["abac_unresolved_principals"] == []
+    markdown = (out / "compliance-evidence-v1.0.md").read_text()
+    assert "- ABAC policies: `complete` (15 effective on 2 tables)\n" in markdown
+    assert "no longer resolve" not in markdown + capsys.readouterr().out
+
+
 def test_table_tags_read_failure_writes_no_evidence(monkeypatch, tmp_path, capsys):
     _prod_client(monkeypatch, table_tags_error=RuntimeError("TABLE_OR_VIEW_NOT_FOUND table_tags"))
     with pytest.raises(evidence_report.EvidenceUnavailable, match="table tags"):

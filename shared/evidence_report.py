@@ -47,6 +47,8 @@ SCHEMA_VERSION = "1.0"
 INTEGRATION_ENV = "GENIERAILS_EVIDENCE_INTEGRATION"
 COLUMN_MASK_TYPES = {"COLUMN_MASK", "POLICY_TYPE_COLUMN_MASK"}
 ROW_FILTER_TYPES = {"ROW_FILTER", "POLICY_TYPE_ROW_FILTER"}
+# Unity Catalog's placeholder for a principal that no longer resolves (deleted); validate_abac reserves it.
+UNRESOLVED_PRINCIPAL = "unknown"
 # What may remain of a match condition once its tag references are removed for
 # "any reference matches" to be its exact meaning: OR, parentheses, whitespace.
 _TAG_REF = re.compile(r"hasTagValue\(\s*'[^']+'\s*,\s*'[^']+'\s*\)|hasTag\(\s*'[^']+'\s*\)")
@@ -323,7 +325,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- Column privileges: `{detail}`")
     if "abac_policy_listing" in report:
         listing = report["abac_policy_listing"]
-        lines.append(f"- ABAC policies: `{listing['status']}` ({listing['policies']} effective on {listing['tables']} tables)")
+        unresolved = unresolved_summary(report)
+        lines.append(f"- ABAC policies: `{listing['status']}` ({listing['policies']} effective on {listing['tables']} tables"
+                     + ("; documented exceptions NOT intact, see the warning below)" if unresolved else ")"))
+        if unresolved:
+            lines.append(f"- **WARNING: {unresolved}.**")
     not_evaluated = report.get("abac_policies_not_evaluated") or []
     if not_evaluated:
         lines.extend([
@@ -494,6 +500,39 @@ def abac_policy_rows(table: str, policies: Iterable[Any], columns: list[dict[str
     return rows, not_evaluated
 
 
+def unresolved_principals(table: str, policies: Iterable[Any]) -> list[dict[str, Any]]:
+    """The effective policies on ``table`` whose to/except principals include one that no longer resolves.
+
+    The policies API shows a deleted principal as ``unknown``. The policy (and its mask) is still in
+    force, but the exception or target it documents names no one, so the report must not read as if it
+    were intact. One entry per policy: its name, securable and how many of each list are unresolved.
+    """
+    from scripts.staged_policy_verify import normalize_policy
+
+    out = []
+    for live in map(normalize_policy, policies):
+        to = sum(1 for item in live["to"] if str(item) == UNRESOLVED_PRINCIPAL)
+        exempt = sum(1 for item in live["except"] if str(item) == UNRESOLVED_PRINCIPAL)
+        if to or exempt:
+            out.append({"policy": live["name"] or "(unnamed)", "on_securable": live["on"] or table,
+                        "to_principals": to, "except_principals": exempt})
+    return out
+
+
+def unresolved_summary(report: dict[str, Any]) -> str | None:
+    """The one-line warning for policies with principals that no longer resolve, or None."""
+    items = report.get("abac_unresolved_principals") or []
+    if not items:
+        return None
+    count = sum(item["to_principals"] + item["except_principals"] for item in items)
+    names = ", ".join(
+        f"{item['policy']} ({', '.join(kind for kind in ('except', 'to') if item[kind + '_principals'])})"
+        for item in items)
+    return (f"{count} exception/target principal(s) no longer resolve (deleted?; listed as "
+            f"'{UNRESOLVED_PRINCIPAL}'): {names}. Those masks still apply, but the exceptions/targets they "
+            "document are NOT intact; fix the principals and re-run make evidence")
+
+
 def collect_live_state(columns: list[dict[str, str]], tables: list[str], warehouse_id: str,
                        auth_file: Path = Path("auth.auto.tfvars")) -> dict[str, Any]:
     """Read live state through the SDK; called only in integration mode (make evidence's default)."""
@@ -604,6 +643,7 @@ def collect_live_state(columns: list[dict[str, str]], tables: list[str], warehou
         table_tags[".".join(str(value) for value in row[:3])].add((str(row[3]), str(row[4])))
     result["abac_policies"] = []
     result["abac_policies_not_evaluated"] = []
+    result["abac_unresolved_principals"] = []
     listed: set[tuple[str, str]] = set()
     for table, table_columns in sorted(by_table.items()):
         try:
@@ -615,7 +655,11 @@ def collect_live_state(columns: list[dict[str, str]], tables: list[str], warehou
         rows, not_evaluated = abac_policy_rows(table, policies, table_columns, column_tags, table_tags[table])
         result["abac_policies"].extend(rows)
         result["abac_policies_not_evaluated"].extend(not_evaluated)
+        for item in unresolved_principals(table, policies):  # an inherited policy is listed once
+            if (item["on_securable"], item["policy"]) not in listed:
+                result["abac_unresolved_principals"].append(item)
         listed.update((live["on"] or table, live["name"]) for live in map(normalize_policy, policies))
+    result["abac_unresolved_principals"].sort(key=lambda item: (item["on_securable"], item["policy"]))
     result["abac_policy_listing"] = {
         "status": "incomplete" if result["abac_policies_not_evaluated"] else "complete",
         "tables": len(by_table), "policies": len(listed),
@@ -763,11 +807,15 @@ def main(argv: list[str] | None = None, *, collector: Callable[..., dict[str, An
         if "abac_policy_listing" in state:
             report["abac_policy_listing"] = state["abac_policy_listing"]
             report["abac_policies_not_evaluated"] = state.get("abac_policies_not_evaluated", [])
+            report["abac_unresolved_principals"] = state.get("abac_unresolved_principals", [])
     else:
         report = assemble_report(columns, tags=tags, approved_by=args.approved_by, approved_at=args.approved_at)
         report["header"]["approval_record"] = approval_record
     paths = write_report(report, output_dir)
     print("Wrote " + " and ".join(str(path) for path in paths))
+    warning = unresolved_summary(report)
+    if warning:  # a warning, not a failure: the masks still apply (exit code unchanged)
+        print(f"WARNING: {warning}.")
     old = Path(args.env_dir) / "generated" / "evidence"
     if old.is_dir():
         print(f"NOTE: {old} is from an earlier GenieRails, which wrote evidence there. Archive it and remove "
