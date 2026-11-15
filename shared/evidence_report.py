@@ -514,9 +514,29 @@ def unresolved_principals(table: str, policies: Iterable[Any]) -> list[dict[str,
         to = sum(1 for item in live["to"] if str(item) == UNRESOLVED_PRINCIPAL)
         exempt = sum(1 for item in live["except"] if str(item) == UNRESOLVED_PRINCIPAL)
         if to or exempt:
-            out.append({"policy": live["name"] or "(unnamed)", "on_securable": live["on"] or table,
+            out.append({"policy": live["name"] or UNNAMED_POLICY, "on_securable": live["on"] or table,
                         "to_principals": to, "except_principals": exempt})
     return out
+
+
+SHOWN_NAME_LIMIT = 128
+UNNAMED_POLICY = "(unnamed)"
+
+
+def _shown_name(value: Any, limit: int = SHOWN_NAME_LIMIT) -> str:
+    """A live-sourced name as the Markdown and terminal warning may show it: one line, control-free.
+
+    The character rule approval.command_name applies to process names (letters, digits and ``._+-``),
+    without its basename or 32-character cut, which real policy names exceed: every other character
+    (CR/LF, ESC and other C0/C1 controls, backticks, spaces, ...) is ``?``, and a longer name is cut
+    with ``…``. The JSON keeps the name as listed (json.dumps escapes it).
+    """
+    from scripts import approval as approvals
+
+    if value == UNNAMED_POLICY:  # this report's own fixed placeholder, not live text
+        return UNNAMED_POLICY
+    text = "".join(char if char in approvals._NAME_CHARS else "?" for char in str(value))
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def unresolved_summary(report: dict[str, Any]) -> str | None:
@@ -526,7 +546,7 @@ def unresolved_summary(report: dict[str, Any]) -> str | None:
         return None
     count = sum(item["to_principals"] + item["except_principals"] for item in items)
     names = ", ".join(
-        f"{item['policy']} ({', '.join(kind for kind in ('except', 'to') if item[kind + '_principals'])})"
+        f"{_shown_name(item['policy'])} ({', '.join(kind for kind in ('except', 'to') if item[kind + '_principals'])})"
         for item in items)
     return (f"{count} exception/target principal(s) no longer resolve (deleted?; listed as "
             f"'{UNRESOLVED_PRINCIPAL}'): {names}. Those masks still apply, but the exceptions/targets they "

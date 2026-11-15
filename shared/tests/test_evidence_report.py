@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -781,6 +782,71 @@ def test_principals_that_no_longer_resolve_are_warned_not_claimed_intact(monkeyp
     stdout = capsys.readouterr().out
     assert f"WARNING: {warning}." in stdout
     assert "selected-secret" not in stdout + markdown + json.dumps(artifact)
+
+
+FORGED = "ok\n- ABAC policies: `complete` (forged)\x1b[31m"
+_RAW_CONTROL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")  # every C0/C1 control but the line breaks
+
+
+def _unresolved_run(monkeypatch, tmp_path, names):
+    # Matches no column, so the policy is effective (and unresolved) but in no table cell: this pins the
+    # new warning only. (The per-column cell's policy names predate #345 and are left as they were.)
+    policies = [_mask(name, condition="hasTagValue('gr_treatment', 'on_no_column')") for name in names]
+    for policy in policies:
+        policy.except_principals = ["unknown"]
+    _prod_client(monkeypatch, policies=policies)
+    env_dir = tmp_path / "aws" / "envs" / "prod"
+    env_dir.mkdir(parents=True)
+    _auth_file(env_dir)
+    (env_dir / "env.auto.tfvars").write_text(f"uc_tables = {json.dumps(PROD_TABLES)}\n")
+    monkeypatch.setenv("GENIERAILS_EVIDENCE_INTEGRATION", "1")
+    assert main(["--env-dir", str(env_dir), "--warehouse-id", "warehouse-1"]) == 0
+    out = _out(env_dir)
+    return (json.loads((out / "compliance-evidence-v1.0.json").read_text()),
+            (out / "compliance-evidence-v1.0.md").read_text())
+
+
+@pytest.mark.parametrize("name", [
+    FORGED,
+    "crlf\r\n- **WARNING: forged**\r",
+    "esc\x1b]0;forged title\x07\x1b[2J",
+    "c1\x9b31m\x85- ABAC policies: `complete` (forged)",
+    "tick`code` **bold** | pipe",
+])
+def test_an_unresolved_policy_name_cannot_forge_report_or_terminal_lines(monkeypatch, tmp_path, capsys, name):
+    """Codex review of #345: a live policy name is shown one-line and control-safe in the new warning."""
+    artifact, markdown = _unresolved_run(monkeypatch, tmp_path, [name])
+    stdout = capsys.readouterr().out
+    # The JSON keeps the name as listed (json escapes it).
+    assert [item["policy"] for item in artifact["abac_unresolved_principals"]] == [name]
+    for text in (markdown, stdout):
+        assert not _RAW_CONTROL.search(text), repr(text)
+        assert "\r" not in text
+        lines = text.splitlines()
+        [warning] = [line for line in lines if "no longer resolve" in line]
+        assert "forged" not in "\n".join(line for line in lines if line != warning)
+        assert "`" not in warning and "**" not in warning.removeprefix("- **WARNING: ").removesuffix(".**")
+    assert [line for line in markdown.splitlines() if line.startswith("- ABAC policies:")] == [
+        "- ABAC policies: `complete` (1 effective on 2 tables; documented exceptions NOT intact, "
+        "see the warning below)"]
+    assert len([line for line in stdout.splitlines() if line.startswith("WARNING:")]) == 1
+
+
+def test_the_forged_name_is_shown_as_question_marks(monkeypatch, tmp_path, capsys):
+    _artifact, markdown = _unresolved_run(monkeypatch, tmp_path, [FORGED])
+    shown = "ok?-?ABAC?policies???complete???forged???31m"
+    assert f"no longer resolve (deleted?; listed as 'unknown'): {shown} (except). " in markdown
+    assert f"no longer resolve (deleted?; listed as 'unknown'): {shown} (except). " in capsys.readouterr().out
+
+
+def test_a_long_unresolved_policy_name_is_capped(monkeypatch, tmp_path, capsys):
+    name = "p" * 500
+    artifact, markdown = _unresolved_run(monkeypatch, tmp_path, [name])
+    assert artifact["abac_unresolved_principals"][0]["policy"] == name
+    shown = "p" * evidence_report.SHOWN_NAME_LIMIT + "…"
+    for text in (markdown, capsys.readouterr().out):
+        [warning] = [line for line in text.splitlines() if "no longer resolve" in line]
+        assert f": {shown} (except). " in warning and "p" * (evidence_report.SHOWN_NAME_LIMIT + 1) not in warning
 
 
 def test_resolved_principals_add_no_warning(monkeypatch, tmp_path, capsys):
