@@ -1757,19 +1757,26 @@ def _released_fifteen_policy_env_with_access(harness) -> dict:
     return desired
 
 
-def _aws6_deleted_principal_takeover_shape(harness, *, with_existing_journal: bool) -> dict:
-    desired = _released_fifteen_policy_env_with_access(harness)
+def _aws6_unknown_policy_map(harness, *, extra_except: str = "", n: int = 14) -> dict:
     state = live_state(harness.env_dir)
     policies = live_policies(state)
-    unknown = {
+    return {
         policy["name"]: {
             "to_principals": [pg.UNKNOWN] if pg.UNKNOWN not in policy.get("to_principals", []) else policy["to_principals"],
-            "except_principals": [pg.UNKNOWN if value != "deployer" else value
-                                  for value in policy.get("except_principals", [])],
+            "except_principals": sorted(
+                [pg.UNKNOWN if value != "deployer" else value for value in policy.get("except_principals", [])]
+                + ([extra_except] if extra_except and index == 0 else [])
+            ),
         }
-        for policy in policies[:14]
+        for index, policy in enumerate(policies[:n])
     }
-    _write_access(harness, gone=AWS_BUSINESS_GRANTS, unknown_policies=unknown)
+
+
+def _aws6_deleted_principal_takeover_shape(harness, *, with_existing_journal: bool,
+                                           extra_except: str = "") -> dict:
+    desired = _released_fifteen_policy_env_with_access(harness)
+    _write_access(harness, gone=AWS_BUSINESS_GRANTS,
+                  unknown_policies=_aws6_unknown_policy_map(harness, extra_except=extra_except))
     harness.live_treatment_tags = dict(desired["tags"])
     if not with_existing_journal:
         spa.journal_path(harness.env_dir).unlink()
@@ -2334,6 +2341,63 @@ def test_bug_n_create_plan_holds_state_recorded_missing_business_grants(harness,
     assert not (plans[-1]["creates"] & set(AWS_BUSINESS_GRANTS))
     assert any("-var=held_access_grants=" in " ".join(p["extra"]) for p in plans)
     assert harness.calls[-1] == "grant"
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def test_bug_n_failed_verify_switch_abandon_rerun_verifies_before_grant(harness):
+    desired = _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=True)
+    harness.fail_verify = {"switch"}
+
+    assert harness.apply() == 1
+    assert "grant" not in harness.calls
+    assert harness.controller().abandon() == 0
+    assert not (_grant_keys(live_state(harness.env_dir)) & set(AWS_BUSINESS_GRANTS))
+    assert harness.journal().get("needs_verified_switch", {}).get("to") == desired["fingerprint"]
+
+    harness.calls.clear()
+    assert harness.apply() == 0
+
+    assert "verify-access:switch" in harness.calls
+    assert harness.calls.index("verify-access:switch") < harness.calls.index("grant")
+    assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
+    assert "needs_verified_switch" not in harness.journal()
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def test_bug_n_refresh_unknown_plus_named_attacker_refuses_without_adoption(harness):
+    _aws6_deleted_principal_takeover_shape(
+        harness, with_existing_journal=True, extra_except="attacker")
+    before = sorted(p.name for p in pg.ledger_dir(harness.env_dir).glob("*.adopted.*.json"))
+
+    with pytest.raises(spa.Refused) as refused:
+        harness.apply()
+
+    assert "unexpected live principal 'attacker'" in str(refused.value)
+    assert "Next:" in str(refused.value)
+    assert harness.calls == []
+    journal = harness.journal()
+    assert not journal.get("transition")
+    assert "adopted_unverified" not in journal
+    assert sorted(p.name for p in pg.ledger_dir(harness.env_dir).glob("*.adopted.*.json")) == before
+
+
+def test_bug_n_changed_generation_refresh_drift_skips_create_and_verifies_before_grant(harness):
+    original = _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=True)
+    sql = harness.env_dir / "generated" / "masking_functions.sql"
+    text = sql.read_text()
+    needle = "gr_mask_live_00_full(x STRING) RETURNS STRING RETURN x;"
+    assert needle in text
+    sql.write_text(text.replace(needle, "gr_mask_live_00_full(x STRING) RETURNS STRING RETURN concat(x, '');"))
+    desired = pg.desired_generation(harness.env_dir)
+    assert desired["fingerprint"] != original["fingerprint"]
+
+    assert harness.apply() == 0
+
+    assert "create" not in harness.calls
+    assert harness.calls[:2] == ["tighten", "inventory:tighten"]
+    assert "verify-access:switch" in harness.calls
+    assert harness.calls.index("verify-access:switch") < harness.calls.index("grant")
+    assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
     _assert_live_generated_principals(harness.env_dir, desired)
 
 

@@ -723,6 +723,8 @@ class Controller:
             raise Refused(
                 "the create plan shows refresh-time policy changes that are not deleted-principal takeover; "
                 "nothing was applied:\n  - " + "\n  - ".join(problems[:20])
+                + "\nNext: revert the out-of-band principal change in the Databricks UI, or re-run after "
+                "confirming the live principals are only deleted principals shown as unknown."
             )
         if not held and not principal_updates:
             return None, []
@@ -731,6 +733,30 @@ class Controller:
         if principal_updates:
             from governance_policies import model_fingerprint
 
+            live = {
+                "policies": {
+                    policy["name"]: {
+                        "to": sorted(policy.get("to_principals") or []),
+                        "except": sorted(policy.get("except_principals") or []),
+                        "binding": _desired_policy_binding(policy),
+                    }
+                    for policy in adopted.get("fgac_policies") or []
+                },
+                "tags": dict(desired.get("tags") or {}),
+                "sql_hash": pg.masking_sql_hash(desired.get("functions_sql") or ""),
+            }
+            checked, adoption_problems = _principal_only_adoption(
+                self.env_dir, live, desired, allow_named_principal_drift=False,
+                live_treatments=dict(desired.get("tags") or {}),
+            )
+            if not checked:
+                raise Refused(
+                    "the data_access refresh shows principal drift that GenieRails can't safely adopt:\n  - "
+                    + "\n  - ".join((adoption_problems or ["no principal-only refresh drift was found"])[:20])
+                    + "\nNothing was applied. Next: revert the out-of-band principal change in the Databricks UI, "
+                    "or re-run after confirming the live principals are only deleted principals shown as unknown."
+                )
+            adopted = checked
             cfg = {"fgac_policies": adopted["fgac_policies"], "tag_assignments": [
                 {"entity_type": "columns", "entity_name": column, "tag_key": pg.TAG_KEY, "tag_value": value}
                 for column, value in sorted((adopted.get("tags") or {}).items())
@@ -783,15 +809,22 @@ class Controller:
                 "controller, or the journal is stale):\n  - " + "\n  - ".join(problems[:20])
                 + "\nNothing was applied.")
         adopted = _adopted_unverified(journal, active)
+        verify_marker = journal.get("needs_verified_switch") or {}
+        if verify_marker and verify_marker.get("to") != desired["fingerprint"]:
+            raise Refused(
+                f"generation {verify_marker.get('to')} still needs a verified switch before grants can open; "
+                f"the generated config is now {desired['fingerprint']}. Nothing was applied. Next: restore the "
+                "generated config for that unfinished recovery and re-run, or restore the policy journal from records."
+            )
         refresh_drift = False
-        if not adopted and active == desired["fingerprint"] and not previewed:
+        if not adopted and not previewed and not verify_marker:
             active, old, refresh_drift = self._adopt_refresh_drift(journal, desired, active, old, retain)
             adopted = _adopted_unverified(journal, active)
         # A principal-only adoption is a real live drift even when the policy
         # generation fingerprint string is unchanged. The staged path must still
         # re-pin the principals under verify/tighten/switch instead of treating
         # it as a grant-only run.
-        change = desired["fingerprint"] != active or bool(adopted) or refresh_drift
+        change = desired["fingerprint"] != active or bool(adopted) or refresh_drift or bool(verify_marker)
         if change and held and not held["confirmed"]:
             raise Refused(
                 f"generation {held['fingerprint']} is still live from the change of run {held['superseded_by']}, "
@@ -807,7 +840,7 @@ class Controller:
         render_old = old
         tier_move = change and pg.has_tier_move(desired, render_old, retain)
         phases = []
-        if not refresh_drift:
+        if not refresh_drift and not verify_marker:
             phases.append("create")
             if change or eligible:
                 phases.append("verify-created")
@@ -833,6 +866,8 @@ class Controller:
             transition["render_from"] = render_from
         if refresh_drift:
             transition["refresh_drift"] = True
+        if verify_marker:
+            transition["needs_verified_switch"] = True
         return transition
 
     def _repair_refresh_drift_transition(self, journal: dict, t: dict, desired: dict) -> None:
@@ -1215,6 +1250,8 @@ class Controller:
         if t["from"] and t["from"] != t["to"]:
             pending.append({"fingerprint": t["from"], "superseded_by": t["run_id"], "confirmed": False})
         journal.update(active=t["to"], pending=pending, transition=None)
+        if (journal.get("needs_verified_switch") or {}).get("to") == t["to"]:
+            journal.pop("needs_verified_switch", None)
         if (journal.get("adopted_unverified") or {}).get("fingerprint") == t["from"]:
             journal.pop("adopted_unverified", None)
         journal["history"] = (journal.get("history") or [])[-(HISTORY_LIMIT - 1):] + [{
@@ -1715,6 +1752,12 @@ class Controller:
                                       if p.get("fingerprint") not in {t["from"], restore_fp}]
                 if (journal.get("adopted_unverified") or {}).get("fingerprint") == t["from"]:
                     journal.pop("adopted_unverified", None)
+                if t.get("refresh_drift") and t.get("failed_phase") == "verify-switched":
+                    journal["needs_verified_switch"] = {
+                        "to": t["to"], "from": restore_fp, "abandoned_run": t["run_id"],
+                        "reason": "refresh-time deleted-principal recovery was abandoned after verify-switched failed",
+                        "at": _now(),
+                    }
             journal["history"] = (journal.get("history") or [])[-(HISTORY_LIMIT - 1):] + [
                 {"run_id": t["run_id"], "abandoned": t["to"], "at": _now()}]
             self._save(journal)
