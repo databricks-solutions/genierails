@@ -2213,8 +2213,10 @@ _plan-layer:
 		engine_root="$$(cd "$(CLOUD_ROOT)/.." && pwd -P)" || exit 1; \
 		repo_root="$$(git -C "$$env_dir" rev-parse --show-toplevel 2>/dev/null || printf '%s\n' "$$engine_root")"; \
 		repo_root="$$(cd "$$repo_root" && pwd -P)" || exit 1; \
-		tmp_root="$${TMPDIR:-/tmp}"; tmp_root="$$(cd "$$tmp_root" 2>/dev/null && pwd -P || printf /tmp)"; \
-		case "$$tmp_root/" in "$$repo_root/"*|"$$engine_root/"*) tmp_root="/tmp" ;; esac; \
+		default_tmp="$$(cd /tmp 2>/dev/null && pwd -P || printf /tmp)"; tmp_root="$${TMPDIR:-$$default_tmp}"; tmp_root="$$(cd "$$tmp_root" 2>/dev/null && pwd -P || printf '%s' "$$default_tmp")"; \
+		if [ -n "$${TMPDIR:-}" ] && { [ ! -O "$$tmp_root" ] || [ -n "$$(find "$$tmp_root" -prune -perm -0002 ! -perm -1000 -print -quit)" ]; }; then tmp_root="$$default_tmp"; fi; \
+		case "$$tmp_root/" in "$$repo_root/"*|"$$engine_root/"*) tmp_root="$$default_tmp" ;; esac; \
+		if { [ ! -O "$$tmp_root" ] && [ -z "$$(find "$$tmp_root" -prune -perm -0002 -perm -1000 -print -quit)" ]; } || [ -n "$$(find "$$tmp_root" -prune -perm -0002 ! -perm -1000 -print -quit)" ]; then echo "check: no safe temporary directory (set TMPDIR to an owner-controlled directory)" >&2; exit 1; fi; \
 		plan_dir="$$(mktemp -d "$$tmp_root/genierails-workspace-plan.XXXXXX")" || exit 1; chmod 700 "$$plan_dir"; \
 		trap '$(_NO_SIGNALS); rm -rf "$$plan_dir"' EXIT; \
 		trap '$(_NO_SIGNALS); exit 129' HUP; trap '$(_NO_SIGNALS); exit 130' INT; trap '$(_NO_SIGNALS); exit 143' TERM; \
