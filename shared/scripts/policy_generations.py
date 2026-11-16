@@ -685,6 +685,52 @@ def classified_violations(plan: dict, stage: str, allowed_policy_deletes=frozens
     return problems
 
 
+def _state_grant_keys(layer_dir: Path) -> set[str]:
+    """``<grant resource>|<key>`` grants recorded before Terraform refresh."""
+    state_file = layer_dir / "terraform.tfstate"
+    try:
+        state = json.loads(state_file.read_text())
+    except (OSError, ValueError):
+        return set()
+    return {
+        f"{resource.get('name')}|{instance.get('index_key')}"
+        for resource in state.get("resources") or []
+        for instance in resource.get("instances") or []
+        if resource.get("module") == "module.data_access"
+        and resource.get("mode", "managed") == "managed"
+        and resource.get("type") == "databricks_grant"
+        and resource.get("name") in BUSINESS_GRANTS
+        and not instance.get("deposed")
+        and instance.get("index_key") is not None
+    }
+
+
+def _pregrant_business_creates_held_by_state(plan: dict, layer_dir: Path) -> list[str]:
+    """Business grant creates caused by refresh dropping objects that state still records."""
+    recorded = _state_grant_keys(layer_dir)
+    held = []
+    for change in plan.get("resource_changes") or []:
+        actions = (change.get("change") or {}).get("actions") or []
+        if change.get("type") != "databricks_grant" or change.get("name") not in BUSINESS_GRANTS:
+            continue
+        key = f"{change.get('name')}|{change.get('index') or ''}"
+        if actions == ["create"] and key in recorded:
+            held.append(key)
+    return sorted(held)
+
+
+def _plan_stage_json(env_name: str, layer_dir: Path, stage: str, plan_file: Path) -> tuple[dict, list[str]]:
+    """Plan a normal staged phase, re-planning pre-grant state-held access creates out."""
+    plan = _plan_json(env_name, layer_dir, stage, plan_file)
+    if stage not in {"create", "tighten", "switch", "restore", "retire", "abandon"}:
+        return plan, []
+    held = _pregrant_business_creates_held_by_state(plan, layer_dir)
+    if not held:
+        return plan, []
+    plan = _plan_json(env_name, layer_dir, stage, plan_file, f"-var=held_access_grants={json.dumps(held)}")
+    return plan, held
+
+
 def _is_protected(address: str, rtype: str) -> bool:
     return rtype in PROTECTED_TYPES or any(address.endswith(t) for t in PROTECTED_TYPES if "." in t)
 
@@ -847,7 +893,11 @@ def run_hook(stage: str, environ: dict | None = None) -> int:
     old = load_snapshot(env_dir, old_fp)
     retire_fp = environ.get("GENIERAILS_RETIRE_FINGERPRINT", "")
     retire = load_snapshot(env_dir, retire_fp) if retire_fp not in {"", desired["fingerprint"], old_fp} else None
-    if stage != "abandon":
+    preserve_adopted_snapshot = (
+        environ.get("GENIERAILS_ADOPTED_FROM_STATE")
+        and environ.get("GENIERAILS_ADOPTED_FROM_STATE") == expected == old_fp
+    )
+    if stage != "abandon" and not preserve_adopted_snapshot:
         save_snapshot(env_dir, desired)
     keep_new_tags = environ.get("GENIERAILS_POLICY_KEEP_NEW_TAGS") == "1"
     staged = plan_stage(stage, desired, old, retire, keep_new_tags=keep_new_tags)
@@ -879,7 +929,7 @@ def run_hook(stage: str, environ: dict | None = None) -> int:
     plan_out = environ.get(PLAN_OUT_ENV)
     with tempfile.TemporaryDirectory() as tmp:
         plan_file = Path(plan_out) if plan_out else Path(tmp) / f"{stage}.tfplan"
-        plan = _plan_json(env_name, layer_dir, stage, plan_file)
+        plan, held = _plan_stage_json(env_name, layer_dir, stage, plan_file)
         violations = classified_violations(plan, stage, set(staged["allowed_policy_deletes"]),
                                            set(staged["allowed_tag_deletes"]))
         if violations:
@@ -891,6 +941,7 @@ def run_hook(stage: str, environ: dict | None = None) -> int:
             print(f"Policy stage {stage}: {note}")
         if plan_out:
             write_json(sidecar_path(plan_file), record | {"changes": plan_changes(plan),
+                                                          "held_access_grants": held,
                                                           "policy_deletes": planned_policy_deletes(plan)})
             print(f"Policy stage {stage}: planned generation {desired['fingerprint']} into {plan_file}"
                   + ("" if plan_changes(plan) else " (no changes)"))

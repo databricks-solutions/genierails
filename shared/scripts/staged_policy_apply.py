@@ -660,7 +660,12 @@ class Controller:
                 "the data_access state doesn't match the policy journal (applied outside the staged "
                 "controller, or the journal is stale):\n  - " + "\n  - ".join(problems[:20])
                 + "\nNothing was applied.")
-        change = desired["fingerprint"] != active
+        adopted = _adopted_unverified(journal, active)
+        # A principal-only adoption is a real live drift even when the policy
+        # generation fingerprint string is unchanged. The staged path must still
+        # re-pin the principals under verify/tighten/switch instead of treating
+        # it as a grant-only run.
+        change = desired["fingerprint"] != active or bool(adopted)
         if change and held and not held["confirmed"]:
             raise Refused(
                 f"generation {held['fingerprint']} is still live from the change of run {held['superseded_by']}, "
@@ -686,7 +691,6 @@ class Controller:
             phases += ["retire", "verify-retired", "drop-functions"]
         # New SELECT opens last, after everything above is applied and verified.
         phases.append("grant")
-        adopted = _adopted_unverified(journal, active)
         transition = {
             "run_id": uuid.uuid4().hex[:12], "commit": self.commit, "from": active,
             "to": desired["fingerprint"], "retain": held["fingerprint"] if held else "",
@@ -749,7 +753,7 @@ class Controller:
                 raise pg.StageError(f"generation {t['to']} has no intact snapshot")
             if retain and not pg.snapshot_intact(retain, t["retain"]):
                 raise pg.StageError(f"generation {t['retain']} has no intact snapshot")
-            change = t["to"] != adopted
+            change = t["to"] != adopted or bool(t.get("adopted_from_state"))
             tier_move = change and pg.has_tier_move(desired, snapshot, retain)
         except (pg.StageError, OSError, ValueError) as exc:
             raise Refused(f"the adopted principal-only drift journal can't be safely repaired ({exc}); "
@@ -784,6 +788,7 @@ class Controller:
             "GENIERAILS_RETIRE_FINGERPRINT": t["retain"],
             "GENIERAILS_POLICY_KEEP_NEW_TAGS": "1" if t["switch_attempted"] else "",
             "GENIERAILS_POLICY_RUN_ID": t["run_id"],
+            "GENIERAILS_ADOPTED_FROM_STATE": str(t.get("adopted_from_state") or ""),
         }
 
     def _verified_adopted_treatment_imports(self, t: dict) -> dict[str, str]:
@@ -1033,6 +1038,7 @@ class Controller:
         return 1
 
     def _finish(self, journal: dict, t: dict) -> None:
+        pg.save_snapshot(self.env_dir, pg.desired_generation(self.env_dir))
         pending = [e for e in journal.get("pending") or [] if e["fingerprint"] not in {t["to"], t["retire"]}]
         if t["from"] and t["from"] != t["to"]:
             pending.append({"fingerprint": t["from"], "superseded_by": t["run_id"], "confirmed": False})
