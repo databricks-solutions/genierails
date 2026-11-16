@@ -693,7 +693,7 @@ module "data_access" {
   withhold_new_table_grants                = local.withhold_new_table_grants
   applied_use_grants                       = local.applied_use_grants
   withhold_new_use_grants                  = local.withhold_new_use_grants
-  held_access_grants                       = var.policy_stage == "rebind" ? var.held_access_grants : []
+  held_access_grants                       = var.held_access_grants
   access_tier_groups                       = var.access_tier_groups
   raw_exempt_principals                    = var.raw_exempt_principals
   governed_tables                          = local.governed_tables

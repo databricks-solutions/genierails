@@ -67,11 +67,13 @@ the saved phases are applied and more remain.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import uuid
 from collections import Counter
 from contextlib import contextmanager
@@ -401,6 +403,22 @@ def _render_fingerprint(t: dict) -> str:
 ADOPTION_HISTORY_REASON = "principal-only drift adopted from state"
 
 
+def _adopted_snapshot_key(base: str, generation: dict) -> str:
+    """A distinct ledger key for an adopted render that hashes to ``base``.
+
+    A test or future hash collision must not let an adopted live render overwrite
+    the generated/last-verified snapshot for ``base``; restore always needs that
+    original snapshot.
+    """
+    payload = {
+        "base": base,
+        "fgac_policies": generation.get("fgac_policies") or [],
+        "tags": dict(generation.get("tags") or {}),
+        "functions_sql": generation.get("functions_sql") or "",
+    }
+    return f"{base}.adopted.{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]}"
+
+
 def adoption_record_matches(journal: dict, t: dict, adopted: str) -> bool:
     """Whether the journal's adoption marker and history entry both vouch for ``t``'s adopted generation.
 
@@ -565,6 +583,8 @@ class Controller:
                                                                   allow_named_principal_drift=True,
                                                                   live_treatments=live_treatments)
             if adopted:
+                if adopted["fingerprint"] == desired["fingerprint"]:
+                    adopted = dict(adopted) | {"fingerprint": _adopted_snapshot_key(desired["fingerprint"], adopted)}
                 pg.save_snapshot(self.env_dir, desired)
                 pg.save_snapshot(self.env_dir, adopted)
                 journal["active"] = adopted["fingerprint"]
@@ -621,6 +641,8 @@ class Controller:
                     + "\nNothing was applied. Next: revert the out-of-band principal change in the Databricks UI, "
                     "or re-run after confirming the live principals are only deleted principals shown as unknown.")
             return journal
+        if adopted["fingerprint"] == desired["fingerprint"]:
+            adopted = dict(adopted) | {"fingerprint": _adopted_snapshot_key(desired["fingerprint"], adopted)}
         pg.save_snapshot(self.env_dir, desired)
         pg.save_snapshot(self.env_dir, adopted)
         journal["active"] = adopted["fingerprint"]
@@ -638,6 +660,106 @@ class Controller:
         print(f"Policy journal: adopted live principal-only drift {adopted['fingerprint']} "
               f"from state; generated config remains {desired['fingerprint']}.")
         return journal
+
+    def _refresh_drift_probe(self, desired: dict, old: dict | None, retain: dict | None) -> tuple[dict | None, list[str]]:
+        """Refresh-only deleted-principal/grant drift visible in a create plan.
+
+        The local state can still record the desired principals and grants while
+        Terraform refresh sees UC's current shape: deleted principals as
+        ``unknown`` and their grants missing.  That must become the same
+        adopted-principal staged path as state-visible drift before anything is
+        applied.
+        """
+        staged = pg.plan_stage("create", desired, old, retain)
+        if staged["problems"]:
+            return None, []
+        layer_dir = self.env_dir / "data_access"
+        pg.write_stage(layer_dir, staged["rendered"])
+        with tempfile.TemporaryDirectory() as tmp:
+            plan, held = pg._plan_stage_json(self.env_name, layer_dir, "create", Path(tmp) / "refresh-drift.tfplan")
+        desired_by_name = {p["name"]: p for p in desired.get("fgac_policies") or []}
+        adopted_by_name = {p["name"]: dict(p) for p in desired.get("fgac_policies") or []}
+        principal_updates = 0
+        problems: list[str] = []
+        for change in plan.get("resource_changes") or []:
+            if change.get("type") != "databricks_policy_info" or change.get("name") != "policies":
+                continue
+            actions = (change.get("change") or {}).get("actions") or []
+            if actions != ["update"]:
+                continue
+            before = (change.get("change") or {}).get("before") or {}
+            after = (change.get("change") or {}).get("after") or {}
+            name = str(change.get("index") or "")
+            desired_policy = desired_by_name.get(name)
+            if not desired_policy:
+                continue
+            before_binding = _normal_binding(_state_policy_binding(before))
+            after_binding = _normal_binding(_state_policy_binding(after))
+            desired_binding = _normal_binding(_desired_policy_binding(desired_policy))
+            if before_binding != desired_binding or after_binding != desired_binding:
+                problems.append(f"policy {name} changes more than principals during refresh")
+                continue
+            before_principals = {
+                "to_principals": sorted(before.get("to_principals") or []),
+                "except_principals": sorted(before.get("except_principals") or []),
+            }
+            after_principals = {
+                "to_principals": sorted(after.get("to_principals") or []),
+                "except_principals": sorted(after.get("except_principals") or []),
+            }
+            desired_principals = {
+                "to_principals": sorted(desired_policy.get("to_principals") or []),
+                "except_principals": sorted(desired_policy.get("except_principals") or []),
+            }
+            if after_principals != desired_principals:
+                problems.append(f"policy {name} doesn't update to the desired principals")
+                continue
+            if pg.UNKNOWN not in before_principals["to_principals"] + before_principals["except_principals"]:
+                problems.append(f"policy {name} changes named principals during refresh")
+                continue
+            adopted_by_name[name].update(before_principals)
+            principal_updates += 1
+        if problems:
+            raise Refused(
+                "the create plan shows refresh-time policy changes that are not deleted-principal takeover; "
+                "nothing was applied:\n  - " + "\n  - ".join(problems[:20])
+            )
+        if not held and not principal_updates:
+            return None, []
+        adopted = dict(desired) | {"fgac_policies": [adopted_by_name[p["name"]]
+                                                     for p in desired.get("fgac_policies") or []]}
+        if principal_updates:
+            from governance_policies import model_fingerprint
+
+            cfg = {"fgac_policies": adopted["fgac_policies"], "tag_assignments": [
+                {"entity_type": "columns", "entity_name": column, "tag_key": pg.TAG_KEY, "tag_value": value}
+                for column, value in sorted((adopted.get("tags") or {}).items())
+            ]}
+            adopted["fingerprint"] = _adopted_snapshot_key(model_fingerprint(cfg, adopted["functions_sql"]), adopted)
+            return adopted, held
+        return None, held
+
+    def _adopt_refresh_drift(self, journal: dict, desired: dict, active: str, old: dict | None,
+                             retain: dict | None) -> tuple[str, dict | None, bool]:
+        adopted, held = self._refresh_drift_probe(desired, old, retain)
+        refresh_drift = bool(held)
+        if not adopted:
+            return active, old, refresh_drift
+        pg.save_snapshot(self.env_dir, desired)
+        pg.save_snapshot(self.env_dir, adopted)
+        journal["active"] = adopted["fingerprint"]
+        journal["adopted_unverified"] = {
+            "fingerprint": adopted["fingerprint"], "restore_from": active or desired["fingerprint"],
+            "reason": ADOPTION_HISTORY_REASON,
+        }
+        journal["history"] = (journal.get("history") or [])[-(HISTORY_LIMIT - 1):] + [{
+            "adopted": adopted["fingerprint"], "at": _now(), "reason": ADOPTION_HISTORY_REASON,
+            "from": active, "to": desired["fingerprint"],
+        }]
+        self._save(journal)
+        print(f"Policy journal: adopted refresh-time deleted-principal drift {adopted['fingerprint']} "
+              f"from Terraform refresh; generated config remains {desired['fingerprint']}.")
+        return adopted["fingerprint"], adopted, True
 
     def _new_transition(self, journal: dict, desired: dict) -> dict:
         active = journal.get("active") or ""
@@ -661,11 +783,15 @@ class Controller:
                 "controller, or the journal is stale):\n  - " + "\n  - ".join(problems[:20])
                 + "\nNothing was applied.")
         adopted = _adopted_unverified(journal, active)
+        refresh_drift = False
+        if not adopted and active == desired["fingerprint"] and not previewed:
+            active, old, refresh_drift = self._adopt_refresh_drift(journal, desired, active, old, retain)
+            adopted = _adopted_unverified(journal, active)
         # A principal-only adoption is a real live drift even when the policy
         # generation fingerprint string is unchanged. The staged path must still
         # re-pin the principals under verify/tighten/switch instead of treating
         # it as a grant-only run.
-        change = desired["fingerprint"] != active or bool(adopted)
+        change = desired["fingerprint"] != active or bool(adopted) or refresh_drift
         if change and held and not held["confirmed"]:
             raise Refused(
                 f"generation {held['fingerprint']} is still live from the change of run {held['superseded_by']}, "
@@ -680,9 +806,11 @@ class Controller:
         # principals back to real groups before verify-created proves the masks.
         render_old = old
         tier_move = change and pg.has_tier_move(desired, render_old, retain)
-        phases = ["create"]
-        if change or eligible:
-            phases.append("verify-created")
+        phases = []
+        if not refresh_drift:
+            phases.append("create")
+            if change or eligible:
+                phases.append("verify-created")
         if tier_move:
             phases += ["tighten", "verify-tightened"]
         if change:
@@ -703,7 +831,45 @@ class Controller:
             transition["restore_from"] = restore_from
             transition["adopted_from_state"] = active
             transition["render_from"] = render_from
+        if refresh_drift:
+            transition["refresh_drift"] = True
         return transition
+
+    def _repair_refresh_drift_transition(self, journal: dict, t: dict, desired: dict) -> None:
+        """Repair a stale unchanged-generation create->grant journal after refresh drift was discovered."""
+        if t.get("adopted_from_state") or t.get("switch_attempted") or "create" in (t.get("completed") or []):
+            return
+        if t.get("from") != t.get("to") or t.get("to") != desired["fingerprint"]:
+            return
+        if t.get("phases") != ["create", "grant"] or t.get("failed_phase") not in {"", "create"}:
+            return
+        active, old, refresh_drift = self._adopt_refresh_drift(
+            journal, desired, t["from"], self._snapshot(t["from"]), self._snapshot(t["retain"]) if t.get("retain") else None)
+        if not refresh_drift:
+            return
+        adopted = _adopted_unverified(journal, active)
+        render_old = old
+        retain = self._snapshot(t["retain"]) if t.get("retain") else None
+        tier_move = bool(adopted) and pg.has_tier_move(desired, render_old, retain)
+        phases = []
+        if tier_move:
+            phases += ["tighten", "verify-tightened"]
+        phases += ["switch", "verify-switched", "grant"]
+        t["from"] = active
+        t["restore_from"] = desired["fingerprint"]
+        t["render_from"] = active
+        t["adopted_from_state"] = active if adopted else ""
+        if not adopted:
+            t.pop("adopted_from_state", None)
+            t["render_from"] = t["from"]
+        t["refresh_drift"] = True
+        t["tier_move"] = tier_move
+        t["phases"] = phases
+        t["status"] = "running"
+        t["failed_phase"] = ""
+        t["error"] = ""
+        t["current"] = ""
+        self._save(journal)
 
     def _adoption_trust(self, journal: dict, t: dict, adopted: str) -> tuple[str, dict | None]:
         """The one adoption trust check: matching marker + history entry, then an intact snapshot.
@@ -723,6 +889,8 @@ class Controller:
     def _repair_adopted_create_render(self, journal: dict, t: dict) -> None:
         """Old failed-create journals rendered create from restore_from; resume from adopted live instead."""
         adopted = t.get("adopted_from_state") or ""
+        if t.get("refresh_drift"):
+            return
         if not adopted or "create" in (t.get("completed") or []) or t.get("switch_attempted"):
             return
         restore_from = _restore_fingerprint(t)
@@ -1038,7 +1206,11 @@ class Controller:
         return 1
 
     def _finish(self, journal: dict, t: dict) -> None:
-        pg.save_snapshot(self.env_dir, pg.desired_generation(self.env_dir))
+        target = self._snapshot(t["to"])
+        if target is None or not pg.snapshot_intact(target, t["to"]):
+            raise Refused(f"the snapshot of generation {t['to']} is missing or changed; access was applied, "
+                          "but the journal was not advanced. Restore the policy generation snapshot, then re-run.")
+        pg.save_snapshot(self.env_dir, target)
         pending = [e for e in journal.get("pending") or [] if e["fingerprint"] not in {t["to"], t["retire"]}]
         if t["from"] and t["from"] != t["to"]:
             pending.append({"fingerprint": t["from"], "superseded_by": t["run_id"], "confirmed": False})
@@ -1062,6 +1234,7 @@ class Controller:
             if t:
                 if t["to"] != desired["fingerprint"]:
                     raise Refused(self._unfinished_message(t, desired))
+                self._repair_refresh_drift_transition(journal, t, desired)
                 self._repair_adopted_create_render(journal, t)
                 print(f"=== Policy staged apply: resuming run {t['run_id']} "
                       f"({t['status']} at {t['failed_phase'] or t['current'] or 'start'}) ===")

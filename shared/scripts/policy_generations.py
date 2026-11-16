@@ -107,6 +107,7 @@ for verification.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -291,7 +292,18 @@ def snapshot_intact(snapshot: dict | None, fingerprint: str) -> bool:
         recorded = {"fgac_policies": snapshot["fgac_policies"], "tag_assignments": [
             {"entity_type": "columns", "entity_name": column, "tag_key": TAG_KEY, "tag_value": value}
             for column, value in tags.items()]}
-        return model_fingerprint(recorded, snapshot["functions_sql"]) == fingerprint
+        actual = model_fingerprint(recorded, snapshot["functions_sql"])
+        if ".adopted." in fingerprint:
+            base, digest = fingerprint.split(".adopted.", 1)
+            payload = {
+                "base": base,
+                "fgac_policies": snapshot["fgac_policies"],
+                "tags": tags,
+                "functions_sql": snapshot["functions_sql"],
+            }
+            return actual == base and hashlib.sha256(
+                json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16] == digest
+        return actual == fingerprint
     except (KeyError, TypeError, ValueError, AttributeError):
         return False
 
@@ -896,6 +908,7 @@ def run_hook(stage: str, environ: dict | None = None) -> int:
     preserve_adopted_snapshot = (
         environ.get("GENIERAILS_ADOPTED_FROM_STATE")
         and environ.get("GENIERAILS_ADOPTED_FROM_STATE") == expected == old_fp
+        and ".adopted." in old_fp
     )
     if stage != "abandon" and not preserve_adopted_snapshot:
         save_snapshot(env_dir, desired)
