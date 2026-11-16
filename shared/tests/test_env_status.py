@@ -476,10 +476,9 @@ def test_committed_rehearses(world, repo):
     account_applied(repo)
     assert world.next("dev") == ("make rehearse ENV=dev", f"no passing rehearsal of HEAD {repo.head()[:12]} from "
                                                           "this receipt store; release-plan needs one")
+    # F3: the promoted env's why says what release-plan needs once, plainly; the command is unchanged.
     assert world.next("prod") == ("make rehearse ENV=dev", f"release-plan ENV=prod needs a passing rehearsal of dev "
-                                                           f"at HEAD {repo.head()[:12]}; no passing rehearsal of HEAD "
-                                                           f"{repo.head()[:12]} from this receipt store; release-plan "
-                                                           "needs one")
+                                                           f"at HEAD {repo.head()[:12]}; this receipt store has none")
 
 
 def test_rehearsed_plans_the_release(world, repo):
@@ -533,6 +532,8 @@ def test_promoted_after_a_dev_input_change_still_rehearses_dev(world, repo):
     command, why = world.next("prod")
     assert command == "make rehearse ENV=dev", why
     assert f"needs a passing rehearsal of dev at HEAD {head[:12]}" in why
+    # F3 (after an engine/input change): "release-plan ... needs" is said once, not twice.
+    assert why.count("release-plan") == 1 and why.count("needs") == 1, why
     assert world.status("prod")["rehearsal"]["reusable_from"] is None
     assert "did not reuse" not in why and "reuses" not in why
     assert "inputs of dev changed" in rg.rehearse_reuse(repo.prod, "prod", Path("Makefile"), "make")

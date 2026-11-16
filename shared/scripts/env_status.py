@@ -209,6 +209,13 @@ def _git(env_dir: Path, cloud_dir: Path, remote: str, branch: str) -> dict:
     }
 
 
+_RELEASE_PLAN_NEEDS_ONE = "; release-plan needs one"
+
+
+def _no_rehearsal(head: str) -> str:
+    return f"no passing rehearsal of HEAD {head[:12]} from this receipt store"
+
+
 def _reusable_from(cloud_dir: Path, source: str, commit: str, mine: list[dict]) -> str | None:
     """The earlier passing rehearsal release-plan (or make rehearse) would reuse for HEAD, read-only.
 
@@ -636,12 +643,12 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
                             + ignored + on_a_terminal if due else "first deploy: rehearse refuses a non-empty account plan "
                             "(the new gr_treatment tag policy), so plan the account layer and get its manifest "
                             "approved" + on_a_terminal)
-            why = f"no passing rehearsal of HEAD {git['head'][:12]} from this receipt store"
+            why = _no_rehearsal(git["head"])
             if rehearsal["failed"]:
                 why += " (one at HEAD failed: fix what stopped it)"
             elif rehearsal["foreign"]:
                 why += f" ({rehearsal['foreign']} receipt(s) for it came from another store and don't count)"
-            return live(f"make rehearse ENV={env}", why + "; release-plan needs one")
+            return live(f"make rehearse ENV={env}", why + _RELEASE_PLAN_NEEDS_ONE)
         if not targets:
             if not (cloud_dir / "envs" / "prod").exists():
                 return ("make setup ENV=prod", f"{env} is rehearsed at HEAD and no env is promoted from it yet")
@@ -704,7 +711,10 @@ def next_step(cloud_dir: Path, env: str, report: dict, *, remote: str = "origin"
             command, why = next_step(cloud_dir, source, collect_for_next(cloud_dir, source, remote, branch),
                                      remote=remote, branch=branch, _seen=(*_seen, env))
             if command == f"make rehearse ENV={source}":
-                return command, f"{need}; {why}"
+                # need already says what release-plan needs: keep only what the source's why adds.
+                missing = why.replace(_RELEASE_PLAN_NEEDS_ONE, "", 1).replace(
+                    _no_rehearsal(git["head"]), "this receipt store has none", 1)
+                return command, f"{need}; {missing}"
             if not command.startswith("make maintain") and command != "nothing to do":
                 return command, why
         return live(f"make rehearse ENV={source}", need)
