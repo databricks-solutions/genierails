@@ -32,7 +32,8 @@ from tests import script_stubs
 from tests.pty_harness import CTRL_C, CTRL_D, pty_run
 from tests.test_approval import QUESTION, RUN, THIS_RUN, Tty
 from tests.test_first_release_rounds import build_world
-from tests.test_release_gate_make import LEGACY_ENV, ROOT, Make, _planned, make, repo  # noqa: F401 (fixtures)
+from tests.test_release_gate_make import (LEGACY_ENV, REFUSAL_CASES, RELEASE_PLAN_REFUSAL, ROOT,  # noqa: F401
+                                         Make, _planned, make, refused_reports_stub, repo)
 
 PROMPT = "[y/N] "
 COMPLETE = "=== Release complete (prod) after {n} round(s), each approved at this terminal ==="
@@ -203,6 +204,44 @@ def test_a_reader_refusal_stops_with_the_ack_hint_and_writes_nothing(loop_make, 
     assert "refused by the reader or weakening check" in shown
     assert "Acknowledgements are a reviewed change, never a prompt: add the keys you accept to envs/prod/ack.txt" \
         in shown
+    assert PROMPT not in shown and not _approvals(repo)
+    assert (ack.read_bytes() if ack.exists() else None) == before
+    assert not list(rg.manifests_dir(repo.cloud, "prod").glob("*/manifest.json"))
+    assert "_release-manifest" not in loop_make.names()
+
+
+RELEASE_FIRST_NOTE = ("Owner and reader acknowledgements cover only a table's first release, so they go stale "
+                      "once it is released.")
+RELEASE_HINT = {
+    "stale-only": ("Acknowledgements are a reviewed change, never a prompt: remove the stale lines listed above "
+                   "(ack.txt entry matches nothing) from envs/prod/ack.txt, commit and merge it, then re-run make "
+                   "release ENV=prod. " + RELEASE_FIRST_NOTE),
+    "unacked-only": ("Acknowledgements are a reviewed change, never a prompt: add the keys you accept to "
+                     "envs/prod/ack.txt, commit and merge it, then re-run make release ENV=prod."),
+    "mixed": ("Acknowledgements are a reviewed change, never a prompt: add the keys you accept to envs/prod/ack.txt "
+              "and remove the stale lines listed above (ack.txt entry matches nothing) from it, commit and merge "
+              "it, then re-run make release ENV=prod. " + RELEASE_FIRST_NOTE),
+}
+
+
+def _one_line(text: str) -> str:
+    return " ".join(text.split())  # the pty wraps nothing, but keep the comparison whitespace-blind
+
+
+@pytest.mark.parametrize("case,stale,unacked", REFUSAL_CASES, ids=[c[0] for c in REFUSAL_CASES])
+def test_a_stale_or_unacknowledged_refusal_stops_with_the_matching_hint(loop_make, repo, case, stale, unacked):
+    ack = repo.prod / "ack.txt"
+    before = ack.read_bytes() if ack.exists() else None
+    assert loop_make("rehearse", "dev").returncode == 0
+    loop_make.reset()
+    rc, shown = _on_a_pty(loop_make, ["y"], stubs=refused_reports_stub(loop_make, stale=stale, unacked=unacked))
+    assert rc == MAKE_FAILED, shown
+    flat = _one_line(shown)
+    assert RELEASE_PLAN_REFUSAL[case].format(ack=repo.cloud / "envs" / "prod" / "ack.txt") in flat
+    assert RELEASE_HINT[case] in flat
+    for other, hint in RELEASE_HINT.items():
+        if other != case:
+            assert hint not in flat, other
     assert PROMPT not in shown and not _approvals(repo)
     assert (ack.read_bytes() if ack.exists() else None) == before
     assert not list(rg.manifests_dir(repo.cloud, "prod").glob("*/manifest.json"))

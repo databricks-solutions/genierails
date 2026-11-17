@@ -1585,6 +1585,40 @@ def test_manifest_refused_when_reports_refused(repo):
         rg.manifest_write(repo.prod, "prod", _plan_dir(repo), prov, "live", {"ok": False})
 
 
+STALE_KEY = "prod:weaken:prod_cat.sch.t.email:nobody"
+FIRST_RELEASE_NOTE = ("owner and reader acknowledgements cover only a table's first release, so they go stale "
+                      "once it is released")
+STALE_ONLY_GUIDANCE = ("remove the stale lines listed above (ack.txt entry matches nothing) from envs/prod/ack.txt, "
+                       "commit and merge that in a PR, then re-run; " + FIRST_RELEASE_NOTE)
+UNACKED_GUIDANCE = "add the reviewed acknowledgements to envs/prod/ack.txt in a PR, or fix the config"
+MIXED_GUIDANCE = ("add the reviewed acknowledgements for the unacknowledged lines above to envs/prod/ack.txt "
+                  "and remove the stale lines listed above (ack.txt entry matches nothing) from it, commit and "
+                  "merge that in a PR, then re-run; " + FIRST_RELEASE_NOTE)
+
+
+_STALE_REPORT = {"ok": False, "unmatched_acknowledgements": ["prod:reader:c.s.t:owner"],
+                 "weakening": {"acknowledged": [], "unacknowledged": []},
+                 "readers": {"tables": [], "checks": [{"acknowledged": [], "unacknowledged": []}]},
+                 "revocations": {"acknowledged": [], "unacknowledged": []}, "first_release_refused": []}
+_UNACKED_READER = {**_STALE_REPORT, "unmatched_acknowledgements": [],
+                   "readers": {"tables": ["c.s.t"], "checks": [{"acknowledged": [], "unacknowledged": [
+                       {"ack_key": "prod:reader:c.s.t:admin", "consequence": "admin reads c.s.t"}]}]}}
+_MIXED = {**_UNACKED_READER, "unmatched_acknowledgements": ["prod:reader:c.s.t:owner"]}
+
+
+@pytest.mark.parametrize("report,guidance", [
+    (_STALE_REPORT, STALE_ONLY_GUIDANCE), (_UNACKED_READER, UNACKED_GUIDANCE), (_MIXED, MIXED_GUIDANCE),
+], ids=["stale-only", "unacked-only", "mixed"])
+def test_manifest_refusal_names_what_to_change_in_ack_txt(repo, report, guidance):
+    rehearse(repo)
+    prov = rg.provenance(repo.prod, "prod")
+    with pytest.raises(rg.Refused) as refused:
+        rg.manifest_write(repo.prod, "prod", _plan_dir(repo), prov, "live", report)
+    assert str(refused.value) == (f"the reader or weakening check refused (above); {guidance}, "
+                                  "then re-run make release-plan ENV=prod")
+    assert not list(rg.manifests_dir(repo.cloud, "prod").glob("*/manifest.json"))
+
+
 def test_manifest_refused_when_the_account_plan_is_not_empty(repo):
     rehearse(repo)
     prov = rg.provenance(repo.prod, "prod")
@@ -2394,6 +2428,52 @@ def test_a_stale_acknowledgement_is_refused(released_prod):
     (released_prod / "ack.txt").write_text("prod:weaken:prod_cat.sch.t.email:nobody\n")
     report = rg.reports(released_prod, "prod")
     assert not report["ok"] and report["unmatched_acknowledgements"] == ["prod:weaken:prod_cat.sch.t.email:nobody"]
+
+
+def _refusal(released_prod, *, stale: bool, unacked: bool) -> dict:
+    if unacked:
+        _write_generated(released_prod, exempt=["etl-sp"])
+    if stale:
+        (released_prod / "ack.txt").write_text(STALE_KEY + "\n")
+    before = (released_prod / "ack.txt").read_bytes() if stale else None
+    report = rg.reports(released_prod, "prod")
+    assert not report["ok"]
+    assert report["unmatched_acknowledgements"] == ([STALE_KEY] if stale else [])
+    assert bool(report["weakening"]["unacknowledged"]) is unacked
+    assert ((released_prod / "ack.txt").read_bytes() if stale else None) == before  # never edited
+    return report
+
+
+@pytest.mark.parametrize("stale,unacked,guidance", [
+    (True, False, STALE_ONLY_GUIDANCE),
+    (False, True, UNACKED_GUIDANCE),
+    (True, True, MIXED_GUIDANCE),
+], ids=["stale-only", "unacked-only", "mixed"])
+def test_the_refusal_says_to_remove_stale_acks_and_add_unacknowledged_ones(released_prod, stale, unacked,
+                                                                           guidance):
+    report = _refusal(released_prod, stale=stale, unacked=unacked)
+    assert rg.refusal_guidance(report, "envs/prod/ack.txt") == guidance
+
+
+@pytest.mark.parametrize("stale,unacked,guidance", [
+    (True, False, STALE_ONLY_GUIDANCE),
+    (False, True, UNACKED_GUIDANCE),
+    (True, True, MIXED_GUIDANCE),
+], ids=["stale-only", "unacked-only", "mixed"])
+def test_the_refusal_guidance_command_reads_the_recorded_report(released_prod, tmp_path, capsys, stale, unacked,
+                                                                guidance):
+    report = _refusal(released_prod, stale=stale, unacked=unacked)
+    plan_dir = tmp_path / "plan"
+    plan_dir.mkdir()
+    (plan_dir / "reports.json").write_text(json.dumps(report))
+    assert rg.main(["refusal-guidance", "--env-dir", str(released_prod), "--env", "prod",
+                    "--plan-dir", str(plan_dir), "--ack-file", "envs/prod/ack.txt"]) in (0, None)
+    assert capsys.readouterr().out == guidance + "\n"
+
+
+def test_the_refusal_guidance_command_refuses_without_a_recorded_report(released_prod, tmp_path):
+    assert rg.main(["refusal-guidance", "--env-dir", str(released_prod), "--env", "prod",
+                    "--plan-dir", str(tmp_path), "--ack-file", "envs/prod/ack.txt"]) == 1
 
 
 def test_a_rollback_acknowledgement_is_stale_until_its_commit_is_released(released_prod):
