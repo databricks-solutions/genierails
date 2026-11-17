@@ -443,6 +443,75 @@ def test_release_plan_refused_by_the_reports_writes_no_manifest(make, repo):
     assert not list(rg.manifests_dir(repo.cloud, "prod").glob(".pending-*"))
 
 
+REFUSED_REPORTS = r'''#!{python}
+import json, sys
+from pathlib import Path
+sys.path.insert(0, {shared!r})
+from scripts import release_gate as rg
+with open({log!r}, "a") as log:
+    log.write(json.dumps(["reports"] + sys.argv[1:]) + "\n")
+args = sys.argv[1:]
+report = json.loads({report!r})
+(Path(args[args.index("--plan-dir") + 1]) / "reports.json").write_text(json.dumps(report))
+rg.print_reports(report)
+raise SystemExit(1)
+'''
+
+STALE_ACK = "prod:reader:prod_cat.sch.t:owner"
+UNACKED_READER = {"ack_key": "prod:reader:prod_cat.sch.t:admin", "consequence": "admin reads prod_cat.sch.t"}
+
+
+def refused_report(*, stale: bool, unacked: bool) -> dict:
+    """A refused reader/weakening report: stale ack.txt entries, an unacknowledged reader, or both."""
+    return {"ok": False, "unmatched_acknowledgements": [STALE_ACK] if stale else [],
+            "weakening": {"acknowledged": [], "unacknowledged": []},
+            "readers": {"tables": ["prod_cat.sch.t"],
+                        "checks": [{"acknowledged": [], "unacknowledged": [UNACKED_READER] if unacked else []}]},
+            "revocations": {"acknowledged": [], "unacknowledged": []}, "first_release_refused": []}
+
+
+def refused_reports_stub(make: "Make", *, stale: bool, unacked: bool) -> dict[str, str]:
+    path = make._write("refused-reports", REFUSED_REPORTS.format(
+        python=sys.executable, shared=str(ROOT / "shared"), log=str(make.log),
+        report=json.dumps(refused_report(stale=stale, unacked=unacked))))
+    return {"release_gate.py reports": str(path)}
+
+
+FIRST_RELEASE_NOTE = ("owner and reader acknowledgements cover only a table's first release, so they go stale "
+                      "once it is released")
+# {ack} is $(_SETUP_ENV_REL)/ack.txt: ENV_DIR relative to the cloud root, as the caller passed it.
+RELEASE_PLAN_REFUSAL = {
+    "stale-only": ("release-plan: refused by the reader or weakening check (above); remove the stale lines listed "
+                   "above (ack.txt entry matches nothing) from {ack}, commit and merge that in a PR, "
+                   "then re-run; " + FIRST_RELEASE_NOTE + ". No manifest was written."),
+    "unacked-only": ("release-plan: refused by the reader or weakening check (above); add the reviewed "
+                     "acknowledgements to {ack} in a PR, or fix the config. No manifest was written."),
+    "mixed": ("release-plan: refused by the reader or weakening check (above); add the reviewed acknowledgements "
+              "for the unacknowledged lines above to {ack} and remove the stale lines listed above "
+              "(ack.txt entry matches nothing) from it, commit and merge that in a PR, then re-run; "
+              + FIRST_RELEASE_NOTE + ". No manifest was written."),
+}
+REFUSAL_CASES = [("stale-only", True, False), ("unacked-only", False, True), ("mixed", True, True)]
+
+
+@pytest.mark.parametrize("case,stale,unacked", REFUSAL_CASES, ids=[c[0] for c in REFUSAL_CASES])
+def test_release_plan_refusal_says_to_remove_stale_acks_and_add_unacknowledged_ones(make, repo, case, stale,
+                                                                                   unacked):
+    ack = repo.prod / "ack.txt"
+    before = ack.read_bytes() if ack.exists() else None
+    assert make("rehearse", "dev").returncode == 0
+    make.reset()
+    result = make("release-plan", "prod", stubs=refused_reports_stub(make, stale=stale, unacked=unacked))
+    assert result.returncode == 2, result.stdout + result.stderr  # make's code for a failed recipe, as before
+    assert RELEASE_PLAN_REFUSAL[case].format(ack=repo.cloud / "envs" / "prod" / "ack.txt") + "\n" in result.stderr
+    assert (f"ERROR: ack.txt entry matches nothing (stale): {STALE_ACK}" in result.stderr) is stale
+    assert (f"ERROR: unacknowledged reader {UNACKED_READER['ack_key']}" in result.stderr) is unacked
+    assert make.names()[-1] == "reports"  # nothing is planned or recorded after the refusal
+    assert not list(rg.manifests_dir(repo.cloud, "prod").glob("*/manifest.json"))
+    assert not list(rg.manifests_dir(repo.cloud, "prod").glob(".pending-*"))
+    assert (ack.read_bytes() if ack.exists() else None) == before and _no_lock(repo, "prod")
+
+
 def test_first_prod_release_with_account_only_generated_tiers_needs_only_owner_acks(make, repo):
     _write_shape(repo.dev)
     _shape_generated_groups(repo.dev)

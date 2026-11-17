@@ -1693,8 +1693,10 @@ release-plan: _guard-not-ci-apply _guard-genie-placeholder ## [deterministic] Pl
 	echo "=== Reader and weakening checks ($(ENV)) ==="; \
 	warehouse_id="$$(python3 "$(SHARED_ROOT)/scripts/resolve_env_config.py" warehouse --env-dir "$(ENV_DIR)" --explicit "$(WAREHOUSE_ID)" --allow-unset)" || { rm -rf "$$plan_dir"; exit 1; }; \
 	if ! $(_RELEASE_REPORTS) --plan-dir "$$plan_dir" --provenance "$$plan_dir/provenance.json" --warehouse-id "$$warehouse_id"; then \
+		guidance="$$($(_RELEASE_GATE) refusal-guidance --env-dir "$(ENV_DIR)" --env "$(ENV)" --plan-dir "$$plan_dir" --ack-file "$(_SETUP_ENV_REL)/ack.txt" 2>/dev/null)" \
+			|| guidance="add the reviewed acknowledgements to $(_SETUP_ENV_REL)/ack.txt in a PR, or fix the config"; \
 		rm -rf "$$plan_dir"; \
-		echo "release-plan: refused by the reader or weakening check (above); add the reviewed acknowledgements to $(_SETUP_ENV_REL)/ack.txt in a PR, or fix the config. No manifest was written." >&2; \
+		echo "release-plan: refused by the reader or weakening check (above); $$guidance. No manifest was written." >&2; \
 		exit 1; \
 	fi; \
 	if ! $(MAKE) --no-print-directory _release-plan-roots ENV="$(ENV)" ENV_DIR="$(ENV_DIR)" PLAN_DIR="$$plan_dir"; then \

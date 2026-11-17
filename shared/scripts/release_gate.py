@@ -1620,6 +1620,36 @@ def print_reports(report: Mapping) -> None:
         print(f"ERROR: ack.txt entry matches nothing (stale): {key}", file=sys.stderr)
 
 
+# Phrases release_loop.py keys its make release hint on (see refusal_guidance).
+STALE_ONLY_GUIDANCE = "remove the stale lines listed above"
+MIXED_GUIDANCE = "and remove the stale lines listed above"
+_FIRST_RELEASE_NOTE = ("owner and reader acknowledgements cover only a table's first release, so they go stale "
+                       "once it is released")
+
+
+def refusal_guidance(report: Mapping, ack_file: str) -> str:
+    """What to change in ack.txt after the reader or weakening check refused ``report``.
+
+    Only stale entries (``ack.txt entry matches nothing``): remove them. Anything
+    still unacknowledged: add it (and remove the stale entries too, if there are
+    any). It only says what to edit; ack.txt is never edited for you.
+    """
+    stale = bool(report.get("unmatched_acknowledgements"))
+    readers = (report.get("readers") or {}).get("checks") or []
+    needs_ack = bool(((report.get("weakening") or {}).get("unacknowledged"))
+                     or any(check.get("unacknowledged") for check in readers)
+                     or ((report.get("revocations") or {}).get("unacknowledged"))
+                     or report.get("first_release_refused"))
+    if stale and not needs_ack:
+        return (f"{STALE_ONLY_GUIDANCE} (ack.txt entry matches nothing) from {ack_file}, commit and merge "
+                f"that in a PR, then re-run; {_FIRST_RELEASE_NOTE}")
+    if stale:
+        return (f"add the reviewed acknowledgements for the unacknowledged lines above to {ack_file} "
+                f"{MIXED_GUIDANCE} (ack.txt entry matches nothing) from it, commit and merge that in a PR, "
+                f"then re-run; {_FIRST_RELEASE_NOTE}")
+    return f"add the reviewed acknowledgements to {ack_file} in a PR, or fix the config"
+
+
 def carried_weakening_acknowledgements(env_dir: Path, env: str, keys: set[str]) -> dict[str, dict]:
     """Weakening acknowledgements consumed by an earlier phase of the same unfinished release.
 
@@ -2580,8 +2610,8 @@ def manifest_write(env_dir: Path, env: str, plan_dir: Path, prov: Mapping, live:
     if status["commit"] != prov.get("commit") or not status["clean_tree"]:
         raise Refused("the checkout changed while release-plan ran; nothing was recorded. Re-run release-plan")
     if not report.get("ok"):
-        raise Refused("the reader or weakening check refused (above); add the reviewed acknowledgements to "
-                      f"envs/{env}/ack.txt in a PR, or fix the config, then re-run make release-plan ENV={env}")
+        raise Refused(f"the reader or weakening check refused (above); "
+                      f"{refusal_guidance(report, f'envs/{env}/ack.txt')}, then re-run make release-plan ENV={env}")
     data_access = _data_access_entry(plan_dir)
     plans = {"account": _plan_entry(plan_dir, "account"), "data_access": data_access,
              "workspace": _plan_entry(plan_dir, "workspace")}
@@ -3326,6 +3356,9 @@ def main(argv: list[str] | None = None) -> int:
     cmd.add_argument("--plan-dir", type=Path, required=True)
     cmd.add_argument("--provenance", type=Path, required=True)
     cmd.add_argument("--warehouse-id", default="")
+    cmd = command("refusal-guidance")
+    cmd.add_argument("--plan-dir", type=Path, required=True)
+    cmd.add_argument("--ack-file", required=True)
     cmd = command("live-snapshot")
     cmd.add_argument("--rederive", action="store_true")
     cmd = command("manifest-write")
@@ -3442,6 +3475,11 @@ def main(argv: list[str] | None = None) -> int:
             print_reports(report)
             if not report["ok"]:
                 return 1
+        elif args.command == "refusal-guidance":
+            report = _read_json(args.plan_dir / "reports.json")
+            if report is None:
+                raise Refused("release-plan recorded no reader/weakening report")
+            print(refusal_guidance(report, args.ack_file))
         elif args.command == "live-snapshot":
             print(live_snapshot(args.env_dir, rederive=args.rederive))
         elif args.command == "manifest-write":

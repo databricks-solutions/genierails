@@ -57,7 +57,17 @@ MAX_ROUNDS = 8  # a constant, not a setting: no knob changes how a release is ap
 COMPLETE, PHASE = "complete", "phase"
 
 # release-plan refusals that need the person to do something the loop never does for them.
+_FIRST_RELEASE_NOTE = ("Owner and reader acknowledgements cover only a table's first release, so they go stale "
+                       "once it is released.")
 _HINTS = (
+    ((rg.MIXED_GUIDANCE,),
+     "Acknowledgements are a reviewed change, never a prompt: add the keys you accept to envs/{env}/ack.txt "
+     "and remove the stale lines listed above (ack.txt entry matches nothing) from it, commit and merge it, "
+     "then re-run make release ENV={env}. " + _FIRST_RELEASE_NOTE),
+    ((rg.STALE_ONLY_GUIDANCE,),
+     "Acknowledgements are a reviewed change, never a prompt: remove the stale lines listed above (ack.txt "
+     "entry matches nothing) from envs/{env}/ack.txt, commit and merge it, then re-run make release "
+     "ENV={env}. " + _FIRST_RELEASE_NOTE),
     (("reader or weakening check",),
      "Acknowledgements are a reviewed change, never a prompt: add the keys you accept to envs/{env}/ack.txt, "
      "commit and merge it, then re-run make release ENV={env}."),
