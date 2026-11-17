@@ -89,6 +89,7 @@ from scripts import policy_generations as pg  # noqa: E402
 
 JOURNAL_VERSION = 1
 JOURNAL_NAME = "journal.json"
+VERIFIED_SWITCH_DEBT_NAME = "needs_verified_switch.json"
 HOOK_DIR = SHARED / "scripts" / "policy_hooks"
 INVENTORY = SHARED / "scripts" / "staged_policy_verify.py"
 AGENT_COVERAGE = SHARED / "scripts" / "agent_coverage.py"
@@ -536,6 +537,48 @@ class Controller:
             journal["transition"]["updated_at"] = _now()
         save_journal(self.env_dir, journal)
 
+    def _verified_switch_debt_path(self) -> Path:
+        return pg.ledger_dir(self.env_dir) / VERIFIED_SWITCH_DEBT_NAME
+
+    def _load_verified_switch_debt(self) -> dict:
+        path = self._verified_switch_debt_path()
+        if not path.exists():
+            return {}
+        try:
+            debt = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            raise Refused(
+                f"the verified-switch debt record {path} is unreadable ({exc}); restore it from records "
+                "or re-run the unfinished recovery before opening grants."
+            ) from exc
+        if not isinstance(debt, dict) or not debt.get("to"):
+            raise Refused(
+                f"the verified-switch debt record {path} has an unknown format. Nothing was applied. "
+                "Next: restore the policy records from backup, or re-run the unfinished recovery before opening grants."
+            )
+        return debt
+
+    def _verified_switch_marker(self, journal: dict) -> dict:
+        journal_marker = journal.get("needs_verified_switch") or {}
+        debt = self._load_verified_switch_debt()
+        if journal_marker and debt and (
+            journal_marker.get("to") != debt.get("to") or journal_marker.get("from") != debt.get("from")
+        ):
+            raise Refused(
+                "the policy journal and verified-switch debt record disagree about which generation still needs "
+                "a verified switch. Nothing was applied. Next: restore the policy records from backup, then re-run."
+            )
+        return journal_marker or debt
+
+    def _record_verified_switch_debt(self, journal: dict, marker: dict) -> None:
+        pg.write_json(self._verified_switch_debt_path(), marker)
+        journal["needs_verified_switch"] = marker
+
+    def _clear_verified_switch_debt(self, fingerprint: str) -> None:
+        debt = self._load_verified_switch_debt()
+        if debt and debt.get("to") == fingerprint:
+            self._verified_switch_debt_path().unlink(missing_ok=True)
+
     def _snapshot(self, fingerprint: str) -> dict | None:
         preview = getattr(self, "_preview_snapshots", {})
         return preview[fingerprint] if fingerprint in preview else pg.load_snapshot(self.env_dir, fingerprint)
@@ -809,7 +852,7 @@ class Controller:
                 "controller, or the journal is stale):\n  - " + "\n  - ".join(problems[:20])
                 + "\nNothing was applied.")
         adopted = _adopted_unverified(journal, active)
-        verify_marker = journal.get("needs_verified_switch") or {}
+        verify_marker = self._verified_switch_marker(journal)
         if verify_marker and verify_marker.get("to") != desired["fingerprint"]:
             raise Refused(
                 f"generation {verify_marker.get('to')} still needs a verified switch before grants can open; "
@@ -1252,6 +1295,7 @@ class Controller:
         journal.update(active=t["to"], pending=pending, transition=None)
         if (journal.get("needs_verified_switch") or {}).get("to") == t["to"]:
             journal.pop("needs_verified_switch", None)
+        self._clear_verified_switch_debt(t["to"])
         if (journal.get("adopted_unverified") or {}).get("fingerprint") == t["from"]:
             journal.pop("adopted_unverified", None)
         journal["history"] = (journal.get("history") or [])[-(HISTORY_LIMIT - 1):] + [{
@@ -1752,12 +1796,13 @@ class Controller:
                                       if p.get("fingerprint") not in {t["from"], restore_fp}]
                 if (journal.get("adopted_unverified") or {}).get("fingerprint") == t["from"]:
                     journal.pop("adopted_unverified", None)
-                if t.get("refresh_drift") and t.get("failed_phase") == "verify-switched":
-                    journal["needs_verified_switch"] = {
+                if (t.get("refresh_drift") or t.get("adopted_from_state")) and t.get("switch_attempted"):
+                    marker = {
                         "to": t["to"], "from": restore_fp, "abandoned_run": t["run_id"],
-                        "reason": "refresh-time deleted-principal recovery was abandoned after verify-switched failed",
+                        "reason": f"deleted-principal recovery was abandoned after {t.get('failed_phase') or 'switch'}",
                         "at": _now(),
                     }
+                    self._record_verified_switch_debt(journal, marker)
             journal["history"] = (journal.get("history") or [])[-(HISTORY_LIMIT - 1):] + [
                 {"run_id": t["run_id"], "abandoned": t["to"], "at": _now()}]
             self._save(journal)

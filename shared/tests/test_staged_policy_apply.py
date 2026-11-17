@@ -1784,6 +1784,34 @@ def _aws6_deleted_principal_takeover_shape(harness, *, with_existing_journal: bo
     return desired
 
 
+def _verified_switch_debt_path(harness) -> Path:
+    return pg.ledger_dir(harness.env_dir) / "needs_verified_switch.json"
+
+
+def _trace_business_grants(harness) -> list[tuple[str, int]]:
+    trace: list[tuple[str, int]] = []
+    real = harness.run
+
+    def run(argv, env=None, check=False):
+        result = real(argv, env=env, check=check)
+        if harness.calls:
+            trace.append((harness.calls[-1], len(_grant_keys(live_state(harness.env_dir)) & set(AWS_BUSINESS_GRANTS))))
+        return result
+
+    harness.run = run
+    return trace
+
+
+def _opened_business_grants_before_verified_switch(trace: list[tuple[str, int]]) -> bool:
+    verified = False
+    for call, grants in trace:
+        if call == "verify-access:switch":
+            verified = True
+        if grants and not verified:
+            return True
+    return False
+
+
 def _drop_first_policy(state: dict) -> None:
     for resource in state["resources"]:
         if (resource["type"], resource["name"]) == ("databricks_policy_info", "policies"):
@@ -2353,14 +2381,77 @@ def test_bug_n_failed_verify_switch_abandon_rerun_verifies_before_grant(harness)
     assert harness.controller().abandon() == 0
     assert not (_grant_keys(live_state(harness.env_dir)) & set(AWS_BUSINESS_GRANTS))
     assert harness.journal().get("needs_verified_switch", {}).get("to") == desired["fingerprint"]
+    assert json.loads(_verified_switch_debt_path(harness).read_text())["to"] == desired["fingerprint"]
 
     harness.calls.clear()
+    trace = _trace_business_grants(harness)
     assert harness.apply() == 0
 
+    assert not _opened_business_grants_before_verified_switch(trace)
     assert "verify-access:switch" in harness.calls
     assert harness.calls.index("verify-access:switch") < harness.calls.index("grant")
     assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
     assert "needs_verified_switch" not in harness.journal()
+    assert not _verified_switch_debt_path(harness).exists()
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def test_bug_n_failed_switch_apply_abandon_rerun_verifies_before_grant(harness):
+    desired = _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=True)
+
+    assert harness.apply(FAKE_TF_FAIL_APPLY="switch") == 1
+    harness.invariant_problems.clear()
+    failed = harness.journal()["transition"]
+    assert failed["failed_phase"] == "switch"
+    assert failed["switch_attempted"]
+    assert failed["refresh_drift"]
+    assert "grant" not in harness.calls
+    assert harness.controller().abandon() == 0
+    assert not (_grant_keys(live_state(harness.env_dir)) & set(AWS_BUSINESS_GRANTS))
+    assert harness.journal().get("needs_verified_switch", {}).get("to") == desired["fingerprint"]
+    assert json.loads(_verified_switch_debt_path(harness).read_text())["to"] == desired["fingerprint"]
+
+    harness.calls.clear()
+    trace = _trace_business_grants(harness)
+    assert harness.apply() == 0
+
+    assert not _opened_business_grants_before_verified_switch(trace)
+    assert "create" not in harness.calls
+    assert "verify-access:switch" in harness.calls
+    assert harness.calls.index("verify-access:switch") < harness.calls.index("grant")
+    assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
+    assert "needs_verified_switch" not in harness.journal()
+    assert not _verified_switch_debt_path(harness).exists()
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+@pytest.mark.parametrize("loss", ["delete_marker", "delete_journal"])
+def test_bug_n_verified_switch_debt_survives_marker_or_journal_loss(harness, loss):
+    desired = _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=True)
+    harness.fail_verify = {"switch"}
+    assert harness.apply() == 1
+    assert harness.controller().abandon() == 0
+    assert _verified_switch_debt_path(harness).exists()
+
+    journal_path = spa.journal_path(harness.env_dir)
+    if loss == "delete_marker":
+        journal = json.loads(journal_path.read_text())
+        journal.pop("needs_verified_switch")
+        journal_path.write_text(json.dumps(journal))
+    else:
+        journal_path.unlink()
+
+    harness.calls.clear()
+    trace = _trace_business_grants(harness)
+    assert harness.apply() == 0
+
+    assert not _opened_business_grants_before_verified_switch(trace)
+    assert "create" not in harness.calls
+    assert "verify-access:switch" in harness.calls
+    assert harness.calls.index("verify-access:switch") < harness.calls.index("grant")
+    assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
+    assert not _verified_switch_debt_path(harness).exists()
+    assert harness.journal()["active"] == desired["fingerprint"]
     _assert_live_generated_principals(harness.env_dir, desired)
 
 
