@@ -830,6 +830,44 @@ class Controller:
               f"from Terraform refresh; generated config remains {desired['fingerprint']}.")
         return adopted["fingerprint"], adopted, True
 
+    def _state_predates_refresh_adoption(self, journal: dict, active: str, adopted: dict | None, live: dict,
+                                         retain: dict | None, live_treatments: dict[str, str] | None) -> bool:
+        """Whether the state is the generation the journal adopted refresh drift *from*, unrefreshed.
+
+        True only when the adoption marker and its history entry vouch for ``active``, the state
+        matches the recorded pre-adoption generation (``restore_from``) exactly, and the adopted
+        generation differs from the state only by named principals replaced, one for one, with
+        ``unknown`` (deleted principals). Anything else -- an out-of-band apply, a stale journal,
+        a named principal swap -- stays a refusal.
+        """
+        marker = _adopted_unverified(journal, active) or {}
+        base_fp = str(marker.get("restore_from") or "")
+        if not adopted or not base_fp or base_fp == active:
+            return False
+        if not any(entry.get("reason") == ADOPTION_HISTORY_REASON and entry.get("adopted") == active
+                   and entry.get("from") == base_fp for entry in journal.get("history") or []):
+            return False
+        base = self._snapshot(base_fp)
+        if not pg.snapshot_intact(base, base_fp) or not pg.snapshot_intact(adopted, active):
+            return False
+        if state_problems(live, base, [retain] if retain else [], live_treatments=live_treatments):
+            return False
+        adopted_by_name = {p["name"]: p for p in adopted.get("fgac_policies") or []}
+        if set(adopted_by_name) != set(live["policies"]):
+            return False
+        replaced = 0
+        for name, policy in adopted_by_name.items():
+            for field, key in (("to", "to_principals"), ("except", "except_principals")):
+                have = Counter(live["policies"][name][field])
+                want = Counter(policy.get(key) or [])
+                added, removed = want - have, have - want
+                if set(added) - {pg.UNKNOWN} or pg.UNKNOWN in removed:
+                    return False
+                if sum(added.values()) != sum(removed.values()):
+                    return False
+                replaced += sum(added.values())
+        return replaced > 0
+
     def _new_transition(self, journal: dict, desired: dict) -> dict:
         active = journal.get("active") or ""
         pending = list(journal.get("pending") or [])
@@ -843,9 +881,17 @@ class Controller:
         live = live_from_state(_read_state(self.env_dir))
         problems = [] if previewed else state_problems(live, old, [retain] if retain else [])
         adopted = _adopted_unverified(journal, active)
+        live_treatments = None
         if problems and adopted:
             live_treatments = self._principal_adoption_live_treatments(live, old or desired)
             problems = state_problems(live, old, [retain] if retain else [], live_treatments=live_treatments)
+        # Refresh-time adoption (release-plan) records the refreshed principals in the journal but
+        # never writes the data_access state, so a later process (make release) still reads the
+        # pre-adoption principals there. Accept exactly that stale-but-consistent shape.
+        stale_refresh_state = bool(problems) and adopted is not None and self._state_predates_refresh_adoption(
+            journal, active, old, live, retain, live_treatments)
+        if stale_refresh_state:
+            problems = []
         if problems:
             raise Refused(
                 "the data_access state doesn't match the policy journal (applied outside the staged "
@@ -859,7 +905,9 @@ class Controller:
                 f"the generated config is now {desired['fingerprint']}. Nothing was applied. Next: restore the "
                 "generated config for that unfinished recovery and re-run, or restore the policy journal from records."
             )
-        refresh_drift = False
+        # The saved plan was built from the refreshed view, so the recomputed transition must be the
+        # refresh-drift one release-plan saved (no create; tighten/switch re-pin the principals).
+        refresh_drift = stale_refresh_state
         if not adopted and not previewed and not verify_marker:
             active, old, refresh_drift = self._adopt_refresh_drift(journal, desired, active, old, retain)
             adopted = _adopted_unverified(journal, active)
