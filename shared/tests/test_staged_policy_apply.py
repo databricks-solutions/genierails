@@ -546,6 +546,10 @@ def simulated_verify_access(env_dir: Path, tfvars: Path, env_file: Path) -> list
     return problems
 
 
+# Forward phases release-plan saves one manifest at a time (staged_policy_apply.APPLY_PHASES).
+RELEASE_PLAN_FORWARD_STAGES = frozenset({"create", "tighten", "switch", "retire", "grant"})
+
+
 class Harness:
     """Runs the controller with in-process hooks against the fake layer."""
 
@@ -627,7 +631,14 @@ class Harness:
                 except pg.StageError as exc:
                     print(exc, file=sys.stderr)
                     rc = 2
-            self._check_invariants(stage, before, env)
+            if env.get(pg.PLAN_OUT_ENV) and stage in RELEASE_PLAN_FORWARD_STAGES:
+                # release-plan saving a forward phase applies nothing: live must be untouched, and it is
+                # still the previous phase's shape (e.g. tightened while planning switch), not this
+                # stage's target. Abandon/rebind plan calls keep the full invariant check below.
+                if live_state(self.env_dir) != before:
+                    self.invariant_problems.append(f"plan of {stage} changed the live state")
+            else:
+                self._check_invariants(stage, before, env)
             if stage in self.diverge_after:
                 path = self.env_dir / "data_access" / "terraform.tfstate"
                 state = live_state(self.env_dir)
@@ -2490,6 +2501,96 @@ def test_bug_n_changed_generation_refresh_drift_skips_create_and_verifies_before
     assert harness.calls.index("verify-access:switch") < harness.calls.index("grant")
     assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
     _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def test_bug_o_release_plan_then_release_applies_adopted_refresh_drift_against_stale_state(harness, tmp_path):
+    """aws-6 prod: release-plan adopts refresh-time 'unknown' drift into the journal, but the
+    data_access state file still records the deleted groups' names (refresh never writes state).
+    make release (a new process) must accept the state the saved plan was built from instead of
+    refusing it as an out-of-band apply."""
+    desired = _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=True)
+    state_before = (harness.env_dir / "data_access" / "terraform.tfstate").read_text()
+
+    out = tmp_path / "plan"
+    assert harness.controller().plan(out) == 0
+    planned = json.loads((out / spa.PHASES_FILE).read_text())
+    journal = harness.journal()
+    assert not journal.get("transition")
+    assert journal["adopted_unverified"]["fingerprint"] == planned["transition"]["from"]
+    assert ".adopted." in planned["transition"]["from"]
+    assert "create" not in planned["transition"]["phases"]
+    # The aws-6 shape: the state file was never refreshed, so it still has the named principals.
+    assert (harness.env_dir / "data_access" / "terraform.tfstate").read_text() == state_before
+    assert pg.UNKNOWN not in state_before
+
+    harness.calls.clear()
+    rc = harness.controller().apply_saved(out)
+    while rc == spa.MORE_PHASES:
+        out = tmp_path / f"plan-{len(harness.calls)}"
+        assert harness.controller().plan(out) == 0
+        rc = harness.controller().apply_saved(out)
+    assert rc == 0
+
+    assert "create" not in harness.calls
+    assert "verify-access:switch" in harness.calls
+    assert harness.calls.index("verify-access:switch") < harness.calls.index("grant")
+    assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def _bug_o_planned_refresh_adoption(harness, tmp_path) -> Path:
+    _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=True)
+    out = tmp_path / "plan"
+    assert harness.controller().plan(out) == 0
+    assert harness.journal()["adopted_unverified"]["fingerprint"].count(".adopted.") == 1
+    harness.calls.clear()
+    return out
+
+
+@pytest.mark.parametrize("out_of_band", ["named_except_swap", "named_to_swap", "dropped_policy"])
+def test_bug_o_release_still_refuses_an_out_of_band_apply_after_refresh_adoption(harness, tmp_path, out_of_band):
+    out = _bug_o_planned_refresh_adoption(harness, tmp_path)
+    journal_before = spa.journal_path(harness.env_dir).read_text()
+    if out_of_band == "named_except_swap":
+        _replace_first_regional_except(harness.env_dir, "attacker")
+    elif out_of_band == "named_to_swap":
+        _replace_first_regional_to(harness.env_dir, "someone_else")
+    else:
+        path = harness.env_dir / "data_access" / "terraform.tfstate"
+        state = live_state(harness.env_dir)
+        _drop_first_policy(state)
+        path.write_text(json.dumps(state))
+
+    with pytest.raises(spa.Refused, match="doesn't match the policy journal"):
+        harness.controller().apply_saved(out)
+
+    assert harness.calls == []
+    assert not harness.journal().get("transition")
+    assert spa.journal_path(harness.env_dir).read_text() == journal_before
+
+
+@pytest.mark.parametrize("stale", ["restore_from", "history", "base_snapshot"])
+def test_bug_o_release_refuses_a_stale_adoption_record_against_the_unrefreshed_state(harness, tmp_path, stale):
+    out = _bug_o_planned_refresh_adoption(harness, tmp_path)
+    path = spa.journal_path(harness.env_dir)
+    journal = json.loads(path.read_text())
+    marker = journal["adopted_unverified"]
+    if stale == "restore_from":
+        marker["restore_from"] = "0000000000000000"
+    elif stale == "history":
+        journal["history"] = [e for e in journal["history"] if e.get("adopted") != marker["fingerprint"]]
+    else:
+        snapshot = pg.ledger_dir(harness.env_dir) / f"{marker['restore_from']}.json"
+        data = json.loads(snapshot.read_text())
+        data["fgac_policies"][0]["except_principals"] = ["tampered"]
+        snapshot.write_text(json.dumps(data))
+    path.write_text(json.dumps(journal))
+
+    with pytest.raises(spa.Refused, match="doesn't match the policy journal"):
+        harness.controller().apply_saved(out)
+
+    assert harness.calls == []
+    assert not harness.journal().get("transition")
 
 
 def test_data_access_root_passes_held_access_grants_to_pregrant_stages():
