@@ -546,6 +546,10 @@ def simulated_verify_access(env_dir: Path, tfvars: Path, env_file: Path) -> list
     return problems
 
 
+# Forward phases release-plan saves one manifest at a time (staged_policy_apply.APPLY_PHASES).
+RELEASE_PLAN_FORWARD_STAGES = frozenset({"create", "tighten", "switch", "retire", "grant"})
+
+
 class Harness:
     """Runs the controller with in-process hooks against the fake layer."""
 
@@ -627,9 +631,10 @@ class Harness:
                 except pg.StageError as exc:
                     print(exc, file=sys.stderr)
                     rc = 2
-            if env.get(pg.PLAN_OUT_ENV):
-                # A plan-only call (release-plan saving a phase) applies nothing: live must be untouched,
-                # and it is still the previous phase's shape, not this stage's target.
+            if env.get(pg.PLAN_OUT_ENV) and stage in RELEASE_PLAN_FORWARD_STAGES:
+                # release-plan saving a forward phase applies nothing: live must be untouched, and it is
+                # still the previous phase's shape (e.g. tightened while planning switch), not this
+                # stage's target. Abandon/rebind plan calls keep the full invariant check below.
                 if live_state(self.env_dir) != before:
                     self.invariant_problems.append(f"plan of {stage} changed the live state")
             else:
