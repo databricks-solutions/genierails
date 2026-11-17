@@ -693,13 +693,13 @@ module "data_access" {
   withhold_new_table_grants                = local.withhold_new_table_grants
   applied_use_grants                       = local.applied_use_grants
   withhold_new_use_grants                  = local.withhold_new_use_grants
-  held_access_grants                       = var.policy_stage == "rebind" ? var.held_access_grants : []
+  held_access_grants                       = var.held_access_grants
   access_tier_groups                       = var.access_tier_groups
   raw_exempt_principals                    = var.raw_exempt_principals
   governed_tables                          = local.governed_tables
   fgac_policies                            = var.fgac_policies
   column_mask_empty_using_policies         = local.column_mask_empty_using_policies
-  sql_warehouse_id                        = var.sql_warehouse_id
+  sql_warehouse_id                         = var.sql_warehouse_id
   warehouse_name                           = var.warehouse_name
   retain_auto_warehouse                    = local.retain_auto_warehouse
   masking_sql_file                         = var.masking_sql_file != "" ? var.masking_sql_file : "${var.env_dir}/masking_functions.sql"
@@ -735,11 +735,14 @@ check "business_select_withheld" {
   }
 }
 
-# Holding grants back would revoke them in any other plan.
-check "rebind_grants_only_in_rebind" {
+# Holding grants back is allowed only in controller-owned staged plans that
+# already proved the plan would otherwise recreate business grants still
+# recorded in state after refresh dropped them. rebind_table_grants remains
+# rebind-only.
+check "held_grants_only_in_staged_phases" {
   assert {
-    condition     = length(var.held_access_grants) + length(var.rebind_table_grants) == 0 || var.policy_stage == "rebind"
-    error_message = "held_access_grants and rebind_table_grants are set only by make policy-rebind (policy_stage = \"rebind\"); they are ignored in this ${var.policy_stage == "" ? "plan" : "${var.policy_stage} plan"}."
+    condition     = (length(var.held_access_grants) == 0 || contains(["create", "tighten", "switch", "restore", "retire", "abandon", "rebind"], var.policy_stage)) && (length(var.rebind_table_grants) == 0 || var.policy_stage == "rebind")
+    error_message = "held_access_grants are set only by staged policy phases before grant, and rebind_table_grants only by make policy-rebind; they are ignored in this ${var.policy_stage == "" ? "plan" : "${var.policy_stage} plan"}."
   }
 }
 

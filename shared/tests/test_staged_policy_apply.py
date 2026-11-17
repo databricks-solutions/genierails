@@ -139,14 +139,22 @@ def sql_hash(sql):
 
 
 def refreshed(state):
-    """The state after Terraform's refresh: grants Unity Catalog lost are gone."""
+    """The state after Terraform's refresh: deleted principals are unknown and their grants are gone."""
     if not os.path.exists(ACCESS):
         return state
-    gone = set(json.load(open(ACCESS)).get("gone") or [])
+    access = json.load(open(ACCESS))
+    gone = set(access.get("gone") or [])
+    unknown = access.get("unknown_policies") or {}
     for resource in state["resources"]:
         if resource["type"] == "databricks_grant":
             resource["instances"] = [i for i in resource["instances"]
                                      if f"{resource['name']}|{i['index_key']}" not in gone]
+        if (resource["type"], resource["name"]) == MASK:
+            for instance in resource["instances"]:
+                fields = unknown.get(instance["index_key"]) or {}
+                for field in ("to_principals", "except_principals"):
+                    if field in fields:
+                        instance["attributes"][field] = fields[field]
     return state
 
 
@@ -184,7 +192,7 @@ def access_wanted(state, stage, masks):
     if not os.path.exists(ACCESS):
         return {}
     access = json.load(open(ACCESS))
-    held = set(json.loads(var("held_access_grants") or "[]")) if stage == "rebind" else set()
+    held = set(json.loads(var("held_access_grants") or "[]"))
     kept = set(json.loads(var("rebind_table_grants") or "[]")) if stage == "rebind" else set()
     applied = set(instances(state, ("databricks_grant", "table_access"))) | kept  # pre-refresh, like the root
     applied_use = {f"{name}|{key}" for name in USE_GRANTS for key in instances(state, ("databricks_grant", name))}
@@ -242,8 +250,11 @@ elif command == "plan":
     prior = load_state()
     want, functions = desired()
     want |= access_wanted(prior, stage, want[MASK])
-    state = refreshed(prior)
-    guarded = staged_policy_guard(stage, state, want[MASK])
+    state = refreshed(json.loads(json.dumps(prior)))
+    # The real root's precondition compares config to the pre-refresh state, so
+    # refresh-only unknown -> real policy updates are caught by staged scheduling,
+    # not by the root guard.
+    guarded = staged_policy_guard(stage, prior, want[MASK])
     if guarded:
         sys.stderr.write("Module output value precondition failed\\n")
         sys.stderr.write("This " + (stage or "plan") + " plan would: " + "; ".join(guarded) + "\\n")
@@ -282,7 +293,8 @@ elif command == "apply-plan":
     state = refreshed(load_state())
     if os.path.exists(ACCESS):  # the refresh is saved with the apply
         access = json.load(open(ACCESS))
-        json.dump(access | {"gone": []}, open(ACCESS, "w"))
+        json.dump(access | {"gone": [], "unknown_policies": {} if plan["stage"] == "switch" else access.get("unknown_policies", {})},
+                  open(ACCESS, "w"))
     changes = plan["resource_changes"]
     remote_tags = json.loads(os.environ.get("FAKE_LIVE_TREATMENT_TAGS") or "{}")
     for change in changes:
@@ -440,6 +452,31 @@ def live_policies(state) -> list[dict]:
 def live_tags(state) -> dict[str, str]:
     return {a["entity_name"]: a["tag_value"]
             for a in _instances(state, "databricks_entity_tag_assignment", "treatment").values()}
+
+
+AWS_BUSINESS_GRANTS = [
+    "catalog_access|cat|raw", "catalog_access|cat|regional", "catalog_access|cat|masked",
+    "schema_access|cat.sch|raw", "schema_access|cat.sch|regional", "schema_access|cat.sch|masked",
+    "table_access|cat.sch.t|raw", "table_access|cat.sch.t|regional", "table_access|cat.sch.t|masked",
+]
+
+
+def _access_file(h) -> Path:
+    return h.env_dir / "data_access" / "fake_access.json"
+
+
+def _grant_keys(state) -> set[str]:
+    return {f"{r['name']}|{i['index_key']}" for r in state["resources"] if r["type"] == "databricks_grant"
+            for i in r["instances"]}
+
+
+def _write_access(h, *, gone=(), unknown_policies=None) -> None:
+    _access_file(h).write_text(json.dumps({
+        "grants": AWS_BUSINESS_GRANTS + ["terraform_sp_manage_catalog|cat"],
+        "client_id": "deployer-sp",
+        "gone": sorted(gone),
+        "unknown_policies": unknown_policies or {},
+    }))
 
 
 def fake_reader(env_dir, rendered, columns):
@@ -645,6 +682,8 @@ class Harness:
         state = live_state(self.env_dir)
         old = pg.load_snapshot(self.env_dir, env.get("GENIERAILS_OLD_POLICY_FINGERPRINT", ""))
         desired = pg.load_snapshot(self.env_dir, env.get("GENIERAILS_POLICY_FINGERPRINT", ""))
+        if env.get("GENIERAILS_ADOPTED_FROM_STATE") == env.get("GENIERAILS_POLICY_FINGERPRINT", ""):
+            desired = pg.desired_generation(self.env_dir)
 
         # The deployer is excepted from every mask by design (build_model's deployer_principal).
         deployer = [p for p in [pg._load(self.env_dir / "env.auto.tfvars").get("deployer_principal_id")] if p]
@@ -1706,6 +1745,73 @@ def _aws_takeover_principal_drift(harness, *, with_existing_journal: bool) -> di
     return desired
 
 
+def _released_fifteen_policy_env_with_access(harness) -> dict:
+    write_env(harness.env_dir, columns=tuple(f"field_{i}" for i in range(9)))
+    desired = _write_fifteen_policy_config(harness.env_dir)
+    _write_access(harness)
+    assert harness.apply() == 0
+    assert harness.controller().confirm() == 0
+    assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
+    harness.calls.clear()
+    harness.verify_envs.clear()
+    return desired
+
+
+def _aws6_unknown_policy_map(harness, *, extra_except: str = "", n: int = 14) -> dict:
+    state = live_state(harness.env_dir)
+    policies = live_policies(state)
+    return {
+        policy["name"]: {
+            "to_principals": [pg.UNKNOWN] if pg.UNKNOWN not in policy.get("to_principals", []) else policy["to_principals"],
+            "except_principals": sorted(
+                [pg.UNKNOWN if value != "deployer" else value for value in policy.get("except_principals", [])]
+                + ([extra_except] if extra_except and index == 0 else [])
+            ),
+        }
+        for index, policy in enumerate(policies[:n])
+    }
+
+
+def _aws6_deleted_principal_takeover_shape(harness, *, with_existing_journal: bool,
+                                           extra_except: str = "") -> dict:
+    desired = _released_fifteen_policy_env_with_access(harness)
+    _write_access(harness, gone=AWS_BUSINESS_GRANTS,
+                  unknown_policies=_aws6_unknown_policy_map(harness, extra_except=extra_except))
+    harness.live_treatment_tags = dict(desired["tags"])
+    if not with_existing_journal:
+        spa.journal_path(harness.env_dir).unlink()
+    harness.calls.clear()
+    return desired
+
+
+def _verified_switch_debt_path(harness) -> Path:
+    return pg.ledger_dir(harness.env_dir) / "needs_verified_switch.json"
+
+
+def _trace_business_grants(harness) -> list[tuple[str, int]]:
+    trace: list[tuple[str, int]] = []
+    real = harness.run
+
+    def run(argv, env=None, check=False):
+        result = real(argv, env=env, check=check)
+        if harness.calls:
+            trace.append((harness.calls[-1], len(_grant_keys(live_state(harness.env_dir)) & set(AWS_BUSINESS_GRANTS))))
+        return result
+
+    harness.run = run
+    return trace
+
+
+def _opened_business_grants_before_verified_switch(trace: list[tuple[str, int]]) -> bool:
+    verified = False
+    for call, grants in trace:
+        if call == "verify-access:switch":
+            verified = True
+        if grants and not verified:
+            return True
+    return False
+
+
 def _drop_first_policy(state: dict) -> None:
     for resource in state["resources"]:
         if (resource["type"], resource["name"]) == ("databricks_policy_info", "policies"):
@@ -2197,6 +2303,200 @@ def test_bug_e_aws_shape_adopted_unknown_create_never_writes_unknown_and_reaches
     assert "tighten" in harness.calls
     assert harness.calls.index("tighten") < harness.calls.index("switch")
     _assert_live_generated_principals(harness.env_dir, desired)
+
+
+@pytest.mark.parametrize("with_existing_journal", [False, True])
+def test_bug_n_aws6_unchanged_generation_deleted_principal_takeover_reaches_grant(
+        harness, with_existing_journal):
+    desired = _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=with_existing_journal)
+
+    assert harness.apply() == 0
+
+    history = harness.journal()["history"]
+    adoption = next(entry for entry in history if entry.get("reason") == spa.ADOPTION_HISTORY_REASON)
+    finished = history[-1]
+    assert adoption["adopted"] != desired["fingerprint"] and adoption["to"] == desired["fingerprint"]
+    assert finished["from"] == adoption["adopted"] and finished["to"] == desired["fingerprint"]
+    assert harness.calls[:2] == ["tighten", "inventory:tighten"]
+    assert "switch" in harness.calls and "verify-access:switch" in harness.calls
+    assert harness.calls[-1] == "grant"
+    assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def test_bug_n_stuck_create_grant_journal_resumes_through_verified_path(harness):
+    desired = _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=True)
+    journal = harness.journal()
+    journal["transition"] = {
+        "run_id": "4aa8a9353cc0", "commit": "abc123", "from": desired["fingerprint"],
+        "to": desired["fingerprint"], "retain": "", "retire": "", "tier_move": False,
+        "phases": ["create", "grant"], "completed": [], "current": "create", "status": "failed",
+        "failed_phase": "create", "error": "create exited 1", "switch_attempted": False,
+        "restoring": False, "restore_failed": False, "restored": None,
+        "started_at": "2026-11-16T00:00:00+00:00", "updated_at": "2026-11-16T00:00:00+00:00",
+    }
+    spa.save_journal(harness.env_dir, journal)
+
+    assert harness.apply() == 0
+
+    repaired = harness.journal()["history"][-1]
+    assert repaired["to"] == desired["fingerprint"]
+    assert "verify-switched" in repaired["phases"]
+    assert harness.calls[:2] == ["tighten", "inventory:tighten"]
+    assert harness.calls[-1] == "grant"
+    assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def test_bug_n_create_plan_holds_state_recorded_missing_business_grants(harness, monkeypatch):
+    desired = _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=True)
+    plans = []
+    real = pg._plan_json
+
+    def recorded(env_name, layer_dir, stage, plan_file, *extra):
+        plan = real(env_name, layer_dir, stage, plan_file, *extra)
+        if stage == "create":
+            creates = {f"{c['name']}|{c['index']}" for c in plan["resource_changes"]
+                       if c["type"] == "databricks_grant" and "create" in c["change"]["actions"]}
+            plans.append({"extra": extra, "creates": creates})
+        return plan
+
+    monkeypatch.setattr(pg, "_plan_json", recorded)
+
+    assert harness.apply() == 0
+
+    assert plans
+    assert not (plans[-1]["creates"] & set(AWS_BUSINESS_GRANTS))
+    assert any("-var=held_access_grants=" in " ".join(p["extra"]) for p in plans)
+    assert harness.calls[-1] == "grant"
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def test_bug_n_failed_verify_switch_abandon_rerun_verifies_before_grant(harness):
+    desired = _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=True)
+    harness.fail_verify = {"switch"}
+
+    assert harness.apply() == 1
+    assert "grant" not in harness.calls
+    assert harness.controller().abandon() == 0
+    assert not (_grant_keys(live_state(harness.env_dir)) & set(AWS_BUSINESS_GRANTS))
+    assert harness.journal().get("needs_verified_switch", {}).get("to") == desired["fingerprint"]
+    assert json.loads(_verified_switch_debt_path(harness).read_text())["to"] == desired["fingerprint"]
+
+    harness.calls.clear()
+    trace = _trace_business_grants(harness)
+    assert harness.apply() == 0
+
+    assert not _opened_business_grants_before_verified_switch(trace)
+    assert "verify-access:switch" in harness.calls
+    assert harness.calls.index("verify-access:switch") < harness.calls.index("grant")
+    assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
+    assert "needs_verified_switch" not in harness.journal()
+    assert not _verified_switch_debt_path(harness).exists()
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def test_bug_n_failed_switch_apply_abandon_rerun_verifies_before_grant(harness):
+    desired = _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=True)
+
+    assert harness.apply(FAKE_TF_FAIL_APPLY="switch") == 1
+    harness.invariant_problems.clear()
+    failed = harness.journal()["transition"]
+    assert failed["failed_phase"] == "switch"
+    assert failed["switch_attempted"]
+    assert failed["refresh_drift"]
+    assert "grant" not in harness.calls
+    assert harness.controller().abandon() == 0
+    assert not (_grant_keys(live_state(harness.env_dir)) & set(AWS_BUSINESS_GRANTS))
+    assert harness.journal().get("needs_verified_switch", {}).get("to") == desired["fingerprint"]
+    assert json.loads(_verified_switch_debt_path(harness).read_text())["to"] == desired["fingerprint"]
+
+    harness.calls.clear()
+    trace = _trace_business_grants(harness)
+    assert harness.apply() == 0
+
+    assert not _opened_business_grants_before_verified_switch(trace)
+    assert "create" not in harness.calls
+    assert "verify-access:switch" in harness.calls
+    assert harness.calls.index("verify-access:switch") < harness.calls.index("grant")
+    assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
+    assert "needs_verified_switch" not in harness.journal()
+    assert not _verified_switch_debt_path(harness).exists()
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+@pytest.mark.parametrize("loss", ["delete_marker", "delete_journal"])
+def test_bug_n_verified_switch_debt_survives_marker_or_journal_loss(harness, loss):
+    desired = _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=True)
+    harness.fail_verify = {"switch"}
+    assert harness.apply() == 1
+    assert harness.controller().abandon() == 0
+    assert _verified_switch_debt_path(harness).exists()
+
+    journal_path = spa.journal_path(harness.env_dir)
+    if loss == "delete_marker":
+        journal = json.loads(journal_path.read_text())
+        journal.pop("needs_verified_switch")
+        journal_path.write_text(json.dumps(journal))
+    else:
+        journal_path.unlink()
+
+    harness.calls.clear()
+    trace = _trace_business_grants(harness)
+    assert harness.apply() == 0
+
+    assert not _opened_business_grants_before_verified_switch(trace)
+    assert "create" not in harness.calls
+    assert "verify-access:switch" in harness.calls
+    assert harness.calls.index("verify-access:switch") < harness.calls.index("grant")
+    assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
+    assert not _verified_switch_debt_path(harness).exists()
+    assert harness.journal()["active"] == desired["fingerprint"]
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def test_bug_n_refresh_unknown_plus_named_attacker_refuses_without_adoption(harness):
+    _aws6_deleted_principal_takeover_shape(
+        harness, with_existing_journal=True, extra_except="attacker")
+    before = sorted(p.name for p in pg.ledger_dir(harness.env_dir).glob("*.adopted.*.json"))
+
+    with pytest.raises(spa.Refused) as refused:
+        harness.apply()
+
+    assert "unexpected live principal 'attacker'" in str(refused.value)
+    assert "Next:" in str(refused.value)
+    assert harness.calls == []
+    journal = harness.journal()
+    assert not journal.get("transition")
+    assert "adopted_unverified" not in journal
+    assert sorted(p.name for p in pg.ledger_dir(harness.env_dir).glob("*.adopted.*.json")) == before
+
+
+def test_bug_n_changed_generation_refresh_drift_skips_create_and_verifies_before_grant(harness):
+    original = _aws6_deleted_principal_takeover_shape(harness, with_existing_journal=True)
+    sql = harness.env_dir / "generated" / "masking_functions.sql"
+    text = sql.read_text()
+    needle = "gr_mask_live_00_full(x STRING) RETURNS STRING RETURN x;"
+    assert needle in text
+    sql.write_text(text.replace(needle, "gr_mask_live_00_full(x STRING) RETURNS STRING RETURN concat(x, '');"))
+    desired = pg.desired_generation(harness.env_dir)
+    assert desired["fingerprint"] != original["fingerprint"]
+
+    assert harness.apply() == 0
+
+    assert "create" not in harness.calls
+    assert harness.calls[:2] == ["tighten", "inventory:tighten"]
+    assert "verify-access:switch" in harness.calls
+    assert harness.calls.index("verify-access:switch") < harness.calls.index("grant")
+    assert set(AWS_BUSINESS_GRANTS) <= _grant_keys(live_state(harness.env_dir))
+    _assert_live_generated_principals(harness.env_dir, desired)
+
+
+def test_data_access_root_passes_held_access_grants_to_pregrant_stages():
+    root = SHARED / "roots" / "data_access" / "main.tf"
+    text = root.read_text()
+    assert "held_access_grants                       = var.held_access_grants" in text
+    assert 'held_access_grants                       = var.policy_stage == "rebind"' not in text
 
 
 def _true_499e19a_adopted_journal_shape(t: dict) -> None:
